@@ -207,6 +207,7 @@ async fn run_chat_stream(
     let mut stream = response.bytes_stream();
     let mut buf = String::new(); // SSE buffer passed to provider parser
     let mut full_text = String::new();
+    let mut in_think = false;
 
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result.map_err(|e| format!("stream read error: {e}"))?;
@@ -215,12 +216,29 @@ async fn run_chat_stream(
         for line in text.lines() {
             match provider.parse_sse_chunk(line, &mut buf)? {
                 (Some(token), false) => {
-                    full_text.push_str(&token);
+                    // Reasoning tokens are sentinel-prefixed by the parser;
+                    // wrap contiguous runs in <think>…</think> so the UI can
+                    // render a collapsible thinking block.
+                    let mut out = String::new();
+                    if let Some(reasoning) = token.strip_prefix(REASONING_PREFIX) {
+                        if !in_think {
+                            out.push_str("<think>");
+                            in_think = true;
+                        }
+                        out.push_str(reasoning);
+                    } else {
+                        if in_think {
+                            out.push_str("</think>");
+                            in_think = false;
+                        }
+                        out.push_str(&token);
+                    }
+                    full_text.push_str(&out);
                     let _ = app.emit(
                         "chat:token",
                         ChatTokenPayload {
                             chat_session_id: chat_session_id.to_string(),
-                            token,
+                            token: out,
                         },
                     );
                 }
@@ -231,6 +249,17 @@ async fn run_chat_stream(
                 _ => {}
             }
         }
+    }
+
+    if in_think {
+        full_text.push_str("</think>");
+        let _ = app.emit(
+            "chat:token",
+            ChatTokenPayload {
+                chat_session_id: chat_session_id.to_string(),
+                token: "</think>".to_string(),
+            },
+        );
     }
 
     let usage = provider.parse_usage(&buf);

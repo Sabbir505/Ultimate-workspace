@@ -14,6 +14,25 @@ type CmdResult<T> = Result<T, String>;
 
 // ---- Chat session CRUD ----
 
+/// Removes `<think>…</think>` reasoning blocks (display-only) from a message
+/// before it is sent back to the API as conversation history.
+fn strip_think_blocks(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    while let Some(start) = rest.find("<think>") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("</think>") {
+            Some(end) => rest = &rest[start + end + "</think>".len()..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_string()
+}
+
 #[tauri::command]
 pub fn list_chat_sessions(db: State<DbState>) -> CmdResult<Vec<ChatSession>> {
     let conn = db.0.lock();
@@ -151,7 +170,8 @@ pub async fn send_chat_message(
             .into_iter()
             .map(|r| ChatMessage {
                 role: r.role,
-                content: r.content,
+                // Thinking blocks are for display only — never re-sent.
+                content: strip_think_blocks(&r.content),
             })
             .collect::<Vec<_>>()
     };

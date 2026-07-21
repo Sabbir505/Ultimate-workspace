@@ -45,6 +45,11 @@ pub struct ChatUsage {
     pub cost_usd: f64,
 }
 
+/// Private-use char prefixed to reasoning/thinking tokens so the stream
+/// runner can distinguish them from answer tokens and wrap them in
+/// `<think>…</think>` for the frontend's collapsible thinking block.
+pub const REASONING_PREFIX: char = '\u{E000}';
+
 // ---- Provider trait ----
 
 #[async_trait::async_trait]
@@ -359,6 +364,10 @@ impl ChatProvider for OpenAIProvider {
             #[derive(Deserialize)]
             struct Delta {
                 content: Option<String>,
+                // Reasoning models (DeepSeek, GLM, o-series compatibles)
+                // stream thinking under one of these keys.
+                reasoning_content: Option<String>,
+                reasoning: Option<String>,
             }
 
             let payload: SsePayload =
@@ -373,7 +382,21 @@ impl ChatProvider for OpenAIProvider {
                     }
                     if let Some(ref delta) = choice.delta {
                         if let Some(ref content) = delta.content {
-                            return Ok((Some(content.clone()), false));
+                            if !content.is_empty() {
+                                return Ok((Some(content.clone()), false));
+                            }
+                        }
+                        if let Some(reasoning) = delta
+                            .reasoning_content
+                            .as_ref()
+                            .or(delta.reasoning.as_ref())
+                        {
+                            if !reasoning.is_empty() {
+                                return Ok((
+                                    Some(format!("{REASONING_PREFIX}{reasoning}")),
+                                    false,
+                                ));
+                            }
                         }
                     }
                 }

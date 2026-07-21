@@ -23,6 +23,9 @@ export function ChatView() {
   const setSessionModel = useChatStore((s) => s.setSessionModel);
   const effort = useChatStore((s) => s.effort);
   const setEffort = useChatStore((s) => s.setEffort);
+  const config = useChatStore((s) => s.config);
+  const loadConfig = useChatStore((s) => s.loadConfig);
+  const newChat = useChatStore((s) => s.newChat);
 
   const activeSession = sessions.find((s) => s.id === activeChatSessionId) ?? null;
   const isCompatible =
@@ -68,6 +71,21 @@ export function ChatView() {
       void loadSessions();
     }
   }, [loaded, loadSessions]);
+
+  // Load the saved provider config (used for auto-starting a session).
+  useEffect(() => {
+    if (!config) void loadConfig();
+  }, [config, loadConfig]);
+
+  // Entering chat with no session selected auto-starts a fresh one, so the
+  // user can type immediately without picking/creating a chat first.
+  const autoStarted = useRef(false);
+  useEffect(() => {
+    if (!loaded || !config || activeChatSessionId || autoStarted.current) return;
+    autoStarted.current = true;
+    const provider = config.provider ?? "openai_compatible";
+    void newChat(provider, config.model ?? "");
+  }, [loaded, activeChatSessionId, config, newChat]);
 
   // Smart auto-scroll: only scroll if the user is already near the bottom.
   // If they've scrolled up to read history, don't yank the scroll.

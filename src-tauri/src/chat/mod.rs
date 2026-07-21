@@ -20,7 +20,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 /// Max model⇄tool round-trips in a single tool-enabled turn before we stop,
 /// to bound cost and prevent runaway loops.
-const MAX_TOOL_ITERS: usize = 6;
+const MAX_TOOL_ITERS: usize = 15;
 
 use crate::db;
 use crate::types::*;

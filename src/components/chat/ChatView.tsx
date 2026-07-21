@@ -8,7 +8,7 @@ import { useChatStore } from "../../state/chat";
 import { ChatComposer } from "./ChatComposer";
 import { MessageBubble, TypingIndicator } from "./MessageBubble";
 import { ArtifactPreviewPane } from "./ArtifactPreviewPane";
-import { listChatModels, openArtifact, type ChatMessage } from "../../lib/ipc";
+import { listChatModels, type ChatMessage } from "../../lib/ipc";
 
 export function ChatView() {
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
@@ -235,10 +235,10 @@ export function ChatView() {
               key={a.path}
               type="button"
               className="chat-artifact-chip"
-              title={`Open ${a.filename}`}
+              title={`Preview ${a.filename}`}
               onClick={(e) => {
                 e.currentTarget.blur();
-                void openArtifact(a.path);
+                setPreviewArtifact(a);
               }}
             >
               <FileIcon />

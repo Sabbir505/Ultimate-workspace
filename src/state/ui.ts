@@ -4,6 +4,8 @@ import { create } from "zustand";
 
 export type ActiveView = "grid" | "settings" | "skills" | "cost" | "chat";
 
+export type SidebarMode = "projects" | "chats";
+
 export interface PeekState {
   open: boolean;
   mode: "file" | "diff";
@@ -24,6 +26,7 @@ interface UiState {
   projectSettingsFor: string | null; // projectId with an open Project Settings panel
   gitPromptProjectId: string | null; // projectId that should be prompted to init git (§4.1)
   sidebarCollapsed: boolean; // hide the sidebar to give the main area full width
+  sidebarMode: SidebarMode; // dev (projects) vs chat list — persists across collapse
 
   setActiveView: (view: ActiveView) => void;
   setPaletteOpen: (open: boolean) => void;
@@ -35,6 +38,7 @@ interface UiState {
   setGitPromptProjectId: (projectId: string | null) => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebar: () => void;
+  setSidebarMode: (mode: SidebarMode) => void;
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -45,6 +49,7 @@ export const useUiStore = create<UiState>((set) => ({
   projectSettingsFor: null,
   gitPromptProjectId: null,
   sidebarCollapsed: false,
+  sidebarMode: "projects",
 
   setActiveView: (activeView) => set({ activeView }),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
@@ -56,4 +61,5 @@ export const useUiStore = create<UiState>((set) => ({
   setGitPromptProjectId: (gitPromptProjectId) => set({ gitPromptProjectId }),
   setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
+  setSidebarMode: (sidebarMode) => set({ sidebarMode }),
 }));

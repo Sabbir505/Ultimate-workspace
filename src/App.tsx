@@ -12,6 +12,7 @@ import { PeekPanel } from "./components/peek/PeekPanel";
 import { SettingsView } from "./components/settings/SettingsView";
 import { ProjectSettingsPanel } from "./components/sidebar/ProjectSettingsPanel";
 import { Sidebar } from "./components/sidebar/Sidebar";
+import { PanelIcon } from "./components/common/PanelIcon";
 import { SkillsLibrary } from "./components/skills-library/SkillsLibrary";
 import { ChatView } from "./components/chat/ChatView";
 import { useChatEvents } from "./hooks/useChatEvents";
@@ -98,18 +99,18 @@ export default function App() {
     <div className="app">
       {!sidebarCollapsed && <Sidebar />}
 
-      {sidebarCollapsed && (
-        <button
-          className="sidebar-restore"
-          onClick={toggleSidebar}
-          title="Show sidebar"
-        >
-          ▣
-        </button>
-      )}
-
       <div className="main">
         <div className="toolbar">
+          {sidebarCollapsed && (
+            <button
+              className="sidebar-restore"
+              onClick={toggleSidebar}
+              title="Show sidebar"
+              aria-label="Show sidebar"
+            >
+              <PanelIcon />
+            </button>
+          )}
           <strong style={{ fontSize: 14 }}>Conduit</strong>
           <span className="spacer" />
           <button onClick={openBrowserPane} title="Open a browser preview pane (google.com)">
@@ -139,7 +140,7 @@ export default function App() {
         <OnboardingBanner />
 
         {activeView === "chat" ? (
-          <div className="grid-wrap">
+          <div className="grid-wrap chat-grid-wrap">
             <ChatBrowserSplit>
               <ChatView />
             </ChatBrowserSplit>

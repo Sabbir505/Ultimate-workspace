@@ -8,11 +8,38 @@
 // user switches to a different chat in the sidebar.
 import { useEffect } from "react";
 import {
+  browserNavigateTab,
+  listenChatArtifact,
   listenChatDone,
   listenChatError,
+  listenChatOpenBrowser,
   listenChatToken,
 } from "../lib/ipc";
 import { useChatStore } from "../state/chat";
+import { usePanesStore } from "../state/panes";
+import { useProjectsStore } from "../state/projects";
+
+/** Open (or reuse) a built-in browser pane pointed at `url`. */
+function openInBrowserPane(url: string): void {
+  const panes = usePanesStore.getState();
+  const existing = panes.panes.find(
+    (p) => p.data.kind === "browser" && !p.data.collapsed,
+  );
+  if (existing && existing.data.kind === "browser") {
+    const tab = existing.data.tabs[existing.data.activeTabIndex];
+    if (tab) {
+      panes.setBrowserUrl(existing.paneId, url, tab.tabId);
+      void browserNavigateTab(existing.paneId, tab.tabId, url).catch(() => {});
+    }
+    panes.focusPane(existing.paneId);
+    return;
+  }
+  panes.addPane({
+    kind: "browser",
+    url,
+    projectId: useProjectsStore.getState().selectedProjectId,
+  });
+}
 
 export function useChatEvents(): void {
   useEffect(() => {
@@ -33,6 +60,18 @@ export function useChatEvents(): void {
     unlistens.push(
       listenChatError(({ chatSessionId, message, code }) => {
         useChatStore.getState().onError(chatSessionId, message, code);
+      }),
+    );
+
+    unlistens.push(
+      listenChatArtifact((payload) => {
+        useChatStore.getState().onArtifact(payload);
+      }),
+    );
+
+    unlistens.push(
+      listenChatOpenBrowser(({ url }) => {
+        openInBrowserPane(url);
       }),
     );
 

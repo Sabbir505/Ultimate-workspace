@@ -18,10 +18,17 @@ import {
   touchChatSession,
   updateChatSessionModel,
   updateChatSessionTitle,
+  type ChatArtifactPayload,
   type ChatConfigPayload,
   type ChatMessageRecord,
   type ChatSession,
 } from "../lib/ipc";
+
+/** A file the model generated during a chat, surfaced as a download chip. */
+export interface ChatArtifact {
+  path: string;
+  filename: string;
+}
 
 interface ChatState {
   loaded: boolean;
@@ -34,6 +41,19 @@ interface ChatState {
   error: string | null;
   /** Reasoning effort sent with messages ("" = provider default). */
   effort: string;
+  /** When true, the model may call tools (web search, …) during a turn. */
+  toolsEnabled: boolean;
+  /** When true, the model may execute code (opt-in, security-sensitive). */
+  codeExecEnabled: boolean;
+  /** Generated files per chat session (chatSessionId -> artifacts). */
+  artifacts: Record<string, ChatArtifact[]>;
+  /** Artifacts attributed to a specific assistant message (messageId -> artifacts). */
+  artifactsByMessage: Record<number, ChatArtifact[]>;
+  /** Artifacts produced by the in-flight turn, keyed by session, until the
+   *  assistant message is persisted and they can be attributed to it. */
+  pendingArtifacts: Record<string, ChatArtifact[]>;
+  /** The artifact currently shown in the preview pane (null = pane closed). */
+  previewArtifact: ChatArtifact | null;
 
   // Actions
   loadSessions: () => Promise<void>;
@@ -45,8 +65,14 @@ interface ChatState {
   renameChat: (chatSessionId: string, title: string) => Promise<void>;
   setSessionModel: (chatSessionId: string, model: string) => Promise<void>;
   setEffort: (effort: string) => void;
+  setToolsEnabled: (enabled: boolean) => void;
+  setCodeExecEnabled: (enabled: boolean) => void;
   sendMessage: (content: string) => Promise<void>;
+  /** Re-run the last user message to get a fresh assistant response. */
+  regenerate: () => Promise<void>;
   cancelStream: () => Promise<void>;
+  /** Open/close the artifact preview pane. */
+  setPreviewArtifact: (artifact: ChatArtifact | null) => void;
   saveApiKey: (provider: string, key: string, baseUrl?: string, model?: string) => Promise<void>;
   clearApiKey: (provider: string) => Promise<void>;
 
@@ -54,6 +80,7 @@ interface ChatState {
   onToken: (chatSessionId: string, token: string) => void;
   onDone: (chatSessionId: string, inputTokens: number | null, outputTokens: number | null, costUsd: number | null) => void;
   onError: (chatSessionId: string, message: string, code: string | null) => void;
+  onArtifact: (payload: ChatArtifactPayload) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -66,6 +93,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   config: null,
   error: null,
   effort: "",
+  toolsEnabled: false,
+  codeExecEnabled: false,
+  artifacts: {},
+  artifactsByMessage: {},
+  pendingArtifacts: {},
+  previewArtifact: null,
 
   loadSessions: async () => {
     const sessions = await listChatSessions();
@@ -85,7 +118,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   selectSession: async (chatSessionId) => {
-    set({ activeChatSessionId: chatSessionId, error: null });
+    set({ activeChatSessionId: chatSessionId, error: null, previewArtifact: null });
     const messages = await getChatMessages(chatSessionId);
     // Only update messages if the user hasn't clicked away to another session
     // while the fetch was in-flight.
@@ -146,8 +179,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setEffort: (effort) => set({ effort }),
 
+  setToolsEnabled: (toolsEnabled) =>
+    set(toolsEnabled ? { toolsEnabled } : { toolsEnabled, codeExecEnabled: false }),
+
+  // Enabling code execution implies tools are on (the tool loop must run).
+  setCodeExecEnabled: (codeExecEnabled) =>
+    set(codeExecEnabled ? { codeExecEnabled, toolsEnabled: true } : { codeExecEnabled }),
+
   sendMessage: async (content) => {
-    const { activeChatSessionId, messages, sessions, effort } = get();
+    const { activeChatSessionId, messages, sessions, effort, toolsEnabled, codeExecEnabled } =
+      get();
     if (!activeChatSessionId) return;
 
     // Optimistically append the user message.
@@ -165,6 +206,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       messages: [...messages, userMsg],
       streamingChatSessionId: activeChatSessionId,
       streaming: { ...get().streaming, [activeChatSessionId]: "" },
+      // Start a fresh artifact buffer for this turn.
+      pendingArtifacts: { ...get().pendingArtifacts, [activeChatSessionId]: [] },
       error: null,
     });
 
@@ -176,8 +219,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }));
     }
 
-    await sendChatMessage(activeChatSessionId, content, effort || undefined);
+    await sendChatMessage(
+      activeChatSessionId,
+      content,
+      effort || undefined,
+      toolsEnabled,
+      codeExecEnabled,
+    );
   },
+
+  // Regenerate resends the most recent user message. The backend appends a
+  // new assistant turn (history is rebuilt from the DB each send).
+  regenerate: async () => {
+    const { messages, streamingChatSessionId } = get();
+    if (streamingChatSessionId) return; // don't regenerate mid-stream
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    if (!lastUser) return;
+    await get().sendMessage(lastUser.content);
+  },
+
+  setPreviewArtifact: (previewArtifact) => set({ previewArtifact }),
 
   cancelStream: async () => {
     const { streamingChatSessionId } = get();
@@ -232,14 +293,52 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // ChatMessageRecord with usage data.
     const messages = await getChatMessages(chatSessionId);
     if (messages) {
-      set((s) => ({
-        messages: s.activeChatSessionId === chatSessionId ? messages : s.messages,
-      }));
+      set((s) => {
+        // Attribute the artifacts produced during this turn to the assistant
+        // message that just completed (the last assistant record).
+        const pending = s.pendingArtifacts[chatSessionId] ?? [];
+        const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+        const artifactsByMessage =
+          pending.length > 0 && lastAssistant
+            ? { ...s.artifactsByMessage, [lastAssistant.id]: pending }
+            : s.artifactsByMessage;
+        const nextPending = { ...s.pendingArtifacts };
+        delete nextPending[chatSessionId];
+        return {
+          messages: s.activeChatSessionId === chatSessionId ? messages : s.messages,
+          artifactsByMessage,
+          pendingArtifacts: nextPending,
+        };
+      });
     }
 
     // Refresh the session list (title may have been updated by the backend).
     const sessions = await listChatSessions();
     if (sessions) set({ sessions });
+  },
+
+  onArtifact: ({ chatSessionId, path, filename }) => {
+    const artifact = { path, filename };
+    set((s) => {
+      const existing = s.artifacts[chatSessionId] ?? [];
+      const alreadyTracked = existing.some((a) => a.path === path);
+      const pending = s.pendingArtifacts[chatSessionId] ?? [];
+      const pendingTracked = pending.some((a) => a.path === path);
+      return {
+        artifacts: alreadyTracked
+          ? s.artifacts
+          : { ...s.artifacts, [chatSessionId]: [...existing, artifact] },
+        // Buffer the artifact so it can be attributed to the assistant message
+        // that produced it once that message is persisted (on chat:done).
+        pendingArtifacts: pendingTracked
+          ? s.pendingArtifacts
+          : { ...s.pendingArtifacts, [chatSessionId]: [...pending, artifact] },
+        // Auto-open the newly generated file in the preview pane when it
+        // belongs to the chat the user is currently viewing.
+        previewArtifact:
+          s.activeChatSessionId === chatSessionId ? artifact : s.previewArtifact,
+      };
+    });
   },
 
   onError: (chatSessionId, message, code) => {

@@ -233,6 +233,37 @@ export interface ChatDonePayload {
   outputTokens: number | null;
   costUsd: number | null;
 }
+export interface ChatArtifactPayload {
+  chatSessionId: string;
+  path: string;
+  filename: string;
+}
+export interface ChatOpenBrowserPayload {
+  chatSessionId: string;
+  url: string;
+}
+
+/** In-app preview of a generated artifact (see `read_artifact_preview`). */
+export interface ArtifactPreview {
+  path: string;
+  filename: string;
+  ext: string;
+  kind:
+    | "text"
+    | "markdown"
+    | "csv"
+    | "json"
+    | "html"
+    | "code"
+    | "image"
+    | "pdf"
+    | "office"
+    | "binary";
+  text: string | null;
+  dataUri: string | null;
+  size: number;
+  truncated: boolean;
+}
 export interface ChatErrorPayload {
   chatSessionId: string;
   message: string;
@@ -255,11 +286,15 @@ export const sendChatMessage = (
   chatSessionId: string,
   content: string,
   effort?: string,
+  toolsEnabled?: boolean,
+  codeExecEnabled?: boolean,
 ) =>
   safeInvoke<void>("send_chat_message", {
     chatSessionId,
     content,
     effort: effort ?? null,
+    toolsEnabled: toolsEnabled ?? false,
+    codeExecEnabled: codeExecEnabled ?? false,
   });
 export const updateChatSessionModel = (chatSessionId: string, model: string) =>
   safeInvoke<void>("update_chat_session_model", { chatSessionId, model });
@@ -299,3 +334,54 @@ export const listenChatDone = (handler: (payload: ChatDonePayload) => void) =>
   safeListen<ChatDonePayload>("chat:done", handler);
 export const listenChatError = (handler: (payload: ChatErrorPayload) => void) =>
   safeListen<ChatErrorPayload>("chat:error", handler);
+export const listenChatArtifact = (handler: (payload: ChatArtifactPayload) => void) =>
+  safeListen<ChatArtifactPayload>("chat:artifact", handler);
+export const listenChatOpenBrowser = (handler: (payload: ChatOpenBrowserPayload) => void) =>
+  safeListen<ChatOpenBrowserPayload>("chat:open-browser", handler);
+
+/** Read a generated artifact for in-app preview. */
+export const readArtifactPreview = (path: string) =>
+  safeInvoke<ArtifactPreview | null>("read_artifact_preview", { path });
+
+/** Open a generated artifact file with the OS default application. */
+export async function openArtifact(path: string): Promise<void> {
+  try {
+    const { openPath } = await import("@tauri-apps/plugin-opener");
+    await openPath(path);
+  } catch (err) {
+    console.warn("openArtifact failed", err);
+  }
+}
+
+/**
+ * Save (download) a single artifact to a user-chosen location via a save
+ * dialog. Returns true if saved, false if the user cancelled.
+ */
+export async function downloadArtifact(
+  path: string,
+  filename: string,
+): Promise<boolean> {
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  const dest = await save({ defaultPath: filename });
+  if (!dest) return false;
+  await safeInvoke<void>("download_artifact", { src: path, dest });
+  return true;
+}
+
+/**
+ * Save all given artifacts into a single `.zip` at a user-chosen location.
+ * Returns true if saved, false if the user cancelled.
+ */
+export async function downloadArtifactsZip(
+  paths: string[],
+  defaultName = "artifacts.zip",
+): Promise<boolean> {
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  const dest = await save({
+    defaultPath: defaultName,
+    filters: [{ name: "Zip archive", extensions: ["zip"] }],
+  });
+  if (!dest) return false;
+  await safeInvoke<void>("download_artifacts_zip", { paths, dest });
+  return true;
+}

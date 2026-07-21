@@ -202,6 +202,40 @@ pub struct ChatDonePayload {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ChatArtifactPayload {
+    pub chat_session_id: String,
+    pub path: String,
+    pub filename: String,
+}
+
+/// Emitted when the `open_url` tool asks the UI to show a page in the
+/// built-in browser pane.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatOpenBrowserPayload {
+    pub chat_session_id: String,
+    pub url: String,
+}
+
+/// In-app preview of a generated artifact file (see `read_artifact_preview`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactPreview {
+    pub path: String,
+    pub filename: String,
+    pub ext: String,
+    /// text | markdown | csv | json | html | code | image | pdf | binary
+    pub kind: String,
+    /// Present for text-like kinds (text/markdown/csv/json/html/code).
+    pub text: Option<String>,
+    /// `data:` URI present for image/pdf kinds.
+    pub data_uri: Option<String>,
+    pub size: u64,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChatErrorPayload {
     pub chat_session_id: String,
     pub message: String,

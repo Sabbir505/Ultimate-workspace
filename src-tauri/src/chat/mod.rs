@@ -3,15 +3,78 @@
 //! Four providers: Anthropic, OpenAI, AnthropicCompatible, OpenAICompatible.
 //! All SSE streaming, API keys stored in the OS keychain, HTTP in Rust backend.
 
+pub mod artifacts;
+pub mod codeexec;
 pub mod commands;
 pub mod providers;
+pub mod pygen;
+pub mod tools;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use rusqlite::Connection;
-use tauri::{AppHandle, Emitter};
+use serde_json::{json, Value};
+use tauri::{AppHandle, Emitter, Manager};
+
+/// Max model⇄tool round-trips in a single tool-enabled turn before we stop,
+/// to bound cost and prevent runaway loops.
+const MAX_TOOL_ITERS: usize = 15;
+
+/// Built-in guidance appended to every tool-enabled turn so the model knows how
+/// to produce high-quality artifacts. The user's custom system prompt and
+/// skills are layered on top of this (never replacing it).
+const TOOL_GUIDE: &str = "You are Conduit, a local-first desktop assistant with tools. \
+When the user asks for a document, report, spreadsheet or slide deck, call \
+`generate_document` and WRITE PYTHON that builds a genuinely professional file \
+(python-docx for docx, python-pptx for pptx, openpyxl for xlsx, reportlab for \
+pdf). Design it properly: a clear title/cover, consistent typography and \
+heading hierarchy, a tasteful colour palette, tables where useful, real \
+multi-slide layouts for decks, and page numbers/footers where appropriate — \
+never a plain text dump. Save the file to the path in the CONDUIT_OUTPUT \
+environment variable. Only use `generate_file` for plain text formats (txt, md, \
+csv, json, html). Prefer accurate, well-structured content over filler.";
+
+/// Assemble the effective system prompt from the built-in tool guidance (only
+/// when tools are on), the user's custom system prompt, and any enabled skills.
+/// Returns `None` when nothing applies.
+pub fn build_system_prompt(
+    custom: Option<&str>,
+    skills: &[(String, String)],
+    tools_enabled: bool,
+) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if tools_enabled {
+        parts.push(TOOL_GUIDE.to_string());
+    }
+    if let Some(c) = custom {
+        let c = c.trim();
+        if !c.is_empty() {
+            parts.push(c.to_string());
+        }
+    }
+    if !skills.is_empty() {
+        let mut s = String::from(
+            "The user has provided the following reusable skills. Apply the \
+             relevant ones when they fit the request:\n",
+        );
+        for (name, body) in skills {
+            let body = body.trim();
+            if body.is_empty() {
+                continue;
+            }
+            s.push_str(&format!("\n## Skill: {}\n{}\n", name.trim(), body));
+        }
+        parts.push(s);
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
 
 use crate::db;
 use crate::types::*;
@@ -49,6 +112,9 @@ impl ChatManager {
         api_key: String,
         base_url: Option<String>,
         effort: Option<String>,
+        tools_enabled: bool,
+        code_exec_enabled: bool,
+        system: Option<String>,
         messages: Vec<ChatMessage>,
         db: Arc<Mutex<Connection>>,
         app: AppHandle,
@@ -61,24 +127,52 @@ impl ChatManager {
             model,
             messages,
             max_tokens: Some(4096),
-            system: None,
+            system: system.filter(|s| !s.trim().is_empty()),
             effort,
         };
 
+        let is_openai = matches!(
+            provider_id,
+            ChatProviderId::OpenAI | ChatProviderId::OpenAICompatible
+        );
+        let is_anthropic = matches!(
+            provider_id,
+            ChatProviderId::Anthropic | ChatProviderId::AnthropicCompatible
+        );
+        // Tools need a base URL; compatible providers already carry one, native
+        // providers fall back to their default endpoint.
+        let tool_base = base_url.clone().unwrap_or_else(|| {
+            if is_openai {
+                OpenAIProvider::DEFAULT_BASE.to_string()
+            } else {
+                AnthropicProvider::DEFAULT_BASE.to_string()
+            }
+        });
+
         let client = self.client.clone();
         let sid = chat_session_id.clone();
+        let caps = tools::ToolCaps {
+            code_exec: code_exec_enabled,
+        };
 
         let handle = tokio::spawn(async move {
-            let result = run_chat_stream(
-                &client,
-                provider.as_ref(),
-                &sid,
-                &chat_req,
-                &api_key,
-                base_url.as_deref(),
-                &app,
-            )
-            .await;
+            let result = if tools_enabled && is_openai {
+                run_openai_tool_loop(&client, &tool_base, &api_key, &chat_req, caps, &sid, &app).await
+            } else if tools_enabled && is_anthropic {
+                run_anthropic_tool_loop(&client, &tool_base, &api_key, &chat_req, caps, &sid, &app)
+                    .await
+            } else {
+                run_chat_stream(
+                    &client,
+                    provider.as_ref(),
+                    &sid,
+                    &chat_req,
+                    &api_key,
+                    base_url.as_deref(),
+                    &app,
+                )
+                .await
+            };
 
             match result {
                 Ok((full_response, usage)) => {
@@ -266,6 +360,423 @@ async fn run_chat_stream(
     Ok((full_text, usage))
 }
 
+/// Emit one `chat:token` event and append it to the running transcript so the
+/// persisted assistant message ends up identical to what was streamed.
+fn emit_token(app: &AppHandle, sid: &str, token: &str, full: &mut String) {
+    if token.is_empty() {
+        return;
+    }
+    full.push_str(token);
+    let _ = app.emit(
+        "chat:token",
+        ChatTokenPayload {
+            chat_session_id: sid.to_string(),
+            token: token.to_string(),
+        },
+    );
+}
+
+/// Directory where generated artifacts are written (`<Documents>/Conduit`,
+/// falling back to home, then temp). Created on demand by the artifact writer.
+fn artifacts_dir(app: &AppHandle) -> PathBuf {
+    let base = app
+        .path()
+        .document_dir()
+        .or_else(|_| app.path().home_dir())
+        .unwrap_or_else(|_| std::env::temp_dir());
+    base.join("Conduit")
+}
+
+/// Run a tool and, if it produced a file, notify the UI. Returns the text to
+/// feed back to the model.
+async fn run_tool(
+    client: &reqwest::Client,
+    artifacts_dir: &std::path::Path,
+    caps: tools::ToolCaps,
+    app: &AppHandle,
+    sid: &str,
+    name: &str,
+    args: &Value,
+) -> String {
+    let outcome = tools::execute_tool(client, artifacts_dir, caps, name, args).await;
+    if let Some(a) = outcome.artifact {
+        let _ = app.emit(
+            "chat:artifact",
+            ChatArtifactPayload {
+                chat_session_id: sid.to_string(),
+                path: a.path,
+                filename: a.filename,
+            },
+        );
+    }
+    if let Some(url) = outcome.browse_url {
+        let _ = app.emit(
+            "chat:open-browser",
+            ChatOpenBrowserPayload {
+                chat_session_id: sid.to_string(),
+                url,
+            },
+        );
+    }
+    outcome.text
+}
+
+/// Parse the `arguments` string of an OpenAI-style tool call into a JSON
+/// object. Some providers emit malformed payloads — e.g. a stray empty object
+/// prepended (`"{}{\"query\":\"x\"}"`) or several concatenated objects. We read
+/// every JSON value in the string and merge object fields (later keys win) so a
+/// leading `{}` no longer wipes out the real arguments.
+fn parse_tool_args(s: &str) -> Value {
+    let s = s.trim();
+    if s.is_empty() {
+        return json!({});
+    }
+    // Fast path: a single well-formed object.
+    if let Ok(v @ Value::Object(_)) = serde_json::from_str::<Value>(s) {
+        return v;
+    }
+    let mut merged = serde_json::Map::new();
+    let stream = serde_json::Deserializer::from_str(s).into_iter::<Value>();
+    for item in stream {
+        if let Ok(Value::Object(map)) = item {
+            for (k, v) in map {
+                merged.insert(k, v);
+            }
+        }
+    }
+    Value::Object(merged)
+}
+
+/// Human-readable narration of a tool call, shown (inside the `<think>` block)
+/// while the tool runs.
+fn tool_status_line(name: &str, args: &Value) -> String {
+    if name == tools::WEB_SEARCH {
+        let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+        format!("Searching the web for \"{q}\"…\n")
+    } else if name == tools::GENERATE_FILE {
+        let f = args.get("filename").and_then(|v| v.as_str()).unwrap_or("file");
+        let fmt = args.get("format").and_then(|v| v.as_str()).unwrap_or("");
+        format!("Generating {fmt} file \"{f}\"…\n")
+    } else if name == tools::GENERATE_DOCUMENT {
+        let f = args.get("filename").and_then(|v| v.as_str()).unwrap_or("document");
+        let fmt = args.get("format").and_then(|v| v.as_str()).unwrap_or("");
+        format!("Building {fmt} document \"{f}\"…\n")
+    } else if name == tools::FETCH_URL || name == tools::OPEN_URL {
+        let u = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        let verb = if name == tools::OPEN_URL { "Opening" } else { "Reading" };
+        format!("{verb} {u}…\n")
+    } else if name == tools::RUN_CODE {
+        let lang = args.get("language").and_then(|v| v.as_str()).unwrap_or("code");
+        format!("Running {lang} code…\n")
+    } else {
+        format!("Running tool {name}…\n")
+    }
+}
+
+/// Agentic tool loop for OpenAI-style providers (native + compatible).
+///
+/// Uses non-streaming `/v1/chat/completions` calls: request with `tools`, and
+/// if the model responds with `tool_calls`, run each tool, feed the results
+/// back, and repeat until it produces a final answer (or the iteration cap is
+/// hit). Tool narration is wrapped in a `<think>` block so the UI shows it as a
+/// collapsible "thought process" and it's stripped from re-sent history.
+async fn run_openai_tool_loop(
+    client: &reqwest::Client,
+    base: &str,
+    api_key: &str,
+    req: &ChatRequest,
+    caps: tools::ToolCaps,
+    sid: &str,
+    app: &AppHandle,
+) -> Result<(String, Option<ChatUsage>), String> {
+    let url = format!("{base}/v1/chat/completions");
+    let tool_specs = tools::openai_tool_specs(caps);
+    let art_dir = artifacts_dir(app);
+
+    let mut messages: Vec<Value> = Vec::new();
+    if let Some(sys) = &req.system {
+        if !sys.is_empty() {
+            messages.push(json!({ "role": "system", "content": sys }));
+        }
+    }
+    for m in &req.messages {
+        messages.push(json!({ "role": m.role, "content": m.content }));
+    }
+
+    let mut full = String::new();
+    let mut in_think = false;
+    let mut total_in = 0i64;
+    let mut total_out = 0i64;
+    let mut have_usage = false;
+
+    for _ in 0..MAX_TOOL_ITERS {
+        let mut body = json!({
+            "model": req.model,
+            "messages": messages,
+            "stream": false,
+            "tools": tool_specs,
+        });
+        if let Some(e) = &req.effort {
+            body["reasoning_effort"] = json!(e);
+        }
+
+        let resp = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let b = resp.text().await.unwrap_or_default();
+            return Err(format!("HTTP {status}: {b}"));
+        }
+
+        let v: Value = resp.json().await.map_err(|e| format!("decode failed: {e}"))?;
+        if let Some(u) = v.get("usage") {
+            total_in += u.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+            total_out += u.get("completion_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+            have_usage = true;
+        }
+
+        let message = v
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .cloned()
+            .ok_or_else(|| "response missing choices[0].message".to_string())?;
+
+        let tool_calls = message
+            .get("tool_calls")
+            .and_then(|t| t.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        if !tool_calls.is_empty() {
+            if !in_think {
+                emit_token(app, sid, "<think>", &mut full);
+                in_think = true;
+            }
+            // The assistant turn (carrying tool_calls) must be echoed back
+            // before the matching tool results. Some providers emit malformed
+            // `arguments` (e.g. a stray `{}` prefix); we normalize them to clean
+            // JSON here so the re-sent history doesn't confuse the model into
+            // repeating the same call.
+            let mut echoed = message.clone();
+            if let Some(arr) = echoed
+                .get_mut("tool_calls")
+                .and_then(|t| t.as_array_mut())
+            {
+                for tc in arr.iter_mut() {
+                    if let Some(a) = tc.get_mut("function").and_then(|f| f.get_mut("arguments")) {
+                        let cleaned = a
+                            .as_str()
+                            .map(parse_tool_args)
+                            .unwrap_or_else(|| json!({}));
+                        *a = json!(cleaned.to_string());
+                    }
+                }
+            }
+            messages.push(echoed);
+            for tc in &tool_calls {
+                let id = tc.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let name = tc
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let args_str = tc
+                    .get("function")
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("{}");
+                let args = parse_tool_args(args_str);
+
+                emit_token(app, sid, &tool_status_line(&name, &args), &mut full);
+                let result = run_tool(client, &art_dir, caps, app, sid, &name, &args).await;
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": id,
+                    "content": result,
+                }));
+            }
+            continue;
+        }
+
+        // No tool calls → final answer.
+        if in_think {
+            emit_token(app, sid, "</think>", &mut full);
+        }
+        let content = message.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        emit_token(app, sid, content, &mut full);
+        return Ok((full, build_usage(true, total_in, total_out, have_usage)));
+    }
+
+    if in_think {
+        emit_token(app, sid, "</think>", &mut full);
+    }
+    emit_token(
+        app,
+        sid,
+        "\n\n_Stopped after reaching the tool-call limit._",
+        &mut full,
+    );
+    Ok((full, build_usage(true, total_in, total_out, have_usage)))
+}
+
+/// Agentic tool loop for Anthropic-style providers (native + compatible).
+async fn run_anthropic_tool_loop(
+    client: &reqwest::Client,
+    base: &str,
+    api_key: &str,
+    req: &ChatRequest,
+    caps: tools::ToolCaps,
+    sid: &str,
+    app: &AppHandle,
+) -> Result<(String, Option<ChatUsage>), String> {
+    let url = format!("{base}/v1/messages");
+    let tool_specs = tools::anthropic_tool_specs(caps);
+    let art_dir = artifacts_dir(app);
+
+    let mut messages: Vec<Value> = req
+        .messages
+        .iter()
+        .map(|m| json!({ "role": m.role, "content": m.content }))
+        .collect();
+
+    let mut full = String::new();
+    let mut in_think = false;
+    let mut total_in = 0i64;
+    let mut total_out = 0i64;
+    let mut have_usage = false;
+
+    for _ in 0..MAX_TOOL_ITERS {
+        let mut body = json!({
+            "model": req.model,
+            "max_tokens": req.max_tokens.unwrap_or(4096),
+            "messages": messages,
+            "tools": tool_specs,
+            "stream": false,
+        });
+        if let Some(sys) = &req.system {
+            if !sys.is_empty() {
+                body["system"] = json!(sys);
+            }
+        }
+
+        let resp = client
+            .post(&url)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let b = resp.text().await.unwrap_or_default();
+            return Err(format!("HTTP {status}: {b}"));
+        }
+
+        let v: Value = resp.json().await.map_err(|e| format!("decode failed: {e}"))?;
+        if let Some(u) = v.get("usage") {
+            total_in += u.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+            total_out += u.get("output_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+            have_usage = true;
+        }
+
+        let content = v
+            .get("content")
+            .and_then(|c| c.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let tool_uses: Vec<&Value> = content
+            .iter()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+            .collect();
+
+        if !tool_uses.is_empty() {
+            if !in_think {
+                emit_token(app, sid, "<think>", &mut full);
+                in_think = true;
+            }
+            // Echo the assistant turn (text + tool_use blocks) verbatim.
+            messages.push(json!({ "role": "assistant", "content": content }));
+
+            let mut results: Vec<Value> = Vec::new();
+            for tu in &tool_uses {
+                let id = tu.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let name = tu.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let args = tu.get("input").cloned().unwrap_or_else(|| json!({}));
+
+                emit_token(app, sid, &tool_status_line(&name, &args), &mut full);
+                let result = run_tool(client, &art_dir, caps, app, sid, &name, &args).await;
+                results.push(json!({
+                    "type": "tool_result",
+                    "tool_use_id": id,
+                    "content": result,
+                }));
+            }
+            messages.push(json!({ "role": "user", "content": results }));
+            continue;
+        }
+
+        // No tool use → final answer: concatenate text blocks.
+        if in_think {
+            emit_token(app, sid, "</think>", &mut full);
+        }
+        let text: String = content
+            .iter()
+            .filter_map(|b| {
+                if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    b.get("text").and_then(|t| t.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        emit_token(app, sid, &text, &mut full);
+        return Ok((full, build_usage(false, total_in, total_out, have_usage)));
+    }
+
+    if in_think {
+        emit_token(app, sid, "</think>", &mut full);
+    }
+    emit_token(
+        app,
+        sid,
+        "\n\n_Stopped after reaching the tool-call limit._",
+        &mut full,
+    );
+    Ok((full, build_usage(false, total_in, total_out, have_usage)))
+}
+
+/// Build a `ChatUsage` summing across all tool-loop round-trips, picking the
+/// provider's cost model.
+fn build_usage(openai: bool, input: i64, output: i64, have: bool) -> Option<ChatUsage> {
+    if !have {
+        return None;
+    }
+    let cost = if openai {
+        calculate_openai_cost(input, output)
+    } else {
+        calculate_anthropic_cost(input, output)
+    };
+    Some(ChatUsage {
+        input_tokens: input,
+        output_tokens: output,
+        cost_usd: cost,
+    })
+}
+
 fn resolve_provider(id: &ChatProviderId) -> Box<dyn ChatProvider> {
     use providers::*;
     match id {
@@ -273,5 +784,36 @@ fn resolve_provider(id: &ChatProviderId) -> Box<dyn ChatProvider> {
         ChatProviderId::OpenAI => Box::new(OpenAIProvider),
         ChatProviderId::AnthropicCompatible => Box::new(AnthropicCompatibleProvider),
         ChatProviderId::OpenAICompatible => Box::new(OpenAICompatibleProvider),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_tool_args_plain_object() {
+        let v = parse_tool_args(r#"{"query":"rust"}"#);
+        assert_eq!(v["query"], "rust");
+    }
+
+    #[test]
+    fn parse_tool_args_recovers_from_prepended_empty_object() {
+        // Observed from an OpenAI-compatible proxy.
+        let v = parse_tool_args(r#"{}{"query": "population of France"}"#);
+        assert_eq!(v["query"], "population of France");
+    }
+
+    #[test]
+    fn parse_tool_args_merges_concatenated_objects() {
+        let v = parse_tool_args(r#"{"a":1}{"b":2}"#);
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"], 2);
+    }
+
+    #[test]
+    fn parse_tool_args_empty_is_object() {
+        assert_eq!(parse_tool_args(""), json!({}));
+        assert_eq!(parse_tool_args("   "), json!({}));
     }
 }

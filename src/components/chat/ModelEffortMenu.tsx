@@ -96,7 +96,7 @@ export function ModelEffortMenu({
               className="model-effort-item"
               aria-haspopup="menu"
               aria-expanded={effortOpen}
-              onClick={() => setEffortOpen((o) => !o)}
+              onClick={() => setEffortOpen(true)}
             >
               <span>Effort</span>
               <span className="model-effort-current">

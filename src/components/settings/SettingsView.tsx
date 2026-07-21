@@ -378,6 +378,9 @@ function ApiKeysPanel() {
     setApiKey("");
     setBaseUrl("");
     setModel("");
+    setFetchedModels([]);
+    setFetchError(null);
+    await loadConfigFn(provider);
   };
 
   // Save is valid when:

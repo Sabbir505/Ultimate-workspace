@@ -226,7 +226,17 @@ pub fn set_chat_api_key(
 #[tauri::command]
 pub fn delete_chat_api_key(provider: String, db: State<DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
-    secrets::delete_chat_api_key(&conn, &provider)
+    secrets::delete_chat_api_key(&conn, &provider)?;
+    // Clearing a provider removes its whole configuration, not just the key.
+    conn.execute(
+        "DELETE FROM app_settings WHERE key IN (?1, ?2)",
+        rusqlite::params![
+            format!("chat.{provider}.base_url"),
+            format!("chat.{provider}.model"),
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Returns non-secret config only — the API key value is NEVER returned.

@@ -8,6 +8,7 @@
 // user switches to a different chat in the sidebar.
 import { useEffect } from "react";
 import {
+  listenChatArtifact,
   listenChatDone,
   listenChatError,
   listenChatToken,
@@ -33,6 +34,12 @@ export function useChatEvents(): void {
     unlistens.push(
       listenChatError(({ chatSessionId, message, code }) => {
         useChatStore.getState().onError(chatSessionId, message, code);
+      }),
+    );
+
+    unlistens.push(
+      listenChatArtifact((payload) => {
+        useChatStore.getState().onArtifact(payload);
       }),
     );
 

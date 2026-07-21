@@ -7,37 +7,111 @@
 //! implementation. New capabilities are added by registering a spec here and a
 //! branch in `execute_tool`.
 
+use std::path::Path;
+
 use serde_json::{json, Value};
+
+use super::{artifacts, codeexec};
 
 /// Names of every tool the model may call. Kept in one place so the specs and
 /// the dispatcher can't drift apart.
 pub const WEB_SEARCH: &str = "web_search";
+pub const GENERATE_FILE: &str = "generate_file";
+pub const FETCH_URL: &str = "fetch_url";
+pub const RUN_CODE: &str = "run_code";
+
+/// Which tool capabilities are enabled for a turn. Web search, file generation
+/// and URL fetching are considered safe and are always on when tools are
+/// enabled; code execution is gated behind an explicit per-chat opt-in.
+#[derive(Clone, Copy, Default)]
+pub struct ToolCaps {
+    pub code_exec: bool,
+}
+
+/// A file produced by a tool, surfaced to the UI as a downloadable artifact.
+pub struct ArtifactRef {
+    pub path: String,
+    pub filename: String,
+}
+
+/// Result of a tool call: `text` is fed back to the model; `artifact` (if any)
+/// is surfaced to the UI.
+pub struct ToolOutcome {
+    pub text: String,
+    pub artifact: Option<ArtifactRef>,
+}
+
+impl ToolOutcome {
+    fn text(t: impl Into<String>) -> Self {
+        Self {
+            text: t.into(),
+            artifact: None,
+        }
+    }
+}
+
+const WEB_SEARCH_DESC: &str = "Search the public web for up-to-date information. \
+    Returns a list of result titles, URLs and snippets. Use this whenever the \
+    answer may depend on current events or facts you are unsure about.";
+
+const GENERATE_FILE_DESC: &str = "Generate a downloadable file/artifact for the \
+    user and save it to disk. Use for documents, reports, spreadsheets and \
+    slide decks. For pptx, separate slides with a line containing only '---'; \
+    the first line of each slide is its title and remaining lines are bullets. \
+    For xlsx/csv, provide comma-separated rows (one row per line).";
+
+const FETCH_URL_DESC: &str = "Fetch a specific web page by URL and return its \
+    readable text content (HTML stripped). Use to read an article or page the \
+    user linked, or a result returned by web_search.";
+
+const RUN_CODE_DESC: &str = "Execute a short snippet of code and return its \
+    output. Supports python, javascript (node) and bash. Runs locally with a \
+    time limit in a temporary directory. Use for calculations, data wrangling \
+    or quick scripts.";
 
 /// OpenAI `tools` array (`{type:"function", function:{...}}` entries).
-pub fn openai_tool_specs() -> Vec<Value> {
-    vec![json!({
+pub fn openai_tool_specs(caps: ToolCaps) -> Vec<Value> {
+    let mut specs = vec![
+        openai_fn(WEB_SEARCH, WEB_SEARCH_DESC, web_search_parameters()),
+        openai_fn(GENERATE_FILE, GENERATE_FILE_DESC, generate_file_parameters()),
+        openai_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
+    ];
+    if caps.code_exec {
+        specs.push(openai_fn(RUN_CODE, RUN_CODE_DESC, run_code_parameters()));
+    }
+    specs
+}
+
+fn openai_fn(name: &str, description: &str, parameters: Value) -> Value {
+    json!({
         "type": "function",
         "function": {
-            "name": WEB_SEARCH,
-            "description": "Search the public web for up-to-date information. \
-                Returns a list of result titles, URLs and snippets. Use this \
-                whenever the answer may depend on current events or facts you \
-                are unsure about.",
-            "parameters": web_search_parameters(),
+            "name": name,
+            "description": description,
+            "parameters": parameters,
         }
-    })]
+    })
 }
 
 /// Anthropic `tools` array (`{name, description, input_schema}` entries).
-pub fn anthropic_tool_specs() -> Vec<Value> {
-    vec![json!({
-        "name": WEB_SEARCH,
-        "description": "Search the public web for up-to-date information. \
-            Returns a list of result titles, URLs and snippets. Use this \
-            whenever the answer may depend on current events or facts you are \
-            unsure about.",
-        "input_schema": web_search_parameters(),
-    })]
+pub fn anthropic_tool_specs(caps: ToolCaps) -> Vec<Value> {
+    let mut specs = vec![
+        anthropic_fn(WEB_SEARCH, WEB_SEARCH_DESC, web_search_parameters()),
+        anthropic_fn(GENERATE_FILE, GENERATE_FILE_DESC, generate_file_parameters()),
+        anthropic_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
+    ];
+    if caps.code_exec {
+        specs.push(anthropic_fn(RUN_CODE, RUN_CODE_DESC, run_code_parameters()));
+    }
+    specs
+}
+
+fn anthropic_fn(name: &str, description: &str, input_schema: Value) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "input_schema": input_schema,
+    })
 }
 
 fn web_search_parameters() -> Value {
@@ -53,22 +127,230 @@ fn web_search_parameters() -> Value {
     })
 }
 
+fn generate_file_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "format": {
+                "type": "string",
+                "enum": ["pdf", "docx", "pptx", "xlsx", "csv", "md", "txt", "html", "json"],
+                "description": "The file format to generate.",
+            },
+            "filename": {
+                "type": "string",
+                "description": "Base file name (extension optional).",
+            },
+            "title": {
+                "type": "string",
+                "description": "Optional document/deck title.",
+            },
+            "content": {
+                "type": "string",
+                "description": "The textual content of the file.",
+            }
+        },
+        "required": ["format", "filename", "content"],
+    })
+}
+
+fn fetch_url_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "The absolute http(s) URL to fetch.",
+            }
+        },
+        "required": ["url"],
+    })
+}
+
+fn run_code_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "language": {
+                "type": "string",
+                "enum": ["python", "javascript", "bash"],
+                "description": "The language of the snippet.",
+            },
+            "code": {
+                "type": "string",
+                "description": "The source code to execute.",
+            }
+        },
+        "required": ["language", "code"],
+    })
+}
+
 /// Dispatch a tool call to its implementation. `args` is the JSON object of
 /// arguments the model produced. Returns the tool result as a string that is
 /// fed back to the model as a `tool` / `tool_result` message.
-pub async fn execute_tool(client: &reqwest::Client, name: &str, args: &Value) -> String {
+pub async fn execute_tool(
+    client: &reqwest::Client,
+    artifacts_dir: &Path,
+    caps: ToolCaps,
+    name: &str,
+    args: &Value,
+) -> ToolOutcome {
     match name {
         WEB_SEARCH => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             if query.trim().is_empty() {
-                return "Error: web_search requires a non-empty \"query\".".to_string();
+                return ToolOutcome::text("Error: web_search requires a non-empty \"query\".");
             }
             match web_search(client, query).await {
-                Ok(results) => results,
-                Err(e) => format!("web_search failed: {e}"),
+                Ok(results) => ToolOutcome::text(results),
+                Err(e) => ToolOutcome::text(format!("web_search failed: {e}")),
             }
         }
-        other => format!("Error: unknown tool \"{other}\"."),
+        GENERATE_FILE => generate_file(artifacts_dir, args),
+        FETCH_URL => {
+            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            match fetch_url(client, url).await {
+                Ok(text) => ToolOutcome::text(text),
+                Err(e) => ToolOutcome::text(format!("fetch_url failed: {e}")),
+            }
+        }
+        RUN_CODE => {
+            if !caps.code_exec {
+                return ToolOutcome::text(
+                    "Error: code execution is disabled. The user must enable it for this chat.",
+                );
+            }
+            let language = args.get("language").and_then(|v| v.as_str()).unwrap_or("");
+            let code = args.get("code").and_then(|v| v.as_str()).unwrap_or("");
+            if code.trim().is_empty() {
+                return ToolOutcome::text("Error: run_code requires non-empty \"code\".");
+            }
+            ToolOutcome::text(codeexec::run_code(language, code).await)
+        }
+        other => ToolOutcome::text(format!("Error: unknown tool \"{other}\".")),
+    }
+}
+
+/// Fetch a URL and return its readable text (HTML stripped, truncated).
+async fn fetch_url(client: &reqwest::Client, url: &str) -> Result<String, String> {
+    let url = url.trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("url must start with http:// or https://".to_string());
+    }
+    let resp = client
+        .get(url)
+        .header("User-Agent", "Conduit/0.1 (chat fetch_url)")
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+    let body = resp.text().await.map_err(|e| e.to_string())?;
+    let title = extract_title(&body);
+    let text = html_to_text(&body);
+    const MAX: usize = 12_000;
+    let text = if text.len() > MAX {
+        let mut cut = MAX;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{}\n… (content truncated)", &text[..cut])
+    } else {
+        text
+    };
+    Ok(format!("Title: {title}\nURL: {url}\n\n{text}"))
+}
+
+fn extract_title(html: &str) -> String {
+    let lower = html.to_lowercase();
+    if let Some(start) = lower.find("<title") {
+        if let Some(gt) = lower[start..].find('>') {
+            let from = start + gt + 1;
+            if let Some(end) = lower[from..].find("</title>") {
+                return strip_html(&html[from..from + end]);
+            }
+        }
+    }
+    "(no title)".to_string()
+}
+
+/// Strip scripts/styles/tags from a full HTML document and collapse whitespace.
+fn html_to_text(html: &str) -> String {
+    let without_blocks = remove_blocks(html, &["script", "style", "noscript", "head", "svg"]);
+    let stripped = strip_html(&without_blocks);
+    // Collapse runs of whitespace / blank lines.
+    let mut out = String::with_capacity(stripped.len());
+    let mut blank_run = 0;
+    for line in stripped.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            blank_run += 1;
+            if blank_run <= 1 {
+                out.push('\n');
+            }
+        } else {
+            blank_run = 0;
+            out.push_str(t);
+            out.push('\n');
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Remove `<tag>…</tag>` regions (case-insensitive) entirely.
+fn remove_blocks(html: &str, tags: &[&str]) -> String {
+    let mut s = html.to_string();
+    for tag in tags {
+        loop {
+            let lower = s.to_lowercase();
+            let open = format!("<{tag}");
+            let close = format!("</{tag}>");
+            let Some(start) = lower.find(&open) else { break };
+            let Some(rel_end) = lower[start..].find(&close) else {
+                s.truncate(start);
+                break;
+            };
+            let end = start + rel_end + close.len();
+            s.replace_range(start..end, " ");
+        }
+    }
+    s
+}
+
+fn generate_file(artifacts_dir: &Path, args: &Value) -> ToolOutcome {
+    let format = args
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let filename = args.get("filename").and_then(|v| v.as_str()).unwrap_or("");
+    let title = args.get("title").and_then(|v| v.as_str());
+    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+
+    if !artifacts::is_supported(&format) {
+        return ToolOutcome::text(format!(
+            "Error: generate_file does not support format \"{format}\"."
+        ));
+    }
+    if filename.trim().is_empty() {
+        return ToolOutcome::text("Error: generate_file requires a \"filename\".");
+    }
+
+    match artifacts::generate(artifacts_dir, &format, filename, title, content) {
+        Ok(file) => ToolOutcome {
+            text: format!(
+                "Created file \"{}\" ({}). It has been saved and is available to the user.",
+                file.filename,
+                file.path.display()
+            ),
+            artifact: Some(ArtifactRef {
+                path: file.path.display().to_string(),
+                filename: file.filename,
+            }),
+        },
+        Err(e) => ToolOutcome::text(format!("generate_file failed: {e}")),
     }
 }
 
@@ -260,21 +542,65 @@ fn strip_html(input: &str) -> String {
 mod tests {
     use super::*;
 
+    fn openai_names(caps: ToolCaps) -> Vec<String> {
+        openai_tool_specs(caps)
+            .iter()
+            .map(|s| s["function"]["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
     #[test]
-    fn openai_spec_has_web_search() {
-        let specs = openai_tool_specs();
-        assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0]["function"]["name"], WEB_SEARCH);
+    fn openai_spec_lists_safe_tools() {
+        let names = openai_names(ToolCaps::default());
+        assert!(names.contains(&WEB_SEARCH.to_string()));
+        assert!(names.contains(&GENERATE_FILE.to_string()));
+        assert!(names.contains(&FETCH_URL.to_string()));
+        assert!(!names.contains(&RUN_CODE.to_string()));
+        let specs = openai_tool_specs(ToolCaps::default());
         assert_eq!(specs[0]["type"], "function");
         assert!(specs[0]["function"]["parameters"]["properties"]["query"].is_object());
     }
 
     #[test]
-    fn anthropic_spec_has_web_search() {
-        let specs = anthropic_tool_specs();
-        assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0]["name"], WEB_SEARCH);
+    fn run_code_gated_behind_capability() {
+        assert!(!openai_names(ToolCaps::default()).contains(&RUN_CODE.to_string()));
+        assert!(openai_names(ToolCaps { code_exec: true }).contains(&RUN_CODE.to_string()));
+    }
+
+    #[test]
+    fn anthropic_spec_lists_safe_tools() {
+        let specs = anthropic_tool_specs(ToolCaps::default());
+        let names: Vec<&str> = specs.iter().map(|s| s["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&WEB_SEARCH));
+        assert!(names.contains(&FETCH_URL));
+        assert!(!names.contains(&RUN_CODE));
         assert!(specs[0]["input_schema"]["properties"]["query"].is_object());
+    }
+
+    #[test]
+    fn html_to_text_drops_scripts_and_tags() {
+        let html = "<html><head><title>Hi</title><style>x{}</style></head>\
+            <body><script>bad()</script><p>Hello <b>world</b></p></body></html>";
+        assert_eq!(extract_title(html), "Hi");
+        let text = html_to_text(html);
+        assert!(text.contains("Hello"));
+        assert!(text.contains("world"));
+        assert!(!text.contains("bad()"));
+        assert!(!text.to_lowercase().contains("<p>"));
+    }
+
+    #[test]
+    fn code_exec_rejected_when_capability_off() {
+        let client = reqwest::Client::new();
+        let dir = std::env::temp_dir();
+        let out = tauri::async_runtime::block_on(execute_tool(
+            &client,
+            &dir,
+            ToolCaps::default(),
+            RUN_CODE,
+            &json!({ "language": "python", "code": "print(1)" }),
+        ));
+        assert!(out.text.contains("code execution is disabled"));
     }
 
     #[test]
@@ -323,26 +649,46 @@ mod tests {
 
     #[test]
     #[ignore = "hits the live network"]
+    fn fetch_url_live_returns_text() {
+        let client = reqwest::Client::new();
+        let out = tauri::async_runtime::block_on(fetch_url(
+            &client,
+            "https://example.com",
+        ))
+        .unwrap();
+        println!("{out}");
+        assert!(out.contains("Example Domain"));
+        assert!(!out.to_lowercase().contains("<html"));
+    }
+
+    #[test]
+    #[ignore = "hits the live network"]
     fn web_search_live_returns_results() {
         let client = reqwest::Client::new();
+        let dir = std::env::temp_dir();
         let out = tauri::async_runtime::block_on(execute_tool(
             &client,
+            &dir,
+            ToolCaps::default(),
             WEB_SEARCH,
             &json!({ "query": "rust programming language" }),
         ));
-        println!("{out}");
-        assert!(out.contains("Search results"));
-        assert!(out.contains("http"));
+        println!("{}", out.text);
+        assert!(out.text.contains("Search results"));
+        assert!(out.text.contains("http"));
     }
 
     #[test]
     fn execute_unknown_tool_reports_error() {
         let client = reqwest::Client::new();
+        let dir = std::env::temp_dir();
         let out = tauri::async_runtime::block_on(execute_tool(
             &client,
+            &dir,
+            ToolCaps::default(),
             "does_not_exist",
             &json!({}),
         ));
-        assert!(out.contains("unknown tool"));
+        assert!(out.text.contains("unknown tool"));
     }
 }

@@ -7,7 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../../state/chat";
 import { ChatComposer } from "./ChatComposer";
 import { MessageBubble } from "./MessageBubble";
-import { listChatModels, type ChatMessage } from "../../lib/ipc";
+import { listChatModels, openArtifact, type ChatMessage } from "../../lib/ipc";
 
 export function ChatView() {
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
@@ -25,9 +25,14 @@ export function ChatView() {
   const setEffort = useChatStore((s) => s.setEffort);
   const toolsEnabled = useChatStore((s) => s.toolsEnabled);
   const setToolsEnabled = useChatStore((s) => s.setToolsEnabled);
+  const codeExecEnabled = useChatStore((s) => s.codeExecEnabled);
+  const setCodeExecEnabled = useChatStore((s) => s.setCodeExecEnabled);
   const config = useChatStore((s) => s.config);
   const loadConfig = useChatStore((s) => s.loadConfig);
   const newChat = useChatStore((s) => s.newChat);
+  const artifacts = useChatStore((s) =>
+    activeChatSessionId ? s.artifacts[activeChatSessionId] : undefined,
+  );
 
   const activeSession = sessions.find((s) => s.id === activeChatSessionId) ?? null;
   const isCompatible =
@@ -197,6 +202,26 @@ export function ChatView() {
         </div>
       )}
 
+      {artifacts && artifacts.length > 0 && (
+        <div className="chat-artifacts" aria-label="Generated files">
+          {artifacts.map((a) => (
+            <button
+              key={a.path}
+              type="button"
+              className="chat-artifact-chip"
+              title={`Open ${a.filename}`}
+              onClick={(e) => {
+                e.currentTarget.blur();
+                void openArtifact(a.path);
+              }}
+            >
+              <FileIcon />
+              <span>{a.filename}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
       <ChatComposer
         draft={draft}
         onSend={handleSend}
@@ -210,7 +235,28 @@ export function ChatView() {
         onEffortChange={setEffort}
         toolsEnabled={toolsEnabled}
         onToolsToggle={setToolsEnabled}
+        codeExecEnabled={codeExecEnabled}
+        onCodeExecToggle={setCodeExecEnabled}
       />
     </div>
+  );
+}
+
+function FileIcon() {
+  return (
+    <svg
+      width={13}
+      height={13}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+    </svg>
   );
 }

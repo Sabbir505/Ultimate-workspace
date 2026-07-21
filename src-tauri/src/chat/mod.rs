@@ -3,17 +3,20 @@
 //! Four providers: Anthropic, OpenAI, AnthropicCompatible, OpenAICompatible.
 //! All SSE streaming, API keys stored in the OS keychain, HTTP in Rust backend.
 
+pub mod artifacts;
+pub mod codeexec;
 pub mod commands;
 pub mod providers;
 pub mod tools;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Max model⇄tool round-trips in a single tool-enabled turn before we stop,
 /// to bound cost and prevent runaway loops.
@@ -56,6 +59,7 @@ impl ChatManager {
         base_url: Option<String>,
         effort: Option<String>,
         tools_enabled: bool,
+        code_exec_enabled: bool,
         messages: Vec<ChatMessage>,
         db: Arc<Mutex<Connection>>,
         app: AppHandle,
@@ -92,12 +96,16 @@ impl ChatManager {
 
         let client = self.client.clone();
         let sid = chat_session_id.clone();
+        let caps = tools::ToolCaps {
+            code_exec: code_exec_enabled,
+        };
 
         let handle = tokio::spawn(async move {
             let result = if tools_enabled && is_openai {
-                run_openai_tool_loop(&client, &tool_base, &api_key, &chat_req, &sid, &app).await
+                run_openai_tool_loop(&client, &tool_base, &api_key, &chat_req, caps, &sid, &app).await
             } else if tools_enabled && is_anthropic {
-                run_anthropic_tool_loop(&client, &tool_base, &api_key, &chat_req, &sid, &app).await
+                run_anthropic_tool_loop(&client, &tool_base, &api_key, &chat_req, caps, &sid, &app)
+                    .await
             } else {
                 run_chat_stream(
                     &client,
@@ -313,12 +321,52 @@ fn emit_token(app: &AppHandle, sid: &str, token: &str, full: &mut String) {
     );
 }
 
+/// Directory where generated artifacts are written (`<Documents>/Conduit`,
+/// falling back to home, then temp). Created on demand by the artifact writer.
+fn artifacts_dir(app: &AppHandle) -> PathBuf {
+    let base = app
+        .path()
+        .document_dir()
+        .or_else(|_| app.path().home_dir())
+        .unwrap_or_else(|_| std::env::temp_dir());
+    base.join("Conduit")
+}
+
+/// Run a tool and, if it produced a file, notify the UI. Returns the text to
+/// feed back to the model.
+async fn run_tool(
+    client: &reqwest::Client,
+    artifacts_dir: &std::path::Path,
+    caps: tools::ToolCaps,
+    app: &AppHandle,
+    sid: &str,
+    name: &str,
+    args: &Value,
+) -> String {
+    let outcome = tools::execute_tool(client, artifacts_dir, caps, name, args).await;
+    if let Some(a) = outcome.artifact {
+        let _ = app.emit(
+            "chat:artifact",
+            ChatArtifactPayload {
+                chat_session_id: sid.to_string(),
+                path: a.path,
+                filename: a.filename,
+            },
+        );
+    }
+    outcome.text
+}
+
 /// Human-readable narration of a tool call, shown (inside the `<think>` block)
 /// while the tool runs.
 fn tool_status_line(name: &str, args: &Value) -> String {
     if name == tools::WEB_SEARCH {
         let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
         format!("Searching the web for \"{q}\"…\n")
+    } else if name == tools::GENERATE_FILE {
+        let f = args.get("filename").and_then(|v| v.as_str()).unwrap_or("file");
+        let fmt = args.get("format").and_then(|v| v.as_str()).unwrap_or("");
+        format!("Generating {fmt} file \"{f}\"…\n")
     } else {
         format!("Running tool {name}…\n")
     }
@@ -336,11 +384,13 @@ async fn run_openai_tool_loop(
     base: &str,
     api_key: &str,
     req: &ChatRequest,
+    caps: tools::ToolCaps,
     sid: &str,
     app: &AppHandle,
 ) -> Result<(String, Option<ChatUsage>), String> {
     let url = format!("{base}/v1/chat/completions");
-    let tool_specs = tools::openai_tool_specs();
+    let tool_specs = tools::openai_tool_specs(caps);
+    let art_dir = artifacts_dir(app);
 
     let mut messages: Vec<Value> = Vec::new();
     if let Some(sys) = &req.system {
@@ -428,7 +478,7 @@ async fn run_openai_tool_loop(
                 let args: Value = serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
 
                 emit_token(app, sid, &tool_status_line(&name, &args), &mut full);
-                let result = tools::execute_tool(client, &name, &args).await;
+                let result = run_tool(client, &art_dir, caps, app, sid, &name, &args).await;
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": id,
@@ -465,11 +515,13 @@ async fn run_anthropic_tool_loop(
     base: &str,
     api_key: &str,
     req: &ChatRequest,
+    caps: tools::ToolCaps,
     sid: &str,
     app: &AppHandle,
 ) -> Result<(String, Option<ChatUsage>), String> {
     let url = format!("{base}/v1/messages");
-    let tool_specs = tools::anthropic_tool_specs();
+    let tool_specs = tools::anthropic_tool_specs(caps);
+    let art_dir = artifacts_dir(app);
 
     let mut messages: Vec<Value> = req
         .messages
@@ -546,7 +598,7 @@ async fn run_anthropic_tool_loop(
                 let args = tu.get("input").cloned().unwrap_or_else(|| json!({}));
 
                 emit_token(app, sid, &tool_status_line(&name, &args), &mut full);
-                let result = tools::execute_tool(client, &name, &args).await;
+                let result = run_tool(client, &art_dir, caps, app, sid, &name, &args).await;
                 results.push(json!({
                     "type": "tool_result",
                     "tool_use_id": id,

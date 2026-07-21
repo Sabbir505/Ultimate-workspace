@@ -202,6 +202,14 @@ pub struct ChatDonePayload {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ChatArtifactPayload {
+    pub chat_session_id: String,
+    pub path: String,
+    pub filename: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChatErrorPayload {
     pub chat_session_id: String,
     pub message: String,

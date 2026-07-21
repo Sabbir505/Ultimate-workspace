@@ -233,6 +233,11 @@ export interface ChatDonePayload {
   outputTokens: number | null;
   costUsd: number | null;
 }
+export interface ChatArtifactPayload {
+  chatSessionId: string;
+  path: string;
+  filename: string;
+}
 export interface ChatErrorPayload {
   chatSessionId: string;
   message: string;
@@ -256,12 +261,14 @@ export const sendChatMessage = (
   content: string,
   effort?: string,
   toolsEnabled?: boolean,
+  codeExecEnabled?: boolean,
 ) =>
   safeInvoke<void>("send_chat_message", {
     chatSessionId,
     content,
     effort: effort ?? null,
     toolsEnabled: toolsEnabled ?? false,
+    codeExecEnabled: codeExecEnabled ?? false,
   });
 export const updateChatSessionModel = (chatSessionId: string, model: string) =>
   safeInvoke<void>("update_chat_session_model", { chatSessionId, model });
@@ -301,3 +308,15 @@ export const listenChatDone = (handler: (payload: ChatDonePayload) => void) =>
   safeListen<ChatDonePayload>("chat:done", handler);
 export const listenChatError = (handler: (payload: ChatErrorPayload) => void) =>
   safeListen<ChatErrorPayload>("chat:error", handler);
+export const listenChatArtifact = (handler: (payload: ChatArtifactPayload) => void) =>
+  safeListen<ChatArtifactPayload>("chat:artifact", handler);
+
+/** Open a generated artifact file with the OS default application. */
+export async function openArtifact(path: string): Promise<void> {
+  try {
+    const { openPath } = await import("@tauri-apps/plugin-opener");
+    await openPath(path);
+  } catch (err) {
+    console.warn("openArtifact failed", err);
+  }
+}

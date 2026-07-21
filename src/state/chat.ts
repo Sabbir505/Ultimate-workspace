@@ -18,10 +18,17 @@ import {
   touchChatSession,
   updateChatSessionModel,
   updateChatSessionTitle,
+  type ChatArtifactPayload,
   type ChatConfigPayload,
   type ChatMessageRecord,
   type ChatSession,
 } from "../lib/ipc";
+
+/** A file the model generated during a chat, surfaced as a download chip. */
+export interface ChatArtifact {
+  path: string;
+  filename: string;
+}
 
 interface ChatState {
   loaded: boolean;
@@ -36,6 +43,10 @@ interface ChatState {
   effort: string;
   /** When true, the model may call tools (web search, …) during a turn. */
   toolsEnabled: boolean;
+  /** When true, the model may execute code (opt-in, security-sensitive). */
+  codeExecEnabled: boolean;
+  /** Generated files per chat session (chatSessionId -> artifacts). */
+  artifacts: Record<string, ChatArtifact[]>;
 
   // Actions
   loadSessions: () => Promise<void>;
@@ -48,6 +59,7 @@ interface ChatState {
   setSessionModel: (chatSessionId: string, model: string) => Promise<void>;
   setEffort: (effort: string) => void;
   setToolsEnabled: (enabled: boolean) => void;
+  setCodeExecEnabled: (enabled: boolean) => void;
   sendMessage: (content: string) => Promise<void>;
   cancelStream: () => Promise<void>;
   saveApiKey: (provider: string, key: string, baseUrl?: string, model?: string) => Promise<void>;
@@ -57,6 +69,7 @@ interface ChatState {
   onToken: (chatSessionId: string, token: string) => void;
   onDone: (chatSessionId: string, inputTokens: number | null, outputTokens: number | null, costUsd: number | null) => void;
   onError: (chatSessionId: string, message: string, code: string | null) => void;
+  onArtifact: (payload: ChatArtifactPayload) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -70,6 +83,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   error: null,
   effort: "",
   toolsEnabled: false,
+  codeExecEnabled: false,
+  artifacts: {},
 
   loadSessions: async () => {
     const sessions = await listChatSessions();
@@ -150,10 +165,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setEffort: (effort) => set({ effort }),
 
-  setToolsEnabled: (toolsEnabled) => set({ toolsEnabled }),
+  setToolsEnabled: (toolsEnabled) =>
+    set(toolsEnabled ? { toolsEnabled } : { toolsEnabled, codeExecEnabled: false }),
+
+  // Enabling code execution implies tools are on (the tool loop must run).
+  setCodeExecEnabled: (codeExecEnabled) =>
+    set(codeExecEnabled ? { codeExecEnabled, toolsEnabled: true } : { codeExecEnabled }),
 
   sendMessage: async (content) => {
-    const { activeChatSessionId, messages, sessions, effort, toolsEnabled } = get();
+    const { activeChatSessionId, messages, sessions, effort, toolsEnabled, codeExecEnabled } =
+      get();
     if (!activeChatSessionId) return;
 
     // Optimistically append the user message.
@@ -182,7 +203,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }));
     }
 
-    await sendChatMessage(activeChatSessionId, content, effort || undefined, toolsEnabled);
+    await sendChatMessage(
+      activeChatSessionId,
+      content,
+      effort || undefined,
+      toolsEnabled,
+      codeExecEnabled,
+    );
   },
 
   cancelStream: async () => {
@@ -246,6 +273,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Refresh the session list (title may have been updated by the backend).
     const sessions = await listChatSessions();
     if (sessions) set({ sessions });
+  },
+
+  onArtifact: ({ chatSessionId, path, filename }) => {
+    set((s) => {
+      const existing = s.artifacts[chatSessionId] ?? [];
+      if (existing.some((a) => a.path === path)) return {};
+      return {
+        artifacts: {
+          ...s.artifacts,
+          [chatSessionId]: [...existing, { path, filename }],
+        },
+      };
+    });
   },
 
   onError: (chatSessionId, message, code) => {

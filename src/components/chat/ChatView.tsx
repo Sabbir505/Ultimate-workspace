@@ -7,15 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../../state/chat";
 import { ChatComposer } from "./ChatComposer";
 import { MessageBubble } from "./MessageBubble";
-import { GlassSelect } from "../common/GlassSelect";
 import { listChatModels, type ChatMessage } from "../../lib/ipc";
-
-const EFFORT_OPTIONS = [
-  { value: "", label: "Effort: default" },
-  { value: "low", label: "Effort: low" },
-  { value: "medium", label: "Effort: medium" },
-  { value: "high", label: "Effort: high" },
-];
 
 export function ChatView() {
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
@@ -52,12 +44,12 @@ export function ChatView() {
     };
   }, [activeSession?.provider, isCompatible, activeChatSessionId]);
 
-  const modelOptions = (() => {
+  const modelIds = (() => {
     const ids = [...models];
     if (activeSession?.model && !ids.includes(activeSession.model)) {
       ids.unshift(activeSession.model);
     }
-    return ids.map((id) => ({ value: id, label: id }));
+    return ids;
   })();
 
   const handleModelChange = useCallback(
@@ -152,34 +144,16 @@ export function ChatView() {
         </div>
       )}
 
-      {activeChatSessionId && (
-        <div className="chat-toolbar">
-          {modelOptions.length > 0 ? (
-            <GlassSelect<string>
-              value={activeSession?.model ?? ""}
-              options={modelOptions}
-              onChange={handleModelChange}
-            />
-          ) : (
-            <span className="chat-toolbar-hint">
-              {isCompatible
-                ? "No models fetched — set base URL & key in Settings → API Keys"
-                : activeSession?.model || "No model set"}
-            </span>
-          )}
-          <GlassSelect<string>
-            value={effort}
-            options={EFFORT_OPTIONS}
-            onChange={setEffort}
-          />
-        </div>
-      )}
-
       <ChatComposer
         onSend={handleSend}
         onStop={handleStop}
         streaming={streamingChatSessionId === activeChatSessionId && streamingChatSessionId !== null}
         disabled={false}
+        model={activeChatSessionId ? (activeSession?.model ?? "") : undefined}
+        models={modelIds}
+        effort={effort}
+        onModelChange={handleModelChange}
+        onEffortChange={setEffort}
       />
     </div>
   );

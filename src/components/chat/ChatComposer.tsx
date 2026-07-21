@@ -1,18 +1,20 @@
 // Chat composer: auto-growing textarea, Send/Stop button.
 // Enter sends; Shift+Enter inserts a newline. Disabled while empty or streaming.
-//
-// Note on model selection: the backend's set_chat_api_key can optionally update
-// the stored model alongside the key, but the frontend never has the plaintext
-// key to pass back for a model-only change. Until the backend exposes a separate
-// set_chat_model command, model changes go through the Settings API Keys panel
-// (where the key is re-entered) or at "New Chat" creation time.
+// A model + effort selector pill sits under the textarea when provided.
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ModelEffortMenu } from "./ModelEffortMenu";
 
 interface Props {
   onSend: (content: string) => void;
   onStop?: () => void;
   streaming: boolean;
   disabled?: boolean;
+  /** Model/effort selector state — selector is hidden when model is undefined. */
+  model?: string;
+  models?: string[];
+  effort?: string;
+  onModelChange?: (model: string) => void;
+  onEffortChange?: (effort: string) => void;
 }
 
 export function ChatComposer({
@@ -20,6 +22,11 @@ export function ChatComposer({
   onStop,
   streaming,
   disabled,
+  model,
+  models,
+  effort,
+  onModelChange,
+  onEffortChange,
 }: Props) {
   const [content, setContent] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -58,6 +65,8 @@ export function ChatComposer({
 
   const isEmpty = !content.trim();
 
+  const showSelector = model !== undefined && onModelChange && onEffortChange;
+
   return (
     <div className="chat-composer">
       <div className="chat-composer-input-row">
@@ -90,6 +99,17 @@ export function ChatComposer({
           </button>
         )}
       </div>
+      {showSelector && (
+        <div className="chat-composer-controls">
+          <ModelEffortMenu
+            model={model}
+            models={models ?? []}
+            effort={effort ?? ""}
+            onModelChange={onModelChange}
+            onEffortChange={onEffortChange}
+          />
+        </div>
+      )}
     </div>
   );
 }

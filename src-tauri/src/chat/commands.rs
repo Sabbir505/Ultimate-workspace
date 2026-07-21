@@ -345,14 +345,23 @@ pub async fn list_chat_models(
         }
     };
 
-    // Try standard OpenAI shape first ({ data: [...] }).
+    // Try standard OpenAI shape first ({ data: [...] }). Only `id` is
+    // required — many compatible providers omit object/created/owned_by.
     let models: Vec<crate::types::ChatModel> = if let Some(data) = json.get("data").and_then(|v| v.as_array()) {
         data.iter()
             .filter_map(|v| {
                 let id = v.get("id")?.as_str()?.to_string();
-                let object = v.get("object")?.as_str()?.to_string();
-                let created = v.get("created")?.as_i64()?;
-                let owned_by = v.get("owned_by")?.as_str()?.to_string();
+                let object = v
+                    .get("object")
+                    .and_then(|o| o.as_str())
+                    .unwrap_or("model")
+                    .to_string();
+                let created = v.get("created").and_then(|c| c.as_i64()).unwrap_or(0);
+                let owned_by = v
+                    .get("owned_by")
+                    .and_then(|o| o.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 Some(crate::types::ChatModel { id, object, created, owned_by })
             })
             .collect()

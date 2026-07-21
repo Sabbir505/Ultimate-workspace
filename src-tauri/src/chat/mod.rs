@@ -357,6 +357,32 @@ async fn run_tool(
     outcome.text
 }
 
+/// Parse the `arguments` string of an OpenAI-style tool call into a JSON
+/// object. Some providers emit malformed payloads — e.g. a stray empty object
+/// prepended (`"{}{\"query\":\"x\"}"`) or several concatenated objects. We read
+/// every JSON value in the string and merge object fields (later keys win) so a
+/// leading `{}` no longer wipes out the real arguments.
+fn parse_tool_args(s: &str) -> Value {
+    let s = s.trim();
+    if s.is_empty() {
+        return json!({});
+    }
+    // Fast path: a single well-formed object.
+    if let Ok(v @ Value::Object(_)) = serde_json::from_str::<Value>(s) {
+        return v;
+    }
+    let mut merged = serde_json::Map::new();
+    let stream = serde_json::Deserializer::from_str(s).into_iter::<Value>();
+    for item in stream {
+        if let Ok(Value::Object(map)) = item {
+            for (k, v) in map {
+                merged.insert(k, v);
+            }
+        }
+    }
+    Value::Object(merged)
+}
+
 /// Human-readable narration of a tool call, shown (inside the `<think>` block)
 /// while the tool runs.
 fn tool_status_line(name: &str, args: &Value) -> String {
@@ -475,7 +501,7 @@ async fn run_openai_tool_loop(
                     .and_then(|f| f.get("arguments"))
                     .and_then(|x| x.as_str())
                     .unwrap_or("{}");
-                let args: Value = serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
+                let args = parse_tool_args(args_str);
 
                 emit_token(app, sid, &tool_status_line(&name, &args), &mut full);
                 let result = run_tool(client, &art_dir, caps, app, sid, &name, &args).await;
@@ -665,5 +691,36 @@ fn resolve_provider(id: &ChatProviderId) -> Box<dyn ChatProvider> {
         ChatProviderId::OpenAI => Box::new(OpenAIProvider),
         ChatProviderId::AnthropicCompatible => Box::new(AnthropicCompatibleProvider),
         ChatProviderId::OpenAICompatible => Box::new(OpenAICompatibleProvider),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_tool_args_plain_object() {
+        let v = parse_tool_args(r#"{"query":"rust"}"#);
+        assert_eq!(v["query"], "rust");
+    }
+
+    #[test]
+    fn parse_tool_args_recovers_from_prepended_empty_object() {
+        // Observed from an OpenAI-compatible proxy.
+        let v = parse_tool_args(r#"{}{"query": "population of France"}"#);
+        assert_eq!(v["query"], "population of France");
+    }
+
+    #[test]
+    fn parse_tool_args_merges_concatenated_objects() {
+        let v = parse_tool_args(r#"{"a":1}{"b":2}"#);
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"], 2);
+    }
+
+    #[test]
+    fn parse_tool_args_empty_is_object() {
+        assert_eq!(parse_tool_args(""), json!({}));
+        assert_eq!(parse_tool_args("   "), json!({}));
     }
 }

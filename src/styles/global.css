@@ -1581,11 +1581,6 @@ table.kv th {
 }
 
 /* Model + effort selector (chat composer) */
-.chat-composer-controls {
-  display: flex;
-  justify-content: flex-end;
-  padding: 6px 2px 0;
-}
 .model-effort-menu {
   position: relative;
 }
@@ -2111,75 +2106,130 @@ table.kv th {
   border-radius: var(--radius-xs);
 }
 
-/* Composer (bottom bar) */
+/* Composer (bottom bar) — Claude-style rounded card */
 .chat-composer {
   flex-shrink: 0;
-  border-top: 1px solid var(--border);
+  padding: 10px 14px 14px;
+}
+.chat-composer-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px 8px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
   background: var(--surface-glass);
   backdrop-filter: blur(20px) saturate(140%);
   -webkit-backdrop-filter: blur(20px) saturate(140%);
-  padding: 10px 14px 14px;
-  box-shadow: var(--glass-rim);
+  box-shadow: var(--glass-rim), 0 6px 24px -12px rgba(0, 0, 0, 0.45);
+  transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
 }
-.chat-composer-controls {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin-bottom: 8px;
-}
-.chat-composer-controls .glass-select {
-  min-width: 150px;
-}
-.chat-model-input {
-  flex: 1;
-  font-size: 12px;
-  padding: 4px 8px;
-  font-family: var(--font-mono);
-}
-.chat-composer-input-row {
-  display: flex;
-  gap: 8px;
-  align-items: flex-end;
+.chat-composer-card:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--glass-rim), 0 0 0 3px var(--accent-soft);
 }
 .chat-composer-textarea {
-  flex: 1;
-  min-height: 38px;
+  min-height: 24px;
   max-height: 200px;
   resize: none;
   font-family: var(--font-ui);
   font-size: 13px;
   line-height: 1.5;
-  padding: 8px 11px;
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
+  padding: 2px 2px 4px;
+  border: none;
+  background: transparent;
   color: var(--text);
   outline: none;
-  box-shadow: var(--glass-rim-soft);
-  transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
   overflow-y: auto;
-}
-.chat-composer-textarea:focus {
-  border-color: var(--accent);
-  box-shadow: var(--glass-rim-soft), 0 0 0 3px var(--accent-soft);
 }
 .chat-composer-textarea::placeholder {
   color: var(--text-dim);
   opacity: 0.7;
 }
-.chat-send-btn {
-  flex-shrink: 0;
-  padding: 8px 18px;
-  font-size: 13px;
-  font-weight: 600;
-  white-space: nowrap;
+.chat-composer-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
-.chat-send-btn:not(.primary) {
-  border-color: var(--danger);
-  color: var(--danger);
+.composer-footer-spacer {
+  flex: 1;
+}
+.composer-attach-btn {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 1;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.composer-attach-btn:hover {
   background: var(--surface-2);
+  color: var(--text);
 }
-.chat-send-btn:not(.primary):hover {
-  background: color-mix(in srgb, var(--danger) 12%, var(--surface-2));
-  border-color: var(--danger);
+.composer-attach-error {
+  font-size: 11px;
+  color: var(--danger);
+}
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-bottom: 4px;
+}
+.composer-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+}
+.composer-attachment-remove {
+  padding: 0 2px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.composer-attachment-remove:hover {
+  color: var(--text);
+}
+.composer-send-btn {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  line-height: 1;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-contrast, #fff);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.composer-send-btn:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+.composer-send-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.composer-send-btn.stop {
+  background: var(--surface-2);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  font-size: 11px;
 }

@@ -2128,6 +2128,13 @@ table.kv th {
   border-color: var(--accent);
   box-shadow: var(--glass-rim), 0 0 0 3px var(--accent-soft);
 }
+.chat-composer-textarea,
+.chat-composer-textarea:focus {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+}
 .chat-composer-textarea {
   min-height: 24px;
   max-height: 200px;

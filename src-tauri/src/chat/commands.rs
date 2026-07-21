@@ -106,22 +106,20 @@ pub async fn send_chat_message(
         other => return Err(format!("unknown provider: {other}")),
     };
 
-    // 4. Load API key from keychain (with hardcoded fallback).
+    // 4. Load API key from keychain.
     let api_key = {
         let conn = db.0.lock();
         secrets::get_chat_api_key(&conn, &provider_str)
     }
     .ok_or_else(|| format!("no API key configured for provider: {provider_str}"))?;
 
-    // 5. Load optional base_url and model override from app_settings (with hardcoded fallback).
+    // 5. Load optional base_url and model override from app_settings.
     let (base_url, model_override) = {
         let conn = db.0.lock();
         let base = db::get_setting(&conn, &format!("chat.{provider_str}.base_url"))
-            .map_err(|e| e.to_string())?
-            .or_else(|| secrets::get_hardcoded_base_url(&provider_str));
+            .map_err(|e| e.to_string())?;
         let mo = db::get_setting(&conn, &format!("chat.{provider_str}.model"))
-            .map_err(|e| e.to_string())?
-            .or_else(|| secrets::get_hardcoded_model(&provider_str));
+            .map_err(|e| e.to_string())?;
         (base, mo)
     };
     let model = model_override.unwrap_or(model_str);
@@ -218,19 +216,15 @@ pub fn delete_chat_api_key(provider: String, db: State<DbState>) -> CmdResult<()
 /// config for the FIRST one that has a stored key (so the UI can pre-fill the
 /// correct provider/model/baseUrl). The `has_key` field tells the API Keys
 /// panel whether Save is allowed without re-entering the key.
-///
-/// Hardcoded test credentials for `openai_compatible` are included as fallback.
 #[tauri::command]
 pub fn get_chat_config(provider: Option<String>, db: State<DbState>) -> CmdResult<ChatConfigPayload> {
     let conn = db.0.lock();
     match provider {
         Some(p) => {
             let base_url = db::get_setting(&conn, &format!("chat.{p}.base_url"))
-                .map_err(|e| e.to_string())?
-                .or_else(|| secrets::get_hardcoded_base_url(&p));
+                .map_err(|e| e.to_string())?;
             let model = db::get_setting(&conn, &format!("chat.{p}.model"))
-                .map_err(|e| e.to_string())?
-                .or_else(|| secrets::get_hardcoded_model(&p));
+                .map_err(|e| e.to_string())?;
             let has_key = secrets::has_chat_api_key(&conn, &p);
             Ok(ChatConfigPayload {
                 provider: Some(p),
@@ -254,12 +248,12 @@ pub fn get_chat_config(provider: Option<String>, db: State<DbState>) -> CmdResul
                     });
                 }
             }
-            // Fallback: return hardcoded openai_compatible config for testing
+            // No provider has a stored key yet.
             Ok(ChatConfigPayload {
-                provider: Some("openai_compatible".to_string()),
-                base_url: Some("https://ai2.18.show".to_string()),
-                model: Some("kimi-k2.6".to_string()),
-                has_key: true,
+                provider: None,
+                base_url: None,
+                model: None,
+                has_key: false,
             })
         }
     }

@@ -64,6 +64,18 @@ export function ChatView() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  // Whether new content should keep the view pinned to the bottom. Flipped
+  // off as soon as the user scrolls up, so streaming tokens never yank the
+  // scroll back down while they're reading history; flipped on again when
+  // they scroll back to the bottom.
+  const stickToBottomRef = useRef(true);
+
+  // Draft handed to the composer: bumping `nonce` re-prefills the textarea
+  // (used by the per-message "Edit" action to load a message for resend).
+  const [draft, setDraft] = useState<{ text: string; nonce: number }>({
+    text: "",
+    nonce: 0,
+  });
 
   // Load sessions on mount if not already loaded.
   useEffect(() => {
@@ -87,22 +99,31 @@ export function ChatView() {
     void newChat(provider, config.model ?? "");
   }, [loaded, activeChatSessionId, config, newChat]);
 
-  // Smart auto-scroll: only scroll if the user is already near the bottom.
-  // If they've scrolled up to read history, don't yank the scroll.
-  const scrollToBottomIfNear = useCallback(() => {
+  // Track whether the user is pinned near the bottom. Runs on every scroll
+  // (user- or programmatic). Once they scroll up past the threshold, auto
+  // follow is paused until they return to the bottom.
+  const handleScroll = useCallback(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
-    const threshold = 120; // px from bottom to consider "near"
-    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    if (distanceFromBottom < threshold) {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    }
+    const threshold = 80; // px from bottom to still count as "at bottom"
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    stickToBottomRef.current = distanceFromBottom < threshold;
   }, []);
 
-  // Scroll on new messages or streaming tokens.
+  // Follow new messages / streaming tokens only while pinned to the bottom.
+  // Uses an instant jump (no smooth animation) so rapid streaming updates
+  // don't fight the user's own scrolling.
   useEffect(() => {
-    scrollToBottomIfNear();
-  }, [messages, streaming, scrollToBottomIfNear]);
+    if (stickToBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ block: "end" });
+    }
+  }, [messages, streaming]);
+
+  // Switching sessions resets to the bottom of the new conversation.
+  useEffect(() => {
+    stickToBottomRef.current = true;
+  }, [activeChatSessionId]);
 
   // Build the list of items to render: persisted messages, plus a live
   // streaming bubble for the active session if tokens are arriving.
@@ -111,10 +132,17 @@ export function ChatView() {
 
   const handleSend = useCallback(
     (content: string) => {
+      // Sending always pins to the bottom so the reply is visible.
+      stickToBottomRef.current = true;
       void sendMessage(content);
     },
     [sendMessage],
   );
+
+  // Load a previous user message back into the composer for editing/resend.
+  const handleEdit = useCallback((content: string) => {
+    setDraft({ text: content, nonce: Date.now() });
+  }, []);
 
   const handleStop = useCallback(() => {
     void cancelStream();
@@ -123,15 +151,15 @@ export function ChatView() {
   // Convert persisted messages for the bubble component.
   // MessageBubble expects { role, content } (its own ChatMessage type), so we
   // map ChatMessageRecord to that shape.
-  const items: Array<ChatMessage & { key: string }> = messages.map((m) => ({
+  const items: Array<ChatMessage & { key: string; live?: boolean }> = messages.map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content,
     key: `msg-${m.id}`,
   }));
 
-  // If streaming, append the live assistant bubble.
+  // If streaming, append the live assistant bubble (no action bar while live).
   if (isStreaming) {
-    items.push({ role: "assistant", content: activeStream, key: "streaming" });
+    items.push({ role: "assistant", content: activeStream, key: "streaming", live: true });
   }
 
   const hasItems = items.length > 0;
@@ -148,9 +176,14 @@ export function ChatView() {
           </div>
         </div>
       ) : (
-        <div className="chat-messages" ref={messagesContainerRef}>
+        <div className="chat-messages" ref={messagesContainerRef} onScroll={handleScroll}>
           {items.map((item) => (
-            <MessageBubble key={item.key} message={{ role: item.role as "user" | "assistant", content: item.content }} />
+            <MessageBubble
+              key={item.key}
+              message={{ role: item.role as "user" | "assistant", content: item.content }}
+              live={item.live}
+              onEdit={item.role === "user" ? handleEdit : undefined}
+            />
           ))}
           {error && (
             <div className="chat-error">
@@ -163,6 +196,7 @@ export function ChatView() {
       )}
 
       <ChatComposer
+        draft={draft}
         onSend={handleSend}
         onStop={handleStop}
         streaming={streamingChatSessionId === activeChatSessionId && streamingChatSessionId !== null}

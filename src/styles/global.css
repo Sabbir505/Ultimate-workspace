@@ -388,6 +388,12 @@ pre,
   flex-direction: column;
   gap: 10px;
 }
+/* Chat mode: the chat view owns its own background and inner padding, so the
+   wrapper sits flush under the toolbar — no framing band of a different tint. */
+.chat-grid-wrap {
+  padding: 0;
+  gap: 0;
+}
 
 /* ---------- Pane grid ---------- */
 .pane-grid {
@@ -844,16 +850,35 @@ pre,
 .sidebar-search {
   padding: 12px;
   border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
-.sidebar-search button {
-  width: 100%;
+.sidebar-search > button:first-child {
+  flex: 1;
   text-align: left;
   color: var(--text-dim);
   background: var(--surface-2);
   padding: 7px 11px;
   border-radius: var(--radius-sm);
 }
-.sidebar-search button:hover {
+.sidebar-search > button:first-child:hover {
+  color: var(--text);
+}
+/* Collapse-sidebar icon button (top of the sidebar) */
+.sidebar-collapse-btn {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+}
+.sidebar-collapse-btn:hover {
   color: var(--text);
 }
 .sidebar-scroll {
@@ -2007,6 +2032,7 @@ table.kv th {
    right; assistant replies render as plain full-width text. */
 .chat-bubble {
   display: flex;
+  flex-direction: column;
   max-width: 75%;
   animation: chat-bubble-in 0.2s var(--ease);
 }
@@ -2016,10 +2042,39 @@ table.kv th {
 }
 .chat-bubble.user {
   align-self: flex-end;
+  align-items: flex-end;
 }
 .chat-bubble.assistant {
   align-self: stretch;
+  align-items: flex-start;
   max-width: 100%;
+}
+
+/* Per-message action bar (copy / edit) — revealed on hover, Claude-style. */
+.chat-msg-actions {
+  display: flex;
+  gap: 2px;
+  margin-top: 4px;
+  opacity: 0;
+  transition: opacity 0.15s var(--ease);
+}
+.chat-bubble:hover .chat-msg-actions,
+.chat-msg-actions:focus-within {
+  opacity: 1;
+}
+.chat-msg-action {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 3px 7px;
+  border-radius: var(--radius-xs);
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.chat-msg-action:hover {
+  color: var(--text);
+  background: var(--surface-2);
 }
 .chat-bubble-inner {
   padding: 10px 14px;

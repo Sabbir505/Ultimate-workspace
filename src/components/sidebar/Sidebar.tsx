@@ -12,6 +12,7 @@ import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { ProjectItem } from "./ProjectItem";
 import { ChatSessionRow, type ChatSessionRowData } from "../chat/ChatSessionRow";
+import { PanelIcon } from "../common/PanelIcon";
 
 type SidebarMode = "projects" | "chats";
 
@@ -105,6 +106,14 @@ export function Sidebar() {
     <aside className="sidebar">
       <div className="sidebar-search">
         <button onClick={() => setPaletteOpen(true)}>⌕ Search… (Cmd/Ctrl+K)</button>
+        <button
+          className="sidebar-collapse-btn"
+          onClick={toggleSidebar}
+          title="Collapse sidebar"
+          aria-label="Collapse sidebar"
+        >
+          <PanelIcon />
+        </button>
       </div>
 
       {/* Mode selector: dev (projects) / chat */}
@@ -198,9 +207,6 @@ export function Sidebar() {
           }
         >
           ⚙ Settings
-        </button>
-        <button className="ghost" onClick={toggleSidebar} title="Hide sidebar">
-          ▤ Collapse sidebar
         </button>
       </div>
     </aside>

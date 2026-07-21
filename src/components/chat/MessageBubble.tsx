@@ -9,6 +9,55 @@ import type { ChatMessage } from "../../lib/ipc";
 
 interface Props {
   message: ChatMessage;
+  /** True for the in-progress streaming bubble — hides the action bar. */
+  live?: boolean;
+  /** When provided (user messages), shows an "Edit" action that loads the
+   *  message text back into the composer. */
+  onEdit?: (content: string) => void;
+}
+
+/** Per-message action bar (Claude-style): copy for every message, plus edit
+ *  for user messages. Appears on hover under the bubble. */
+function MessageActions({
+  content,
+  onEdit,
+}: {
+  content: string;
+  onEdit?: (content: string) => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const copy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      // Clipboard unavailable — silently ignore.
+    }
+  }, [content]);
+
+  return (
+    <div className="chat-msg-actions">
+      <button
+        className="chat-msg-action"
+        onClick={copy}
+        title="Copy message"
+        aria-label="Copy message"
+      >
+        {copied ? "Copied" : "Copy"}
+      </button>
+      {onEdit && (
+        <button
+          className="chat-msg-action"
+          onClick={() => onEdit(content)}
+          title="Edit message"
+          aria-label="Edit message"
+        >
+          Edit
+        </button>
+      )}
+    </div>
+  );
 }
 
 /** Splits a `<think>…</think>` reasoning block (streamed by reasoning
@@ -83,7 +132,7 @@ function CopyButton({ code }: { code: string }) {
   );
 }
 
-export function MessageBubble({ message }: Props) {
+export function MessageBubble({ message, live, onEdit }: Props) {
   const isUser = message.role === "user";
   const inlineCodeStyle = useInlineCodeStyle();
   const { thinking, done, rest } = isUser
@@ -162,6 +211,7 @@ export function MessageBubble({ message }: Props) {
           {rest}
         </ReactMarkdown>
       </div>
+      {!live && <MessageActions content={message.content} onEdit={onEdit} />}
     </div>
   );
 }

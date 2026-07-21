@@ -18,6 +18,9 @@ interface Props {
   onStop?: () => void;
   streaming: boolean;
   disabled?: boolean;
+  /** Prefill the textarea (e.g. editing a prior message). Bumping `nonce`
+   *  re-applies `text` even if the text is unchanged. */
+  draft?: { text: string; nonce: number };
   /** Model/effort selector state — selector is hidden when model is undefined. */
   model?: string;
   models?: string[];
@@ -31,6 +34,7 @@ export function ChatComposer({
   onStop,
   streaming,
   disabled,
+  draft,
   model,
   models,
   effort,
@@ -42,6 +46,19 @@ export function ChatComposer({
   const [attachError, setAttachError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Prefill from an external draft (per-message Edit action). Focuses and
+  // moves the caret to the end so the user can immediately tweak and resend.
+  useEffect(() => {
+    if (!draft || draft.nonce === 0) return;
+    setContent(draft.text);
+    const ta = textareaRef.current;
+    if (ta) {
+      ta.focus();
+      const end = draft.text.length;
+      requestAnimationFrame(() => ta.setSelectionRange(end, end));
+    }
+  }, [draft?.nonce]);
 
   // Auto-grow the textarea as the user types.
   useEffect(() => {

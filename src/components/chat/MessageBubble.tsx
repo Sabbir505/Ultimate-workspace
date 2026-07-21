@@ -26,15 +26,21 @@ function MessageActions({
   onEdit?: (content: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
-  const copy = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(content);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1800);
-    } catch {
-      // Clipboard unavailable — silently ignore.
-    }
-  }, [content]);
+  const copy = useCallback(
+    async (e: React.MouseEvent<HTMLButtonElement>) => {
+      // Drop focus so the hover-only action bar doesn't stay pinned open
+      // after a mouse click.
+      e.currentTarget.blur();
+      try {
+        await navigator.clipboard.writeText(content);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1800);
+      } catch {
+        // Clipboard unavailable — silently ignore.
+      }
+    },
+    [content],
+  );
 
   return (
     <div className="chat-msg-actions">
@@ -49,7 +55,10 @@ function MessageActions({
       {onEdit && (
         <button
           className="chat-msg-action"
-          onClick={() => onEdit(content)}
+          onClick={(e) => {
+            e.currentTarget.blur();
+            onEdit(content);
+          }}
           title="Edit message"
           aria-label="Edit message"
         >

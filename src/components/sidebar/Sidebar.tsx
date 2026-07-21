@@ -6,15 +6,13 @@
 // When in chat mode, the sidebar-scroll switches to a chat-session list
 // powered by useChatStore.
 import { open } from "@tauri-apps/plugin-dialog";
-import { useCallback, useState } from "react";
+import { useCallback } from "react";
 import { useProjectsStore } from "../../state/projects";
 import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { ProjectItem } from "./ProjectItem";
 import { ChatSessionRow, type ChatSessionRowData } from "../chat/ChatSessionRow";
 import { PanelIcon } from "../common/PanelIcon";
-
-type SidebarMode = "projects" | "chats";
 
 export function Sidebar() {
   const projects = useProjectsStore((s) => s.projects);
@@ -25,6 +23,8 @@ export function Sidebar() {
   const setPaletteOpen = useUiStore((s) => s.setPaletteOpen);
   const setGitPromptProjectId = useUiStore((s) => s.setGitPromptProjectId);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
+  const sidebarMode = useUiStore((s) => s.sidebarMode);
+  const setSidebarMode = useUiStore((s) => s.setSidebarMode);
 
   // Chat store
   const chatSessions = useChatStore((s) => s.sessions);
@@ -37,7 +37,6 @@ export function Sidebar() {
   const loadSessions = useChatStore((s) => s.loadSessions);
   const loadConfig = useChatStore((s) => s.loadConfig);
 
-  const [sidebarMode, setSidebarMode] = useState<SidebarMode>("projects");
 
   const handleNewChat = useCallback(() => {
     // Fall back to a compatible provider when no config is saved yet;
@@ -65,7 +64,7 @@ export function Sidebar() {
   );
 
   const switchToMode = useCallback(
-    (mode: SidebarMode) => {
+    (mode: "projects" | "chats") => {
       setSidebarMode(mode);
       if (mode === "projects") {
         setActiveView("grid");
@@ -78,7 +77,7 @@ export function Sidebar() {
         setActiveView("chat");
       }
     },
-    [setActiveView, chatLoaded, loadSessions, loadConfig],
+    [setActiveView, setSidebarMode, chatLoaded, loadSessions, loadConfig],
   );
 
   const addProject = async () => {

@@ -99,19 +99,18 @@ export default function App() {
     <div className="app">
       {!sidebarCollapsed && <Sidebar />}
 
-      {sidebarCollapsed && (
-        <button
-          className="sidebar-restore"
-          onClick={toggleSidebar}
-          title="Show sidebar"
-          aria-label="Show sidebar"
-        >
-          <PanelIcon />
-        </button>
-      )}
-
       <div className="main">
         <div className="toolbar">
+          {sidebarCollapsed && (
+            <button
+              className="sidebar-restore"
+              onClick={toggleSidebar}
+              title="Show sidebar"
+              aria-label="Show sidebar"
+            >
+              <PanelIcon />
+            </button>
+          )}
           <strong style={{ fontSize: 14 }}>Conduit</strong>
           <span className="spacer" />
           <button onClick={openBrowserPane} title="Open a browser preview pane (google.com)">

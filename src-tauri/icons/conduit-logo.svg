@@ -1,0 +1,52 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0B0B12"/>
+      <stop offset="100%" stop-color="#08080C"/>
+    </linearGradient>
+    <linearGradient id="ring1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00D4AA"/>
+      <stop offset="100%" stop-color="#00D4AA" stop-opacity="0.35"/>
+    </linearGradient>
+    <linearGradient id="ring2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3FDFC0"/>
+      <stop offset="100%" stop-color="#7C6FF7" stop-opacity="0.55"/>
+    </linearGradient>
+    <linearGradient id="ring3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#9C90FF"/>
+      <stop offset="100%" stop-color="#7C6FF7"/>
+    </linearGradient>
+    <radialGradient id="core" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#EDEBFF"/>
+      <stop offset="55%" stop-color="#7C6FF7"/>
+      <stop offset="100%" stop-color="#7C6FF7" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- squircle background -->
+  <rect x="0" y="0" width="512" height="512" rx="112" fill="url(#bg)"/>
+
+  <!-- concentric tunnel rings, open arc for directional/flow feel -->
+  <g transform="rotate(-45 256 256)" filter="url(#glow)">
+    <circle cx="256" cy="256" r="176" fill="none" stroke="url(#ring1)"
+            stroke-width="14" stroke-linecap="round"
+            stroke-dasharray="740 828" stroke-dashoffset="0"/>
+    <circle cx="256" cy="256" r="130" fill="none" stroke="url(#ring2)"
+            stroke-width="16" stroke-linecap="round"
+            stroke-dasharray="545 817" stroke-dashoffset="0"/>
+    <circle cx="256" cy="256" r="84" fill="none" stroke="url(#ring3)"
+            stroke-width="18" stroke-linecap="round"
+            stroke-dasharray="352 528" stroke-dashoffset="0"/>
+  </g>
+
+  <!-- vanishing point / core -->
+  <circle cx="256" cy="256" r="30" fill="url(#core)"/>
+  <circle cx="256" cy="256" r="7" fill="#F5F3FF"/>
+</svg>

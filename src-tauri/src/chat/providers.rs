@@ -1,0 +1,668 @@
+//! Chat provider implementations: Anthropic, OpenAI, and compatible variants.
+//!
+//! Each provider builds the correct HTTP request and parses the SSE stream
+//! into tokens and usage info. SSE parsing is tested with real payload samples.
+
+use serde::{Deserialize, Serialize};
+
+// ---- Shared types ----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatProviderId {
+    Anthropic,
+    OpenAI,
+    AnthropicCompatible,
+    OpenAICompatible,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ChatRequest {
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChatUsage {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_usd: f64,
+}
+
+// ---- Provider trait ----
+
+#[async_trait::async_trait]
+#[allow(dead_code)]
+pub trait ChatProvider: Send + Sync {
+    fn id(&self) -> ChatProviderId;
+    fn default_model(&self) -> &'static str;
+
+    /// Build the HTTP request — URL, headers, JSON body with stream:true.
+    /// Takes a pre-built client for connection reuse.
+    fn build_request(
+        &self,
+        client: &reqwest::Client,
+        req: &ChatRequest,
+        api_key: &str,
+        base_url: Option<&str>,
+    ) -> Result<reqwest::RequestBuilder, String>;
+
+    /// Parse ONE line from the SSE stream. Returns (token, done).
+    /// `buf` is the per-request accumulation buffer used for usage parsing.
+    fn parse_sse_chunk(
+        &self,
+        line: &str,
+        buf: &mut String,
+    ) -> Result<(Option<String>, bool), String>;
+
+    /// Parse final usage from the accumulated SSE buffer.
+    fn parse_usage(&self, buf: &str) -> Option<ChatUsage>;
+}
+
+// ---- Shared request bodies (Anthropic + OpenAI wire shapes) ----
+//
+// Hoisted to module level so the native + Compatible variants of each
+// provider share ONE body definition + ONE request-builder instead of
+// copy-pasting ~45 LOC per variant. The Compatible variants differ only
+// in how they resolve the base_url (they REQUIRE one; the native variants
+// default it) — everything else is identical, so they delegate here.
+
+#[derive(Serialize)]
+struct AnthropicWireMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+struct AnthropicWireBody {
+    model: String,
+    messages: Vec<AnthropicWireMessage>,
+    max_tokens: i64,
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
+}
+
+#[derive(Serialize)]
+struct OpenAIWireMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct OpenAIWireBody {
+    model: String,
+    messages: Vec<OpenAIWireMessage>,
+    stream: bool,
+}
+
+/// Build the Anthropic `/v1/messages` streaming request. Both
+/// `AnthropicProvider` and `AnthropicCompatibleProvider` route through here.
+fn anthropic_request(
+    client: &reqwest::Client,
+    req: &ChatRequest,
+    api_key: &str,
+    base: &str,
+) -> reqwest::RequestBuilder {
+    let url = format!("{base}/v1/messages");
+    let body = AnthropicWireBody {
+        model: req.model.clone(),
+        messages: req
+            .messages
+            .iter()
+            .map(|m| AnthropicWireMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            })
+            .collect(),
+        max_tokens: req.max_tokens.unwrap_or(4096),
+        stream: true,
+        system: req.system.clone(),
+    };
+    client
+        .post(&url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body)
+}
+
+/// Build the OpenAI `/v1/chat/completions` streaming request. Both
+/// `OpenAIProvider` and `OpenAICompatibleProvider` route through here.
+fn openai_request(
+    client: &reqwest::Client,
+    req: &ChatRequest,
+    api_key: &str,
+    base: &str,
+) -> reqwest::RequestBuilder {
+    let url = format!("{base}/v1/chat/completions");
+    let body = OpenAIWireBody {
+        model: req.model.clone(),
+        messages: req
+            .messages
+            .iter()
+            .map(|m| OpenAIWireMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            })
+            .collect(),
+        stream: true,
+    };
+    client
+        .post(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("content-type", "application/json")
+        .json(&body)
+}
+
+// ---- Anthropic ----
+
+pub struct AnthropicProvider;
+
+impl AnthropicProvider {
+    const DEFAULT_BASE: &'static str = "https://api.anthropic.com";
+}
+
+impl ChatProvider for AnthropicProvider {
+    fn id(&self) -> ChatProviderId {
+        ChatProviderId::Anthropic
+    }
+
+    fn default_model(&self) -> &'static str {
+        "claude-sonnet-4-5-20250929"
+    }
+
+    fn build_request(
+        &self,
+        client: &reqwest::Client,
+        req: &ChatRequest,
+        api_key: &str,
+        base_url: Option<&str>,
+    ) -> Result<reqwest::RequestBuilder, String> {
+        Ok(anthropic_request(
+            client,
+            req,
+            api_key,
+            base_url.unwrap_or(Self::DEFAULT_BASE),
+        ))
+    }
+
+    fn parse_sse_chunk(
+        &self,
+        line: &str,
+        buf: &mut String,
+    ) -> Result<(Option<String>, bool), String> {
+        buf.push_str(line);
+        buf.push('\n');
+
+        // Anthropic SSE: lines prefixed with "event:" and "data:"
+        if line.starts_with("data: ") {
+            let data = &line[6..];
+
+            #[derive(Deserialize)]
+            struct SsePayload {
+                #[serde(rename = "type")]
+                event_type: String,
+                delta: Option<Delta>,
+                usage: Option<serde_json::Value>,
+            }
+
+            #[derive(Deserialize)]
+            struct Delta {
+                text: Option<String>,
+            }
+
+            let payload: SsePayload =
+                serde_json::from_str(data).map_err(|e| format!("SSE parse error: {e}"))?;
+
+            match payload.event_type.as_str() {
+                "content_block_delta" => {
+                    if let Some(ref delta) = payload.delta {
+                        if let Some(ref text) = delta.text {
+                            return Ok((Some(text.clone()), false));
+                        }
+                    }
+                }
+                "message_delta" | "message_stop" => {
+                    // Usage will be in the payload; we keep it in buf.
+                    return Ok((None, true));
+                }
+                "ping" => {}
+                _ => {}
+            }
+        }
+
+        Ok((None, false))
+    }
+
+    fn parse_usage(&self, buf: &str) -> Option<ChatUsage> {
+        // Usage in Anthropic appears in the message_delta or message_stop
+        // events. Search backwards through the buffer for the event that
+        // carries usage.
+        for line in buf.lines().rev() {
+            if let Some(data) = line.strip_prefix("data: ") {
+                #[derive(Deserialize)]
+                struct UsageEvent {
+                    usage: Option<UsageData>,
+                }
+                #[derive(Deserialize)]
+                struct UsageData {
+                    input_tokens: Option<i64>,
+                    output_tokens: Option<i64>,
+                }
+                if let Ok(ev) = serde_json::from_str::<UsageEvent>(data) {
+                    if let Some(u) = ev.usage {
+                        let input = u.input_tokens.unwrap_or(0);
+                        let output = u.output_tokens.unwrap_or(0);
+                        let cost = calculate_anthropic_cost(input, output);
+                        return Some(ChatUsage {
+                            input_tokens: input,
+                            output_tokens: output,
+                            cost_usd: cost,
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+fn calculate_anthropic_cost(input_tokens: i64, output_tokens: i64) -> f64 {
+    // Approximate rates for claude-sonnet-4-5 ($3/$15 per Mtok).
+    // The real rate should come from a settings override — this is the
+    // fallback estimate used when pricing keys are absent.
+    let in_rate = 3.0;
+    let out_rate = 15.0;
+    (input_tokens as f64 * in_rate + output_tokens as f64 * out_rate) / 1_000_000.0
+}
+
+// ---- OpenAI ----
+
+pub struct OpenAIProvider;
+
+impl OpenAIProvider {
+    const DEFAULT_BASE: &'static str = "https://api.openai.com";
+}
+
+impl ChatProvider for OpenAIProvider {
+    fn id(&self) -> ChatProviderId {
+        ChatProviderId::OpenAI
+    }
+
+    fn default_model(&self) -> &'static str {
+        "gpt-4o"
+    }
+
+    fn build_request(
+        &self,
+        client: &reqwest::Client,
+        req: &ChatRequest,
+        api_key: &str,
+        base_url: Option<&str>,
+    ) -> Result<reqwest::RequestBuilder, String> {
+        Ok(openai_request(
+            client,
+            req,
+            api_key,
+            base_url.unwrap_or(Self::DEFAULT_BASE),
+        ))
+    }
+
+    fn parse_sse_chunk(
+        &self,
+        line: &str,
+        buf: &mut String,
+    ) -> Result<(Option<String>, bool), String> {
+        buf.push_str(line);
+        buf.push('\n');
+
+        if line.starts_with("data: ") {
+            let data = &line[6..];
+
+            if data == "[DONE]" {
+                return Ok((None, true));
+            }
+
+            #[derive(Deserialize)]
+            struct SsePayload {
+                choices: Option<Vec<Choice>>,
+                usage: Option<serde_json::Value>,
+            }
+
+            #[derive(Deserialize)]
+            struct Choice {
+                delta: Option<Delta>,
+                finish_reason: Option<String>,
+            }
+
+            #[derive(Deserialize)]
+            struct Delta {
+                content: Option<String>,
+            }
+
+            let payload: SsePayload =
+                serde_json::from_str(data).map_err(|e| format!("SSE parse error: {e}"))?;
+
+            // Check for final chunk (may have usage, may have finish_reason).
+            let mut is_done = false;
+            if let Some(ref choices) = payload.choices {
+                for choice in choices {
+                    if choice.finish_reason.as_deref() == Some("stop") {
+                        is_done = true;
+                    }
+                    if let Some(ref delta) = choice.delta {
+                        if let Some(ref content) = delta.content {
+                            return Ok((Some(content.clone()), false));
+                        }
+                    }
+                }
+            }
+
+            // Some compatible endpoints send usage on the same chunk as finish.
+            if payload.usage.is_some() || is_done {
+                return Ok((None, payload.usage.is_some() || is_done));
+            }
+        }
+
+        Ok((None, false))
+    }
+
+    fn parse_usage(&self, buf: &str) -> Option<ChatUsage> {
+        // Usage in OpenAI appears in the final chunk with usage object.
+        // Search for the last data line that contains usage.
+        for line in buf.lines().rev() {
+            if let Some(data) = line.strip_prefix("data: ") {
+                if data == "[DONE]" {
+                    continue;
+                }
+                #[derive(Deserialize)]
+                struct UsageEvent {
+                    usage: Option<UsageData>,
+                }
+                #[derive(Deserialize)]
+                struct UsageData {
+                    prompt_tokens: Option<i64>,
+                    completion_tokens: Option<i64>,
+                    total_tokens: Option<i64>,
+                }
+                if let Ok(ev) = serde_json::from_str::<UsageEvent>(data) {
+                    if let Some(u) = ev.usage {
+                        let input = u.prompt_tokens.unwrap_or(0);
+                        let output = u.completion_tokens.unwrap_or(0);
+                        let cost = calculate_openai_cost(input, output);
+                        return Some(ChatUsage {
+                            input_tokens: input,
+                            output_tokens: output,
+                            cost_usd: cost,
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+fn calculate_openai_cost(input_tokens: i64, output_tokens: i64) -> f64 {
+    // Approximate rates for gpt-4o ($2.50/$10 per Mtok).
+    let in_rate = 2.50;
+    let out_rate = 10.0;
+    (input_tokens as f64 * in_rate + output_tokens as f64 * out_rate) / 1_000_000.0
+}
+
+// ---- AnthropicCompatible ----
+
+pub struct AnthropicCompatibleProvider;
+
+impl ChatProvider for AnthropicCompatibleProvider {
+    fn id(&self) -> ChatProviderId {
+        ChatProviderId::AnthropicCompatible
+    }
+
+    fn default_model(&self) -> &'static str {
+        "claude-sonnet-4-5-20250929"
+    }
+
+    fn build_request(
+        &self,
+        client: &reqwest::Client,
+        req: &ChatRequest,
+        api_key: &str,
+        base_url: Option<&str>,
+    ) -> Result<reqwest::RequestBuilder, String> {
+        let base =
+            base_url.ok_or_else(|| "base_url is required for AnthropicCompatible".to_string())?;
+        Ok(anthropic_request(client, req, api_key, base))
+    }
+
+    fn parse_sse_chunk(
+        &self,
+        line: &str,
+        buf: &mut String,
+    ) -> Result<(Option<String>, bool), String> {
+        AnthropicProvider.parse_sse_chunk(line, buf)
+    }
+
+    fn parse_usage(&self, buf: &str) -> Option<ChatUsage> {
+        AnthropicProvider.parse_usage(buf)
+    }
+}
+
+// ---- OpenAICompatible ----
+
+pub struct OpenAICompatibleProvider;
+
+impl ChatProvider for OpenAICompatibleProvider {
+    fn id(&self) -> ChatProviderId {
+        ChatProviderId::OpenAICompatible
+    }
+
+    fn default_model(&self) -> &'static str {
+        "gpt-4o"
+    }
+
+    fn build_request(
+        &self,
+        client: &reqwest::Client,
+        req: &ChatRequest,
+        api_key: &str,
+        base_url: Option<&str>,
+    ) -> Result<reqwest::RequestBuilder, String> {
+        let base =
+            base_url.ok_or_else(|| "base_url is required for OpenAICompatible".to_string())?;
+        Ok(openai_request(client, req, api_key, base))
+    }
+
+    fn parse_sse_chunk(
+        &self,
+        line: &str,
+        buf: &mut String,
+    ) -> Result<(Option<String>, bool), String> {
+        OpenAIProvider.parse_sse_chunk(line, buf)
+    }
+
+    fn parse_usage(&self, buf: &str) -> Option<ChatUsage> {
+        OpenAIProvider.parse_usage(buf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- Anthropic SSE tests ----
+
+    #[test]
+    fn anthropic_parse_content_block_delta() {
+        let provider = AnthropicProvider;
+        let mut buf = String::new();
+
+        // Simulate event + data lines arriving:
+        let event_line = "event: content_block_delta";
+        let (tok, done) = provider.parse_sse_chunk(event_line, &mut buf).unwrap();
+        assert!(tok.is_none());
+        assert!(!done);
+
+        let data_line = r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+        let (tok, done) = provider.parse_sse_chunk(data_line, &mut buf).unwrap();
+        assert_eq!(tok, Some("Hello".to_string()));
+        assert!(!done);
+    }
+
+    #[test]
+    fn anthropic_parse_message_delta_with_usage() {
+        let provider = AnthropicProvider;
+        let mut buf = String::new();
+
+        let data_line = r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":42}}"#;
+        let (tok, done) = provider.parse_sse_chunk(data_line, &mut buf).unwrap();
+        assert!(tok.is_none());
+        assert!(done);
+
+        let usage = provider.parse_usage(&buf);
+        assert!(usage.is_some());
+        let u = usage.unwrap();
+        assert_eq!(u.output_tokens, 42);
+        assert!(u.cost_usd > 0.0);
+    }
+
+    #[test]
+    fn anthropic_parse_message_stop() {
+        let provider = AnthropicProvider;
+        let mut buf = String::new();
+
+        let data_line = r#"data: {"type":"message_stop"}"#;
+        let (tok, done) = provider.parse_sse_chunk(data_line, &mut buf).unwrap();
+        assert!(tok.is_none());
+        assert!(done);
+    }
+
+    #[test]
+    fn anthropic_parse_ping_is_ignored() {
+        let provider = AnthropicProvider;
+        let mut buf = String::new();
+
+        let data_line = r#"data: {"type":"ping"}"#;
+        let (tok, done) = provider.parse_sse_chunk(data_line, &mut buf).unwrap();
+        assert!(tok.is_none());
+        assert!(!done);
+    }
+
+    #[test]
+    fn anthropic_parse_usage_full() {
+        let provider = AnthropicProvider;
+        let buf = r#"
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":95}}
+"#;
+        let usage = provider.parse_usage(buf);
+        assert!(usage.is_some());
+        let u = usage.unwrap();
+        assert_eq!(u.output_tokens, 95);
+        assert_eq!(u.input_tokens, 0);
+        assert!(u.cost_usd > 0.0);
+    }
+
+    #[test]
+    fn anthropic_parse_usage_none() {
+        let provider = AnthropicProvider;
+        let buf = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n";
+        let usage = provider.parse_usage(buf);
+        assert!(usage.is_none());
+    }
+
+    // ---- OpenAI SSE tests ----
+
+    #[test]
+    fn openai_parse_delta_content() {
+        let provider = OpenAIProvider;
+        let mut buf = String::new();
+
+        let data_line = r#"data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}"#;
+        let (tok, done) = provider.parse_sse_chunk(data_line, &mut buf).unwrap();
+        assert_eq!(tok, Some("Hello".to_string()));
+        assert!(!done);
+    }
+
+    #[test]
+    fn openai_parse_done() {
+        let provider = OpenAIProvider;
+        let mut buf = String::new();
+
+        let data_line = "data: [DONE]";
+        let (tok, done) = provider.parse_sse_chunk(data_line, &mut buf).unwrap();
+        assert!(tok.is_none());
+        assert!(done);
+    }
+
+    #[test]
+    fn openai_parse_final_chunk_with_usage() {
+        let provider = OpenAIProvider;
+        let mut buf = String::new();
+
+        let data_line = r#"data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}"#;
+        let (tok, done) = provider.parse_sse_chunk(data_line, &mut buf).unwrap();
+        assert!(tok.is_none());
+        assert!(done);
+
+        let usage = provider.parse_usage(&buf);
+        assert!(usage.is_some());
+        let u = usage.unwrap();
+        assert_eq!(u.input_tokens, 100);
+        assert_eq!(u.output_tokens, 50);
+        assert!(u.cost_usd > 0.0);
+    }
+
+    #[test]
+    fn openai_parse_usage_no_usage_field() {
+        let provider = OpenAIProvider;
+        let buf = r#"data: {"id":"chatcmpl-123","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+data: [DONE]
+"#;
+        let usage = provider.parse_usage(buf);
+        assert!(usage.is_none());
+    }
+
+    #[test]
+    fn anthropic_compatible_delegates_to_anthropic() {
+        let provider = AnthropicCompatibleProvider;
+        let mut buf = String::new();
+
+        let data_line = r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#;
+        let (tok, done) = provider.parse_sse_chunk(data_line, &mut buf).unwrap();
+        assert_eq!(tok, Some("Hi".to_string()));
+        assert!(!done);
+
+        let buf2 = r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":10,"output_tokens":20}}"#;
+        let usage = provider.parse_usage(buf2);
+        assert!(usage.is_some());
+        let u = usage.unwrap();
+        assert_eq!(u.input_tokens, 10);
+        assert_eq!(u.output_tokens, 20);
+    }
+
+    #[test]
+    fn openai_compatible_delegates_to_openai() {
+        let provider = OpenAICompatibleProvider;
+        let mut buf = String::new();
+
+        let data_line = r#"data: {"id":"x","choices":[{"index":0,"delta":{"content":"hey"},"finish_reason":null}]}"#;
+        let (tok, done) = provider.parse_sse_chunk(data_line, &mut buf).unwrap();
+        assert_eq!(tok, Some("hey".to_string()));
+        assert!(!done);
+    }
+}

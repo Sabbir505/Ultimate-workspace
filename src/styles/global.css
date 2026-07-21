@@ -1,0 +1,2032 @@
+/* Conduit "Liquid Glass" visual system (PRD §7.1–7.3).
+   The window itself is transparent; acrylic blur comes from the Rust side
+   (window-vibrancy apply_blur on Windows). Every surface here is therefore
+   semi-transparent so the blur shows through. Glass is built from four
+   layered effects on each surface:
+     1. a translucent fill (let the window blur read through),
+     2. a backdrop-filter blur so content *behind the surface* (another pane,
+        an overlay) softens — the "liquid" depth,
+     3. a 1px top-edge highlight (inset, white-ish, low alpha) = the glass
+        "sheen" that reads as a specular rim,
+     4. a soft outer shadow for separation from the desktop.
+   Layered together these turn a flat dark theme into glass. */
+
+:root {
+  --font-ui: "Space Grotesk", -apple-system, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Space Mono", ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+
+  /* Pane state colors (§7.3 / legend §12.4) */
+  --state-idle: #9aa4b2;
+  --state-working: #34d17b;
+  --state-waiting: #f2c14e;
+  --state-diff: #58a6ff;
+
+  --radius: 12px;
+  --radius-sm: 8px;
+  --radius-xs: 6px;
+  --sidebar-width: 250px;
+
+  /* Shared glass layer helpers. Compose surfaces with var(--glass) on the
+     `background` and var(--glass-rim) on the box-shadow top edge. */
+  --glass-rim: inset 0 1px 0 0 rgba(255, 255, 255, 0.14);
+  --glass-rim-soft: inset 0 1px 0 0 rgba(255, 255, 255, 0.08);
+  --glass-shadow: 0 8px 28px -12px rgba(0, 0, 0, 0.55), 0 2px 8px -4px rgba(0, 0, 0, 0.4);
+  --glass-shadow-lg: 0 24px 64px -16px rgba(0, 0, 0, 0.6), 0 8px 20px -10px rgba(0, 0, 0, 0.45);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+:root[data-theme="dark"] {
+  /* Cool blue-gray tint under glass */
+  --bg-tint: rgba(18, 24, 34, 0.72);
+  --surface: rgba(28, 36, 50, 0.55);
+  --surface-2: rgba(40, 50, 68, 0.5);
+  --surface-solid: #1c2432;
+  /* Stronger glass fills for elevated surfaces (toolbars, headers, popovers). */
+  --surface-glass: rgba(34, 42, 58, 0.62);
+  --surface-glass-2: rgba(46, 56, 76, 0.6);
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --text: #e8edf4;
+  --text-dim: #93a0b4;
+  --accent: #6ea8fe;
+  --accent-soft: rgba(110, 168, 254, 0.16);
+  --accent-glow: rgba(110, 168, 254, 0.35);
+  --danger: #ff7b72;
+  --shadow: rgba(0, 0, 0, 0.45);
+  --diff-add-bg: rgba(52, 209, 123, 0.12);
+  --diff-del-bg: rgba(255, 123, 114, 0.12);
+  --diff-hunk-bg: rgba(88, 166, 255, 0.12);
+}
+
+:root[data-theme="light"] {
+  /* Warm off-white tint under glass */
+  --bg-tint: rgba(244, 241, 236, 0.78);
+  --surface: rgba(255, 255, 255, 0.55);
+  --surface-2: rgba(250, 248, 244, 0.65);
+  --surface-solid: #f6f3ee;
+  --surface-glass: rgba(255, 255, 255, 0.62);
+  --surface-glass-2: rgba(252, 250, 246, 0.7);
+  --border: rgba(30, 30, 40, 0.1);
+  --border-strong: rgba(30, 30, 40, 0.2);
+  --text: #2a2f3a;
+  --text-dim: #6b7280;
+  --accent: #2f6fdd;
+  --accent-soft: rgba(47, 111, 221, 0.12);
+  --accent-glow: rgba(47, 111, 221, 0.28);
+  --danger: #d64545;
+  --shadow: rgba(60, 60, 80, 0.18);
+  --diff-add-bg: rgba(22, 163, 74, 0.12);
+  --diff-del-bg: rgba(214, 69, 69, 0.1);
+  --diff-hunk-bg: rgba(47, 111, 221, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  /* Solid fallback: the window is non-transparent (transparent:true deadlocks
+     WebView2 child-webview creation under acrylic blur). The native blur still
+     paints the window backdrop via window-vibrancy; the rgba surfaces above
+     it composite over this solid base instead of the desktop. */
+  background: var(--surface-solid);
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  user-select: none;
+  /* Crisp anti-aliasing over the glass — without this, light-on-dark text on
+     a translucent surface looks muddy. -webkit-font-smoothing is the only
+     knob Chromium honors here. */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: 0.005em;
+}
+
+button {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  padding: 5px 11px;
+  cursor: pointer;
+  box-shadow: var(--glass-rim-soft);
+  transition: background 0.18s var(--ease), border-color 0.18s var(--ease),
+    box-shadow 0.18s var(--ease), transform 0.08s var(--ease);
+}
+button:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-glass-2);
+}
+button:active {
+  transform: translateY(0.5px);
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+button.primary {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 92%, #fff 8%), var(--accent));
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  color: #fff;
+  box-shadow: var(--glass-rim), 0 4px 14px -6px var(--accent-glow);
+}
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--text-dim);
+}
+button.ghost:hover {
+  color: var(--text);
+  background: var(--surface-2);
+  box-shadow: var(--glass-rim-soft);
+}
+button.danger {
+  color: var(--danger);
+}
+
+input,
+textarea,
+select {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  padding: 5px 9px;
+  outline: none;
+  box-shadow: var(--glass-rim-soft);
+  transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
+}
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: var(--accent);
+  box-shadow: var(--glass-rim-soft), 0 0 0 3px var(--accent-soft);
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+
+code,
+pre,
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* ---------- Glass dropdown (replaces native <select>) ----------
+   Native <select> option lists are OS-rendered and unthemeable, so the CLI
+   chooser and theme chooser use a custom dropdown whose list is a floating
+   glass popover. The popover is positioned absolutely under the trigger; the
+   .glass-select wrapper must be `position: relative` (set inline by callers in
+   flex contexts where width should follow content, or via the default below). */
+.glass-select {
+  position: relative;
+  display: inline-flex;
+}
+.glass-select-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 9px 5px 11px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  box-shadow: var(--glass-rim-soft);
+  cursor: pointer;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease),
+    box-shadow 0.15s var(--ease);
+}
+.glass-select-trigger:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-glass-2);
+}
+.glass-select.open .glass-select-trigger {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  box-shadow: var(--glass-rim-soft), 0 0 0 3px var(--accent-soft);
+}
+.glass-select-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.glass-select-chevron {
+  flex: none;
+  font-size: 10px;
+  color: var(--text-dim);
+  transition: transform 0.2s var(--ease), color 0.15s var(--ease);
+}
+.glass-select.open .glass-select-chevron {
+  transform: rotate(180deg);
+  color: var(--accent);
+}
+.glass-select-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 80;
+  min-width: 100%;
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--surface-glass);
+  backdrop-filter: blur(28px) saturate(150%);
+  -webkit-backdrop-filter: blur(28px) saturate(150%);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+  animation: glass-select-in 0.16s var(--ease);
+  max-height: 280px;
+  overflow-y: auto;
+}
+@keyframes glass-select-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.99); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.glass-select-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-xs);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+  box-shadow: none;
+  cursor: pointer;
+  transition: background 0.1s var(--ease);
+}
+.glass-select-option:hover,
+.glass-select-option.active {
+  background: var(--accent-soft);
+}
+.glass-select-option.selected {
+  color: var(--accent);
+}
+.glass-select-option:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.glass-select-option-label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow: hidden;
+}
+.glass-select-option-hint {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.glass-select-check {
+  flex: none;
+  font-size: 11px;
+  color: var(--accent);
+}
+
+/* ---------- App shell ---------- */
+.app {
+  display: flex;
+  height: 100%;
+  background: var(--bg-tint);
+  position: relative;
+}
+/* Ambient color wash behind the glass. The window blur is uniform; this soft
+   radial tint gives the translucent surfaces something to refract so the UI
+   reads as "liquid" rather than a flat sheet. Purely decorative, sits under
+   every surface (z-index: 0 on .app, surfaces are ≥1). */
+.app::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(120% 80% at 12% -8%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 55%),
+    radial-gradient(110% 70% at 100% 0%, color-mix(in srgb, var(--state-diff) 9%, transparent), transparent 50%);
+  z-index: 0;
+}
+.app > * {
+  position: relative;
+  z-index: 1;
+}
+
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  position: relative;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  /* Bottom sheen line — a brighter hairline under the toolbar reads as glass
+     catching light along its lower edge. */
+  box-shadow: var(--glass-rim), 0 1px 0 0 rgba(255, 255, 255, 0.06) inset;
+  position: relative;
+  z-index: 4;
+}
+.toolbar > strong {
+  letter-spacing: 0.02em;
+  font-weight: 600;
+}
+.toolbar .spacer {
+  flex: 1;
+}
+.toolbar .broadcast-toggle.active {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 92%, #fff 8%), var(--accent));
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  color: #fff;
+  box-shadow: var(--glass-rim), 0 4px 14px -6px var(--accent-glow);
+}
+
+.grid-wrap {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ---------- Pane grid ---------- */
+.pane-grid {
+  flex: 1;
+  display: grid;
+  gap: 10px;
+  min-height: 0;
+  position: relative;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  background: var(--surface-glass);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  /* Glass sheen: top inner highlight + soft separation shadow. The state
+     color glow (below) layers on top of this via box-shadow overrides. */
+  box-shadow: var(--glass-rim), var(--glass-shadow);
+  transition: box-shadow 0.35s var(--ease), border-color 0.35s var(--ease),
+    transform 0.18s var(--ease);
+}
+/* Minimized browser panes are mounted here (so their native webview stays alive)
+   but kept zero-size and off-screen so they take no layout space. The webview
+   itself is hidden via browser_set_visible(false) by the BrowserPane occlusion
+   effect (visible=false). */
+.dormant-browsers {
+  position: absolute;
+  left: -99999px;
+  top: -99999px;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.pane[data-state="idle"] {
+  border-color: var(--border);
+}
+.pane[data-state="working"] {
+  border-color: color-mix(in srgb, var(--state-working) 55%, transparent);
+  box-shadow: var(--glass-rim), 0 0 22px -6px var(--state-working),
+    0 0 1px 0 color-mix(in srgb, var(--state-working) 60%, transparent);
+}
+.pane[data-state="waiting"] {
+  border-color: color-mix(in srgb, var(--state-waiting) 55%, transparent);
+  box-shadow: var(--glass-rim), 0 0 22px -6px var(--state-waiting),
+    0 0 1px 0 color-mix(in srgb, var(--state-waiting) 60%, transparent);
+}
+.pane[data-state="diff_ready"] {
+  border-color: color-mix(in srgb, var(--state-diff) 60%, transparent);
+  box-shadow: var(--glass-rim), 0 0 26px -6px var(--state-diff),
+    0 0 1px 0 color-mix(in srgb, var(--state-diff) 65%, transparent);
+}
+.pane.focused {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  box-shadow: var(--glass-rim), 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent),
+    0 0 30px -8px var(--accent-glow), var(--glass-shadow);
+}
+
+.pane-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: linear-gradient(180deg, var(--surface-glass-2), var(--surface-2));
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.05) inset;
+  cursor: default;
+  flex-shrink: 0;
+}
+.pane-header .title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  font-size: 12.5px;
+}
+.pane-header .harness-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 99px;
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.pane-header .broadcast-check {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.state-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15) inset;
+  transition: box-shadow 0.3s var(--ease);
+}
+.state-dot[data-state="idle"] { background: var(--state-idle); }
+.state-dot[data-state="working"] {
+  background: var(--state-working);
+  box-shadow: 0 0 8px -1px var(--state-working), 0 0 0 1px rgba(0, 0, 0, 0.15) inset;
+}
+.state-dot[data-state="waiting"] {
+  background: var(--state-waiting);
+  box-shadow: 0 0 8px -1px var(--state-waiting), 0 0 0 1px rgba(0, 0, 0, 0.15) inset;
+}
+.state-dot[data-state="diff_ready"] {
+  background: var(--state-diff);
+  box-shadow: 0 0 8px -1px var(--state-diff), 0 0 0 1px rgba(0, 0, 0, 0.15) inset;
+}
+
+.pane-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: rgba(0, 0, 0, 0.25);
+}
+:root[data-theme="light"] .pane-body {
+  background: rgba(255, 255, 255, 0.35);
+}
+.pane-body .xterm {
+  height: 100%;
+  padding: 6px;
+}
+
+.pane-exit-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: #fff;
+  z-index: 5;
+}
+
+/* Splitters */
+.splitter {
+  background: transparent;
+  transition: background 0.2s var(--ease), box-shadow 0.2s var(--ease);
+  z-index: 3;
+  border-radius: 2px;
+}
+.splitter:hover,
+.splitter.dragging {
+  background: var(--accent-soft);
+  box-shadow: 0 0 8px -2px var(--accent-glow);
+}
+.splitter.vertical {
+  cursor: col-resize;
+}
+.splitter.horizontal {
+  cursor: row-resize;
+}
+
+/* ---------- Split layout (browser open: spotlight terminal | browser) ---------- */
+.split-layout {
+  display: flex;
+  position: relative;
+  gap: 0;
+}
+.split-left {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 6px;
+}
+/* Stack container: fills remaining height in split-left, holds up to 2
+ * terminal slots with an optional horizontal splitter between them. */
+.split-terminals-stack {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0; /* gap is handled by the splitter overlay */
+}
+/* Individual slot inside the stack — contains all terminals so the hidden/
+ * visible toggle pattern works identically to the single-terminal layout. */
+.split-slot {
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+.split-terminals-stack .split-slot .pane {
+  width: 100%;
+  height: 100%;
+}
+/* Legacy single-terminal container (kept for any non-split-layout uses). */
+.split-terminals {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.split-terminals .pane {
+  flex: 1;
+  min-width: 0;
+}
+.split-right {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+.split-right .pane {
+  flex: 1;
+  min-width: 0;
+}
+.spotlight-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.spotlight-bar select {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  padding: 3px 6px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: var(--radius);
+}
+
+/* ---------- Browser pane ---------- */
+.browser-urlbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto; /* toolbar, not a flex grower — pane-body owns the space */
+  min-width: 0;
+  padding: 5px 8px;
+  background: linear-gradient(180deg, var(--surface-glass-2), var(--surface-2));
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.05) inset;
+}
+.browser-urlbar input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 99px;
+}
+
+/* ---------- Browser tab bar (multi-tab) ---------- */
+.browser-tabbar {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 4px 8px 0;
+  background: var(--surface-glass);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.04) inset;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.browser-tabbar::-webkit-scrollbar {
+  display: none;
+}
+.browser-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  min-width: 0;
+  max-width: 180px;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease),
+    border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+  box-shadow: var(--glass-rim-soft);
+}
+.browser-tab:hover {
+  color: var(--text);
+  background: var(--surface-glass-2);
+}
+.browser-tab.active {
+  color: var(--text);
+  background: var(--surface-glass);
+  border-color: var(--border-strong);
+  box-shadow: var(--glass-rim);
+}
+.browser-tab .tab-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.browser-tab .tab-close {
+  flex: none;
+  padding: 0 3px;
+  font-size: 10px;
+  line-height: 1;
+  border-radius: 99px;
+  opacity: 0;
+  transition: opacity 0.12s var(--ease);
+}
+.browser-tab:hover .tab-close,
+.browser-tab.active .tab-close {
+  opacity: 1;
+}
+.new-tab-btn {
+  flex: none;
+  padding: 5px 9px;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  box-shadow: none;
+  margin-bottom: 4px;
+}
+.new-tab-btn:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.browser-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #fff;
+}
+.browser-spinner {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border: 2px solid var(--accent-soft, rgba(128, 128, 128, 0.4));
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: browser-spin 0.8s linear infinite;
+}
+@keyframes browser-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.browser-blocked {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  background: var(--surface-glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  z-index: 2;
+}
+
+/* ---------- Broadcast bar (§4.5) ---------- */
+.broadcast-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: var(--radius);
+  box-shadow: var(--glass-rim), 0 0 24px -10px var(--accent-glow);
+}
+.broadcast-bar input.broadcast-input {
+  flex: 1;
+  font-family: var(--font-mono);
+}
+.broadcast-bar .pane-checks {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.broadcast-bar .pane-checks label {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+/* ---------- Sidebar ---------- */
+.sidebar {
+  width: var(--sidebar-width);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--surface-glass);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  box-shadow: var(--glass-rim);
+  position: relative;
+  z-index: 3;
+}
+/* Floating "show sidebar" button — visible only while the sidebar is collapsed
+ * (App.tsx renders it in place of <Sidebar/>). Sits flush against the top-left. */
+.sidebar-restore {
+  position: fixed;
+  left: 8px;
+  top: 10px;
+  z-index: 40;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--glass-rim);
+  color: var(--text-dim);
+}
+.sidebar-restore:hover {
+  color: var(--text);
+}
+.sidebar-search {
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.sidebar-search button {
+  width: 100%;
+  text-align: left;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  padding: 7px 11px;
+  border-radius: var(--radius-sm);
+}
+.sidebar-search button:hover {
+  color: var(--text);
+}
+.sidebar-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+.sidebar-section-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+  padding: 8px 8px 5px;
+  opacity: 0.85;
+}
+.sidebar-footer {
+  border-top: 1px solid var(--border);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sidebar-footer button {
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-weight: 500;
+  box-shadow: none;
+}
+.sidebar-footer button:hover,
+.sidebar-footer button.active {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.project-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s var(--ease);
+}
+.project-row:hover {
+  background: var(--surface-2);
+}
+.project-row.selected {
+  background: var(--accent-soft);
+  box-shadow: var(--glass-rim-soft);
+}
+.project-row .name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.project-row .caret {
+  width: 14px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.git-badge {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.git-badge .dirty-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.git-badge .dirty-dot.dirty { background: var(--state-waiting); }
+.git-badge .dirty-dot.clean { background: var(--state-working); }
+
+.session-list {
+  margin-left: 16px;
+  border-left: 1px solid var(--border);
+  padding-left: 8px;
+}
+.session-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s var(--ease);
+}
+.session-row:hover {
+  background: var(--surface-2);
+}
+.session-row .info {
+  flex: 1;
+  min-width: 0;
+}
+.session-row .title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+.session-row .meta {
+  font-size: 10px;
+  color: var(--text-dim);
+  display: flex;
+  gap: 6px;
+}
+.session-row .harness-tag {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.session-row input.title-edit {
+  width: 100%;
+  font-size: 12.5px;
+  padding: 2px 5px;
+}
+
+.new-session-row {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  align-items: center;
+}
+/* The harness picker fills the row so the "+ New Session" button sits flush
+   against a full-width dropdown. */
+.new-session-row .glass-select {
+  flex: 1;
+  min-width: 0;
+}
+.new-session-row .glass-select-trigger {
+  width: 100%;
+  font-size: 11.5px;
+  padding: 5px 8px 5px 10px;
+}
+.new-session-row button {
+  flex: none;
+  white-space: nowrap;
+}
+
+.empty-state {
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--text-dim);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+}
+
+/* Context menu */
+.context-menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 180px;
+  background: var(--surface-glass);
+  backdrop-filter: blur(28px) saturate(150%);
+  -webkit-backdrop-filter: blur(28px) saturate(150%);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+  padding: 5px;
+}
+.context-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 6px 10px;
+  border-radius: var(--radius-xs);
+  box-shadow: none;
+}
+.context-menu button:hover {
+  background: var(--surface-2);
+}
+.context-menu hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 4px 0;
+}
+
+/* ---------- Command palette (§12.3) ---------- */
+.palette-overlay,
+.modal-overlay,
+.view-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  z-index: 50;
+  animation: overlay-in 0.18s var(--ease);
+}
+@keyframes overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.palette {
+  margin-top: 12vh;
+  width: min(560px, 90vw);
+  background: var(--surface-glass);
+  backdrop-filter: blur(32px) saturate(150%);
+  -webkit-backdrop-filter: blur(32px) saturate(150%);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+  overflow: hidden;
+  animation: palette-in 0.22s var(--ease);
+}
+@keyframes palette-in {
+  from { opacity: 0; transform: translateY(-8px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.palette input {
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 15px 18px;
+  font-size: 15px;
+}
+.palette .results {
+  max-height: 50vh;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  padding: 6px;
+}
+.palette .section {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+  padding: 8px 10px 4px;
+}
+.palette .item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: background 0.12s var(--ease);
+}
+.palette .item.active {
+  background: var(--accent-soft);
+  box-shadow: var(--glass-rim-soft);
+}
+.palette .item .label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.palette .item .hint {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* ---------- Overlay views (settings / skills / cost) ---------- */
+.view-overlay {
+  align-items: stretch;
+  justify-content: flex-end;
+  z-index: 40;
+}
+/* Centered-modal variant (settings / skills library / cost dashboard). */
+.view-overlay.modal-centered {
+  align-items: center;
+  justify-content: center;
+}
+.view-overlay.modal-centered .view-panel {
+  width: min(1120px, 95vw);
+  max-height: 88vh;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+  animation: modal-in 0.22s var(--ease);
+}
+@keyframes modal-in {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
+}
+.view-panel {
+  width: min(640px, 92vw);
+  background: var(--surface-glass);
+  backdrop-filter: blur(32px) saturate(150%);
+  -webkit-backdrop-filter: blur(32px) saturate(150%);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+}
+.view-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--surface-glass-2), transparent);
+}
+.view-header h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  flex: 1;
+}
+.view-body {
+  flex: 1;
+  overflow: hidden; /* panels scroll internally; the body never grows past the modal */
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 0;
+}
+.view-body h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.form-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.form-row label {
+  color: var(--text-dim);
+  min-width: 120px;
+}
+.form-row input,
+.form-row textarea,
+.form-row select {
+  flex: 1;
+  min-width: 0;
+}
+table.kv {
+  width: 100%;
+  border-collapse: collapse;
+}
+table.kv td,
+table.kv th {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+table.kv th {
+  color: var(--text-dim);
+  font-weight: 500;
+}
+.kbd-chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  padding: 2px 7px;
+  box-shadow: var(--glass-rim-soft), 0 1px 0 0 rgba(0, 0, 0, 0.25);
+}
+.kbd-chip.recording {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---------- Settings: sectioned nav + fixed-height panels ----------
+   The settings split has a fixed pixel height based on the tallest tab
+   (Shortcuts: 15 keybinding rows + header + note + defaults line ~500px).
+   Every tab — Appearance (2 rows), Pricing (12-card grid), Harnesses,
+   Shortcuts — renders into this identical, locked box. The .settings-panel
+   scrolls internally when its content overflows (e.g. Pricing grid) so the
+   modal never reflows on tab switch. */
+.settings-split {
+  display: flex;
+  gap: 18px;
+  height: 500px;
+  min-height: 500px;
+  max-height: 500px;
+  flex-shrink: 0;
+}
+.settings-nav {
+  width: 168px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-right: 1px solid var(--border);
+  padding-right: 14px;
+}
+.settings-nav .nav-item {
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  color: var(--text-dim);
+  padding: 8px 11px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: none;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+.settings-nav .nav-item:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.settings-nav .nav-item.active {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  box-shadow: var(--glass-rim-soft);
+}
+.settings-nav .nav-item .nav-sub {
+  display: block;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-weight: 400;
+  margin-top: 1px;
+}
+.settings-panel {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.settings-panel .panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 4px;
+}
+.settings-panel .panel-head h3 {
+  margin: 0;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.settings-panel .panel-head .panel-count {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.settings-panel h3.section {
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+/* Reserved-height empty / loading state. Keeps the surrounding layout fixed
+   whether the region is empty, loading, or full. */
+.empty-reserved {
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  color: var(--text-dim);
+}
+.empty-reserved .empty-icon {
+  font-size: 22px;
+  opacity: 0.6;
+}
+.empty-reserved .empty-text {
+  font-size: 12px;
+  line-height: 1.5;
+  max-width: 340px;
+}
+.empty-reserved.small {
+  min-height: 120px;
+}
+
+/* Two-column rate grid for the pricing panel — denser than form-rows so 12
+   models fit without scrolling, with input/output grouped per model. */
+.rate-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+.rate-grid .rate-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--surface-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: var(--glass-rim-soft);
+}
+.rate-grid .rate-card .rate-name {
+  font-size: 12px;
+  font-weight: 500;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.rate-grid .rate-card .rate-name .rate-id {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.rate-grid .rate-card .rate-fields {
+  display: flex;
+  gap: 6px;
+}
+.rate-grid .rate-card .rate-fields .field {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.rate-grid .rate-card .rate-fields label {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.rate-grid .rate-card .rate-fields input {
+  width: 100%;
+  font-size: 12px;
+  padding: 3px 6px;
+  font-family: var(--font-mono);
+}
+
+/* ---------- Modal ---------- */
+.modal-overlay {
+  align-items: center;
+  z-index: 60;
+}
+.modal {
+  width: min(440px, 90vw);
+  background: var(--surface-glass);
+  backdrop-filter: blur(32px) saturate(150%);
+  -webkit-backdrop-filter: blur(32px) saturate(150%);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: modal-in 0.22s var(--ease);
+}
+.modal h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.modal p {
+  margin: 0;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+.modal .actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ---------- Peek panel (§7.9) ---------- */
+.peek-panel {
+  width: min(560px, 90vw);
+  background: var(--surface-glass);
+  backdrop-filter: blur(32px) saturate(150%);
+  -webkit-backdrop-filter: blur(32px) saturate(150%);
+  border-left: 1px solid var(--border-strong);
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+}
+.peek-content {
+  flex: 1;
+  overflow: auto;
+  padding: 12px 16px;
+  user-select: text;
+}
+.peek-content pre {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diff-file {
+  margin-bottom: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  box-shadow: var(--glass-rim-soft);
+}
+.diff-file .diff-file-header {
+  padding: 6px 11px;
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.05) inset;
+}
+.diff-line {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 0 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+.diff-line.add { background: var(--diff-add-bg); }
+.diff-line.del { background: var(--diff-del-bg); }
+.diff-line.hunk { background: var(--diff-hunk-bg); color: var(--accent); }
+.diff-line.meta { color: var(--text-dim); }
+
+/* ---------- Cost dashboard ---------- */
+.chart {
+  width: 100%;
+}
+.chart .bar {
+  fill: var(--accent);
+}
+.chart .bar-label {
+  fill: var(--text-dim);
+  font-size: 10px;
+  font-family: var(--font-ui);
+}
+.chart .bar-value {
+  fill: var(--text);
+  font-size: 10px;
+  font-family: var(--font-mono);
+}
+.estimate-note {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+/* Cost dashboard: each section reserves a fixed height so the chart and table
+   areas stay stable when empty (no data yet) or while loading — switching
+   between populated and unpopulated states does not reflow the modal. */
+.cost-section {
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cost-chart-frame {
+  min-height: 180px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  background: var(--surface);
+}
+.cost-chart-frame .chart {
+  min-width: 100%;
+}
+
+/* ---------- Onboarding banner (§9) ---------- */
+.onboarding-banner {
+  margin: 10px 12px 0;
+  padding: 13px 15px;
+  border: 1px solid color-mix(in srgb, var(--state-waiting) 50%, var(--border));
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: var(--glass-rim), 0 0 24px -12px color-mix(in srgb, var(--state-waiting) 60%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.onboarding-banner strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+.onboarding-banner .hint {
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.onboarding-banner code {
+  background: var(--surface-2);
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  font-size: 11px;
+  box-shadow: var(--glass-rim-soft);
+}
+
+/* Scrollbars */
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 99px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--border-strong) 80%, var(--text-dim));
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------- Skills & Loops library ---------- */
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 10px;
+}
+.tab-bar .tab {
+  padding: 5px 13px;
+  border-radius: 99px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: none;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+.tab-bar .tab:hover {
+  color: var(--text);
+}
+.tab-bar .tab.active {
+  background: var(--accent-soft);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  box-shadow: var(--glass-rim-soft);
+}
+.installed-panel {
+  display: flex;
+  gap: 14px;
+  min-height: 0;
+  flex: 1;
+  /* Fills the shared .library-panel container (fixed height, below) so every
+     tab — Skills, Loops, Prompt templates — occupies identical space and
+     switching tabs never resizes the modal. */
+  height: 100%;
+}
+/* The single fixed-height box that every library tab renders into. This — not
+   the per-tab panels — is what keeps the modal a constant size across tabs;
+   each tab fills it and scrolls internally if its content overflows. */
+.library-panel {
+  height: 500px;
+  min-height: 500px;
+  max-height: 500px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* Templates tab: same container, internal scroll. */
+.templates-panel {
+  height: 100%;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+}
+.installed-list {
+  width: 42%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.installed-items {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.installed-item {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  background: var(--surface-glass);
+  box-shadow: var(--glass-rim-soft);
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.installed-item:hover {
+  background: var(--surface-glass-2);
+}
+.installed-item.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: var(--glass-rim-soft), 0 0 16px -8px var(--accent-glow);
+}
+.installed-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+.installed-item-desc {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 3px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.installed-editor {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.installed-editor textarea {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.18);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  resize: none;
+}
+.source-badge {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  background: var(--surface-2);
+  box-shadow: var(--glass-rim-soft);
+}
+.source-badge.claude {
+  color: #e08a4c;
+  border-color: #e08a4c66;
+}
+.source-badge.kimi {
+  color: #5b9bd5;
+  border-color: #5b9bd566;
+}
+.source-badge.both {
+  color: #7fba6e;
+  border-color: #7fba6e66;
+}
+
+/* ---------- Chat ---------- */
+/* Mode selector pills under sidebar search */
+.sidebar-mode-toggle {
+  display: flex;
+  gap: 4px;
+  padding: 0 12px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.sidebar-mode-pill {
+  flex: 1;
+  text-align: center;
+  padding: 6px 0;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  cursor: pointer;
+  box-shadow: var(--glass-rim-soft);
+  transition: background 0.18s var(--ease), color 0.18s var(--ease),
+    border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
+}
+.sidebar-mode-pill:hover {
+  color: var(--text);
+  background: var(--surface-glass-2);
+}
+.sidebar-mode-pill.active {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  box-shadow: var(--glass-rim-soft), 0 0 12px -4px var(--accent-glow);
+}
+
+/* Chat session rows in sidebar */
+.chat-new-btn-row {
+  padding: 6px 8px;
+}
+.chat-session-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s var(--ease);
+}
+.chat-session-row:hover {
+  background: var(--surface-2);
+}
+.chat-session-row.active {
+  background: var(--accent-soft);
+  box-shadow: var(--glass-rim-soft);
+}
+.chat-session-row .chat-session-delete {
+  flex: none;
+  opacity: 0;
+  padding: 0 4px;
+  font-size: 10px;
+  transition: opacity 0.15s var(--ease);
+  margin-top: 1px;
+}
+.chat-session-row:hover .chat-session-delete {
+  opacity: 1;
+}
+.chat-session-info {
+  flex: 1;
+  min-width: 0;
+}
+.chat-session-title {
+  font-size: 12.5px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-session-meta {
+  font-size: 10px;
+  color: var(--text-dim);
+  display: flex;
+  gap: 6px;
+}
+.chat-session-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100px;
+  opacity: 0.8;
+}
+
+/* ChatView main area */
+.chat-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-tint);
+  position: relative;
+}
+
+/* Scrollable message list */
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Empty state (centered in chat area) */
+.chat-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+/* Message bubbles */
+.chat-bubble {
+  display: flex;
+  max-width: 75%;
+  animation: chat-bubble-in 0.2s var(--ease);
+}
+@keyframes chat-bubble-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.chat-bubble.user {
+  align-self: flex-end;
+}
+.chat-bubble.assistant {
+  align-self: flex-start;
+}
+.chat-bubble-inner {
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+.chat-bubble.user .chat-bubble-inner {
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface-glass));
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  box-shadow: var(--glass-rim-soft), 0 4px 14px -8px var(--accent-glow);
+  border-bottom-right-radius: var(--radius-xs);
+}
+.chat-bubble.assistant .chat-bubble-inner {
+  background: var(--surface-glass);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  border: 1px solid var(--border);
+  box-shadow: var(--glass-rim-soft);
+  border-bottom-left-radius: var(--radius-xs);
+}
+.chat-bubble-inner p {
+  margin: 0 0 8px;
+}
+.chat-bubble-inner p:last-child {
+  margin-bottom: 0;
+}
+.chat-bubble-inner ul,
+.chat-bubble-inner ol {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+.chat-bubble-inner li {
+  margin-bottom: 3px;
+}
+.chat-bubble-inner h1,
+.chat-bubble-inner h2,
+.chat-bubble-inner h3,
+.chat-bubble-inner h4 {
+  margin: 12px 0 6px;
+  font-weight: 600;
+}
+.chat-bubble-inner h1 { font-size: 1.25em; }
+.chat-bubble-inner h2 { font-size: 1.15em; }
+.chat-bubble-inner h3 { font-size: 1.05em; }
+.chat-bubble-inner blockquote {
+  margin: 8px 0;
+  padding: 6px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--surface-2);
+  border-radius: var(--radius-xs);
+  color: var(--text-dim);
+}
+
+/* Code blocks inside messages */
+.chat-code-block {
+  margin: 10px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.28);
+  box-shadow: var(--glass-rim-soft);
+}
+:root[data-theme="light"] .chat-code-block {
+  background: rgba(255, 255, 255, 0.4);
+}
+.chat-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+.copy-code-btn {
+  padding: 2px 7px;
+  font-size: 10px;
+  border-radius: var(--radius-xs);
+}
+
+/* Composer (bottom bar) */
+.chat-composer {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  padding: 10px 14px 14px;
+  box-shadow: var(--glass-rim);
+}
+.chat-composer-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.chat-composer-controls .glass-select {
+  min-width: 150px;
+}
+.chat-model-input {
+  flex: 1;
+  font-size: 12px;
+  padding: 4px 8px;
+  font-family: var(--font-mono);
+}
+.chat-composer-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+.chat-composer-textarea {
+  flex: 1;
+  min-height: 38px;
+  max-height: 200px;
+  resize: none;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 8px 11px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  outline: none;
+  box-shadow: var(--glass-rim-soft);
+  transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
+  overflow-y: auto;
+}
+.chat-composer-textarea:focus {
+  border-color: var(--accent);
+  box-shadow: var(--glass-rim-soft), 0 0 0 3px var(--accent-soft);
+}
+.chat-composer-textarea::placeholder {
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+.chat-send-btn {
+  flex-shrink: 0;
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.chat-send-btn:not(.primary) {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--surface-2);
+}
+.chat-send-btn:not(.primary):hover {
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface-2));
+  border-color: var(--danger);
+}

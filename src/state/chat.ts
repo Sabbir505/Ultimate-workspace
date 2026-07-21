@@ -1,0 +1,242 @@
+// Chat store: sessions, messages, live streaming state, config, and all actions.
+// Mirrors the style of src/state/projects.ts and src/state/settings.ts.
+//
+// IMPORTANT: all streaming updates are keyed by chatSessionId, NOT by
+// "active session", so streams complete correctly even if the user switches
+// to a different chat in the sidebar.
+import { create } from "zustand";
+import {
+  cancelChatMessage,
+  createChatSession,
+  deleteChatApiKey,
+  deleteChatSession,
+  getChatConfig,
+  getChatMessages,
+  listChatSessions,
+  sendChatMessage,
+  setChatApiKey,
+  touchChatSession,
+  updateChatSessionTitle,
+  type ChatConfigPayload,
+  type ChatMessageRecord,
+  type ChatSession,
+} from "../lib/ipc";
+
+interface ChatState {
+  loaded: boolean;
+  sessions: ChatSession[];
+  activeChatSessionId: string | null;
+  messages: ChatMessageRecord[];
+  streaming: Record<string, string>; // chatSessionId -> accumulating assistant text
+  streamingChatSessionId: string | null; // which session is currently streaming
+  config: ChatConfigPayload | null;
+  error: string | null;
+
+  // Actions
+  loadSessions: () => Promise<void>;
+  loadMessages: (chatSessionId: string) => Promise<void>;
+  loadConfig: (provider?: string) => Promise<void>;
+  selectSession: (chatSessionId: string) => Promise<void>;
+  newChat: (provider: string, model: string) => Promise<ChatSession | null>;
+  deleteChat: (chatSessionId: string) => Promise<void>;
+  renameChat: (chatSessionId: string, title: string) => Promise<void>;
+  sendMessage: (content: string) => Promise<void>;
+  cancelStream: () => Promise<void>;
+  saveApiKey: (provider: string, key: string, baseUrl?: string, model?: string) => Promise<void>;
+  clearApiKey: (provider: string) => Promise<void>;
+
+  // Called by the event hook (useChatEvents) — not meant for direct component use.
+  onToken: (chatSessionId: string, token: string) => void;
+  onDone: (chatSessionId: string, inputTokens: number | null, outputTokens: number | null, costUsd: number | null) => void;
+  onError: (chatSessionId: string, message: string, code: string | null) => void;
+}
+
+export const useChatStore = create<ChatState>((set, get) => ({
+  loaded: false,
+  sessions: [],
+  activeChatSessionId: null,
+  messages: [],
+  streaming: {},
+  streamingChatSessionId: null,
+  config: null,
+  error: null,
+
+  loadSessions: async () => {
+    const sessions = await listChatSessions();
+    set({ loaded: true, sessions: sessions ?? [] });
+  },
+
+  loadMessages: async (chatSessionId) => {
+    const messages = await getChatMessages(chatSessionId);
+    set((s) => ({
+      messages: s.activeChatSessionId === chatSessionId ? (messages ?? []) : s.messages,
+    }));
+  },
+
+  loadConfig: async (provider?: string) => {
+    const config = await getChatConfig(provider);
+    set({ config });
+  },
+
+  selectSession: async (chatSessionId) => {
+    set({ activeChatSessionId: chatSessionId, error: null });
+    const messages = await getChatMessages(chatSessionId);
+    // Only update messages if the user hasn't clicked away to another session
+    // while the fetch was in-flight.
+    if (get().activeChatSessionId === chatSessionId) {
+      set({ messages: messages ?? [], activeChatSessionId: chatSessionId });
+    }
+    // Touch and reorder in the background.
+    void touchChatSession(chatSessionId).then(async () => {
+      const sessions = await listChatSessions();
+      if (sessions) set({ sessions });
+    });
+  },
+
+  newChat: async (provider, model) => {
+    const session = await createChatSession(provider, model);
+    if (session) {
+      // Insert at the top so it appears immediately in the sidebar.
+      set((s) => ({
+        sessions: [session, ...s.sessions],
+        activeChatSessionId: session.id,
+        messages: [],
+        error: null,
+      }));
+    }
+    return session;
+  },
+
+  deleteChat: async (chatSessionId) => {
+    await deleteChatSession(chatSessionId);
+    set((s) => ({
+      sessions: s.sessions.filter((sess) => sess.id !== chatSessionId),
+      activeChatSessionId: s.activeChatSessionId === chatSessionId ? null : s.activeChatSessionId,
+      messages: s.activeChatSessionId === chatSessionId ? [] : s.messages,
+      // Don't clear streaming state for another session if it happens to be the same ID
+      // (unlikely but safe).
+      streamingChatSessionId:
+        s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
+    }));
+  },
+
+  renameChat: async (chatSessionId, title) => {
+    await updateChatSessionTitle(chatSessionId, title);
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === chatSessionId ? { ...sess, title } : sess,
+      ),
+    }));
+  },
+
+  sendMessage: async (content) => {
+    const { activeChatSessionId, messages, sessions } = get();
+    if (!activeChatSessionId) return;
+
+    // Optimistically append the user message.
+    const userMsg: ChatMessageRecord = {
+      id: -Date.now(), // temporary negative id
+      chatSessionId: activeChatSessionId,
+      role: "user",
+      content,
+      inputTokens: null,
+      outputTokens: null,
+      costUsd: null,
+      createdAt: Date.now(),
+    };
+    set({
+      messages: [...messages, userMsg],
+      streamingChatSessionId: activeChatSessionId,
+      streaming: { ...get().streaming, [activeChatSessionId]: "" },
+      error: null,
+    });
+
+    // Bump the session to top of the list.
+    const active = sessions.find((s) => s.id === activeChatSessionId);
+    if (active) {
+      set((s) => ({
+        sessions: [active, ...s.sessions.filter((sess) => sess.id !== activeChatSessionId)],
+      }));
+    }
+
+    await sendChatMessage(activeChatSessionId, content);
+  },
+
+  cancelStream: async () => {
+    const { streamingChatSessionId } = get();
+    if (streamingChatSessionId) {
+      await cancelChatMessage(streamingChatSessionId);
+      // The backend may still fire chat:error or chat:done; our event handler
+      // will clear streaming state. But we clear optimistically here too.
+      set({ streamingChatSessionId: null });
+    }
+  },
+
+  saveApiKey: async (provider, key, baseUrl, model) => {
+    await setChatApiKey(provider, key, baseUrl, model);
+    // Refresh config for the SPECIFIC provider that was just saved, so the
+    // API Keys panel sees hasKey: true for the currently selected provider.
+    const config = await getChatConfig(provider);
+    set({ config });
+  },
+
+  clearApiKey: async (provider) => {
+    await deleteChatApiKey(provider);
+    const config = await getChatConfig(provider);
+    set({ config });
+  },
+
+  // ---- Event handlers (called by useChatEvents) ----
+
+  onToken: (chatSessionId, token) => {
+    set((s) => ({
+      streaming: {
+        ...s.streaming,
+        [chatSessionId]: (s.streaming[chatSessionId] ?? "") + token,
+      },
+      // Don't change streamingChatSessionId — it stays on the session that
+      // sent the message, not the currently viewed session.
+    }));
+  },
+
+  onDone: async (chatSessionId, inputTokens, outputTokens, costUsd) => {
+    // Clear streaming state for this session.
+    set((s) => {
+      const nextStreaming = { ...s.streaming };
+      delete nextStreaming[chatSessionId];
+      return {
+        streaming: nextStreaming,
+        streamingChatSessionId:
+          s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
+      };
+    });
+
+    // Refetch messages from the backend to get the final persisted
+    // ChatMessageRecord with usage data.
+    const messages = await getChatMessages(chatSessionId);
+    if (messages) {
+      set((s) => ({
+        messages: s.activeChatSessionId === chatSessionId ? messages : s.messages,
+      }));
+    }
+
+    // Refresh the session list (title may have been updated by the backend).
+    const sessions = await listChatSessions();
+    if (sessions) set({ sessions });
+  },
+
+  onError: (chatSessionId, message, code) => {
+    // Clear streaming state and surface the error for the active session.
+    set((s) => {
+      const nextStreaming = { ...s.streaming };
+      delete nextStreaming[chatSessionId];
+      return {
+        streaming: nextStreaming,
+        streamingChatSessionId:
+          s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
+        error:
+          s.activeChatSessionId === chatSessionId ? message : s.error,
+      };
+    });
+  },
+}));

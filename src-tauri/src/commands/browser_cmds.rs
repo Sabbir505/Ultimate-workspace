@@ -1,0 +1,123 @@
+//! Native browser-pane commands (child webviews; see src/browser.rs).
+//!
+//! All commands return a clean error on Linux — the frontend detects that
+//! from browser_create and falls back to the iframe implementation.
+
+use tauri::{Emitter, State};
+
+use crate::browser::Rect;
+use crate::types::BrowserNavigatedEvent;
+use crate::BrowserState;
+
+type CmdResult<T> = Result<T, String>;
+
+// The create command is async so it runs on a Tauri async worker thread, not
+// the main thread. That way if add_child hangs (WebView2 init deadlock), only
+// the worker thread blocks — the main thread and other commands stay alive.
+#[tauri::command]
+pub async fn browser_create(
+    pane_id: String,
+    tab_id: String,
+    url: String,
+    rect: Rect,
+    browser: State<'_, BrowserState>,
+) -> CmdResult<()> {
+    browser.0.create(&pane_id, &tab_id, &url, rect)
+}
+
+#[tauri::command]
+pub fn browser_navigate(
+    pane_id: String,
+    tab_id: String,
+    url: String,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.navigate(&pane_id, &tab_id, &url)
+}
+
+/// Called from injected JS in the webview whenever history.pushState or
+/// history.replaceState fires. Emits browser:navigated so the frontend's
+/// address bar + history stack stay in sync with same-document navigations
+/// (e.g. Bing's Images/Videos/Maps tabs, SPAs).
+#[tauri::command]
+pub fn browser_push_state(
+    pane_id: String,
+    tab_id: String,
+    url: String,
+    app: tauri::AppHandle,
+) -> CmdResult<()> {
+    let _ = app.emit(
+        "browser:navigated",
+        BrowserNavigatedEvent {
+            pane_id,
+            tab_id,
+            url,
+        },
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub fn browser_go_back(
+    pane_id: String,
+    tab_id: String,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.go_back(&pane_id, &tab_id)
+}
+
+#[tauri::command]
+pub fn browser_go_forward(
+    pane_id: String,
+    tab_id: String,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.go_forward(&pane_id, &tab_id)
+}
+
+#[tauri::command]
+pub fn browser_reload(
+    pane_id: String,
+    tab_id: String,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.reload(&pane_id, &tab_id)
+}
+
+#[tauri::command]
+pub fn browser_set_bounds(
+    pane_id: String,
+    tab_id: String,
+    rect: Rect,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.set_bounds(&pane_id, &tab_id, rect)
+}
+
+#[tauri::command]
+pub fn browser_set_visible(
+    pane_id: String,
+    tab_id: String,
+    visible: bool,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.set_visible(&pane_id, &tab_id, visible)
+}
+
+#[tauri::command]
+pub fn browser_close(
+    pane_id: String,
+    tab_id: String,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.close(&pane_id, &tab_id)
+}
+
+/// Close ALL tab webviews for a pane (used when the entire pane is closed).
+#[tauri::command]
+pub fn browser_close_pane(
+    pane_id: String,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.close_pane_tabs(&pane_id)
+}

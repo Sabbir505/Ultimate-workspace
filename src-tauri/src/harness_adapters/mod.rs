@@ -1,0 +1,419 @@
+//! Pluggable adapter interface for AI coding agent CLIs (PRD §6.4).
+//!
+//! Conduit never talks to an agent's protocol directly — it spawns the harness
+//! binary in a pty and scrapes *hints* (session ids, usage/cost lines,
+//! diff-approval prompts) out of the stripped terminal output. All scraping
+//! is deliberately conservative and best-effort: a missed parse degrades a
+//! feature (resume button, cost dashboard) but must never break the pane.
+
+use once_cell::sync::Lazy;
+use regex::Regex;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+pub mod claude_code;
+pub mod kimi_code;
+pub mod opencode;
+
+/// A command ready to be turned into a `portable_pty::CommandBuilder`.
+///
+/// The PRD trait returns `std::process::Command`, but portable-pty needs its
+/// own `CommandBuilder`, so adapters return this neutral spec instead and the
+/// pty layer converts it. (Deviation from PRD §6.4 signature — noted in
+/// BUILD_LOG.md.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandSpec {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+impl CommandSpec {
+    pub fn new(program: &str, args: &[&str]) -> Self {
+        Self {
+            program: program.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+}
+
+/// Best-effort token/cost usage scraped from harness output.
+/// Cost is only ever what the harness itself printed — we never invent a
+/// pricing table (CONTRACT/PRD §7.12).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UsageInfo {
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cost_usd: Option<f64>,
+}
+
+pub trait HarnessAdapter: Send + Sync {
+    /// Stable id used in the DB and over IPC: "claude_code" | "kimi_code".
+    fn id(&self) -> &'static str;
+    fn display_name(&self) -> &'static str;
+    /// Binary name looked up on PATH.
+    fn binary(&self) -> &'static str;
+    /// Interactive new-session command, e.g. `claude` / `kimi`.
+    fn spawn_new_command(&self) -> CommandSpec;
+    /// Resume-by-id command — the core of Conduit's pane lifecycle: panes are
+    /// killed on close/quit and sessions are resurrected by id later.
+    fn spawn_resume_command(&self, session_id: &str) -> CommandSpec;
+    /// Interactive login flow command (spawned in a temporary pane, PRD §9).
+    fn login_command(&self) -> CommandSpec;
+    /// Scrape the harness's own session id from stripped pty output.
+    fn parse_session_id(&self, output: &str) -> Option<String>;
+    /// On-disk usage/cost totals for a session (PRD §7.12 prefers harness
+    /// session logs over pty scraping). Returns cumulative totals plus the
+    /// model id when the log records it, so callers can price per-model;
+    /// None when nothing is available yet.
+    fn usage_from_disk(&self, _cwd: &std::path::Path, _harness_session_id: &str) -> Option<SessionUsage> {
+        None
+    }
+    /// Filesystem fallback for session-id capture: inspect the harness's
+    /// on-disk session store for a session created in `cwd` at/after `since`
+    /// (pane spawn time). Needed because neither harness reliably prints its
+    /// session id in the TUI — Claude writes `~/.claude/projects/<slug>/*.jsonl`,
+    /// Kimi appends to `~/.kimi-code/session_index.jsonl`. Default: no probe.
+    fn find_session_id_on_disk(&self, _cwd: &std::path::Path, _since: std::time::SystemTime) -> Option<String> {
+        None
+    }
+    /// Scrape usage/cost info from stripped pty output. Conservative.
+    fn parse_usage(&self, output: &str) -> Option<UsageInfo>;
+    /// Regexes matching the harness's diff-approval prompt. Matched against
+    /// the recent output tail when the pane goes quiet; a hit promotes the
+    /// pane state from "waiting" to "diff_ready" (PRD §7.3, best-effort).
+    fn diff_prompt_patterns(&self) -> &'static [Regex];
+    /// True when the binary is runnable on PATH (checked via `--version`).
+    fn is_installed(&self) -> bool {
+        binary_on_path(self.binary())
+    }
+}
+
+/// Usage totals plus the model that produced them — the model id (as the
+/// harness writes it in its logs) drives per-model pricing (§7.12).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionUsage {
+    pub usage: UsageInfo,
+    pub model: Option<String>,
+}
+
+/// Canonical per-model pricing keys — used both for Settings override keys
+/// (`price.<key>.input_per_mtok` / `.output_per_mtok`) and for the default
+/// rate table. Model ids from logs are matched loosely (contains) since
+/// Claude writes dated ids like "claude-sonnet-4-5-20250929".
+pub fn canonical_model_key(model: &str) -> Option<&'static str> {
+    let m = model.to_lowercase();
+    if m.contains("opus") {
+        Some("claude-opus-4-8")
+    } else if m.contains("sonnet-5") || m.contains("sonnet_5") {
+        Some("claude-sonnet-5")
+    } else if m.contains("sonnet") {
+        Some("claude-sonnet-4-5")
+    } else if m.contains("haiku") {
+        Some("claude-haiku-4-5")
+    } else if m.contains("kimi-k3") || m.contains("kimi_k3") {
+        Some("kimi-k3")
+    } else if m.contains("kimi-k2.7") || m.contains("kimi_k2.7") {
+        Some("kimi-k2.7-code")
+    } else if m.contains("kimi-k2.6") || m.contains("kimi_k2.6") {
+        Some("kimi-k2.6")
+    } else if m.contains("glm-5.2") || m.contains("glm-5-2") {
+        Some("glm-5.2")
+    } else if m.contains("glm-5.1") || m.contains("glm-5-1") {
+        Some("glm-5.1")
+    } else if m.contains("deepseek-v4-pro") || m.contains("deepseek_v4_pro") {
+        Some("deepseek-v4-pro")
+    } else if m.contains("minimax-m3") || m.contains("minimax_m3") {
+        Some("minimax-m3")
+    } else if m.contains("qwen3.7-plus") || m.contains("qwen3.7_plus") {
+        Some("qwen3.7-plus")
+    } else {
+        None
+    }
+}
+
+/// Default rates ($/Mtok input, output) from official pricing pages
+/// (anthropic.com, platform.kimi.ai, docs.z.ai, api-docs.deepseek.com,
+/// platform.minimax.io, alibabacloud.com — researched 2026-07; claude-sonnet-5
+/// is the $2/$10 intro rate valid until 2026-08-31; minimax-m3 uses the
+/// "permanent 50% off" effective rate; qwen3.7-plus uses the ≤256K tier).
+/// Users override per-model in Settings; everything stays labeled an estimate.
+/// NOTE: the user routes both CLIs through a third-party relay whose actual
+/// billing may differ from these official list prices.
+pub fn default_rates(key: &str) -> Option<(f64, f64)> {
+    match key {
+        "claude-opus-4-8" => Some((5.0, 25.0)),
+        "claude-sonnet-5" => Some((2.0, 10.0)),
+        "claude-sonnet-4-5" => Some((3.0, 15.0)),
+        "claude-haiku-4-5" => Some((1.0, 5.0)),
+        "kimi-k3" => Some((3.0, 15.0)),
+        "kimi-k2.7-code" => Some((0.95, 4.0)),
+        "kimi-k2.6" => Some((0.95, 4.0)),
+        "glm-5.2" => Some((1.4, 4.4)),
+        "glm-5.1" => Some((1.4, 4.4)),
+        "deepseek-v4-pro" => Some((0.435, 0.87)),
+        "minimax-m3" => Some((0.3, 1.2)),
+        "qwen3.7-plus" => Some((0.4, 1.6)),
+        _ => None,
+    }
+}
+
+/// Fallback pricing key when the session log names no model.
+pub fn harness_default_model_key(harness_id: &str) -> &'static str {
+    match harness_id {
+        "kimi_code" => "kimi-k3",
+        // OpenCode is provider-agnostic — it routes to whatever the user
+        // configured — but its out-of-box default is Anthropic Claude, so a
+        // Claude Sonnet rate is the least-wrong estimate when the session log
+        // names no model. Users override per-model in Settings.
+        "opencode" => "claude-sonnet-4-5",
+        _ => "claude-sonnet-4-5",
+    }
+}
+
+/// Registry of all v1 adapters, keyed by adapter id.
+pub fn adapters() -> &'static HashMap<&'static str, Arc<dyn HarnessAdapter>> {
+    static ADAPTERS: Lazy<HashMap<&'static str, Arc<dyn HarnessAdapter>>> = Lazy::new(|| {
+        let mut m: HashMap<&'static str, Arc<dyn HarnessAdapter>> = HashMap::new();
+        m.insert("claude_code", Arc::new(claude_code::ClaudeCodeAdapter));
+        m.insert("kimi_code", Arc::new(kimi_code::KimiCodeAdapter));
+        m.insert("opencode", Arc::new(opencode::OpenCodeAdapter));
+        m
+    });
+    &ADAPTERS
+}
+
+pub fn get_adapter(id: &str) -> Option<Arc<dyn HarnessAdapter>> {
+    adapters().get(id).cloned()
+}
+
+pub fn all_adapters() -> Vec<Arc<dyn HarnessAdapter>> {
+    adapters().values().cloned().collect()
+}
+
+/// On Windows, agent CLIs installed via npm are `.cmd`/`.bat` shims
+/// (`claude.cmd`, `kimi.cmd`) which CreateProcess — and therefore both
+/// `std::process::Command` and portable-pty — cannot execute directly: the
+/// bare name only resolves through a shell's PATHEXT handling. Wrapping in
+/// `cmd.exe /C` restores that resolution. Without this, both harness
+/// detection and pane spawning silently fail on a stock Windows install.
+/// POSIX systems spawn the binary directly.
+pub fn resolve_for_spawn(spec: &CommandSpec) -> CommandSpec {
+    #[cfg(windows)]
+    {
+        if spec.program.eq_ignore_ascii_case("cmd.exe") {
+            return spec.clone(); // already shell-wrapped (e.g. spawn_shell)
+        }
+        let mut args = vec!["/C".to_string(), spec.program.clone()];
+        args.extend(spec.args.iter().cloned());
+        CommandSpec {
+            program: "cmd.exe".to_string(),
+            args,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        spec.clone()
+    }
+}
+
+/// Runs `<binary> --version` with a short timeout; a clean exit means the
+/// harness is installed. Used for the onboarding/Settings status (PRD §9).
+/// Spawning `--version` (rather than `where`/`which`) also confirms the binary
+/// actually executes on this machine, not just that a file exists on PATH.
+pub fn binary_on_path(binary: &str) -> bool {
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    let spec = resolve_for_spawn(&CommandSpec::new(binary, &["--version"]));
+    let mut cmd = Command::new(&spec.program);
+    cmd.args(&spec.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // A GUI app spawning a console tool on Windows would otherwise flash a
+    // console window for every check.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(_) => return false, // not found on PATH (or not executable)
+    };
+    // Poll briefly instead of a blocking wait so a hung shim can't wedge the
+    // caller. 5s is generous for `--version`.
+    for _ in 0..50 {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(_) => return false,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    false
+}
+
+// ---- Shared conservative usage scraping -------------------------------------
+
+fn parse_num(s: &str) -> Option<i64> {
+    // Harnesses print thousands separators ("1,234"); strip them.
+    s.replace(',', "").parse::<i64>().ok()
+}
+
+static RE_TOKENS_IN_OUT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)tokens:\s*([\d,]+)\s*in\s*/\s*([\d,]+)\s*out").unwrap()
+});
+static RE_INPUT_TOKENS: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)input[ _-]?tokens?:\s*([\d,]+)").unwrap());
+static RE_OUTPUT_TOKENS: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)output[ _-]?tokens?:\s*([\d,]+)").unwrap());
+static RE_COST: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:total\s+)?(?:est(?:imated)?\.?\s+)?cost:\s*\$\s*(\d+(?:\.\d+)?)").unwrap()
+});
+
+/// Shared usage parser used by both adapters. Matches lines like
+/// "Tokens: 1,234 in / 567 out", "Input tokens: 100", "Total cost: $0.12".
+/// Returns None when nothing matched — callers must tolerate that.
+pub fn parse_usage_common(output: &str) -> Option<UsageInfo> {
+    let mut info = UsageInfo {
+        input_tokens: None,
+        output_tokens: None,
+        cost_usd: None,
+    };
+    if let Some(c) = RE_TOKENS_IN_OUT.captures(output) {
+        info.input_tokens = parse_num(&c[1]);
+        info.output_tokens = parse_num(&c[2]);
+    } else {
+        if let Some(c) = RE_INPUT_TOKENS.captures(output) {
+            info.input_tokens = parse_num(&c[1]);
+        }
+        if let Some(c) = RE_OUTPUT_TOKENS.captures(output) {
+            info.output_tokens = parse_num(&c[1]);
+        }
+    }
+    if let Some(c) = RE_COST.captures(output) {
+        info.cost_usd = c[1].parse::<f64>().ok();
+    }
+    if info.input_tokens.is_some() || info.output_tokens.is_some() || info.cost_usd.is_some() {
+        Some(info)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_model_key_matches_log_ids() {
+        assert_eq!(canonical_model_key("claude-sonnet-4-5-20250929"), Some("claude-sonnet-4-5"));
+        assert_eq!(canonical_model_key("claude-opus-4-8"), Some("claude-opus-4-8"));
+        assert_eq!(canonical_model_key("claude-haiku-4-5-20251001"), Some("claude-haiku-4-5"));
+        assert_eq!(canonical_model_key("kimi-k3"), Some("kimi-k3"));
+        // Claude Code on this machine maps Anthropic tiers to relay models:
+        assert_eq!(canonical_model_key("Kimi-K3[1M]"), Some("kimi-k3"));
+        assert_eq!(canonical_model_key("Kimi-K2.6"), Some("kimi-k2.6"));
+        assert_eq!(canonical_model_key("Kimi-K2.7"), Some("kimi-k2.7-code"));
+        assert_eq!(canonical_model_key("glm-5.2"), Some("glm-5.2"));
+        assert_eq!(canonical_model_key("glm-5.1"), Some("glm-5.1"));
+        assert_eq!(canonical_model_key("DeepSeek-V4-Pro"), Some("deepseek-v4-pro"));
+        assert_eq!(canonical_model_key("minimax-m3"), Some("minimax-m3"));
+        assert_eq!(canonical_model_key("qwen3.7-plus"), Some("qwen3.7-plus"));
+        assert_eq!(canonical_model_key("some-future-model"), None);
+    }
+
+    #[test]
+    fn default_rates_cover_all_canonical_keys() {
+        for key in [
+            "claude-opus-4-8",
+            "claude-sonnet-5",
+            "claude-sonnet-4-5",
+            "claude-haiku-4-5",
+            "kimi-k3",
+            "kimi-k2.7-code",
+            "kimi-k2.6",
+            "glm-5.2",
+            "glm-5.1",
+            "deepseek-v4-pro",
+            "minimax-m3",
+            "qwen3.7-plus",
+        ] {
+            let (i, o) = default_rates(key).expect(key);
+            assert!(i > 0.0 && o > 0.0, "{key}");
+        }
+        assert_eq!(default_rates("claude-sonnet-5"), Some((2.0, 10.0)));
+        assert_eq!(harness_default_model_key("kimi_code"), "kimi-k3");
+        assert_eq!(harness_default_model_key("claude_code"), "claude-sonnet-4-5");
+    }
+
+    #[test]
+    fn usage_tokens_in_out() {
+        let u = parse_usage_common("Tokens: 1,234 in / 567 out").unwrap();
+        assert_eq!(u.input_tokens, Some(1234));
+        assert_eq!(u.output_tokens, Some(567));
+        assert_eq!(u.cost_usd, None);
+    }
+
+    #[test]
+    fn resolve_for_spawn_wraps_cmd_shims_on_windows() {
+        let spec = resolve_for_spawn(&CommandSpec::new("kimi", &["-r", "abc123"]));
+        #[cfg(windows)]
+        {
+            // npm-installed CLIs resolve to `.cmd` shims that CreateProcess
+            // cannot execute directly — they must go through cmd.exe.
+            assert_eq!(spec.program, "cmd.exe");
+            assert_eq!(spec.args, vec!["/C", "kimi", "-r", "abc123"]);
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(spec.program, "kimi");
+            assert_eq!(spec.args, vec!["-r", "abc123"]);
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn resolve_for_spawn_does_not_double_wrap_cmd() {
+        let spec = resolve_for_spawn(&CommandSpec::new("cmd.exe", &["/C", "npm run dev"]));
+        assert_eq!(spec.program, "cmd.exe");
+        assert_eq!(spec.args, vec!["/C", "npm run dev"]);
+    }
+
+    #[test]
+    fn usage_separate_token_lines() {
+        let u = parse_usage_common("Input tokens: 42\nOutput tokens: 7").unwrap();
+        assert_eq!(u.input_tokens, Some(42));
+        assert_eq!(u.output_tokens, Some(7));
+    }
+
+    #[test]
+    fn usage_total_cost() {
+        let u = parse_usage_common("Total cost: $0.12").unwrap();
+        assert_eq!(u.cost_usd, Some(0.12));
+        assert_eq!(u.input_tokens, None);
+    }
+
+    #[test]
+    fn usage_cost_without_total_prefix() {
+        let u = parse_usage_common("cost: $1.50").unwrap();
+        assert_eq!(u.cost_usd, Some(1.50));
+    }
+
+    #[test]
+    fn usage_nothing_matched() {
+        assert!(parse_usage_common("hello world, no stats here").is_none());
+        assert!(parse_usage_common("").is_none());
+    }
+
+    #[test]
+    fn registry_has_all_adapters() {
+        assert!(get_adapter("claude_code").is_some());
+        assert!(get_adapter("kimi_code").is_some());
+        assert!(get_adapter("opencode").is_some());
+        assert!(get_adapter("nope").is_none());
+    }
+}

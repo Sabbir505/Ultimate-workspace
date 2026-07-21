@@ -1,0 +1,291 @@
+// Thin wrappers around the Tauri IPC contract (CONTRACT.md). Command names and
+// payload shapes here are binding — do not "improve" them without updating the
+// contract and the Rust backend in lockstep.
+//
+// Every invoke is routed through `safeInvoke`, which rejects quietly (with a
+// console warning) when the Tauri runtime is absent — e.g. inside jsdom tests
+// or a plain `vite dev` browser session. Event listeners go through
+// `safeListen` for the same reason: they are registered lazily (React
+// effects / bootstrap), never at module import time.
+
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type {
+  CostEvent,
+  CostRollups,
+  GitStatusInfo,
+  HarnessId,
+  HarnessStatus,
+  InstalledSkill,
+  Project,
+  QuickAction,
+  SessionRecord,
+  Skill,
+} from "../types";
+
+function tauriAvailable(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+/** Exported so components can pick a non-Tauri fallback (e.g. the browser
+ *  pane's iframe mode under jsdom / plain vite dev). */
+export const tauriRuntimeAvailable = tauriAvailable;
+
+export async function safeInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  if (!tauriAvailable()) {
+    // Outside Tauri there is no backend; resolve with a benign empty value so
+    // bootstrap code and tests don't explode. Callers treat null as "empty".
+    console.warn(`[conduit] invoke("${cmd}") skipped — Tauri runtime not available`);
+    return null as T;
+  }
+  return invoke<T>(cmd, args);
+}
+
+export async function safeListen<T>(
+  event: string,
+  handler: (payload: T) => void,
+): Promise<UnlistenFn> {
+  if (!tauriAvailable()) return () => {};
+  try {
+    return await listen<T>(event, (e) => handler(e.payload));
+  } catch (err) {
+    console.warn(`[conduit] listen("${event}") failed`, err);
+    return () => {};
+  }
+}
+
+// --- Projects / sessions ---
+export const listProjects = () => safeInvoke<Project[] | null>("list_projects");
+export const addProject = (path: string) => safeInvoke<Project | null>("add_project", { path });
+export const removeProject = (projectId: string) => safeInvoke<void>("remove_project", { projectId });
+export const renameProject = (projectId: string, name: string) =>
+  safeInvoke<void>("rename_project", { projectId, name });
+export const initGitRepo = (projectId: string) => safeInvoke<void>("init_git_repo", { projectId });
+export const listSessions = (projectId?: string) =>
+  safeInvoke<SessionRecord[] | null>("list_sessions", projectId ? { projectId } : {});
+export const createSession = (projectId: string, harness: HarnessId) =>
+  safeInvoke<SessionRecord | null>("create_session", { projectId, harness });
+export const updateSessionTitle = (sessionId: string, title: string) =>
+  safeInvoke<void>("update_session_title", { sessionId, title });
+export const deleteSession = (sessionId: string) => safeInvoke<void>("delete_session", { sessionId });
+export const touchSession = (sessionId: string) => safeInvoke<void>("touch_session", { sessionId });
+
+// --- PTY ---
+export const spawnAgentSession = (paneId: string, sessionId: string) =>
+  safeInvoke<void>("spawn_agent_session", { paneId, sessionId });
+export const spawnShell = (paneId: string, cwd: string, command: string, injectSecretsProjectId?: string) =>
+  safeInvoke<void>("spawn_shell", { paneId, cwd, command, injectSecretsProjectId });
+export const writePty = (paneId: string, data: string) => safeInvoke<void>("write_pty", { paneId, data });
+export const resizePty = (paneId: string, cols: number, rows: number) =>
+  safeInvoke<void>("resize_pty", { paneId, cols, rows });
+export const killPty = (paneId: string) => safeInvoke<void>("kill_pty", { paneId });
+
+// --- Native browser panes (child webviews; Linux falls back to iframe) ---
+//
+// Multi-tab API: every command and the `browser:navigated` event carry a
+// `tabId` (webview label = `browser-{paneId}-tab-{tabId}`). Use `tabId =
+// "default"` for the single-tab path — there is one code path for both.
+//
+// Logical-pixel rect from getBoundingClientRect — Tauri does HiDPI conversion.
+export interface BrowserRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+export interface BrowserNavigatedPayload {
+  paneId: string;
+  tabId: string;
+  url: string;
+}
+export const browserCreateTab = (paneId: string, tabId: string, url: string, rect: BrowserRect) =>
+  safeInvoke<void>("browser_create", { paneId, tabId, url, rect });
+export const browserNavigateTab = (paneId: string, tabId: string, url: string) =>
+  safeInvoke<void>("browser_navigate", { paneId, tabId, url });
+export const browserGoBackTab = (paneId: string, tabId: string) =>
+  safeInvoke<void>("browser_go_back", { paneId, tabId });
+export const browserGoForwardTab = (paneId: string, tabId: string) =>
+  safeInvoke<void>("browser_go_forward", { paneId, tabId });
+export const browserReloadTab = (paneId: string, tabId: string) =>
+  safeInvoke<void>("browser_reload", { paneId, tabId });
+export const browserSetBoundsTab = (paneId: string, tabId: string, rect: BrowserRect) =>
+  safeInvoke<void>("browser_set_bounds", { paneId, tabId, rect });
+export const browserSetVisibleTab = (paneId: string, tabId: string, visible: boolean) =>
+  safeInvoke<void>("browser_set_visible", { paneId, tabId, visible });
+export const browserCloseTab = (paneId: string, tabId: string) =>
+  safeInvoke<void>("browser_close", { paneId, tabId });
+/** Close ALL tab webviews for a pane (used when the entire pane is closed). */
+export const browserClosePane = (paneId: string) =>
+  safeInvoke<void>("browser_close_pane", { paneId });
+export const listenBrowserNavigatedTab = (handler: (payload: BrowserNavigatedPayload) => void) =>
+  safeListen<BrowserNavigatedPayload>("browser:navigated", handler);
+
+// --- Harnesses ---
+export const listHarnesses = () => safeInvoke<HarnessStatus[] | null>("list_harnesses");
+export const runHarnessLogin = (paneId: string, harnessId: HarnessId, cwd: string) =>
+  safeInvoke<void>("run_harness_login", { paneId, harnessId, cwd });
+
+// --- Git ---
+export const getGitStatus = (path: string) => safeInvoke<GitStatusInfo | null>("get_git_status", { path });
+export const createWorktree = (projectId: string, branchName: string) =>
+  safeInvoke<string | null>("create_worktree", { projectId, branchName });
+export const getGitDiff = (path: string) => safeInvoke<string | null>("get_git_diff", { path });
+
+// --- Settings / skills / quick actions / secrets / cost ---
+export const getSetting = (key: string) => safeInvoke<string | null>("get_setting", { key });
+export const setSetting = (key: string, value: string) => safeInvoke<void>("set_setting", { key, value });
+export const listSkills = (projectId?: string) =>
+  safeInvoke<Skill[] | null>("list_skills", projectId ? { projectId } : {});
+export const createSkill = (name: string, slashCommand: string, content: string, scope: string) =>
+  safeInvoke<Skill | null>("create_skill", { name, slashCommand, content, scope });
+export const updateSkill = (id: string, name: string, slashCommand: string, content: string) =>
+  safeInvoke<void>("update_skill", { id, name, slashCommand, content });
+export const deleteSkill = (id: string) => safeInvoke<void>("delete_skill", { id });
+export const listQuickActions = (projectId: string) =>
+  safeInvoke<QuickAction[] | null>("list_quick_actions", { projectId });
+export const createQuickAction = (
+  projectId: string,
+  label: string,
+  command: string,
+  keybinding?: string,
+  runOnWorktree?: boolean,
+) => safeInvoke<QuickAction | null>("create_quick_action", { projectId, label, command, keybinding, runOnWorktree });
+export const updateQuickAction = (id: string, label: string, command: string, keybinding?: string, runOnWorktree?: boolean) =>
+  safeInvoke<void>("update_quick_action", { id, label, command, keybinding, runOnWorktree });
+export const deleteQuickAction = (id: string) => safeInvoke<void>("delete_quick_action", { id });
+export const setSecret = (projectId: string, key: string, value: string) =>
+  safeInvoke<void>("set_secret", { projectId, key, value });
+export const deleteSecret = (projectId: string, key: string) =>
+  safeInvoke<void>("delete_secret", { projectId, key });
+export const listSecretKeys = (projectId: string) =>
+  safeInvoke<string[] | null>("list_secret_keys", { projectId });
+export const getCostEvents = (sessionId?: string) =>
+  safeInvoke<CostEvent[] | null>("get_cost_events", sessionId ? { sessionId } : {});
+export const getCostRollups = () => safeInvoke<CostRollups | null>("get_cost_rollups");
+export const exportSessionMarkdown = (paneId: string) =>
+  safeInvoke<string | null>("export_session_markdown", { paneId });
+export const readFileText = (path: string) => safeInvoke<string | null>("read_file_text", { path });
+
+// --- Installed skills / loops (harness skill directories) ---
+export const listInstalledSkills = () => safeInvoke<InstalledSkill[] | null>("list_installed_skills");
+export const listInstalledLoops = () => safeInvoke<InstalledSkill[] | null>("list_installed_loops");
+export const readInstalledSkill = (slug: string, kind: string) =>
+  safeInvoke<string | null>("read_installed_skill", { slug, kind });
+export const saveInstalledSkill = (slug: string, kind: string, content: string) =>
+  safeInvoke<void>("save_installed_skill", { slug, kind, content });
+export const createInstalledSkill = (name: string, kind: string, content: string) =>
+  safeInvoke<InstalledSkill | null>("create_installed_skill", { name, kind, content });
+export const deleteInstalledSkill = (slug: string, kind: string) =>
+  safeInvoke<void>("delete_installed_skill", { slug, kind });
+
+// --- Chat mode (direct LLM HTTP API, separate from CLI agent panes) ---
+// Command names and arg shapes are binding per CONTRACT.md — do not rename
+// without updating the Rust backend in lockstep. Types mirror the serde
+// structs (camelCase fields).
+export type ChatProvider =
+  | "anthropic"
+  | "openai"
+  | "anthropic_compatible"
+  | "openai_compatible";
+
+export interface ChatSession {
+  id: string;
+  title: string | null;
+  provider: string;
+  model: string;
+  createdAt: number;
+  lastActiveAt: number;
+}
+
+export interface ChatMessageRecord {
+  id: number;
+  chatSessionId: string;
+  role: string;
+  content: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+  createdAt: number;
+}
+
+export interface ChatConfigPayload {
+  provider: string | null;
+  baseUrl: string | null;
+  model: string | null;
+  /** True when an API key exists in the keychain for this provider. */
+  hasKey: boolean;
+}
+
+/** View-model type used by MessageBubble — lightweight { role, content }. */
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+// Chat event payloads (backend -> frontend).
+export interface ChatTokenPayload {
+  chatSessionId: string;
+  token: string;
+}
+export interface ChatDonePayload {
+  chatSessionId: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+}
+export interface ChatErrorPayload {
+  chatSessionId: string;
+  message: string;
+  code: string | null;
+}
+
+export const listChatSessions = () =>
+  safeInvoke<ChatSession[] | null>("list_chat_sessions");
+export const createChatSession = (provider: string, model: string) =>
+  safeInvoke<ChatSession | null>("create_chat_session", { provider, model });
+export const deleteChatSession = (chatSessionId: string) =>
+  safeInvoke<void>("delete_chat_session", { chatSessionId });
+export const updateChatSessionTitle = (chatSessionId: string, title: string) =>
+  safeInvoke<void>("update_chat_session_title", { chatSessionId, title });
+export const getChatMessages = (chatSessionId: string) =>
+  safeInvoke<ChatMessageRecord[] | null>("get_chat_messages", { chatSessionId });
+export const touchChatSession = (chatSessionId: string) =>
+  safeInvoke<void>("touch_chat_session", { chatSessionId });
+export const sendChatMessage = (chatSessionId: string, content: string) =>
+  safeInvoke<void>("send_chat_message", { chatSessionId, content });
+export const cancelChatMessage = (chatSessionId: string) =>
+  safeInvoke<void>("cancel_chat_message", { chatSessionId });
+export const setChatApiKey = (
+  provider: string,
+  key: string,
+  baseUrl?: string,
+  model?: string,
+) =>
+  safeInvoke<void>("set_chat_api_key", {
+    provider,
+    key,
+    baseUrl: baseUrl ?? null,
+    model: model ?? null,
+  });
+export const deleteChatApiKey = (provider: string) =>
+  safeInvoke<void>("delete_chat_api_key", { provider });
+export const getChatConfig = (provider?: string) =>
+  safeInvoke<ChatConfigPayload | null>("get_chat_config", provider ? { provider } : {});
+
+export const listChatModels = (
+  provider: string,
+  baseUrl?: string,
+  apiKey?: string,
+) =>
+  safeInvoke<{ id: string; object: string; created: number; ownedBy: string }[] | null>("list_chat_models", {
+    provider,
+    baseUrl: baseUrl ?? null,
+    apiKey: apiKey ?? null,
+  });
+
+export const listenChatToken = (handler: (payload: ChatTokenPayload) => void) =>
+  safeListen<ChatTokenPayload>("chat:token", handler);
+export const listenChatDone = (handler: (payload: ChatDonePayload) => void) =>
+  safeListen<ChatDonePayload>("chat:done", handler);
+export const listenChatError = (handler: (payload: ChatErrorPayload) => void) =>
+  safeListen<ChatErrorPayload>("chat:error", handler);

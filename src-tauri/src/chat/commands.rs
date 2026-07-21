@@ -205,6 +205,137 @@ pub fn cancel_chat_message(
     Ok(())
 }
 
+// ---- Artifact preview ----
+
+/// Standard base64 encode (no external crate).
+fn base64_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[(n >> 18 & 63) as usize] as char);
+        out.push(ALPHABET[(n >> 12 & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Read a generated artifact for in-app preview. Text-like files return their
+/// decoded (and length-capped) text; images and PDFs return a `data:` URI;
+/// binary Office formats return metadata only (rendered as a file card).
+#[tauri::command]
+pub fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
+    use std::path::Path;
+
+    let p = Path::new(&path);
+    let filename = p
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.clone());
+    let ext = p
+        .extension()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+
+    let meta = std::fs::metadata(p).map_err(|e| format!("cannot stat file: {e}"))?;
+    let size = meta.len();
+
+    // Classify by extension.
+    let text_kind = match ext.as_str() {
+        "md" | "markdown" => Some("markdown"),
+        "csv" => Some("csv"),
+        "json" => Some("json"),
+        "html" | "htm" => Some("html"),
+        "txt" | "log" | "text" => Some("text"),
+        "js" | "ts" | "tsx" | "jsx" | "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "hpp"
+        | "sh" | "bash" | "yaml" | "yml" | "toml" | "xml" | "sql" | "rb" | "php" | "css" => {
+            Some("code")
+        }
+        _ => None,
+    };
+    let is_image = matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp"
+    );
+    let is_pdf = ext == "pdf";
+
+    const MAX_TEXT: usize = 400_000; // ~400 KB of text
+    const MAX_MEDIA: u64 = 25 * 1024 * 1024; // 25 MB
+
+    if let Some(kind) = text_kind {
+        let bytes = std::fs::read(p).map_err(|e| format!("cannot read file: {e}"))?;
+        let mut text = String::from_utf8_lossy(&bytes).into_owned();
+        let truncated = text.len() > MAX_TEXT;
+        if truncated {
+            let mut cut = MAX_TEXT;
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text.truncate(cut);
+        }
+        return Ok(ArtifactPreview {
+            path,
+            filename,
+            ext,
+            kind: kind.to_string(),
+            text: Some(text),
+            data_uri: None,
+            size,
+            truncated,
+        });
+    }
+
+    if (is_image || is_pdf) && size <= MAX_MEDIA {
+        let bytes = std::fs::read(p).map_err(|e| format!("cannot read file: {e}"))?;
+        let mime = match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "svg" => "image/svg+xml",
+            "bmp" => "image/bmp",
+            "pdf" => "application/pdf",
+            _ => "application/octet-stream",
+        };
+        let data_uri = format!("data:{mime};base64,{}", base64_encode(&bytes));
+        return Ok(ArtifactPreview {
+            path,
+            filename,
+            ext,
+            kind: if is_pdf { "pdf" } else { "image" }.to_string(),
+            text: None,
+            data_uri: Some(data_uri),
+            size,
+            truncated: false,
+        });
+    }
+
+    // Binary (docx/pptx/xlsx/…) or oversized media: metadata only.
+    Ok(ArtifactPreview {
+        path,
+        filename,
+        ext,
+        kind: "binary".to_string(),
+        text: None,
+        data_uri: None,
+        size,
+        truncated: false,
+    })
+}
+
 // ---- API key management ----
 
 /// Store the chat API key in the OS keychain, and provider config in app_settings.

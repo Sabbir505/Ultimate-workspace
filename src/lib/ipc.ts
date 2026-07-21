@@ -238,6 +238,22 @@ export interface ChatArtifactPayload {
   path: string;
   filename: string;
 }
+export interface ChatOpenBrowserPayload {
+  chatSessionId: string;
+  url: string;
+}
+
+/** In-app preview of a generated artifact (see `read_artifact_preview`). */
+export interface ArtifactPreview {
+  path: string;
+  filename: string;
+  ext: string;
+  kind: "text" | "markdown" | "csv" | "json" | "html" | "code" | "image" | "pdf" | "binary";
+  text: string | null;
+  dataUri: string | null;
+  size: number;
+  truncated: boolean;
+}
 export interface ChatErrorPayload {
   chatSessionId: string;
   message: string;
@@ -310,6 +326,12 @@ export const listenChatError = (handler: (payload: ChatErrorPayload) => void) =>
   safeListen<ChatErrorPayload>("chat:error", handler);
 export const listenChatArtifact = (handler: (payload: ChatArtifactPayload) => void) =>
   safeListen<ChatArtifactPayload>("chat:artifact", handler);
+export const listenChatOpenBrowser = (handler: (payload: ChatOpenBrowserPayload) => void) =>
+  safeListen<ChatOpenBrowserPayload>("chat:open-browser", handler);
+
+/** Read a generated artifact for in-app preview. */
+export const readArtifactPreview = (path: string) =>
+  safeInvoke<ArtifactPreview | null>("read_artifact_preview", { path });
 
 /** Open a generated artifact file with the OS default application. */
 export async function openArtifact(path: string): Promise<void> {

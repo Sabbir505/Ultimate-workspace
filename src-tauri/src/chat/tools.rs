@@ -19,6 +19,7 @@ pub const WEB_SEARCH: &str = "web_search";
 pub const GENERATE_FILE: &str = "generate_file";
 pub const FETCH_URL: &str = "fetch_url";
 pub const RUN_CODE: &str = "run_code";
+pub const OPEN_URL: &str = "open_url";
 
 /// Which tool capabilities are enabled for a turn. Web search, file generation
 /// and URL fetching are considered safe and are always on when tools are
@@ -35,10 +36,12 @@ pub struct ArtifactRef {
 }
 
 /// Result of a tool call: `text` is fed back to the model; `artifact` (if any)
-/// is surfaced to the UI.
+/// is surfaced to the UI; `browse_url` (if any) asks the UI to open that URL in
+/// the built-in browser pane.
 pub struct ToolOutcome {
     pub text: String,
     pub artifact: Option<ArtifactRef>,
+    pub browse_url: Option<String>,
 }
 
 impl ToolOutcome {
@@ -46,6 +49,7 @@ impl ToolOutcome {
         Self {
             text: t.into(),
             artifact: None,
+            browse_url: None,
         }
     }
 }
@@ -69,12 +73,18 @@ const RUN_CODE_DESC: &str = "Execute a short snippet of code and return its \
     time limit in a temporary directory. Use for calculations, data wrangling \
     or quick scripts.";
 
+const OPEN_URL_DESC: &str = "Open a web page in the app's built-in browser so \
+    the user can see it, and return its readable text to you. Use when the user \
+    asks to open/show/visit a site, or when it helps to display a page visually \
+    alongside your answer.";
+
 /// OpenAI `tools` array (`{type:"function", function:{...}}` entries).
 pub fn openai_tool_specs(caps: ToolCaps) -> Vec<Value> {
     let mut specs = vec![
         openai_fn(WEB_SEARCH, WEB_SEARCH_DESC, web_search_parameters()),
         openai_fn(GENERATE_FILE, GENERATE_FILE_DESC, generate_file_parameters()),
         openai_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
+        openai_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
     ];
     if caps.code_exec {
         specs.push(openai_fn(RUN_CODE, RUN_CODE_DESC, run_code_parameters()));
@@ -99,6 +109,7 @@ pub fn anthropic_tool_specs(caps: ToolCaps) -> Vec<Value> {
         anthropic_fn(WEB_SEARCH, WEB_SEARCH_DESC, web_search_parameters()),
         anthropic_fn(GENERATE_FILE, GENERATE_FILE_DESC, generate_file_parameters()),
         anthropic_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
+        anthropic_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
     ];
     if caps.code_exec {
         specs.push(anthropic_fn(RUN_CODE, RUN_CODE_DESC, run_code_parameters()));
@@ -211,6 +222,26 @@ pub async fn execute_tool(
             match fetch_url(client, url).await {
                 Ok(text) => ToolOutcome::text(text),
                 Err(e) => ToolOutcome::text(format!("fetch_url failed: {e}")),
+            }
+        }
+        OPEN_URL => {
+            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                return ToolOutcome::text("Error: open_url requires an http(s) URL.");
+            }
+            let normalized = url.to_string();
+            match fetch_url(client, url).await {
+                Ok(text) => ToolOutcome {
+                    text: format!("Opened {normalized} in the built-in browser.\n\n{text}"),
+                    artifact: None,
+                    browse_url: Some(normalized),
+                },
+                // Even if reading fails, still show the page to the user.
+                Err(e) => ToolOutcome {
+                    text: format!("Opened {normalized} in the built-in browser (could not extract text: {e})."),
+                    artifact: None,
+                    browse_url: Some(normalized),
+                },
             }
         }
         RUN_CODE => {
@@ -375,6 +406,7 @@ fn generate_file(artifacts_dir: &Path, args: &Value) -> ToolOutcome {
                 path: file.path.display().to_string(),
                 filename: file.filename,
             }),
+            browse_url: None,
         },
         Err(e) => ToolOutcome::text(format!("generate_file failed: {e}")),
     }
@@ -591,6 +623,26 @@ mod tests {
     fn run_code_gated_behind_capability() {
         assert!(!openai_names(ToolCaps::default()).contains(&RUN_CODE.to_string()));
         assert!(openai_names(ToolCaps { code_exec: true }).contains(&RUN_CODE.to_string()));
+    }
+
+    #[test]
+    fn open_url_listed_as_safe_tool() {
+        assert!(openai_names(ToolCaps::default()).contains(&OPEN_URL.to_string()));
+    }
+
+    #[test]
+    fn open_url_rejects_non_http() {
+        let client = reqwest::Client::new();
+        let dir = std::env::temp_dir();
+        let out = tauri::async_runtime::block_on(execute_tool(
+            &client,
+            &dir,
+            ToolCaps::default(),
+            OPEN_URL,
+            &json!({ "url": "ftp://example.com" }),
+        ));
+        assert!(out.browse_url.is_none());
+        assert!(out.text.contains("http(s)"));
     }
 
     #[test]

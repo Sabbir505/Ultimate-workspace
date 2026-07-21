@@ -6,7 +6,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../../state/chat";
 import { ChatComposer } from "./ChatComposer";
-import { MessageBubble } from "./MessageBubble";
+import { MessageBubble, TypingIndicator } from "./MessageBubble";
+import { ArtifactPreviewPane } from "./ArtifactPreviewPane";
 import { listChatModels, openArtifact, type ChatMessage } from "../../lib/ipc";
 
 export function ChatView() {
@@ -18,7 +19,10 @@ export function ChatView() {
   const loaded = useChatStore((s) => s.loaded);
   const loadSessions = useChatStore((s) => s.loadSessions);
   const sendMessage = useChatStore((s) => s.sendMessage);
+  const regenerate = useChatStore((s) => s.regenerate);
   const cancelStream = useChatStore((s) => s.cancelStream);
+  const previewArtifact = useChatStore((s) => s.previewArtifact);
+  const setPreviewArtifact = useChatStore((s) => s.setPreviewArtifact);
   const sessions = useChatStore((s) => s.sessions);
   const setSessionModel = useChatStore((s) => s.setSessionModel);
   const effort = useChatStore((s) => s.effort);
@@ -136,6 +140,12 @@ export function ChatView() {
   // streaming bubble for the active session if tokens are arriving.
   const activeStream = activeChatSessionId ? (streaming[activeChatSessionId] ?? "") : "";
   const isStreaming = streamingChatSessionId === activeChatSessionId && activeStream.length > 0;
+  // The request is in flight but no content has streamed yet: show the
+  // Claude-style "thinking" animation so the user knows something is happening.
+  const waitingForFirstToken =
+    streamingChatSessionId === activeChatSessionId &&
+    streamingChatSessionId !== null &&
+    activeStream.length === 0;
 
   const handleSend = useCallback(
     (content: string) => {
@@ -155,6 +165,11 @@ export function ChatView() {
     void cancelStream();
   }, [cancelStream]);
 
+  const handleRepeat = useCallback(() => {
+    stickToBottomRef.current = true;
+    void regenerate();
+  }, [regenerate]);
+
   // Convert persisted messages for the bubble component.
   // MessageBubble expects { role, content } (its own ChatMessage type), so we
   // map ChatMessageRecord to that shape.
@@ -170,8 +185,13 @@ export function ChatView() {
   }
 
   const hasItems = items.length > 0;
+  // Regenerate applies to the most recent assistant message only.
+  const lastAssistantKey = [...items]
+    .reverse()
+    .find((i) => i.role === "assistant" && !i.live)?.key;
 
   return (
+    <div className={`chat-view-wrap${previewArtifact ? " has-preview" : ""}`}>
     <div className="chat-view">
       {!activeChatSessionId && !hasItems ? (
         <div className="chat-empty">
@@ -190,8 +210,14 @@ export function ChatView() {
               message={{ role: item.role as "user" | "assistant", content: item.content }}
               live={item.live}
               onEdit={item.role === "user" ? handleEdit : undefined}
+              onRepeat={
+                item.role === "assistant" && item.key === lastAssistantKey
+                  ? handleRepeat
+                  : undefined
+              }
             />
           ))}
+          {waitingForFirstToken && <TypingIndicator />}
           {error && (
             <div className="chat-error">
               <span className="chat-error-icon">⚠</span>
@@ -238,6 +264,13 @@ export function ChatView() {
         codeExecEnabled={codeExecEnabled}
         onCodeExecToggle={setCodeExecEnabled}
       />
+    </div>
+    {previewArtifact && (
+      <ArtifactPreviewPane
+        artifact={previewArtifact}
+        onClose={() => setPreviewArtifact(null)}
+      />
+    )}
     </div>
   );
 }

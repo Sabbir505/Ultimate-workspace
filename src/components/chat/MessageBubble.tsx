@@ -4,6 +4,7 @@
 // this component simply accepts a `content: string` prop and renders it.
 import { useCallback, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import type { ChatMessage } from "../../lib/ipc";
 
@@ -14,16 +15,68 @@ interface Props {
   /** When provided (user messages), shows an "Edit" action that loads the
    *  message text back into the composer. */
   onEdit?: (content: string) => void;
+  /** When provided (assistant messages), shows a "Regenerate" action. */
+  onRepeat?: () => void;
 }
 
-/** Per-message action bar (Claude-style): copy for every message, plus edit
- *  for user messages. Appears on hover under the bubble. */
+// --- Inline SVG icons (Claude-style, stroke-based, currentColor). ---
+const iconProps = {
+  width: 15,
+  height: 15,
+  viewBox: "0 0 24 24",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 2,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+};
+
+function CopyIcon() {
+  return (
+    <svg {...iconProps} aria-hidden="true">
+      <rect x="9" y="9" width="13" height="13" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg {...iconProps} aria-hidden="true">
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
+
+function EditIcon() {
+  return (
+    <svg {...iconProps} aria-hidden="true">
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+    </svg>
+  );
+}
+
+function RepeatIcon() {
+  return (
+    <svg {...iconProps} aria-hidden="true">
+      <path d="M3 2v6h6" />
+      <path d="M3 13a9 9 0 1 0 3-7.7L3 8" />
+    </svg>
+  );
+}
+
+/** Per-message action bar (Claude-style icons): copy for every message, edit
+ *  for user messages, regenerate for assistant messages. Appears on hover
+ *  under the bubble. */
 function MessageActions({
   content,
   onEdit,
+  onRepeat,
 }: {
   content: string;
   onEdit?: (content: string) => void;
+  onRepeat?: () => void;
 }) {
   const [copied, setCopied] = useState(false);
   const copy = useCallback(
@@ -47,11 +100,24 @@ function MessageActions({
       <button
         className="chat-msg-action"
         onClick={copy}
-        title="Copy message"
+        title={copied ? "Copied" : "Copy message"}
         aria-label="Copy message"
       >
-        {copied ? "Copied" : "Copy"}
+        {copied ? <CheckIcon /> : <CopyIcon />}
       </button>
+      {onRepeat && (
+        <button
+          className="chat-msg-action"
+          onClick={(e) => {
+            e.currentTarget.blur();
+            onRepeat();
+          }}
+          title="Regenerate response"
+          aria-label="Regenerate response"
+        >
+          <RepeatIcon />
+        </button>
+      )}
       {onEdit && (
         <button
           className="chat-msg-action"
@@ -62,9 +128,25 @@ function MessageActions({
           title="Edit message"
           aria-label="Edit message"
         >
-          Edit
+          <EditIcon />
         </button>
       )}
+    </div>
+  );
+}
+
+/** Claude-style pre-token "thinking" animation: three pulsing dots shown
+ *  while the request is in flight but no content has streamed yet. */
+export function TypingIndicator() {
+  return (
+    <div className="chat-bubble assistant">
+      <div className="chat-bubble-inner">
+        <div className="chat-typing" aria-label="Assistant is responding" role="status">
+          <span className="chat-typing-dot" />
+          <span className="chat-typing-dot" />
+          <span className="chat-typing-dot" />
+        </div>
+      </div>
     </div>
   );
 }
@@ -141,7 +223,7 @@ function CopyButton({ code }: { code: string }) {
   );
 }
 
-export function MessageBubble({ message, live, onEdit }: Props) {
+export function MessageBubble({ message, live, onEdit, onRepeat }: Props) {
   const isUser = message.role === "user";
   const inlineCodeStyle = useInlineCodeStyle();
   const { thinking, done, rest } = isUser
@@ -154,7 +236,9 @@ export function MessageBubble({ message, live, onEdit }: Props) {
         {thinking !== null && thinking.length > 0 && (
           <ThinkingBlock thinking={thinking} done={done} />
         )}
+        <div className="chat-markdown">
         <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
           components={{
             code({ className, children, ...props }) {
               const match = /language-(\w+)/.exec(className || "");
@@ -219,8 +303,15 @@ export function MessageBubble({ message, live, onEdit }: Props) {
         >
           {rest}
         </ReactMarkdown>
+        </div>
       </div>
-      {!live && <MessageActions content={message.content} onEdit={onEdit} />}
+      {!live && (
+        <MessageActions
+          content={message.content}
+          onEdit={onEdit}
+          onRepeat={onRepeat}
+        />
+      )}
     </div>
   );
 }

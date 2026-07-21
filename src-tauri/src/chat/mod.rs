@@ -354,6 +354,15 @@ async fn run_tool(
             },
         );
     }
+    if let Some(url) = outcome.browse_url {
+        let _ = app.emit(
+            "chat:open-browser",
+            ChatOpenBrowserPayload {
+                chat_session_id: sid.to_string(),
+                url,
+            },
+        );
+    }
     outcome.text
 }
 
@@ -393,6 +402,13 @@ fn tool_status_line(name: &str, args: &Value) -> String {
         let f = args.get("filename").and_then(|v| v.as_str()).unwrap_or("file");
         let fmt = args.get("format").and_then(|v| v.as_str()).unwrap_or("");
         format!("Generating {fmt} file \"{f}\"…\n")
+    } else if name == tools::FETCH_URL || name == tools::OPEN_URL {
+        let u = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        let verb = if name == tools::OPEN_URL { "Opening" } else { "Reading" };
+        format!("{verb} {u}…\n")
+    } else if name == tools::RUN_CODE {
+        let lang = args.get("language").and_then(|v| v.as_str()).unwrap_or("code");
+        format!("Running {lang} code…\n")
     } else {
         format!("Running tool {name}…\n")
     }

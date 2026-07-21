@@ -47,6 +47,8 @@ interface ChatState {
   codeExecEnabled: boolean;
   /** Generated files per chat session (chatSessionId -> artifacts). */
   artifacts: Record<string, ChatArtifact[]>;
+  /** The artifact currently shown in the preview pane (null = pane closed). */
+  previewArtifact: ChatArtifact | null;
 
   // Actions
   loadSessions: () => Promise<void>;
@@ -61,7 +63,11 @@ interface ChatState {
   setToolsEnabled: (enabled: boolean) => void;
   setCodeExecEnabled: (enabled: boolean) => void;
   sendMessage: (content: string) => Promise<void>;
+  /** Re-run the last user message to get a fresh assistant response. */
+  regenerate: () => Promise<void>;
   cancelStream: () => Promise<void>;
+  /** Open/close the artifact preview pane. */
+  setPreviewArtifact: (artifact: ChatArtifact | null) => void;
   saveApiKey: (provider: string, key: string, baseUrl?: string, model?: string) => Promise<void>;
   clearApiKey: (provider: string) => Promise<void>;
 
@@ -85,6 +91,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   toolsEnabled: false,
   codeExecEnabled: false,
   artifacts: {},
+  previewArtifact: null,
 
   loadSessions: async () => {
     const sessions = await listChatSessions();
@@ -104,7 +111,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   selectSession: async (chatSessionId) => {
-    set({ activeChatSessionId: chatSessionId, error: null });
+    set({ activeChatSessionId: chatSessionId, error: null, previewArtifact: null });
     const messages = await getChatMessages(chatSessionId);
     // Only update messages if the user hasn't clicked away to another session
     // while the fetch was in-flight.
@@ -212,6 +219,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     );
   },
 
+  // Regenerate resends the most recent user message. The backend appends a
+  // new assistant turn (history is rebuilt from the DB each send).
+  regenerate: async () => {
+    const { messages, streamingChatSessionId } = get();
+    if (streamingChatSessionId) return; // don't regenerate mid-stream
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    if (!lastUser) return;
+    await get().sendMessage(lastUser.content);
+  },
+
+  setPreviewArtifact: (previewArtifact) => set({ previewArtifact }),
+
   cancelStream: async () => {
     const { streamingChatSessionId } = get();
     if (streamingChatSessionId) {
@@ -276,14 +295,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   onArtifact: ({ chatSessionId, path, filename }) => {
+    const artifact = { path, filename };
     set((s) => {
       const existing = s.artifacts[chatSessionId] ?? [];
-      if (existing.some((a) => a.path === path)) return {};
+      const alreadyTracked = existing.some((a) => a.path === path);
       return {
-        artifacts: {
-          ...s.artifacts,
-          [chatSessionId]: [...existing, { path, filename }],
-        },
+        artifacts: alreadyTracked
+          ? s.artifacts
+          : { ...s.artifacts, [chatSessionId]: [...existing, artifact] },
+        // Auto-open the newly generated file in the preview pane when it
+        // belongs to the chat the user is currently viewing.
+        previewArtifact:
+          s.activeChatSessionId === chatSessionId ? artifact : s.previewArtifact,
       };
     });
   },

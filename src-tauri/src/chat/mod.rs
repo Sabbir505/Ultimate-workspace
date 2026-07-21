@@ -48,6 +48,7 @@ impl ChatManager {
         model: String,
         api_key: String,
         base_url: Option<String>,
+        effort: Option<String>,
         messages: Vec<ChatMessage>,
         db: Arc<Mutex<Connection>>,
         app: AppHandle,
@@ -61,6 +62,7 @@ impl ChatManager {
             messages,
             max_tokens: Some(4096),
             system: None,
+            effort,
         };
 
         let client = self.client.clone();

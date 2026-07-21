@@ -32,6 +32,10 @@ pub struct ChatRequest {
     pub max_tokens: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
+    /// Reasoning effort hint ("low" | "medium" | "high"). Sent as
+    /// `reasoning_effort` on OpenAI-style requests; ignored by Anthropic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -107,6 +111,8 @@ struct OpenAIWireBody {
     model: String,
     messages: Vec<OpenAIWireMessage>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 /// Build the Anthropic `/v1/messages` streaming request. Both
@@ -160,6 +166,7 @@ fn openai_request(
             })
             .collect(),
         stream: true,
+        reasoning_effort: req.effort.clone(),
     };
     client
         .post(&url)

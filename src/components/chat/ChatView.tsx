@@ -3,11 +3,19 @@
 // Shows an empty state when no chat session is selected.
 // Live streaming: accumulates tokens into an assistant bubble that updates
 // as they arrive, then swaps to the final persisted message on chat:done.
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../../state/chat";
 import { ChatComposer } from "./ChatComposer";
 import { MessageBubble } from "./MessageBubble";
-import type { ChatMessage } from "../../lib/ipc";
+import { GlassSelect } from "../common/GlassSelect";
+import { listChatModels, type ChatMessage } from "../../lib/ipc";
+
+const EFFORT_OPTIONS = [
+  { value: "", label: "Effort: default" },
+  { value: "low", label: "Effort: low" },
+  { value: "medium", label: "Effort: medium" },
+  { value: "high", label: "Effort: high" },
+];
 
 export function ChatView() {
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
@@ -19,6 +27,45 @@ export function ChatView() {
   const loadSessions = useChatStore((s) => s.loadSessions);
   const sendMessage = useChatStore((s) => s.sendMessage);
   const cancelStream = useChatStore((s) => s.cancelStream);
+  const sessions = useChatStore((s) => s.sessions);
+  const setSessionModel = useChatStore((s) => s.setSessionModel);
+  const effort = useChatStore((s) => s.effort);
+  const setEffort = useChatStore((s) => s.setEffort);
+
+  const activeSession = sessions.find((s) => s.id === activeChatSessionId) ?? null;
+  const isCompatible =
+    activeSession?.provider === "anthropic_compatible" ||
+    activeSession?.provider === "openai_compatible";
+  const [models, setModels] = useState<string[]>([]);
+
+  // Fetch the model list for compatible providers (uses the stored key and
+  // base URL from Settings). Refetched when the session's provider changes.
+  useEffect(() => {
+    setModels([]);
+    if (!activeSession || !isCompatible) return;
+    let stale = false;
+    void listChatModels(activeSession.provider).then((list) => {
+      if (!stale && list) setModels(list.map((m) => m.id));
+    });
+    return () => {
+      stale = true;
+    };
+  }, [activeSession?.provider, isCompatible, activeChatSessionId]);
+
+  const modelOptions = (() => {
+    const ids = [...models];
+    if (activeSession?.model && !ids.includes(activeSession.model)) {
+      ids.unshift(activeSession.model);
+    }
+    return ids.map((id) => ({ value: id, label: id }));
+  })();
+
+  const handleModelChange = useCallback(
+    (model: string) => {
+      if (activeChatSessionId) void setSessionModel(activeChatSessionId, model);
+    },
+    [activeChatSessionId, setSessionModel],
+  );
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -102,6 +149,29 @@ export function ChatView() {
             </div>
           )}
           <div ref={messagesEndRef} />
+        </div>
+      )}
+
+      {activeChatSessionId && (
+        <div className="chat-toolbar">
+          {modelOptions.length > 0 ? (
+            <GlassSelect<string>
+              value={activeSession?.model ?? ""}
+              options={modelOptions}
+              onChange={handleModelChange}
+            />
+          ) : (
+            <span className="chat-toolbar-hint">
+              {isCompatible
+                ? "No models fetched — set base URL & key in Settings → API Keys"
+                : activeSession?.model || "No model set"}
+            </span>
+          )}
+          <GlassSelect<string>
+            value={effort}
+            options={EFFORT_OPTIONS}
+            onChange={setEffort}
+          />
         </div>
       )}
 

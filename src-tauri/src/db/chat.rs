@@ -78,6 +78,18 @@ pub fn update_chat_session_title(
     Ok(())
 }
 
+pub fn update_chat_session_model(
+    conn: &Connection,
+    chat_session_id: &str,
+    model: &str,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE chat_sessions SET model = ?2 WHERE id = ?1",
+        params![chat_session_id, model],
+    )?;
+    Ok(())
+}
+
 pub fn touch_chat_session(conn: &Connection, chat_session_id: &str) -> DbResult<()> {
     conn.execute(
         "UPDATE chat_sessions SET last_active_at = ?2 WHERE id = ?1",

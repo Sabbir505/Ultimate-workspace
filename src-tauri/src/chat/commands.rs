@@ -40,6 +40,16 @@ pub fn delete_chat_session(
 }
 
 #[tauri::command]
+pub fn update_chat_session_model(
+    chat_session_id: String,
+    model: String,
+    db: State<DbState>,
+) -> CmdResult<()> {
+    let conn = db.0.lock();
+    db::update_chat_session_model(&conn, &chat_session_id, &model).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn update_chat_session_title(
     chat_session_id: String,
     title: String,
@@ -75,6 +85,7 @@ pub fn touch_chat_session(
 pub async fn send_chat_message(
     chat_session_id: String,
     content: String,
+    effort: Option<String>,
     chat_state: State<'_, crate::ChatState>,
     db: State<'_, DbState>,
     app: AppHandle,
@@ -122,7 +133,14 @@ pub async fn send_chat_message(
             .map_err(|e| e.to_string())?;
         (base, mo)
     };
-    let model = model_override.unwrap_or(model_str);
+    // Per-session model wins; the Settings model is only a default for
+    // sessions created without one.
+    let model = if model_str.trim().is_empty() {
+        model_override.ok_or_else(|| "no model configured for this chat".to_string())?
+    } else {
+        model_str
+    };
+    let effort = effort.filter(|e| !e.trim().is_empty());
 
     // 6. Build message history from DB.
     let messages = {
@@ -145,6 +163,7 @@ pub async fn send_chat_message(
         model,
         api_key,
         base_url,
+        effort,
         messages,
         shared_db,
         app,

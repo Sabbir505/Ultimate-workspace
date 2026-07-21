@@ -21,6 +21,10 @@ describe("browserOccluded", () => {
     }
   });
 
+  it("is not occluded in chat mode (chat hosts browser panes in its split)", () => {
+    expect(browserOccluded({ ...clear, activeView: "chat" })).toBe(false);
+  });
+
   it("is occluded by the command palette, peek panel, and modals", () => {
     expect(browserOccluded({ ...clear, paletteOpen: true })).toBe(true);
     expect(browserOccluded({ ...clear, peekOpen: true })).toBe(true);

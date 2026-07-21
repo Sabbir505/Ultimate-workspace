@@ -251,8 +251,18 @@ export const getChatMessages = (chatSessionId: string) =>
   safeInvoke<ChatMessageRecord[] | null>("get_chat_messages", { chatSessionId });
 export const touchChatSession = (chatSessionId: string) =>
   safeInvoke<void>("touch_chat_session", { chatSessionId });
-export const sendChatMessage = (chatSessionId: string, content: string) =>
-  safeInvoke<void>("send_chat_message", { chatSessionId, content });
+export const sendChatMessage = (
+  chatSessionId: string,
+  content: string,
+  effort?: string,
+) =>
+  safeInvoke<void>("send_chat_message", {
+    chatSessionId,
+    content,
+    effort: effort ?? null,
+  });
+export const updateChatSessionModel = (chatSessionId: string, model: string) =>
+  safeInvoke<void>("update_chat_session_model", { chatSessionId, model });
 export const cancelChatMessage = (chatSessionId: string) =>
   safeInvoke<void>("cancel_chat_message", { chatSessionId });
 export const setChatApiKey = (

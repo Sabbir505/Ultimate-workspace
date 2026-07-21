@@ -16,6 +16,7 @@ import {
   sendChatMessage,
   setChatApiKey,
   touchChatSession,
+  updateChatSessionModel,
   updateChatSessionTitle,
   type ChatConfigPayload,
   type ChatMessageRecord,
@@ -31,6 +32,8 @@ interface ChatState {
   streamingChatSessionId: string | null; // which session is currently streaming
   config: ChatConfigPayload | null;
   error: string | null;
+  /** Reasoning effort sent with messages ("" = provider default). */
+  effort: string;
 
   // Actions
   loadSessions: () => Promise<void>;
@@ -40,6 +43,8 @@ interface ChatState {
   newChat: (provider: string, model: string) => Promise<ChatSession | null>;
   deleteChat: (chatSessionId: string) => Promise<void>;
   renameChat: (chatSessionId: string, title: string) => Promise<void>;
+  setSessionModel: (chatSessionId: string, model: string) => Promise<void>;
+  setEffort: (effort: string) => void;
   sendMessage: (content: string) => Promise<void>;
   cancelStream: () => Promise<void>;
   saveApiKey: (provider: string, key: string, baseUrl?: string, model?: string) => Promise<void>;
@@ -60,6 +65,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   streamingChatSessionId: null,
   config: null,
   error: null,
+  effort: "",
 
   loadSessions: async () => {
     const sessions = await listChatSessions();
@@ -129,8 +135,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
+  setSessionModel: async (chatSessionId, model) => {
+    await updateChatSessionModel(chatSessionId, model);
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === chatSessionId ? { ...sess, model } : sess,
+      ),
+    }));
+  },
+
+  setEffort: (effort) => set({ effort }),
+
   sendMessage: async (content) => {
-    const { activeChatSessionId, messages, sessions } = get();
+    const { activeChatSessionId, messages, sessions, effort } = get();
     if (!activeChatSessionId) return;
 
     // Optimistically append the user message.
@@ -159,7 +176,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }));
     }
 
-    await sendChatMessage(activeChatSessionId, content);
+    await sendChatMessage(activeChatSessionId, content, effort || undefined);
   },
 
   cancelStream: async () => {

@@ -128,7 +128,7 @@ mod platform {
 mod platform {
     use super::account;
     use crate::db;
-    use rusqlite::Connection;
+    use rusqlite::{Connection, OptionalExtension};
 
     const OBFUSCATION_KEY: &[u8] = b"nexus-local-secrets-obfuscation-v1";
 
@@ -180,7 +180,7 @@ mod platform {
 
     pub fn chat_load(conn: &Connection, provider: &str) -> Option<String> {
         ensure_chat_secrets_table(conn).ok()?;
-        let blob: Option<Vec<u8>> = conn
+        let blob: Vec<u8> = conn
             .query_row(
                 "SELECT value_encrypted FROM chat_secrets WHERE provider = ?1",
                 rusqlite::params![provider],
@@ -210,14 +210,6 @@ fn chat_account(provider: &str) -> String {
     format!("conduit:chat:{provider}")
 }
 
-// ---- Hardcoded test configuration ----
-// These values are used as fallback when no user-configured key exists.
-// This allows testing the chat without manually entering API credentials.
-const HARDCODED_BASE_URL: &str = "https://ai2.18.show";
-const HARDCODED_API_KEY: &str = "sk-84fe0942e39eb903e53254883a9d97cf0d1dada54003299336adface8b1f3000";
-const HARDCODED_MODEL: &str = "kimi-k2.6";
-const HARDCODED_PROVIDER: &str = "openai_compatible";
-
 /// Store a chat provider API key in the OS keychain. The value is NEVER
 /// returned to the frontend via any IPC command — it is only used by the
 /// Rust backend for outbound HTTP requests to the LLM provider.
@@ -227,15 +219,7 @@ pub fn set_chat_api_key(conn: &Connection, provider: &str, value: &str) -> Resul
 }
 
 pub fn get_chat_api_key(conn: &Connection, provider: &str) -> Option<String> {
-    // Return user-configured key if it exists, otherwise fall back to hardcoded
-    // test credentials for the openai_compatible provider.
-    platform::chat_load(conn, provider).or_else(|| {
-        if provider == HARDCODED_PROVIDER {
-            Some(HARDCODED_API_KEY.to_string())
-        } else {
-            None
-        }
-    })
+    platform::chat_load(conn, provider)
 }
 
 /// True when a chat API key exists for this provider (keychain entry or
@@ -243,30 +227,11 @@ pub fn get_chat_api_key(conn: &Connection, provider: &str) -> Option<String> {
 /// is allowed without the user re-entering their key.
 pub fn has_chat_api_key(conn: &Connection, provider: &str) -> bool {
     platform::chat_load(conn, provider).is_some()
-        || provider == HARDCODED_PROVIDER
 }
 
 pub fn delete_chat_api_key(conn: &Connection, provider: &str) -> Result<(), String> {
     platform::chat_remove(conn, provider);
     Ok(())
-}
-
-/// Returns the hardcoded base URL for testing when no user config exists.
-pub fn get_hardcoded_base_url(provider: &str) -> Option<String> {
-    if provider == HARDCODED_PROVIDER {
-        Some(HARDCODED_BASE_URL.to_string())
-    } else {
-        None
-    }
-}
-
-/// Returns the hardcoded model for testing when no user config exists.
-pub fn get_hardcoded_model(provider: &str) -> Option<String> {
-    if provider == HARDCODED_PROVIDER {
-        Some(HARDCODED_MODEL.to_string())
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]

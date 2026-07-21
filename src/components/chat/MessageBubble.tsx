@@ -11,6 +11,42 @@ interface Props {
   message: ChatMessage;
 }
 
+/** Splits a `<think>…</think>` reasoning block (streamed by reasoning
+ *  models) off the front of the message. `done` is false while the closing
+ *  tag hasn't arrived yet (still thinking). */
+function splitThinking(content: string): {
+  thinking: string | null;
+  done: boolean;
+  rest: string;
+} {
+  const match = /^\s*<think>([\s\S]*?)(?:<\/think>|$)/.exec(content);
+  if (!match) return { thinking: null, done: true, rest: content };
+  const done = match[0].includes("</think>");
+  return {
+    thinking: match[1].trim(),
+    done,
+    rest: content.slice(match[0].length).trim(),
+  };
+}
+
+function ThinkingBlock({ thinking, done }: { thinking: string; done: boolean }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={`chat-thinking${done ? "" : " live"}`}>
+      <button
+        className="chat-thinking-toggle"
+        onClick={() => setOpen((o) => !o)}
+        title={open ? "Hide thinking" : "Show thinking"}
+      >
+        <span className="chat-thinking-icon">✵</span>
+        {done ? "Thought process" : "Thinking…"}
+        <span className={`chat-thinking-chevron${open ? " open" : ""}`}>›</span>
+      </button>
+      {open && <div className="chat-thinking-body">{thinking}</div>}
+    </div>
+  );
+}
+
 /** Returns a style object for inline code elements using CSS variable lookups
  *  that work in both light and dark themes (the variables resolve at runtime). */
 function useInlineCodeStyle() {
@@ -50,10 +86,16 @@ function CopyButton({ code }: { code: string }) {
 export function MessageBubble({ message }: Props) {
   const isUser = message.role === "user";
   const inlineCodeStyle = useInlineCodeStyle();
+  const { thinking, done, rest } = isUser
+    ? { thinking: null, done: true, rest: message.content }
+    : splitThinking(message.content);
 
   return (
     <div className={`chat-bubble${isUser ? " user" : " assistant"}`}>
       <div className="chat-bubble-inner">
+        {thinking !== null && thinking.length > 0 && (
+          <ThinkingBlock thinking={thinking} done={done} />
+        )}
         <ReactMarkdown
           components={{
             code({ className, children, ...props }) {
@@ -117,7 +159,7 @@ export function MessageBubble({ message }: Props) {
             },
           }}
         >
-          {message.content}
+          {rest}
         </ReactMarkdown>
       </div>
     </div>

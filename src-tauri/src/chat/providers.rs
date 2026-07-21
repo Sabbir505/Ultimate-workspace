@@ -32,6 +32,10 @@ pub struct ChatRequest {
     pub max_tokens: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
+    /// Reasoning effort hint ("low" | "medium" | "high"). Sent as
+    /// `reasoning_effort` on OpenAI-style requests; ignored by Anthropic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -40,6 +44,11 @@ pub struct ChatUsage {
     pub output_tokens: i64,
     pub cost_usd: f64,
 }
+
+/// Private-use char prefixed to reasoning/thinking tokens so the stream
+/// runner can distinguish them from answer tokens and wrap them in
+/// `<think>…</think>` for the frontend's collapsible thinking block.
+pub const REASONING_PREFIX: char = '\u{E000}';
 
 // ---- Provider trait ----
 
@@ -107,6 +116,8 @@ struct OpenAIWireBody {
     model: String,
     messages: Vec<OpenAIWireMessage>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 /// Build the Anthropic `/v1/messages` streaming request. Both
@@ -160,6 +171,7 @@ fn openai_request(
             })
             .collect(),
         stream: true,
+        reasoning_effort: req.effort.clone(),
     };
     client
         .post(&url)
@@ -352,6 +364,10 @@ impl ChatProvider for OpenAIProvider {
             #[derive(Deserialize)]
             struct Delta {
                 content: Option<String>,
+                // Reasoning models (DeepSeek, GLM, o-series compatibles)
+                // stream thinking under one of these keys.
+                reasoning_content: Option<String>,
+                reasoning: Option<String>,
             }
 
             let payload: SsePayload =
@@ -366,7 +382,21 @@ impl ChatProvider for OpenAIProvider {
                     }
                     if let Some(ref delta) = choice.delta {
                         if let Some(ref content) = delta.content {
-                            return Ok((Some(content.clone()), false));
+                            if !content.is_empty() {
+                                return Ok((Some(content.clone()), false));
+                            }
+                        }
+                        if let Some(reasoning) = delta
+                            .reasoning_content
+                            .as_ref()
+                            .or(delta.reasoning.as_ref())
+                        {
+                            if !reasoning.is_empty() {
+                                return Ok((
+                                    Some(format!("{REASONING_PREFIX}{reasoning}")),
+                                    false,
+                                ));
+                            }
                         }
                     }
                 }

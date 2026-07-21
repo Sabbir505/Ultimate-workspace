@@ -7,7 +7,7 @@ import { CostDashboard } from "./components/cost-dashboard/CostDashboard";
 import { Modal } from "./components/common/Modal";
 import { OnboardingBanner } from "./components/onboarding/OnboardingBanner";
 import { BroadcastBar } from "./components/panes/BroadcastBar";
-import { PaneGrid } from "./components/panes/PaneGrid";
+import { ChatBrowserSplit, PaneGrid } from "./components/panes/PaneGrid";
 import { PeekPanel } from "./components/peek/PeekPanel";
 import { SettingsView } from "./components/settings/SettingsView";
 import { ProjectSettingsPanel } from "./components/sidebar/ProjectSettingsPanel";
@@ -139,7 +139,11 @@ export default function App() {
         <OnboardingBanner />
 
         {activeView === "chat" ? (
-          <ChatView />
+          <div className="grid-wrap">
+            <ChatBrowserSplit>
+              <ChatView />
+            </ChatBrowserSplit>
+          </div>
         ) : (
           <div className="grid-wrap">
             <PaneGrid />

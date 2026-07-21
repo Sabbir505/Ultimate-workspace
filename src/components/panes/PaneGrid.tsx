@@ -190,6 +190,90 @@ export function PaneGrid() {
 }
 
 /**
+ * Chat mode's layout host: renders the chat view full-width, and when a
+ * visible (non-minimized) browser pane exists, splits chat left | browser
+ * right — same as dev-mode split. Minimized browsers stay mounted via
+ * DormantBrowsers so the toolbar can restore them from chat mode too.
+ */
+export function ChatBrowserSplit({ children }: { children: React.ReactNode }) {
+  const panes = usePanesStore((s) => s.panes);
+  const focusedPaneId = usePanesStore((s) => s.focusedPaneId);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [frac, setFrac] = useState(0.5);
+
+  const browsers = useMemo(
+    () => panes.filter((p) => p.data.kind === "browser" && !p.data.collapsed),
+    [panes],
+  );
+
+  const startDrag = useCallback((e: React.PointerEvent) => {
+    const container = containerRef.current;
+    if (!container) return;
+    e.preventDefault();
+    const rect = container.getBoundingClientRect();
+    const onMove = (ev: PointerEvent) => {
+      const f = (ev.clientX - rect.left) / rect.width;
+      setFrac(Math.min(0.8, Math.max(0.2, f)));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }, []);
+
+  if (browsers.length === 0) {
+    return (
+      <>
+        {children}
+        <DormantBrowsers panes={panes} />
+      </>
+    );
+  }
+
+  const activeBrowserId = browsers
+    .reduce((a, b) => (a.lastUsedAt > b.lastUsedAt ? a : b))
+    .paneId;
+
+  return (
+    <>
+      <div className="pane-grid split-layout" ref={containerRef}>
+        <div
+          className="split-left chat-split-left"
+          style={{ width: `${(frac * 100).toFixed(2)}%` }}
+        >
+          {children}
+        </div>
+        <SplitterOverlay
+          orientation="vertical"
+          onPointerDown={startDrag}
+          style={{
+            left: `calc(${(frac * 100).toFixed(3)}% - ${GAP_PX / 2}px)`,
+            top: 0,
+            bottom: 0,
+            width: GAP_PX,
+          }}
+        />
+        <div className="split-right">
+          {browsers.map((b) => (
+            <PaneFrame
+              key={b.paneId}
+              pane={b}
+              index={panes.indexOf(b)}
+              focused={b.paneId === focusedPaneId}
+              hidden={b.paneId !== activeBrowserId}
+              visible={b.paneId === activeBrowserId}
+            />
+          ))}
+        </div>
+      </div>
+      <DormantBrowsers panes={panes} />
+    </>
+  );
+}
+
+/**
  * Minimized browser panes live here: kept mounted (so their native webview +
  * URL/history tracking stay alive) but in a zero-size, off-screen container
  * with visible=false (the occlusion effect hides the webview). Restored from

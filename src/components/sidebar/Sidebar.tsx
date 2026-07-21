@@ -39,9 +39,10 @@ export function Sidebar() {
   const [sidebarMode, setSidebarMode] = useState<SidebarMode>("projects");
 
   const handleNewChat = useCallback(() => {
-    // Use hardcoded openai_compatible provider as default for testing
+    // Fall back to a compatible provider when no config is saved yet;
+    // sending will prompt the user to configure a key in Settings.
     const provider = chatConfig?.provider ?? "openai_compatible";
-    const model = chatConfig?.model ?? "kimi-k2.6";
+    const model = chatConfig?.model ?? "";
     void newChat(provider, model).then((session) => {
       if (session) setActiveView("chat");
     });

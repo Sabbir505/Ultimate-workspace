@@ -292,11 +292,24 @@ function ApiKeysPanel() {
   const [fetchError, setFetchError] = useState<string | null>(null);
 
   const isCompatible = provider === "anthropic_compatible" || provider === "openai_compatible";
+  const hasExistingKey = config?.provider === provider && config?.hasKey;
 
   // Bootstrap: load config for the currently selected provider.
   useEffect(() => {
     void loadConfigFn(provider);
   }, [loadConfigFn, provider]);
+
+  // Auto-fetch the model list once a base URL is set and a key is available
+  // (typed in or already stored), debounced so we don't fire per keystroke.
+  useEffect(() => {
+    if (!isCompatible || !baseUrl.trim()) return;
+    if (!apiKey.trim() && !hasExistingKey) return;
+    const t = setTimeout(() => {
+      void handleFetchModels();
+    }, 600);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isCompatible, baseUrl, apiKey, hasExistingKey, provider]);
 
   // When config arrives (bootstrap or after save/clear), pre-fill fields
   // for the currently selected provider.
@@ -365,12 +378,14 @@ function ApiKeysPanel() {
     setApiKey("");
     setBaseUrl("");
     setModel("");
+    setFetchedModels([]);
+    setFetchError(null);
+    await loadConfigFn(provider);
   };
 
   // Save is valid when:
   // - For native providers: API key is required
   // - For compatible providers: base URL is required, key is optional (can be added later)
-  const hasExistingKey = config?.provider === provider && config?.hasKey;
   const canSave = isCompatible
     ? baseUrl.trim().length > 0
     : apiKey.trim().length > 0 || hasExistingKey;
@@ -383,6 +398,19 @@ function ApiKeysPanel() {
     <>
       <div className="panel-head">
         <h3>Chat API Keys</h3>
+      </div>
+      <div className="api-config-summary">
+        <strong>Current configuration</strong>
+        {config?.provider === provider ? (
+          <div className="hint">
+            API key: {config.hasKey ? "saved ✓" : "not set"}
+            {isCompatible && <> · Base URL: {config.baseUrl || "not set"}</>}
+            {" · Model: "}
+            {config.model || "not set"}
+          </div>
+        ) : (
+          <div className="hint">Loading…</div>
+        )}
       </div>
       <div className="form-row">
         <label>Provider</label>

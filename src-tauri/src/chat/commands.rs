@@ -14,6 +14,25 @@ type CmdResult<T> = Result<T, String>;
 
 // ---- Chat session CRUD ----
 
+/// Removes `<think>…</think>` reasoning blocks (display-only) from a message
+/// before it is sent back to the API as conversation history.
+fn strip_think_blocks(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    while let Some(start) = rest.find("<think>") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("</think>") {
+            Some(end) => rest = &rest[start + end + "</think>".len()..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_string()
+}
+
 #[tauri::command]
 pub fn list_chat_sessions(db: State<DbState>) -> CmdResult<Vec<ChatSession>> {
     let conn = db.0.lock();
@@ -37,6 +56,16 @@ pub fn delete_chat_session(
 ) -> CmdResult<()> {
     let conn = db.0.lock();
     db::delete_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_chat_session_model(
+    chat_session_id: String,
+    model: String,
+    db: State<DbState>,
+) -> CmdResult<()> {
+    let conn = db.0.lock();
+    db::update_chat_session_model(&conn, &chat_session_id, &model).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -75,6 +104,7 @@ pub fn touch_chat_session(
 pub async fn send_chat_message(
     chat_session_id: String,
     content: String,
+    effort: Option<String>,
     chat_state: State<'_, crate::ChatState>,
     db: State<'_, DbState>,
     app: AppHandle,
@@ -106,25 +136,30 @@ pub async fn send_chat_message(
         other => return Err(format!("unknown provider: {other}")),
     };
 
-    // 4. Load API key from keychain (with hardcoded fallback).
+    // 4. Load API key from keychain.
     let api_key = {
         let conn = db.0.lock();
         secrets::get_chat_api_key(&conn, &provider_str)
     }
     .ok_or_else(|| format!("no API key configured for provider: {provider_str}"))?;
 
-    // 5. Load optional base_url and model override from app_settings (with hardcoded fallback).
+    // 5. Load optional base_url and model override from app_settings.
     let (base_url, model_override) = {
         let conn = db.0.lock();
         let base = db::get_setting(&conn, &format!("chat.{provider_str}.base_url"))
-            .map_err(|e| e.to_string())?
-            .or_else(|| secrets::get_hardcoded_base_url(&provider_str));
+            .map_err(|e| e.to_string())?;
         let mo = db::get_setting(&conn, &format!("chat.{provider_str}.model"))
-            .map_err(|e| e.to_string())?
-            .or_else(|| secrets::get_hardcoded_model(&provider_str));
+            .map_err(|e| e.to_string())?;
         (base, mo)
     };
-    let model = model_override.unwrap_or(model_str);
+    // Per-session model wins; the Settings model is only a default for
+    // sessions created without one.
+    let model = if model_str.trim().is_empty() {
+        model_override.ok_or_else(|| "no model configured for this chat".to_string())?
+    } else {
+        model_str
+    };
+    let effort = effort.filter(|e| !e.trim().is_empty());
 
     // 6. Build message history from DB.
     let messages = {
@@ -135,7 +170,8 @@ pub async fn send_chat_message(
             .into_iter()
             .map(|r| ChatMessage {
                 role: r.role,
-                content: r.content,
+                // Thinking blocks are for display only — never re-sent.
+                content: strip_think_blocks(&r.content),
             })
             .collect::<Vec<_>>()
     };
@@ -147,6 +183,7 @@ pub async fn send_chat_message(
         model,
         api_key,
         base_url,
+        effort,
         messages,
         shared_db,
         app,
@@ -209,7 +246,17 @@ pub fn set_chat_api_key(
 #[tauri::command]
 pub fn delete_chat_api_key(provider: String, db: State<DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
-    secrets::delete_chat_api_key(&conn, &provider)
+    secrets::delete_chat_api_key(&conn, &provider)?;
+    // Clearing a provider removes its whole configuration, not just the key.
+    conn.execute(
+        "DELETE FROM app_settings WHERE key IN (?1, ?2)",
+        rusqlite::params![
+            format!("chat.{provider}.base_url"),
+            format!("chat.{provider}.model"),
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Returns non-secret config only — the API key value is NEVER returned.
@@ -218,19 +265,15 @@ pub fn delete_chat_api_key(provider: String, db: State<DbState>) -> CmdResult<()
 /// config for the FIRST one that has a stored key (so the UI can pre-fill the
 /// correct provider/model/baseUrl). The `has_key` field tells the API Keys
 /// panel whether Save is allowed without re-entering the key.
-///
-/// Hardcoded test credentials for `openai_compatible` are included as fallback.
 #[tauri::command]
 pub fn get_chat_config(provider: Option<String>, db: State<DbState>) -> CmdResult<ChatConfigPayload> {
     let conn = db.0.lock();
     match provider {
         Some(p) => {
             let base_url = db::get_setting(&conn, &format!("chat.{p}.base_url"))
-                .map_err(|e| e.to_string())?
-                .or_else(|| secrets::get_hardcoded_base_url(&p));
+                .map_err(|e| e.to_string())?;
             let model = db::get_setting(&conn, &format!("chat.{p}.model"))
-                .map_err(|e| e.to_string())?
-                .or_else(|| secrets::get_hardcoded_model(&p));
+                .map_err(|e| e.to_string())?;
             let has_key = secrets::has_chat_api_key(&conn, &p);
             Ok(ChatConfigPayload {
                 provider: Some(p),
@@ -254,12 +297,12 @@ pub fn get_chat_config(provider: Option<String>, db: State<DbState>) -> CmdResul
                     });
                 }
             }
-            // Fallback: return hardcoded openai_compatible config for testing
+            // No provider has a stored key yet.
             Ok(ChatConfigPayload {
-                provider: Some("openai_compatible".to_string()),
-                base_url: Some("https://ai2.18.show".to_string()),
-                model: Some("kimi-k2.6".to_string()),
-                has_key: true,
+                provider: None,
+                base_url: None,
+                model: None,
+                has_key: false,
             })
         }
     }
@@ -332,14 +375,23 @@ pub async fn list_chat_models(
         }
     };
 
-    // Try standard OpenAI shape first ({ data: [...] }).
+    // Try standard OpenAI shape first ({ data: [...] }). Only `id` is
+    // required — many compatible providers omit object/created/owned_by.
     let models: Vec<crate::types::ChatModel> = if let Some(data) = json.get("data").and_then(|v| v.as_array()) {
         data.iter()
             .filter_map(|v| {
                 let id = v.get("id")?.as_str()?.to_string();
-                let object = v.get("object")?.as_str()?.to_string();
-                let created = v.get("created")?.as_i64()?;
-                let owned_by = v.get("owned_by")?.as_str()?.to_string();
+                let object = v
+                    .get("object")
+                    .and_then(|o| o.as_str())
+                    .unwrap_or("model")
+                    .to_string();
+                let created = v.get("created").and_then(|c| c.as_i64()).unwrap_or(0);
+                let owned_by = v
+                    .get("owned_by")
+                    .and_then(|o| o.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 Some(crate::types::ChatModel { id, object, created, owned_by })
             })
             .collect()

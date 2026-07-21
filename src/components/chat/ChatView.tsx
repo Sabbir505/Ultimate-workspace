@@ -3,11 +3,11 @@
 // Shows an empty state when no chat session is selected.
 // Live streaming: accumulates tokens into an assistant bubble that updates
 // as they arrive, then swaps to the final persisted message on chat:done.
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../../state/chat";
 import { ChatComposer } from "./ChatComposer";
 import { MessageBubble } from "./MessageBubble";
-import type { ChatMessage } from "../../lib/ipc";
+import { listChatModels, type ChatMessage } from "../../lib/ipc";
 
 export function ChatView() {
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
@@ -19,6 +19,48 @@ export function ChatView() {
   const loadSessions = useChatStore((s) => s.loadSessions);
   const sendMessage = useChatStore((s) => s.sendMessage);
   const cancelStream = useChatStore((s) => s.cancelStream);
+  const sessions = useChatStore((s) => s.sessions);
+  const setSessionModel = useChatStore((s) => s.setSessionModel);
+  const effort = useChatStore((s) => s.effort);
+  const setEffort = useChatStore((s) => s.setEffort);
+  const config = useChatStore((s) => s.config);
+  const loadConfig = useChatStore((s) => s.loadConfig);
+  const newChat = useChatStore((s) => s.newChat);
+
+  const activeSession = sessions.find((s) => s.id === activeChatSessionId) ?? null;
+  const isCompatible =
+    activeSession?.provider === "anthropic_compatible" ||
+    activeSession?.provider === "openai_compatible";
+  const [models, setModels] = useState<string[]>([]);
+
+  // Fetch the model list for compatible providers (uses the stored key and
+  // base URL from Settings). Refetched when the session's provider changes.
+  useEffect(() => {
+    setModels([]);
+    if (!activeSession || !isCompatible) return;
+    let stale = false;
+    void listChatModels(activeSession.provider).then((list) => {
+      if (!stale && list) setModels(list.map((m) => m.id));
+    });
+    return () => {
+      stale = true;
+    };
+  }, [activeSession?.provider, isCompatible, activeChatSessionId]);
+
+  const modelIds = (() => {
+    const ids = [...models];
+    if (activeSession?.model && !ids.includes(activeSession.model)) {
+      ids.unshift(activeSession.model);
+    }
+    return ids;
+  })();
+
+  const handleModelChange = useCallback(
+    (model: string) => {
+      if (activeChatSessionId) void setSessionModel(activeChatSessionId, model);
+    },
+    [activeChatSessionId, setSessionModel],
+  );
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -29,6 +71,21 @@ export function ChatView() {
       void loadSessions();
     }
   }, [loaded, loadSessions]);
+
+  // Load the saved provider config (used for auto-starting a session).
+  useEffect(() => {
+    if (!config) void loadConfig();
+  }, [config, loadConfig]);
+
+  // Entering chat with no session selected auto-starts a fresh one, so the
+  // user can type immediately without picking/creating a chat first.
+  const autoStarted = useRef(false);
+  useEffect(() => {
+    if (!loaded || !config || activeChatSessionId || autoStarted.current) return;
+    autoStarted.current = true;
+    const provider = config.provider ?? "openai_compatible";
+    void newChat(provider, config.model ?? "");
+  }, [loaded, activeChatSessionId, config, newChat]);
 
   // Smart auto-scroll: only scroll if the user is already near the bottom.
   // If they've scrolled up to read history, don't yank the scroll.
@@ -110,6 +167,11 @@ export function ChatView() {
         onStop={handleStop}
         streaming={streamingChatSessionId === activeChatSessionId && streamingChatSessionId !== null}
         disabled={false}
+        model={activeChatSessionId ? (activeSession?.model ?? "") : undefined}
+        models={modelIds}
+        effort={effort}
+        onModelChange={handleModelChange}
+        onEffortChange={setEffort}
       />
     </div>
   );

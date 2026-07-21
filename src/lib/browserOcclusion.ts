@@ -9,7 +9,8 @@
 import type { ActiveView } from "../state/ui";
 
 export interface OcclusionInputs {
-  /** ui.activeView — anything but "grid" is a full-window overlay view. */
+  /** ui.activeView — anything but "grid"/"chat" is a full-window overlay
+   *  view. Chat mode hosts browser panes in its own split layout. */
   activeView: ActiveView;
   paletteOpen: boolean;
   peekOpen: boolean;
@@ -37,7 +38,7 @@ export function browserOccluded({
   return (
     collapsed ||
     !paneVisible ||
-    activeView !== "grid" ||
+    (activeView !== "grid" && activeView !== "chat") ||
     paletteOpen ||
     peekOpen ||
     modalOpen

@@ -8,6 +8,7 @@ import { useChatStore } from "../../state/chat";
 import { ChatComposer } from "./ChatComposer";
 import { MessageBubble, TypingIndicator } from "./MessageBubble";
 import { ArtifactPreviewPane } from "./ArtifactPreviewPane";
+import { ArtifactsMenu } from "./ArtifactsMenu";
 import { listChatModels, type ChatMessage } from "../../lib/ipc";
 
 export function ChatView() {
@@ -37,6 +38,7 @@ export function ChatView() {
   const artifacts = useChatStore((s) =>
     activeChatSessionId ? s.artifacts[activeChatSessionId] : undefined,
   );
+  const artifactsByMessage = useChatStore((s) => s.artifactsByMessage);
 
   const activeSession = sessions.find((s) => s.id === activeChatSessionId) ?? null;
   const isCompatible =
@@ -173,11 +175,14 @@ export function ChatView() {
   // Convert persisted messages for the bubble component.
   // MessageBubble expects { role, content } (its own ChatMessage type), so we
   // map ChatMessageRecord to that shape.
-  const items: Array<ChatMessage & { key: string; live?: boolean }> = messages.map((m) => ({
-    role: m.role as "user" | "assistant",
-    content: m.content,
-    key: `msg-${m.id}`,
-  }));
+  const items: Array<ChatMessage & { key: string; id?: number; live?: boolean }> = messages.map(
+    (m) => ({
+      role: m.role as "user" | "assistant",
+      content: m.content,
+      key: `msg-${m.id}`,
+      id: m.id,
+    }),
+  );
 
   // If streaming, append the live assistant bubble (no action bar while live).
   if (isStreaming) {
@@ -193,6 +198,11 @@ export function ChatView() {
   return (
     <div className={`chat-view-wrap${previewArtifact ? " has-preview" : ""}`}>
     <div className="chat-view">
+      {artifacts && artifacts.length > 0 && (
+        <div className="chat-artifacts-toolbar">
+          <ArtifactsMenu artifacts={artifacts} onOpen={setPreviewArtifact} />
+        </div>
+      )}
       {!activeChatSessionId && !hasItems ? (
         <div className="chat-empty">
           <div className="empty-reserved">
@@ -215,6 +225,8 @@ export function ChatView() {
                   ? handleRepeat
                   : undefined
               }
+              artifacts={item.id != null ? artifactsByMessage[item.id] : undefined}
+              onPreviewArtifact={setPreviewArtifact}
             />
           ))}
           {waitingForFirstToken && <TypingIndicator />}
@@ -225,26 +237,6 @@ export function ChatView() {
             </div>
           )}
           <div ref={messagesEndRef} />
-        </div>
-      )}
-
-      {artifacts && artifacts.length > 0 && (
-        <div className="chat-artifacts" aria-label="Generated files">
-          {artifacts.map((a) => (
-            <button
-              key={a.path}
-              type="button"
-              className="chat-artifact-chip"
-              title={`Preview ${a.filename}`}
-              onClick={(e) => {
-                e.currentTarget.blur();
-                setPreviewArtifact(a);
-              }}
-            >
-              <FileIcon />
-              <span>{a.filename}</span>
-            </button>
-          ))}
         </div>
       )}
 
@@ -272,24 +264,5 @@ export function ChatView() {
       />
     )}
     </div>
-  );
-}
-
-function FileIcon() {
-  return (
-    <svg
-      width={13}
-      height={13}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-      <polyline points="14 2 14 8 20 8" />
-    </svg>
   );
 }

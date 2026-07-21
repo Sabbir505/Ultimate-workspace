@@ -2635,3 +2635,189 @@ table.kv th {
 .artifact-preview-open:hover {
   filter: brightness(1.1);
 }
+
+/* Inline artifact chips shown under the assistant message that produced them */
+.chat-msg-artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+/* Top-right artifacts control (icon + dropdown) inside the chat view */
+.chat-artifacts-toolbar {
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  z-index: 6;
+}
+.artifacts-menu {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+  box-shadow: var(--glass-rim-soft);
+}
+.artifacts-menu-icon,
+.artifacts-menu-caret {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+}
+.artifacts-menu-icon {
+  padding: 0 8px 0 12px;
+  height: 30px;
+  border-radius: 16px 0 0 16px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.artifacts-menu-caret {
+  padding: 0 10px 0 6px;
+  border-radius: 0 16px 16px 0;
+  border-left: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+.artifacts-menu-icon:hover,
+.artifacts-menu-caret:hover {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.artifacts-menu-count {
+  min-width: 16px;
+  text-align: center;
+}
+.artifacts-menu-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 280px;
+  max-height: 360px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-lg, 0 10px 30px rgba(0, 0, 0, 0.25));
+  overflow: hidden;
+}
+.artifacts-menu-list {
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.artifacts-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  text-align: left;
+}
+.artifacts-menu-item:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.artifacts-menu-item-ext {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: var(--radius-xs);
+  padding: 2px 6px;
+  min-width: 42px;
+  text-align: center;
+}
+.artifacts-menu-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+.artifacts-menu-downloadall {
+  flex-shrink: 0;
+  padding: 9px 12px;
+  border: none;
+  border-top: 1px solid var(--border);
+  background: transparent;
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.artifacts-menu-downloadall:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.artifacts-menu-downloadall:disabled {
+  color: var(--text-dim);
+  cursor: default;
+}
+
+/* Inline Office document (docx/pptx/xlsx) preview */
+.artifact-preview-office {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.artifact-preview-office h1 {
+  font-size: 1.5em;
+  margin: 0 0 0.5em;
+}
+.artifact-preview-office h2 {
+  font-size: 1.3em;
+  margin: 1em 0 0.4em;
+}
+.artifact-preview-office h3 {
+  font-size: 1.12em;
+  margin: 0.9em 0 0.3em;
+}
+.artifact-preview-office h4,
+.artifact-preview-office h5 {
+  font-size: 1em;
+  margin: 0.8em 0 0.3em;
+}
+.artifact-preview-office p {
+  margin: 0 0 0.6em;
+}
+.artifact-preview-office.pptx .slide {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 16px 18px;
+  margin-bottom: 14px;
+}
+.artifact-preview-office.pptx .slide-num {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+.artifact-preview-office.pptx .slide p:first-of-type {
+  font-size: 1.15em;
+  font-weight: 600;
+}
+.artifact-preview-office.xlsx table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12.5px;
+}
+.artifact-preview-office.xlsx td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+}
+.artifact-preview-office.xlsx tr:first-child td {
+  font-weight: 600;
+  background: var(--surface-2);
+}

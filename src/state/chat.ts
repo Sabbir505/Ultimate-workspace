@@ -47,6 +47,11 @@ interface ChatState {
   codeExecEnabled: boolean;
   /** Generated files per chat session (chatSessionId -> artifacts). */
   artifacts: Record<string, ChatArtifact[]>;
+  /** Artifacts attributed to a specific assistant message (messageId -> artifacts). */
+  artifactsByMessage: Record<number, ChatArtifact[]>;
+  /** Artifacts produced by the in-flight turn, keyed by session, until the
+   *  assistant message is persisted and they can be attributed to it. */
+  pendingArtifacts: Record<string, ChatArtifact[]>;
   /** The artifact currently shown in the preview pane (null = pane closed). */
   previewArtifact: ChatArtifact | null;
 
@@ -91,6 +96,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   toolsEnabled: false,
   codeExecEnabled: false,
   artifacts: {},
+  artifactsByMessage: {},
+  pendingArtifacts: {},
   previewArtifact: null,
 
   loadSessions: async () => {
@@ -199,6 +206,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       messages: [...messages, userMsg],
       streamingChatSessionId: activeChatSessionId,
       streaming: { ...get().streaming, [activeChatSessionId]: "" },
+      // Start a fresh artifact buffer for this turn.
+      pendingArtifacts: { ...get().pendingArtifacts, [activeChatSessionId]: [] },
       error: null,
     });
 
@@ -284,9 +293,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // ChatMessageRecord with usage data.
     const messages = await getChatMessages(chatSessionId);
     if (messages) {
-      set((s) => ({
-        messages: s.activeChatSessionId === chatSessionId ? messages : s.messages,
-      }));
+      set((s) => {
+        // Attribute the artifacts produced during this turn to the assistant
+        // message that just completed (the last assistant record).
+        const pending = s.pendingArtifacts[chatSessionId] ?? [];
+        const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+        const artifactsByMessage =
+          pending.length > 0 && lastAssistant
+            ? { ...s.artifactsByMessage, [lastAssistant.id]: pending }
+            : s.artifactsByMessage;
+        const nextPending = { ...s.pendingArtifacts };
+        delete nextPending[chatSessionId];
+        return {
+          messages: s.activeChatSessionId === chatSessionId ? messages : s.messages,
+          artifactsByMessage,
+          pendingArtifacts: nextPending,
+        };
+      });
     }
 
     // Refresh the session list (title may have been updated by the backend).
@@ -299,10 +322,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => {
       const existing = s.artifacts[chatSessionId] ?? [];
       const alreadyTracked = existing.some((a) => a.path === path);
+      const pending = s.pendingArtifacts[chatSessionId] ?? [];
+      const pendingTracked = pending.some((a) => a.path === path);
       return {
         artifacts: alreadyTracked
           ? s.artifacts
           : { ...s.artifacts, [chatSessionId]: [...existing, artifact] },
+        // Buffer the artifact so it can be attributed to the assistant message
+        // that produced it once that message is persisted (on chat:done).
+        pendingArtifacts: pendingTracked
+          ? s.pendingArtifacts
+          : { ...s.pendingArtifacts, [chatSessionId]: [...pending, artifact] },
         // Auto-open the newly generated file in the preview pane when it
         // belongs to the chat the user is currently viewing.
         previewArtifact:

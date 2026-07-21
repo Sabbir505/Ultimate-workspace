@@ -233,9 +233,240 @@ fn base64_encode(data: &[u8]) -> String {
     out
 }
 
+/// Minimal XML entity unescape (order matters: `&amp;` last).
+fn xml_unescape(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Escape text for safe embedding in the HTML we build for doc/ppt previews.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Concatenate the inner text of every `<tag …>…</close>` occurrence in `chunk`
+/// (used to pull `<w:t>`/`<a:t>` run text out of Office XML).
+fn collect_tag_text(chunk: &str, open: &str, close: &str) -> String {
+    let mut out = String::new();
+    let mut rest = chunk;
+    while let Some(i) = rest.find(open) {
+        let after = &rest[i + open.len()..];
+        // Only match a real element start: `<w:t>` or `<w:t …>` (not `<w:tbl>`).
+        if !(after.starts_with('>') || after.starts_with(' ') || after.starts_with('/')) {
+            rest = after;
+            continue;
+        }
+        if let Some(gt) = after.find('>') {
+            let content = &after[gt + 1..];
+            if let Some(ce) = content.find(close) {
+                out.push_str(&content[..ce]);
+                rest = &content[ce + close.len()..];
+                continue;
+            }
+        }
+        break;
+    }
+    xml_unescape(&out)
+}
+
+/// Split an Office XML string into element slices that start with `<p>` where
+/// `p` is the paragraph tag (`w:p` for docx, `a:p` for pptx). Matches only real
+/// paragraph starts (`<w:p>` / `<w:p …>`), never `<w:pPr>`/`<w:pStyle>`.
+fn split_paragraphs<'a>(xml: &'a str, tag: &str) -> Vec<&'a str> {
+    let exact = format!("<{tag}>");
+    let with_attrs = format!("<{tag} ");
+    let mut starts = Vec::new();
+    let mut idx = 0;
+    let needle = format!("<{tag}");
+    while let Some(rel) = xml[idx..].find(&needle) {
+        let abs = idx + rel;
+        let rest = &xml[abs..];
+        if rest.starts_with(&exact) || rest.starts_with(&with_attrs) {
+            starts.push(abs);
+        }
+        idx = abs + needle.len();
+    }
+    let mut out = Vec::new();
+    for (k, &s) in starts.iter().enumerate() {
+        let end = starts.get(k + 1).copied().unwrap_or(xml.len());
+        out.push(&xml[s..end]);
+    }
+    out
+}
+
+/// Render a docx `word/document.xml` as simple HTML (headings + paragraphs).
+fn docx_to_html(bytes: &[u8]) -> Option<String> {
+    use std::io::Read;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
+    let mut xml = String::new();
+    zip.by_name("word/document.xml")
+        .ok()?
+        .read_to_string(&mut xml)
+        .ok()?;
+
+    let mut html = String::new();
+    for para in split_paragraphs(&xml, "w:p") {
+        let text = collect_tag_text(para, "<w:t", "</w:t>");
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Heading detection via <w:pStyle w:val="…">.
+        let style = para
+            .find("<w:pStyle")
+            .and_then(|i| para[i..].find("w:val=\"").map(|j| i + j + 7))
+            .and_then(|s| para[s..].find('"').map(|e| &para[s..s + e]))
+            .unwrap_or("");
+        let tag = match style {
+            "Title" => "h1",
+            "Heading1" => "h2",
+            "Heading2" => "h3",
+            "Heading3" => "h4",
+            s if s.starts_with("Heading") => "h5",
+            _ => "p",
+        };
+        html.push_str(&format!("<{tag}>{}</{tag}>", html_escape(trimmed)));
+    }
+    Some(html)
+}
+
+/// Render a pptx as HTML: one titled section per slide.
+fn pptx_to_html(bytes: &[u8]) -> Option<String> {
+    use std::io::Read;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
+
+    // Collect + sort slide files numerically (slide1, slide2, … slide10).
+    let mut names: Vec<String> = zip
+        .file_names()
+        .filter(|n| {
+            n.starts_with("ppt/slides/slide") && n.ends_with(".xml") && !n.contains("_rels")
+        })
+        .map(|s| s.to_string())
+        .collect();
+    names.sort_by_key(|n| {
+        n.trim_start_matches("ppt/slides/slide")
+            .trim_end_matches(".xml")
+            .parse::<u32>()
+            .unwrap_or(u32::MAX)
+    });
+
+    let mut html = String::new();
+    for (i, name) in names.iter().enumerate() {
+        let mut xml = String::new();
+        if zip
+            .by_name(name)
+            .ok()
+            .and_then(|mut f| f.read_to_string(&mut xml).ok())
+            .is_none()
+        {
+            continue;
+        }
+        html.push_str(&format!(
+            "<section class=\"slide\"><div class=\"slide-num\">Slide {}</div>",
+            i + 1
+        ));
+        for para in split_paragraphs(&xml, "a:p") {
+            let text = collect_tag_text(para, "<a:t", "</a:t>");
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                html.push_str(&format!("<p>{}</p>", html_escape(trimmed)));
+            }
+        }
+        html.push_str("</section>");
+    }
+    if html.is_empty() {
+        None
+    } else {
+        Some(html)
+    }
+}
+
+/// Render the first worksheet of an xlsx as an HTML table (shared strings resolved).
+fn xlsx_to_html(bytes: &[u8]) -> Option<String> {
+    use std::io::Read;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
+
+    // Shared strings table (cells of type "s" index into this).
+    let mut shared: Vec<String> = Vec::new();
+    if let Ok(mut f) = zip.by_name("xl/sharedStrings.xml") {
+        let mut xml = String::new();
+        if f.read_to_string(&mut xml).is_ok() {
+            for si in xml.split("<si>").skip(1) {
+                shared.push(collect_tag_text(si, "<t", "</t>"));
+            }
+        }
+    }
+
+    let mut xml = String::new();
+    zip.by_name("xl/worksheets/sheet1.xml")
+        .ok()?
+        .read_to_string(&mut xml)
+        .ok()?;
+
+    let mut rows_html = String::new();
+    let mut row_count = 0usize;
+    for row in xml.split("<row").skip(1) {
+        if row_count >= 500 {
+            break;
+        }
+        let mut cells_html = String::new();
+        for cell in split_cells(row) {
+            let open_tag_end = cell.find('>').unwrap_or(cell.len());
+            let is_shared = cell[..open_tag_end].contains("t=\"s\"");
+            let raw = collect_tag_text(cell, "<v", "</v>");
+            let value = if is_shared {
+                raw.trim()
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|i| shared.get(i).cloned())
+                    .unwrap_or_default()
+            } else if raw.is_empty() {
+                collect_tag_text(cell, "<t", "</t>")
+            } else {
+                raw
+            };
+            cells_html.push_str(&format!("<td>{}</td>", html_escape(value.trim())));
+        }
+        rows_html.push_str(&format!("<tr>{cells_html}</tr>"));
+        row_count += 1;
+    }
+    if rows_html.is_empty() {
+        None
+    } else {
+        Some(format!("<table>{rows_html}</table>"))
+    }
+}
+
+/// Split a worksheet row slice into `<c …>…</c>` cell slices.
+fn split_cells(row: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut idx = 0;
+    while let Some(rel) = row[idx..].find("<c") {
+        let abs = idx + rel;
+        let rest = &row[abs..];
+        if rest.starts_with("<c>") || rest.starts_with("<c ") {
+            let end = row[abs + 2..]
+                .find("<c")
+                .map(|e| abs + 2 + e)
+                .unwrap_or(row.len());
+            out.push(&row[abs..end]);
+            idx = end;
+        } else {
+            idx = abs + 2;
+        }
+    }
+    out
+}
+
 /// Read a generated artifact for in-app preview. Text-like files return their
 /// decoded (and length-capped) text; images and PDFs return a `data:` URI;
-/// binary Office formats return metadata only (rendered as a file card).
+/// Office documents (docx/pptx/xlsx) are extracted to HTML (kind = `office`);
+/// anything else returns metadata only (rendered as a file card).
 #[tauri::command]
 pub fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
     use std::path::Path;
@@ -323,7 +554,31 @@ pub fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
         });
     }
 
-    // Binary (docx/pptx/xlsx/…) or oversized media: metadata only.
+    // Office documents: extract to HTML so they render inline (kind = office).
+    if matches!(ext.as_str(), "docx" | "pptx" | "xlsx") && size <= MAX_MEDIA {
+        if let Ok(bytes) = std::fs::read(p) {
+            let html = match ext.as_str() {
+                "docx" => docx_to_html(&bytes),
+                "pptx" => pptx_to_html(&bytes),
+                "xlsx" => xlsx_to_html(&bytes),
+                _ => None,
+            };
+            if let Some(html) = html {
+                return Ok(ArtifactPreview {
+                    path,
+                    filename,
+                    ext,
+                    kind: "office".to_string(),
+                    text: Some(html),
+                    data_uri: None,
+                    size,
+                    truncated: false,
+                });
+            }
+        }
+    }
+
+    // Anything else (unsupported/oversized/unparseable): metadata only.
     Ok(ArtifactPreview {
         path,
         filename,
@@ -334,6 +589,57 @@ pub fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
         size,
         truncated: false,
     })
+}
+
+// ---- Artifact download ----
+
+/// Copy a generated artifact to a user-chosen destination path (the frontend
+/// gets `dest` from a save dialog).
+#[tauri::command]
+pub fn download_artifact(src: String, dest: String) -> CmdResult<()> {
+    std::fs::copy(&src, &dest).map_err(|e| format!("could not save file: {e}"))?;
+    Ok(())
+}
+
+/// Zip several artifacts into a user-chosen destination `.zip` path. Duplicate
+/// filenames are disambiguated with a numeric suffix.
+#[tauri::command]
+pub fn download_artifacts_zip(paths: Vec<String>, dest: String) -> CmdResult<()> {
+    use std::io::Write;
+    use std::path::Path;
+    use zip::write::SimpleFileOptions;
+
+    let file = std::fs::File::create(&dest).map_err(|e| format!("could not create zip: {e}"))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for src in &paths {
+        let data = match std::fs::read(src) {
+            Ok(d) => d,
+            Err(_) => continue, // skip missing files rather than aborting the whole zip
+        };
+        let base = Path::new(src)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".to_string());
+        let mut name = base.clone();
+        let mut n = 1;
+        while used.contains(&name) {
+            let (stem, ext) = match base.rsplit_once('.') {
+                Some((s, e)) => (s.to_string(), format!(".{e}")),
+                None => (base.clone(), String::new()),
+            };
+            name = format!("{stem} ({n}){ext}");
+            n += 1;
+        }
+        used.insert(name.clone());
+        zip.start_file(name, opts)
+            .map_err(|e| format!("zip error: {e}"))?;
+        zip.write_all(&data).map_err(|e| format!("zip error: {e}"))?;
+    }
+    zip.finish().map_err(|e| format!("zip error: {e}"))?;
+    Ok(())
 }
 
 // ---- API key management ----
@@ -548,4 +854,63 @@ pub async fn list_chat_models(
     };
 
     Ok(models)
+}
+
+#[cfg(test)]
+mod office_preview_tests {
+    use super::*;
+
+    #[test]
+    fn collect_tag_text_joins_runs_and_unescapes() {
+        let xml = r#"<w:r><w:t>Hello</w:t></w:r><w:r><w:t xml:space="preserve"> A &amp; B</w:t></w:r>"#;
+        assert_eq!(collect_tag_text(xml, "<w:t", "</w:t>"), "Hello A & B");
+    }
+
+    #[test]
+    fn collect_tag_text_ignores_similar_tags() {
+        // `<w:tbl>` must not be picked up when collecting `<w:t>` runs.
+        let xml = r#"<w:tbl><w:t>keep</w:t></w:tbl>"#;
+        assert_eq!(collect_tag_text(xml, "<w:t", "</w:t>"), "keep");
+    }
+
+    #[test]
+    fn split_paragraphs_skips_ppr() {
+        let xml = r#"<w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p><w:p><w:r><w:t>Body</w:t></w:r></w:p></w:body>"#;
+        let paras = split_paragraphs(xml, "w:p");
+        assert_eq!(paras.len(), 2);
+        assert!(collect_tag_text(paras[0], "<w:t", "</w:t>").contains("Title"));
+        assert!(collect_tag_text(paras[1], "<w:t", "</w:t>").contains("Body"));
+    }
+
+    #[test]
+    fn docx_and_pptx_extract_from_generated_files() {
+        let dir = std::env::temp_dir().join(format!("conduit-office-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let docx = crate::chat::artifacts::generate(
+            &dir,
+            "docx",
+            "t.docx",
+            None,
+            "Solar System\nEight planets orbit the Sun.",
+        )
+        .unwrap();
+        let html = docx_to_html(&std::fs::read(&docx.path).unwrap()).unwrap();
+        assert!(html.contains("Solar System"), "docx html: {html}");
+        assert!(html.contains("Eight planets"), "docx html: {html}");
+
+        let pptx = crate::chat::artifacts::generate(
+            &dir,
+            "pptx",
+            "t.pptx",
+            None,
+            "Slide One\nAlpha\n---\nSlide Two\nBeta",
+        )
+        .unwrap();
+        let phtml = pptx_to_html(&std::fs::read(&pptx.path).unwrap()).unwrap();
+        assert!(phtml.contains("Slide 1"), "pptx html: {phtml}");
+        assert!(phtml.contains("Alpha") && phtml.contains("Beta"), "pptx html: {phtml}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -7,6 +7,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import {
+  downloadArtifact,
   openArtifact,
   readArtifactPreview,
   type ArtifactPreview,
@@ -70,6 +71,15 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
       </div>
     );
   }
+  if (kind === "office" && text != null) {
+    const cls =
+      ext === "pptx"
+        ? "artifact-preview-office pptx"
+        : ext === "xlsx"
+          ? "artifact-preview-office xlsx"
+          : "artifact-preview-office docx";
+    return <div className={cls} dangerouslySetInnerHTML={{ __html: text }} />;
+  }
   if (kind === "html" && text != null) {
     return (
       <iframe
@@ -129,6 +139,26 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
   );
 }
 
+function DownloadIcon() {
+  return (
+    <svg
+      width={15}
+      height={15}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </svg>
+  );
+}
+
 export function ArtifactPreviewPane({
   artifact,
   onClose,
@@ -162,6 +192,15 @@ export function ArtifactPreviewPane({
           {artifact.filename}
         </span>
         <div className="artifact-preview-header-actions">
+          <button
+            type="button"
+            className="artifact-preview-header-btn"
+            title="Download"
+            aria-label="Download"
+            onClick={() => void downloadArtifact(artifact.path, artifact.filename)}
+          >
+            <DownloadIcon />
+          </button>
           <button
             type="button"
             className="artifact-preview-header-btn"

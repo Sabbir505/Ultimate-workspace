@@ -248,7 +248,17 @@ export interface ArtifactPreview {
   path: string;
   filename: string;
   ext: string;
-  kind: "text" | "markdown" | "csv" | "json" | "html" | "code" | "image" | "pdf" | "binary";
+  kind:
+    | "text"
+    | "markdown"
+    | "csv"
+    | "json"
+    | "html"
+    | "code"
+    | "image"
+    | "pdf"
+    | "office"
+    | "binary";
   text: string | null;
   dataUri: string | null;
   size: number;
@@ -341,4 +351,37 @@ export async function openArtifact(path: string): Promise<void> {
   } catch (err) {
     console.warn("openArtifact failed", err);
   }
+}
+
+/**
+ * Save (download) a single artifact to a user-chosen location via a save
+ * dialog. Returns true if saved, false if the user cancelled.
+ */
+export async function downloadArtifact(
+  path: string,
+  filename: string,
+): Promise<boolean> {
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  const dest = await save({ defaultPath: filename });
+  if (!dest) return false;
+  await safeInvoke<void>("download_artifact", { src: path, dest });
+  return true;
+}
+
+/**
+ * Save all given artifacts into a single `.zip` at a user-chosen location.
+ * Returns true if saved, false if the user cancelled.
+ */
+export async function downloadArtifactsZip(
+  paths: string[],
+  defaultName = "artifacts.zip",
+): Promise<boolean> {
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  const dest = await save({
+    defaultPath: defaultName,
+    filters: [{ name: "Zip archive", extensions: ["zip"] }],
+  });
+  if (!dest) return false;
+  await safeInvoke<void>("download_artifacts_zip", { paths, dest });
+  return true;
 }

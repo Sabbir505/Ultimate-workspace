@@ -7,6 +7,7 @@ pub mod artifacts;
 pub mod codeexec;
 pub mod commands;
 pub mod providers;
+pub mod pygen;
 pub mod tools;
 
 use std::collections::HashMap;
@@ -21,6 +22,59 @@ use tauri::{AppHandle, Emitter, Manager};
 /// Max model⇄tool round-trips in a single tool-enabled turn before we stop,
 /// to bound cost and prevent runaway loops.
 const MAX_TOOL_ITERS: usize = 15;
+
+/// Built-in guidance appended to every tool-enabled turn so the model knows how
+/// to produce high-quality artifacts. The user's custom system prompt and
+/// skills are layered on top of this (never replacing it).
+const TOOL_GUIDE: &str = "You are Conduit, a local-first desktop assistant with tools. \
+When the user asks for a document, report, spreadsheet or slide deck, call \
+`generate_document` and WRITE PYTHON that builds a genuinely professional file \
+(python-docx for docx, python-pptx for pptx, openpyxl for xlsx, reportlab for \
+pdf). Design it properly: a clear title/cover, consistent typography and \
+heading hierarchy, a tasteful colour palette, tables where useful, real \
+multi-slide layouts for decks, and page numbers/footers where appropriate — \
+never a plain text dump. Save the file to the path in the CONDUIT_OUTPUT \
+environment variable. Only use `generate_file` for plain text formats (txt, md, \
+csv, json, html). Prefer accurate, well-structured content over filler.";
+
+/// Assemble the effective system prompt from the built-in tool guidance (only
+/// when tools are on), the user's custom system prompt, and any enabled skills.
+/// Returns `None` when nothing applies.
+pub fn build_system_prompt(
+    custom: Option<&str>,
+    skills: &[(String, String)],
+    tools_enabled: bool,
+) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if tools_enabled {
+        parts.push(TOOL_GUIDE.to_string());
+    }
+    if let Some(c) = custom {
+        let c = c.trim();
+        if !c.is_empty() {
+            parts.push(c.to_string());
+        }
+    }
+    if !skills.is_empty() {
+        let mut s = String::from(
+            "The user has provided the following reusable skills. Apply the \
+             relevant ones when they fit the request:\n",
+        );
+        for (name, body) in skills {
+            let body = body.trim();
+            if body.is_empty() {
+                continue;
+            }
+            s.push_str(&format!("\n## Skill: {}\n{}\n", name.trim(), body));
+        }
+        parts.push(s);
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
 
 use crate::db;
 use crate::types::*;
@@ -60,6 +114,7 @@ impl ChatManager {
         effort: Option<String>,
         tools_enabled: bool,
         code_exec_enabled: bool,
+        system: Option<String>,
         messages: Vec<ChatMessage>,
         db: Arc<Mutex<Connection>>,
         app: AppHandle,
@@ -72,7 +127,7 @@ impl ChatManager {
             model,
             messages,
             max_tokens: Some(4096),
-            system: None,
+            system: system.filter(|s| !s.trim().is_empty()),
             effort,
         };
 
@@ -402,6 +457,10 @@ fn tool_status_line(name: &str, args: &Value) -> String {
         let f = args.get("filename").and_then(|v| v.as_str()).unwrap_or("file");
         let fmt = args.get("format").and_then(|v| v.as_str()).unwrap_or("");
         format!("Generating {fmt} file \"{f}\"…\n")
+    } else if name == tools::GENERATE_DOCUMENT {
+        let f = args.get("filename").and_then(|v| v.as_str()).unwrap_or("document");
+        let fmt = args.get("format").and_then(|v| v.as_str()).unwrap_or("");
+        format!("Building {fmt} document \"{f}\"…\n")
     } else if name == tools::FETCH_URL || name == tools::OPEN_URL {
         let u = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
         let verb = if name == tools::OPEN_URL { "Opening" } else { "Reading" };

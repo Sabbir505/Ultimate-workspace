@@ -160,16 +160,22 @@ fn openai_request(
     base: &str,
 ) -> reqwest::RequestBuilder {
     let url = format!("{base}/v1/chat/completions");
+    let mut messages: Vec<OpenAIWireMessage> = Vec::new();
+    if let Some(sys) = &req.system {
+        if !sys.is_empty() {
+            messages.push(OpenAIWireMessage {
+                role: "system".to_string(),
+                content: sys.clone(),
+            });
+        }
+    }
+    messages.extend(req.messages.iter().map(|m| OpenAIWireMessage {
+        role: m.role.clone(),
+        content: m.content.clone(),
+    }));
     let body = OpenAIWireBody {
         model: req.model.clone(),
-        messages: req
-            .messages
-            .iter()
-            .map(|m| OpenAIWireMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
-            })
-            .collect(),
+        messages,
         stream: true,
         reasoning_effort: req.effort.clone(),
     };

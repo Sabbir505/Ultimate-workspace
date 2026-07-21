@@ -11,12 +11,13 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use super::{artifacts, codeexec};
+use super::{artifacts, codeexec, pygen};
 
 /// Names of every tool the model may call. Kept in one place so the specs and
 /// the dispatcher can't drift apart.
 pub const WEB_SEARCH: &str = "web_search";
 pub const GENERATE_FILE: &str = "generate_file";
+pub const GENERATE_DOCUMENT: &str = "generate_document";
 pub const FETCH_URL: &str = "fetch_url";
 pub const RUN_CODE: &str = "run_code";
 pub const OPEN_URL: &str = "open_url";
@@ -58,11 +59,25 @@ const WEB_SEARCH_DESC: &str = "Search the public web for up-to-date information.
     Returns a list of result titles, URLs and snippets. Use this whenever the \
     answer may depend on current events or facts you are unsure about.";
 
-const GENERATE_FILE_DESC: &str = "Generate a downloadable file/artifact for the \
-    user and save it to disk. Use for documents, reports, spreadsheets and \
-    slide decks. For pptx, separate slides with a line containing only '---'; \
-    the first line of each slide is its title and remaining lines are bullets. \
-    For xlsx/csv, provide comma-separated rows (one row per line).";
+const GENERATE_FILE_DESC: &str = "Generate a simple downloadable text-based \
+    file/artifact and save it to disk. Best for plain formats: txt, md, csv, \
+    json, html. For a professionally formatted docx/pptx/xlsx/pdf, prefer \
+    generate_document instead. For pptx here, separate slides with a line \
+    containing only '---'; the first line of each slide is its title and \
+    remaining lines are bullets. For xlsx/csv, provide comma-separated rows \
+    (one row per line).";
+
+const GENERATE_DOCUMENT_DESC: &str = "Create a REAL, professionally formatted \
+    document by writing Python that builds it with a document library, then \
+    saves it. Use this for docx (python-docx), pptx (python-pptx), xlsx \
+    (openpyxl) and pdf (reportlab). Produce genuinely designed output — title \
+    pages, headings, typography, colours, tables, multi-slide layouts, footers \
+    — not a plain text dump. Your Python MUST save the file to the path in the \
+    CONDUIT_OUTPUT environment variable (it is the requested filename inside \
+    the artifacts directory, which is also the current working directory). \
+    Import only from the standard library plus python-docx, python-pptx, \
+    openpyxl and reportlab. Do not print secrets or perform network/other side \
+    effects.";
 
 const FETCH_URL_DESC: &str = "Fetch a specific web page by URL and return its \
     readable text content (HTML stripped). Use to read an article or page the \
@@ -83,6 +98,11 @@ pub fn openai_tool_specs(caps: ToolCaps) -> Vec<Value> {
     let mut specs = vec![
         openai_fn(WEB_SEARCH, WEB_SEARCH_DESC, web_search_parameters()),
         openai_fn(GENERATE_FILE, GENERATE_FILE_DESC, generate_file_parameters()),
+        openai_fn(
+            GENERATE_DOCUMENT,
+            GENERATE_DOCUMENT_DESC,
+            generate_document_parameters(),
+        ),
         openai_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
         openai_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
     ];
@@ -108,6 +128,11 @@ pub fn anthropic_tool_specs(caps: ToolCaps) -> Vec<Value> {
     let mut specs = vec![
         anthropic_fn(WEB_SEARCH, WEB_SEARCH_DESC, web_search_parameters()),
         anthropic_fn(GENERATE_FILE, GENERATE_FILE_DESC, generate_file_parameters()),
+        anthropic_fn(
+            GENERATE_DOCUMENT,
+            GENERATE_DOCUMENT_DESC,
+            generate_document_parameters(),
+        ),
         anthropic_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
         anthropic_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
     ];
@@ -164,6 +189,30 @@ fn generate_file_parameters() -> Value {
     })
 }
 
+fn generate_document_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "format": {
+                "type": "string",
+                "enum": ["docx", "pptx", "xlsx", "pdf"],
+                "description": "The document format to generate.",
+            },
+            "filename": {
+                "type": "string",
+                "description": "Base file name (extension optional).",
+            },
+            "code": {
+                "type": "string",
+                "description": "Complete Python source that builds the document \
+                    and saves it to the CONDUIT_OUTPUT path (python-docx / \
+                    python-pptx / openpyxl / reportlab).",
+            }
+        },
+        "required": ["format", "filename", "code"],
+    })
+}
+
 fn fetch_url_parameters() -> Value {
     json!({
         "type": "object",
@@ -217,6 +266,7 @@ pub async fn execute_tool(
             }
         }
         GENERATE_FILE => generate_file(artifacts_dir, args),
+        GENERATE_DOCUMENT => generate_document(artifacts_dir, args).await,
         FETCH_URL => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
             match fetch_url(client, url).await {
@@ -409,6 +459,46 @@ fn generate_file(artifacts_dir: &Path, args: &Value) -> ToolOutcome {
             browse_url: None,
         },
         Err(e) => ToolOutcome::text(format!("generate_file failed: {e}")),
+    }
+}
+
+/// Build a rich document by running the model's Python (python-docx etc.).
+async fn generate_document(artifacts_dir: &Path, args: &Value) -> ToolOutcome {
+    let format = args
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let filename = args.get("filename").and_then(|v| v.as_str()).unwrap_or("");
+    let code = args.get("code").and_then(|v| v.as_str()).unwrap_or("");
+
+    if !pygen::is_supported(&format) {
+        return ToolOutcome::text(format!(
+            "Error: generate_document supports docx, pptx, xlsx and pdf (got \"{format}\"). \
+             Use generate_file for plain text formats."
+        ));
+    }
+    if filename.trim().is_empty() {
+        return ToolOutcome::text("Error: generate_document requires a \"filename\".");
+    }
+
+    match pygen::generate(artifacts_dir, &format, filename, code).await {
+        Ok(file) => ToolOutcome {
+            text: format!(
+                "Created document \"{}\" ({}). It has been saved and is available to the user.",
+                file.filename,
+                file.path.display()
+            ),
+            artifact: Some(ArtifactRef {
+                path: file.path.display().to_string(),
+                filename: file.filename,
+            }),
+            browse_url: None,
+        },
+        Err(e) => ToolOutcome::text(format!(
+            "generate_document failed: {e}\n\nIf the document library is unavailable, fall back \
+             to generate_file with well-structured content."
+        )),
     }
 }
 

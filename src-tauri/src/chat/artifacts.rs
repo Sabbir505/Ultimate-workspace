@@ -73,7 +73,7 @@ pub fn generate(
     })
 }
 
-fn canonical_ext(format: &str) -> &'static str {
+pub(crate) fn canonical_ext(format: &str) -> &'static str {
     match format {
         "markdown" | "md" => "md",
         "txt" => "txt",
@@ -89,7 +89,7 @@ fn canonical_ext(format: &str) -> &'static str {
 }
 
 /// Keep a filename to a safe basename (no path separators, no traversal).
-fn sanitize_filename(name: &str) -> String {
+pub(crate) fn sanitize_filename(name: &str) -> String {
     let base = name
         .rsplit(['/', '\\'])
         .next()

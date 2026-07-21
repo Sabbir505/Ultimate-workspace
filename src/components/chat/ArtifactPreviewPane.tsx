@@ -194,12 +194,13 @@ export function ArtifactPreviewPane({
         <div className="artifact-preview-header-actions">
           <button
             type="button"
-            className="artifact-preview-header-btn"
+            className="artifact-preview-download-btn"
             title="Download"
             aria-label="Download"
             onClick={() => void downloadArtifact(artifact.path, artifact.filename)}
           >
             <DownloadIcon />
+            <span>Download</span>
           </button>
           <button
             type="button"

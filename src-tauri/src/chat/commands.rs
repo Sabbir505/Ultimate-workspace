@@ -163,6 +163,19 @@ pub async fn send_chat_message(
     };
     let effort = effort.filter(|e| !e.trim().is_empty());
 
+    // 5b. Assemble the system prompt from the user's custom prompt + skills
+    // (global, provider-independent settings), plus built-in tool guidance.
+    let tools_on = tools_enabled.unwrap_or(false);
+    let system = {
+        let conn = db.0.lock();
+        let custom = db::get_setting(&conn, "assistant.systemPrompt")
+            .map_err(|e| e.to_string())?;
+        let skills_json = db::get_setting(&conn, "assistant.skills")
+            .map_err(|e| e.to_string())?;
+        let skills = parse_skills(skills_json.as_deref());
+        crate::chat::build_system_prompt(custom.as_deref(), &skills, tools_on)
+    };
+
     // 6. Build message history from DB.
     let messages = {
         let conn = db.0.lock();
@@ -186,14 +199,41 @@ pub async fn send_chat_message(
         api_key,
         base_url,
         effort,
-        tools_enabled.unwrap_or(false),
+        tools_on,
         code_exec_enabled.unwrap_or(false),
+        system,
         messages,
         shared_db,
         app,
     );
 
     Ok(())
+}
+
+/// Parse the persisted skills setting (`assistant.skills`) — a JSON array of
+/// `{ name, content, enabled }` — into `(name, content)` pairs, keeping only
+/// enabled entries with non-empty content.
+fn parse_skills(json: Option<&str>) -> Vec<(String, String)> {
+    let Some(raw) = json else { return Vec::new() };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
+    let Some(arr) = value.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter(|s| s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true))
+        .filter_map(|s| {
+            let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let content = s.get("content").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if content.is_empty() {
+                None
+            } else {
+                let name = if name.is_empty() { "Skill" } else { name };
+                Some((name.to_string(), content.to_string()))
+            }
+        })
+        .collect()
 }
 
 #[tauri::command]

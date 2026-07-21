@@ -31,10 +31,17 @@ const ACTION_LABELS: Record<KeybindingAction, string> = {
   spotlightPrev: "Cycle terminal pair backward (split layout)",
 };
 
-type Category = "appearance" | "pricing" | "harnesses" | "shortcuts" | "apikeys";
+type Category =
+  | "appearance"
+  | "assistant"
+  | "pricing"
+  | "harnesses"
+  | "shortcuts"
+  | "apikeys";
 
 const CATEGORIES: Array<{ key: Category; label: string; sub: string }> = [
   { key: "appearance", label: "Appearance", sub: "Theme, notifications" },
+  { key: "assistant", label: "Assistant", sub: "System prompt & skills" },
   { key: "pricing", label: "Pricing", sub: "Per-model $/Mtok rates" },
   { key: "harnesses", label: "Harnesses", sub: "CLI install & login" },
   { key: "shortcuts", label: "Shortcuts", sub: "Remap keybindings" },
@@ -124,6 +131,8 @@ export function SettingsView() {
                   </div>
                 </>
               )}
+
+              {category === "assistant" && <AssistantPanel />}
 
               {category === "pricing" && (
                 <>
@@ -264,6 +273,165 @@ export function SettingsView() {
         </div>
       </div>
     </div>
+  );
+}
+
+interface SkillItem {
+  id: string;
+  name: string;
+  content: string;
+  enabled: boolean;
+}
+
+const K_SYSTEM_PROMPT = "assistant.systemPrompt";
+const K_SKILLS = "assistant.skills";
+
+/** Assistant panel: a Claude-style custom system prompt plus reusable "skills"
+ *  (named instruction snippets). Both persist through get_setting/set_setting
+ *  and are injected into chat requests by the backend. The system prompt is
+ *  debounce-saved; skills are saved on every edit. */
+function AssistantPanel() {
+  const [systemPrompt, setSystemPrompt] = useState("");
+  const [skills, setSkills] = useState<SkillItem[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+
+  useEffect(() => {
+    let stale = false;
+    void Promise.all([getSetting(K_SYSTEM_PROMPT), getSetting(K_SKILLS)]).then(
+      ([sp, sk]) => {
+        if (stale) return;
+        setSystemPrompt(sp ?? "");
+        if (sk) {
+          try {
+            const parsed = JSON.parse(sk) as SkillItem[];
+            if (Array.isArray(parsed)) setSkills(parsed);
+          } catch {
+            /* corrupt setting — start empty */
+          }
+        }
+        setLoaded(true);
+      },
+    );
+    return () => {
+      stale = true;
+    };
+  }, []);
+
+  // Debounce-persist the system prompt.
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setTimeout(() => {
+      void setSetting(K_SYSTEM_PROMPT, systemPrompt);
+      setSavedAt(Date.now());
+    }, 500);
+    return () => clearTimeout(t);
+  }, [systemPrompt, loaded]);
+
+  const persistSkills = (next: SkillItem[]) => {
+    setSkills(next);
+    void setSetting(K_SKILLS, JSON.stringify(next));
+    setSavedAt(Date.now());
+  };
+
+  const addSkill = () => {
+    persistSkills([
+      ...skills,
+      {
+        id: `skill_${Date.now()}`,
+        name: "",
+        content: "",
+        enabled: true,
+      },
+    ]);
+  };
+
+  const updateSkill = (id: string, patch: Partial<SkillItem>) => {
+    persistSkills(skills.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  };
+
+  const removeSkill = (id: string) => {
+    persistSkills(skills.filter((s) => s.id !== id));
+  };
+
+  return (
+    <>
+      <div className="panel-head">
+        <h3>Assistant</h3>
+        {savedAt && <span className="panel-count">saved ✓</span>}
+      </div>
+      <p className="estimate-note">
+        The system prompt and any enabled skills are sent to the model on every
+        chat turn (in addition to the built-in tool guidance). Use skills to
+        capture reusable instructions — e.g. how to format a report, brand
+        colours, or a slide-deck style — that the model applies when relevant.
+      </p>
+
+      <div className="form-row form-row-stack">
+        <label>Custom system prompt</label>
+        <textarea
+          className="assistant-textarea"
+          value={systemPrompt}
+          onChange={(e) => setSystemPrompt(e.target.value)}
+          placeholder="e.g. You are a concise, senior technical writer. Prefer clean, well-structured documents with a professional tone…"
+          rows={6}
+        />
+      </div>
+
+      <div className="panel-head" style={{ marginTop: 16 }}>
+        <h3 style={{ fontSize: 14 }}>Skills</h3>
+        <button className="ghost" style={{ padding: "2px 8px" }} onClick={addSkill}>
+          + Add skill
+        </button>
+      </div>
+      {skills.length === 0 ? (
+        <div className="empty-reserved">
+          <span className="empty-text">
+            No skills yet. Add one to give the model reusable, on-demand
+            instructions for generating documents, decks and more.
+          </span>
+        </div>
+      ) : (
+        <div className="skills-list">
+          {skills.map((s) => (
+            <div className="skill-card" key={s.id}>
+              <div className="skill-card-head">
+                <input
+                  className="skill-name-input"
+                  type="text"
+                  value={s.name}
+                  onChange={(e) => updateSkill(s.id, { name: e.target.value })}
+                  placeholder="Skill name (e.g. Report style)"
+                />
+                <label className="skill-enable" title="Enable this skill">
+                  <input
+                    type="checkbox"
+                    checked={s.enabled}
+                    onChange={(e) => updateSkill(s.id, { enabled: e.target.checked })}
+                  />
+                  <span>Enabled</span>
+                </label>
+                <button
+                  className="ghost skill-remove"
+                  title="Delete skill"
+                  aria-label="Delete skill"
+                  onClick={() => removeSkill(s.id)}
+                >
+                  ✕
+                </button>
+              </div>
+              <textarea
+                className="assistant-textarea"
+                value={s.content}
+                onChange={(e) => updateSkill(s.id, { content: e.target.value })}
+                placeholder="Instructions the model should follow when this skill applies…"
+                rows={4}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 

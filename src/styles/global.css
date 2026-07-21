@@ -1546,6 +1546,22 @@ table.kv th {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  position: relative;
+}
+.onboarding-banner-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 0 6px;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.onboarding-banner-close:hover {
+  color: var(--text);
 }
 .onboarding-banner strong {
   font-size: 13px;

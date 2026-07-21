@@ -486,8 +486,26 @@ async fn run_openai_tool_loop(
                 in_think = true;
             }
             // The assistant turn (carrying tool_calls) must be echoed back
-            // verbatim before the matching tool results.
-            messages.push(message.clone());
+            // before the matching tool results. Some providers emit malformed
+            // `arguments` (e.g. a stray `{}` prefix); we normalize them to clean
+            // JSON here so the re-sent history doesn't confuse the model into
+            // repeating the same call.
+            let mut echoed = message.clone();
+            if let Some(arr) = echoed
+                .get_mut("tool_calls")
+                .and_then(|t| t.as_array_mut())
+            {
+                for tc in arr.iter_mut() {
+                    if let Some(a) = tc.get_mut("function").and_then(|f| f.get_mut("arguments")) {
+                        let cleaned = a
+                            .as_str()
+                            .map(parse_tool_args)
+                            .unwrap_or_else(|| json!({}));
+                        *a = json!(cleaned.to_string());
+                    }
+                }
+            }
+            messages.push(echoed);
             for tc in &tool_calls {
                 let id = tc.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
                 let name = tc

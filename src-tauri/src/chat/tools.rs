@@ -264,7 +264,9 @@ async fn fetch_url(client: &reqwest::Client, url: &str) -> Result<String, String
 }
 
 fn extract_title(html: &str) -> String {
-    let lower = html.to_lowercase();
+    // ASCII lowercase preserves byte length, so offsets found in `lower` are
+    // valid indices into `html` (Unicode `to_lowercase` can change length).
+    let lower = html.to_ascii_lowercase();
     if let Some(start) = lower.find("<title") {
         if let Some(gt) = lower[start..].find('>') {
             let from = start + gt + 1;
@@ -299,15 +301,39 @@ fn html_to_text(html: &str) -> String {
     out.trim().to_string()
 }
 
-/// Remove `<tag>…</tag>` regions (case-insensitive) entirely.
+/// Remove `<tag>…</tag>` regions (case-insensitive) entirely. The opening tag
+/// is matched on a name boundary so `<head>` does not also match `<header>`.
 fn remove_blocks(html: &str, tags: &[&str]) -> String {
     let mut s = html.to_string();
     for tag in tags {
         loop {
-            let lower = s.to_lowercase();
+            // ASCII lowercase preserves byte length so offsets stay valid in `s`.
+            let lower = s.to_ascii_lowercase();
             let open = format!("<{tag}");
             let close = format!("</{tag}>");
-            let Some(start) = lower.find(&open) else { break };
+
+            // Find `<tag` where the following char ends the tag name (space,
+            // `>`, `/`, or the tag is self-terminated), skipping e.g. `<header`.
+            let mut search_from = 0;
+            let start = loop {
+                match lower[search_from..].find(&open) {
+                    None => break None,
+                    Some(rel) => {
+                        let idx = search_from + rel;
+                        let after = &lower[idx + open.len()..];
+                        let boundary = after
+                            .chars()
+                            .next()
+                            .map(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '>' | '/'))
+                            .unwrap_or(true);
+                        if boundary {
+                            break Some(idx);
+                        }
+                        search_from = idx + open.len();
+                    }
+                }
+            };
+            let Some(start) = start else { break };
             let Some(rel_end) = lower[start..].find(&close) else {
                 s.truncate(start);
                 break;
@@ -659,6 +685,19 @@ mod tests {
         println!("{out}");
         assert!(out.contains("Example Domain"));
         assert!(!out.to_lowercase().contains("<html"));
+    }
+
+    #[test]
+    #[ignore = "hits the live network; inspect readable-text quality"]
+    fn fetch_url_live_wikipedia_quality() {
+        let client = reqwest::Client::new();
+        let out = tauri::async_runtime::block_on(fetch_url(
+            &client,
+            "https://en.wikipedia.org/wiki/Demographics_of_France",
+        ))
+        .unwrap();
+        println!("===LEN {}===", out.len());
+        println!("{}", &out[..out.len().min(1500)]);
     }
 
     #[test]

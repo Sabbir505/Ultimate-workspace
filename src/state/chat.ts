@@ -34,6 +34,8 @@ interface ChatState {
   error: string | null;
   /** Reasoning effort sent with messages ("" = provider default). */
   effort: string;
+  /** When true, the model may call tools (web search, …) during a turn. */
+  toolsEnabled: boolean;
 
   // Actions
   loadSessions: () => Promise<void>;
@@ -45,6 +47,7 @@ interface ChatState {
   renameChat: (chatSessionId: string, title: string) => Promise<void>;
   setSessionModel: (chatSessionId: string, model: string) => Promise<void>;
   setEffort: (effort: string) => void;
+  setToolsEnabled: (enabled: boolean) => void;
   sendMessage: (content: string) => Promise<void>;
   cancelStream: () => Promise<void>;
   saveApiKey: (provider: string, key: string, baseUrl?: string, model?: string) => Promise<void>;
@@ -66,6 +69,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   config: null,
   error: null,
   effort: "",
+  toolsEnabled: false,
 
   loadSessions: async () => {
     const sessions = await listChatSessions();
@@ -146,8 +150,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setEffort: (effort) => set({ effort }),
 
+  setToolsEnabled: (toolsEnabled) => set({ toolsEnabled }),
+
   sendMessage: async (content) => {
-    const { activeChatSessionId, messages, sessions, effort } = get();
+    const { activeChatSessionId, messages, sessions, effort, toolsEnabled } = get();
     if (!activeChatSessionId) return;
 
     // Optimistically append the user message.
@@ -176,7 +182,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }));
     }
 
-    await sendChatMessage(activeChatSessionId, content, effort || undefined);
+    await sendChatMessage(activeChatSessionId, content, effort || undefined, toolsEnabled);
   },
 
   cancelStream: async () => {

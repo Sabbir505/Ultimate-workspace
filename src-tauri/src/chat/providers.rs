@@ -185,7 +185,7 @@ fn openai_request(
 pub struct AnthropicProvider;
 
 impl AnthropicProvider {
-    const DEFAULT_BASE: &'static str = "https://api.anthropic.com";
+    pub const DEFAULT_BASE: &'static str = "https://api.anthropic.com";
 }
 
 impl ChatProvider for AnthropicProvider {
@@ -293,7 +293,7 @@ impl ChatProvider for AnthropicProvider {
     }
 }
 
-fn calculate_anthropic_cost(input_tokens: i64, output_tokens: i64) -> f64 {
+pub(crate) fn calculate_anthropic_cost(input_tokens: i64, output_tokens: i64) -> f64 {
     // Approximate rates for claude-sonnet-4-5 ($3/$15 per Mtok).
     // The real rate should come from a settings override — this is the
     // fallback estimate used when pricing keys are absent.
@@ -307,7 +307,7 @@ fn calculate_anthropic_cost(input_tokens: i64, output_tokens: i64) -> f64 {
 pub struct OpenAIProvider;
 
 impl OpenAIProvider {
-    const DEFAULT_BASE: &'static str = "https://api.openai.com";
+    pub const DEFAULT_BASE: &'static str = "https://api.openai.com";
 }
 
 impl ChatProvider for OpenAIProvider {
@@ -447,7 +447,7 @@ impl ChatProvider for OpenAIProvider {
     }
 }
 
-fn calculate_openai_cost(input_tokens: i64, output_tokens: i64) -> f64 {
+pub(crate) fn calculate_openai_cost(input_tokens: i64, output_tokens: i64) -> f64 {
     // Approximate rates for gpt-4o ($2.50/$10 per Mtok).
     let in_rate = 2.50;
     let out_rate = 10.0;

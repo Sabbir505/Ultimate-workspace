@@ -23,6 +23,8 @@ export function ChatView() {
   const setSessionModel = useChatStore((s) => s.setSessionModel);
   const effort = useChatStore((s) => s.effort);
   const setEffort = useChatStore((s) => s.setEffort);
+  const toolsEnabled = useChatStore((s) => s.toolsEnabled);
+  const setToolsEnabled = useChatStore((s) => s.setToolsEnabled);
   const config = useChatStore((s) => s.config);
   const loadConfig = useChatStore((s) => s.loadConfig);
   const newChat = useChatStore((s) => s.newChat);
@@ -206,6 +208,8 @@ export function ChatView() {
         effort={effort}
         onModelChange={handleModelChange}
         onEffortChange={setEffort}
+        toolsEnabled={toolsEnabled}
+        onToolsToggle={setToolsEnabled}
       />
     </div>
   );

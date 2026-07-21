@@ -2283,6 +2283,33 @@ table.kv th {
   background: var(--surface-2);
   color: var(--text);
 }
+.composer-tools-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  line-height: 1;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition:
+    background 0.15s var(--ease),
+    color 0.15s var(--ease),
+    border-color 0.15s var(--ease);
+}
+.composer-tools-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.composer-tools-btn.active {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
+}
 .composer-attach-error {
   font-size: 11px;
   color: var(--danger);

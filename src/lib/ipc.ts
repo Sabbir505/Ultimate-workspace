@@ -255,11 +255,13 @@ export const sendChatMessage = (
   chatSessionId: string,
   content: string,
   effort?: string,
+  toolsEnabled?: boolean,
 ) =>
   safeInvoke<void>("send_chat_message", {
     chatSessionId,
     content,
     effort: effort ?? null,
+    toolsEnabled: toolsEnabled ?? false,
   });
 export const updateChatSessionModel = (chatSessionId: string, model: string) =>
   safeInvoke<void>("update_chat_session_model", { chatSessionId, model });

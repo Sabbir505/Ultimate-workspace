@@ -6,6 +6,26 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ModelEffortMenu } from "./ModelEffortMenu";
 
+function GlobeIcon() {
+  return (
+    <svg
+      width={13}
+      height={13}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18" />
+      <path d="M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18" />
+    </svg>
+  );
+}
+
 const MAX_ATTACHMENT_BYTES = 256 * 1024;
 
 interface Attachment {
@@ -27,6 +47,9 @@ interface Props {
   effort?: string;
   onModelChange?: (model: string) => void;
   onEffortChange?: (effort: string) => void;
+  /** Whether tool use (web search, …) is enabled for this chat. */
+  toolsEnabled?: boolean;
+  onToolsToggle?: (enabled: boolean) => void;
 }
 
 export function ChatComposer({
@@ -40,6 +63,8 @@ export function ChatComposer({
   effort,
   onModelChange,
   onEffortChange,
+  toolsEnabled,
+  onToolsToggle,
 }: Props) {
   const [content, setContent] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -174,6 +199,26 @@ export function ChatComposer({
           >
             +
           </button>
+          {onToolsToggle && (
+            <button
+              type="button"
+              className={`composer-tools-btn${toolsEnabled ? " active" : ""}`}
+              title={
+                toolsEnabled
+                  ? "Web search enabled — click to disable"
+                  : "Enable web search & tools"
+              }
+              aria-label="Toggle web search and tools"
+              aria-pressed={toolsEnabled ? true : false}
+              onClick={(e) => {
+                e.currentTarget.blur();
+                onToolsToggle(!toolsEnabled);
+              }}
+            >
+              <GlobeIcon />
+              <span>Search</span>
+            </button>
+          )}
           {attachError && <span className="composer-attach-error">{attachError}</span>}
           <div className="composer-footer-spacer" />
           {showSelector && (

@@ -18,9 +18,12 @@
 //!   the frontend falls back to the iframe implementation.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
+use tokio::sync::oneshot;
 use serde::Deserialize;
 use tauri::webview::WebviewBuilder;
 use tauri::{
@@ -117,6 +120,15 @@ pub struct BrowserManager {
     /// Panes currently being created (so concurrent creates for the same paneId
     /// don't race — the second one waits for the first). Key = pane_id string.
     in_flight: Mutex<std::collections::HashSet<String>>,
+    /// The (pane_id, tab_id) most recently created or navigated — the target
+    /// the agentic `browser_*` chat tools act on ("the page the user is
+    /// looking at").
+    active: Mutex<Option<(String, String)>>,
+    /// In-flight agentic actions: request id -> result sender. The action's
+    /// injected JS calls back `browser_action_result` with the id, which
+    /// resolves the matching oneshot so the async tool call can return.
+    pending: Mutex<HashMap<u64, oneshot::Sender<String>>>,
+    next_req: AtomicU64,
 }
 
 impl BrowserManager {
@@ -125,6 +137,9 @@ impl BrowserManager {
             app,
             webviews: Mutex::new(HashMap::new()),
             in_flight: Mutex::new(std::collections::HashSet::new()),
+            active: Mutex::new(None),
+            pending: Mutex::new(HashMap::new()),
+            next_req: AtomicU64::new(1),
         }
     }
 
@@ -304,6 +319,7 @@ impl BrowserManager {
         let parsed: tauri::Url = url
             .parse()
             .map_err(|e| format!("invalid url `{url}`: {e}"))?;
+        *self.active.lock() = Some((pane_id.to_string(), tab_id.to_string()));
         let label = browser_label(pane_id, tab_id);
         let webview = self.get(&label)?;
         webview.navigate(parsed)
@@ -409,6 +425,69 @@ impl BrowserManager {
         self.get(label)?.eval(js).map_err(|e| e.to_string())
     }
 
+    // --- Agentic browser control ---------------------------------------
+    // The chat's `browser_*` tools drive whatever page is active. Because
+    // `webview.eval` is fire-and-forget, each action's JS reports its result
+    // back by invoking the `browser_action_result` command with a request id;
+    // `resolve_action` (below) matches it to the pending oneshot.
+
+    /// Resolve a pending agentic action (called by the `browser_action_result`
+    /// command from the injected JS). Unknown ids are ignored (already timed
+    /// out or resolved).
+    pub fn resolve_action(&self, req_id: u64, result: String) {
+        if let Some(tx) = self.pending.lock().remove(&req_id) {
+            let _ = tx.send(result);
+        }
+    }
+
+    fn active_label(&self) -> Result<String, String> {
+        match self.active.lock().as_ref() {
+            Some((p, t)) => Ok(browser_label(p, t)),
+            None => Err("No page is open in the browser pane yet — call open_url first.".to_string()),
+        }
+    }
+
+    /// Eval a JS action body (an IIFE-able block that `return`s a string) in the
+    /// active page and await the string it reports back. Times out so a stuck
+    /// or navigating page can't wedge the chat turn.
+    async fn run_action(&self, body: &str) -> Result<String, String> {
+        ensure_supported()?;
+        let label = self.active_label()?;
+        let webview = self.get(&label)?;
+        let req_id = self.next_req.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel::<String>();
+        self.pending.lock().insert(req_id, tx);
+        let js = action_wrapper_js(req_id, body);
+        if let Err(e) = webview.eval(&js) {
+            self.pending.lock().remove(&req_id);
+            return Err(e.to_string());
+        }
+        match tokio::time::timeout(Duration::from_secs(15), rx).await {
+            Ok(Ok(s)) => Ok(s),
+            Ok(Err(_)) => Err("browser action channel closed".to_string()),
+            Err(_) => {
+                self.pending.lock().remove(&req_id);
+                Err("browser action timed out — the page may still be loading.".to_string())
+            }
+        }
+    }
+
+    pub async fn read_page(&self) -> Result<String, String> {
+        self.run_action(READ_PAGE_JS).await
+    }
+
+    pub async fn click_ref(&self, r: i64) -> Result<String, String> {
+        self.run_action(&click_js(r)).await
+    }
+
+    pub async fn type_into(&self, r: i64, text: &str) -> Result<String, String> {
+        self.run_action(&type_js(r, text)).await
+    }
+
+    pub async fn scroll_by(&self, dy: i64) -> Result<String, String> {
+        self.run_action(&scroll_js(dy)).await
+    }
+
     fn get(&self, label: &str) -> Result<Webview, String> {
         self.webviews
             .lock()
@@ -418,9 +497,143 @@ impl BrowserManager {
     }
 }
 
+/// Wrap an agentic action `body` (a JS block that `return`s a string) so it
+/// runs in the page and reports its result — or an error message — back to the
+/// backend via the `browser_action_result` command keyed by `req_id`.
+fn action_wrapper_js(req_id: u64, body: &str) -> String {
+    format!(
+        r#"(function() {{
+    var __report = function(res) {{
+        try {{
+            window.__TAURI_INTERNALS__.invoke('browser_action_result', {{
+                reqId: {req_id},
+                result: String(res)
+            }}).catch(function() {{}});
+        }} catch(e) {{}}
+    }};
+    try {{
+        __report((function() {{ {body} }})());
+    }} catch(e) {{
+        __report('ERROR: ' + (e && e.message ? e.message : e));
+    }}
+}})();"#
+    )
+}
+
+/// Read the active page: URL, title, a numbered list of interactive elements
+/// (each tagged with a `data-conduit-ref` the click/type tools target) and the
+/// visible text. Only elements with a non-zero box are listed, so hidden menus
+/// don't pollute the map.
+const READ_PAGE_JS: &str = r#"
+var sel = 'a[href], button, input, textarea, select, [role=button], [onclick]';
+var els = Array.prototype.slice.call(document.querySelectorAll(sel));
+var lines = [];
+var i = 0;
+els.forEach(function(el) {
+    var r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return;
+    el.setAttribute('data-conduit-ref', String(i));
+    var tag = el.tagName.toLowerCase();
+    var label = (el.innerText || el.value || el.getAttribute('aria-label') ||
+        el.getAttribute('placeholder') || el.getAttribute('name') || '')
+        .trim().replace(/\s+/g, ' ').slice(0, 80);
+    var extra = tag === 'a' ? (el.getAttribute('href') || '')
+        : (el.getAttribute('type') || '');
+    lines.push('[' + i + '] ' + tag + (extra ? '(' + extra + ')' : '') +
+        (label ? ' ' + JSON.stringify(label) : ''));
+    i++;
+});
+var text = (document.body ? document.body.innerText : '')
+    .replace(/\n{3,}/g, '\n\n').trim().slice(0, 6000);
+return 'URL: ' + location.href + '\nTITLE: ' + document.title +
+    '\n\nINTERACTIVE ELEMENTS (ref | tag | label):\n' +
+    (lines.length ? lines.join('\n') : '(none found)') +
+    '\n\nPAGE TEXT:\n' + text;
+"#;
+
+fn click_js(r: i64) -> String {
+    format!(
+        r#"
+var el = document.querySelector('[data-conduit-ref="{r}"]');
+if (!el) return 'ERROR: no element with ref {r}. Call browser_read first to refresh the element map.';
+el.scrollIntoView({{block: 'center'}});
+el.click();
+return 'Clicked ref {r}. Current URL: ' + location.href + '. Call browser_read to see the resulting page.';
+"#
+    )
+}
+
+fn type_js(r: i64, text: &str) -> String {
+    let js_text = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        r#"
+var el = document.querySelector('[data-conduit-ref="{r}"]');
+if (!el) return 'ERROR: no element with ref {r}. Call browser_read first to refresh the element map.';
+el.focus();
+if ('value' in el) {{
+    el.value = {js_text};
+}} else {{
+    el.textContent = {js_text};
+}}
+el.dispatchEvent(new Event('input', {{bubbles: true}}));
+el.dispatchEvent(new Event('change', {{bubbles: true}}));
+return 'Typed into ref {r}.';
+"#
+    )
+}
+
+fn scroll_js(dy: i64) -> String {
+    format!(
+        r#"
+window.scrollBy(0, {dy});
+return 'Scrolled by {dy}px. scrollY=' + Math.round(window.scrollY) +
+    ' of ' + Math.round(document.body ? document.body.scrollHeight : 0) + '.';
+"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_wrapper_reports_via_command_with_req_id() {
+        let js = action_wrapper_js(42, "return 'hi';");
+        assert!(js.contains("browser_action_result"));
+        assert!(js.contains("reqId: 42"));
+        assert!(js.contains("return 'hi';"));
+        // Errors are reported too, not swallowed.
+        assert!(js.contains("'ERROR: '"));
+    }
+
+    #[test]
+    fn click_js_targets_ref_and_guards_missing() {
+        let js = click_js(3);
+        assert!(js.contains(r#"data-conduit-ref="3""#));
+        assert!(js.contains(".click()"));
+        assert!(js.contains("ERROR: no element with ref 3"));
+    }
+
+    #[test]
+    fn type_js_json_escapes_text() {
+        let js = type_js(1, "he said \"hi\"\nbye");
+        // The typed text must be a valid JS string literal (quotes/newlines escaped).
+        assert!(js.contains(r#"he said \"hi\"\nbye"#));
+        assert!(js.contains(r#"data-conduit-ref="1""#));
+        assert!(js.contains("dispatchEvent"));
+    }
+
+    #[test]
+    fn scroll_js_uses_amount() {
+        assert!(scroll_js(-250).contains("window.scrollBy(0, -250)"));
+    }
+
+    #[test]
+    fn read_page_js_assigns_refs_and_collects_text() {
+        assert!(READ_PAGE_JS.contains("data-conduit-ref"));
+        assert!(READ_PAGE_JS.contains("INTERACTIVE ELEMENTS"));
+        assert!(READ_PAGE_JS.contains("location.href"));
+    }
 
     #[test]
     fn label_is_prefixed_and_unique_per_pane_and_tab() {

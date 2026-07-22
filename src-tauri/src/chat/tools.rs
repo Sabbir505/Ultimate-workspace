@@ -22,6 +22,10 @@ pub const GENERATE_DIAGRAM: &str = "generate_diagram";
 pub const FETCH_URL: &str = "fetch_url";
 pub const RUN_CODE: &str = "run_code";
 pub const OPEN_URL: &str = "open_url";
+pub const BROWSER_READ: &str = "browser_read";
+pub const BROWSER_CLICK: &str = "browser_click";
+pub const BROWSER_TYPE: &str = "browser_type";
+pub const BROWSER_SCROLL: &str = "browser_scroll";
 
 /// Which tool capabilities are enabled for a turn. Web search, file generation
 /// and URL fetching are considered safe and are always on when tools are
@@ -136,6 +140,27 @@ const RUN_CODE_DESC: &str = "Execute a short snippet of code and return its \
     time limit in a temporary directory. Use for calculations, data wrangling \
     or quick scripts.";
 
+const BROWSER_READ_DESC: &str = "Inspect the page currently open in the app's \
+    built-in browser pane. Returns its URL, title, the visible text, and a \
+    numbered list of interactive elements (links, buttons, inputs) — each with \
+    a `ref` number. Call this first (after open_url) and again after any \
+    click/type to get the fresh element map before acting. Drives whatever page \
+    the user is looking at.";
+
+const BROWSER_CLICK_DESC: &str = "Click an element in the built-in browser pane \
+    by its `ref` number (from the most recent browser_read). Use for links, \
+    buttons, and submit controls. The ref map changes when the page changes, so \
+    always browser_read again afterwards.";
+
+const BROWSER_TYPE_DESC: &str = "Type text into an input/textarea in the \
+    built-in browser pane by its `ref` number (from the most recent \
+    browser_read). Sets the field value and fires input/change events. Follow \
+    with a browser_click on the search/submit button (or another browser_read).";
+
+const BROWSER_SCROLL_DESC: &str = "Scroll the page in the built-in browser pane \
+    vertically by `amount` pixels (negative scrolls up). Use to reveal content \
+    below the fold before reading again.";
+
 const OPEN_URL_DESC: &str = "Open a web page in the app's built-in browser so \
     the user can see it, and return its readable text to you. Use when the user \
     asks to open/show/visit a site, or when it helps to display a page visually \
@@ -154,6 +179,10 @@ pub fn openai_tool_specs(caps: ToolCaps) -> Vec<Value> {
         openai_fn(GENERATE_DIAGRAM, GENERATE_DIAGRAM_DESC, generate_diagram_parameters()),
         openai_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
         openai_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
+        openai_fn(BROWSER_READ, BROWSER_READ_DESC, no_parameters()),
+        openai_fn(BROWSER_CLICK, BROWSER_CLICK_DESC, browser_ref_parameters()),
+        openai_fn(BROWSER_TYPE, BROWSER_TYPE_DESC, browser_type_parameters()),
+        openai_fn(BROWSER_SCROLL, BROWSER_SCROLL_DESC, browser_scroll_parameters()),
     ];
     if caps.code_exec {
         specs.push(openai_fn(RUN_CODE, RUN_CODE_DESC, run_code_parameters()));
@@ -185,6 +214,10 @@ pub fn anthropic_tool_specs(caps: ToolCaps) -> Vec<Value> {
         anthropic_fn(GENERATE_DIAGRAM, GENERATE_DIAGRAM_DESC, generate_diagram_parameters()),
         anthropic_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
         anthropic_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
+        anthropic_fn(BROWSER_READ, BROWSER_READ_DESC, no_parameters()),
+        anthropic_fn(BROWSER_CLICK, BROWSER_CLICK_DESC, browser_ref_parameters()),
+        anthropic_fn(BROWSER_TYPE, BROWSER_TYPE_DESC, browser_type_parameters()),
+        anthropic_fn(BROWSER_SCROLL, BROWSER_SCROLL_DESC, browser_scroll_parameters()),
     ];
     if caps.code_exec {
         specs.push(anthropic_fn(RUN_CODE, RUN_CODE_DESC, run_code_parameters()));
@@ -286,6 +319,52 @@ fn generate_diagram_parameters() -> Value {
             }
         },
         "required": ["filename", "html"],
+    })
+}
+
+fn no_parameters() -> Value {
+    json!({ "type": "object", "properties": {} })
+}
+
+fn browser_ref_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "ref": {
+                "type": "integer",
+                "description": "The element's ref number from the latest browser_read.",
+            }
+        },
+        "required": ["ref"],
+    })
+}
+
+fn browser_type_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "ref": {
+                "type": "integer",
+                "description": "The input's ref number from the latest browser_read.",
+            },
+            "text": {
+                "type": "string",
+                "description": "The text to type into the field.",
+            }
+        },
+        "required": ["ref", "text"],
+    })
+}
+
+fn browser_scroll_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "amount": {
+                "type": "integer",
+                "description": "Pixels to scroll vertically; negative scrolls up. Default 600.",
+            }
+        },
     })
 }
 

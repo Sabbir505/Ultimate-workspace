@@ -57,6 +57,19 @@ pub fn browser_push_state(
     Ok(())
 }
 
+/// Called from an agentic action's injected JS to report its result back to
+/// the backend, keyed by the request id the backend assigned. Resolves the
+/// pending oneshot the `browser_read`/`browser_click`/etc. tool is awaiting.
+#[tauri::command]
+pub fn browser_action_result(
+    req_id: u64,
+    result: String,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.resolve_action(req_id, result);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn browser_go_back(
     pane_id: String,

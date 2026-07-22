@@ -107,6 +107,12 @@ diagram artifact.\n\
 - `fetch_url(url)` — fetch a specific page's readable text by URL.\n\
 - `open_url(url)` — open a page in the app's built-in browser pane and return \
 its text.\n\
+- `browser_read()` — inspect the page currently open in the browser pane: its \
+URL, title, visible text, and a numbered list of interactive elements (each \
+with a `ref`).\n\
+- `browser_click(ref)` / `browser_type(ref, text)` / `browser_scroll(amount)` — \
+drive that page: click a link/button, type into an input, or scroll. Refs come \
+from the latest `browser_read`.\n\
 - `run_code(language, code)` — execute a short snippet (python/javascript/bash) \
 in a sandbox. Only present when code execution is explicitly enabled for this chat.\n\n\
 If a tool described here is not actually available in a given turn, do not \
@@ -129,6 +135,18 @@ blocks (Mermaid is not used here), never describe a diagram in prose without \
 producing it, and never draw it with ASCII art.\n\
 - Do not narrate the artifact's contents at length after producing it — a short \
 one-line acknowledgment is enough; the panel is the primary surface.\n\n\
+## Browsing the web interactively\n\
+When the user asks you to *do* something on a site (search on it, follow a \
+link, fill a form, read further down a page), drive the built-in browser in an \
+observe→act loop: (1) `open_url` to load the starting page; (2) `browser_read` \
+to see the current URL, text and the numbered interactive elements; (3) act \
+with `browser_click`/`browser_type`/`browser_scroll` using a `ref` from that \
+read; (4) `browser_read` again to observe the result, and repeat until the goal \
+is met. The `ref` numbers are only valid for the most recent read — always \
+re-read after the page changes. Prefer `open_url`/`browser_read` (which return \
+page text) over `fetch_url` when the user should also *see* the page. If an \
+action reports an error or a page won't load, say so plainly rather than \
+pretending it worked.\n\n\
 ## Skill loading\n\
 Skill files (docx, pptx, pdf, diagram-html-svg, and any user-added skills from \
 Settings → Assistant) are user-enabled instructions. When a skill is enabled, \
@@ -167,7 +185,8 @@ available. Do not answer from memory and imply it is current.\n\
 as an artifact. Describing what the file would contain, without calling these \
 tools, is an incorrect response — treat it as a failed turn, not a shortcut.\n\
 3. The tool names are EXACTLY: `web_search`, `generate_document`, \
-`generate_file`, `fetch_url`, `open_url`, `run_code`. Do not call \
+`generate_file`, `generate_diagram`, `fetch_url`, `open_url`, `browser_read`, \
+`browser_click`, `browser_type`, `browser_scroll`, `run_code`. Do not call \
 `execute_code`, `emit_artifact`, or any other name — those do not exist here.\n\
 4. If a tool call fails or is unavailable, say so in one plain sentence. Do \
 not continue as if it had succeeded.\n\
@@ -557,6 +576,12 @@ async fn run_tool(
     name: &str,
     args: &Value,
 ) -> String {
+    // Agentic browser tools act on the live browser-pane webview, so they run
+    // here (where the AppHandle -> BrowserState is available) rather than in
+    // the provider-agnostic execute_tool dispatcher.
+    if let Some(text) = run_browser_tool(app, name, args).await {
+        return text;
+    }
     let outcome = tools::execute_tool(client, artifacts_dir, caps, name, args).await;
     if let Some(a) = outcome.artifact {
         let _ = app.emit(
@@ -578,6 +603,43 @@ async fn run_tool(
         );
     }
     outcome.text
+}
+
+/// Dispatch the agentic browser tools (`browser_read`/`browser_click`/
+/// `browser_type`/`browser_scroll`) against the active browser-pane webview.
+/// Returns `None` for any other tool name so the caller falls through to the
+/// normal tool dispatcher.
+async fn run_browser_tool(app: &AppHandle, name: &str, args: &Value) -> Option<String> {
+    use tools::{BROWSER_CLICK, BROWSER_READ, BROWSER_SCROLL, BROWSER_TYPE};
+    if !matches!(name, BROWSER_READ | BROWSER_CLICK | BROWSER_TYPE | BROWSER_SCROLL) {
+        return None;
+    }
+    let browser = app.state::<crate::BrowserState>();
+    let mgr = browser.0.clone();
+    let result = match name {
+        BROWSER_READ => mgr.read_page().await,
+        BROWSER_CLICK => match args.get("ref").and_then(|v| v.as_i64()) {
+            Some(r) => mgr.click_ref(r).await,
+            None => Err("browser_click requires an integer \"ref\" from browser_read.".to_string()),
+        },
+        BROWSER_TYPE => {
+            let r = args.get("ref").and_then(|v| v.as_i64());
+            let text = args.get("text").and_then(|v| v.as_str());
+            match (r, text) {
+                (Some(r), Some(text)) => mgr.type_into(r, text).await,
+                _ => Err("browser_type requires an integer \"ref\" and \"text\".".to_string()),
+            }
+        }
+        BROWSER_SCROLL => {
+            let dy = args.get("amount").and_then(|v| v.as_i64()).unwrap_or(600);
+            mgr.scroll_by(dy).await
+        }
+        _ => unreachable!("guarded by matches! above"),
+    };
+    Some(match result {
+        Ok(text) => text,
+        Err(e) => format!("{name} failed: {e}"),
+    })
 }
 
 /// Monotonic counter for synthetic tool-call ids. Real OpenAI ids come from
@@ -790,6 +852,16 @@ fn tool_status_line(name: &str, args: &Value) -> String {
     } else if name == tools::RUN_CODE {
         let lang = args.get("language").and_then(|v| v.as_str()).unwrap_or("code");
         format!("Running {lang} code…\n")
+    } else if name == tools::BROWSER_READ {
+        "Reading the browser page…\n".to_string()
+    } else if name == tools::BROWSER_CLICK {
+        let r = args.get("ref").and_then(|v| v.as_i64()).unwrap_or(-1);
+        format!("Clicking element [{r}] in the browser…\n")
+    } else if name == tools::BROWSER_TYPE {
+        let t = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        format!("Typing \"{t}\" in the browser…\n")
+    } else if name == tools::BROWSER_SCROLL {
+        "Scrolling the browser page…\n".to_string()
     } else {
         format!("Running tool {name}…\n")
     }

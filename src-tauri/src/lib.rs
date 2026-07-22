@@ -104,6 +104,7 @@ pub fn run() {
             commands::browser_cmds::browser_create,
             commands::browser_cmds::browser_navigate,
             commands::browser_cmds::browser_push_state,
+            commands::browser_cmds::browser_action_result,
             commands::browser_cmds::browser_go_back,
             commands::browser_cmds::browser_go_forward,
             commands::browser_cmds::browser_reload,

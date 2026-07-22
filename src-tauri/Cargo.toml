@@ -33,7 +33,7 @@ window-vibrancy = "0.5"
 reqwest = { version = "0.12", features = ["stream", "rustls-tls", "json"], default-features = false }
 async-trait = "0.1"
 futures-util = "0.3"
-tokio = { version = "1", features = ["rt", "process", "time"] }
+tokio = { version = "1", features = ["rt", "process", "time", "sync"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]

@@ -83,6 +83,7 @@ Commands:
 - `browser_create(paneId: string, tabId: string, url: string, rect: BrowserRect) -> ()` — create a native webview for a pane+tab; async (runs on worker thread to avoid blocking the main thread on WebView2 init)
 - `browser_navigate(paneId: string, tabId: string, url: string) -> ()`
 - `browser_push_state(paneId: string, tabId: string, url: string) -> ()` — called from injected JS on same-document navigations (pushState/replaceState/hashchange)
+- `browser_action_result(reqId: number, result: string) -> ()` — called from injected JS to return an agentic browser action's result to the backend (resolves the pending `browser_read`/`browser_click`/`browser_type`/`browser_scroll` tool call keyed by `reqId`)
 - `browser_go_back(paneId: string, tabId: string) -> ()`
 - `browser_go_forward(paneId: string, tabId: string) -> ()`
 - `browser_reload(paneId: string, tabId: string) -> ()`
@@ -124,7 +125,7 @@ Commands:
 - `update_chat_session_title(chatSessionId: string, title: string) -> ()`
 - `get_chat_messages(chatSessionId: string) -> ChatMessageRecord[]` (chronological by id)
 - `touch_chat_session(chatSessionId: string) -> ()` (sets lastActiveAt = now)
-- `send_chat_message(chatSessionId: string, content: string, effort?: string, toolsEnabled?: boolean, codeExecEnabled?: boolean) -> ()` — persists user message, looks up provider/model/api_key, assembles message history, kicks off SSE streaming. Emits `chat:token`, then `chat:done` or `chat:error`. All diagrams go through the `generate_diagram` (vector SVG) tool.
+- `send_chat_message(chatSessionId: string, content: string, effort?: string, toolsEnabled?: boolean, codeExecEnabled?: boolean) -> ()` — persists user message, looks up provider/model/api_key, assembles message history, kicks off SSE streaming. Emits `chat:token`, then `chat:done` or `chat:error`. All diagrams go through the `generate_diagram` (vector SVG) tool. Chat tools: `web_search`, `generate_file`, `generate_document`, `generate_diagram`, `fetch_url`, `open_url`, `run_code`, plus agentic browser control (`browser_read`/`browser_click`/`browser_type`/`browser_scroll`) that drives the active browser pane via injected JS (native webview only; no-op on the Linux iframe fallback).
 - `cancel_chat_message(chatSessionId: string) -> ()` — aborts the active stream for that session.
 - `set_chat_api_key(provider: string, key: string, baseUrl?: string, model?: string) -> ()` — stores key in OS keychain, stores baseUrl/model in app_settings. The key value is NEVER returned via any IPC command.
 - `delete_chat_api_key(provider: string) -> ()`

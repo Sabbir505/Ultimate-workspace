@@ -124,7 +124,7 @@ Commands:
 - `update_chat_session_title(chatSessionId: string, title: string) -> ()`
 - `get_chat_messages(chatSessionId: string) -> ChatMessageRecord[]` (chronological by id)
 - `touch_chat_session(chatSessionId: string) -> ()` (sets lastActiveAt = now)
-- `send_chat_message(chatSessionId: string, content: string, effort?: string, toolsEnabled?: boolean, codeExecEnabled?: boolean, diagramMode?: string) -> ()` — persists user message, looks up provider/model/api_key, assembles message history, kicks off SSE streaming. Emits `chat:token`, then `chat:done` or `chat:error`. `diagramMode` can be `"quick"` (force Mermaid), `"designed"` (force generate_diagram), or empty (model decides).
+- `send_chat_message(chatSessionId: string, content: string, effort?: string, toolsEnabled?: boolean, codeExecEnabled?: boolean) -> ()` — persists user message, looks up provider/model/api_key, assembles message history, kicks off SSE streaming. Emits `chat:token`, then `chat:done` or `chat:error`. All diagrams go through the `generate_diagram` (vector SVG) tool.
 - `cancel_chat_message(chatSessionId: string) -> ()` — aborts the active stream for that session.
 - `set_chat_api_key(provider: string, key: string, baseUrl?: string, model?: string) -> ()` — stores key in OS keychain, stores baseUrl/model in app_settings. The key value is NEVER returned via any IPC command.
 - `delete_chat_api_key(provider: string) -> ()`

@@ -2382,37 +2382,6 @@ table.kv th {
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   color: var(--accent);
 }
-.composer-diagram-toggle {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  overflow: hidden;
-}
-.diagram-toggle-seg {
-  height: 26px;
-  padding: 0 9px;
-  font-size: 11px;
-  line-height: 1;
-  border: none;
-  background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
-  transition:
-    background 0.15s var(--ease),
-    color 0.15s var(--ease);
-}
-.diagram-toggle-seg:not(:last-child) {
-  border-right: 1px solid var(--border);
-}
-.diagram-toggle-seg:hover {
-  background: var(--surface-2);
-  color: var(--text);
-}
-.diagram-toggle-seg.active {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent);
-}
 .chat-artifacts {
   display: flex;
   flex-wrap: wrap;

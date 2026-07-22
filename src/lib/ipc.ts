@@ -289,7 +289,6 @@ export const sendChatMessage = (
   effort?: string,
   toolsEnabled?: boolean,
   codeExecEnabled?: boolean,
-  diagramMode?: string,
 ) =>
   safeInvoke<void>("send_chat_message", {
     chatSessionId,
@@ -297,7 +296,6 @@ export const sendChatMessage = (
     effort: effort ?? null,
     toolsEnabled: toolsEnabled ?? false,
     codeExecEnabled: codeExecEnabled ?? false,
-    diagramMode: diagramMode ?? "",
   });
 export const updateChatSessionModel = (chatSessionId: string, model: string) =>
   safeInvoke<void>("update_chat_session_model", { chatSessionId, model });

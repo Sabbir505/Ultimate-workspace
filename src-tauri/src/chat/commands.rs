@@ -107,7 +107,6 @@ pub async fn send_chat_message(
     effort: Option<String>,
     tools_enabled: Option<bool>,
     code_exec_enabled: Option<bool>,
-    diagram_mode: Option<String>,
     chat_state: State<'_, crate::ChatState>,
     db: State<'_, DbState>,
     app: AppHandle,
@@ -178,25 +177,6 @@ pub async fn send_chat_message(
         let skills = parse_skills(skills_json.as_deref());
         crate::chat::build_system_prompt(provider_id.clone(), &model, custom.as_deref(), &skills, tools_on)
     };
-
-    // 5c. Append a diagram-mode bias directive when the user has explicitly
-    // chosen "quick" or "designed" (empty = model decides).
-    let system = match diagram_mode.as_deref() {
-        Some("quick") => {
-            let directive = "\n\n## Diagram mode (user override)\n\
-            The user wants a QUICK diagram: emit it as a ```mermaid fenced block \
-            in your text response. Do not call generate_diagram this turn.";
-            system.map(|s| s + directive).or_else(|| Some(directive.trim().to_string()))
-        }
-        Some("designed") => {
-            let directive = "\n\n## Diagram mode (user override)\n\
-            The user wants a DESIGNED diagram: call the generate_diagram tool to \
-            produce a hand-styled HTML/CSS diagram. Follow the diagram-html-svg \
-            skill's structural rules. Do not use a mermaid block this turn.";
-            system.map(|s| s + directive).or_else(|| Some(directive.trim().to_string()))
-        }
-        _ => system,
-    }; // No directive for "" or anything else — model decides.
 
     // 6. Build message history from DB.
     let messages = {

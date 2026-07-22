@@ -32,6 +32,10 @@ import { useArtifactsStore } from "./artifacts";
 export interface ChatArtifact {
   path: string;
   filename: string;
+  /** Inline (non-file) live preview payload — e.g. a ```jsx / ```tsx code
+   *  block from an assistant message. When set, the preview pane renders it
+   *  directly (live React preview) instead of reading `path` from disk. */
+  inline?: { kind: "jsx" | "tsx"; code: string };
 }
 
 /** Float starred chats to the top while preserving the existing (recency)
@@ -388,6 +392,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   onArtifact: ({ chatSessionId, path, filename }) => {
     const artifact = { path, filename };
+    // Diagrams / HTML render inline in the chat message, so they must NOT
+    // hijack the preview pane; other files still auto-open there.
+    const ext = filename.split(".").pop()?.toLowerCase();
+    const rendersInline = ext === "html" || ext === "svg";
     set((s) => {
       const existing = s.artifacts[chatSessionId] ?? [];
       const alreadyTracked = existing.some((a) => a.path === path);
@@ -403,9 +411,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ? s.pendingArtifacts
           : { ...s.pendingArtifacts, [chatSessionId]: [...pending, artifact] },
         // Auto-open the newly generated file in the preview pane when it
-        // belongs to the chat the user is currently viewing.
+        // belongs to the chat the user is currently viewing — except diagrams/
+        // HTML, which render inline in the chat.
         previewArtifact:
-          s.activeChatSessionId === chatSessionId ? artifact : s.previewArtifact,
+          !rendersInline && s.activeChatSessionId === chatSessionId
+            ? artifact
+            : s.previewArtifact,
       };
     });
     // Refresh the persistent Artifacts sidebar library.

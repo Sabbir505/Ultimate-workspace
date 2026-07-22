@@ -14,6 +14,7 @@ import {
 } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { ArtifactExportMenu } from "./ArtifactExportMenu";
+import { JsxPreview } from "./JsxPreview";
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -170,8 +171,11 @@ export function ArtifactPreviewPane({
 }) {
   const [preview, setPreview] = useState<ArtifactPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const inline = artifact.inline;
 
   useEffect(() => {
+    // Inline previews (e.g. a JSX code block) have no file on disk.
+    if (inline) return;
     let stale = false;
     setPreview(null);
     setError(null);
@@ -185,7 +189,33 @@ export function ArtifactPreviewPane({
     return () => {
       stale = true;
     };
-  }, [artifact.path]);
+  }, [artifact.path, inline]);
+
+  if (inline) {
+    return (
+      <div className="artifact-preview-pane">
+        <div className="artifact-preview-header">
+          <span className="artifact-preview-title" title={artifact.filename}>
+            {artifact.filename}
+          </span>
+          <div className="artifact-preview-header-actions">
+            <button
+              type="button"
+              className="artifact-preview-header-btn"
+              title="Close preview"
+              aria-label="Close preview"
+              onClick={onClose}
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+        <div className="artifact-preview-content">
+          <JsxPreview code={inline.code} lang={inline.kind} variant="pane" />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="artifact-preview-pane">

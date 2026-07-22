@@ -29,6 +29,64 @@ export interface ChatAttachment {
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "webp"];
 const DOC_EXTS = ["docx", "pptx", "xlsx", "pdf"];
 
+/** Short type badge shown on the attachment card (e.g. "PDF", "IMAGE"). */
+function attachmentBadge(a: ChatAttachment): string {
+  if (a.kind === "image") return "IMAGE";
+  if (a.kind === "doc") return (a.format ?? "DOC").toUpperCase();
+  const ext = a.name.includes(".") ? a.name.split(".").pop() ?? "" : "";
+  return (ext || "TEXT").toUpperCase();
+}
+
+function AttachmentIcon() {
+  return (
+    <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+    </svg>
+  );
+}
+
+/** Compact attachment card shown in the composer before sending — a file
+ *  icon, the (truncated) name, a type badge, and a remove button. */
+function AttachmentCard({
+  attachment,
+  onRemove,
+}: {
+  attachment: ChatAttachment;
+  onRemove: () => void;
+}) {
+  const badge = attachmentBadge(attachment);
+  const isImage = attachment.kind === "image";
+  const thumb =
+    isImage && attachment.data && attachment.mediaType
+      ? `data:${attachment.mediaType};base64,${attachment.data}`
+      : null;
+  return (
+    <div className="composer-attachment-card" title={attachment.name}>
+      <div className="composer-attachment-thumb">
+        {thumb ? (
+          <img src={thumb} alt={attachment.name} />
+        ) : (
+          <AttachmentIcon />
+        )}
+      </div>
+      <div className="composer-attachment-meta">
+        <span className="composer-attachment-name">{attachment.name}</span>
+        <span className="composer-attachment-badge">{badge}</span>
+      </div>
+      <button
+        type="button"
+        className="composer-attachment-remove"
+        title="Remove attachment"
+        aria-label="Remove attachment"
+        onClick={onRemove}
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
 /** Read a File's bytes as base64 (without the `data:...;base64,` prefix). */
 function readAsBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -174,19 +232,13 @@ export function ChatComposer({
         {attachments.length > 0 && (
           <div className="composer-attachments">
             {attachments.map((a) => (
-              <span key={a.name} className="composer-attachment-chip">
-                {a.name}
-                <button
-                  type="button"
-                  className="composer-attachment-remove"
-                  title="Remove attachment"
-                  onClick={() =>
-                    setAttachments((prev) => prev.filter((p) => p.name !== a.name))
-                  }
-                >
-                  ×
-                </button>
-              </span>
+              <AttachmentCard
+                key={a.name}
+                attachment={a}
+                onRemove={() =>
+                  setAttachments((prev) => prev.filter((p) => p.name !== a.name))
+                }
+              />
             ))}
           </div>
         )}

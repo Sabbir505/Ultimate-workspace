@@ -37,6 +37,9 @@ multi-slide layouts for decks, and page numbers/footers where appropriate — \
 never a plain text dump. Save the file to the path in the CONDUIT_OUTPUT \
 environment variable. Only use `generate_file` for plain text formats (txt, md, \
 csv, json, html). Prefer accurate, well-structured content over filler. \
+When the user asks for a diagram (flowchart, architecture, mind-map, sequence, \
+etc.), call `generate_diagram` and author it as inline <svg> — it renders \
+inline in the chat, sized to its content, and can be exported to SVG/PNG. \
 When you write a React/JSX component for the user to look at, put it in a \
 single ```jsx (or ```tsx) code block as one self-contained component with a \
 default export (`export default function App() { … }`) and no external imports \
@@ -106,8 +109,8 @@ json, html). Also surfaces the file as an artifact.\n\
 visual). Author it as ONE root inline <svg> (with xmlns, viewBox and \
 width/height): nodes as <rect rx=..>, labels as <text>, connectors as \
 <path>/<line> with an arrowhead <marker>. This is true vector, so it exports \
-crisply to SVG and PNG. Produces a self-contained .html file surfaced as a \
-diagram artifact.\n\
+crisply to SVG and PNG. Produces a self-contained .html file that renders \
+inline in the chat.\n\
 - `fetch_url(url)` — fetch a specific page's readable text by URL.\n\
 - `open_url(url)` — open a page in the app's built-in browser pane and return \
 its text.\n\
@@ -132,7 +135,7 @@ text response (the frontend renders fenced blocks) rather than inventing a tool 
 call for it.\n\
 - Diagrams (flowcharts, sequence, state, class, ER, gantt, mindmaps, etc.): \
 ALWAYS call `generate_diagram` and author the diagram as inline <svg> — the app \
-surfaces it in the artifact panel as a real, exportable vector diagram. \
+renders it inline in the chat as a real, exportable vector diagram. \
 Whenever you decide a diagram would help explain something, or the user asks \
 you to diagram/visualize it, call `generate_diagram`. Do NOT emit ```mermaid \
 blocks (Mermaid is not used here), never describe a diagram in prose without \

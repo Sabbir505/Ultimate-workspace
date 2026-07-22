@@ -125,7 +125,17 @@ function buildSrcDoc(compiled: string): string {
 </html>`;
 }
 
-export function JsxPreview({ code, lang }: { code: string; lang: string }) {
+export function JsxPreview({
+  code,
+  lang,
+  variant = "inline",
+}: {
+  code: string;
+  lang: string;
+  /** "pane" makes the block fill its container (used in the preview pane);
+   *  "inline" keeps a natural, content-sized height. */
+  variant?: "inline" | "pane";
+}) {
   const isTsx = lang === "tsx";
   const [tab, setTab] = useState<"preview" | "code">("preview");
   const [srcDoc, setSrcDoc] = useState<string | null>(null);
@@ -187,7 +197,7 @@ export function JsxPreview({ code, lang }: { code: string; lang: string }) {
   );
 
   return (
-    <div className="chat-jsx-block">
+    <div className={`chat-jsx-block${variant === "pane" ? " pane" : ""}`}>
       <div className="chat-jsx-header">
         <span className="chat-jsx-lang">{isTsx ? "tsx" : "jsx"}</span>
         <div className="chat-jsx-tabs">

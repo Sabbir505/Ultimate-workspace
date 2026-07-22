@@ -9,7 +9,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import type { ChatMessage } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { MermaidDiagram } from "./MermaidDiagram";
-import { JsxPreview } from "./JsxPreview";
+import { InlineDiagram } from "./InlineDiagram";
 
 interface Props {
   message: ChatMessage;
@@ -92,7 +92,32 @@ function FileIcon() {
   );
 }
 
-/** Row of clickable chips for the files an assistant message produced. */
+/** Download/preview chip for a generated file. */
+function ArtifactChip({
+  artifact,
+  onPreviewArtifact,
+}: {
+  artifact: ChatArtifact;
+  onPreviewArtifact?: (artifact: ChatArtifact) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="chat-artifact-chip"
+      title={`Preview ${artifact.filename}`}
+      onClick={(e) => {
+        e.currentTarget.blur();
+        onPreviewArtifact?.(artifact);
+      }}
+    >
+      <FileIcon />
+      <span>{artifact.filename}</span>
+    </button>
+  );
+}
+
+/** The files an assistant message produced. Diagrams (and other .html/.svg
+ *  visuals) render inline in the chat; every other file is a download chip. */
 function MessageArtifacts({
   artifacts,
   onPreviewArtifact,
@@ -100,24 +125,33 @@ function MessageArtifacts({
   artifacts: ChatArtifact[];
   onPreviewArtifact?: (artifact: ChatArtifact) => void;
 }) {
+  const isVisual = (name: string) => {
+    const ext = name.split(".").pop()?.toLowerCase();
+    return ext === "html" || ext === "svg";
+  };
+  const chips = artifacts.filter((a) => !isVisual(a.filename));
+  const visuals = artifacts.filter((a) => isVisual(a.filename));
   return (
-    <div className="chat-msg-artifacts" aria-label="Generated files">
-      {artifacts.map((a) => (
-        <button
+    <>
+      {visuals.map((a) => (
+        <InlineDiagram
           key={a.path}
-          type="button"
-          className="chat-artifact-chip"
-          title={`Preview ${a.filename}`}
-          onClick={(e) => {
-            e.currentTarget.blur();
-            onPreviewArtifact?.(a);
-          }}
-        >
-          <FileIcon />
-          <span>{a.filename}</span>
-        </button>
+          artifact={a}
+          onFallback={() => (
+            <div className="chat-msg-artifacts">
+              <ArtifactChip artifact={a} onPreviewArtifact={onPreviewArtifact} />
+            </div>
+          )}
+        />
       ))}
-    </div>
+      {chips.length > 0 && (
+        <div className="chat-msg-artifacts" aria-label="Generated files">
+          {chips.map((a) => (
+            <ArtifactChip key={a.path} artifact={a} onPreviewArtifact={onPreviewArtifact} />
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -387,9 +421,65 @@ function CopyButton({ code }: { code: string }) {
   );
 }
 
+/** djb2 — a tiny stable hash so a JSX block gets a consistent preview id. */
+function hashCode(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+/** Chip that opens a ```jsx / ```tsx block as a live preview in the side pane
+ *  (Claude-style), instead of rendering it inline in the chat. */
+function JsxArtifactChip({
+  code,
+  lang,
+  onPreviewArtifact,
+}: {
+  code: string;
+  lang: "jsx" | "tsx";
+  onPreviewArtifact?: (artifact: ChatArtifact) => void;
+}) {
+  const filename = `Component.${lang}`;
+  return (
+    <button
+      type="button"
+      className="chat-artifact-chip chat-jsx-chip"
+      title="Open live React preview"
+      onClick={(e) => {
+        e.currentTarget.blur();
+        onPreviewArtifact?.({
+          path: `jsx:${lang}:${hashCode(code)}`,
+          filename,
+          inline: { kind: lang, code },
+        });
+      }}
+    >
+      <ReactIcon />
+      <span>React preview</span>
+    </button>
+  );
+}
+
+function ReactIcon() {
+  return (
+    <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+      <circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none" />
+      <ellipse cx="12" cy="12" rx="10" ry="4" />
+      <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(60 12 12)" />
+      <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(120 12 12)" />
+    </svg>
+  );
+}
+
 /** Renders a markdown string with syntax-highlighted code fences, mermaid
  *  diagrams and glass-styled links — the assistant's normal answer body. */
-function Markdown({ content }: { content: string }) {
+function Markdown({
+  content,
+  onPreviewArtifact,
+}: {
+  content: string;
+  onPreviewArtifact?: (artifact: ChatArtifact) => void;
+}) {
   const inlineCodeStyle = useInlineCodeStyle();
   return (
     <div className="chat-markdown">
@@ -414,9 +504,16 @@ function Markdown({ content }: { content: string }) {
               return <MermaidDiagram code={codeString} />;
             }
 
-            // React/JSX artifacts render as a live sandboxed preview (Claude-style).
+            // React/JSX artifacts open as a live preview in the side pane
+            // (rendered by ArtifactPreviewPane), not inline in the chat.
             if (match && (match[1] === "jsx" || match[1] === "tsx")) {
-              return <JsxPreview code={codeString} lang={match[1]} />;
+              return (
+                <JsxArtifactChip
+                  code={codeString}
+                  lang={match[1] as "jsx" | "tsx"}
+                  onPreviewArtifact={onPreviewArtifact}
+                />
+              );
             }
 
             // Code block with language.
@@ -502,7 +599,7 @@ export function MessageBubble({
             return <ToolBlock key={i} data={seg.data} done={seg.done} />;
           }
           return seg.text.trim().length > 0 ? (
-            <Markdown key={i} content={seg.text} />
+            <Markdown key={i} content={seg.text} onPreviewArtifact={onPreviewArtifact} />
           ) : null;
         })}
         {!isUser && artifacts && artifacts.length > 0 && (

@@ -127,7 +127,7 @@ const GENERATE_DIAGRAM_DESC: &str = "Create a hand-styled, fully-laid-out \
     the top of the SVG, above the flow). Use inline presentation only — no \
     external resources, no scripts, no CDN fonts (rely on system font \
     families). Only fall back to HTML/CSS boxes if a layout genuinely needs \
-    text reflow the SVG can't do. The diagram renders in the artifact panel and \
+    text reflow the SVG can't do. The diagram renders inline in the chat and \
     exports to SVG and PNG. Do NOT emit ```mermaid blocks — Mermaid is not used \
     here; every diagram goes through this tool.";
 

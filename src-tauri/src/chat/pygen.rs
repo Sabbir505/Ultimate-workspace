@@ -44,6 +44,25 @@ pub fn is_supported(format: &str) -> bool {
     matches!(format, "docx" | "pptx" | "xlsx" | "pdf")
 }
 
+/// Resolve the Python interpreter command. Prefers `python3`, falling back to
+/// `python` (common on Windows, where `python3` often isn't on PATH). Returns
+/// `python3` when neither responds, so the failure message stays sensible.
+pub fn python_program() -> &'static str {
+    for cand in ["python3", "python"] {
+        let ok = std::process::Command::new(cand)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            return cand;
+        }
+    }
+    "python3"
+}
+
 /// Run `code` (Python) to produce `filename` (a `format` document) inside
 /// `dir`. The program's working directory is `dir`, and the intended absolute
 /// output path is exposed as the `CONDUIT_OUTPUT` environment variable.
@@ -82,7 +101,8 @@ pub async fn generate(
         return Err(format!("could not write generator script: {e}"));
     }
 
-    let mut cmd = Command::new("python3");
+    let python = python_program();
+    let mut cmd = Command::new(python);
     cmd.arg(&script)
         .current_dir(dir)
         .env("CONDUIT_OUTPUT", &out_path)
@@ -101,7 +121,7 @@ pub async fn generate(
             )),
         },
         Err(e) => Err(format!(
-            "could not start python3 (is Python installed?): {e}"
+            "could not start {python} (is Python installed and on PATH?): {e}"
         )),
     };
 

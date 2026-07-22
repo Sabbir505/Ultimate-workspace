@@ -24,10 +24,11 @@ const EXEC_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_OUTPUT: usize = 12_000;
 
 /// Languages the tool understands. Returns the interpreter program and the
-/// temp source-file extension.
+/// temp source-file extension. Python resolves to `python3` or `python`
+/// (whichever is on PATH) so it works on Windows too.
 fn interpreter(language: &str) -> Option<(&'static str, &'static str)> {
     match language.to_lowercase().as_str() {
-        "python" | "py" | "python3" => Some(("python3", "py")),
+        "python" | "py" | "python3" => Some((super::pygen::python_program(), "py")),
         "javascript" | "js" | "node" => Some(("node", "js")),
         "bash" | "sh" | "shell" => Some(("bash", "sh")),
         _ => None,

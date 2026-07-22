@@ -24,6 +24,7 @@ import {
   type ChatMessageRecord,
   type ChatSession,
 } from "../lib/ipc";
+import { useArtifactsStore } from "./artifacts";
 
 /** A file the model generated during a chat, surfaced as a download chip. */
 export interface ChatArtifact {
@@ -353,6 +354,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           s.activeChatSessionId === chatSessionId ? artifact : s.previewArtifact,
       };
     });
+    // Refresh the persistent Artifacts sidebar library.
+    void useArtifactsStore.getState().load();
   },
 
   onError: (chatSessionId, message, code) => {

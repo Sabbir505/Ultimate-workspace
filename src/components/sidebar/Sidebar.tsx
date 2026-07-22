@@ -12,6 +12,7 @@ import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { ProjectItem } from "./ProjectItem";
 import { ChatSessionRow, type ChatSessionRowData } from "../chat/ChatSessionRow";
+import { ArtifactLibrary } from "./ArtifactLibrary";
 import { PanelIcon } from "../common/PanelIcon";
 
 export function Sidebar() {
@@ -178,6 +179,7 @@ export function Sidebar() {
                 />
               ))
             )}
+            <ArtifactLibrary />
           </>
         )}
       </div>

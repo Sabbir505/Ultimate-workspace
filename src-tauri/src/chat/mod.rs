@@ -584,6 +584,18 @@ async fn run_tool(
     }
     let outcome = tools::execute_tool(client, artifacts_dir, caps, name, args).await;
     if let Some(a) = outcome.artifact {
+        // Persist to the Artifacts sidebar (30-day retention) before notifying
+        // the UI. A DB failure must not block the chat, so errors are ignored.
+        let kind = std::path::Path::new(&a.filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        {
+            let db = app.state::<crate::DbState>();
+            let conn = db.0.lock();
+            let _ = db::insert_artifact(&conn, Some(sid), &a.filename, &a.path, &kind);
+        }
         let _ = app.emit(
             "chat:artifact",
             ChatArtifactPayload {

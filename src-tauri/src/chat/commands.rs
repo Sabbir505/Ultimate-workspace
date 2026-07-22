@@ -40,6 +40,42 @@ pub fn list_chat_sessions(db: State<DbState>) -> CmdResult<Vec<ChatSession>> {
     db::list_chat_sessions(&conn).map_err(|e| e.to_string())
 }
 
+// ---- Artifacts (30-day retention) ----
+
+/// All persisted artifacts, most recent first.
+#[tauri::command]
+pub fn list_artifacts(db: State<DbState>) -> CmdResult<Vec<ArtifactRecord>> {
+    let conn = db.0.lock();
+    db::list_artifacts(&conn).map_err(|e| e.to_string())
+}
+
+/// Delete an artifact (DB row + on-disk file).
+#[tauri::command]
+pub fn delete_artifact(id: String, db: State<DbState>) -> CmdResult<()> {
+    let path = {
+        let conn = db.0.lock();
+        db::delete_artifact(&conn, &id).map_err(|e| e.to_string())?
+    };
+    if let Some(path) = path {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
+/// Sweep artifacts past their 30-day expiry, removing both rows and files.
+/// Called on startup; returns the number of artifacts removed.
+pub fn sweep_expired_artifacts(db: &Arc<parking_lot::Mutex<rusqlite::Connection>>) -> usize {
+    let paths = {
+        let conn = db.lock();
+        db::delete_expired_artifacts(&conn).unwrap_or_default()
+    };
+    let n = paths.len();
+    for p in paths {
+        let _ = std::fs::remove_file(p);
+    }
+    n
+}
+
 #[tauri::command]
 pub fn create_chat_session(
     provider: String,

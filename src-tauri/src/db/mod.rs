@@ -7,6 +7,7 @@
 //! Why SQLite for this data and not JSON: sessions/cost events need querying
 //! (search, filtering, cost rollups) per PRD §6.1.
 
+mod artifacts;
 mod chat;
 mod cost;
 mod projects;
@@ -159,6 +160,19 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
 
         CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(chat_session_id, id);
         CREATE INDEX IF NOT EXISTS idx_chat_sessions_active ON chat_sessions(last_active_at DESC);
+
+        CREATE TABLE IF NOT EXISTS artifacts (
+          id TEXT PRIMARY KEY,
+          chat_session_id TEXT,
+          filename TEXT NOT NULL,
+          path TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_artifacts_created ON artifacts(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_expires ON artifacts(expires_at);
         ",
     )
 }
@@ -204,6 +218,11 @@ pub use chat::{
     add_chat_message, create_chat_session, delete_chat_session, get_chat_session,
     list_chat_messages, list_chat_sessions, touch_chat_session, update_chat_session_model,
     update_chat_session_title,
+};
+
+// artifacts
+pub use artifacts::{
+    delete_artifact, delete_expired_artifacts, insert_artifact, list_artifacts,
 };
 
 // ---- test helpers ----

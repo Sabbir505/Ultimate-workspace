@@ -194,6 +194,21 @@ pub struct ChatAttachmentInput {
     pub format: Option<String>,
 }
 
+/// A generated artifact (file/diagram) surfaced in the Artifacts sidebar.
+/// Persisted so it survives restarts; auto-deleted after 30 days.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactRecord {
+    pub id: String,
+    pub chat_session_id: Option<String>,
+    pub filename: String,
+    pub path: String,
+    /// Lowercase file extension: "docx" | "pptx" | "pdf" | "xlsx" | "html" | ...
+    pub kind: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessageRecord {

@@ -243,6 +243,24 @@ export interface ChatOpenBrowserPayload {
   url: string;
 }
 
+/** A persisted artifact in the sidebar library (30-day retention). */
+export interface ArtifactRecord {
+  id: string;
+  chatSessionId: string | null;
+  filename: string;
+  path: string;
+  kind: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+/** All persisted artifacts, most recent first. */
+export const listArtifacts = () => safeInvoke<ArtifactRecord[]>("list_artifacts", {});
+
+/** Delete an artifact (row + on-disk file). */
+export const deleteArtifact = (id: string) =>
+  safeInvoke<void>("delete_artifact", { id });
+
 /** In-app preview of a generated artifact (see `read_artifact_preview`). */
 export interface ArtifactPreview {
   path: string;

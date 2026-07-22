@@ -97,8 +97,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   config: null,
   error: null,
   effort: "",
-  toolsEnabled: false,
-  codeExecEnabled: false,
+  // Tools are on by default so the model itself decides when to web-search,
+  // generate a file/document/diagram, fetch a URL or run code — the user no
+  // longer has to arm them manually before each relevant request.
+  toolsEnabled: true,
+  codeExecEnabled: true,
   diagramMode: "" as "" | "quick" | "designed",
   artifacts: {},
   artifactsByMessage: {},

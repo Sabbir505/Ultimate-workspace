@@ -6,6 +6,7 @@
 pub mod artifacts;
 pub mod codeexec;
 pub mod commands;
+pub mod office;
 pub mod providers;
 pub mod pygen;
 pub mod tools;

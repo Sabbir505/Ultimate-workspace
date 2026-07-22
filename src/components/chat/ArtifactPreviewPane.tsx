@@ -73,13 +73,14 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
     );
   }
   if (kind === "office" && text != null) {
-    const cls =
-      ext === "pptx"
-        ? "artifact-preview-office pptx"
-        : ext === "xlsx"
-          ? "artifact-preview-office xlsx"
-          : "artifact-preview-office docx";
-    return <div className={cls} dangerouslySetInnerHTML={{ __html: text }} />;
+    return (
+      <iframe
+        className={`artifact-preview-html office ${ext}`}
+        title={preview.filename}
+        sandbox=""
+        srcDoc={text}
+      />
+    );
   }
   if ((kind === "html" || kind === "diagram") && text != null) {
     return (

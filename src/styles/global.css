@@ -2942,65 +2942,6 @@ table.kv th {
   cursor: default;
 }
 
-/* Inline Office document (docx/pptx/xlsx) preview */
-.artifact-preview-office {
-  color: var(--text);
-  font-size: 14px;
-  line-height: 1.6;
-}
-.artifact-preview-office h1 {
-  font-size: 1.5em;
-  margin: 0 0 0.5em;
-}
-.artifact-preview-office h2 {
-  font-size: 1.3em;
-  margin: 1em 0 0.4em;
-}
-.artifact-preview-office h3 {
-  font-size: 1.12em;
-  margin: 0.9em 0 0.3em;
-}
-.artifact-preview-office h4,
-.artifact-preview-office h5 {
-  font-size: 1em;
-  margin: 0.8em 0 0.3em;
-}
-.artifact-preview-office p {
-  margin: 0 0 0.6em;
-}
-.artifact-preview-office.pptx .slide {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface-2);
-  padding: 16px 18px;
-  margin-bottom: 14px;
-}
-.artifact-preview-office.pptx .slide-num {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-  margin-bottom: 8px;
-}
-.artifact-preview-office.pptx .slide p:first-of-type {
-  font-size: 1.15em;
-  font-weight: 600;
-}
-.artifact-preview-office.xlsx table {
-  border-collapse: collapse;
-  width: 100%;
-  font-size: 12.5px;
-}
-.artifact-preview-office.xlsx td {
-  border: 1px solid var(--border);
-  padding: 4px 8px;
-}
-.artifact-preview-office.xlsx tr:first-child td {
-  font-weight: 600;
-  background: var(--surface-2);
-}
-
 /* ---- Settings: Assistant panel (system prompt + skills) ---- */
 .form-row-stack {
   flex-direction: column;

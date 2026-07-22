@@ -308,5 +308,20 @@ deck.save()
             .expect("pptx via helper");
         assert!(g.path.exists());
         assert!(g.filename.ends_with(".pptx"));
+
+        let pdf_code = r#"
+import conduit_docgen as cd
+pdf = cd.Pdf(title="Brief", subtitle="Sub", theme="plum", author="Acme")
+pdf.heading("Summary")
+pdf.paragraph("Body.")
+pdf.bullets(["a", "b"])
+pdf.table(["k", "v"], [["x", "1"]])
+pdf.callout("Bottom line.")
+pdf.save()
+"#;
+        let g = tauri::async_runtime::block_on(generate(dir.path(), "pdf", "styled", pdf_code))
+            .expect("pdf via helper");
+        assert!(g.path.exists());
+        assert!(g.filename.ends_with(".pdf"));
     }
 }

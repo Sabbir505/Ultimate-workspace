@@ -68,17 +68,30 @@ const GENERATE_FILE_DESC: &str = "Generate a simple downloadable text-based \
     remaining lines are bullets. For xlsx/csv, provide comma-separated rows \
     (one row per line).";
 
-const GENERATE_DOCUMENT_DESC: &str = "Create a REAL, professionally formatted \
-    document by writing Python that builds it with a document library, then \
-    saves it. Use this for docx (python-docx), pptx (python-pptx), xlsx \
-    (openpyxl) and pdf (reportlab). Produce genuinely designed output — title \
-    pages, headings, typography, colours, tables, multi-slide layouts, footers \
-    — not a plain text dump. Your Python MUST save the file to the path in the \
-    CONDUIT_OUTPUT environment variable (it is the requested filename inside \
-    the artifacts directory, which is also the current working directory). \
-    Import only from the standard library plus python-docx, python-pptx, \
-    openpyxl and reportlab. Do not print secrets or perform network/other side \
-    effects.";
+const GENERATE_DOCUMENT_DESC: &str = "Create a REAL, professionally designed \
+    document by writing Python that builds it, then saves it to the path in the \
+    CONDUIT_OUTPUT environment variable (the requested filename inside the \
+    working directory). Supports docx, pptx, xlsx and pdf. The output must look \
+    polished — like something ChatGPT/Claude would produce — NOT a plain text \
+    dump: a cover/title, themed colours, real typography, headings, tables, and \
+    for decks multiple well-laid-out slides with a title slide and section \
+    dividers.\n\n\
+    STRONGLY PREFER the pre-installed `conduit_docgen` helper for docx and \
+    pptx — it gives a consistent, professional theme with almost no code:\n\
+      import conduit_docgen as cd\n\
+      doc = cd.Doc(title='Quarterly Report', subtitle='FY2025 Q2', theme='blue')\n\
+      doc.heading('Overview'); doc.paragraph('...'); doc.bullets(['a','b'])\n\
+      doc.table(['Metric','Value'], [['Revenue','$1.2M']]); doc.callout('Key point'); doc.save()\n\
+      deck = cd.Deck(title='Product Launch', subtitle='2025', theme='blue', footer='Acme Inc')\n\
+      deck.section('Introduction'); deck.bullets('Why now', ['ready','mature'])\n\
+      deck.two_column('Compare','A',['fast'],'B',['robust']); deck.table_slide('Numbers',['Q','Rev'],[['Q1','1.0']])\n\
+      deck.closing('Thank you','q@acme.com'); deck.save()\n\
+    Themes: blue, slate, emerald, plum, amber. You can still access doc.document \
+    / deck.prs for raw python-docx/python-pptx tweaks. For xlsx use openpyxl and \
+    for pdf use reportlab with clear headings/spacing. Build enough real content \
+    to be genuinely useful (several sections or 6+ slides for a deck). Import \
+    only from the standard library, conduit_docgen, python-docx, python-pptx, \
+    openpyxl and reportlab. Do not print secrets or perform network side effects.";
 
 const GENERATE_DIAGRAM_DESC: &str = "Create a hand-styled, fully-laid-out \
     HTML/CSS diagram as a self-contained .html file. Use this when a diagram \
@@ -222,8 +235,11 @@ fn generate_document_parameters() -> Value {
             "code": {
                 "type": "string",
                 "description": "Complete Python source that builds the document \
-                    and saves it to the CONDUIT_OUTPUT path (python-docx / \
-                    python-pptx / openpyxl / reportlab).",
+                    and saves it to the CONDUIT_OUTPUT path. For docx/pptx \
+                    prefer `import conduit_docgen as cd` (pre-installed styled \
+                    toolkit); otherwise use python-docx / python-pptx / openpyxl \
+                    / reportlab directly. Produce a polished, themed result with \
+                    real content — not a plain text dump.",
             }
         },
         "required": ["format", "filename", "code"],

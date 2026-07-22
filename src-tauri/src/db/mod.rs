@@ -67,7 +67,38 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     init_schema(conn)?;
+    migrate_chat_session_flags(conn)?;
+    migrate_artifacts_message_id(conn)?;
     migrate_unc_paths(conn)
+}
+
+/// Add the `starred` / `unread` columns to `chat_sessions` on databases created
+/// before those columns existed. `ALTER TABLE … ADD COLUMN` errors if the
+/// column is already present, so a duplicate-column error is treated as a no-op.
+fn migrate_chat_session_flags(conn: &Connection) -> DbResult<()> {
+    for col in ["starred", "unread"] {
+        let sql = format!("ALTER TABLE chat_sessions ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0");
+        if let Err(e) = conn.execute(&sql, []) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name") {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Add the `chat_message_id` column to `artifacts` on databases created before
+/// it existed, so reopened chats can re-attach artifacts to their message.
+/// A duplicate-column error is treated as a no-op.
+fn migrate_artifacts_message_id(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE artifacts ADD COLUMN chat_message_id INTEGER";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 
 /// Schema = PRD §6.3 verbatim + the `quick_actions` table from CONTRACT.md.
@@ -144,7 +175,9 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           provider TEXT NOT NULL,
           model TEXT NOT NULL,
           created_at INTEGER NOT NULL,
-          last_active_at INTEGER NOT NULL
+          last_active_at INTEGER NOT NULL,
+          starred INTEGER NOT NULL DEFAULT 0,
+          unread INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS chat_messages (
@@ -164,6 +197,7 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         CREATE TABLE IF NOT EXISTS artifacts (
           id TEXT PRIMARY KEY,
           chat_session_id TEXT,
+          chat_message_id INTEGER,
           filename TEXT NOT NULL,
           path TEXT NOT NULL,
           kind TEXT NOT NULL,
@@ -216,13 +250,14 @@ pub use cost::{
 // chat
 pub use chat::{
     add_chat_message, create_chat_session, delete_chat_session, get_chat_session,
-    list_chat_messages, list_chat_sessions, touch_chat_session, update_chat_session_model,
-    update_chat_session_title,
+    list_chat_messages, list_chat_sessions, set_chat_session_starred, set_chat_session_unread,
+    touch_chat_session, update_chat_session_model, update_chat_session_title,
 };
 
 // artifacts
 pub use artifacts::{
-    delete_artifact, delete_expired_artifacts, insert_artifact, list_artifacts,
+    attach_artifacts_to_message, delete_artifact, delete_expired_artifacts, insert_artifact,
+    list_artifacts, list_artifacts_for_chat,
 };
 
 // ---- test helpers ----

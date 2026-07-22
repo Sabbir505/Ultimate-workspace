@@ -14,6 +14,7 @@ pub enum ChatProviderId {
     OpenAI,
     AnthropicCompatible,
     OpenAICompatible,
+    OpenRouter,
 }
 
 /// A base64-encoded image attached to a user message, sent to vision-capable
@@ -536,6 +537,59 @@ impl ChatProvider for OpenAICompatibleProvider {
         let base =
             base_url.ok_or_else(|| "base_url is required for OpenAICompatible".to_string())?;
         Ok(openai_request(client, req, api_key, base))
+    }
+
+    fn parse_sse_chunk(
+        &self,
+        line: &str,
+        buf: &mut String,
+    ) -> Result<(Option<String>, bool), String> {
+        OpenAIProvider.parse_sse_chunk(line, buf)
+    }
+
+    fn parse_usage(&self, buf: &str) -> Option<ChatUsage> {
+        OpenAIProvider.parse_usage(buf)
+    }
+}
+
+// ---- OpenRouter ----
+//
+// OpenRouter (https://openrouter.ai) is an OpenAI-compatible aggregator: the
+// same `/v1/chat/completions` wire format, `Authorization: Bearer` auth, and a
+// `/v1/models` catalogue — but with a FIXED endpoint, so unlike the generic
+// "OpenAI Compatible" provider the user does not have to type a base URL. It's
+// its own first-class provider so its key/model live under their own settings
+// namespace. OpenRouter recommends (optional) `HTTP-Referer` / `X-Title`
+// headers to identify the app; we send them best-effort.
+
+pub struct OpenRouterProvider;
+
+impl OpenRouterProvider {
+    /// `openai_request` appends `/v1/chat/completions`, so the base stops at
+    /// `/api` to yield `https://openrouter.ai/api/v1/chat/completions`.
+    pub const DEFAULT_BASE: &'static str = "https://openrouter.ai/api";
+}
+
+impl ChatProvider for OpenRouterProvider {
+    fn id(&self) -> ChatProviderId {
+        ChatProviderId::OpenRouter
+    }
+
+    fn default_model(&self) -> &'static str {
+        "openai/gpt-4o"
+    }
+
+    fn build_request(
+        &self,
+        client: &reqwest::Client,
+        req: &ChatRequest,
+        api_key: &str,
+        base_url: Option<&str>,
+    ) -> Result<reqwest::RequestBuilder, String> {
+        let base = base_url.unwrap_or(Self::DEFAULT_BASE);
+        Ok(openai_request(client, req, api_key, base)
+            .header("HTTP-Referer", "https://conduit.app")
+            .header("X-Title", "Conduit"))
     }
 
     fn parse_sse_chunk(

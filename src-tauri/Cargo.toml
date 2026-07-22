@@ -36,6 +36,8 @@ futures-util = "0.3"
 tokio = { version = "1", features = ["rt", "process", "time", "sync"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 base64 = "0.22"
+# Text extraction from PDF attachments in the Chat tab.
+pdf-extract = "0.7"
 
 [dev-dependencies]
 tempfile = "3"

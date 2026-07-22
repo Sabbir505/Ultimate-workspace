@@ -169,6 +169,12 @@ pub struct ChatSession {
     pub model: String,
     pub created_at: i64,
     pub last_active_at: i64,
+    /// Starred chats are pinned to the top of the sidebar list.
+    #[serde(default)]
+    pub starred: bool,
+    /// Marked-unread chats show an unread dot in the sidebar.
+    #[serde(default)]
+    pub unread: bool,
 }
 
 /// A file attached to a chat message from the composer. Images are forwarded
@@ -201,6 +207,10 @@ pub struct ChatAttachmentInput {
 pub struct ArtifactRecord {
     pub id: String,
     pub chat_session_id: Option<String>,
+    /// The assistant message this artifact was produced by, set once that turn
+    /// completes. Lets the chat re-attach artifacts to their message bubble
+    /// (inline diagrams / file chips) when a session is reopened.
+    pub chat_message_id: Option<i64>,
     pub filename: String,
     pub path: String,
     /// Lowercase file extension: "docx" | "pptx" | "pdf" | "xlsx" | "html" | ...

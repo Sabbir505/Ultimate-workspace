@@ -889,6 +889,154 @@ pre,
 }
 
 /* Artifact library (chat sidebar) */
+.artifact-lib-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 8px 8px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+  opacity: 0.85;
+  text-align: left;
+}
+.artifact-lib-title:hover {
+  color: var(--text);
+  opacity: 1;
+}
+.artifact-lib-title-count {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+}
+.artifact-lib-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  max-height: 66vh;
+  overflow-y: auto;
+  margin: 4px 0 2px;
+}
+
+/* Search box at the top of the artifacts modal. */
+.artifact-lib-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 4px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.artifact-lib-search-icon {
+  color: var(--text-dim);
+  font-size: 14px;
+}
+.artifact-lib-search input {
+  flex: 1 1 auto;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+
+/* Card grid for rich artifacts (diagrams / documents / images). */
+.artifact-lib-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+  padding: 2px;
+}
+.artifact-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-glass-2);
+  cursor: pointer;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.artifact-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-soft);
+}
+.artifact-card-preview {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 96px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-tint);
+}
+.artifact-card-glyph {
+  font-size: 34px;
+  line-height: 1;
+  color: var(--text-dim);
+}
+.artifact-card-del {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+  opacity: 0;
+}
+.artifact-card:hover .artifact-card-del {
+  opacity: 0.7;
+}
+.artifact-card-del:hover {
+  opacity: 1;
+  color: var(--danger, #ff6b6b);
+}
+.artifact-card-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.artifact-card-meta {
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.artifact-lib-files {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.artifact-lib-section-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 8px 8px 2px;
+}
 .artifact-lib-empty {
   font-size: 11px;
   color: var(--text-dim);
@@ -1508,6 +1656,14 @@ table.kv th {
   justify-content: flex-end;
   gap: 8px;
 }
+/* Wide, solid variant used by the Artifacts library so the card grid is
+   readable (the default glass fill washes cards out over the dimmed app). */
+.modal.modal-artifacts {
+  width: min(860px, 92vw);
+  background: var(--surface-solid);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
 
 /* ---------- Peek panel (§7.9) ---------- */
 .peek-panel {
@@ -1992,6 +2148,7 @@ table.kv th {
   padding: 6px 8px;
 }
 .chat-session-row {
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: 6px;
@@ -2007,16 +2164,113 @@ table.kv th {
   background: var(--accent-soft);
   box-shadow: var(--glass-rim-soft);
 }
-.chat-session-row .chat-session-delete {
+.chat-session-row.unread .chat-session-title {
+  font-weight: 700;
+}
+
+/* Vertical three-dot options button (revealed on hover / when menu open). */
+.chat-session-row .chat-session-menu-btn {
   flex: none;
   opacity: 0;
-  padding: 0 4px;
-  font-size: 10px;
-  transition: opacity 0.15s var(--ease);
+  padding: 0 5px;
+  font-size: 15px;
+  line-height: 1;
+  border-radius: var(--radius-sm);
+  transition: opacity 0.15s var(--ease), background 0.15s var(--ease);
   margin-top: 1px;
 }
-.chat-session-row:hover .chat-session-delete {
+.chat-session-row:hover .chat-session-menu-btn,
+.chat-session-row .chat-session-menu-btn[aria-expanded="true"] {
   opacity: 1;
+}
+.chat-session-row .chat-session-menu-btn:hover {
+  background: var(--surface-3, var(--surface-2));
+}
+
+.chat-session-star-badge {
+  flex: none;
+  font-size: 11px;
+  line-height: 1;
+  margin-top: 3px;
+  color: var(--accent);
+}
+.chat-session-unread-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-top: 5px;
+  background: var(--accent);
+}
+
+/* Spinning ring shown on a chat row while its response is still streaming,
+   so the user can tell which chats are working after navigating away. */
+.chat-session-working {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  margin-top: 3px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  animation: chat-session-spin 0.7s linear infinite;
+}
+@keyframes chat-session-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.chat-session-rename-input {
+  width: 100%;
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 1px 4px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1, var(--surface-2));
+  color: var(--text);
+}
+
+/* Hover/click context menu popover. */
+.chat-session-menu {
+  position: absolute;
+  top: 30px;
+  right: 6px;
+  z-index: 30;
+  min-width: 168px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--surface-1, var(--surface-2));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px);
+  box-shadow: var(--glass-rim-soft), 0 8px 24px -8px rgba(0, 0, 0, 0.5);
+}
+.chat-session-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 12.5px;
+  text-align: left;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.chat-session-menu button:hover {
+  background: var(--surface-2);
+}
+.chat-session-menu button.danger {
+  color: var(--danger, #e5484d);
+}
+.chat-session-menu .chat-menu-icon {
+  width: 15px;
+  text-align: center;
+  opacity: 0.85;
 }
 .chat-session-info {
   flex: 1;
@@ -2189,6 +2443,76 @@ table.kv th {
   overflow-wrap: break-word;
 }
 
+/* Collapsible tool-call / script-writing process cards (Claude-style). */
+.chat-tool {
+  margin: 6px 0;
+}
+.chat-tool-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.chat-tool-toggle:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-3, var(--surface-2));
+}
+.chat-tool-toggle:disabled {
+  cursor: default;
+}
+.chat-tool-icon {
+  font-size: 13px;
+  flex: none;
+}
+.chat-tool-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-tool .chat-thinking-chevron {
+  flex: none;
+}
+.chat-tool.live .chat-tool-toggle {
+  animation: thinking-pulse 1.4s ease-in-out infinite;
+}
+.chat-tool-spinner {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  animation: tool-spin 0.7s linear infinite;
+}
+@keyframes tool-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.chat-tool-body {
+  margin-top: 6px;
+}
+.chat-tool-detail {
+  padding: 8px 12px;
+  border-left: 2px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: break-word;
+  margin-bottom: 6px;
+}
+
 /* Chat mode split (chat left | browser right) */
 .chat-split-left {
   min-width: 0;
@@ -2259,6 +2583,215 @@ table.kv th {
   padding: 2px 7px;
   font-size: 10px;
   border-radius: var(--radius-xs);
+}
+
+/* Live React/JSX preview block (rendered from a ```jsx / ```tsx fence). */
+.chat-jsx-block {
+  margin: 12px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.28);
+  box-shadow: var(--glass-rim-soft);
+}
+:root[data-theme="light"] .chat-jsx-block {
+  background: rgba(255, 255, 255, 0.4);
+}
+.chat-jsx-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+.chat-jsx-lang {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+.chat-jsx-tabs {
+  display: flex;
+  gap: 4px;
+}
+.chat-jsx-tab {
+  padding: 2px 9px;
+  font-size: 11px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.chat-jsx-tab:hover {
+  color: var(--text);
+}
+.chat-jsx-tab.active {
+  background: var(--surface-1, rgba(0, 0, 0, 0.25));
+  border-color: var(--border);
+  color: var(--text);
+}
+.chat-jsx-frame {
+  width: 100%;
+  min-height: 320px;
+  border: none;
+  background: #fff;
+  display: block;
+}
+/* Pane variant fills the preview pane's height. */
+.chat-jsx-block.pane {
+  margin: 0;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+}
+.chat-jsx-block.pane .chat-jsx-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.chat-jsx-block.pane .chat-jsx-frame {
+  flex: 1;
+  height: 100%;
+}
+/* Code view must scroll (both axes) instead of clipping long source. */
+.chat-jsx-code {
+  overflow: auto;
+  max-height: 420px;
+}
+.chat-jsx-block.pane .chat-jsx-code {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+  width: 100%;
+}
+.chat-jsx-block.pane .chat-jsx-code pre,
+.chat-jsx-block.pane .chat-jsx-code code {
+  white-space: pre;
+}
+/* JSX preview chip (opens the pane). */
+.chat-jsx-chip {
+  border-color: var(--accent, #6c8fd6);
+}
+.chat-jsx-loading {
+  padding: 16px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+.chat-jsx-error {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--state-error, #ff6b6b);
+  border-bottom: 1px solid var(--border);
+}
+
+/* Inline vector diagram (generated by `generate_diagram`, rendered in the chat
+   message). A light card holding the sandboxed diagram iframe, sized to the
+   diagram's intrinsic height. */
+.chat-diagram-block {
+  position: relative;
+  margin: 12px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  /* visible (not hidden) so the hover kebab dropdown isn't clipped; the frame
+     rounds its own corners instead. */
+  overflow: visible;
+  background: #fff;
+}
+/* Single hover-revealed vertical three-dot menu, top-right over the diagram. */
+.chat-diagram-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.chat-diagram-block:hover .chat-diagram-actions,
+.chat-diagram-actions:focus-within {
+  opacity: 1;
+}
+.chat-diagram-frame {
+  display: block;
+  width: 100%;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: #fff;
+}
+
+/* Vertical three-dot (kebab) menu for the inline diagram. */
+.artifact-kebab {
+  position: relative;
+}
+.artifact-kebab-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  border-radius: var(--radius-xs);
+  background: rgba(255, 255, 255, 0.95);
+  color: #1b1b1b;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+}
+.artifact-kebab-btn:hover {
+  background: #fff;
+}
+/* High-contrast dark popup so the actions are always legible over the white
+   diagram canvas (which forced the previous var(--text) colour to blend in). */
+.artifact-kebab-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 176px;
+  padding: 5px;
+  background: #23262e;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  z-index: 3;
+}
+.artifact-kebab-item {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  text-align: left;
+  font-size: 13px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: #f2f3f5;
+  cursor: pointer;
+}
+.artifact-kebab-item:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+}
+.artifact-kebab-item:disabled {
+  color: rgba(242, 243, 245, 0.4);
+  cursor: default;
+}
+.chat-diagram-loading,
+.chat-diagram-error {
+  margin: 12px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  color: var(--text-dim);
+  background: var(--surface-2);
+}
+.chat-diagram-error {
+  color: var(--state-error, #ff6b6b);
 }
 
 /* Mermaid diagram block (rendered inline from a ```mermaid fence). No header
@@ -2475,34 +3008,82 @@ table.kv th {
   font-size: 11px;
   color: var(--danger);
 }
+.composer-model-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+}
 .composer-attachments {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   padding-bottom: 4px;
 }
-.composer-attachment-chip {
+/* Compact file attachment card (Claude-style): thumbnail/icon, name + type
+   badge, and a hover-revealed remove button. */
+.composer-attachment-card {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px 8px;
-  font-size: 11px;
+  gap: 9px;
+  max-width: 240px;
+  padding: 7px 10px;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 10px;
   background: var(--surface-2);
   color: var(--text);
 }
+.composer-attachment-thumb {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: var(--surface-1, rgba(255, 255, 255, 0.06));
+  color: var(--text-dim);
+  overflow: hidden;
+}
+.composer-attachment-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.composer-attachment-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.composer-attachment-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.composer-attachment-badge {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
 .composer-attachment-remove {
-  padding: 0 2px;
+  flex: none;
+  margin-left: 2px;
+  width: 18px;
+  height: 18px;
   border: none;
+  border-radius: 50%;
   background: transparent;
   color: var(--text-dim);
-  font-size: 13px;
+  font-size: 15px;
   line-height: 1;
   cursor: pointer;
 }
 .composer-attachment-remove:hover {
   color: var(--text);
+  background: var(--surface-1, rgba(255, 255, 255, 0.08));
 }
 .composer-send-btn {
   width: 30px;
@@ -2626,6 +3207,7 @@ table.kv th {
   flex: 1 1 55%;
 }
 .artifact-preview-pane {
+  position: relative;
   flex: 1 1 45%;
   min-width: 320px;
   display: flex;
@@ -2633,6 +3215,60 @@ table.kv th {
   min-height: 0;
   border-left: 1px solid var(--border);
   background: var(--bg-tint);
+}
+/* Drag handle on the pane's left edge (mirrors the browser pane resizer). */
+.artifact-preview-resizer {
+  position: absolute;
+  top: 0;
+  left: -3px;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 5;
+  touch-action: none;
+}
+.artifact-preview-resizer:hover,
+.artifact-preview-resizer:active {
+  background: linear-gradient(
+    to right,
+    transparent 2px,
+    var(--accent) 2px,
+    var(--accent) 5px,
+    transparent 5px
+  );
+}
+/* Transform-scale zoom: the inner wrapper is scaled, and the scaler reserves a
+   scroll area matching the scaled size so zoom-in pans and zoom-out fits all. */
+.artifact-preview-scaler {
+  position: relative;
+}
+.artifact-preview-zoom {
+  padding: 14px 16px;
+  box-sizing: border-box;
+}
+.artifact-preview-zoom-ctrls {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  margin-right: 4px;
+  padding-right: 6px;
+  border-right: 1px solid var(--border);
+}
+.artifact-preview-zoom-level {
+  min-width: 40px;
+  height: 26px;
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+}
+.artifact-preview-zoom-level:hover {
+  color: var(--text);
+  background: var(--surface-1, var(--surface-2));
 }
 .artifact-preview-header {
   display: flex;
@@ -2753,13 +3389,13 @@ table.kv th {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 14px 16px;
+  padding: 0;
 }
 .artifact-preview-loading,
 .artifact-preview-error {
   color: var(--text-dim);
   font-size: 12.5px;
-  padding: 8px 2px;
+  padding: 14px 18px;
 }
 .artifact-preview-image {
   max-width: 100%;

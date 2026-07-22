@@ -30,11 +30,15 @@ export function Sidebar() {
   // Chat store
   const chatSessions = useChatStore((s) => s.sessions);
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
+  const chatStreaming = useChatStore((s) => s.streaming);
   const chatConfig = useChatStore((s) => s.config);
   const chatLoaded = useChatStore((s) => s.loaded);
   const selectSession = useChatStore((s) => s.selectSession);
   const newChat = useChatStore((s) => s.newChat);
   const deleteChat = useChatStore((s) => s.deleteChat);
+  const renameChat = useChatStore((s) => s.renameChat);
+  const setStarred = useChatStore((s) => s.setStarred);
+  const setUnread = useChatStore((s) => s.setUnread);
   const loadSessions = useChatStore((s) => s.loadSessions);
   const loadConfig = useChatStore((s) => s.loadConfig);
 
@@ -43,8 +47,8 @@ export function Sidebar() {
     // Fall back to a compatible provider when no config is saved yet;
     // sending will prompt the user to configure a key in Settings.
     const provider = chatConfig?.provider ?? "openai_compatible";
-    const model = chatConfig?.model ?? "";
-    void newChat(provider, model).then((session) => {
+    // No model is selected by default — the user must pick one before sending.
+    void newChat(provider, "").then((session) => {
       if (session) setActiveView("chat");
     });
   }, [newChat, chatConfig, setActiveView]);
@@ -62,6 +66,27 @@ export function Sidebar() {
       void deleteChat(id);
     },
     [deleteChat],
+  );
+
+  const handleRenameChat = useCallback(
+    (id: string, title: string) => {
+      void renameChat(id, title);
+    },
+    [renameChat],
+  );
+
+  const handleToggleStar = useCallback(
+    (id: string, starred: boolean) => {
+      void setStarred(id, starred);
+    },
+    [setStarred],
+  );
+
+  const handleSetUnread = useCallback(
+    (id: string, unread: boolean) => {
+      void setUnread(id, unread);
+    },
+    [setUnread],
   );
 
   const switchToMode = useCallback(
@@ -100,6 +125,8 @@ export function Sidebar() {
     title: s.title ?? "Untitled Chat",
     lastActiveAt: s.lastActiveAt,
     lastMessage: undefined,
+    starred: s.starred ?? false,
+    unread: s.unread ?? false,
   }));
 
   return (
@@ -164,6 +191,7 @@ export function Sidebar() {
                 + New Chat
               </button>
             </div>
+            <ArtifactLibrary />
             {chatRowData.length === 0 ? (
               <div className="empty-state">
                 <div>No chats yet</div>
@@ -174,12 +202,15 @@ export function Sidebar() {
                   key={s.id}
                   session={s}
                   active={s.id === activeChatSessionId}
+                  working={s.id in chatStreaming}
                   onSelect={handleSelectChat}
                   onDelete={handleDeleteChat}
+                  onRename={handleRenameChat}
+                  onToggleStar={handleToggleStar}
+                  onSetUnread={handleSetUnread}
                 />
               ))
             )}
-            <ArtifactLibrary />
           </>
         )}
       </div>

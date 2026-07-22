@@ -185,6 +185,7 @@ export const deleteInstalledSkill = (slug: string, kind: string) =>
 export type ChatProvider =
   | "anthropic"
   | "openai"
+  | "openrouter"
   | "anthropic_compatible"
   | "openai_compatible";
 
@@ -195,6 +196,10 @@ export interface ChatSession {
   model: string;
   createdAt: number;
   lastActiveAt: number;
+  /** Starred chats are pinned to the top of the sidebar list. */
+  starred?: boolean;
+  /** Marked-unread chats show an unread dot in the sidebar. */
+  unread?: boolean;
 }
 
 export interface ChatMessageRecord {
@@ -247,6 +252,8 @@ export interface ChatOpenBrowserPayload {
 export interface ArtifactRecord {
   id: string;
   chatSessionId: string | null;
+  /** The assistant message that produced this artifact (null until attributed). */
+  chatMessageId: number | null;
   filename: string;
   path: string;
   kind: string;
@@ -256,6 +263,10 @@ export interface ArtifactRecord {
 
 /** All persisted artifacts, most recent first. */
 export const listArtifacts = () => safeInvoke<ArtifactRecord[]>("list_artifacts", {});
+
+/** Artifacts for one chat session (oldest first) so a reopened chat restores them. */
+export const listChatArtifacts = (chatSessionId: string) =>
+  safeInvoke<ArtifactRecord[]>("list_chat_artifacts", { chatSessionId });
 
 /** Delete an artifact (row + on-disk file). */
 export const deleteArtifact = (id: string) =>
@@ -297,6 +308,14 @@ export const deleteChatSession = (chatSessionId: string) =>
   safeInvoke<void>("delete_chat_session", { chatSessionId });
 export const updateChatSessionTitle = (chatSessionId: string, title: string) =>
   safeInvoke<void>("update_chat_session_title", { chatSessionId, title });
+/** Ask the session's model for a short auto-generated title. Returns the new
+ *  title, or null if one couldn't be produced (e.g. no API key/model). */
+export const generateChatTitle = (chatSessionId: string) =>
+  safeInvoke<string | null>("generate_chat_title", { chatSessionId });
+export const setChatSessionStarred = (chatSessionId: string, starred: boolean) =>
+  safeInvoke<void>("set_chat_session_starred", { chatSessionId, starred });
+export const setChatSessionUnread = (chatSessionId: string, unread: boolean) =>
+  safeInvoke<void>("set_chat_session_unread", { chatSessionId, unread });
 export const getChatMessages = (chatSessionId: string) =>
   safeInvoke<ChatMessageRecord[] | null>("get_chat_messages", { chatSessionId });
 export const touchChatSession = (chatSessionId: string) =>

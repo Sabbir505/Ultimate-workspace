@@ -148,6 +148,9 @@ pub fn run() {
             commands::chat_cmds::create_chat_session,
             commands::chat_cmds::delete_chat_session,
             commands::chat_cmds::update_chat_session_title,
+            commands::chat_cmds::generate_chat_title,
+            commands::chat_cmds::set_chat_session_starred,
+            commands::chat_cmds::set_chat_session_unread,
             commands::chat_cmds::update_chat_session_model,
             commands::chat_cmds::get_chat_messages,
             commands::chat_cmds::touch_chat_session,
@@ -161,6 +164,7 @@ pub fn run() {
             commands::chat_cmds::download_artifact,
             commands::chat_cmds::download_artifacts_zip,
             commands::chat_cmds::list_artifacts,
+            commands::chat_cmds::list_chat_artifacts,
             commands::chat_cmds::delete_artifact,
         ]);
 

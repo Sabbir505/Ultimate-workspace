@@ -66,11 +66,16 @@ const WEB_SEARCH_DESC: &str = "Search the public web for up-to-date information.
 
 const GENERATE_FILE_DESC: &str = "Generate a simple downloadable text-based \
     file/artifact and save it to disk. Best for plain formats: txt, md, csv, \
-    json, html. For a professionally formatted docx/pptx/xlsx/pdf, prefer \
-    generate_document instead. For pptx here, separate slides with a line \
-    containing only '---'; the first line of each slide is its title and \
-    remaining lines are bullets. For xlsx/csv, provide comma-separated rows \
-    (one row per line).";
+    json, html. ALSO use this to save SOURCE CODE: set `format` to the \
+    language (e.g. \"python\", \"javascript\", \"typescript\", \"java\", \
+    \"cpp\", \"csharp\", \"go\", \"rust\", \"ruby\", \"php\", \"sql\", \
+    \"bash\", …) so the file gets the correct extension (main.py, App.java, \
+    main.cpp) — do NOT bolt on a .txt. If you include an extension in \
+    `filename`, make it the real language extension, not .txt. For a \
+    professionally formatted docx/pptx/xlsx/pdf, prefer generate_document \
+    instead. For pptx here, separate slides with a line containing only '---'; \
+    the first line of each slide is its title and remaining lines are bullets. \
+    For xlsx/csv, provide comma-separated rows (one row per line).";
 
 const GENERATE_DOCUMENT_DESC: &str = "Create a REAL, professionally designed \
     document by writing Python that builds it, then saves it to the path in the \
@@ -127,7 +132,7 @@ const GENERATE_DIAGRAM_DESC: &str = "Create a hand-styled, fully-laid-out \
     the top of the SVG, above the flow). Use inline presentation only — no \
     external resources, no scripts, no CDN fonts (rely on system font \
     families). Only fall back to HTML/CSS boxes if a layout genuinely needs \
-    text reflow the SVG can't do. The diagram renders in the artifact panel and \
+    text reflow the SVG can't do. The diagram renders inline in the chat and \
     exports to SVG and PNG. Do NOT emit ```mermaid blocks — Mermaid is not used \
     here; every diagram goes through this tool.";
 
@@ -252,12 +257,16 @@ fn generate_file_parameters() -> Value {
         "properties": {
             "format": {
                 "type": "string",
-                "enum": ["pdf", "docx", "pptx", "xlsx", "csv", "md", "txt", "html", "json"],
-                "description": "The file format to generate.",
+                "description": "The file format: a document format (pdf, docx, \
+                    pptx, xlsx, csv, md, txt, html, json) OR a source-code \
+                    language so the file gets the right extension (python, \
+                    javascript, typescript, jsx, tsx, java, c, cpp, csharp, go, \
+                    rust, ruby, php, swift, kotlin, sql, bash, yaml, css, …).",
             },
             "filename": {
                 "type": "string",
-                "description": "Base file name (extension optional).",
+                "description": "Base file name. Extension optional; if you add \
+                    one, use the real language extension (main.py), not .txt.",
             },
             "title": {
                 "type": "string",

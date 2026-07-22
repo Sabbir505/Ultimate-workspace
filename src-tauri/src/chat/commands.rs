@@ -15,15 +15,23 @@ type CmdResult<T> = Result<T, String>;
 
 // ---- Chat session CRUD ----
 
-/// Removes `<think>…</think>` reasoning blocks (display-only) from a message
-/// before it is sent back to the API as conversation history.
+/// Removes display-only process blocks — `<think>…</think>` reasoning and
+/// `<tool>…</tool>` tool-call narration — from a message before it is sent
+/// back to the API as conversation history.
 fn strip_think_blocks(content: &str) -> String {
+    strip_tagged_blocks(&strip_tagged_blocks(content, "think"), "tool")
+}
+
+/// Strip every `<tag>…</tag>` span (and an unterminated trailing `<tag>…`).
+fn strip_tagged_blocks(content: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
     let mut out = String::with_capacity(content.len());
     let mut rest = content;
-    while let Some(start) = rest.find("<think>") {
+    while let Some(start) = rest.find(&open) {
         out.push_str(&rest[..start]);
-        match rest[start..].find("</think>") {
-            Some(end) => rest = &rest[start + end + "</think>".len()..],
+        match rest[start..].find(&close) {
+            Some(end) => rest = &rest[start + end + close.len()..],
             None => {
                 rest = "";
                 break;
@@ -47,6 +55,17 @@ pub fn list_chat_sessions(db: State<DbState>) -> CmdResult<Vec<ChatSession>> {
 pub fn list_artifacts(db: State<DbState>) -> CmdResult<Vec<ArtifactRecord>> {
     let conn = db.0.lock();
     db::list_artifacts(&conn).map_err(|e| e.to_string())
+}
+
+/// Artifacts belonging to one chat session, oldest first, so a reopened chat
+/// can restore its inline diagrams / file chips.
+#[tauri::command]
+pub fn list_chat_artifacts(
+    chat_session_id: String,
+    db: State<DbState>,
+) -> CmdResult<Vec<ArtifactRecord>> {
+    let conn = db.0.lock();
+    db::list_artifacts_for_chat(&conn, &chat_session_id).map_err(|e| e.to_string())
 }
 
 /// Delete an artifact (DB row + on-disk file).
@@ -113,6 +132,226 @@ pub fn update_chat_session_title(
 ) -> CmdResult<()> {
     let conn = db.0.lock();
     db::update_chat_session_title(&conn, &chat_session_id, &title).map_err(|e| e.to_string())
+}
+
+/// Normalize a model-produced title: first non-empty line, quotes/`Title:`
+/// prefix stripped, capped to a handful of words and characters, no trailing
+/// punctuation.
+fn clean_title(raw: &str) -> String {
+    let line = raw.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    let mut t = line
+        .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+        .trim()
+        .to_string();
+    if let Some(stripped) = t.strip_prefix("Title:").or_else(|| t.strip_prefix("title:")) {
+        t = stripped.trim().to_string();
+    }
+    let words: Vec<&str> = t.split_whitespace().collect();
+    if words.len() > 8 {
+        t = words[..8].join(" ");
+    }
+    if t.chars().count() > 60 {
+        t = t.chars().take(60).collect::<String>().trim().to_string();
+    }
+    t.trim_end_matches(['.', ',', ';', ':']).trim().to_string()
+}
+
+/// One-shot (non-streaming) OpenAI-style completion returning the message text.
+async fn openai_oneshot(
+    client: &reqwest::Client,
+    api_key: &str,
+    base: &str,
+    model: &str,
+    system: &str,
+    user: &str,
+) -> CmdResult<String> {
+    let url = format!("{base}/v1/chat/completions");
+    let body = serde_json::json!({
+        "model": model,
+        "stream": false,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    });
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(v["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string())
+}
+
+/// One-shot (non-streaming) Anthropic-style completion returning the text.
+async fn anthropic_oneshot(
+    client: &reqwest::Client,
+    api_key: &str,
+    base: &str,
+    model: &str,
+    system: &str,
+    user: &str,
+) -> CmdResult<String> {
+    let url = format!("{base}/v1/messages");
+    let body = serde_json::json!({
+        "model": model,
+        "max_tokens": 32,
+        "stream": false,
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+    });
+    let resp = client
+        .post(&url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(v["content"][0]["text"].as_str().unwrap_or("").to_string())
+}
+
+/// Ask the session's model for a short (3–6 word) title summarizing the
+/// conversation so far and persist it. Returns the new title, or `None` when
+/// one couldn't be produced (missing key/model, empty transcript, API error) —
+/// the caller keeps whatever title already exists.
+#[tauri::command]
+pub async fn generate_chat_title(
+    chat_session_id: String,
+    db: State<'_, DbState>,
+) -> CmdResult<Option<String>> {
+    let (provider_str, model_str) = {
+        let conn = db.0.lock();
+        let cs = db::get_chat_session(&conn, &chat_session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "chat session not found".to_string())?;
+        (cs.provider, cs.model)
+    };
+
+    let api_key = {
+        let conn = db.0.lock();
+        secrets::get_chat_api_key(&conn, &provider_str)
+    };
+    let Some(api_key) = api_key else {
+        return Ok(None);
+    };
+
+    let (base_url, model_override) = {
+        let conn = db.0.lock();
+        let base = db::get_setting(&conn, &format!("chat.{provider_str}.base_url"))
+            .map_err(|e| e.to_string())?;
+        let mo = db::get_setting(&conn, &format!("chat.{provider_str}.model"))
+            .map_err(|e| e.to_string())?;
+        (base, mo)
+    };
+    let model = if model_str.trim().is_empty() {
+        match model_override {
+            Some(m) if !m.trim().is_empty() => m,
+            _ => return Ok(None),
+        }
+    } else {
+        model_str
+    };
+
+    // Build a compact transcript from history (length-capped).
+    let transcript = {
+        let conn = db.0.lock();
+        let records = db::list_chat_messages(&conn, &chat_session_id).map_err(|e| e.to_string())?;
+        let mut t = String::new();
+        for r in &records {
+            let text = strip_think_blocks(&r.content);
+            let text = text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let who = if r.role == "user" { "User" } else { "Assistant" };
+            let snippet: String = text.chars().take(600).collect();
+            t.push_str(who);
+            t.push_str(": ");
+            t.push_str(&snippet);
+            t.push('\n');
+            if t.len() > 4000 {
+                break;
+            }
+        }
+        t
+    };
+    if transcript.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let system = "You generate a very short chat title (3 to 6 words) summarizing \
+        the conversation topic. Reply with ONLY the title text — no surrounding \
+        quotes, no trailing punctuation, no 'Title:' prefix.";
+    let user = format!("Conversation:\n{transcript}\nTitle:");
+
+    let base_url = base_url.filter(|b| !b.trim().is_empty());
+    let client = reqwest::Client::new();
+    let raw = match provider_str.as_str() {
+        "openai" => {
+            let base = base_url.as_deref().unwrap_or(OpenAIProvider::DEFAULT_BASE);
+            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
+        }
+        "openrouter" => {
+            let base = base_url.as_deref().unwrap_or(OpenRouterProvider::DEFAULT_BASE);
+            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
+        }
+        "openai_compatible" => {
+            let Some(base) = base_url.as_deref() else {
+                return Ok(None);
+            };
+            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
+        }
+        "anthropic" => {
+            let base = base_url.as_deref().unwrap_or(AnthropicProvider::DEFAULT_BASE);
+            anthropic_oneshot(&client, &api_key, base, &model, system, &user).await?
+        }
+        "anthropic_compatible" => {
+            let Some(base) = base_url.as_deref() else {
+                return Ok(None);
+            };
+            anthropic_oneshot(&client, &api_key, base, &model, system, &user).await?
+        }
+        _ => return Ok(None),
+    };
+
+    let title = clean_title(&raw);
+    if title.is_empty() {
+        return Ok(None);
+    }
+    {
+        let conn = db.0.lock();
+        db::update_chat_session_title(&conn, &chat_session_id, &title).map_err(|e| e.to_string())?;
+    }
+    Ok(Some(title))
+}
+
+#[tauri::command]
+pub fn set_chat_session_starred(
+    chat_session_id: String,
+    starred: bool,
+    db: State<DbState>,
+) -> CmdResult<()> {
+    let conn = db.0.lock();
+    db::set_chat_session_starred(&conn, &chat_session_id, starred).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_chat_session_unread(
+    chat_session_id: String,
+    unread: bool,
+    db: State<DbState>,
+) -> CmdResult<()> {
+    let conn = db.0.lock();
+    db::set_chat_session_unread(&conn, &chat_session_id, unread).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -233,6 +472,7 @@ pub async fn send_chat_message(
         "openai" => ChatProviderId::OpenAI,
         "anthropic_compatible" => ChatProviderId::AnthropicCompatible,
         "openai_compatible" => ChatProviderId::OpenAICompatible,
+        "openrouter" => ChatProviderId::OpenRouter,
         other => return Err(format!("unknown provider: {other}")),
     };
 
@@ -656,7 +896,13 @@ pub fn get_chat_config(provider: Option<String>, db: State<DbState>) -> CmdResul
             })
         }
         None => {
-            for p in ["anthropic", "openai", "anthropic_compatible", "openai_compatible"] {
+            for p in [
+                "anthropic",
+                "openai",
+                "openrouter",
+                "anthropic_compatible",
+                "openai_compatible",
+            ] {
                 if secrets::has_chat_api_key(&conn, p) {
                     let base_url = db::get_setting(&conn, &format!("chat.{p}.base_url"))
                         .map_err(|e| e.to_string())?;
@@ -694,12 +940,17 @@ pub async fn list_chat_models(
     use reqwest;
 
     // Resolve base_url: prefer the passed argument, then the stored setting.
+    // OpenRouter has a fixed endpoint, so it falls back to its default base.
     let base = match base_url {
         Some(url) if !url.trim().is_empty() => url,
         _ => {
             let conn = db.0.lock();
             db::get_setting(&conn, &format!("chat.{provider}.base_url"))
                 .map_err(|e| e.to_string())?
+                .or_else(|| {
+                    (provider == "openrouter")
+                        .then(|| OpenRouterProvider::DEFAULT_BASE.to_string())
+                })
                 .ok_or_else(|| "base_url is required for compatible providers".to_string())?
         }
     };
@@ -721,7 +972,9 @@ pub async fn list_chat_models(
 
     let req = match provider.as_str() {
         "anthropic_compatible" => req.header("x-api-key", key),
-        "openai_compatible" => req.header("Authorization", format!("Bearer {key}")),
+        "openai_compatible" | "openrouter" => {
+            req.header("Authorization", format!("Bearer {key}"))
+        }
         _ => return Err("list_chat_models only supports compatible providers".to_string()),
     };
 
@@ -786,4 +1039,27 @@ pub async fn list_chat_models(
     };
 
     Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_think_blocks_removes_think_and_tool_markup() {
+        let raw = "<think>reasoning</think>Here is the answer.";
+        assert_eq!(strip_think_blocks(raw), "Here is the answer.");
+
+        let with_tool = "<tool>{\"title\":\"Running python code\"}</tool>The result is 42.";
+        assert_eq!(strip_think_blocks(with_tool), "The result is 42.");
+
+        let mixed = "<think>plan</think><tool>{\"title\":\"x\"}</tool>Done.<tool>{\"title\":\"y\"}</tool>";
+        assert_eq!(strip_think_blocks(mixed), "Done.");
+
+        // Unterminated trailing block (mid-stream) is dropped entirely.
+        assert_eq!(strip_think_blocks("Answer.<tool>{\"title\":\"partial"), "Answer.");
+
+        // Plain content is untouched (aside from trimming).
+        assert_eq!(strip_think_blocks("  just text  "), "just text");
+    }
 }

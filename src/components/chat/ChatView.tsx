@@ -37,9 +37,12 @@ export function ChatView() {
   const artifactsByMessage = useChatStore((s) => s.artifactsByMessage);
 
   const activeSession = sessions.find((s) => s.id === activeChatSessionId) ?? null;
+  // Providers whose model list is fetched from a `/v1/models` endpoint
+  // (the compatible providers plus OpenRouter, which has a fixed endpoint).
   const isCompatible =
     activeSession?.provider === "anthropic_compatible" ||
-    activeSession?.provider === "openai_compatible";
+    activeSession?.provider === "openai_compatible" ||
+    activeSession?.provider === "openrouter";
   const [models, setModels] = useState<string[]>([]);
 
   // Fetch the model list for compatible providers (uses the stored key and
@@ -105,7 +108,8 @@ export function ChatView() {
     if (!loaded || !config || activeChatSessionId || autoStarted.current) return;
     autoStarted.current = true;
     const provider = config.provider ?? "openai_compatible";
-    void newChat(provider, config.model ?? "");
+    // No model is selected by default — the user must pick one before sending.
+    void newChat(provider, "");
   }, [loaded, activeChatSessionId, config, newChat]);
 
   // Track whether the user is pinned near the bottom. Runs on every scroll

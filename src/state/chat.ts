@@ -10,11 +10,15 @@ import {
   createChatSession,
   deleteChatApiKey,
   deleteChatSession,
+  generateChatTitle,
   getChatConfig,
   getChatMessages,
+  listChatArtifacts,
   listChatSessions,
   sendChatMessage,
   setChatApiKey,
+  setChatSessionStarred,
+  setChatSessionUnread,
   touchChatSession,
   updateChatSessionModel,
   updateChatSessionTitle,
@@ -26,10 +30,26 @@ import {
 } from "../lib/ipc";
 import { useArtifactsStore } from "./artifacts";
 
+/** Sessions the user manually renamed — never auto-summarize their title. */
+const manuallyRenamed = new Set<string>();
+
 /** A file the model generated during a chat, surfaced as a download chip. */
 export interface ChatArtifact {
   path: string;
   filename: string;
+  /** Inline (non-file) live preview payload — e.g. a ```jsx / ```tsx code
+   *  block from an assistant message. When set, the preview pane renders it
+   *  directly (live React preview) instead of reading `path` from disk. */
+  inline?: { kind: "jsx" | "tsx"; code: string };
+}
+
+/** Float starred chats to the top while preserving the existing (recency)
+ *  order within the starred and unstarred groups. Stable so the optimistic
+ *  "bump active chat to top" reordering still works. */
+function sortSessions(list: ChatSession[]): ChatSession[] {
+  const starred = list.filter((s) => s.starred);
+  const rest = list.filter((s) => !s.starred);
+  return [...starred, ...rest];
 }
 
 interface ChatState {
@@ -65,6 +85,10 @@ interface ChatState {
   newChat: (provider: string, model: string) => Promise<ChatSession | null>;
   deleteChat: (chatSessionId: string) => Promise<void>;
   renameChat: (chatSessionId: string, title: string) => Promise<void>;
+  /** Star/unstar a chat (pins it to the top of the sidebar). */
+  setStarred: (chatSessionId: string, starred: boolean) => Promise<void>;
+  /** Mark a chat read/unread (shows an unread dot in the sidebar). */
+  setUnread: (chatSessionId: string, unread: boolean) => Promise<void>;
   setSessionModel: (chatSessionId: string, model: string) => Promise<void>;
   setEffort: (effort: string) => void;
   setToolsEnabled: (enabled: boolean) => void;
@@ -123,12 +147,46 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   selectSession: async (chatSessionId) => {
-    set({ activeChatSessionId: chatSessionId, error: null, previewArtifact: null });
-    const messages = await getChatMessages(chatSessionId);
+    // Opening a chat clears its unread mark (persisted only if it was set).
+    const wasUnread = get().sessions.find((s) => s.id === chatSessionId)?.unread ?? false;
+    set((s) => ({
+      activeChatSessionId: chatSessionId,
+      error: null,
+      previewArtifact: null,
+      sessions: s.sessions.map((sess) =>
+        sess.id === chatSessionId && sess.unread ? { ...sess, unread: false } : sess,
+      ),
+    }));
+    if (wasUnread) void setChatSessionUnread(chatSessionId, false);
+    const [messages, records] = await Promise.all([
+      getChatMessages(chatSessionId),
+      listChatArtifacts(chatSessionId),
+    ]);
     // Only update messages if the user hasn't clicked away to another session
     // while the fetch was in-flight.
     if (get().activeChatSessionId === chatSessionId) {
       set({ messages: messages ?? [], activeChatSessionId: chatSessionId });
+      // Restore this chat's generated artifacts (inline diagrams / file chips)
+      // so they reappear when the session is reopened. Skip sessions that are
+      // mid-stream — their live buffers are the source of truth.
+      if (records && get().streamingChatSessionId !== chatSessionId) {
+        const list: ChatArtifact[] = records.map((r) => ({
+          path: r.path,
+          filename: r.filename,
+        }));
+        const byMessage: Record<number, ChatArtifact[]> = {};
+        for (const r of records) {
+          if (r.chatMessageId == null) continue;
+          (byMessage[r.chatMessageId] ??= []).push({
+            path: r.path,
+            filename: r.filename,
+          });
+        }
+        set((s) => ({
+          artifacts: { ...s.artifacts, [chatSessionId]: list },
+          artifactsByMessage: { ...s.artifactsByMessage, ...byMessage },
+        }));
+      }
     }
     // Touch and reorder in the background.
     void touchChatSession(chatSessionId).then(async () => {
@@ -140,9 +198,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   newChat: async (provider, model) => {
     const session = await createChatSession(provider, model);
     if (session) {
-      // Insert at the top so it appears immediately in the sidebar.
+      // Insert at the top so it appears immediately in the sidebar (below
+      // any starred chats).
       set((s) => ({
-        sessions: [session, ...s.sessions],
+        sessions: sortSessions([session, ...s.sessions]),
         activeChatSessionId: session.id,
         messages: [],
         error: null,
@@ -165,10 +224,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   renameChat: async (chatSessionId, title) => {
+    manuallyRenamed.add(chatSessionId);
     await updateChatSessionTitle(chatSessionId, title);
     set((s) => ({
       sessions: s.sessions.map((sess) =>
         sess.id === chatSessionId ? { ...sess, title } : sess,
+      ),
+    }));
+  },
+
+  setStarred: async (chatSessionId, starred) => {
+    await setChatSessionStarred(chatSessionId, starred);
+    set((s) => ({
+      sessions: sortSessions(
+        s.sessions.map((sess) =>
+          sess.id === chatSessionId ? { ...sess, starred } : sess,
+        ),
+      ),
+    }));
+  },
+
+  setUnread: async (chatSessionId, unread) => {
+    await setChatSessionUnread(chatSessionId, unread);
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === chatSessionId ? { ...sess, unread } : sess,
       ),
     }));
   },
@@ -195,6 +275,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { activeChatSessionId, messages, sessions, effort, toolsEnabled, codeExecEnabled } =
       get();
     if (!activeChatSessionId) return;
+    // Guard against a double-send while a turn is already streaming for this
+    // session (e.g. a duplicate submit during a slow tool-calling turn), which
+    // would persist the same user message twice.
+    if (get().streamingChatSessionId === activeChatSessionId) return;
 
     // Optimistic bubble mirrors what the backend will persist: the typed text
     // plus a compact note per attachment (the model gets the real content).
@@ -229,7 +313,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const active = sessions.find((s) => s.id === activeChatSessionId);
     if (active) {
       set((s) => ({
-        sessions: [active, ...s.sessions.filter((sess) => sess.id !== activeChatSessionId)],
+        sessions: sortSessions([
+          active,
+          ...s.sessions.filter((sess) => sess.id !== activeChatSessionId),
+        ]),
       }));
     }
 
@@ -293,6 +380,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   onDone: async (chatSessionId, inputTokens, outputTokens, costUsd) => {
+    // A reply that lands while the user is viewing a different chat marks the
+    // finished one unread, so it surfaces in the sidebar.
+    if (get().activeChatSessionId !== chatSessionId) {
+      await setChatSessionUnread(chatSessionId, true);
+    }
     // Clear streaming state for this session.
     set((s) => {
       const nextStreaming = { ...s.streaming };
@@ -307,6 +399,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Refetch messages from the backend to get the final persisted
     // ChatMessageRecord with usage data.
     const messages = await getChatMessages(chatSessionId);
+
+    // Auto-summarize the chat title after the 1st completed turn (a quick
+    // first guess) and refine it after the 3rd, unless the user renamed it.
+    const assistantTurns = (messages ?? []).filter((m) => m.role === "assistant").length;
+    if (
+      !manuallyRenamed.has(chatSessionId) &&
+      (assistantTurns === 1 || assistantTurns === 3)
+    ) {
+      void generateChatTitle(chatSessionId)
+        .then((title) => {
+          if (!title) return;
+          set((s) => ({
+            sessions: sortSessions(
+              s.sessions.map((sess) =>
+                sess.id === chatSessionId ? { ...sess, title } : sess,
+              ),
+            ),
+          }));
+        })
+        .catch(() => {
+          /* best-effort: keep the existing title on failure */
+        });
+    }
+
     if (messages) {
       set((s) => {
         // Attribute the artifacts produced during this turn to the assistant
@@ -334,6 +450,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   onArtifact: ({ chatSessionId, path, filename }) => {
     const artifact = { path, filename };
+    // Diagrams / HTML render inline in the chat message, so they must NOT
+    // hijack the preview pane; other files still auto-open there.
+    const ext = filename.split(".").pop()?.toLowerCase();
+    const rendersInline = ext === "html" || ext === "svg";
     set((s) => {
       const existing = s.artifacts[chatSessionId] ?? [];
       const alreadyTracked = existing.some((a) => a.path === path);
@@ -349,9 +469,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ? s.pendingArtifacts
           : { ...s.pendingArtifacts, [chatSessionId]: [...pending, artifact] },
         // Auto-open the newly generated file in the preview pane when it
-        // belongs to the chat the user is currently viewing.
+        // belongs to the chat the user is currently viewing — except diagrams/
+        // HTML, which render inline in the chat.
         previewArtifact:
-          s.activeChatSessionId === chatSessionId ? artifact : s.previewArtifact,
+          !rendersInline && s.activeChatSessionId === chatSessionId
+            ? artifact
+            : s.previewArtifact,
       };
     });
     // Refresh the persistent Artifacts sidebar library.

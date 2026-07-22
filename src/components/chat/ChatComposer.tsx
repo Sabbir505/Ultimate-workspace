@@ -197,7 +197,11 @@ export function ChatComposer({
     }
   }, []);
 
+  // A model must be explicitly chosen before sending (no default model).
+  const needsModel = model !== undefined && !model.trim();
+
   const handleSend = useCallback(() => {
+    if (needsModel) return;
     const trimmed = content.trim();
     if (!trimmed && attachments.length === 0) return;
     onSend(trimmed, attachments);
@@ -209,18 +213,18 @@ export function ChatComposer({
     if (ta) {
       ta.style.height = "auto";
     }
-  }, [content, attachments, onSend]);
+  }, [content, attachments, onSend, needsModel]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        if (!disabled && !streaming) {
+        if (!disabled && !streaming && !needsModel) {
           handleSend();
         }
       }
     },
-    [disabled, streaming, handleSend],
+    [disabled, streaming, needsModel, handleSend],
   );
 
   const isEmpty = !content.trim() && attachments.length === 0;
@@ -273,6 +277,9 @@ export function ChatComposer({
             +
           </button>
           {attachError && <span className="composer-attach-error">{attachError}</span>}
+          {!attachError && needsModel && (
+            <span className="composer-model-hint">Select a model to start</span>
+          )}
           <div className="composer-footer-spacer" />
           {showSelector && (
             <ModelEffortMenu
@@ -296,8 +303,8 @@ export function ChatComposer({
             <button
               className="composer-send-btn"
               onClick={handleSend}
-              disabled={isEmpty || disabled}
-              title="Send message"
+              disabled={isEmpty || disabled || needsModel}
+              title={needsModel ? "Select a model first" : "Send message"}
               aria-label="Send message"
             >
               ↑

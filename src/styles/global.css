@@ -2523,6 +2523,22 @@ table.kv th {
   flex: 1;
   height: 100%;
 }
+/* Code view must scroll (both axes) instead of clipping long source. */
+.chat-jsx-code {
+  overflow: auto;
+  max-height: 420px;
+}
+.chat-jsx-block.pane .chat-jsx-code {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+  width: 100%;
+}
+.chat-jsx-block.pane .chat-jsx-code pre,
+.chat-jsx-block.pane .chat-jsx-code code {
+  white-space: pre;
+}
 /* JSX preview chip (opens the pane). */
 .chat-jsx-chip {
   border-color: var(--accent, #6c8fd6);
@@ -2543,38 +2559,84 @@ table.kv th {
    message). A light card holding the sandboxed diagram iframe, sized to the
    diagram's intrinsic height. */
 .chat-diagram-block {
+  position: relative;
   margin: 12px 0;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   overflow: hidden;
   background: #fff;
 }
-.chat-diagram-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 8px 6px 12px;
-  background: var(--surface-2);
-  border-bottom: 1px solid var(--border);
+/* Single hover-revealed vertical three-dot menu, top-right over the diagram. */
+.chat-diagram-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  opacity: 0;
+  transition: opacity 0.12s ease;
 }
-.chat-diagram-name {
-  font-size: 11.5px;
-  font-weight: 500;
-  color: var(--text-dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.chat-diagram-body {
-  overflow: auto;
-  background: #fff;
+.chat-diagram-block:hover .chat-diagram-actions,
+.chat-diagram-actions:focus-within {
+  opacity: 1;
 }
 .chat-diagram-frame {
   display: block;
   width: 100%;
   border: none;
   background: #fff;
+}
+
+/* Vertical three-dot (kebab) menu for the inline diagram. */
+.artifact-kebab {
+  position: relative;
+}
+.artifact-kebab-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: rgba(255, 255, 255, 0.92);
+  color: #333;
+  cursor: pointer;
+  box-shadow: var(--glass-rim-soft);
+}
+.artifact-kebab-btn:hover {
+  background: #fff;
+}
+.artifact-kebab-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 168px;
+  padding: 4px;
+  background: var(--surface-1, #1c1f26);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md, 0 8px 24px rgba(0, 0, 0, 0.3));
+  z-index: 3;
+}
+.artifact-kebab-item {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  text-align: left;
+  font-size: 12.5px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.artifact-kebab-item:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+.artifact-kebab-item:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 .chat-diagram-loading,
 .chat-diagram-error {
@@ -2803,6 +2865,10 @@ table.kv th {
 .composer-attach-error {
   font-size: 11px;
   color: var(--danger);
+}
+.composer-model-hint {
+  font-size: 11px;
+  color: var(--text-dim);
 }
 .composer-attachments {
   display: flex;

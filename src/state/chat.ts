@@ -10,6 +10,7 @@ import {
   createChatSession,
   deleteChatApiKey,
   deleteChatSession,
+  generateChatTitle,
   getChatConfig,
   getChatMessages,
   listChatSessions,
@@ -27,6 +28,9 @@ import {
   type ChatSession,
 } from "../lib/ipc";
 import { useArtifactsStore } from "./artifacts";
+
+/** Sessions the user manually renamed — never auto-summarize their title. */
+const manuallyRenamed = new Set<string>();
 
 /** A file the model generated during a chat, surfaced as a download chip. */
 export interface ChatArtifact {
@@ -195,6 +199,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   renameChat: async (chatSessionId, title) => {
+    manuallyRenamed.add(chatSessionId);
     await updateChatSessionTitle(chatSessionId, title);
     set((s) => ({
       sessions: s.sessions.map((sess) =>
@@ -369,6 +374,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Refetch messages from the backend to get the final persisted
     // ChatMessageRecord with usage data.
     const messages = await getChatMessages(chatSessionId);
+
+    // Auto-summarize the chat title after the 1st completed turn (a quick
+    // first guess) and refine it after the 3rd, unless the user renamed it.
+    const assistantTurns = (messages ?? []).filter((m) => m.role === "assistant").length;
+    if (
+      !manuallyRenamed.has(chatSessionId) &&
+      (assistantTurns === 1 || assistantTurns === 3)
+    ) {
+      void generateChatTitle(chatSessionId)
+        .then((title) => {
+          if (!title) return;
+          set((s) => ({
+            sessions: sortSessions(
+              s.sessions.map((sess) =>
+                sess.id === chatSessionId ? { ...sess, title } : sess,
+              ),
+            ),
+          }));
+        })
+        .catch(() => {
+          /* best-effort: keep the existing title on failure */
+        });
+    }
+
     if (messages) {
       set((s) => {
         // Attribute the artifacts produced during this turn to the assistant

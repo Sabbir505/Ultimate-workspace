@@ -24,9 +24,68 @@ pub struct GeneratedFile {
 pub fn is_supported(format: &str) -> bool {
     matches!(
         format,
-        "txt" | "md" | "markdown" | "csv" | "json" | "html"
+        "txt" | "text" | "md" | "markdown" | "csv" | "json" | "html" | "htm"
             | "pdf" | "docx" | "pptx" | "xlsx"
-    )
+    ) || is_code_format(format)
+}
+
+/// Source-code / config formats written verbatim, mapped to a real extension so
+/// a Python file is `.py`, C++ is `.cpp`, etc. (never `foo.py.txt`).
+pub(crate) fn is_code_format(format: &str) -> bool {
+    !matches!(code_ext(format), "")
+}
+
+/// Canonical source extension for a code/config language, or "" if unknown.
+fn code_ext(format: &str) -> &'static str {
+    match format {
+        "python" | "py" => "py",
+        "javascript" | "js" | "node" => "js",
+        "typescript" | "ts" => "ts",
+        "jsx" => "jsx",
+        "tsx" => "tsx",
+        "java" => "java",
+        "c" => "c",
+        "cpp" | "c++" | "cxx" | "cc" => "cpp",
+        "h" | "hpp" => "h",
+        "csharp" | "c#" | "cs" => "cs",
+        "go" | "golang" => "go",
+        "rust" | "rs" => "rs",
+        "ruby" | "rb" => "rb",
+        "php" => "php",
+        "swift" => "swift",
+        "kotlin" | "kt" => "kt",
+        "scala" => "scala",
+        "sh" | "bash" | "shell" | "zsh" => "sh",
+        "sql" => "sql",
+        "yaml" | "yml" => "yaml",
+        "toml" => "toml",
+        "ini" => "ini",
+        "xml" => "xml",
+        "css" => "css",
+        "scss" => "scss",
+        "r" => "r",
+        "dart" => "dart",
+        "lua" => "lua",
+        "perl" | "pl" => "pl",
+        _ => "",
+    }
+}
+
+/// Whether `name` already ends with a recognized code/text extension, so we
+/// keep the author's own extension instead of appending another.
+fn has_known_ext(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    match lower.rsplit_once('.') {
+        Some((_, ext)) => {
+            !matches!(code_ext(ext), "")
+                || matches!(
+                    ext,
+                    "txt" | "md" | "markdown" | "csv" | "json" | "html" | "htm"
+                        | "pdf" | "docx" | "pptx" | "xlsx"
+                )
+        }
+        None => false,
+    }
 }
 
 /// Write `content` (and optional `title`) to a `format` file named `filename`
@@ -38,11 +97,16 @@ pub fn generate(
     title: Option<&str>,
     content: &str,
 ) -> Result<GeneratedFile, String> {
+    if !is_supported(format) {
+        return Err(format!("unsupported format \"{format}\""));
+    }
     std::fs::create_dir_all(dir).map_err(|e| format!("could not create artifacts dir: {e}"))?;
 
     let ext = canonical_ext(format);
     let base = sanitize_filename(filename);
-    let name = if base.to_lowercase().ends_with(&format!(".{ext}")) {
+    let name = if base.to_lowercase().ends_with(&format!(".{ext}")) || has_known_ext(&base) {
+        // Respect an extension the author already chose (e.g. `main.py`) rather
+        // than appending another (which produced `main.py.txt`).
         base
     } else {
         format!("{base}.{ext}")
@@ -50,21 +114,22 @@ pub fn generate(
     let path = dir.join(&name);
 
     match format {
-        "txt" | "md" | "markdown" | "csv" | "json" | "html" => {
+        "pdf" => write_pdf(&path, title, content)?,
+        "docx" => write_docx(&path, title, content)?,
+        "pptx" => write_pptx(&path, title, content)?,
+        "xlsx" => write_xlsx(&path, title, content)?,
+        // Everything else (text, markdown, html, and all code/config
+        // languages) is written verbatim.
+        _ => {
             let body = match (format, title) {
-                ("html", Some(t)) if !t.is_empty() => wrap_html(t, content),
-                ("md", Some(t)) | ("markdown", Some(t)) if !t.is_empty() => {
+                ("html" | "htm", Some(t)) if !t.is_empty() => wrap_html(t, content),
+                ("md" | "markdown", Some(t)) if !t.is_empty() => {
                     format!("# {t}\n\n{content}")
                 }
                 _ => content.to_string(),
             };
             std::fs::write(&path, body).map_err(|e| e.to_string())?;
         }
-        "pdf" => write_pdf(&path, title, content)?,
-        "docx" => write_docx(&path, title, content)?,
-        "pptx" => write_pptx(&path, title, content)?,
-        "xlsx" => write_xlsx(&path, title, content)?,
-        other => return Err(format!("unsupported format \"{other}\"")),
     }
 
     Ok(GeneratedFile {
@@ -76,15 +141,22 @@ pub fn generate(
 pub(crate) fn canonical_ext(format: &str) -> &'static str {
     match format {
         "markdown" | "md" => "md",
-        "txt" => "txt",
+        "txt" | "text" => "txt",
         "csv" => "csv",
         "json" => "json",
-        "html" => "html",
+        "html" | "htm" => "html",
         "pdf" => "pdf",
         "docx" => "docx",
         "pptx" => "pptx",
         "xlsx" => "xlsx",
-        _ => "txt",
+        _ => {
+            let code = code_ext(format);
+            if code.is_empty() {
+                "txt"
+            } else {
+                code
+            }
+        }
     }
 }
 
@@ -561,6 +633,24 @@ mod tests {
         let s = std::fs::read_to_string(&f.path).unwrap();
         assert!(s.contains("# Title"));
         assert!(s.contains("body text"));
+    }
+
+    #[test]
+    fn code_formats_get_language_extension() {
+        let d = tmp();
+        // format = language → correct source extension.
+        let f = generate(d.path(), "python", "main", None, "print('hi')\n").unwrap();
+        assert_eq!(f.filename, "main.py");
+        let f = generate(d.path(), "cpp", "app", None, "int main(){}\n").unwrap();
+        assert_eq!(f.filename, "app.cpp");
+        // An author-supplied language extension is respected, never `foo.py.txt`.
+        let f = generate(d.path(), "txt", "script.py", None, "print(1)\n").unwrap();
+        assert_eq!(f.filename, "script.py");
+        assert!(!f.filename.ends_with(".txt"));
+        // Content is written verbatim for code.
+        let f = generate(d.path(), "javascript", "index", None, "const x = 1;\n").unwrap();
+        assert_eq!(f.filename, "index.js");
+        assert_eq!(std::fs::read_to_string(&f.path).unwrap(), "const x = 1;\n");
     }
 
     #[test]

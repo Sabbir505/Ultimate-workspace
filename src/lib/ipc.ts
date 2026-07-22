@@ -301,6 +301,10 @@ export const deleteChatSession = (chatSessionId: string) =>
   safeInvoke<void>("delete_chat_session", { chatSessionId });
 export const updateChatSessionTitle = (chatSessionId: string, title: string) =>
   safeInvoke<void>("update_chat_session_title", { chatSessionId, title });
+/** Ask the session's model for a short auto-generated title. Returns the new
+ *  title, or null if one couldn't be produced (e.g. no API key/model). */
+export const generateChatTitle = (chatSessionId: string) =>
+  safeInvoke<string | null>("generate_chat_title", { chatSessionId });
 export const setChatSessionStarred = (chatSessionId: string, starred: boolean) =>
   safeInvoke<void>("set_chat_session_starred", { chatSessionId, starred });
 export const setChatSessionUnread = (chatSessionId: string, unread: boolean) =>

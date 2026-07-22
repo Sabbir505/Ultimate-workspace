@@ -58,8 +58,9 @@ export function InlineDiagram({
     if (!preview?.text) return 320;
     const d = svgDims(preview.text);
     if (!d) return 320;
-    // Fit to the diagram's own height; cap very tall ones (they scroll).
-    return Math.min(Math.max(Math.round(d.h) + 28, 120), 640);
+    // Fit to the diagram's own height so it takes the full space it needs and
+    // renders in one piece (no inner scroller).
+    return Math.max(Math.round(d.h) + 8, 120);
   }, [preview]);
 
   if (error) {
@@ -75,25 +76,21 @@ export function InlineDiagram({
 
   return (
     <div className="chat-diagram-block">
-      <div className="chat-diagram-toolbar">
-        <span className="chat-diagram-name" title={artifact.filename}>
-          {artifact.filename}
-        </span>
+      <div className="chat-diagram-actions">
         <ArtifactExportMenu
           preview={preview}
           path={artifact.path}
           filename={artifact.filename}
+          variant="kebab"
         />
       </div>
-      <div className="chat-diagram-body">
-        <iframe
-          className="chat-diagram-frame"
-          title={artifact.filename}
-          sandbox=""
-          srcDoc={preview.text}
-          style={{ height }}
-        />
-      </div>
+      <iframe
+        className="chat-diagram-frame"
+        title={artifact.filename}
+        sandbox=""
+        srcDoc={preview.text}
+        style={{ height }}
+      />
     </div>
   );
 }

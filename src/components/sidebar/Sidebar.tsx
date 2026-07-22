@@ -46,8 +46,8 @@ export function Sidebar() {
     // Fall back to a compatible provider when no config is saved yet;
     // sending will prompt the user to configure a key in Settings.
     const provider = chatConfig?.provider ?? "openai_compatible";
-    const model = chatConfig?.model ?? "";
-    void newChat(provider, model).then((session) => {
+    // No model is selected by default — the user must pick one before sending.
+    void newChat(provider, "").then((session) => {
       if (session) setActiveView("chat");
     });
   }, [newChat, chatConfig, setActiveView]);

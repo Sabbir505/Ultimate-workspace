@@ -17,7 +17,7 @@
 // so it renders identically off-DOM. The capture uses a white canvas (EXPORT_BG)
 // to match the preview iframe — diagrams are authored for a light page, so a
 // dark canvas would produce an unreadable near-black export.
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toPng, toSvg } from "html-to-image";
 import { downloadArtifact } from "../../lib/ipc";
 import type { ArtifactPreview } from "../../lib/ipc";
@@ -27,6 +27,10 @@ interface Props {
   /** The on-disk path + filename, for raw-file download fallback. */
   path: string;
   filename: string;
+  /** "toolbar" (default) shows inline icon buttons; "kebab" shows a single
+   *  vertical three-dot button that opens a text menu (used inline on a
+   *  chat diagram, revealed on hover). */
+  variant?: "toolbar" | "kebab";
 }
 
 /** Canvas background for rasterized exports. Kept in sync with the preview
@@ -37,6 +41,16 @@ const EXPORT_BG = "#ffffff";
 /** Whether a kind supports the raster export menu at all. */
 function supportsRasterExport(kind: ArtifactPreview["kind"]): boolean {
   return kind === "diagram" || kind === "html" || kind === "image";
+}
+
+function KebabIcon() {
+  return (
+    <svg width={16} height={16} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <circle cx="12" cy="5" r="1.8" />
+      <circle cx="12" cy="12" r="1.8" />
+      <circle cx="12" cy="19" r="1.8" />
+    </svg>
+  );
 }
 
 function CopyIcon() {
@@ -227,10 +241,23 @@ async function copyDataUrlToClipboard(dataUrl: string): Promise<void> {
   ]);
 }
 
-export function ArtifactExportMenu({ preview, path, filename }: Props) {
+export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar" }: Props) {
   const [busy, setBusy] = useState<null | "copy" | "png" | "svg">(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const kebabRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (kebabRef.current && !kebabRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [menuOpen]);
 
   if (!supportsRasterExport(preview.kind)) return null;
 
@@ -340,6 +367,59 @@ export function ArtifactExportMenu({ preview, path, filename }: Props) {
       {children}
     </button>
   );
+
+  if (variant === "kebab") {
+    const runAndClose = (fn: () => Promise<void>) => {
+      setMenuOpen(false);
+      void fn();
+    };
+    return (
+      <div className="artifact-kebab" ref={kebabRef}>
+        <button
+          type="button"
+          className="artifact-kebab-btn"
+          title="Diagram actions"
+          aria-label="Diagram actions"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen((o) => !o)}
+        >
+          <KebabIcon />
+        </button>
+        {menuOpen && (
+          <div className="artifact-kebab-menu" role="menu">
+            <button
+              type="button"
+              role="menuitem"
+              className="artifact-kebab-item"
+              disabled={busy !== null}
+              onClick={() => runAndClose(handleDownloadPng)}
+            >
+              Download as PNG
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="artifact-kebab-item"
+              disabled={svgDisabled || busy !== null}
+              onClick={() => runAndClose(handleDownloadSvg)}
+            >
+              Download as SVG
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="artifact-kebab-item"
+              disabled={busy !== null}
+              onClick={() => runAndClose(handleCopy)}
+            >
+              Copy image
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="artifact-export-menu">

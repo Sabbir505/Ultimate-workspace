@@ -921,10 +921,120 @@ pre,
 .artifact-lib-modal {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  max-height: 50vh;
+  gap: 6px;
+  width: min(760px, 82vw);
+  max-height: 66vh;
   overflow-y: auto;
   margin: 4px 0 2px;
+}
+
+/* Search box at the top of the artifacts modal. */
+.artifact-lib-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 4px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.artifact-lib-search-icon {
+  color: var(--text-dim);
+  font-size: 14px;
+}
+.artifact-lib-search input {
+  flex: 1 1 auto;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+
+/* Card grid for rich artifacts (diagrams / documents / images). */
+.artifact-lib-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+  padding: 2px;
+}
+.artifact-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.artifact-card:hover {
+  border-color: var(--accent);
+  background: var(--glass-hover, rgba(255, 255, 255, 0.06));
+}
+.artifact-card-preview {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 96px;
+  border-radius: 8px;
+  background: var(--surface-1, var(--surface-3, rgba(0, 0, 0, 0.25)));
+}
+.artifact-card-glyph {
+  font-size: 34px;
+  line-height: 1;
+  opacity: 0.9;
+}
+.artifact-card-del {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+  opacity: 0;
+}
+.artifact-card:hover .artifact-card-del {
+  opacity: 0.7;
+}
+.artifact-card-del:hover {
+  opacity: 1;
+  color: var(--danger, #ff6b6b);
+}
+.artifact-card-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.artifact-card-meta {
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.artifact-lib-files {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.artifact-lib-section-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 8px 8px 2px;
 }
 .artifact-lib-empty {
   font-size: 11px;

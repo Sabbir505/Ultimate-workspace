@@ -14,8 +14,13 @@ import { ArtifactExportMenu } from "./ArtifactExportMenu";
 /** Injected into the iframe document (display only) so the diagram scales down
  *  to the chat width instead of overflowing with a scrollbar. Export still uses
  *  the untouched `preview.text`, so downloads keep the original resolution. */
+/** Horizontal padding (px per side) inside the iframe so the diagram never
+ *  touches the frame edge; kept in sync with the height calculation below. */
+const FIT_PAD_X = 12;
+const FIT_PAD_Y = 8;
 const FIT_STYLE =
-  "<style>html,body{margin:0;padding:0;overflow:hidden;background:#fff}" +
+  `<style>html{margin:0}body{margin:0;padding:${FIT_PAD_Y}px ${FIT_PAD_X}px;` +
+  "overflow:hidden;background:#fff;display:flex;justify-content:center}" +
   "svg{display:block;max-width:100%;height:auto}</style>";
 
 function withFitStyle(html: string): string {
@@ -94,10 +99,12 @@ export function InlineDiagram({
     if (!preview?.text) return 320;
     const d = svgDims(preview.text);
     if (!d || d.w <= 0) return 320;
-    // The SVG scales down to the container width (max-width:100%), so the
-    // rendered height scales by the same ratio. Never upscale small diagrams.
-    const ratio = containerW > 0 && d.w > containerW ? containerW / d.w : 1;
-    return Math.max(Math.round(d.h * ratio) + 4, 120);
+    // The SVG scales down to the available width (container minus padding) via
+    // max-width:100%, so the rendered height scales by the same ratio. Never
+    // upscale small diagrams. Add the vertical padding back on.
+    const avail = containerW - FIT_PAD_X * 2;
+    const ratio = avail > 0 && d.w > avail ? avail / d.w : 1;
+    return Math.max(Math.round(d.h * ratio) + FIT_PAD_Y * 2, 120);
   }, [preview, containerW]);
 
   if (error) {

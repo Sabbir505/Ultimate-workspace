@@ -16,11 +16,26 @@ pub enum ChatProviderId {
     OpenAICompatible,
 }
 
+/// A base64-encoded image attached to a user message, sent to vision-capable
+/// models as a proper image content part (not inlined as garbled text).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ChatImage {
+    /// e.g. "image/png", "image/jpeg".
+    pub media_type: String,
+    /// Raw base64 (no `data:` prefix).
+    pub data: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// Images attached to this (user) turn. Empty for plain text messages and
+    /// for history rebuilt from the DB (images are only sent for the live turn).
+    #[serde(default)]
+    pub images: Vec<ChatImage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

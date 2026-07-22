@@ -754,6 +754,102 @@ tr:nth-child(even) td{background:#f8fafc}";
     )
 }
 
+/// Extract readable plain text from a supported Office file's bytes, so it can
+/// be handed to the model as message context. Returns `None` for unsupported
+/// formats or unparseable files. `format` is the lowercase extension.
+pub fn doc_to_text(format: &str, bytes: &[u8]) -> Option<String> {
+    let text = match format {
+        "docx" => docx_bytes_to_text(bytes)?,
+        "pptx" => pptx_bytes_to_text(bytes)?,
+        "xlsx" => strip_html_to_text(&xlsx_to_html(bytes)?),
+        _ => return None,
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        // Cap to keep the prompt bounded on very large documents.
+        Some(trimmed.chars().take(50_000).collect())
+    }
+}
+
+fn docx_bytes_to_text(bytes: &[u8]) -> Option<String> {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
+    let mut xml = String::new();
+    zip.by_name("word/document.xml").ok()?.read_to_string(&mut xml).ok()?;
+    let mut out = String::new();
+    for para in elements(&xml, "w:p") {
+        let line = collect_text(para, "w:t");
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    Some(out)
+}
+
+fn pptx_bytes_to_text(bytes: &[u8]) -> Option<String> {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
+    let names: Vec<String> = zip
+        .file_names()
+        .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
+        .map(|n| n.to_string())
+        .collect();
+    let mut ordered = names;
+    ordered.sort();
+    let mut out = String::new();
+    for (i, name) in ordered.iter().enumerate() {
+        let mut xml = String::new();
+        if zip.by_name(name).ok()?.read_to_string(&mut xml).is_err() {
+            continue;
+        }
+        out.push_str(&format!("--- Slide {} ---\n", i + 1));
+        for para in elements(&xml, "a:p") {
+            let line = collect_text(para, "a:t");
+            if !line.trim().is_empty() {
+                out.push_str(line.trim_end());
+                out.push('\n');
+            }
+        }
+        out.push('\n');
+    }
+    Some(out)
+}
+
+/// Strip HTML tags to plain text, turning row/paragraph boundaries into
+/// newlines and cells into tab-separated values, then decode entities.
+fn strip_html_to_text(html: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    let mut tag = String::new();
+    for ch in html.chars() {
+        match ch {
+            '<' => {
+                in_tag = true;
+                tag.clear();
+            }
+            '>' => {
+                in_tag = false;
+                let t = tag.trim_start_matches('/').to_ascii_lowercase();
+                if t.starts_with("tr") || t.starts_with("p") || t.starts_with("div")
+                    || t.starts_with("br") || t.starts_with("h")
+                {
+                    out.push('\n');
+                } else if t.starts_with("td") || t.starts_with("th") {
+                    out.push('\t');
+                }
+            }
+            _ if in_tag => tag.push(ch),
+            _ => out.push(ch),
+        }
+    }
+    let decoded = xml_unescape(&out);
+    decoded
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -790,6 +886,39 @@ mod tests {
         let html = docx_to_html(&std::fs::read(&f.path).unwrap()).unwrap();
         assert!(html.contains("Solar System"), "{html}");
         assert!(html.contains("Eight planets"), "{html}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn doc_to_text_extracts_docx_and_pptx() {
+        let dir = std::env::temp_dir().join(format!("conduit-doctext-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let docx = crate::chat::artifacts::generate(
+            &dir,
+            "docx",
+            "t.docx",
+            None,
+            "Solar System\nEight planets orbit the Sun.",
+        )
+        .unwrap();
+        let text = doc_to_text("docx", &std::fs::read(&docx.path).unwrap()).unwrap();
+        assert!(text.contains("Solar System"), "{text}");
+        assert!(text.contains("Eight planets orbit the Sun."), "{text}");
+        assert!(!text.contains('<'), "should be plain text, got: {text}");
+
+        let pptx = crate::chat::artifacts::generate(
+            &dir,
+            "pptx",
+            "t.pptx",
+            None,
+            "Slide One\nAlpha\n---\nSlide Two\nBeta",
+        )
+        .unwrap();
+        let ptext = doc_to_text("pptx", &std::fs::read(&pptx.path).unwrap()).unwrap();
+        assert!(ptext.contains("Alpha") && ptext.contains("Beta"), "{ptext}");
+
+        assert!(doc_to_text("bogus", b"not a real file").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

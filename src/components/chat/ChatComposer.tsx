@@ -2,19 +2,48 @@
 // top and a footer row below — "+" attach button on the left, model/effort
 // pill and a circular ↑ send button on the right.
 // Enter sends; Shift+Enter inserts a newline.
-// Attached text files are appended to the outgoing message as fenced blocks.
+// Attachments: images are sent as vision input, docx/pptx/xlsx are extracted to
+// text server-side, and plain-text files are inlined into the message.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ModelEffortMenu } from "./ModelEffortMenu";
 
-const MAX_ATTACHMENT_BYTES = 256 * 1024;
+const MAX_TEXT_BYTES = 512 * 1024;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_DOC_BYTES = 10 * 1024 * 1024;
 
-interface Attachment {
+// Attachment kinds map to the backend `ChatAttachmentInput`: images go to the
+// model as vision input, docs are text-extracted server-side, text is inlined.
+export interface ChatAttachment {
   name: string;
-  content: string;
+  kind: "text" | "image" | "doc";
+  /** Decoded text for `kind === "text"`. */
+  text?: string;
+  /** Base64 bytes (no data: prefix) for images and docs. */
+  data?: string;
+  /** MIME type for images, e.g. "image/png". */
+  mediaType?: string;
+  /** File extension for docs: "docx" | "pptx" | "xlsx". */
+  format?: string;
+}
+
+const IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "webp"];
+const DOC_EXTS = ["docx", "pptx", "xlsx"];
+
+/** Read a File's bytes as base64 (without the `data:...;base64,` prefix). */
+function readAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const res = typeof reader.result === "string" ? reader.result : "";
+      resolve(res.slice(res.indexOf(",") + 1));
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
 }
 
 interface Props {
-  onSend: (content: string) => void;
+  onSend: (content: string, attachments: ChatAttachment[]) => void;
   onStop?: () => void;
   streaming: boolean;
   disabled?: boolean;
@@ -42,7 +71,7 @@ export function ChatComposer({
   onEffortChange,
 }: Props) {
   const [content, setContent] = useState("");
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -72,19 +101,44 @@ export function ChatComposer({
     if (!files) return;
     setAttachError(null);
     for (const file of Array.from(files)) {
-      if (file.size > MAX_ATTACHMENT_BYTES) {
-        setAttachError(`${file.name} is too large (max 256 KB)`);
+      const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+      const isImage =
+        IMAGE_EXTS.includes(ext) ||
+        (file.type.startsWith("image/") && file.type !== "image/svg+xml");
+      const isDoc = DOC_EXTS.includes(ext);
+      const limit = isImage ? MAX_IMAGE_BYTES : isDoc ? MAX_DOC_BYTES : MAX_TEXT_BYTES;
+      if (file.size > limit) {
+        setAttachError(`${file.name} is too large (max ${Math.round(limit / 1024 / 1024)} MB)`);
+        continue;
+      }
+      if (ext === "pdf") {
+        setAttachError("PDF text extraction isn't supported yet — convert to DOCX or paste the text.");
         continue;
       }
       try {
-        const text = await file.text();
+        let attachment: ChatAttachment;
+        if (isImage) {
+          attachment = {
+            name: file.name,
+            kind: "image",
+            data: await readAsBase64(file),
+            mediaType: file.type || `image/${ext === "jpg" ? "jpeg" : ext}`,
+          };
+        } else if (isDoc) {
+          attachment = {
+            name: file.name,
+            kind: "doc",
+            data: await readAsBase64(file),
+            format: ext,
+          };
+        } else {
+          attachment = { name: file.name, kind: "text", text: await file.text() };
+        }
         setAttachments((prev) =>
-          prev.some((a) => a.name === file.name)
-            ? prev
-            : [...prev, { name: file.name, content: text }],
+          prev.some((a) => a.name === file.name) ? prev : [...prev, attachment],
         );
       } catch {
-        setAttachError(`Could not read ${file.name} as text`);
+        setAttachError(`Could not read ${file.name}`);
       }
     }
   }, []);
@@ -92,11 +146,7 @@ export function ChatComposer({
   const handleSend = useCallback(() => {
     const trimmed = content.trim();
     if (!trimmed && attachments.length === 0) return;
-    let message = trimmed;
-    for (const a of attachments) {
-      message += `\n\nAttached file: ${a.name}\n\`\`\`\n${a.content}\n\`\`\``;
-    }
-    onSend(message.trim());
+    onSend(trimmed, attachments);
     setContent("");
     setAttachments([]);
     setAttachError(null);

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use base64::Engine;
 use tauri::{AppHandle, State};
 
 use crate::chat::providers::*;
@@ -98,6 +99,61 @@ pub fn touch_chat_session(
 
 // ---- Send / cancel ----
 
+/// Turn composer attachments into (extra message text, vision images). Text
+/// files and extracted document text are appended to the message body so they
+/// persist in history; images are collected separately to be sent as vision
+/// content on the live turn (a short placeholder is added to the body text).
+fn process_attachments(
+    attachments: &[ChatAttachmentInput],
+) -> (String, Vec<ChatImage>) {
+    let mut extra = String::new();
+    let mut images: Vec<ChatImage> = Vec::new();
+    for a in attachments {
+        match a.kind.as_str() {
+            "image" => {
+                if let (Some(data), Some(media_type)) = (&a.data, &a.media_type) {
+                    images.push(ChatImage {
+                        media_type: media_type.clone(),
+                        data: data.clone(),
+                    });
+                    extra.push_str(&format!("\n\n[Attached image: {}]", a.name));
+                }
+            }
+            "doc" => {
+                let extracted = match (&a.data, &a.format) {
+                    (Some(b64), Some(fmt)) => base64::engine::general_purpose::STANDARD
+                        .decode(b64)
+                        .ok()
+                        .and_then(|bytes| {
+                            crate::chat::office::doc_to_text(&fmt.to_ascii_lowercase(), &bytes)
+                        }),
+                    _ => None,
+                };
+                match extracted {
+                    Some(text) => extra.push_str(&format!(
+                        "\n\nAttached file: {}\n```\n{}\n```",
+                        a.name, text
+                    )),
+                    None => extra.push_str(&format!(
+                        "\n\n[Attached file {} could not be read as text.]",
+                        a.name
+                    )),
+                }
+            }
+            _ => {
+                // "text" (and unknown kinds): inline the provided decoded text.
+                if let Some(text) = &a.text {
+                    extra.push_str(&format!(
+                        "\n\nAttached file: {}\n```\n{}\n```",
+                        a.name, text
+                    ));
+                }
+            }
+        }
+    }
+    (extra, images)
+}
+
 /// Persists the user message, looks up provider/model/api_key/base_url for the
 /// session, assembles messages from history, and kicks off streaming.
 #[tauri::command]
@@ -107,10 +163,16 @@ pub async fn send_chat_message(
     effort: Option<String>,
     tools_enabled: Option<bool>,
     code_exec_enabled: Option<bool>,
+    attachments: Option<Vec<ChatAttachmentInput>>,
     chat_state: State<'_, crate::ChatState>,
     db: State<'_, DbState>,
     app: AppHandle,
 ) -> CmdResult<()> {
+    let (extra_text, images) = match &attachments {
+        Some(list) => process_attachments(list),
+        None => (String::new(), Vec::new()),
+    };
+    let content = format!("{content}{extra_text}");
     let chat_mgr = &chat_state.0;
     // 1. Look up the session.
     let (provider_str, model_str) = {
@@ -179,7 +241,7 @@ pub async fn send_chat_message(
     };
 
     // 6. Build message history from DB.
-    let messages = {
+    let mut messages = {
         let conn = db.0.lock();
         let records = db::list_chat_messages(&conn, &chat_session_id)
             .map_err(|e| e.to_string())?;
@@ -189,9 +251,20 @@ pub async fn send_chat_message(
                 role: r.role,
                 // Thinking blocks are for display only — never re-sent.
                 content: strip_think_blocks(&r.content),
+                images: Vec::new(),
             })
             .collect::<Vec<_>>()
     };
+    // Attach this turn's images to the just-persisted user message so they are
+    // sent as vision content. Images are not persisted, so they only apply to
+    // the live turn (not to regenerated/older turns).
+    if !images.is_empty() {
+        if let Some(last) = messages.last_mut() {
+            if last.role == "user" {
+                last.images = images;
+            }
+        }
+    }
 
     let shared_db = Arc::clone(&db.0);
     chat_state.0.send(

@@ -5,7 +5,7 @@
 // as they arrive, then swaps to the final persisted message on chat:done.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../../state/chat";
-import { ChatComposer } from "./ChatComposer";
+import { ChatComposer, type ChatAttachment } from "./ChatComposer";
 import { MessageBubble, TypingIndicator } from "./MessageBubble";
 import { ArtifactPreviewPane } from "./ArtifactPreviewPane";
 import { ArtifactsMenu } from "./ArtifactsMenu";
@@ -146,10 +146,10 @@ export function ChatView() {
     activeStream.length === 0;
 
   const handleSend = useCallback(
-    (content: string) => {
+    (content: string, attachments: ChatAttachment[]) => {
       // Sending always pins to the bottom so the reply is visible.
       stickToBottomRef.current = true;
-      void sendMessage(content);
+      void sendMessage(content, attachments);
     },
     [sendMessage],
   );

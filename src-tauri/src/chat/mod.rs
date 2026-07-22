@@ -867,6 +867,48 @@ fn tool_status_line(name: &str, args: &Value) -> String {
     }
 }
 
+/// Build an OpenAI-style message object, using a multimodal `content` array
+/// when the message carries images (vision), otherwise a plain string.
+fn openai_message_json(m: &ChatMessage) -> Value {
+    if m.images.is_empty() {
+        return json!({ "role": m.role, "content": m.content });
+    }
+    let mut parts: Vec<Value> = Vec::new();
+    if !m.content.is_empty() {
+        parts.push(json!({ "type": "text", "text": m.content }));
+    }
+    for img in &m.images {
+        parts.push(json!({
+            "type": "image_url",
+            "image_url": { "url": format!("data:{};base64,{}", img.media_type, img.data) }
+        }));
+    }
+    json!({ "role": m.role, "content": parts })
+}
+
+/// Build an Anthropic-style message object, using a content-block array with
+/// `image` blocks when the message carries images, otherwise a plain string.
+fn anthropic_message_json(m: &ChatMessage) -> Value {
+    if m.images.is_empty() {
+        return json!({ "role": m.role, "content": m.content });
+    }
+    let mut blocks: Vec<Value> = Vec::new();
+    if !m.content.is_empty() {
+        blocks.push(json!({ "type": "text", "text": m.content }));
+    }
+    for img in &m.images {
+        blocks.push(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": img.media_type,
+                "data": img.data,
+            }
+        }));
+    }
+    json!({ "role": m.role, "content": blocks })
+}
+
 /// Agentic tool loop for OpenAI-style providers (native + compatible).
 ///
 /// Uses non-streaming `/v1/chat/completions` calls: request with `tools`, and
@@ -894,7 +936,7 @@ async fn run_openai_tool_loop(
         }
     }
     for m in &req.messages {
-        messages.push(json!({ "role": m.role, "content": m.content }));
+        messages.push(openai_message_json(m));
     }
 
     let mut full = String::new();
@@ -1081,7 +1123,7 @@ async fn run_anthropic_tool_loop(
     let mut messages: Vec<Value> = req
         .messages
         .iter()
-        .map(|m| json!({ "role": m.role, "content": m.content }))
+        .map(anthropic_message_json)
         .collect();
 
     let mut full = String::new();

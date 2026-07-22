@@ -18,6 +18,7 @@ import {
   touchChatSession,
   updateChatSessionModel,
   updateChatSessionTitle,
+  type ChatAttachmentInput,
   type ChatArtifactPayload,
   type ChatConfigPayload,
   type ChatMessageRecord,
@@ -67,7 +68,7 @@ interface ChatState {
   setEffort: (effort: string) => void;
   setToolsEnabled: (enabled: boolean) => void;
   setCodeExecEnabled: (enabled: boolean) => void;
-  sendMessage: (content: string) => Promise<void>;
+  sendMessage: (content: string, attachments?: ChatAttachmentInput[]) => Promise<void>;
   /** Re-run the last user message to get a fresh assistant response. */
   regenerate: () => Promise<void>;
   cancelStream: () => Promise<void>;
@@ -189,17 +190,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setCodeExecEnabled: (codeExecEnabled) =>
     set(codeExecEnabled ? { codeExecEnabled, toolsEnabled: true } : { codeExecEnabled }),
 
-  sendMessage: async (content) => {
+  sendMessage: async (content, attachments) => {
     const { activeChatSessionId, messages, sessions, effort, toolsEnabled, codeExecEnabled } =
       get();
     if (!activeChatSessionId) return;
+
+    // Optimistic bubble mirrors what the backend will persist: the typed text
+    // plus a compact note per attachment (the model gets the real content).
+    const attachNote = (attachments ?? [])
+      .map((a) =>
+        a.kind === "image" ? `\n\n[Attached image: ${a.name}]` : `\n\n[Attached file: ${a.name}]`,
+      )
+      .join("");
+    const displayContent = `${content}${attachNote}`;
 
     // Optimistically append the user message.
     const userMsg: ChatMessageRecord = {
       id: -Date.now(), // temporary negative id
       chatSessionId: activeChatSessionId,
       role: "user",
-      content,
+      content: displayContent,
       inputTokens: null,
       outputTokens: null,
       costUsd: null,
@@ -228,6 +238,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       effort || undefined,
       toolsEnabled,
       codeExecEnabled,
+      attachments,
     );
   },
 

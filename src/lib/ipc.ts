@@ -283,12 +283,21 @@ export const getChatMessages = (chatSessionId: string) =>
   safeInvoke<ChatMessageRecord[] | null>("get_chat_messages", { chatSessionId });
 export const touchChatSession = (chatSessionId: string) =>
   safeInvoke<void>("touch_chat_session", { chatSessionId });
+export interface ChatAttachmentInput {
+  name: string;
+  kind: "text" | "image" | "doc";
+  text?: string;
+  data?: string;
+  mediaType?: string;
+  format?: string;
+}
 export const sendChatMessage = (
   chatSessionId: string,
   content: string,
   effort?: string,
   toolsEnabled?: boolean,
   codeExecEnabled?: boolean,
+  attachments?: ChatAttachmentInput[],
 ) =>
   safeInvoke<void>("send_chat_message", {
     chatSessionId,
@@ -296,6 +305,7 @@ export const sendChatMessage = (
     effort: effort ?? null,
     toolsEnabled: toolsEnabled ?? false,
     codeExecEnabled: codeExecEnabled ?? false,
+    attachments: attachments ?? null,
   });
 export const updateChatSessionModel = (chatSessionId: string, model: string) =>
   safeInvoke<void>("update_chat_session_model", { chatSessionId, model });

@@ -108,18 +108,23 @@ const GENERATE_DOCUMENT_DESC: &str = "Create a REAL, professionally designed \
     Do not print secrets or perform network side effects.";
 
 const GENERATE_DIAGRAM_DESC: &str = "Create a hand-styled, fully-laid-out \
-    HTML/CSS diagram as a self-contained .html file. Use this when a diagram \
-    needs deliberate visual hierarchy that Mermaid's auto-layout can't express \
-    — nested groupings/containers, a 2-D grid of sub-nodes, mixed box sizes, a \
+    diagram as a self-contained .html file. Use this when a diagram needs \
+    deliberate visual hierarchy that Mermaid's auto-layout can't express — \
+    nested groupings/containers, a 2-D grid of sub-nodes, mixed box sizes, a \
     bold-label-plus-dim-description two-line node, solid primary-flow arrows \
     with a dashed feedback line looping back, and consistent color-per-category. \
-    Emit ONE complete HTML document in the `html` argument: a title placed \
-    ABOVE the flow (not inside it), a styled <body> with inline <style> (no \
-    external resources, no scripts), semantic node boxes, connector arrows \
-    (CSS/SVG), and a legend if colors carry meaning. The diagram is rendered \
-    in the artifact panel and can be exported to PNG. Do NOT use this for \
-    simple flowcharts/sequences that Mermaid handles well — those go in a \
-    ```mermaid block in your text response instead.";
+    STRONGLY PREFER authoring the diagram as ONE root inline <svg> (with an \
+    explicit xmlns, viewBox and width/height): draw nodes as <rect rx=..>, \
+    labels as <text>, and connectors as <path>/<line> with an arrowhead \
+    <marker>. Pure SVG is true vector, so it exports crisply to BOTH SVG and \
+    PNG. Wrap that single <svg> in a minimal complete HTML document in the \
+    `html` argument (a <body> holding the <svg>; put the title as a <text> at \
+    the top of the SVG, above the flow). Use inline presentation only — no \
+    external resources, no scripts, no CDN fonts (rely on system font \
+    families). Only fall back to HTML/CSS boxes if a layout genuinely needs \
+    text reflow the SVG can't do. The diagram renders in the artifact panel and \
+    exports to SVG and PNG. Do NOT use this for simple flowcharts/sequences that \
+    Mermaid handles well — those go in a ```mermaid block in your text response.";
 
 const FETCH_URL_DESC: &str = "Fetch a specific web page by URL and return its \
     readable text content (HTML stripped). Use to read an article or page the \

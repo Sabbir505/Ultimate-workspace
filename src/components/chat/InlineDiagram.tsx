@@ -6,10 +6,27 @@
 // to the diagram's intrinsic height so it takes only the vertical space it
 // truly needs (tall diagrams are capped and scroll). A compact toolbar carries
 // the same Copy / PNG / SVG export controls the pane offered.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { readArtifactPreview, type ArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { ArtifactExportMenu } from "./ArtifactExportMenu";
+
+/** Injected into the iframe document (display only) so the diagram scales down
+ *  to the chat width instead of overflowing with a scrollbar. Export still uses
+ *  the untouched `preview.text`, so downloads keep the original resolution. */
+const FIT_STYLE =
+  "<style>html,body{margin:0;padding:0;overflow:hidden;background:#fff}" +
+  "svg{display:block;max-width:100%;height:auto}</style>";
+
+function withFitStyle(html: string): string {
+  if (/<head[^>]*>/i.test(html)) {
+    return html.replace(/<head[^>]*>/i, (m) => m + FIT_STYLE);
+  }
+  if (/<html[^>]*>/i.test(html)) {
+    return html.replace(/<html[^>]*>/i, (m) => `${m}<head>${FIT_STYLE}</head>`);
+  }
+  return FIT_STYLE + html;
+}
 
 /** Intrinsic pixel size of the diagram's root <svg>, from width/height or the
  *  viewBox. Used to fit the inline frame to the diagram's real dimensions. */
@@ -37,6 +54,8 @@ export function InlineDiagram({
 }) {
   const [preview, setPreview] = useState<ArtifactPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const blockRef = useRef<HTMLDivElement>(null);
+  const [containerW, setContainerW] = useState(0);
 
   useEffect(() => {
     let stale = false;
@@ -54,14 +73,32 @@ export function InlineDiagram({
     };
   }, [artifact.path]);
 
+  // Track the rendered width so we can size the frame to the diagram's height
+  // AFTER it's been scaled down to fit (max-width:100%) — no inner scroller.
+  useEffect(() => {
+    const el = blockRef.current;
+    if (!el) return;
+    const update = () => setContainerW(el.clientWidth);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [preview]);
+
+  const srcDoc = useMemo(
+    () => (preview?.text != null ? withFitStyle(preview.text) : ""),
+    [preview],
+  );
+
   const height = useMemo(() => {
     if (!preview?.text) return 320;
     const d = svgDims(preview.text);
-    if (!d) return 320;
-    // Fit to the diagram's own height so it takes the full space it needs and
-    // renders in one piece (no inner scroller).
-    return Math.max(Math.round(d.h) + 8, 120);
-  }, [preview]);
+    if (!d || d.w <= 0) return 320;
+    // The SVG scales down to the container width (max-width:100%), so the
+    // rendered height scales by the same ratio. Never upscale small diagrams.
+    const ratio = containerW > 0 && d.w > containerW ? containerW / d.w : 1;
+    return Math.max(Math.round(d.h * ratio) + 4, 120);
+  }, [preview, containerW]);
 
   if (error) {
     return <div className="chat-diagram-error">Could not load diagram: {error}</div>;
@@ -75,7 +112,7 @@ export function InlineDiagram({
   }
 
   return (
-    <div className="chat-diagram-block">
+    <div className="chat-diagram-block" ref={blockRef}>
       <div className="chat-diagram-actions">
         <ArtifactExportMenu
           preview={preview}
@@ -88,7 +125,7 @@ export function InlineDiagram({
         className="chat-diagram-frame"
         title={artifact.filename}
         sandbox=""
-        srcDoc={preview.text}
+        srcDoc={srcDoc}
         style={{ height }}
       />
     </div>

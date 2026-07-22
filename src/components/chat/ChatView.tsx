@@ -28,10 +28,6 @@ export function ChatView() {
   const setSessionModel = useChatStore((s) => s.setSessionModel);
   const effort = useChatStore((s) => s.effort);
   const setEffort = useChatStore((s) => s.setEffort);
-  const toolsEnabled = useChatStore((s) => s.toolsEnabled);
-  const setToolsEnabled = useChatStore((s) => s.setToolsEnabled);
-  const codeExecEnabled = useChatStore((s) => s.codeExecEnabled);
-  const setCodeExecEnabled = useChatStore((s) => s.setCodeExecEnabled);
   const diagramMode = useChatStore((s) => s.diagramMode);
   const setDiagramMode = useChatStore((s) => s.setDiagramMode);
   const config = useChatStore((s) => s.config);
@@ -253,10 +249,6 @@ export function ChatView() {
         effort={effort}
         onModelChange={handleModelChange}
         onEffortChange={setEffort}
-        toolsEnabled={toolsEnabled}
-        onToolsToggle={setToolsEnabled}
-        codeExecEnabled={codeExecEnabled}
-        onCodeExecToggle={setCodeExecEnabled}
         diagramMode={diagramMode}
         onDiagramModeChange={setDiagramMode}
       />

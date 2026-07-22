@@ -6,45 +6,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ModelEffortMenu } from "./ModelEffortMenu";
 
-function GlobeIcon() {
-  return (
-    <svg
-      width={13}
-      height={13}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <circle cx="12" cy="12" r="9" />
-      <path d="M3 12h18" />
-      <path d="M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18" />
-    </svg>
-  );
-}
-
-function CodeIcon() {
-  return (
-    <svg
-      width={13}
-      height={13}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <polyline points="16 18 22 12 16 6" />
-      <polyline points="8 6 2 12 8 18" />
-    </svg>
-  );
-}
-
 const MAX_ATTACHMENT_BYTES = 256 * 1024;
 
 interface Attachment {
@@ -66,12 +27,6 @@ interface Props {
   effort?: string;
   onModelChange?: (model: string) => void;
   onEffortChange?: (effort: string) => void;
-  /** Whether tool use (web search, …) is enabled for this chat. */
-  toolsEnabled?: boolean;
-  onToolsToggle?: (enabled: boolean) => void;
-  /** Whether code execution (opt-in, security-sensitive) is enabled. */
-  codeExecEnabled?: boolean;
-  onCodeExecToggle?: (enabled: boolean) => void;
   /** Diagram mode override: "" = Auto (model decides), "quick" = Mermaid, "designed" = generate_diagram. */
   diagramMode?: "" | "quick" | "designed";
   onDiagramModeChange?: (mode: "" | "quick" | "designed") => void;
@@ -88,10 +43,6 @@ export function ChatComposer({
   effort,
   onModelChange,
   onEffortChange,
-  toolsEnabled,
-  onToolsToggle,
-  codeExecEnabled,
-  onCodeExecToggle,
   diagramMode,
   onDiagramModeChange,
 }: Props) {
@@ -228,46 +179,6 @@ export function ChatComposer({
           >
             +
           </button>
-          {onToolsToggle && (
-            <button
-              type="button"
-              className={`composer-tools-btn${toolsEnabled ? " active" : ""}`}
-              title={
-                toolsEnabled
-                  ? "Web search enabled — click to disable"
-                  : "Enable web search & tools"
-              }
-              aria-label="Toggle web search and tools"
-              aria-pressed={toolsEnabled ? true : false}
-              onClick={(e) => {
-                e.currentTarget.blur();
-                onToolsToggle(!toolsEnabled);
-              }}
-            >
-              <GlobeIcon />
-              <span>Search</span>
-            </button>
-          )}
-          {onCodeExecToggle && (
-            <button
-              type="button"
-              className={`composer-tools-btn${codeExecEnabled ? " active" : ""}`}
-              title={
-                codeExecEnabled
-                  ? "Code execution enabled — runs code locally with a time limit. Click to disable."
-                  : "Enable code execution (runs model-written code locally — use with care)"
-              }
-              aria-label="Toggle code execution"
-              aria-pressed={codeExecEnabled ? true : false}
-              onClick={(e) => {
-                e.currentTarget.blur();
-                onCodeExecToggle(!codeExecEnabled);
-              }}
-            >
-              <CodeIcon />
-              <span>Code</span>
-            </button>
-          )}
           {onDiagramModeChange && (
             <div
               className="composer-diagram-toggle"

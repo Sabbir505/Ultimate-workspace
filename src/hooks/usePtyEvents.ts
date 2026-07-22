@@ -83,8 +83,10 @@ export function usePtyEvents(): void {
 
     unlistens.push(
       safeListen<BrowserUrlDetectedPayload>("browser:url_detected", ({ paneId, url }) => {
-        // When a CLI agent prints a URL, open it in the built-in browser
-        // instead of the system browser. Create a browser pane if none exists.
+        // The backend only emits this for LOCAL dev-server / preview URLs
+        // (localhost, 127.x, 0.0.0.0, *.local) — remote URLs printed by CLIs
+        // no longer hijack the browser. Open the preview in the built-in
+        // browser pane, reusing an existing one or creating one if none.
         const panesStore = usePanesStore.getState();
         const existing = panesStore.panes.find((p) => p.data.kind === "browser");
         if (existing) {

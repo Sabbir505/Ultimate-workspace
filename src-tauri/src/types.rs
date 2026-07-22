@@ -171,6 +171,44 @@ pub struct ChatSession {
     pub last_active_at: i64,
 }
 
+/// A file attached to a chat message from the composer. Images are forwarded
+/// to the model as vision input; documents (docx/pptx/xlsx) are extracted to
+/// text server-side; plain-text files carry their decoded text directly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatAttachmentInput {
+    pub name: String,
+    /// "image" | "text" | "doc".
+    pub kind: String,
+    /// Decoded text for `kind == "text"`.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Base64 bytes for `kind == "image"` or `kind == "doc"` (no data: prefix).
+    #[serde(default)]
+    pub data: Option<String>,
+    /// MIME type for images, e.g. "image/png".
+    #[serde(default)]
+    pub media_type: Option<String>,
+    /// File extension/format for docs, e.g. "docx", "pptx", "xlsx", "pdf".
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+/// A generated artifact (file/diagram) surfaced in the Artifacts sidebar.
+/// Persisted so it survives restarts; auto-deleted after 30 days.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactRecord {
+    pub id: String,
+    pub chat_session_id: Option<String>,
+    pub filename: String,
+    pub path: String,
+    /// Lowercase file extension: "docx" | "pptx" | "pdf" | "xlsx" | "html" | ...
+    pub kind: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessageRecord {

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use base64::Engine;
 use tauri::{AppHandle, State};
 
 use crate::chat::providers::*;
@@ -37,6 +38,42 @@ fn strip_think_blocks(content: &str) -> String {
 pub fn list_chat_sessions(db: State<DbState>) -> CmdResult<Vec<ChatSession>> {
     let conn = db.0.lock();
     db::list_chat_sessions(&conn).map_err(|e| e.to_string())
+}
+
+// ---- Artifacts (30-day retention) ----
+
+/// All persisted artifacts, most recent first.
+#[tauri::command]
+pub fn list_artifacts(db: State<DbState>) -> CmdResult<Vec<ArtifactRecord>> {
+    let conn = db.0.lock();
+    db::list_artifacts(&conn).map_err(|e| e.to_string())
+}
+
+/// Delete an artifact (DB row + on-disk file).
+#[tauri::command]
+pub fn delete_artifact(id: String, db: State<DbState>) -> CmdResult<()> {
+    let path = {
+        let conn = db.0.lock();
+        db::delete_artifact(&conn, &id).map_err(|e| e.to_string())?
+    };
+    if let Some(path) = path {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
+/// Sweep artifacts past their 30-day expiry, removing both rows and files.
+/// Called on startup; returns the number of artifacts removed.
+pub fn sweep_expired_artifacts(db: &Arc<parking_lot::Mutex<rusqlite::Connection>>) -> usize {
+    let paths = {
+        let conn = db.lock();
+        db::delete_expired_artifacts(&conn).unwrap_or_default()
+    };
+    let n = paths.len();
+    for p in paths {
+        let _ = std::fs::remove_file(p);
+    }
+    n
 }
 
 #[tauri::command]
@@ -98,6 +135,61 @@ pub fn touch_chat_session(
 
 // ---- Send / cancel ----
 
+/// Turn composer attachments into (extra message text, vision images). Text
+/// files and extracted document text are appended to the message body so they
+/// persist in history; images are collected separately to be sent as vision
+/// content on the live turn (a short placeholder is added to the body text).
+fn process_attachments(
+    attachments: &[ChatAttachmentInput],
+) -> (String, Vec<ChatImage>) {
+    let mut extra = String::new();
+    let mut images: Vec<ChatImage> = Vec::new();
+    for a in attachments {
+        match a.kind.as_str() {
+            "image" => {
+                if let (Some(data), Some(media_type)) = (&a.data, &a.media_type) {
+                    images.push(ChatImage {
+                        media_type: media_type.clone(),
+                        data: data.clone(),
+                    });
+                    extra.push_str(&format!("\n\n[Attached image: {}]", a.name));
+                }
+            }
+            "doc" => {
+                let extracted = match (&a.data, &a.format) {
+                    (Some(b64), Some(fmt)) => base64::engine::general_purpose::STANDARD
+                        .decode(b64)
+                        .ok()
+                        .and_then(|bytes| {
+                            crate::chat::office::doc_to_text(&fmt.to_ascii_lowercase(), &bytes)
+                        }),
+                    _ => None,
+                };
+                match extracted {
+                    Some(text) => extra.push_str(&format!(
+                        "\n\nAttached file: {}\n```\n{}\n```",
+                        a.name, text
+                    )),
+                    None => extra.push_str(&format!(
+                        "\n\n[Attached file {} could not be read as text.]",
+                        a.name
+                    )),
+                }
+            }
+            _ => {
+                // "text" (and unknown kinds): inline the provided decoded text.
+                if let Some(text) = &a.text {
+                    extra.push_str(&format!(
+                        "\n\nAttached file: {}\n```\n{}\n```",
+                        a.name, text
+                    ));
+                }
+            }
+        }
+    }
+    (extra, images)
+}
+
 /// Persists the user message, looks up provider/model/api_key/base_url for the
 /// session, assembles messages from history, and kicks off streaming.
 #[tauri::command]
@@ -107,11 +199,16 @@ pub async fn send_chat_message(
     effort: Option<String>,
     tools_enabled: Option<bool>,
     code_exec_enabled: Option<bool>,
-    diagram_mode: Option<String>,
+    attachments: Option<Vec<ChatAttachmentInput>>,
     chat_state: State<'_, crate::ChatState>,
     db: State<'_, DbState>,
     app: AppHandle,
 ) -> CmdResult<()> {
+    let (extra_text, images) = match &attachments {
+        Some(list) => process_attachments(list),
+        None => (String::new(), Vec::new()),
+    };
+    let content = format!("{content}{extra_text}");
     let chat_mgr = &chat_state.0;
     // 1. Look up the session.
     let (provider_str, model_str) = {
@@ -179,27 +276,8 @@ pub async fn send_chat_message(
         crate::chat::build_system_prompt(provider_id.clone(), &model, custom.as_deref(), &skills, tools_on)
     };
 
-    // 5c. Append a diagram-mode bias directive when the user has explicitly
-    // chosen "quick" or "designed" (empty = model decides).
-    let system = match diagram_mode.as_deref() {
-        Some("quick") => {
-            let directive = "\n\n## Diagram mode (user override)\n\
-            The user wants a QUICK diagram: emit it as a ```mermaid fenced block \
-            in your text response. Do not call generate_diagram this turn.";
-            system.map(|s| s + directive).or_else(|| Some(directive.trim().to_string()))
-        }
-        Some("designed") => {
-            let directive = "\n\n## Diagram mode (user override)\n\
-            The user wants a DESIGNED diagram: call the generate_diagram tool to \
-            produce a hand-styled HTML/CSS diagram. Follow the diagram-html-svg \
-            skill's structural rules. Do not use a mermaid block this turn.";
-            system.map(|s| s + directive).or_else(|| Some(directive.trim().to_string()))
-        }
-        _ => system,
-    }; // No directive for "" or anything else — model decides.
-
     // 6. Build message history from DB.
-    let messages = {
+    let mut messages = {
         let conn = db.0.lock();
         let records = db::list_chat_messages(&conn, &chat_session_id)
             .map_err(|e| e.to_string())?;
@@ -209,9 +287,20 @@ pub async fn send_chat_message(
                 role: r.role,
                 // Thinking blocks are for display only — never re-sent.
                 content: strip_think_blocks(&r.content),
+                images: Vec::new(),
             })
             .collect::<Vec<_>>()
     };
+    // Attach this turn's images to the just-persisted user message so they are
+    // sent as vision content. Images are not persisted, so they only apply to
+    // the live turn (not to regenerated/older turns).
+    if !images.is_empty() {
+        if let Some(last) = messages.last_mut() {
+            if last.role == "user" {
+                last.images = images;
+            }
+        }
+    }
 
     let shared_db = Arc::clone(&db.0);
     chat_state.0.send(
@@ -295,235 +384,6 @@ fn base64_encode(data: &[u8]) -> String {
     out
 }
 
-/// Minimal XML entity unescape (order matters: `&amp;` last).
-fn xml_unescape(s: &str) -> String {
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
-}
-
-/// Escape text for safe embedding in the HTML we build for doc/ppt previews.
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
-/// Concatenate the inner text of every `<tag …>…</close>` occurrence in `chunk`
-/// (used to pull `<w:t>`/`<a:t>` run text out of Office XML).
-fn collect_tag_text(chunk: &str, open: &str, close: &str) -> String {
-    let mut out = String::new();
-    let mut rest = chunk;
-    while let Some(i) = rest.find(open) {
-        let after = &rest[i + open.len()..];
-        // Only match a real element start: `<w:t>` or `<w:t …>` (not `<w:tbl>`).
-        if !(after.starts_with('>') || after.starts_with(' ') || after.starts_with('/')) {
-            rest = after;
-            continue;
-        }
-        if let Some(gt) = after.find('>') {
-            let content = &after[gt + 1..];
-            if let Some(ce) = content.find(close) {
-                out.push_str(&content[..ce]);
-                rest = &content[ce + close.len()..];
-                continue;
-            }
-        }
-        break;
-    }
-    xml_unescape(&out)
-}
-
-/// Split an Office XML string into element slices that start with `<p>` where
-/// `p` is the paragraph tag (`w:p` for docx, `a:p` for pptx). Matches only real
-/// paragraph starts (`<w:p>` / `<w:p …>`), never `<w:pPr>`/`<w:pStyle>`.
-fn split_paragraphs<'a>(xml: &'a str, tag: &str) -> Vec<&'a str> {
-    let exact = format!("<{tag}>");
-    let with_attrs = format!("<{tag} ");
-    let mut starts = Vec::new();
-    let mut idx = 0;
-    let needle = format!("<{tag}");
-    while let Some(rel) = xml[idx..].find(&needle) {
-        let abs = idx + rel;
-        let rest = &xml[abs..];
-        if rest.starts_with(&exact) || rest.starts_with(&with_attrs) {
-            starts.push(abs);
-        }
-        idx = abs + needle.len();
-    }
-    let mut out = Vec::new();
-    for (k, &s) in starts.iter().enumerate() {
-        let end = starts.get(k + 1).copied().unwrap_or(xml.len());
-        out.push(&xml[s..end]);
-    }
-    out
-}
-
-/// Render a docx `word/document.xml` as simple HTML (headings + paragraphs).
-fn docx_to_html(bytes: &[u8]) -> Option<String> {
-    use std::io::Read;
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
-    let mut xml = String::new();
-    zip.by_name("word/document.xml")
-        .ok()?
-        .read_to_string(&mut xml)
-        .ok()?;
-
-    let mut html = String::new();
-    for para in split_paragraphs(&xml, "w:p") {
-        let text = collect_tag_text(para, "<w:t", "</w:t>");
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        // Heading detection via <w:pStyle w:val="…">.
-        let style = para
-            .find("<w:pStyle")
-            .and_then(|i| para[i..].find("w:val=\"").map(|j| i + j + 7))
-            .and_then(|s| para[s..].find('"').map(|e| &para[s..s + e]))
-            .unwrap_or("");
-        let tag = match style {
-            "Title" => "h1",
-            "Heading1" => "h2",
-            "Heading2" => "h3",
-            "Heading3" => "h4",
-            s if s.starts_with("Heading") => "h5",
-            _ => "p",
-        };
-        html.push_str(&format!("<{tag}>{}</{tag}>", html_escape(trimmed)));
-    }
-    Some(html)
-}
-
-/// Render a pptx as HTML: one titled section per slide.
-fn pptx_to_html(bytes: &[u8]) -> Option<String> {
-    use std::io::Read;
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
-
-    // Collect + sort slide files numerically (slide1, slide2, … slide10).
-    let mut names: Vec<String> = zip
-        .file_names()
-        .filter(|n| {
-            n.starts_with("ppt/slides/slide") && n.ends_with(".xml") && !n.contains("_rels")
-        })
-        .map(|s| s.to_string())
-        .collect();
-    names.sort_by_key(|n| {
-        n.trim_start_matches("ppt/slides/slide")
-            .trim_end_matches(".xml")
-            .parse::<u32>()
-            .unwrap_or(u32::MAX)
-    });
-
-    let mut html = String::new();
-    for (i, name) in names.iter().enumerate() {
-        let mut xml = String::new();
-        if zip
-            .by_name(name)
-            .ok()
-            .and_then(|mut f| f.read_to_string(&mut xml).ok())
-            .is_none()
-        {
-            continue;
-        }
-        html.push_str(&format!(
-            "<section class=\"slide\"><div class=\"slide-num\">Slide {}</div>",
-            i + 1
-        ));
-        for para in split_paragraphs(&xml, "a:p") {
-            let text = collect_tag_text(para, "<a:t", "</a:t>");
-            let trimmed = text.trim();
-            if !trimmed.is_empty() {
-                html.push_str(&format!("<p>{}</p>", html_escape(trimmed)));
-            }
-        }
-        html.push_str("</section>");
-    }
-    if html.is_empty() {
-        None
-    } else {
-        Some(html)
-    }
-}
-
-/// Render the first worksheet of an xlsx as an HTML table (shared strings resolved).
-fn xlsx_to_html(bytes: &[u8]) -> Option<String> {
-    use std::io::Read;
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
-
-    // Shared strings table (cells of type "s" index into this).
-    let mut shared: Vec<String> = Vec::new();
-    if let Ok(mut f) = zip.by_name("xl/sharedStrings.xml") {
-        let mut xml = String::new();
-        if f.read_to_string(&mut xml).is_ok() {
-            for si in xml.split("<si>").skip(1) {
-                shared.push(collect_tag_text(si, "<t", "</t>"));
-            }
-        }
-    }
-
-    let mut xml = String::new();
-    zip.by_name("xl/worksheets/sheet1.xml")
-        .ok()?
-        .read_to_string(&mut xml)
-        .ok()?;
-
-    let mut rows_html = String::new();
-    let mut row_count = 0usize;
-    for row in xml.split("<row").skip(1) {
-        if row_count >= 500 {
-            break;
-        }
-        let mut cells_html = String::new();
-        for cell in split_cells(row) {
-            let open_tag_end = cell.find('>').unwrap_or(cell.len());
-            let is_shared = cell[..open_tag_end].contains("t=\"s\"");
-            let raw = collect_tag_text(cell, "<v", "</v>");
-            let value = if is_shared {
-                raw.trim()
-                    .parse::<usize>()
-                    .ok()
-                    .and_then(|i| shared.get(i).cloned())
-                    .unwrap_or_default()
-            } else if raw.is_empty() {
-                collect_tag_text(cell, "<t", "</t>")
-            } else {
-                raw
-            };
-            cells_html.push_str(&format!("<td>{}</td>", html_escape(value.trim())));
-        }
-        rows_html.push_str(&format!("<tr>{cells_html}</tr>"));
-        row_count += 1;
-    }
-    if rows_html.is_empty() {
-        None
-    } else {
-        Some(format!("<table>{rows_html}</table>"))
-    }
-}
-
-/// Split a worksheet row slice into `<c …>…</c>` cell slices.
-fn split_cells(row: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut idx = 0;
-    while let Some(rel) = row[idx..].find("<c") {
-        let abs = idx + rel;
-        let rest = &row[abs..];
-        if rest.starts_with("<c>") || rest.starts_with("<c ") {
-            let end = row[abs + 2..]
-                .find("<c")
-                .map(|e| abs + 2 + e)
-                .unwrap_or(row.len());
-            out.push(&row[abs..end]);
-            idx = end;
-        } else {
-            idx = abs + 2;
-        }
-    }
-    out
-}
 
 /// Read a generated artifact for in-app preview. Text-like files return their
 /// decoded (and length-capped) text; images and PDFs return a `data:` URI;
@@ -625,13 +485,14 @@ pub fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
         });
     }
 
-    // Office documents: extract to HTML so they render inline (kind = office).
+    // Office documents: render to faithful, self-contained HTML (colours,
+    // fonts, tables, slide layouts) shown in a sandboxed iframe (kind = office).
     if matches!(ext.as_str(), "docx" | "pptx" | "xlsx") && size <= MAX_MEDIA {
         if let Ok(bytes) = std::fs::read(p) {
             let html = match ext.as_str() {
-                "docx" => docx_to_html(&bytes),
-                "pptx" => pptx_to_html(&bytes),
-                "xlsx" => xlsx_to_html(&bytes),
+                "docx" => crate::chat::office::docx_to_html(&bytes),
+                "pptx" => crate::chat::office::pptx_to_html(&bytes),
+                "xlsx" => crate::chat::office::xlsx_to_html(&bytes),
                 _ => None,
             };
             if let Some(html) = html {
@@ -925,63 +786,4 @@ pub async fn list_chat_models(
     };
 
     Ok(models)
-}
-
-#[cfg(test)]
-mod office_preview_tests {
-    use super::*;
-
-    #[test]
-    fn collect_tag_text_joins_runs_and_unescapes() {
-        let xml = r#"<w:r><w:t>Hello</w:t></w:r><w:r><w:t xml:space="preserve"> A &amp; B</w:t></w:r>"#;
-        assert_eq!(collect_tag_text(xml, "<w:t", "</w:t>"), "Hello A & B");
-    }
-
-    #[test]
-    fn collect_tag_text_ignores_similar_tags() {
-        // `<w:tbl>` must not be picked up when collecting `<w:t>` runs.
-        let xml = r#"<w:tbl><w:t>keep</w:t></w:tbl>"#;
-        assert_eq!(collect_tag_text(xml, "<w:t", "</w:t>"), "keep");
-    }
-
-    #[test]
-    fn split_paragraphs_skips_ppr() {
-        let xml = r#"<w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p><w:p><w:r><w:t>Body</w:t></w:r></w:p></w:body>"#;
-        let paras = split_paragraphs(xml, "w:p");
-        assert_eq!(paras.len(), 2);
-        assert!(collect_tag_text(paras[0], "<w:t", "</w:t>").contains("Title"));
-        assert!(collect_tag_text(paras[1], "<w:t", "</w:t>").contains("Body"));
-    }
-
-    #[test]
-    fn docx_and_pptx_extract_from_generated_files() {
-        let dir = std::env::temp_dir().join(format!("conduit-office-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let docx = crate::chat::artifacts::generate(
-            &dir,
-            "docx",
-            "t.docx",
-            None,
-            "Solar System\nEight planets orbit the Sun.",
-        )
-        .unwrap();
-        let html = docx_to_html(&std::fs::read(&docx.path).unwrap()).unwrap();
-        assert!(html.contains("Solar System"), "docx html: {html}");
-        assert!(html.contains("Eight planets"), "docx html: {html}");
-
-        let pptx = crate::chat::artifacts::generate(
-            &dir,
-            "pptx",
-            "t.pptx",
-            None,
-            "Slide One\nAlpha\n---\nSlide Two\nBeta",
-        )
-        .unwrap();
-        let phtml = pptx_to_html(&std::fs::read(&pptx.path).unwrap()).unwrap();
-        assert!(phtml.contains("Slide 1"), "pptx html: {phtml}");
-        assert!(phtml.contains("Alpha") && phtml.contains("Beta"), "pptx html: {phtml}");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }

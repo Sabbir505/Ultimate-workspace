@@ -887,6 +887,58 @@ pre,
   padding: 8px 8px 5px;
   opacity: 0.85;
 }
+
+/* Artifact library (chat sidebar) */
+.artifact-lib-empty {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 2px 8px 8px;
+  line-height: 1.4;
+  opacity: 0.8;
+}
+.artifact-lib-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text);
+}
+.artifact-lib-row:hover {
+  background: var(--glass-hover, rgba(255, 255, 255, 0.06));
+}
+.artifact-lib-icon {
+  flex: 0 0 auto;
+  font-size: 13px;
+  line-height: 1;
+}
+.artifact-lib-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.artifact-lib-del {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+  opacity: 0;
+}
+.artifact-lib-row:hover .artifact-lib-del {
+  opacity: 0.7;
+}
+.artifact-lib-del:hover {
+  opacity: 1;
+  color: var(--danger, #ff6b6b);
+}
 .sidebar-footer {
   border-top: 1px solid var(--border);
   padding: 8px;
@@ -2382,37 +2434,6 @@ table.kv th {
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   color: var(--accent);
 }
-.composer-diagram-toggle {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  overflow: hidden;
-}
-.diagram-toggle-seg {
-  height: 26px;
-  padding: 0 9px;
-  font-size: 11px;
-  line-height: 1;
-  border: none;
-  background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
-  transition:
-    background 0.15s var(--ease),
-    color 0.15s var(--ease);
-}
-.diagram-toggle-seg:not(:last-child) {
-  border-right: 1px solid var(--border);
-}
-.diagram-toggle-seg:hover {
-  background: var(--surface-2);
-  color: var(--text);
-}
-.diagram-toggle-seg.active {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent);
-}
 .chat-artifacts {
   display: flex;
   flex-wrap: wrap;
@@ -2940,65 +2961,6 @@ table.kv th {
 .artifacts-menu-downloadall:disabled {
   color: var(--text-dim);
   cursor: default;
-}
-
-/* Inline Office document (docx/pptx/xlsx) preview */
-.artifact-preview-office {
-  color: var(--text);
-  font-size: 14px;
-  line-height: 1.6;
-}
-.artifact-preview-office h1 {
-  font-size: 1.5em;
-  margin: 0 0 0.5em;
-}
-.artifact-preview-office h2 {
-  font-size: 1.3em;
-  margin: 1em 0 0.4em;
-}
-.artifact-preview-office h3 {
-  font-size: 1.12em;
-  margin: 0.9em 0 0.3em;
-}
-.artifact-preview-office h4,
-.artifact-preview-office h5 {
-  font-size: 1em;
-  margin: 0.8em 0 0.3em;
-}
-.artifact-preview-office p {
-  margin: 0 0 0.6em;
-}
-.artifact-preview-office.pptx .slide {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface-2);
-  padding: 16px 18px;
-  margin-bottom: 14px;
-}
-.artifact-preview-office.pptx .slide-num {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-  margin-bottom: 8px;
-}
-.artifact-preview-office.pptx .slide p:first-of-type {
-  font-size: 1.15em;
-  font-weight: 600;
-}
-.artifact-preview-office.xlsx table {
-  border-collapse: collapse;
-  width: 100%;
-  font-size: 12.5px;
-}
-.artifact-preview-office.xlsx td {
-  border: 1px solid var(--border);
-  padding: 4px 8px;
-}
-.artifact-preview-office.xlsx tr:first-child td {
-  font-weight: 600;
-  background: var(--surface-2);
 }
 
 /* ---- Settings: Assistant panel (system prompt + skills) ---- */

@@ -347,18 +347,32 @@ export function BrowserPane({ pane, visible = true }: Props) {
     };
   }, [frameSrc, activeTabState?.nativeOk, activeTabId]);
 
-  // Sync the address bar if the active tab's URL changes externally.
+  // Sync when the active tab's URL changes externally (e.g. the chat's
+  // `open_url` tool emits `chat:open-browser` -> setBrowserUrl). Besides the
+  // address bar, the iframe fallback navigates only when its own `history`
+  // advances (frameSrc = currentUrl(history)), so an external URL must be
+  // pushed into history too — otherwise the address bar updates but the page
+  // never changes. The native path navigates via browser_navigate directly,
+  // so pushing here is a harmless no-op-or-sync for it.
   useEffect(() => {
-    if (activeTab?.url) {
-      setTabStates((prev) => {
-        const next = new Map(prev);
-        const existing = next.get(activeTabId);
-        if (existing && existing.address !== activeTab.url) {
-          next.set(activeTabId, { ...existing, address: activeTab.url });
-        }
-        return next;
+    const url = activeTab?.url;
+    if (!url) return;
+    setTabStates((prev) => {
+      const existing = prev.get(activeTabId);
+      if (!existing) return prev;
+      const historyUrl = currentUrl(existing.history);
+      const urlChanged = historyUrl !== url;
+      if (!urlChanged && existing.address === url) return prev;
+      const next = new Map(prev);
+      next.set(activeTabId, {
+        ...existing,
+        address: url,
+        history: urlChanged ? pushUrl(existing.history, url) : existing.history,
+        loading: urlChanged ? existing.nativeOk !== true : existing.loading,
+        loadFailed: urlChanged ? false : existing.loadFailed,
       });
-    }
+      return next;
+    });
   }, [activeTab?.url, activeTabId]);
 
   const persist = useCallback(

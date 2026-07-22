@@ -9,7 +9,9 @@ Use this when Mermaid's auto-layout can't express the structure — nested group
 
 ## Output format
 
-Produce a single self-contained HTML file (inline `<style>`, no external assets — no CDN fonts, no scripts) and call `generate_diagram(filename, title, html)` with the full HTML document in the `html` argument. The file is written to the artifacts directory and surfaced in the artifact panel as a diagram (PNG-exportable). Use flexbox/grid for layout, plain CSS borders/positioned divs or an inline `<svg>` for connector lines — don't reach for a charting/diagramming JS library; this is styled markup, not a rendered chart. Do not call `emit_artifact` — that tool does not exist; `generate_diagram` is the correct one.
+**Prefer pure inline SVG.** Author the diagram as ONE root `<svg>` element with an explicit `xmlns="http://www.w3.org/2000/svg"`, a `viewBox`, and `width`/`height` — nodes as `<rect rx="10">`, labels as `<text>`, connectors as `<path>`/`<line>` with an arrowhead `<marker>`, and the title as a `<text>` near the top (outside the flow). A pure-SVG diagram is true vector, so the artifact panel exports it crisply to **both SVG and PNG** (the panel extracts the root `<svg>` for the SVG download; if the diagram is HTML/CSS instead, SVG export falls back to wrapping the DOM in a `<foreignObject>`, which is lower fidelity). Only fall back to HTML/CSS boxes (flexbox/grid, positioned divs) when a node genuinely needs multi-line text reflow that hand-placed `<text>` can't handle.
+
+Wrap the single `<svg>` in a minimal complete HTML document and call `generate_diagram(filename, title, html)` with that document in the `html` argument — no external assets (no CDN fonts, no scripts), inline presentation only, system font families. The file is written to the artifacts directory and surfaced in the artifact panel as a diagram. Don't reach for a charting/diagramming JS library; this is hand-authored markup, not a rendered chart. Do not call `emit_artifact` — that tool does not exist; `generate_diagram` is the correct one.
 
 ## Structure pattern (matches the reference style)
 

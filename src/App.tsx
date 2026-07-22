@@ -22,6 +22,7 @@ import { usePtyEvents } from "./hooks/usePtyEvents";
 import { useTheme } from "./hooks/useTheme";
 import { exportFocusedSession } from "./lib/exportSession";
 import { confirmReplaceLru } from "./lib/sessionLauncher";
+import { ensureDefaultSkills } from "./lib/defaultSkills";
 import { MAX_PANES, usePanesStore } from "./state/panes";
 import { useProjectsStore } from "./state/projects";
 import { useSettingsStore } from "./state/settings";
@@ -51,6 +52,9 @@ export default function App() {
     void useSettingsStore.getState().load();
     void useProjectsStore.getState().loadAll();
     void useSkillsStore.getState().load();
+    // Seed built-in document/diagram skills on first run so the model has that
+    // guidance immediately, without the user opening Settings.
+    void ensureDefaultSkills();
   }, []);
 
   useTheme();

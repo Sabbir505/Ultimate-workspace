@@ -9,6 +9,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getSetting, readFileText, setSetting, type ChatProvider, listChatModels } from "../../lib/ipc";
 import { acceleratorFromEvent, DEFAULT_KEYBINDINGS, type KeybindingAction } from "../../lib/keybindings";
 import { runLoginFlow } from "../../lib/sessionLauncher";
+import { seededSkills } from "../../lib/defaultSkills";
 import { useProjectsStore } from "../../state/projects";
 import { useSettingsStore, type ThemeSetting } from "../../state/settings";
 import { useUiStore } from "../../state/ui";
@@ -303,7 +304,14 @@ function AssistantPanel() {
       ([sp, sk]) => {
         if (stale) return;
         setSystemPrompt(sp ?? "");
-        if (sk) {
+        if (sk == null) {
+          // First run: seed the built-in document/diagram skills so they are
+          // enabled out of the box. Persisted immediately so this only happens
+          // once — deleting them afterwards sticks.
+          const seeded = seededSkills();
+          setSkills(seeded);
+          void setSetting(K_SKILLS, JSON.stringify(seeded));
+        } else {
           try {
             const parsed = JSON.parse(sk) as SkillItem[];
             if (Array.isArray(parsed)) setSkills(parsed);

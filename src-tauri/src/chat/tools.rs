@@ -22,6 +22,10 @@ pub const GENERATE_DIAGRAM: &str = "generate_diagram";
 pub const FETCH_URL: &str = "fetch_url";
 pub const RUN_CODE: &str = "run_code";
 pub const OPEN_URL: &str = "open_url";
+pub const BROWSER_READ: &str = "browser_read";
+pub const BROWSER_CLICK: &str = "browser_click";
+pub const BROWSER_TYPE: &str = "browser_type";
+pub const BROWSER_SCROLL: &str = "browser_scroll";
 
 /// Which tool capabilities are enabled for a turn. Web search, file generation
 /// and URL fetching are considered safe and are always on when tools are
@@ -68,31 +72,64 @@ const GENERATE_FILE_DESC: &str = "Generate a simple downloadable text-based \
     remaining lines are bullets. For xlsx/csv, provide comma-separated rows \
     (one row per line).";
 
-const GENERATE_DOCUMENT_DESC: &str = "Create a REAL, professionally formatted \
-    document by writing Python that builds it with a document library, then \
-    saves it. Use this for docx (python-docx), pptx (python-pptx), xlsx \
-    (openpyxl) and pdf (reportlab). Produce genuinely designed output — title \
-    pages, headings, typography, colours, tables, multi-slide layouts, footers \
-    — not a plain text dump. Your Python MUST save the file to the path in the \
-    CONDUIT_OUTPUT environment variable (it is the requested filename inside \
-    the artifacts directory, which is also the current working directory). \
-    Import only from the standard library plus python-docx, python-pptx, \
-    openpyxl and reportlab. Do not print secrets or perform network/other side \
-    effects.";
+const GENERATE_DOCUMENT_DESC: &str = "Create a REAL, professionally designed \
+    document by writing Python that builds it, then saves it to the path in the \
+    CONDUIT_OUTPUT environment variable (the requested filename inside the \
+    working directory). Supports docx, pptx, xlsx and pdf. The output must look \
+    polished — like something ChatGPT/Claude would produce — NOT a plain text \
+    dump: a cover/title, themed colours, real typography, headings, tables, and \
+    for decks multiple well-laid-out slides with a title slide and section \
+    dividers.\n\n\
+    Aim for an EDITORIAL, modern look like Claude/ChatGPT/Gemini ship — an \
+    elegant serif display face paired with a clean sans body, generous \
+    whitespace, a strong type hierarchy, ONE restrained accent colour and rich \
+    full-bleed cover/section slides. Hierarchy comes from type scale, weight and \
+    whitespace — NEVER from decorative accent bars, stripes or underlines under \
+    titles. Clean white pages for documents; save saturated colour for deck \
+    cover/section/closing slides.\n\n\
+    STRONGLY PREFER the pre-installed `conduit_docgen` helper — it ships this \
+    editorial system for docx, pptx AND pdf with almost no code:\n\
+      import conduit_docgen as cd\n\
+      doc = cd.Doc(title='Quarterly Report', subtitle='FY2025 Q2', theme='ink', author='Acme')\n\
+      doc.heading('Overview'); doc.paragraph('...'); doc.bullets(['a','b']); doc.numbered(['1','2'])\n\
+      doc.table(['Metric','Value'], [['Revenue','$1.2M']]); doc.callout('Key point'); doc.save()\n\
+      deck = cd.Deck(title='Product Launch', subtitle='2025', theme='midnight', footer='Acme Inc')\n\
+      deck.section('Introduction', number=1); deck.bullets('Why now', ['ready','mature'], eyebrow='Context')\n\
+      deck.two_column('Compare','A',['fast'],'B',['robust']); deck.table_slide('Numbers',['Q','Rev'],[['Q1','1.0']])\n\
+      deck.closing('Thank you','q@acme.com'); deck.save()\n\
+      pdf = cd.Pdf(title='Research Brief', subtitle='...', theme='plum', author='Acme Labs')\n\
+      pdf.heading('Summary'); pdf.paragraph('...'); pdf.bullets(['a','b'])\n\
+      pdf.table(['Model','Latency'], [['A','12ms']]); pdf.callout('Bottom line'); pdf.save()\n\
+    Themes: ink (blue-black, default), midnight (violet), emerald, plum, amber, \
+    crimson, teal (older names blue/slate/green/purple/red/orange still work). \
+    CHOOSE a theme that fits the subject rather than always defaulting, and vary \
+    structure to fit the content instead of repeating one template. cd.Pdf \
+    handles pdf via reportlab; prefer it over hand-rolled reportlab. You can \
+    still access doc.document / deck.prs for raw python-docx/python-pptx tweaks. \
+    For xlsx use openpyxl. Build enough real content to be genuinely useful \
+    (several sections or 6+ slides for a deck). Import only from the standard \
+    library, conduit_docgen, python-docx, python-pptx, openpyxl and reportlab. \
+    Do not print secrets or perform network side effects.";
 
 const GENERATE_DIAGRAM_DESC: &str = "Create a hand-styled, fully-laid-out \
-    HTML/CSS diagram as a self-contained .html file. Use this when a diagram \
-    needs deliberate visual hierarchy that Mermaid's auto-layout can't express \
-    — nested groupings/containers, a 2-D grid of sub-nodes, mixed box sizes, a \
-    bold-label-plus-dim-description two-line node, solid primary-flow arrows \
-    with a dashed feedback line looping back, and consistent color-per-category. \
-    Emit ONE complete HTML document in the `html` argument: a title placed \
-    ABOVE the flow (not inside it), a styled <body> with inline <style> (no \
-    external resources, no scripts), semantic node boxes, connector arrows \
-    (CSS/SVG), and a legend if colors carry meaning. The diagram is rendered \
-    in the artifact panel and can be exported to PNG. Do NOT use this for \
-    simple flowcharts/sequences that Mermaid handles well — those go in a \
-    ```mermaid block in your text response instead.";
+    diagram as a self-contained .html file. This is the tool for EVERY diagram \
+    — architecture, flowchart, sequence, feature breakdown, mind-map, anything \
+    visual — with deliberate visual hierarchy: nested groupings/containers, a \
+    2-D grid of sub-nodes, mixed box sizes, a bold-label-plus-dim-description \
+    two-line node, solid primary-flow arrows with a dashed feedback line looping \
+    back, and consistent color-per-category. \
+    STRONGLY PREFER authoring the diagram as ONE root inline <svg> (with an \
+    explicit xmlns, viewBox and width/height): draw nodes as <rect rx=..>, \
+    labels as <text>, and connectors as <path>/<line> with an arrowhead \
+    <marker>. Pure SVG is true vector, so it exports crisply to BOTH SVG and \
+    PNG. Wrap that single <svg> in a minimal complete HTML document in the \
+    `html` argument (a <body> holding the <svg>; put the title as a <text> at \
+    the top of the SVG, above the flow). Use inline presentation only — no \
+    external resources, no scripts, no CDN fonts (rely on system font \
+    families). Only fall back to HTML/CSS boxes if a layout genuinely needs \
+    text reflow the SVG can't do. The diagram renders in the artifact panel and \
+    exports to SVG and PNG. Do NOT emit ```mermaid blocks — Mermaid is not used \
+    here; every diagram goes through this tool.";
 
 const FETCH_URL_DESC: &str = "Fetch a specific web page by URL and return its \
     readable text content (HTML stripped). Use to read an article or page the \
@@ -102,6 +139,27 @@ const RUN_CODE_DESC: &str = "Execute a short snippet of code and return its \
     output. Supports python, javascript (node) and bash. Runs locally with a \
     time limit in a temporary directory. Use for calculations, data wrangling \
     or quick scripts.";
+
+const BROWSER_READ_DESC: &str = "Inspect the page currently open in the app's \
+    built-in browser pane. Returns its URL, title, the visible text, and a \
+    numbered list of interactive elements (links, buttons, inputs) — each with \
+    a `ref` number. Call this first (after open_url) and again after any \
+    click/type to get the fresh element map before acting. Drives whatever page \
+    the user is looking at.";
+
+const BROWSER_CLICK_DESC: &str = "Click an element in the built-in browser pane \
+    by its `ref` number (from the most recent browser_read). Use for links, \
+    buttons, and submit controls. The ref map changes when the page changes, so \
+    always browser_read again afterwards.";
+
+const BROWSER_TYPE_DESC: &str = "Type text into an input/textarea in the \
+    built-in browser pane by its `ref` number (from the most recent \
+    browser_read). Sets the field value and fires input/change events. Follow \
+    with a browser_click on the search/submit button (or another browser_read).";
+
+const BROWSER_SCROLL_DESC: &str = "Scroll the page in the built-in browser pane \
+    vertically by `amount` pixels (negative scrolls up). Use to reveal content \
+    below the fold before reading again.";
 
 const OPEN_URL_DESC: &str = "Open a web page in the app's built-in browser so \
     the user can see it, and return its readable text to you. Use when the user \
@@ -121,6 +179,10 @@ pub fn openai_tool_specs(caps: ToolCaps) -> Vec<Value> {
         openai_fn(GENERATE_DIAGRAM, GENERATE_DIAGRAM_DESC, generate_diagram_parameters()),
         openai_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
         openai_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
+        openai_fn(BROWSER_READ, BROWSER_READ_DESC, no_parameters()),
+        openai_fn(BROWSER_CLICK, BROWSER_CLICK_DESC, browser_ref_parameters()),
+        openai_fn(BROWSER_TYPE, BROWSER_TYPE_DESC, browser_type_parameters()),
+        openai_fn(BROWSER_SCROLL, BROWSER_SCROLL_DESC, browser_scroll_parameters()),
     ];
     if caps.code_exec {
         specs.push(openai_fn(RUN_CODE, RUN_CODE_DESC, run_code_parameters()));
@@ -152,6 +214,10 @@ pub fn anthropic_tool_specs(caps: ToolCaps) -> Vec<Value> {
         anthropic_fn(GENERATE_DIAGRAM, GENERATE_DIAGRAM_DESC, generate_diagram_parameters()),
         anthropic_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
         anthropic_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
+        anthropic_fn(BROWSER_READ, BROWSER_READ_DESC, no_parameters()),
+        anthropic_fn(BROWSER_CLICK, BROWSER_CLICK_DESC, browser_ref_parameters()),
+        anthropic_fn(BROWSER_TYPE, BROWSER_TYPE_DESC, browser_type_parameters()),
+        anthropic_fn(BROWSER_SCROLL, BROWSER_SCROLL_DESC, browser_scroll_parameters()),
     ];
     if caps.code_exec {
         specs.push(anthropic_fn(RUN_CODE, RUN_CODE_DESC, run_code_parameters()));
@@ -222,8 +288,11 @@ fn generate_document_parameters() -> Value {
             "code": {
                 "type": "string",
                 "description": "Complete Python source that builds the document \
-                    and saves it to the CONDUIT_OUTPUT path (python-docx / \
-                    python-pptx / openpyxl / reportlab).",
+                    and saves it to the CONDUIT_OUTPUT path. For docx/pptx \
+                    prefer `import conduit_docgen as cd` (pre-installed styled \
+                    toolkit); otherwise use python-docx / python-pptx / openpyxl \
+                    / reportlab directly. Produce a polished, themed result with \
+                    real content — not a plain text dump.",
             }
         },
         "required": ["format", "filename", "code"],
@@ -250,6 +319,52 @@ fn generate_diagram_parameters() -> Value {
             }
         },
         "required": ["filename", "html"],
+    })
+}
+
+fn no_parameters() -> Value {
+    json!({ "type": "object", "properties": {} })
+}
+
+fn browser_ref_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "ref": {
+                "type": "integer",
+                "description": "The element's ref number from the latest browser_read.",
+            }
+        },
+        "required": ["ref"],
+    })
+}
+
+fn browser_type_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "ref": {
+                "type": "integer",
+                "description": "The input's ref number from the latest browser_read.",
+            },
+            "text": {
+                "type": "string",
+                "description": "The text to type into the field.",
+            }
+        },
+        "required": ["ref", "text"],
+    })
+}
+
+fn browser_scroll_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "amount": {
+                "type": "integer",
+                "description": "Pixels to scroll vertically; negative scrolls up. Default 600.",
+            }
+        },
     })
 }
 

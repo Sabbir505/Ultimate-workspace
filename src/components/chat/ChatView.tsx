@@ -5,7 +5,7 @@
 // as they arrive, then swaps to the final persisted message on chat:done.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../../state/chat";
-import { ChatComposer } from "./ChatComposer";
+import { ChatComposer, type ChatAttachment } from "./ChatComposer";
 import { MessageBubble, TypingIndicator } from "./MessageBubble";
 import { ArtifactPreviewPane } from "./ArtifactPreviewPane";
 import { ArtifactsMenu } from "./ArtifactsMenu";
@@ -28,12 +28,6 @@ export function ChatView() {
   const setSessionModel = useChatStore((s) => s.setSessionModel);
   const effort = useChatStore((s) => s.effort);
   const setEffort = useChatStore((s) => s.setEffort);
-  const toolsEnabled = useChatStore((s) => s.toolsEnabled);
-  const setToolsEnabled = useChatStore((s) => s.setToolsEnabled);
-  const codeExecEnabled = useChatStore((s) => s.codeExecEnabled);
-  const setCodeExecEnabled = useChatStore((s) => s.setCodeExecEnabled);
-  const diagramMode = useChatStore((s) => s.diagramMode);
-  const setDiagramMode = useChatStore((s) => s.setDiagramMode);
   const config = useChatStore((s) => s.config);
   const loadConfig = useChatStore((s) => s.loadConfig);
   const newChat = useChatStore((s) => s.newChat);
@@ -152,10 +146,10 @@ export function ChatView() {
     activeStream.length === 0;
 
   const handleSend = useCallback(
-    (content: string) => {
+    (content: string, attachments: ChatAttachment[]) => {
       // Sending always pins to the bottom so the reply is visible.
       stickToBottomRef.current = true;
-      void sendMessage(content);
+      void sendMessage(content, attachments);
     },
     [sendMessage],
   );
@@ -253,12 +247,6 @@ export function ChatView() {
         effort={effort}
         onModelChange={handleModelChange}
         onEffortChange={setEffort}
-        toolsEnabled={toolsEnabled}
-        onToolsToggle={setToolsEnabled}
-        codeExecEnabled={codeExecEnabled}
-        onCodeExecToggle={setCodeExecEnabled}
-        diagramMode={diagramMode}
-        onDiagramModeChange={setDiagramMode}
       />
     </div>
     {previewArtifact && (

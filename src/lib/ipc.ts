@@ -243,6 +243,24 @@ export interface ChatOpenBrowserPayload {
   url: string;
 }
 
+/** A persisted artifact in the sidebar library (30-day retention). */
+export interface ArtifactRecord {
+  id: string;
+  chatSessionId: string | null;
+  filename: string;
+  path: string;
+  kind: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+/** All persisted artifacts, most recent first. */
+export const listArtifacts = () => safeInvoke<ArtifactRecord[]>("list_artifacts", {});
+
+/** Delete an artifact (row + on-disk file). */
+export const deleteArtifact = (id: string) =>
+  safeInvoke<void>("delete_artifact", { id });
+
 /** In-app preview of a generated artifact (see `read_artifact_preview`). */
 export interface ArtifactPreview {
   path: string;
@@ -283,13 +301,21 @@ export const getChatMessages = (chatSessionId: string) =>
   safeInvoke<ChatMessageRecord[] | null>("get_chat_messages", { chatSessionId });
 export const touchChatSession = (chatSessionId: string) =>
   safeInvoke<void>("touch_chat_session", { chatSessionId });
+export interface ChatAttachmentInput {
+  name: string;
+  kind: "text" | "image" | "doc";
+  text?: string;
+  data?: string;
+  mediaType?: string;
+  format?: string;
+}
 export const sendChatMessage = (
   chatSessionId: string,
   content: string,
   effort?: string,
   toolsEnabled?: boolean,
   codeExecEnabled?: boolean,
-  diagramMode?: string,
+  attachments?: ChatAttachmentInput[],
 ) =>
   safeInvoke<void>("send_chat_message", {
     chatSessionId,
@@ -297,7 +323,7 @@ export const sendChatMessage = (
     effort: effort ?? null,
     toolsEnabled: toolsEnabled ?? false,
     codeExecEnabled: codeExecEnabled ?? false,
-    diagramMode: diagramMode ?? "",
+    attachments: attachments ?? null,
   });
 export const updateChatSessionModel = (chatSessionId: string, model: string) =>
   safeInvoke<void>("update_chat_session_model", { chatSessionId, model });

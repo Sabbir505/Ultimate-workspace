@@ -52,6 +52,8 @@ pub fn run() {
             fs::create_dir_all(&data_dir)?;
             let conn = db::open(&data_dir.join("conduit.db"))?;
             let shared_db = Arc::new(Mutex::new(conn));
+            // Sweep artifacts past their 30-day retention window on startup.
+            chat::commands::sweep_expired_artifacts(&shared_db);
             app.manage(DbState(Arc::clone(&shared_db)));
             app.manage(PtyState(PtyManager::new(app.handle().clone(), shared_db)));
             app.manage(BrowserState(Arc::new(browser::BrowserManager::new(
@@ -104,6 +106,7 @@ pub fn run() {
             commands::browser_cmds::browser_create,
             commands::browser_cmds::browser_navigate,
             commands::browser_cmds::browser_push_state,
+            commands::browser_cmds::browser_action_result,
             commands::browser_cmds::browser_go_back,
             commands::browser_cmds::browser_go_forward,
             commands::browser_cmds::browser_reload,
@@ -157,6 +160,8 @@ pub fn run() {
             commands::chat_cmds::read_artifact_preview,
             commands::chat_cmds::download_artifact,
             commands::chat_cmds::download_artifacts_zip,
+            commands::chat_cmds::list_artifacts,
+            commands::chat_cmds::delete_artifact,
         ]);
 
     let app = builder

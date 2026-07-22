@@ -1,10 +1,10 @@
 // Per-artifact export menu shown in the ArtifactPreviewPane header. Provides
 // Copy-to-clipboard, Download PNG, and Download SVG actions, gated by what
 // the artifact kind actually supports:
-//   • diagram / html — PNG + Copy (rasterized from the rendered HTML via
-//     html-to-image). SVG is greyed out for `diagram` because the output is
-//     HTML+CSS, not vector; the tooltip says so. (SVG stays enabled for `html`
-//     only if we later add a pure-SVG mode — for now html also exposes PNG.)
+//   • diagram / html — Copy + PNG + SVG. PNG/Copy rasterize the rendered HTML
+//     via html-to-image. SVG prefers extracting the diagram's own root <svg>
+//     (true vector, when the diagram was authored as inline SVG); otherwise it
+//     falls back to html-to-image's foreignObject-based toSvg().
 //   • image          — Copy + Download (the existing raw-file download path;
 //     no re-rasterization needed).
 //   • other kinds    — no export menu (they use the pane's Download/Open buttons).
@@ -16,7 +16,7 @@
 // html-to-image can walk. The diagram HTML is inline-styled and dependency-free,
 // so it renders identically off-DOM.
 import { useState, type ReactNode } from "react";
-import { toPng } from "html-to-image";
+import { toPng, toSvg } from "html-to-image";
 import { downloadArtifact } from "../../lib/ipc";
 import type { ArtifactPreview } from "../../lib/ipc";
 
@@ -89,6 +89,50 @@ async function rasterizeHtml(html: string): Promise<string> {
   }
 }
 
+/** Extract the diagram's own root <svg> as a standalone, namespaced SVG string,
+ *  or null when the diagram isn't authored as inline SVG. */
+function extractRootSvg(html: string): string | null {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const svg = doc.querySelector("svg");
+  if (!svg) return null;
+  if (!svg.getAttribute("xmlns")) {
+    svg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  }
+  if (!svg.getAttribute("xmlns:xlink")) {
+    svg.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+  }
+  return `<?xml version="1.0" encoding="UTF-8"?>\n${svg.outerHTML}`;
+}
+
+/** Build an off-DOM node holding the diagram HTML and serialize it to an SVG
+ *  data URL via html-to-image (wraps the DOM in a <foreignObject>). Fallback
+ *  for diagrams that are HTML/CSS rather than pure SVG. */
+async function rasterizeToSvg(html: string): Promise<string> {
+  const holder = document.createElement("div");
+  holder.style.position = "fixed";
+  holder.style.left = "-99999px";
+  holder.style.top = "0";
+  holder.style.background = "#0b0b12";
+  holder.style.padding = "24px";
+  holder.innerHTML = html;
+  document.body.appendChild(holder);
+  try {
+    await new Promise((r) => requestAnimationFrame(() => r(null)));
+    return await toSvg(holder, { cacheBust: true, backgroundColor: "#0b0b12" });
+  } finally {
+    document.body.removeChild(holder);
+  }
+}
+
+function triggerDownload(href: string, filename: string): void {
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
 async function copyDataUrlToClipboard(dataUrl: string): Promise<void> {
   const resp = await fetch(dataUrl);
   const blob = await resp.blob();
@@ -98,7 +142,7 @@ async function copyDataUrlToClipboard(dataUrl: string): Promise<void> {
 }
 
 export function ArtifactExportMenu({ preview, path, filename }: Props) {
-  const [busy, setBusy] = useState<null | "copy" | "png">(null);
+  const [busy, setBusy] = useState<null | "copy" | "png" | "svg">(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
 
@@ -146,12 +190,7 @@ export function ArtifactExportMenu({ preview, path, filename }: Props) {
         throw new Error("nothing rasterizable to export");
       }
       // Download via an anchor (Tauri webview supports blob downloads).
-      const a = document.createElement("a");
-      a.href = dataUrl;
-      a.download = `${preview.filename.replace(/\.[^.]+$/, "")}.png`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+      triggerDownload(dataUrl, `${preview.filename.replace(/\.[^.]+$/, "")}.png`);
       flash("Saved PNG");
     } catch (e) {
       setError(`PNG export failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -160,14 +199,38 @@ export function ArtifactExportMenu({ preview, path, filename }: Props) {
     }
   };
 
-  // SVG export: only meaningful for true vector output. html_diagram is
-  // HTML+CSS (raster-only), so we grey it out with a tooltip. For an `image`
-  // that is actually an SVG file we *could* offer it, but the raw-file
-  // Download button already covers that — keep this menu's SVG disabled for
-  // v1 to avoid implying vector export where none exists.
-  const svgDisabled = true;
-  const svgTooltip =
-    "SVG export isn't available for HTML/CSS diagrams (they're raster output). Download PNG instead.";
+  // SVG export: prefer the diagram's own inline <svg> (true vector); if the
+  // diagram is HTML/CSS instead, fall back to a foreignObject-wrapped SVG.
+  // Only offered for diagram/html kinds (an `image` file's raw Download button
+  // already covers SVG files).
+  const svgDisabled = !isHtmlDiagram;
+  const svgTooltip = isHtmlDiagram
+    ? "Download as SVG (vector when the diagram is authored as SVG)"
+    : "SVG export applies to diagrams only.";
+
+  const handleDownloadSvg = async () => {
+    if (!isHtmlDiagram || !preview.text) return;
+    setBusy("svg");
+    setError(null);
+    try {
+      const base = preview.filename.replace(/\.[^.]+$/, "");
+      const rootSvg = extractRootSvg(preview.text);
+      if (rootSvg) {
+        const blob = new Blob([rootSvg], { type: "image/svg+xml" });
+        const url = URL.createObjectURL(blob);
+        triggerDownload(url, `${base}.svg`);
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+      } else {
+        const dataUrl = await rasterizeToSvg(preview.text);
+        triggerDownload(dataUrl, `${base}.svg`);
+      }
+      flash("Saved SVG");
+    } catch (e) {
+      setError(`SVG export failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const Btn = ({
     onClick,
@@ -208,16 +271,18 @@ export function ArtifactExportMenu({ preview, path, filename }: Props) {
       >
         <ImageIcon />
       </Btn>
-      <button
-        type="button"
-        className="artifact-export-btn svg-disabled"
+      <Btn
+        onClick={handleDownloadSvg}
         title={svgTooltip}
-        aria-label="SVG export (unavailable)"
-        disabled
+        disabled={svgDisabled || busy !== null}
       >
         <SvgIcon />
-      </button>
-      {busy && <span className="artifact-export-status">{busy === "copy" ? "Copying…" : "Rendering PNG…"}</span>}
+      </Btn>
+      {busy && (
+        <span className="artifact-export-status">
+          {busy === "copy" ? "Copying…" : busy === "svg" ? "Rendering SVG…" : "Rendering PNG…"}
+        </span>
+      )}
       {done && !error && <span className="artifact-export-status ok">{done}</span>}
       {error && <span className="artifact-export-status err" title={error}>{error}</span>}
       {/* Raw-file download still available via the pane's main Download button. */}

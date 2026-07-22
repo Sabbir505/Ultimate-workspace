@@ -18,11 +18,13 @@ import {
   touchChatSession,
   updateChatSessionModel,
   updateChatSessionTitle,
+  type ChatAttachmentInput,
   type ChatArtifactPayload,
   type ChatConfigPayload,
   type ChatMessageRecord,
   type ChatSession,
 } from "../lib/ipc";
+import { useArtifactsStore } from "./artifacts";
 
 /** A file the model generated during a chat, surfaced as a download chip. */
 export interface ChatArtifact {
@@ -45,9 +47,6 @@ interface ChatState {
   toolsEnabled: boolean;
   /** When true, the model may execute code (opt-in, security-sensitive). */
   codeExecEnabled: boolean;
-  /** Diagram mode override: "" = model decides, "quick" = Mermaid,
-   *  "designed" = html_diagram (generate_diagram tool). */
-  diagramMode: "" | "quick" | "designed";
   /** Generated files per chat session (chatSessionId -> artifacts). */
   artifacts: Record<string, ChatArtifact[]>;
   /** Artifacts attributed to a specific assistant message (messageId -> artifacts). */
@@ -70,8 +69,7 @@ interface ChatState {
   setEffort: (effort: string) => void;
   setToolsEnabled: (enabled: boolean) => void;
   setCodeExecEnabled: (enabled: boolean) => void;
-  setDiagramMode: (mode: "" | "quick" | "designed") => void;
-  sendMessage: (content: string) => Promise<void>;
+  sendMessage: (content: string, attachments?: ChatAttachmentInput[]) => Promise<void>;
   /** Re-run the last user message to get a fresh assistant response. */
   regenerate: () => Promise<void>;
   cancelStream: () => Promise<void>;
@@ -97,9 +95,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   config: null,
   error: null,
   effort: "",
-  toolsEnabled: false,
-  codeExecEnabled: false,
-  diagramMode: "" as "" | "quick" | "designed",
+  // Tools are on by default so the model itself decides when to web-search,
+  // generate a file/document/diagram, fetch a URL or run code — the user no
+  // longer has to arm them manually before each relevant request.
+  toolsEnabled: true,
+  codeExecEnabled: true,
   artifacts: {},
   artifactsByMessage: {},
   pendingArtifacts: {},
@@ -191,19 +191,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setCodeExecEnabled: (codeExecEnabled) =>
     set(codeExecEnabled ? { codeExecEnabled, toolsEnabled: true } : { codeExecEnabled }),
 
-  setDiagramMode: (diagramMode) => set({ diagramMode }),
-
-  sendMessage: async (content) => {
-    const { activeChatSessionId, messages, sessions, effort, toolsEnabled, codeExecEnabled, diagramMode } =
+  sendMessage: async (content, attachments) => {
+    const { activeChatSessionId, messages, sessions, effort, toolsEnabled, codeExecEnabled } =
       get();
     if (!activeChatSessionId) return;
+
+    // Optimistic bubble mirrors what the backend will persist: the typed text
+    // plus a compact note per attachment (the model gets the real content).
+    const attachNote = (attachments ?? [])
+      .map((a) =>
+        a.kind === "image" ? `\n\n[Attached image: ${a.name}]` : `\n\n[Attached file: ${a.name}]`,
+      )
+      .join("");
+    const displayContent = `${content}${attachNote}`;
 
     // Optimistically append the user message.
     const userMsg: ChatMessageRecord = {
       id: -Date.now(), // temporary negative id
       chatSessionId: activeChatSessionId,
       role: "user",
-      content,
+      content: displayContent,
       inputTokens: null,
       outputTokens: null,
       costUsd: null,
@@ -232,7 +239,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       effort || undefined,
       toolsEnabled,
       codeExecEnabled,
-      diagramMode,
+      attachments,
     );
   },
 
@@ -347,6 +354,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           s.activeChatSessionId === chatSessionId ? artifact : s.previewArtifact,
       };
     });
+    // Refresh the persistent Artifacts sidebar library.
+    void useArtifactsStore.getState().load();
   },
 
   onError: (chatSessionId, message, code) => {

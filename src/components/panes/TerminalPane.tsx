@@ -46,6 +46,25 @@ function resolvedAppTheme(setting: string): string {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
+/** Re-fit the terminal grid to its container and tell the pty the new size.
+ *  xterm's fit() re-lays out the buffer and can reset the viewport to the TOP
+ *  when rows change (e.g. a flex reflow arriving mid-output) — the cause of the
+ *  "terminal jumps to the top" bug. We snapshot whether the user was scrolled
+ *  to the bottom BEFORE fitting and restore that follow-the-tail position after,
+ *  while leaving the viewport alone if the user had deliberately scrolled up. */
+function refit(term: Terminal, fit: FitAddon, paneId: string): void {
+  const buf = term.buffer.active;
+  const wasAtBottom = buf.viewportY >= buf.baseY;
+  try {
+    fit.fit();
+    resizePty(paneId, term.cols, term.rows);
+  } catch {
+    // hidden/zero-size container — nothing to fit.
+    return;
+  }
+  if (wasAtBottom) term.scrollToBottom();
+}
+
 interface Props {
   pane: Pane;
   focused: boolean;
@@ -94,22 +113,13 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
       );
       if (next !== term.options.fontSize) {
         term.options.fontSize = next;
-        try {
-          fit.fit();
-          resizePty(paneId, term.cols, term.rows);
-        } catch {
-          /* hidden container */
-        }
+        refit(term, fit, paneId);
       }
     };
     container.addEventListener("wheel", onWheel, { passive: false });
     // Initial fit after layout settles.
     requestAnimationFrame(() => {
-      try {
-        fit.fit();
-      } catch {
-        /* container not measurable yet */
-      }
+      refit(term, fit, paneId);
     });
 
     // Terminal output stream for THIS pane only.
@@ -214,12 +224,7 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
     const observer = new ResizeObserver(() => {
       if (resizeTimer !== null) window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
-        try {
-          fit.fit();
-          resizePty(paneId, term.cols, term.rows);
-        } catch {
-          /* hidden/zero-size container */
-        }
+        refit(term, fit, paneId);
       }, RESIZE_DEBOUNCE_MS);
     });
     observer.observe(container);
@@ -252,12 +257,7 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
     const fit = fitRef.current;
     if (!term || !fit) return;
     const raf = requestAnimationFrame(() => {
-      try {
-        fit.fit();
-        resizePty(paneId, term.cols, term.rows);
-      } catch {
-        /* container not measurable yet */
-      }
+      refit(term, fit, paneId);
     });
     return () => cancelAnimationFrame(raf);
   }, [visible, paneId]);

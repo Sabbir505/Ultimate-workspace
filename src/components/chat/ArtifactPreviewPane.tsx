@@ -220,13 +220,35 @@ export function ArtifactPreviewPane({
   const [error, setError] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
   const [paneWidth, setPaneWidth] = useState<number | null>(null);
+  const [baseWidth, setBaseWidth] = useState<number | null>(null);
+  const [baseHeight, setBaseHeight] = useState<number | null>(null);
   const paneRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const innerRef = useRef<HTMLDivElement>(null);
   const inline = artifact.inline;
 
   // Reset zoom when switching to a different artifact.
   useEffect(() => {
     setZoom(1);
   }, [artifact.path, artifact.filename]);
+
+  // Track the content area's inner width (the width the artifact is laid out
+  // at when zoom = 1) and the artifact's unscaled height, so we can reserve a
+  // correctly-sized scroll area for the transform-scaled content.
+  useEffect(() => {
+    const content = contentRef.current;
+    const inner = innerRef.current;
+    if (!content || !inner) return;
+    const measure = () => {
+      setBaseWidth(content.clientWidth);
+      setBaseHeight(inner.offsetHeight);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(content);
+    ro.observe(inner);
+    return () => ro.disconnect();
+  }, [preview, inline, artifact.path]);
 
   // Drag the left edge to resize the pane, mirroring the browser pane.
   const startResize = useCallback((e: React.PointerEvent) => {
@@ -249,7 +271,18 @@ export function ArtifactPreviewPane({
   }, []);
 
   const paneStyle = paneWidth != null ? { flex: `0 0 ${paneWidth}px` } : undefined;
-  const zoomStyle = { zoom } as React.CSSProperties;
+
+  // Transform-scale zoom: scale the content and reserve a scroll area sized to
+  // the scaled dimensions so zooming in lets you pan, and zooming out fits all.
+  const innerStyle: React.CSSProperties = {
+    transform: `scale(${zoom})`,
+    transformOrigin: "0 0",
+    width: baseWidth != null ? `${baseWidth}px` : "100%",
+  };
+  const scalerStyle: React.CSSProperties = {
+    width: baseWidth != null ? `${baseWidth * zoom}px` : "100%",
+    height: baseHeight != null ? `${baseHeight * zoom}px` : undefined,
+  };
 
   const resizer = (
     <div
@@ -301,9 +334,11 @@ export function ArtifactPreviewPane({
             </button>
           </div>
         </div>
-        <div className="artifact-preview-content">
-          <div className="artifact-preview-zoom" style={zoomStyle}>
-            <JsxPreview code={inline.code} lang={inline.kind} variant="pane" />
+        <div className="artifact-preview-content" ref={contentRef}>
+          <div className="artifact-preview-scaler" style={scalerStyle}>
+            <div className="artifact-preview-zoom" ref={innerRef} style={innerStyle}>
+              <JsxPreview code={inline.code} lang={inline.kind} variant="pane" />
+            </div>
           </div>
         </div>
       </div>
@@ -357,14 +392,16 @@ export function ArtifactPreviewPane({
           </button>
         </div>
       </div>
-      <div className="artifact-preview-content">
+      <div className="artifact-preview-content" ref={contentRef}>
         {error ? (
           <div className="artifact-preview-error">Could not open preview: {error}</div>
         ) : !preview ? (
           <div className="artifact-preview-loading">Loading preview…</div>
         ) : (
-          <div className="artifact-preview-zoom" style={zoomStyle}>
-            <PreviewBody preview={preview} />
+          <div className="artifact-preview-scaler" style={scalerStyle}>
+            <div className="artifact-preview-zoom" ref={innerRef} style={innerStyle}>
+              <PreviewBody preview={preview} />
+            </div>
           </div>
         )}
       </div>

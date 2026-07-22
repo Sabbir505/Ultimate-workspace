@@ -3237,10 +3237,14 @@ table.kv th {
     transparent 5px
   );
 }
-/* Zoom wrapper: WebKit `zoom` reflows the content so the scroll area grows,
-   giving usable scrollbars when zoomed in and a fit-all view when zoomed out. */
+/* Transform-scale zoom: the inner wrapper is scaled, and the scaler reserves a
+   scroll area matching the scaled size so zoom-in pans and zoom-out fits all. */
+.artifact-preview-scaler {
+  position: relative;
+}
 .artifact-preview-zoom {
-  width: 100%;
+  padding: 14px 16px;
+  box-sizing: border-box;
 }
 .artifact-preview-zoom-ctrls {
   display: inline-flex;
@@ -3385,13 +3389,13 @@ table.kv th {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 14px 16px;
+  padding: 0;
 }
 .artifact-preview-loading,
 .artifact-preview-error {
   color: var(--text-dim);
   font-size: 12.5px;
-  padding: 8px 2px;
+  padding: 14px 18px;
 }
 .artifact-preview-image {
   max-width: 100%;

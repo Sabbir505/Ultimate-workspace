@@ -205,22 +205,59 @@ export function TypingIndicator() {
   );
 }
 
-/** Splits a `<think>…</think>` reasoning block (streamed by reasoning
- *  models) off the front of the message. `done` is false while the closing
- *  tag hasn't arrived yet (still thinking). */
-function splitThinking(content: string): {
-  thinking: string | null;
-  done: boolean;
-  rest: string;
-} {
-  const match = /^\s*<think>([\s\S]*?)(?:<\/think>|$)/.exec(content);
-  if (!match) return { thinking: null, done: true, rest: content };
-  const done = match[0].includes("</think>");
-  return {
-    thinking: match[1].trim(),
-    done,
-    rest: content.slice(match[0].length).trim(),
-  };
+/** A tool-call process step emitted by the backend as `<tool>{json}</tool>`. */
+interface ToolData {
+  kind?: string;
+  title?: string;
+  detail?: string;
+  lang?: string;
+  code?: string;
+}
+
+type Segment =
+  | { type: "text"; text: string }
+  | { type: "think"; text: string; done: boolean }
+  | { type: "tool"; data: ToolData | null; done: boolean };
+
+/** Split an assistant message into ordered segments: plain markdown text,
+ *  `<think>` reasoning blocks, and `<tool>` process cards. A block whose
+ *  closing tag hasn't streamed in yet is marked `done: false`. */
+function parseSegments(content: string): Segment[] {
+  const segs: Segment[] = [];
+  let rest = content;
+  const tagRe = /<(think|tool)>/;
+  for (;;) {
+    const m = tagRe.exec(rest);
+    if (!m) {
+      if (rest) segs.push({ type: "text", text: rest });
+      break;
+    }
+    const before = rest.slice(0, m.index);
+    if (before) segs.push({ type: "text", text: before });
+
+    const tag = m[1];
+    const afterOpen = rest.slice(m.index + m[0].length);
+    const close = `</${tag}>`;
+    const ci = afterOpen.indexOf(close);
+    const inner = ci === -1 ? afterOpen : afterOpen.slice(0, ci);
+    const done = ci !== -1;
+
+    if (tag === "think") {
+      segs.push({ type: "think", text: inner.trim(), done });
+    } else {
+      let data: ToolData | null = null;
+      try {
+        data = JSON.parse(inner) as ToolData;
+      } catch {
+        data = null;
+      }
+      segs.push({ type: "tool", data, done });
+    }
+
+    if (ci === -1) break;
+    rest = afterOpen.slice(ci + close.length);
+  }
+  return segs;
 }
 
 function ThinkingBlock({ thinking, done }: { thinking: string; done: boolean }) {
@@ -237,6 +274,78 @@ function ThinkingBlock({ thinking, done }: { thinking: string; done: boolean }) 
         <span className={`chat-thinking-chevron${open ? " open" : ""}`}>›</span>
       </button>
       {open && <div className="chat-thinking-body">{thinking}</div>}
+    </div>
+  );
+}
+
+/** Emoji glyph for a tool step, keyed by the backend-provided `kind`. */
+function toolGlyph(kind?: string): string {
+  switch (kind) {
+    case "search":
+      return "🔎";
+    case "web":
+      return "🌐";
+    case "browser":
+      return "🖥";
+    case "file":
+    case "code":
+      return "‹›";
+    default:
+      return "⚙";
+  }
+}
+
+/** A collapsible "process" card for a single tool call (tool calling, writing
+ *  a script, …). Collapsed by default; expands to reveal detail/code. */
+function ToolBlock({ data, done }: { data: ToolData | null; done: boolean }) {
+  const [open, setOpen] = useState(false);
+  const title = data?.title ?? "Working…";
+  const hasBody = Boolean(data?.code || data?.detail);
+  return (
+    <div className={`chat-tool${done ? "" : " live"}`}>
+      <button
+        className="chat-tool-toggle"
+        onClick={() => hasBody && setOpen((o) => !o)}
+        title={open ? "Hide details" : "Show details"}
+        disabled={!hasBody}
+      >
+        <span className="chat-tool-icon">{toolGlyph(data?.kind)}</span>
+        <span className="chat-tool-title">{title}</span>
+        {!done && <span className="chat-tool-spinner" aria-hidden="true" />}
+        {hasBody && (
+          <span className={`chat-thinking-chevron${open ? " open" : ""}`}>›</span>
+        )}
+      </button>
+      {open && hasBody && (
+        <div className="chat-tool-body">
+          {data?.detail && <div className="chat-tool-detail">{data.detail}</div>}
+          {data?.code && (
+            <div className="chat-code-block">
+              <div className="chat-code-header">
+                <span className="chat-code-lang">{data.lang || "text"}</span>
+                <CopyButton code={data.code} />
+              </div>
+              <SyntaxHighlighter
+                style={{}}
+                language={data.lang || "text"}
+                PreTag="div"
+                customStyle={{
+                  margin: 0,
+                  background: "transparent",
+                  padding: "12px 16px",
+                  fontSize: "12px",
+                  fontFamily: "var(--font-mono)",
+                  lineHeight: 1.5,
+                  overflowX: "auto",
+                }}
+                codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
+              >
+                {data.code}
+              </SyntaxHighlighter>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -277,6 +386,81 @@ function CopyButton({ code }: { code: string }) {
   );
 }
 
+/** Renders a markdown string with syntax-highlighted code fences, mermaid
+ *  diagrams and glass-styled links — the assistant's normal answer body. */
+function Markdown({ content }: { content: string }) {
+  const inlineCodeStyle = useInlineCodeStyle();
+  return (
+    <div className="chat-markdown">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          code({ className, children, ...props }) {
+            const match = /language-(\w+)/.exec(className || "");
+            const codeString = String(children).replace(/\n$/, "");
+
+            // Inline code: no language class and short.
+            if (!match && !String(children).includes("\n")) {
+              return (
+                <code style={inlineCodeStyle} {...props}>
+                  {children}
+                </code>
+              );
+            }
+
+            // Mermaid diagrams render as inline SVG, not as highlighted text.
+            if (match && match[1] === "mermaid") {
+              return <MermaidDiagram code={codeString} />;
+            }
+
+            // Code block with language.
+            return (
+              <div className="chat-code-block">
+                <div className="chat-code-header">
+                  <span className="chat-code-lang">{match ? match[1] : "text"}</span>
+                  <CopyButton code={codeString} />
+                </div>
+                <SyntaxHighlighter
+                  style={{}}
+                  language={match ? match[1] : "text"}
+                  PreTag="div"
+                  customStyle={{
+                    margin: 0,
+                    background: "transparent",
+                    padding: "12px 16px",
+                    fontSize: "12px",
+                    fontFamily: "var(--font-mono)",
+                    lineHeight: 1.5,
+                    overflowX: "auto",
+                  }}
+                  codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
+                >
+                  {codeString}
+                </SyntaxHighlighter>
+              </div>
+            );
+          },
+          // Render links with target=_blank and glass-appropriate styling.
+          a({ href, children }) {
+            return (
+              <a
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "var(--accent)" }}
+              >
+                {children}
+              </a>
+            );
+          },
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 export function MessageBubble({
   message,
   live,
@@ -286,103 +470,41 @@ export function MessageBubble({
   onPreviewArtifact,
 }: Props) {
   const isUser = message.role === "user";
-  const inlineCodeStyle = useInlineCodeStyle();
-  const { thinking, done, rest } = isUser
-    ? { thinking: null, done: true, rest: message.content }
-    : splitThinking(message.content);
+  // User messages are rendered verbatim; assistant messages are split into
+  // reasoning / tool-call / answer segments (Claude-style process view).
+  const segments: Segment[] = isUser
+    ? [{ type: "text", text: message.content }]
+    : parseSegments(message.content);
+
+  // Copy action yields the visible answer text only (no process markup).
+  const plainText = segments
+    .filter((s): s is Extract<Segment, { type: "text" }> => s.type === "text")
+    .map((s) => s.text)
+    .join("")
+    .trim();
 
   return (
     <div className={`chat-bubble${isUser ? " user" : " assistant"}`}>
       <div className="chat-bubble-inner">
-        {thinking !== null && thinking.length > 0 && (
-          <ThinkingBlock thinking={thinking} done={done} />
-        )}
-        <div className="chat-markdown">
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          components={{
-            code({ className, children, ...props }) {
-              const match = /language-(\w+)/.exec(className || "");
-              const codeString = String(children).replace(/\n$/, "");
-
-              // Inline code: no language class and short.
-              if (!match && !String(children).includes("\n")) {
-                return (
-                  <code style={inlineCodeStyle} {...props}>
-                    {children}
-                  </code>
-                );
-              }
-
-              // Mermaid diagrams render as inline SVG, not as highlighted text.
-              if (match && match[1] === "mermaid") {
-                return <MermaidDiagram code={codeString} />;
-              }
-
-              // Code block with language.
-              return (
-                <div className="chat-code-block">
-                  <div className="chat-code-header">
-                    <span className="chat-code-lang">
-                      {match ? match[1] : "text"}
-                    </span>
-                    <CopyButton code={codeString} />
-                  </div>
-                  <SyntaxHighlighter
-                    style={{}}
-                    language={match ? match[1] : "text"}
-                    PreTag="div"
-                    customStyle={{
-                      margin: 0,
-                      background: "transparent",
-                      padding: "12px 16px",
-                      fontSize: "12px",
-                      fontFamily: "var(--font-mono)",
-                      lineHeight: 1.5,
-                      overflowX: "auto",
-                    }}
-                    codeTagProps={{
-                      style: {
-                        fontFamily: "var(--font-mono)",
-                      },
-                    }}
-                  >
-                    {codeString}
-                  </SyntaxHighlighter>
-                </div>
-              );
-            },
-            // Render links with target=_blank and glass-appropriate styling.
-            a({ href, children }) {
-              return (
-                <a
-                  href={href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{ color: "var(--accent)" }}
-                >
-                  {children}
-                </a>
-              );
-            },
-          }}
-        >
-          {rest}
-        </ReactMarkdown>
-        </div>
+        {segments.map((seg, i) => {
+          if (seg.type === "think") {
+            return seg.text.length > 0 ? (
+              <ThinkingBlock key={i} thinking={seg.text} done={seg.done} />
+            ) : null;
+          }
+          if (seg.type === "tool") {
+            return <ToolBlock key={i} data={seg.data} done={seg.done} />;
+          }
+          return seg.text.trim().length > 0 ? (
+            <Markdown key={i} content={seg.text} />
+          ) : null;
+        })}
         {!isUser && artifacts && artifacts.length > 0 && (
-          <MessageArtifacts
-            artifacts={artifacts}
-            onPreviewArtifact={onPreviewArtifact}
-          />
+          <MessageArtifacts artifacts={artifacts} onPreviewArtifact={onPreviewArtifact} />
         )}
       </div>
       {!live && (
-        <MessageActions
-          content={message.content}
-          onEdit={onEdit}
-          onRepeat={onRepeat}
-        />
+        <MessageActions content={plainText || message.content} onEdit={onEdit} onRepeat={onRepeat} />
       )}
     </div>
   );

@@ -195,6 +195,10 @@ export interface ChatSession {
   model: string;
   createdAt: number;
   lastActiveAt: number;
+  /** Starred chats are pinned to the top of the sidebar list. */
+  starred?: boolean;
+  /** Marked-unread chats show an unread dot in the sidebar. */
+  unread?: boolean;
 }
 
 export interface ChatMessageRecord {
@@ -297,6 +301,10 @@ export const deleteChatSession = (chatSessionId: string) =>
   safeInvoke<void>("delete_chat_session", { chatSessionId });
 export const updateChatSessionTitle = (chatSessionId: string, title: string) =>
   safeInvoke<void>("update_chat_session_title", { chatSessionId, title });
+export const setChatSessionStarred = (chatSessionId: string, starred: boolean) =>
+  safeInvoke<void>("set_chat_session_starred", { chatSessionId, starred });
+export const setChatSessionUnread = (chatSessionId: string, unread: boolean) =>
+  safeInvoke<void>("set_chat_session_unread", { chatSessionId, unread });
 export const getChatMessages = (chatSessionId: string) =>
   safeInvoke<ChatMessageRecord[] | null>("get_chat_messages", { chatSessionId });
 export const touchChatSession = (chatSessionId: string) =>

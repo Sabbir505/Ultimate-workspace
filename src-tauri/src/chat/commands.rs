@@ -15,15 +15,23 @@ type CmdResult<T> = Result<T, String>;
 
 // ---- Chat session CRUD ----
 
-/// Removes `<think>…</think>` reasoning blocks (display-only) from a message
-/// before it is sent back to the API as conversation history.
+/// Removes display-only process blocks — `<think>…</think>` reasoning and
+/// `<tool>…</tool>` tool-call narration — from a message before it is sent
+/// back to the API as conversation history.
 fn strip_think_blocks(content: &str) -> String {
+    strip_tagged_blocks(&strip_tagged_blocks(content, "think"), "tool")
+}
+
+/// Strip every `<tag>…</tag>` span (and an unterminated trailing `<tag>…`).
+fn strip_tagged_blocks(content: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
     let mut out = String::with_capacity(content.len());
     let mut rest = content;
-    while let Some(start) = rest.find("<think>") {
+    while let Some(start) = rest.find(&open) {
         out.push_str(&rest[..start]);
-        match rest[start..].find("</think>") {
-            Some(end) => rest = &rest[start + end + "</think>".len()..],
+        match rest[start..].find(&close) {
+            Some(end) => rest = &rest[start + end + close.len()..],
             None => {
                 rest = "";
                 break;
@@ -113,6 +121,26 @@ pub fn update_chat_session_title(
 ) -> CmdResult<()> {
     let conn = db.0.lock();
     db::update_chat_session_title(&conn, &chat_session_id, &title).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_chat_session_starred(
+    chat_session_id: String,
+    starred: bool,
+    db: State<DbState>,
+) -> CmdResult<()> {
+    let conn = db.0.lock();
+    db::set_chat_session_starred(&conn, &chat_session_id, starred).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_chat_session_unread(
+    chat_session_id: String,
+    unread: bool,
+    db: State<DbState>,
+) -> CmdResult<()> {
+    let conn = db.0.lock();
+    db::set_chat_session_unread(&conn, &chat_session_id, unread).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -786,4 +814,27 @@ pub async fn list_chat_models(
     };
 
     Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_think_blocks_removes_think_and_tool_markup() {
+        let raw = "<think>reasoning</think>Here is the answer.";
+        assert_eq!(strip_think_blocks(raw), "Here is the answer.");
+
+        let with_tool = "<tool>{\"title\":\"Running python code\"}</tool>The result is 42.";
+        assert_eq!(strip_think_blocks(with_tool), "The result is 42.");
+
+        let mixed = "<think>plan</think><tool>{\"title\":\"x\"}</tool>Done.<tool>{\"title\":\"y\"}</tool>";
+        assert_eq!(strip_think_blocks(mixed), "Done.");
+
+        // Unterminated trailing block (mid-stream) is dropped entirely.
+        assert_eq!(strip_think_blocks("Answer.<tool>{\"title\":\"partial"), "Answer.");
+
+        // Plain content is untouched (aside from trimming).
+        assert_eq!(strip_think_blocks("  just text  "), "just text");
+    }
 }

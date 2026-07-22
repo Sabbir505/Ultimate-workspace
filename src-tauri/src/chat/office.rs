@@ -762,6 +762,7 @@ pub fn doc_to_text(format: &str, bytes: &[u8]) -> Option<String> {
         "docx" => docx_bytes_to_text(bytes)?,
         "pptx" => pptx_bytes_to_text(bytes)?,
         "xlsx" => strip_html_to_text(&xlsx_to_html(bytes)?),
+        "pdf" => pdf_bytes_to_text(bytes)?,
         _ => return None,
     };
     let trimmed = text.trim();
@@ -771,6 +772,17 @@ pub fn doc_to_text(format: &str, bytes: &[u8]) -> Option<String> {
         // Cap to keep the prompt bounded on very large documents.
         Some(trimmed.chars().take(50_000).collect())
     }
+}
+
+/// Extract text from a PDF's bytes. Uses `pdf-extract`, which can panic on some
+/// malformed inputs, so the call is wrapped in `catch_unwind` to degrade
+/// gracefully to `None` rather than taking down the chat task.
+fn pdf_bytes_to_text(bytes: &[u8]) -> Option<String> {
+    let owned = bytes.to_vec();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pdf_extract::extract_text_from_mem(&owned).ok()
+    }));
+    result.ok().flatten()
 }
 
 fn docx_bytes_to_text(bytes: &[u8]) -> Option<String> {
@@ -919,6 +931,29 @@ mod tests {
         assert!(ptext.contains("Alpha") && ptext.contains("Beta"), "{ptext}");
 
         assert!(doc_to_text("bogus", b"not a real file").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn doc_to_text_extracts_pdf_and_handles_garbage() {
+        let dir = std::env::temp_dir().join(format!("conduit-pdftext-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let pdf = crate::chat::artifacts::generate(
+            &dir,
+            "pdf",
+            "t.pdf",
+            Some("Quarterly Report"),
+            "Revenue grew twelve percent.\nCosts stayed flat.",
+        )
+        .unwrap();
+        let text = doc_to_text("pdf", &std::fs::read(&pdf.path).unwrap()).unwrap();
+        assert!(text.contains("Revenue grew twelve percent."), "{text}");
+
+        // Malformed PDF bytes degrade gracefully to None (never panic).
+        assert!(doc_to_text("pdf", b"%PDF-1.4 not really a pdf").is_none());
+        assert!(doc_to_text("pdf", b"").is_none());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

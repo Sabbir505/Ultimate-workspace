@@ -17,16 +17,44 @@ fn map_chat_session(row: &rusqlite::Row) -> rusqlite::Result<ChatSession> {
         model: row.get("model")?,
         created_at: row.get("created_at")?,
         last_active_at: row.get("last_active_at")?,
+        starred: row.get::<_, i64>("starred")? != 0,
+        unread: row.get::<_, i64>("unread")? != 0,
     })
 }
 
-/// Most recent first (last_active_at desc).
+/// Starred chats first, then most recent (last_active_at desc).
 pub fn list_chat_sessions(conn: &Connection) -> DbResult<Vec<ChatSession>> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM chat_sessions ORDER BY last_active_at DESC",
+        "SELECT * FROM chat_sessions ORDER BY starred DESC, last_active_at DESC",
     )?;
     let rows = stmt.query_map([], map_chat_session)?;
     rows.collect()
+}
+
+/// Pin (or unpin) a chat to the top of the sidebar list.
+pub fn set_chat_session_starred(
+    conn: &Connection,
+    chat_session_id: &str,
+    starred: bool,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE chat_sessions SET starred = ?2 WHERE id = ?1",
+        params![chat_session_id, starred as i64],
+    )?;
+    Ok(())
+}
+
+/// Mark a chat as read/unread (shows an unread dot in the sidebar).
+pub fn set_chat_session_unread(
+    conn: &Connection,
+    chat_session_id: &str,
+    unread: bool,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE chat_sessions SET unread = ?2 WHERE id = ?1",
+        params![chat_session_id, unread as i64],
+    )?;
+    Ok(())
 }
 
 pub fn create_chat_session(

@@ -148,6 +148,8 @@ pub fn run() {
             commands::chat_cmds::create_chat_session,
             commands::chat_cmds::delete_chat_session,
             commands::chat_cmds::update_chat_session_title,
+            commands::chat_cmds::set_chat_session_starred,
+            commands::chat_cmds::set_chat_session_unread,
             commands::chat_cmds::update_chat_session_model,
             commands::chat_cmds::get_chat_messages,
             commands::chat_cmds::touch_chat_session,

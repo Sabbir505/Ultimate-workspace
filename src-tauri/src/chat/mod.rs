@@ -843,40 +843,72 @@ fn coerce_param_value(raw: &str) -> Value {
     Value::String(s.to_string())
 }
 
-/// Human-readable narration of a tool call, shown (inside the `<think>` block)
-/// while the tool runs.
-fn tool_status_line(name: &str, args: &Value) -> String {
-    if name == tools::WEB_SEARCH {
-        let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-        format!("Searching the web for \"{q}\"…\n")
+/// Structured narration of a tool call, emitted as a `<tool>{json}</tool>`
+/// marker so the UI can render each step as its own collapsible card (tool
+/// calling, writing a script, etc.). `json` carries a `kind` (drives the icon),
+/// a `title`, an optional one-line `detail`, and — for code-producing tools —
+/// the `code`/`lang` so the user can expand and read what was written.
+///
+/// `<tool>` blocks are display-only and stripped from re-sent history exactly
+/// like `<think>` blocks.
+fn tool_block(name: &str, args: &Value) -> String {
+    let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    // A tool's own output must never contain the closing tag or it would
+    // truncate the block on the client; neutralize it defensively.
+    let sanitize = |v: String| v.replace("</tool>", "<\\/tool>");
+
+    let meta: Value = if name == tools::WEB_SEARCH {
+        json!({ "kind": "search", "title": "Searching the web", "detail": s("query") })
     } else if name == tools::GENERATE_FILE {
-        let f = args.get("filename").and_then(|v| v.as_str()).unwrap_or("file");
-        let fmt = args.get("format").and_then(|v| v.as_str()).unwrap_or("");
-        format!("Generating {fmt} file \"{f}\"…\n")
+        json!({
+            "kind": "file",
+            "title": format!("Generating {} file \"{}\"", s("format"), s("filename")),
+            "lang": s("format"),
+            "code": sanitize(s("content")),
+        })
     } else if name == tools::GENERATE_DOCUMENT {
-        let f = args.get("filename").and_then(|v| v.as_str()).unwrap_or("document");
-        let fmt = args.get("format").and_then(|v| v.as_str()).unwrap_or("");
-        format!("Building {fmt} document \"{f}\"…\n")
+        json!({
+            "kind": "code",
+            "title": format!("Building {} document \"{}\"", s("format"), s("filename")),
+            "lang": "python",
+            "code": sanitize(s("code")),
+        })
+    } else if name == tools::GENERATE_DIAGRAM {
+        json!({
+            "kind": "code",
+            "title": format!("Designing diagram \"{}\"", s("filename")),
+            "lang": "html",
+            "code": sanitize(s("html")),
+        })
     } else if name == tools::FETCH_URL || name == tools::OPEN_URL {
-        let u = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
         let verb = if name == tools::OPEN_URL { "Opening" } else { "Reading" };
-        format!("{verb} {u}…\n")
+        json!({ "kind": "web", "title": format!("{verb} a web page"), "detail": s("url") })
     } else if name == tools::RUN_CODE {
-        let lang = args.get("language").and_then(|v| v.as_str()).unwrap_or("code");
-        format!("Running {lang} code…\n")
+        let lang = args
+            .get("language")
+            .and_then(|v| v.as_str())
+            .unwrap_or("code")
+            .to_string();
+        json!({
+            "kind": "code",
+            "title": format!("Running {lang} code"),
+            "lang": lang,
+            "code": sanitize(s("code")),
+        })
     } else if name == tools::BROWSER_READ {
-        "Reading the browser page…\n".to_string()
+        json!({ "kind": "browser", "title": "Reading the browser page" })
     } else if name == tools::BROWSER_CLICK {
         let r = args.get("ref").and_then(|v| v.as_i64()).unwrap_or(-1);
-        format!("Clicking element [{r}] in the browser…\n")
+        json!({ "kind": "browser", "title": format!("Clicking element [{r}] in the browser") })
     } else if name == tools::BROWSER_TYPE {
-        let t = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
-        format!("Typing \"{t}\" in the browser…\n")
+        json!({ "kind": "browser", "title": "Typing in the browser", "detail": s("text") })
     } else if name == tools::BROWSER_SCROLL {
-        "Scrolling the browser page…\n".to_string()
+        json!({ "kind": "browser", "title": "Scrolling the browser page" })
     } else {
-        format!("Running tool {name}…\n")
-    }
+        json!({ "kind": "tool", "title": format!("Running tool {name}") })
+    };
+
+    format!("<tool>{meta}</tool>")
 }
 
 /// Build an OpenAI-style message object, using a multimodal `content` array
@@ -952,7 +984,6 @@ async fn run_openai_tool_loop(
     }
 
     let mut full = String::new();
-    let mut in_think = false;
     let mut total_in = 0i64;
     let mut total_out = 0i64;
     let mut have_usage = false;
@@ -1033,10 +1064,6 @@ async fn run_openai_tool_loop(
         };
 
         if !tool_calls.is_empty() {
-            if !in_think {
-                emit_token(app, sid, "<think>", &mut full);
-                in_think = true;
-            }
             // The assistant turn (carrying tool_calls) must be echoed back
             // before the matching tool results. Some providers emit malformed
             // `arguments` (e.g. a stray `{}` prefix); we normalize them to clean
@@ -1084,7 +1111,7 @@ async fn run_openai_tool_loop(
                     .unwrap_or("{}");
                 let args = parse_tool_args(args_str);
 
-                emit_token(app, sid, &tool_status_line(&name, &args), &mut full);
+                emit_token(app, sid, &tool_block(&name, &args), &mut full);
                 let result = run_tool(client, &art_dir, caps, app, sid, &name, &args).await;
                 messages.push(json!({
                     "role": "tool",
@@ -1096,9 +1123,6 @@ async fn run_openai_tool_loop(
         }
 
         // No tool calls → final answer.
-        if in_think {
-            emit_token(app, sid, "</think>", &mut full);
-        }
         let content = message.get("content").and_then(|c| c.as_str()).unwrap_or("");
         // Never surface raw Hermes tool-call markup to the user.
         let content = strip_hermes_tool_calls(content);
@@ -1106,9 +1130,6 @@ async fn run_openai_tool_loop(
         return Ok((full, build_usage(true, total_in, total_out, have_usage)));
     }
 
-    if in_think {
-        emit_token(app, sid, "</think>", &mut full);
-    }
     emit_token(
         app,
         sid,
@@ -1139,7 +1160,6 @@ async fn run_anthropic_tool_loop(
         .collect();
 
     let mut full = String::new();
-    let mut in_think = false;
     let mut total_in = 0i64;
     let mut total_out = 0i64;
     let mut have_usage = false;
@@ -1193,10 +1213,6 @@ async fn run_anthropic_tool_loop(
             .collect();
 
         if !tool_uses.is_empty() {
-            if !in_think {
-                emit_token(app, sid, "<think>", &mut full);
-                in_think = true;
-            }
             // Echo the assistant turn (text + tool_use blocks) verbatim.
             messages.push(json!({ "role": "assistant", "content": content }));
 
@@ -1206,7 +1222,7 @@ async fn run_anthropic_tool_loop(
                 let name = tu.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
                 let args = tu.get("input").cloned().unwrap_or_else(|| json!({}));
 
-                emit_token(app, sid, &tool_status_line(&name, &args), &mut full);
+                emit_token(app, sid, &tool_block(&name, &args), &mut full);
                 let result = run_tool(client, &art_dir, caps, app, sid, &name, &args).await;
                 results.push(json!({
                     "type": "tool_result",
@@ -1219,9 +1235,6 @@ async fn run_anthropic_tool_loop(
         }
 
         // No tool use → final answer: concatenate text blocks.
-        if in_think {
-            emit_token(app, sid, "</think>", &mut full);
-        }
         let text: String = content
             .iter()
             .filter_map(|b| {
@@ -1237,9 +1250,6 @@ async fn run_anthropic_tool_loop(
         return Ok((full, build_usage(false, total_in, total_out, have_usage)));
     }
 
-    if in_think {
-        emit_token(app, sid, "</think>", &mut full);
-    }
     emit_token(
         app,
         sid,

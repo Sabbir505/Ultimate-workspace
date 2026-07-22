@@ -2,8 +2,8 @@
 // top and a footer row below — "+" attach button on the left, model/effort
 // pill and a circular ↑ send button on the right.
 // Enter sends; Shift+Enter inserts a newline.
-// Attachments: images are sent as vision input, docx/pptx/xlsx are extracted to
-// text server-side, and plain-text files are inlined into the message.
+// Attachments: images are sent as vision input, docx/pptx/xlsx/pdf are extracted
+// to text server-side, and plain-text files are inlined into the message.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ModelEffortMenu } from "./ModelEffortMenu";
 
@@ -22,12 +22,12 @@ export interface ChatAttachment {
   data?: string;
   /** MIME type for images, e.g. "image/png". */
   mediaType?: string;
-  /** File extension for docs: "docx" | "pptx" | "xlsx". */
+  /** File extension for docs: "docx" | "pptx" | "xlsx" | "pdf". */
   format?: string;
 }
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "webp"];
-const DOC_EXTS = ["docx", "pptx", "xlsx"];
+const DOC_EXTS = ["docx", "pptx", "xlsx", "pdf"];
 
 /** Read a File's bytes as base64 (without the `data:...;base64,` prefix). */
 function readAsBase64(file: File): Promise<string> {
@@ -109,10 +109,6 @@ export function ChatComposer({
       const limit = isImage ? MAX_IMAGE_BYTES : isDoc ? MAX_DOC_BYTES : MAX_TEXT_BYTES;
       if (file.size > limit) {
         setAttachError(`${file.name} is too large (max ${Math.round(limit / 1024 / 1024)} MB)`);
-        continue;
-      }
-      if (ext === "pdf") {
-        setAttachError("PDF text extraction isn't supported yet — convert to DOCX or paste the text.");
         continue;
       }
       try {

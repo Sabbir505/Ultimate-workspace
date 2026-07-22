@@ -35,6 +35,9 @@ export function Sidebar() {
   const selectSession = useChatStore((s) => s.selectSession);
   const newChat = useChatStore((s) => s.newChat);
   const deleteChat = useChatStore((s) => s.deleteChat);
+  const renameChat = useChatStore((s) => s.renameChat);
+  const setStarred = useChatStore((s) => s.setStarred);
+  const setUnread = useChatStore((s) => s.setUnread);
   const loadSessions = useChatStore((s) => s.loadSessions);
   const loadConfig = useChatStore((s) => s.loadConfig);
 
@@ -62,6 +65,27 @@ export function Sidebar() {
       void deleteChat(id);
     },
     [deleteChat],
+  );
+
+  const handleRenameChat = useCallback(
+    (id: string, title: string) => {
+      void renameChat(id, title);
+    },
+    [renameChat],
+  );
+
+  const handleToggleStar = useCallback(
+    (id: string, starred: boolean) => {
+      void setStarred(id, starred);
+    },
+    [setStarred],
+  );
+
+  const handleSetUnread = useCallback(
+    (id: string, unread: boolean) => {
+      void setUnread(id, unread);
+    },
+    [setUnread],
   );
 
   const switchToMode = useCallback(
@@ -100,6 +124,8 @@ export function Sidebar() {
     title: s.title ?? "Untitled Chat",
     lastActiveAt: s.lastActiveAt,
     lastMessage: undefined,
+    starred: s.starred ?? false,
+    unread: s.unread ?? false,
   }));
 
   return (
@@ -176,6 +202,9 @@ export function Sidebar() {
                   active={s.id === activeChatSessionId}
                   onSelect={handleSelectChat}
                   onDelete={handleDeleteChat}
+                  onRename={handleRenameChat}
+                  onToggleStar={handleToggleStar}
+                  onSetUnread={handleSetUnread}
                 />
               ))
             )}

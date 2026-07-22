@@ -15,6 +15,8 @@ import {
   listChatSessions,
   sendChatMessage,
   setChatApiKey,
+  setChatSessionStarred,
+  setChatSessionUnread,
   touchChatSession,
   updateChatSessionModel,
   updateChatSessionTitle,
@@ -30,6 +32,15 @@ import { useArtifactsStore } from "./artifacts";
 export interface ChatArtifact {
   path: string;
   filename: string;
+}
+
+/** Float starred chats to the top while preserving the existing (recency)
+ *  order within the starred and unstarred groups. Stable so the optimistic
+ *  "bump active chat to top" reordering still works. */
+function sortSessions(list: ChatSession[]): ChatSession[] {
+  const starred = list.filter((s) => s.starred);
+  const rest = list.filter((s) => !s.starred);
+  return [...starred, ...rest];
 }
 
 interface ChatState {
@@ -65,6 +76,10 @@ interface ChatState {
   newChat: (provider: string, model: string) => Promise<ChatSession | null>;
   deleteChat: (chatSessionId: string) => Promise<void>;
   renameChat: (chatSessionId: string, title: string) => Promise<void>;
+  /** Star/unstar a chat (pins it to the top of the sidebar). */
+  setStarred: (chatSessionId: string, starred: boolean) => Promise<void>;
+  /** Mark a chat read/unread (shows an unread dot in the sidebar). */
+  setUnread: (chatSessionId: string, unread: boolean) => Promise<void>;
   setSessionModel: (chatSessionId: string, model: string) => Promise<void>;
   setEffort: (effort: string) => void;
   setToolsEnabled: (enabled: boolean) => void;
@@ -123,7 +138,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   selectSession: async (chatSessionId) => {
-    set({ activeChatSessionId: chatSessionId, error: null, previewArtifact: null });
+    // Opening a chat clears its unread mark (persisted only if it was set).
+    const wasUnread = get().sessions.find((s) => s.id === chatSessionId)?.unread ?? false;
+    set((s) => ({
+      activeChatSessionId: chatSessionId,
+      error: null,
+      previewArtifact: null,
+      sessions: s.sessions.map((sess) =>
+        sess.id === chatSessionId && sess.unread ? { ...sess, unread: false } : sess,
+      ),
+    }));
+    if (wasUnread) void setChatSessionUnread(chatSessionId, false);
     const messages = await getChatMessages(chatSessionId);
     // Only update messages if the user hasn't clicked away to another session
     // while the fetch was in-flight.
@@ -140,9 +165,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   newChat: async (provider, model) => {
     const session = await createChatSession(provider, model);
     if (session) {
-      // Insert at the top so it appears immediately in the sidebar.
+      // Insert at the top so it appears immediately in the sidebar (below
+      // any starred chats).
       set((s) => ({
-        sessions: [session, ...s.sessions],
+        sessions: sortSessions([session, ...s.sessions]),
         activeChatSessionId: session.id,
         messages: [],
         error: null,
@@ -169,6 +195,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({
       sessions: s.sessions.map((sess) =>
         sess.id === chatSessionId ? { ...sess, title } : sess,
+      ),
+    }));
+  },
+
+  setStarred: async (chatSessionId, starred) => {
+    await setChatSessionStarred(chatSessionId, starred);
+    set((s) => ({
+      sessions: sortSessions(
+        s.sessions.map((sess) =>
+          sess.id === chatSessionId ? { ...sess, starred } : sess,
+        ),
+      ),
+    }));
+  },
+
+  setUnread: async (chatSessionId, unread) => {
+    await setChatSessionUnread(chatSessionId, unread);
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === chatSessionId ? { ...sess, unread } : sess,
       ),
     }));
   },
@@ -229,7 +275,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const active = sessions.find((s) => s.id === activeChatSessionId);
     if (active) {
       set((s) => ({
-        sessions: [active, ...s.sessions.filter((sess) => sess.id !== activeChatSessionId)],
+        sessions: sortSessions([
+          active,
+          ...s.sessions.filter((sess) => sess.id !== activeChatSessionId),
+        ]),
       }));
     }
 
@@ -293,6 +342,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   onDone: async (chatSessionId, inputTokens, outputTokens, costUsd) => {
+    // A reply that lands while the user is viewing a different chat marks the
+    // finished one unread, so it surfaces in the sidebar.
+    if (get().activeChatSessionId !== chatSessionId) {
+      await setChatSessionUnread(chatSessionId, true);
+    }
     // Clear streaming state for this session.
     set((s) => {
       const nextStreaming = { ...s.streaming };

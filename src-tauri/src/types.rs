@@ -169,6 +169,12 @@ pub struct ChatSession {
     pub model: String,
     pub created_at: i64,
     pub last_active_at: i64,
+    /// Starred chats are pinned to the top of the sidebar list.
+    #[serde(default)]
+    pub starred: bool,
+    /// Marked-unread chats show an unread dot in the sidebar.
+    #[serde(default)]
+    pub unread: bool,
 }
 
 /// A file attached to a chat message from the composer. Images are forwarded

@@ -32,6 +32,36 @@ use crate::db;
 use crate::harness_adapters::{CommandSpec, HarnessAdapter, UsageInfo};
 use crate::types::{BrowserUrlDetectedEvent, CostUpdatedEvent, PtyExitEvent, PtyOutputEvent, PtyStateEvent, SessionHarnessIdEvent};
 
+/// True only for URLs that point at a local dev server / preview, which are the
+/// only URLs allowed to auto-navigate the built-in browser pane. This keeps
+/// arbitrary remote URLs printed by CLIs (git remotes, docs, GitHub links) from
+/// hijacking the browser — those stay as plain terminal text.
+fn is_local_dev_url(url: &str) -> bool {
+    // Strip scheme, then take the host portion up to the first '/', ':', or end.
+    let after_scheme = url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(url);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    // Drop userinfo and port; handle bracketed IPv6 like [::1]:5173.
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(end) = host.strip_prefix('[').and_then(|h| h.split_once(']')) {
+        end.0
+    } else {
+        host.split(':').next().unwrap_or(host)
+    };
+    let host = host.to_ascii_lowercase();
+    host == "localhost"
+        || host == "0.0.0.0"
+        || host == "::1"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.starts_with("127.")
+}
+
 /// Rolling stripped transcript cap per pane (CONTRACT.md: ~1MB). Used for
 /// `export_session_markdown`.
 const TRANSCRIPT_CAP: usize = 1024 * 1024;
@@ -433,6 +463,14 @@ impl PtyManager {
                             if let Some(ref re) = url_re {
                                 for m in re.find_iter(&scan) {
                                     let url = m.as_str().to_string();
+                                    // Only auto-open URLs that point at a local
+                                    // dev server / preview (localhost, 127.x,
+                                    // 0.0.0.0, [::1], *.local). Arbitrary remote
+                                    // URLs printed by CLIs (git remotes, docs,
+                                    // GitHub links) must NOT hijack the browser.
+                                    if !is_local_dev_url(&url) {
+                                        continue;
+                                    }
                                     // Only emit each unique URL once per pane
                                     // to avoid re-opening a browser pane the
                                     // user just closed.
@@ -636,5 +674,29 @@ impl PtyManager {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_local_dev_url;
+
+    #[test]
+    fn local_dev_urls_are_detected() {
+        assert!(is_local_dev_url("http://localhost:5173/"));
+        assert!(is_local_dev_url("http://127.0.0.1:3000"));
+        assert!(is_local_dev_url("https://0.0.0.0:8080/app"));
+        assert!(is_local_dev_url("http://[::1]:5173/"));
+        assert!(is_local_dev_url("http://myapp.local/"));
+        assert!(is_local_dev_url("http://foo.localhost:1234"));
+    }
+
+    #[test]
+    fn remote_urls_are_ignored() {
+        assert!(!is_local_dev_url("https://github.com/org/repo"));
+        assert!(!is_local_dev_url("https://example.com/localhost"));
+        assert!(!is_local_dev_url("http://192.168.1.5:3000"));
+        assert!(!is_local_dev_url("https://docs.rs/tokio"));
+        assert!(!is_local_dev_url("http://user@evil.com/localhost"));
     }
 }

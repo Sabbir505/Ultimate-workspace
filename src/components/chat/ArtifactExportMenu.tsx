@@ -14,7 +14,9 @@
 // iframe's contentDocument (sandbox="" makes it cross-origin / null) — instead
 // we render the same self-contained HTML string into a hidden node that
 // html-to-image can walk. The diagram HTML is inline-styled and dependency-free,
-// so it renders identically off-DOM.
+// so it renders identically off-DOM. The capture uses a white canvas (EXPORT_BG)
+// to match the preview iframe — diagrams are authored for a light page, so a
+// dark canvas would produce an unreadable near-black export.
 import { useState, type ReactNode } from "react";
 import { toPng, toSvg } from "html-to-image";
 import { downloadArtifact } from "../../lib/ipc";
@@ -26,6 +28,11 @@ interface Props {
   path: string;
   filename: string;
 }
+
+/** Canvas background for rasterized exports. Kept in sync with the preview
+ *  iframe's white background so a downloaded PNG/SVG looks exactly like what
+ *  the user saw in the pane (and isn't rendered as a dark, unreadable image). */
+const EXPORT_BG = "#ffffff";
 
 /** Whether a kind supports the raster export menu at all. */
 function supportsRasterExport(kind: ArtifactPreview["kind"]): boolean {
@@ -71,7 +78,10 @@ async function rasterizeHtml(html: string): Promise<string> {
   holder.style.position = "fixed";
   holder.style.left = "-99999px";
   holder.style.top = "0";
-  holder.style.background = "#0b0b12"; // matches the skill's default dark canvas
+  // Match the preview iframe (`.artifact-preview-html { background: #fff }`):
+  // diagrams are authored assuming a light page, so a dark canvas would render
+  // dark-stroked/dark-text diagrams as an unreadable near-black image.
+  holder.style.background = EXPORT_BG;
   holder.style.padding = "24px";
   holder.innerHTML = html;
   document.body.appendChild(holder);
@@ -81,7 +91,7 @@ async function rasterizeHtml(html: string): Promise<string> {
     const dataUrl = await toPng(holder, {
       pixelRatio: 2,
       cacheBust: true,
-      backgroundColor: "#0b0b12",
+      backgroundColor: EXPORT_BG,
     });
     return dataUrl;
   } finally {
@@ -101,6 +111,19 @@ function extractRootSvg(html: string): string | null {
   if (!svg.getAttribute("xmlns:xlink")) {
     svg.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
   }
+  // Paint an opaque white backdrop behind the diagram so the exported file
+  // isn't transparent (which viewers with a dark backdrop show as near-black,
+  // the same "dark PNG" symptom). Insert as the first child so it sits behind.
+  if (!svg.querySelector('rect[data-export-bg="1"]')) {
+    const bg = doc.createElementNS("http://www.w3.org/2000/svg", "rect");
+    bg.setAttribute("data-export-bg", "1");
+    bg.setAttribute("x", "0");
+    bg.setAttribute("y", "0");
+    bg.setAttribute("width", "100%");
+    bg.setAttribute("height", "100%");
+    bg.setAttribute("fill", EXPORT_BG);
+    svg.insertBefore(bg, svg.firstChild);
+  }
   return `<?xml version="1.0" encoding="UTF-8"?>\n${svg.outerHTML}`;
 }
 
@@ -112,13 +135,13 @@ async function rasterizeToSvg(html: string): Promise<string> {
   holder.style.position = "fixed";
   holder.style.left = "-99999px";
   holder.style.top = "0";
-  holder.style.background = "#0b0b12";
+  holder.style.background = EXPORT_BG;
   holder.style.padding = "24px";
   holder.innerHTML = html;
   document.body.appendChild(holder);
   try {
     await new Promise((r) => requestAnimationFrame(() => r(null)));
-    return await toSvg(holder, { cacheBust: true, backgroundColor: "#0b0b12" });
+    return await toSvg(holder, { cacheBust: true, backgroundColor: EXPORT_BG });
   } finally {
     document.body.removeChild(holder);
   }

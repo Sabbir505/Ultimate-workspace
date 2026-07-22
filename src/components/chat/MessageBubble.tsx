@@ -9,6 +9,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import type { ChatMessage } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { MermaidDiagram } from "./MermaidDiagram";
+import { JsxPreview } from "./JsxPreview";
 
 interface Props {
   message: ChatMessage;
@@ -411,6 +412,11 @@ function Markdown({ content }: { content: string }) {
             // Mermaid diagrams render as inline SVG, not as highlighted text.
             if (match && match[1] === "mermaid") {
               return <MermaidDiagram code={codeString} />;
+            }
+
+            // React/JSX artifacts render as a live sandboxed preview (Claude-style).
+            if (match && (match[1] === "jsx" || match[1] === "tsx")) {
+              return <JsxPreview code={codeString} lang={match[1]} />;
             }
 
             // Code block with language.

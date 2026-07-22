@@ -36,7 +36,11 @@ heading hierarchy, a tasteful colour palette, tables where useful, real \
 multi-slide layouts for decks, and page numbers/footers where appropriate — \
 never a plain text dump. Save the file to the path in the CONDUIT_OUTPUT \
 environment variable. Only use `generate_file` for plain text formats (txt, md, \
-csv, json, html). Prefer accurate, well-structured content over filler.";
+csv, json, html). Prefer accurate, well-structured content over filler. \
+When you write a React/JSX component for the user to look at, put it in a \
+single ```jsx (or ```tsx) code block as one self-contained component with a \
+default export (`export default function App() { … }`) and no external imports \
+beyond `react` — it is rendered live in a sandboxed preview.";
 
 /// Coarse classification of the active model. Frontier hosted models (Claude,
 /// GPT, etc.) follow implied instructions reliably; locally-run or
@@ -953,13 +957,345 @@ fn anthropic_message_json(m: &ChatMessage) -> Value {
     json!({ "role": m.role, "content": blocks })
 }
 
+/// One streaming round against an OpenAI-style `/v1/chat/completions`.
+///
+/// Emits assistant text and reasoning tokens live (reasoning wrapped in
+/// `<think>…</think>`) exactly as they arrive over SSE, accumulates any
+/// `tool_calls` deltas, and returns the reconstructed `assistant` message value
+/// plus `(input_tokens, output_tokens, have_usage)`. Live emission stops once
+/// Hermes `<tool_call…>` markup appears in the text (an OpenAI-compatible
+/// fallback shape), so that markup is never shown to the user.
+async fn openai_stream_round(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+    body: &Value,
+    app: &AppHandle,
+    sid: &str,
+    full: &mut String,
+) -> Result<(Value, i64, i64, bool), String> {
+    use futures_util::StreamExt;
+
+    let resp = client
+        .post(url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("content-type", "application/json")
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let b = resp.text().await.unwrap_or_default();
+        return Err(format!("HTTP {status}: {b}"));
+    }
+
+    let mut stream = resp.bytes_stream();
+    let mut pending = String::new();
+
+    let mut content = String::new();
+    let mut suppress = false;
+    let mut in_think = false;
+    // Per-index accumulation of (id, name, arguments).
+    let mut calls: Vec<(String, String, String)> = Vec::new();
+    let mut input = 0i64;
+    let mut output = 0i64;
+    let mut have_usage = false;
+
+    'outer: while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("stream read error: {e}"))?;
+        pending.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(nl) = pending.find('\n') {
+            let line: String = pending.drain(..=nl).collect();
+            let line = line.trim_end();
+            let data = match line.strip_prefix("data: ") {
+                Some(d) => d,
+                None => continue,
+            };
+            if data == "[DONE]" {
+                break 'outer;
+            }
+            let v: Value = match serde_json::from_str(data) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
+                input = u.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(input);
+                output = u
+                    .get("completion_tokens")
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(output);
+                have_usage = true;
+            }
+            let delta = match v.pointer("/choices/0/delta") {
+                Some(d) => d,
+                None => continue,
+            };
+            if let Some(c) = delta.get("content").and_then(|x| x.as_str()) {
+                if !c.is_empty() {
+                    if in_think {
+                        emit_token(app, sid, "</think>", full);
+                        in_think = false;
+                    }
+                    content.push_str(c);
+                    if !suppress && content.contains("<tool_call") {
+                        suppress = true;
+                    }
+                    if !suppress {
+                        emit_token(app, sid, c, full);
+                    }
+                }
+            }
+            if let Some(r) = delta
+                .get("reasoning_content")
+                .and_then(|x| x.as_str())
+                .or_else(|| delta.get("reasoning").and_then(|x| x.as_str()))
+            {
+                if !r.is_empty() {
+                    if !in_think {
+                        emit_token(app, sid, "<think>", full);
+                        in_think = true;
+                    }
+                    emit_token(app, sid, r, full);
+                }
+            }
+            if let Some(tcs) = delta.get("tool_calls").and_then(|x| x.as_array()) {
+                for tc in tcs {
+                    let idx = tc.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                    while calls.len() <= idx {
+                        calls.push((String::new(), String::new(), String::new()));
+                    }
+                    if let Some(id) = tc.get("id").and_then(|x| x.as_str()) {
+                        if !id.is_empty() {
+                            calls[idx].0 = id.to_string();
+                        }
+                    }
+                    if let Some(name) = tc.pointer("/function/name").and_then(|x| x.as_str()) {
+                        if !name.is_empty() {
+                            calls[idx].1 = name.to_string();
+                        }
+                    }
+                    if let Some(a) = tc.pointer("/function/arguments").and_then(|x| x.as_str()) {
+                        calls[idx].2.push_str(a);
+                    }
+                }
+            }
+        }
+    }
+
+    if in_think {
+        emit_token(app, sid, "</think>", full);
+    }
+
+    let tool_calls: Vec<Value> = calls
+        .into_iter()
+        .filter(|(_, name, _)| !name.is_empty())
+        .map(|(id, name, args)| {
+            let id = if id.is_empty() {
+                next_synthetic_tool_id()
+            } else {
+                id
+            };
+            json!({
+                "id": id,
+                "type": "function",
+                "function": { "name": name, "arguments": args },
+            })
+        })
+        .collect();
+
+    Ok((
+        json!({ "role": "assistant", "content": content, "tool_calls": tool_calls }),
+        input,
+        output,
+        have_usage,
+    ))
+}
+
+/// One streaming round against an Anthropic `/v1/messages`.
+///
+/// Emits assistant text (and `thinking`, wrapped in `<think>…</think>`) live as
+/// it streams, accumulates `tool_use` blocks (id/name/input), and returns the
+/// reconstructed `content` block array plus `(input_tokens, output_tokens,
+/// have_usage)`.
+async fn anthropic_stream_round(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+    body: &Value,
+    app: &AppHandle,
+    sid: &str,
+    full: &mut String,
+) -> Result<(Vec<Value>, i64, i64, bool), String> {
+    use futures_util::StreamExt;
+
+    let resp = client
+        .post(url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let b = resp.text().await.unwrap_or_default();
+        return Err(format!("HTTP {status}: {b}"));
+    }
+
+    // Accumulated content blocks in stream order. kind: 0=text, 1=tool, 2=thinking.
+    struct Blk {
+        kind: u8,
+        text: String,
+        id: String,
+        name: String,
+        json: String,
+    }
+    let mut blocks: Vec<Blk> = Vec::new();
+    let mut in_think = false;
+    let mut input = 0i64;
+    let mut output = 0i64;
+    let mut have_usage = false;
+
+    let mut stream = resp.bytes_stream();
+    let mut pending = String::new();
+
+    'outer: while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("stream read error: {e}"))?;
+        pending.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(nl) = pending.find('\n') {
+            let line: String = pending.drain(..=nl).collect();
+            let line = line.trim_end();
+            let data = match line.strip_prefix("data: ") {
+                Some(d) => d,
+                None => continue,
+            };
+            let p: Value = match serde_json::from_str(data) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            match p.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                "message_start" => {
+                    if let Some(u) = p.pointer("/message/usage") {
+                        input += u.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+                        have_usage = true;
+                    }
+                }
+                "content_block_start" => {
+                    let idx = p.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                    let cb = p.get("content_block");
+                    let kind = match cb.and_then(|c| c.get("type")).and_then(|t| t.as_str()) {
+                        Some("tool_use") => 1,
+                        Some("thinking") => 2,
+                        _ => 0,
+                    };
+                    let id = cb
+                        .and_then(|c| c.get("id"))
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = cb
+                        .and_then(|c| c.get("name"))
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    while blocks.len() <= idx {
+                        blocks.push(Blk {
+                            kind: 0,
+                            text: String::new(),
+                            id: String::new(),
+                            name: String::new(),
+                            json: String::new(),
+                        });
+                    }
+                    blocks[idx].kind = kind;
+                    blocks[idx].id = id;
+                    blocks[idx].name = name;
+                }
+                "content_block_delta" => {
+                    let idx = p.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                    let delta = p.get("delta");
+                    let dtype = delta
+                        .and_then(|d| d.get("type"))
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("");
+                    match dtype {
+                        "text_delta" => {
+                            if let Some(t) = delta.and_then(|d| d.get("text")).and_then(|x| x.as_str()) {
+                                if in_think {
+                                    emit_token(app, sid, "</think>", full);
+                                    in_think = false;
+                                }
+                                if let Some(b) = blocks.get_mut(idx) {
+                                    b.text.push_str(t);
+                                }
+                                emit_token(app, sid, t, full);
+                            }
+                        }
+                        "input_json_delta" => {
+                            if let Some(j) =
+                                delta.and_then(|d| d.get("partial_json")).and_then(|x| x.as_str())
+                            {
+                                if let Some(b) = blocks.get_mut(idx) {
+                                    b.json.push_str(j);
+                                }
+                            }
+                        }
+                        "thinking_delta" => {
+                            if let Some(t) =
+                                delta.and_then(|d| d.get("thinking")).and_then(|x| x.as_str())
+                            {
+                                if !in_think {
+                                    emit_token(app, sid, "<think>", full);
+                                    in_think = true;
+                                }
+                                emit_token(app, sid, t, full);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                "message_delta" => {
+                    if let Some(o) = p.pointer("/usage/output_tokens").and_then(|x| x.as_i64()) {
+                        output = o;
+                        have_usage = true;
+                    }
+                }
+                "message_stop" => break 'outer,
+                _ => {}
+            }
+        }
+    }
+
+    if in_think {
+        emit_token(app, sid, "</think>", full);
+    }
+
+    let content: Vec<Value> = blocks
+        .into_iter()
+        .filter_map(|b| match b.kind {
+            1 => {
+                let input_val = serde_json::from_str::<Value>(&b.json).unwrap_or_else(|_| json!({}));
+                Some(json!({ "type": "tool_use", "id": b.id, "name": b.name, "input": input_val }))
+            }
+            2 => None,
+            _ if !b.text.is_empty() => Some(json!({ "type": "text", "text": b.text })),
+            _ => None,
+        })
+        .collect();
+
+    Ok((content, input, output, have_usage))
+}
+
 /// Agentic tool loop for OpenAI-style providers (native + compatible).
 ///
-/// Uses non-streaming `/v1/chat/completions` calls: request with `tools`, and
-/// if the model responds with `tool_calls`, run each tool, feed the results
-/// back, and repeat until it produces a final answer (or the iteration cap is
-/// hit). Tool narration is wrapped in a `<think>` block so the UI shows it as a
-/// collapsible "thought process" and it's stripped from re-sent history.
+/// Uses streaming `/v1/chat/completions` calls: request with `tools`, stream
+/// the assistant's text/reasoning live, and if the model emits `tool_calls`,
+/// run each tool, feed the results back, and repeat until it produces a final
+/// answer (or the iteration cap is hit). Each tool call is emitted as a
+/// `<tool>` marker the UI shows as a collapsible card and strips from re-sent
+/// history.
 async fn run_openai_tool_loop(
     client: &reqwest::Client,
     base: &str,
@@ -992,41 +1328,19 @@ async fn run_openai_tool_loop(
         let mut body = json!({
             "model": req.model,
             "messages": messages,
-            "stream": false,
+            "stream": true,
+            "stream_options": { "include_usage": true },
             "tools": tool_specs,
         });
         if let Some(e) = &req.effort {
             body["reasoning_effort"] = json!(e);
         }
 
-        let resp = client
-            .post(&url)
-            .header("Authorization", format!("Bearer {api_key}"))
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("request failed: {e}"))?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let b = resp.text().await.unwrap_or_default();
-            return Err(format!("HTTP {status}: {b}"));
-        }
-
-        let v: Value = resp.json().await.map_err(|e| format!("decode failed: {e}"))?;
-        if let Some(u) = v.get("usage") {
-            total_in += u.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-            total_out += u.get("completion_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-            have_usage = true;
-        }
-
-        let message = v
-            .get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("message"))
-            .cloned()
-            .ok_or_else(|| "response missing choices[0].message".to_string())?;
+        let (message, in_tok, out_tok, have) =
+            openai_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?;
+        total_in += in_tok;
+        total_out += out_tok;
+        have_usage = have_usage || have;
 
         let tool_calls = message
             .get("tool_calls")
@@ -1122,11 +1436,8 @@ async fn run_openai_tool_loop(
             continue;
         }
 
-        // No tool calls → final answer.
-        let content = message.get("content").and_then(|c| c.as_str()).unwrap_or("");
-        // Never surface raw Hermes tool-call markup to the user.
-        let content = strip_hermes_tool_calls(content);
-        emit_token(app, sid, &content, &mut full);
+        // No tool calls → final answer. The text was already streamed live in
+        // `openai_stream_round` (Hermes markup, if any, was suppressed there).
         return Ok((full, build_usage(true, total_in, total_out, have_usage)));
     }
 
@@ -1170,7 +1481,7 @@ async fn run_anthropic_tool_loop(
             "max_tokens": req.max_tokens.unwrap_or(4096),
             "messages": messages,
             "tools": tool_specs,
-            "stream": false,
+            "stream": true,
         });
         if let Some(sys) = &req.system {
             if !sys.is_empty() {
@@ -1178,34 +1489,11 @@ async fn run_anthropic_tool_loop(
             }
         }
 
-        let resp = client
-            .post(&url)
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("request failed: {e}"))?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let b = resp.text().await.unwrap_or_default();
-            return Err(format!("HTTP {status}: {b}"));
-        }
-
-        let v: Value = resp.json().await.map_err(|e| format!("decode failed: {e}"))?;
-        if let Some(u) = v.get("usage") {
-            total_in += u.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-            total_out += u.get("output_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-            have_usage = true;
-        }
-
-        let content = v
-            .get("content")
-            .and_then(|c| c.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let (content, in_tok, out_tok, have) =
+            anthropic_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?;
+        total_in += in_tok;
+        total_out += out_tok;
+        have_usage = have_usage || have;
 
         let tool_uses: Vec<&Value> = content
             .iter()
@@ -1234,19 +1522,8 @@ async fn run_anthropic_tool_loop(
             continue;
         }
 
-        // No tool use → final answer: concatenate text blocks.
-        let text: String = content
-            .iter()
-            .filter_map(|b| {
-                if b.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    b.get("text").and_then(|t| t.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("");
-        emit_token(app, sid, &text, &mut full);
+        // No tool use → final answer. Text blocks were already streamed live in
+        // `anthropic_stream_round`.
         return Ok((full, build_usage(false, total_in, total_out, have_usage)));
     }
 

@@ -190,6 +190,7 @@ export function Sidebar() {
                 + New Chat
               </button>
             </div>
+            <ArtifactLibrary />
             {chatRowData.length === 0 ? (
               <div className="empty-state">
                 <div>No chats yet</div>
@@ -208,7 +209,6 @@ export function Sidebar() {
                 />
               ))
             )}
-            <ArtifactLibrary />
           </>
         )}
       </div>

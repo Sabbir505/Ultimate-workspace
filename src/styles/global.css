@@ -3207,6 +3207,7 @@ table.kv th {
   flex: 1 1 55%;
 }
 .artifact-preview-pane {
+  position: relative;
   flex: 1 1 45%;
   min-width: 320px;
   display: flex;
@@ -3214,6 +3215,56 @@ table.kv th {
   min-height: 0;
   border-left: 1px solid var(--border);
   background: var(--bg-tint);
+}
+/* Drag handle on the pane's left edge (mirrors the browser pane resizer). */
+.artifact-preview-resizer {
+  position: absolute;
+  top: 0;
+  left: -3px;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 5;
+  touch-action: none;
+}
+.artifact-preview-resizer:hover,
+.artifact-preview-resizer:active {
+  background: linear-gradient(
+    to right,
+    transparent 2px,
+    var(--accent) 2px,
+    var(--accent) 5px,
+    transparent 5px
+  );
+}
+/* Zoom wrapper: WebKit `zoom` reflows the content so the scroll area grows,
+   giving usable scrollbars when zoomed in and a fit-all view when zoomed out. */
+.artifact-preview-zoom {
+  width: 100%;
+}
+.artifact-preview-zoom-ctrls {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  margin-right: 4px;
+  padding-right: 6px;
+  border-right: 1px solid var(--border);
+}
+.artifact-preview-zoom-level {
+  min-width: 40px;
+  height: 26px;
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+}
+.artifact-preview-zoom-level:hover {
+  color: var(--text);
+  background: var(--surface-1, var(--surface-2));
 }
 .artifact-preview-header {
   display: flex;

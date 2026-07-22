@@ -2,7 +2,7 @@
 // Auto-opened when the model generates a file. Text-like artifacts render
 // inline (markdown/code/csv/json/html); images and PDFs render via a data
 // URI; binary Office formats show a file card with an "Open" button.
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
@@ -162,6 +162,53 @@ function DownloadIcon() {
   );
 }
 
+const ZOOM_MIN = 0.25;
+const ZOOM_MAX = 3;
+const ZOOM_STEP = 0.1;
+const MIN_PANE_WIDTH = 320;
+
+/** Zoom controls shown in the preview header. */
+function ZoomControls({
+  zoom,
+  setZoom,
+}: {
+  zoom: number;
+  setZoom: (fn: (z: number) => number) => void;
+}) {
+  const clamp = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+  return (
+    <div className="artifact-preview-zoom-ctrls">
+      <button
+        type="button"
+        className="artifact-preview-header-btn"
+        title="Zoom out"
+        aria-label="Zoom out"
+        onClick={() => setZoom((z) => clamp(z - ZOOM_STEP))}
+      >
+        −
+      </button>
+      <button
+        type="button"
+        className="artifact-preview-zoom-level"
+        title="Reset zoom"
+        aria-label="Reset zoom"
+        onClick={() => setZoom(() => 1)}
+      >
+        {Math.round(zoom * 100)}%
+      </button>
+      <button
+        type="button"
+        className="artifact-preview-header-btn"
+        title="Zoom in"
+        aria-label="Zoom in"
+        onClick={() => setZoom((z) => clamp(z + ZOOM_STEP))}
+      >
+        +
+      </button>
+    </div>
+  );
+}
+
 export function ArtifactPreviewPane({
   artifact,
   onClose,
@@ -171,7 +218,49 @@ export function ArtifactPreviewPane({
 }) {
   const [preview, setPreview] = useState<ArtifactPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const [paneWidth, setPaneWidth] = useState<number | null>(null);
+  const paneRef = useRef<HTMLDivElement>(null);
   const inline = artifact.inline;
+
+  // Reset zoom when switching to a different artifact.
+  useEffect(() => {
+    setZoom(1);
+  }, [artifact.path, artifact.filename]);
+
+  // Drag the left edge to resize the pane, mirroring the browser pane.
+  const startResize = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    const handle = e.currentTarget as HTMLElement;
+    handle.setPointerCapture(e.pointerId);
+    const onMove = (ev: PointerEvent) => {
+      // Pane is docked right, so width grows as the pointer moves left.
+      const next = window.innerWidth - ev.clientX;
+      const max = window.innerWidth - 360;
+      setPaneWidth(Math.min(max, Math.max(MIN_PANE_WIDTH, next)));
+    };
+    const onUp = (ev: PointerEvent) => {
+      handle.releasePointerCapture(ev.pointerId);
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+  }, []);
+
+  const paneStyle = paneWidth != null ? { flex: `0 0 ${paneWidth}px` } : undefined;
+  const zoomStyle = { zoom } as React.CSSProperties;
+
+  const resizer = (
+    <div
+      className="artifact-preview-resizer"
+      onPointerDown={startResize}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize preview pane"
+      title="Drag to resize"
+    />
+  );
 
   useEffect(() => {
     // Inline previews (e.g. a JSX code block) have no file on disk.
@@ -193,12 +282,14 @@ export function ArtifactPreviewPane({
 
   if (inline) {
     return (
-      <div className="artifact-preview-pane">
+      <div className="artifact-preview-pane" ref={paneRef} style={paneStyle}>
+        {resizer}
         <div className="artifact-preview-header">
           <span className="artifact-preview-title" title={artifact.filename}>
             {artifact.filename}
           </span>
           <div className="artifact-preview-header-actions">
+            <ZoomControls zoom={zoom} setZoom={setZoom} />
             <button
               type="button"
               className="artifact-preview-header-btn"
@@ -211,19 +302,23 @@ export function ArtifactPreviewPane({
           </div>
         </div>
         <div className="artifact-preview-content">
-          <JsxPreview code={inline.code} lang={inline.kind} variant="pane" />
+          <div className="artifact-preview-zoom" style={zoomStyle}>
+            <JsxPreview code={inline.code} lang={inline.kind} variant="pane" />
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="artifact-preview-pane">
+    <div className="artifact-preview-pane" ref={paneRef} style={paneStyle}>
+      {resizer}
       <div className="artifact-preview-header">
         <span className="artifact-preview-title" title={artifact.filename}>
           {artifact.filename}
         </span>
         <div className="artifact-preview-header-actions">
+          <ZoomControls zoom={zoom} setZoom={setZoom} />
           {preview && (preview.kind === "diagram" || preview.kind === "html" || preview.kind === "image") ? (
             <ArtifactExportMenu
               preview={preview}
@@ -268,7 +363,9 @@ export function ArtifactPreviewPane({
         ) : !preview ? (
           <div className="artifact-preview-loading">Loading preview…</div>
         ) : (
-          <PreviewBody preview={preview} />
+          <div className="artifact-preview-zoom" style={zoomStyle}>
+            <PreviewBody preview={preview} />
+          </div>
         )}
       </div>
     </div>

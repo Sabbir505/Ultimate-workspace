@@ -2084,6 +2084,24 @@ table.kv th {
   background: var(--accent);
 }
 
+/* Spinning ring shown on a chat row while its response is still streaming,
+   so the user can tell which chats are working after navigating away. */
+.chat-session-working {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  margin-top: 3px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  animation: chat-session-spin 0.7s linear infinite;
+}
+@keyframes chat-session-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .chat-session-rename-input {
   width: 100%;
   font-size: 12.5px;

@@ -17,6 +17,8 @@ export interface ChatSessionRowData {
 interface Props {
   session: ChatSessionRowData;
   active: boolean;
+  /** True while this chat has a response streaming (even when viewed elsewhere). */
+  working?: boolean;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onRename: (id: string, title: string) => void;
@@ -27,6 +29,7 @@ interface Props {
 export function ChatSessionRow({
   session,
   active,
+  working,
   onSelect,
   onDelete,
   onRename,
@@ -102,12 +105,15 @@ export function ChatSessionRow({
       onClick={() => !editing && onSelect(session.id)}
       title={session.title}
     >
-      {session.starred && (
+      {working && (
+        <span className="chat-session-working" title="Working…" aria-label="Working" />
+      )}
+      {!working && session.starred && (
         <span className="chat-session-star-badge" title="Starred">
           ★
         </span>
       )}
-      {session.unread && !session.starred && (
+      {!working && session.unread && !session.starred && (
         <span className="chat-session-unread-dot" aria-label="Unread" />
       )}
       <div className="chat-session-info">

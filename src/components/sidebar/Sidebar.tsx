@@ -30,6 +30,7 @@ export function Sidebar() {
   // Chat store
   const chatSessions = useChatStore((s) => s.sessions);
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
+  const chatStreaming = useChatStore((s) => s.streaming);
   const chatConfig = useChatStore((s) => s.config);
   const chatLoaded = useChatStore((s) => s.loaded);
   const selectSession = useChatStore((s) => s.selectSession);
@@ -201,6 +202,7 @@ export function Sidebar() {
                   key={s.id}
                   session={s}
                   active={s.id === activeChatSessionId}
+                  working={s.id in chatStreaming}
                   onSelect={handleSelectChat}
                   onDelete={handleDeleteChat}
                   onRename={handleRenameChat}

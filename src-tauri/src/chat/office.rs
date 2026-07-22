@@ -262,7 +262,32 @@ fn docx_run_html(run: &str) -> String {
             style.push_str(&format!("font-size:{:.1}pt;", halfpts / 2.0));
         }
     }
+    if let Some(f) = opening_tag(rpr, "w:rFonts").and_then(|t| attr(t, "w:ascii")) {
+        style.push_str(&format!("font-family:{};", font_stack(f)));
+    }
     format!("<span style=\"{style}\">{}</span>", html_escape(&text))
+}
+
+/// A CSS font-family stack for a document font name, with a generic fallback
+/// that matches its classification so the preview echoes serif vs. sans.
+fn font_stack(name: &str) -> String {
+    const SERIF: [&str; 8] = [
+        "georgia",
+        "cambria",
+        "times",
+        "garamond",
+        "constantia",
+        "book antiqua",
+        "liberation serif",
+        "noto serif",
+    ];
+    let lower = name.to_ascii_lowercase();
+    let generic = if SERIF.iter().any(|s| lower.contains(s)) {
+        "serif"
+    } else {
+        "sans-serif"
+    };
+    format!("'{}',{generic}", name.replace('\'', ""))
 }
 
 fn docx_para_html(para: &str) -> String {
@@ -300,23 +325,66 @@ fn docx_para_html(para: &str) -> String {
     }
 }
 
+/// CSS for a Word border spec (`val` style, `w:sz` eighths-of-a-point, colour).
+fn edge_css(borders: &str, edge: &str) -> String {
+    let tag = opening_tag(borders, &format!("w:{edge}"));
+    let val = tag.and_then(|t| attr(t, "w:val")).unwrap_or("none");
+    if val == "none" || val == "nil" {
+        return "none".to_string();
+    }
+    let color = tag
+        .and_then(|t| attr(t, "w:color"))
+        .filter(|c| hex_ok(c))
+        .map(|c| c.to_ascii_uppercase())
+        .unwrap_or_else(|| "94A3B8".to_string());
+    let pt = tag
+        .and_then(|t| attr(t, "w:sz"))
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|e| (e / 8.0).max(0.5))
+        .unwrap_or(0.5);
+    format!("{pt:.1}pt solid #{color}")
+}
+
 fn docx_table_html(tbl: &str) -> String {
+    let tblpr = elements(tbl, "w:tblPr").into_iter().next().unwrap_or("");
+    let tb = elements(tblpr, "w:tblBorders").into_iter().next().unwrap_or("");
+    let (top, bottom, left, right, ih, iv) = (
+        edge_css(tb, "top"),
+        edge_css(tb, "bottom"),
+        edge_css(tb, "left"),
+        edge_css(tb, "right"),
+        edge_css(tb, "insideH"),
+        edge_css(tb, "insideV"),
+    );
+    let trs = elements(tbl, "w:tr");
+    let nrows = trs.len();
     let mut rows = String::new();
-    for tr in elements(tbl, "w:tr") {
+    for (ri, tr) in trs.iter().enumerate() {
+        let tcs = elements(tr, "w:tc");
+        let ncols = tcs.len();
         let mut cells = String::new();
-        for tc in elements(tr, "w:tc") {
+        for (ci, tc) in tcs.iter().enumerate() {
             let tcpr = elements(tc, "w:tcPr").into_iter().next().unwrap_or("");
-            let mut cs = String::from(
-                "padding:7px 11px;border:1px solid #e2e8f0;vertical-align:top;",
+            let bt = if ri == 0 { &top } else { &ih };
+            let mut bb = if ri + 1 == nrows { bottom.clone() } else { ih.clone() };
+            let bl = if ci == 0 { &left } else { &iv };
+            let br = if ci + 1 == ncols { &right } else { &iv };
+            // A cell-level bottom border (e.g. a strong header rule) wins.
+            let tcb = elements(tcpr, "w:tcBorders").into_iter().next().unwrap_or("");
+            let cell_bottom = edge_css(tcb, "bottom");
+            if cell_bottom != "none" {
+                bb = cell_bottom;
+            }
+            let mut cs = format!(
+                "padding:8px 14px 8px 0;vertical-align:top;border-top:{bt};border-bottom:{bb};\
+                 border-left:{bl};border-right:{br};"
             );
             if let Some(shd) = opening_tag(tcpr, "w:shd") {
                 if let Some(fill) = attr(shd, "w:fill").filter(|f| hex_ok(f)) {
-                    cs.push_str(&format!("background:#{};", fill.to_ascii_uppercase()));
-                }
-            }
-            if let Some(lb) = opening_tag(tcpr, "w:left") {
-                if let Some(color) = attr(lb, "w:color").filter(|c| hex_ok(c)) {
-                    cs.push_str(&format!("border-left:3px solid #{};", color.to_ascii_uppercase()));
+                    cs.push_str(&format!(
+                        "background:#{};padding-left:14px;",
+                        fill.to_ascii_uppercase()
+                    ));
                 }
             }
             let inner: String = elements(tc, "w:p").iter().map(|p| docx_para_html(p)).collect();
@@ -325,7 +393,7 @@ fn docx_table_html(tbl: &str) -> String {
         rows.push_str(&format!("<tr>{cells}</tr>"));
     }
     format!(
-        "<table style=\"border-collapse:collapse;width:100%;margin:10px 0;font-size:10.5pt\">{rows}</table>"
+        "<table style=\"border-collapse:collapse;width:100%;margin:12px 0;font-size:10.5pt\">{rows}</table>"
     )
 }
 
@@ -406,8 +474,23 @@ fn xfrm_of(sppr: &str) -> Option<Xfrm> {
 fn pptx_text_html(txbody: &str, default_color: &str) -> String {
     let mut out = String::new();
     for p in elements(txbody, "a:p") {
+        let ppr_el = elements(p, "a:pPr").into_iter().next().unwrap_or("");
         let ppr = opening_tag(p, "a:pPr");
         let align = ppr.and_then(|t| attr(t, "algn")).unwrap_or("l");
+        // Bullet marker: <a:buChar char="•"/> (unless <a:buNone/>).
+        let bullet = if ppr_el.contains("<a:buNone") {
+            None
+        } else if let Some(tag) = opening_tag(ppr_el, "a:buChar") {
+            attr(tag, "char").map(|c| xml_unescape(c))
+        } else if ppr_el.contains("<a:buAutoNum") {
+            Some("•".to_string())
+        } else {
+            None
+        };
+        let bullet_color = {
+            let buclr = elements(ppr_el, "a:buClr").into_iter().next().unwrap_or("");
+            first_srgb(buclr)
+        };
         let css_align = match align {
             "ctr" => "center",
             "r" => "right",
@@ -438,10 +521,21 @@ fn pptx_text_html(txbody: &str, default_color: &str) -> String {
             if let Some(c) = first_srgb(rpr) {
                 style.push_str(&format!("color:#{c};"));
             }
+            if let Some(f) = opening_tag(rpr, "a:latin").and_then(|t| attr(t, "typeface")) {
+                style.push_str(&format!("font-family:{};", font_stack(f)));
+            }
             runs.push_str(&format!("<span style=\"{style}\">{}</span>", html_escape(&text)));
         }
         if runs.is_empty() {
             out.push_str("<div class=\"ap\">&nbsp;</div>");
+        } else if let Some(mark) = bullet {
+            let mc = bullet_color.unwrap_or_else(|| default_color.to_string());
+            out.push_str(&format!(
+                "<div class=\"ap bul\" style=\"text-align:{css_align}\">\
+                 <span class=\"bm\" style=\"color:#{mc}\">{}</span>\
+                 <span class=\"bt\">{runs}</span></div>",
+                html_escape(&mark)
+            ));
         } else {
             out.push_str(&format!("<div class=\"ap\" style=\"text-align:{css_align}\">{runs}</div>"));
         }
@@ -592,6 +686,9 @@ aspect-ratio:{aspect:.4};background:#fff;border:1px solid #e2e8f0;border-radius:
 overflow:hidden;box-shadow:0 2px 10px rgba(15,23,42,.14);container-type:inline-size;\
 font-size:2.2cqw;line-height:1.15}}\
 .slide .ap{{width:100%}}\
+.slide .ap.bul{{display:flex;align-items:baseline;gap:0.8cqw}}\
+.slide .ap.bul .bm{{flex:0 0 auto;font-weight:700}}\
+.slide .ap.bul .bt{{flex:1 1 auto}}\
 .slide table{{font-size:2cqw}}"
     );
     Some(doc_shell(inner, css).replace("</style>", &format!("{deck_css}</style>")))

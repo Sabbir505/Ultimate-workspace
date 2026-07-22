@@ -76,26 +76,36 @@ const GENERATE_DOCUMENT_DESC: &str = "Create a REAL, professionally designed \
     dump: a cover/title, themed colours, real typography, headings, tables, and \
     for decks multiple well-laid-out slides with a title slide and section \
     dividers.\n\n\
-    STRONGLY PREFER the pre-installed `conduit_docgen` helper — it ships a \
-    consistent, professional theme for docx, pptx AND pdf with almost no code:\n\
+    Aim for an EDITORIAL, modern look like Claude/ChatGPT/Gemini ship — an \
+    elegant serif display face paired with a clean sans body, generous \
+    whitespace, a strong type hierarchy, ONE restrained accent colour and rich \
+    full-bleed cover/section slides. Hierarchy comes from type scale, weight and \
+    whitespace — NEVER from decorative accent bars, stripes or underlines under \
+    titles. Clean white pages for documents; save saturated colour for deck \
+    cover/section/closing slides.\n\n\
+    STRONGLY PREFER the pre-installed `conduit_docgen` helper — it ships this \
+    editorial system for docx, pptx AND pdf with almost no code:\n\
       import conduit_docgen as cd\n\
-      doc = cd.Doc(title='Quarterly Report', subtitle='FY2025 Q2', theme='blue', author='Acme')\n\
+      doc = cd.Doc(title='Quarterly Report', subtitle='FY2025 Q2', theme='ink', author='Acme')\n\
       doc.heading('Overview'); doc.paragraph('...'); doc.bullets(['a','b']); doc.numbered(['1','2'])\n\
       doc.table(['Metric','Value'], [['Revenue','$1.2M']]); doc.callout('Key point'); doc.save()\n\
-      deck = cd.Deck(title='Product Launch', subtitle='2025', theme='blue', footer='Acme Inc')\n\
+      deck = cd.Deck(title='Product Launch', subtitle='2025', theme='midnight', footer='Acme Inc')\n\
       deck.section('Introduction', number=1); deck.bullets('Why now', ['ready','mature'], eyebrow='Context')\n\
       deck.two_column('Compare','A',['fast'],'B',['robust']); deck.table_slide('Numbers',['Q','Rev'],[['Q1','1.0']])\n\
       deck.closing('Thank you','q@acme.com'); deck.save()\n\
       pdf = cd.Pdf(title='Research Brief', subtitle='...', theme='plum', author='Acme Labs')\n\
       pdf.heading('Summary'); pdf.paragraph('...'); pdf.bullets(['a','b'])\n\
       pdf.table(['Model','Latency'], [['A','12ms']]); pdf.callout('Bottom line'); pdf.save()\n\
-    Themes: blue, slate, emerald, plum, amber. cd.Pdf handles pdf via reportlab; \
-    prefer it over hand-rolled reportlab. You can still access doc.document / \
-    deck.prs for raw python-docx/python-pptx tweaks. For xlsx use openpyxl. \
-    Build enough real content to be genuinely useful (several sections or 6+ \
-    slides for a deck). Import only from the standard library, conduit_docgen, \
-    python-docx, python-pptx, openpyxl and reportlab. Do not print secrets or \
-    perform network side effects.";
+    Themes: ink (blue-black, default), midnight (violet), emerald, plum, amber, \
+    crimson, teal (older names blue/slate/green/purple/red/orange still work). \
+    CHOOSE a theme that fits the subject rather than always defaulting, and vary \
+    structure to fit the content instead of repeating one template. cd.Pdf \
+    handles pdf via reportlab; prefer it over hand-rolled reportlab. You can \
+    still access doc.document / deck.prs for raw python-docx/python-pptx tweaks. \
+    For xlsx use openpyxl. Build enough real content to be genuinely useful \
+    (several sections or 6+ slides for a deck). Import only from the standard \
+    library, conduit_docgen, python-docx, python-pptx, openpyxl and reportlab. \
+    Do not print secrets or perform network side effects.";
 
 const GENERATE_DIAGRAM_DESC: &str = "Create a hand-styled, fully-laid-out \
     HTML/CSS diagram as a self-contained .html file. Use this when a diagram \

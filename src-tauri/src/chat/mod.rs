@@ -316,9 +316,13 @@ impl ChatManager {
             effort,
         };
 
+        // OpenRouter speaks the OpenAI wire format, so it rides the OpenAI
+        // request/tool path.
         let is_openai = matches!(
             provider_id,
-            ChatProviderId::OpenAI | ChatProviderId::OpenAICompatible
+            ChatProviderId::OpenAI
+                | ChatProviderId::OpenAICompatible
+                | ChatProviderId::OpenRouter
         );
         let is_anthropic = matches!(
             provider_id,
@@ -327,7 +331,9 @@ impl ChatManager {
         // Tools need a base URL; compatible providers already carry one, native
         // providers fall back to their default endpoint.
         let tool_base = base_url.clone().unwrap_or_else(|| {
-            if is_openai {
+            if matches!(provider_id, ChatProviderId::OpenRouter) {
+                providers::OpenRouterProvider::DEFAULT_BASE.to_string()
+            } else if is_openai {
                 OpenAIProvider::DEFAULT_BASE.to_string()
             } else {
                 AnthropicProvider::DEFAULT_BASE.to_string()
@@ -1564,6 +1570,7 @@ fn resolve_provider(id: &ChatProviderId) -> Box<dyn ChatProvider> {
         ChatProviderId::OpenAI => Box::new(OpenAIProvider),
         ChatProviderId::AnthropicCompatible => Box::new(AnthropicCompatibleProvider),
         ChatProviderId::OpenAICompatible => Box::new(OpenAICompatibleProvider),
+        ChatProviderId::OpenRouter => Box::new(OpenRouterProvider),
     }
 }
 

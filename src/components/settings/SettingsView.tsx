@@ -516,6 +516,10 @@ function ApiKeysPanel() {
   const [fetchError, setFetchError] = useState<string | null>(null);
 
   const isCompatible = provider === "anthropic_compatible" || provider === "openai_compatible";
+  // OpenRouter uses a fixed endpoint (no base-URL field) but still supports
+  // fetching its model catalogue from `/v1/models`.
+  const isOpenRouter = provider === "openrouter";
+  const canFetchModels = isCompatible || isOpenRouter;
   const hasExistingKey = config?.provider === provider && config?.hasKey;
 
   // Bootstrap: load config for the currently selected provider.
@@ -526,14 +530,15 @@ function ApiKeysPanel() {
   // Auto-fetch the model list once a base URL is set and a key is available
   // (typed in or already stored), debounced so we don't fire per keystroke.
   useEffect(() => {
-    if (!isCompatible || !baseUrl.trim()) return;
+    if (isCompatible && !baseUrl.trim()) return;
+    if (!canFetchModels) return;
     if (!apiKey.trim() && !hasExistingKey) return;
     const t = setTimeout(() => {
       void handleFetchModels();
     }, 600);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isCompatible, baseUrl, apiKey, hasExistingKey, provider]);
+  }, [canFetchModels, isCompatible, baseUrl, apiKey, hasExistingKey, provider]);
 
   // When config arrives (bootstrap or after save/clear), pre-fill fields
   // for the currently selected provider.
@@ -556,7 +561,7 @@ function ApiKeysPanel() {
   };
 
   const handleFetchModels = async () => {
-    if (!isCompatible) return;
+    if (!canFetchModels) return;
     setFetchingModels(true);
     setFetchError(null);
     setFetchedModels([]);
@@ -643,6 +648,7 @@ function ApiKeysPanel() {
           options={[
             { value: "anthropic", label: "Anthropic" },
             { value: "openai", label: "OpenAI" },
+            { value: "openrouter", label: "OpenRouter" },
             { value: "anthropic_compatible", label: "Anthropic Compatible" },
             { value: "openai_compatible", label: "OpenAI Compatible" },
           ]}
@@ -682,6 +688,23 @@ function ApiKeysPanel() {
             style={{ padding: "5px 12px", whiteSpace: "nowrap" }}
             onClick={handleFetchModels}
             disabled={fetchingModels || !baseUrl.trim()}
+          >
+            {fetchingModels ? "Fetching…" : "Fetch Models"}
+          </button>
+        </div>
+      )}
+      {isOpenRouter && (
+        <div className="form-row">
+          <label />
+          <span className="hint" style={{ flex: 1 }}>
+            Uses OpenRouter's endpoint (https://openrouter.ai/api). Save your
+            key, then fetch the model catalogue.
+          </span>
+          <button
+            className="ghost"
+            style={{ padding: "5px 12px", whiteSpace: "nowrap" }}
+            onClick={handleFetchModels}
+            disabled={fetchingModels || (!apiKey.trim() && !hasExistingKey)}
           >
             {fetchingModels ? "Fetching…" : "Fetch Models"}
           </button>

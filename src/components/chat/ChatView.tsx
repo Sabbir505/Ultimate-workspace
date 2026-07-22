@@ -37,9 +37,12 @@ export function ChatView() {
   const artifactsByMessage = useChatStore((s) => s.artifactsByMessage);
 
   const activeSession = sessions.find((s) => s.id === activeChatSessionId) ?? null;
+  // Providers whose model list is fetched from a `/v1/models` endpoint
+  // (the compatible providers plus OpenRouter, which has a fixed endpoint).
   const isCompatible =
     activeSession?.provider === "anthropic_compatible" ||
-    activeSession?.provider === "openai_compatible";
+    activeSession?.provider === "openai_compatible" ||
+    activeSession?.provider === "openrouter";
   const [models, setModels] = useState<string[]>([]);
 
   // Fetch the model list for compatible providers (uses the stored key and

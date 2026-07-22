@@ -185,6 +185,7 @@ export const deleteInstalledSkill = (slug: string, kind: string) =>
 export type ChatProvider =
   | "anthropic"
   | "openai"
+  | "openrouter"
   | "anthropic_compatible"
   | "openai_compatible";
 

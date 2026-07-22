@@ -289,6 +289,10 @@ pub async fn generate_chat_title(
             let base = base_url.as_deref().unwrap_or(OpenAIProvider::DEFAULT_BASE);
             openai_oneshot(&client, &api_key, base, &model, system, &user).await?
         }
+        "openrouter" => {
+            let base = base_url.as_deref().unwrap_or(OpenRouterProvider::DEFAULT_BASE);
+            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
+        }
         "openai_compatible" => {
             let Some(base) = base_url.as_deref() else {
                 return Ok(None);
@@ -457,6 +461,7 @@ pub async fn send_chat_message(
         "openai" => ChatProviderId::OpenAI,
         "anthropic_compatible" => ChatProviderId::AnthropicCompatible,
         "openai_compatible" => ChatProviderId::OpenAICompatible,
+        "openrouter" => ChatProviderId::OpenRouter,
         other => return Err(format!("unknown provider: {other}")),
     };
 
@@ -880,7 +885,13 @@ pub fn get_chat_config(provider: Option<String>, db: State<DbState>) -> CmdResul
             })
         }
         None => {
-            for p in ["anthropic", "openai", "anthropic_compatible", "openai_compatible"] {
+            for p in [
+                "anthropic",
+                "openai",
+                "openrouter",
+                "anthropic_compatible",
+                "openai_compatible",
+            ] {
                 if secrets::has_chat_api_key(&conn, p) {
                     let base_url = db::get_setting(&conn, &format!("chat.{p}.base_url"))
                         .map_err(|e| e.to_string())?;
@@ -918,12 +929,17 @@ pub async fn list_chat_models(
     use reqwest;
 
     // Resolve base_url: prefer the passed argument, then the stored setting.
+    // OpenRouter has a fixed endpoint, so it falls back to its default base.
     let base = match base_url {
         Some(url) if !url.trim().is_empty() => url,
         _ => {
             let conn = db.0.lock();
             db::get_setting(&conn, &format!("chat.{provider}.base_url"))
                 .map_err(|e| e.to_string())?
+                .or_else(|| {
+                    (provider == "openrouter")
+                        .then(|| OpenRouterProvider::DEFAULT_BASE.to_string())
+                })
                 .ok_or_else(|| "base_url is required for compatible providers".to_string())?
         }
     };
@@ -945,7 +961,9 @@ pub async fn list_chat_models(
 
     let req = match provider.as_str() {
         "anthropic_compatible" => req.header("x-api-key", key),
-        "openai_compatible" => req.header("Authorization", format!("Bearer {key}")),
+        "openai_compatible" | "openrouter" => {
+            req.header("Authorization", format!("Bearer {key}"))
+        }
         _ => return Err("list_chat_models only supports compatible providers".to_string()),
     };
 

@@ -33,10 +33,66 @@ interface Props {
   variant?: "toolbar" | "kebab";
 }
 
-/** Canvas background for rasterized exports. Kept in sync with the preview
- *  iframe's white background so a downloaded PNG/SVG looks exactly like what
- *  the user saw in the pane (and isn't rendered as a dark, unreadable image). */
+/** Fallback export background when the diagram declares none. Diagrams are
+ *  usually authored for a light page; a diagram that sets its own (e.g. dark)
+ *  background is honoured via `pageBackground` so the download matches chat. */
 const EXPORT_BG = "#ffffff";
+
+/** Best-effort: the diagram page's own background colour, so a downloaded
+ *  PNG/SVG matches what the user saw in chat (the diagram may be authored with
+ *  a dark background). Reads a full-canvas <rect> fill, then the body inline
+ *  style, then body/html/:root CSS rules; falls back to white. */
+function pageBackground(html: string): string {
+  const solid = (v: string): string | null => {
+    const t = v.trim().toLowerCase();
+    if (t === "transparent" || t === "none" || t === "") return null;
+    if (/^#[0-9a-f]{3,8}$/.test(t)) return t;
+    if (/^rgba?\(/.test(t) || /^hsla?\(/.test(t)) return t;
+    if (/^[a-z]+$/.test(t)) return t; // named colour
+    return null; // gradients / urls / etc. — not a solid fill we can paint
+  };
+  const fromDecl = (block: string): string | null => {
+    const re = /background(?:-color)?\s*:\s*([^;]+)/gi;
+    let m: RegExpExecArray | null;
+    let found: string | null = null;
+    while ((m = re.exec(block))) {
+      const c = solid(m[1]);
+      if (c) found = c; // last wins, mirroring CSS cascade within a block
+    }
+    return found;
+  };
+  try {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const svg = doc.querySelector("svg");
+    if (svg) {
+      const cover = Array.from(svg.querySelectorAll("rect")).find((r) => {
+        const x = (r.getAttribute("x") ?? "0").trim();
+        const y = (r.getAttribute("y") ?? "0").trim();
+        const w = (r.getAttribute("width") ?? "").trim();
+        const h = (r.getAttribute("height") ?? "").trim();
+        return (x === "0" && y === "0" && w === "100%" && h === "100%");
+      });
+      const fill = cover?.getAttribute("fill");
+      if (fill && solid(fill)) return fill;
+    }
+    const inline = fromDecl(doc.body?.getAttribute("style") ?? "");
+    if (inline) return inline;
+    const css = Array.from(doc.querySelectorAll("style"))
+      .map((s) => s.textContent ?? "")
+      .join("\n");
+    const ruleRe = /(?:^|[},])\s*(?:html|body|:root)[^{}]*\{([^}]*)\}/gi;
+    let rm: RegExpExecArray | null;
+    let ruleBg: string | null = null;
+    while ((rm = ruleRe.exec(css))) {
+      const c = fromDecl(rm[1]);
+      if (c) ruleBg = c;
+    }
+    if (ruleBg) return ruleBg;
+  } catch {
+    /* fall back to white */
+  }
+  return EXPORT_BG;
+}
 
 /** Whether a kind supports the raster export menu at all. */
 function supportsRasterExport(kind: ArtifactPreview["kind"]): boolean {
@@ -88,14 +144,13 @@ function SvgIcon() {
  *  PNG data URL. Used by both Copy and Download PNG. Throws on failure (e.g.
  *  tainted canvas) — caller surfaces a friendly error. */
 async function rasterizeHtml(html: string): Promise<string> {
+  const bg = pageBackground(html);
   const holder = document.createElement("div");
   holder.style.position = "fixed";
   holder.style.left = "-99999px";
   holder.style.top = "0";
-  // Match the preview iframe (`.artifact-preview-html { background: #fff }`):
-  // diagrams are authored assuming a light page, so a dark canvas would render
-  // dark-stroked/dark-text diagrams as an unreadable near-black image.
-  holder.style.background = EXPORT_BG;
+  // Use the diagram's own page background so the export matches chat.
+  holder.style.background = bg;
   holder.style.padding = "24px";
   holder.innerHTML = html;
   document.body.appendChild(holder);
@@ -105,7 +160,7 @@ async function rasterizeHtml(html: string): Promise<string> {
     const dataUrl = await toPng(holder, {
       pixelRatio: 2,
       cacheBust: true,
-      backgroundColor: EXPORT_BG,
+      backgroundColor: bg,
     });
     return dataUrl;
   } finally {
@@ -132,7 +187,7 @@ function svgPixelSize(svg: string): { w: number; h: number } {
 /** Rasterize a standalone <svg> string to a PNG data URL via an <img> + canvas.
  *  This is reliable in the WebKitGTK/Tauri webview where html-to-image's
  *  foreignObject capture produces a blank image. Throws on failure. */
-async function svgToPng(svg: string, scale = 2): Promise<string> {
+async function svgToPng(svg: string, scale = 2, bg = EXPORT_BG): Promise<string> {
   const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
   try {
     const img = new Image();
@@ -152,7 +207,7 @@ async function svgToPng(svg: string, scale = 2): Promise<string> {
     canvas.height = Math.max(1, Math.round(h * scale));
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("no 2d canvas context");
-    ctx.fillStyle = EXPORT_BG;
+    ctx.fillStyle = bg;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     return canvas.toDataURL("image/png");
@@ -165,10 +220,11 @@ async function svgToPng(svg: string, scale = 2): Promise<string> {
  *  diagram's own root <svg> (reliable everywhere); falls back to html-to-image
  *  for HTML/CSS diagrams that aren't authored as inline SVG. */
 async function diagramToPng(html: string): Promise<string> {
-  const rootSvg = extractRootSvg(html);
+  const bg = pageBackground(html);
+  const rootSvg = extractRootSvg(html, bg);
   if (rootSvg) {
     try {
-      return await svgToPng(rootSvg);
+      return await svgToPng(rootSvg, 2, bg);
     } catch {
       // Fall through to the html-to-image path below.
     }
@@ -178,7 +234,7 @@ async function diagramToPng(html: string): Promise<string> {
 
 /** Extract the diagram's own root <svg> as a standalone, namespaced SVG string,
  *  or null when the diagram isn't authored as inline SVG. */
-function extractRootSvg(html: string): string | null {
+function extractRootSvg(html: string, bg = EXPORT_BG): string | null {
   const doc = new DOMParser().parseFromString(html, "text/html");
   const svg = doc.querySelector("svg");
   if (!svg) return null;
@@ -188,18 +244,18 @@ function extractRootSvg(html: string): string | null {
   if (!svg.getAttribute("xmlns:xlink")) {
     svg.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
   }
-  // Paint an opaque white backdrop behind the diagram so the exported file
-  // isn't transparent (which viewers with a dark backdrop show as near-black,
-  // the same "dark PNG" symptom). Insert as the first child so it sits behind.
+  // Paint an opaque backdrop (the diagram's own page background) behind the
+  // diagram so the exported file isn't transparent and matches chat. Insert as
+  // the first child so it sits behind everything.
   if (!svg.querySelector('rect[data-export-bg="1"]')) {
-    const bg = doc.createElementNS("http://www.w3.org/2000/svg", "rect");
-    bg.setAttribute("data-export-bg", "1");
-    bg.setAttribute("x", "0");
-    bg.setAttribute("y", "0");
-    bg.setAttribute("width", "100%");
-    bg.setAttribute("height", "100%");
-    bg.setAttribute("fill", EXPORT_BG);
-    svg.insertBefore(bg, svg.firstChild);
+    const rect = doc.createElementNS("http://www.w3.org/2000/svg", "rect");
+    rect.setAttribute("data-export-bg", "1");
+    rect.setAttribute("x", "0");
+    rect.setAttribute("y", "0");
+    rect.setAttribute("width", "100%");
+    rect.setAttribute("height", "100%");
+    rect.setAttribute("fill", bg);
+    svg.insertBefore(rect, svg.firstChild);
   }
   return `<?xml version="1.0" encoding="UTF-8"?>\n${svg.outerHTML}`;
 }
@@ -208,17 +264,18 @@ function extractRootSvg(html: string): string | null {
  *  data URL via html-to-image (wraps the DOM in a <foreignObject>). Fallback
  *  for diagrams that are HTML/CSS rather than pure SVG. */
 async function rasterizeToSvg(html: string): Promise<string> {
+  const bg = pageBackground(html);
   const holder = document.createElement("div");
   holder.style.position = "fixed";
   holder.style.left = "-99999px";
   holder.style.top = "0";
-  holder.style.background = EXPORT_BG;
+  holder.style.background = bg;
   holder.style.padding = "24px";
   holder.innerHTML = html;
   document.body.appendChild(holder);
   try {
     await new Promise((r) => requestAnimationFrame(() => r(null)));
-    return await toSvg(holder, { cacheBust: true, backgroundColor: EXPORT_BG });
+    return await toSvg(holder, { cacheBust: true, backgroundColor: bg });
   } finally {
     document.body.removeChild(holder);
   }
@@ -327,7 +384,7 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
     setError(null);
     try {
       const base = preview.filename.replace(/\.[^.]+$/, "");
-      const rootSvg = extractRootSvg(preview.text);
+      const rootSvg = extractRootSvg(preview.text, pageBackground(preview.text));
       if (rootSvg) {
         const blob = new Blob([rootSvg], { type: "image/svg+xml" });
         const url = URL.createObjectURL(blob);

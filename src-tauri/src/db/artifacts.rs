@@ -14,6 +14,7 @@ fn map_artifact(row: &rusqlite::Row) -> rusqlite::Result<ArtifactRecord> {
     Ok(ArtifactRecord {
         id: row.get("id")?,
         chat_session_id: row.get("chat_session_id")?,
+        chat_message_id: row.get("chat_message_id")?,
         filename: row.get("filename")?,
         path: row.get("path")?,
         kind: row.get("kind")?,
@@ -41,12 +42,40 @@ pub fn insert_artifact(
     Ok(ArtifactRecord {
         id,
         chat_session_id: chat_session_id.map(str::to_string),
+        chat_message_id: None,
         filename: filename.to_string(),
         path: path.to_string(),
         kind: kind.to_string(),
         created_at: now,
         expires_at,
     })
+}
+
+/// Artifacts for one chat session, oldest first (chat timeline order).
+pub fn list_artifacts_for_chat(
+    conn: &Connection,
+    chat_session_id: &str,
+) -> DbResult<Vec<ArtifactRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM artifacts WHERE chat_session_id = ?1 ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![chat_session_id], map_artifact)?;
+    rows.collect()
+}
+
+/// Attribute a session's not-yet-attributed artifacts to the assistant message
+/// that just completed, so reopening the chat can render them on that bubble.
+pub fn attach_artifacts_to_message(
+    conn: &Connection,
+    chat_session_id: &str,
+    chat_message_id: i64,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE artifacts SET chat_message_id = ?2
+         WHERE chat_session_id = ?1 AND chat_message_id IS NULL",
+        params![chat_session_id, chat_message_id],
+    )?;
+    Ok(())
 }
 
 /// Most recent first.

@@ -252,6 +252,8 @@ export interface ChatOpenBrowserPayload {
 export interface ArtifactRecord {
   id: string;
   chatSessionId: string | null;
+  /** The assistant message that produced this artifact (null until attributed). */
+  chatMessageId: number | null;
   filename: string;
   path: string;
   kind: string;
@@ -261,6 +263,10 @@ export interface ArtifactRecord {
 
 /** All persisted artifacts, most recent first. */
 export const listArtifacts = () => safeInvoke<ArtifactRecord[]>("list_artifacts", {});
+
+/** Artifacts for one chat session (oldest first) so a reopened chat restores them. */
+export const listChatArtifacts = (chatSessionId: string) =>
+  safeInvoke<ArtifactRecord[]>("list_chat_artifacts", { chatSessionId });
 
 /** Delete an artifact (row + on-disk file). */
 export const deleteArtifact = (id: string) =>

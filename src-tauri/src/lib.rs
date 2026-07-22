@@ -164,6 +164,7 @@ pub fn run() {
             commands::chat_cmds::download_artifact,
             commands::chat_cmds::download_artifacts_zip,
             commands::chat_cmds::list_artifacts,
+            commands::chat_cmds::list_chat_artifacts,
             commands::chat_cmds::delete_artifact,
         ]);
 

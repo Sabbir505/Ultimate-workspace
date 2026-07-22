@@ -57,6 +57,17 @@ pub fn list_artifacts(db: State<DbState>) -> CmdResult<Vec<ArtifactRecord>> {
     db::list_artifacts(&conn).map_err(|e| e.to_string())
 }
 
+/// Artifacts belonging to one chat session, oldest first, so a reopened chat
+/// can restore its inline diagrams / file chips.
+#[tauri::command]
+pub fn list_chat_artifacts(
+    chat_session_id: String,
+    db: State<DbState>,
+) -> CmdResult<Vec<ArtifactRecord>> {
+    let conn = db.0.lock();
+    db::list_artifacts_for_chat(&conn, &chat_session_id).map_err(|e| e.to_string())
+}
+
 /// Delete an artifact (DB row + on-disk file).
 #[tauri::command]
 pub fn delete_artifact(id: String, db: State<DbState>) -> CmdResult<()> {

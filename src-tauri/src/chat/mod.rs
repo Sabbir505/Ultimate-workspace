@@ -370,7 +370,7 @@ impl ChatManager {
                     // Persist the assistant message with usage.
                     {
                         let conn = db.lock();
-                        let _ = db::add_chat_message(
+                        let persisted = db::add_chat_message(
                             &conn,
                             &sid,
                             "assistant",
@@ -397,6 +397,12 @@ impl ChatManager {
                                 }
                             }),
                         );
+                        // Attribute this turn's artifacts to the assistant
+                        // message so they reappear on its bubble when the chat
+                        // is reopened.
+                        if let Ok(msg) = persisted {
+                            let _ = db::attach_artifacts_to_message(&conn, &sid, msg.id);
+                        }
                         let _ = db::touch_chat_session(&conn, &sid);
                     }
                     let _ = app.emit(

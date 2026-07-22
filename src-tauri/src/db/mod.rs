@@ -68,6 +68,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     init_schema(conn)?;
     migrate_chat_session_flags(conn)?;
+    migrate_artifacts_message_id(conn)?;
     migrate_unc_paths(conn)
 }
 
@@ -82,6 +83,19 @@ fn migrate_chat_session_flags(conn: &Connection) -> DbResult<()> {
             if !msg.contains("duplicate column name") {
                 return Err(e);
             }
+        }
+    }
+    Ok(())
+}
+
+/// Add the `chat_message_id` column to `artifacts` on databases created before
+/// it existed, so reopened chats can re-attach artifacts to their message.
+/// A duplicate-column error is treated as a no-op.
+fn migrate_artifacts_message_id(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE artifacts ADD COLUMN chat_message_id INTEGER";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
         }
     }
     Ok(())
@@ -183,6 +197,7 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         CREATE TABLE IF NOT EXISTS artifacts (
           id TEXT PRIMARY KEY,
           chat_session_id TEXT,
+          chat_message_id INTEGER,
           filename TEXT NOT NULL,
           path TEXT NOT NULL,
           kind TEXT NOT NULL,
@@ -241,7 +256,8 @@ pub use chat::{
 
 // artifacts
 pub use artifacts::{
-    delete_artifact, delete_expired_artifacts, insert_artifact, list_artifacts,
+    attach_artifacts_to_message, delete_artifact, delete_expired_artifacts, insert_artifact,
+    list_artifacts, list_artifacts_for_chat,
 };
 
 // ---- test helpers ----

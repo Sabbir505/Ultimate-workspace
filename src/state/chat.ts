@@ -13,6 +13,7 @@ import {
   generateChatTitle,
   getChatConfig,
   getChatMessages,
+  listChatArtifacts,
   listChatSessions,
   sendChatMessage,
   setChatApiKey,
@@ -157,11 +158,35 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ),
     }));
     if (wasUnread) void setChatSessionUnread(chatSessionId, false);
-    const messages = await getChatMessages(chatSessionId);
+    const [messages, records] = await Promise.all([
+      getChatMessages(chatSessionId),
+      listChatArtifacts(chatSessionId),
+    ]);
     // Only update messages if the user hasn't clicked away to another session
     // while the fetch was in-flight.
     if (get().activeChatSessionId === chatSessionId) {
       set({ messages: messages ?? [], activeChatSessionId: chatSessionId });
+      // Restore this chat's generated artifacts (inline diagrams / file chips)
+      // so they reappear when the session is reopened. Skip sessions that are
+      // mid-stream — their live buffers are the source of truth.
+      if (records && get().streamingChatSessionId !== chatSessionId) {
+        const list: ChatArtifact[] = records.map((r) => ({
+          path: r.path,
+          filename: r.filename,
+        }));
+        const byMessage: Record<number, ChatArtifact[]> = {};
+        for (const r of records) {
+          if (r.chatMessageId == null) continue;
+          (byMessage[r.chatMessageId] ??= []).push({
+            path: r.path,
+            filename: r.filename,
+          });
+        }
+        set((s) => ({
+          artifacts: { ...s.artifacts, [chatSessionId]: list },
+          artifactsByMessage: { ...s.artifactsByMessage, ...byMessage },
+        }));
+      }
     }
     // Touch and reorder in the background.
     void touchChatSession(chatSessionId).then(async () => {

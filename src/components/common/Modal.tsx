@@ -11,9 +11,11 @@ interface ModalProps {
   children: ReactNode;
   actions: ReactNode;
   onClose?: () => void;
+  /** Extra class on the modal box (e.g. for a wider, solid variant). */
+  className?: string;
 }
 
-export function Modal({ title, children, actions, onClose }: ModalProps) {
+export function Modal({ title, children, actions, onClose, className }: ModalProps) {
   return createPortal(
     <div
       className="modal-overlay"
@@ -21,7 +23,7 @@ export function Modal({ title, children, actions, onClose }: ModalProps) {
         if (e.target === e.currentTarget && onClose) onClose();
       }}
     >
-      <div className="modal" role="dialog" aria-label={title}>
+      <div className={`modal${className ? ` ${className}` : ""}`} role="dialog" aria-label={title}>
         <h3>{title}</h3>
         {children}
         <div className="actions">{actions}</div>

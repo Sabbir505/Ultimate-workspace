@@ -110,6 +110,7 @@ export function ArtifactLibrary() {
       {open && (
         <Modal
           title="Artifacts"
+          className="modal-artifacts"
           onClose={() => setOpen(false)}
           actions={
             <button type="button" className="ghost" onClick={() => setOpen(false)}>

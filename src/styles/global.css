@@ -922,7 +922,7 @@ pre,
   display: flex;
   flex-direction: column;
   gap: 6px;
-  width: min(760px, 82vw);
+  width: 100%;
   max-height: 66vh;
   overflow-y: auto;
   margin: 4px 0 2px;
@@ -968,14 +968,14 @@ pre,
   gap: 6px;
   padding: 10px;
   border-radius: 12px;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-glass-2);
   cursor: pointer;
-  transition: border-color 0.12s, background 0.12s;
+  transition: border-color 0.12s, box-shadow 0.12s;
 }
 .artifact-card:hover {
   border-color: var(--accent);
-  background: var(--glass-hover, rgba(255, 255, 255, 0.06));
+  box-shadow: 0 0 0 1px var(--accent-soft);
 }
 .artifact-card-preview {
   position: relative;
@@ -984,12 +984,13 @@ pre,
   justify-content: center;
   height: 96px;
   border-radius: 8px;
-  background: var(--surface-1, var(--surface-3, rgba(0, 0, 0, 0.25)));
+  border: 1px solid var(--border);
+  background: var(--bg-tint);
 }
 .artifact-card-glyph {
   font-size: 34px;
   line-height: 1;
-  opacity: 0.9;
+  color: var(--text-dim);
 }
 .artifact-card-del {
   position: absolute;
@@ -1654,6 +1655,14 @@ table.kv th {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+/* Wide, solid variant used by the Artifacts library so the card grid is
+   readable (the default glass fill washes cards out over the dimmed app). */
+.modal.modal-artifacts {
+  width: min(860px, 92vw);
+  background: var(--surface-solid);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 /* ---------- Peek panel (§7.9) ---------- */

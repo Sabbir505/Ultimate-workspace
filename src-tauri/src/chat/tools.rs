@@ -18,6 +18,7 @@ use super::{artifacts, codeexec, pygen};
 pub const WEB_SEARCH: &str = "web_search";
 pub const GENERATE_FILE: &str = "generate_file";
 pub const GENERATE_DOCUMENT: &str = "generate_document";
+pub const GENERATE_DIAGRAM: &str = "generate_diagram";
 pub const FETCH_URL: &str = "fetch_url";
 pub const RUN_CODE: &str = "run_code";
 pub const OPEN_URL: &str = "open_url";
@@ -79,6 +80,20 @@ const GENERATE_DOCUMENT_DESC: &str = "Create a REAL, professionally formatted \
     openpyxl and reportlab. Do not print secrets or perform network/other side \
     effects.";
 
+const GENERATE_DIAGRAM_DESC: &str = "Create a hand-styled, fully-laid-out \
+    HTML/CSS diagram as a self-contained .html file. Use this when a diagram \
+    needs deliberate visual hierarchy that Mermaid's auto-layout can't express \
+    — nested groupings/containers, a 2-D grid of sub-nodes, mixed box sizes, a \
+    bold-label-plus-dim-description two-line node, solid primary-flow arrows \
+    with a dashed feedback line looping back, and consistent color-per-category. \
+    Emit ONE complete HTML document in the `html` argument: a title placed \
+    ABOVE the flow (not inside it), a styled <body> with inline <style> (no \
+    external resources, no scripts), semantic node boxes, connector arrows \
+    (CSS/SVG), and a legend if colors carry meaning. The diagram is rendered \
+    in the artifact panel and can be exported to PNG. Do NOT use this for \
+    simple flowcharts/sequences that Mermaid handles well — those go in a \
+    ```mermaid block in your text response instead.";
+
 const FETCH_URL_DESC: &str = "Fetch a specific web page by URL and return its \
     readable text content (HTML stripped). Use to read an article or page the \
     user linked, or a result returned by web_search.";
@@ -103,6 +118,7 @@ pub fn openai_tool_specs(caps: ToolCaps) -> Vec<Value> {
             GENERATE_DOCUMENT_DESC,
             generate_document_parameters(),
         ),
+        openai_fn(GENERATE_DIAGRAM, GENERATE_DIAGRAM_DESC, generate_diagram_parameters()),
         openai_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
         openai_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
     ];
@@ -133,6 +149,7 @@ pub fn anthropic_tool_specs(caps: ToolCaps) -> Vec<Value> {
             GENERATE_DOCUMENT_DESC,
             generate_document_parameters(),
         ),
+        anthropic_fn(GENERATE_DIAGRAM, GENERATE_DIAGRAM_DESC, generate_diagram_parameters()),
         anthropic_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
         anthropic_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
     ];
@@ -213,6 +230,29 @@ fn generate_document_parameters() -> Value {
     })
 }
 
+fn generate_diagram_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "filename": {
+                "type": "string",
+                "description": "Base file name (extension optional; .html is used).",
+            },
+            "title": {
+                "type": "string",
+                "description": "Diagram title, shown above the flow.",
+            },
+            "html": {
+                "type": "string",
+                "description": "Complete self-contained HTML document for the \
+                    diagram (inline <style>, no external resources, no scripts). \
+                    This is written verbatim to the .html file.",
+            }
+        },
+        "required": ["filename", "html"],
+    })
+}
+
 fn fetch_url_parameters() -> Value {
     json!({
         "type": "object",
@@ -267,6 +307,7 @@ pub async fn execute_tool(
         }
         GENERATE_FILE => generate_file(artifacts_dir, args),
         GENERATE_DOCUMENT => generate_document(artifacts_dir, args).await,
+        GENERATE_DIAGRAM => generate_diagram(artifacts_dir, args),
         FETCH_URL => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
             match fetch_url(client, url).await {
@@ -502,6 +543,186 @@ async fn generate_document(artifacts_dir: &Path, args: &Value) -> ToolOutcome {
     }
 }
 
+/// Sentinel HTML comment prepended to every diagram file. The preview
+/// classifier (`read_artifact_preview`) looks for it to route the file as
+/// `kind: "diagram"` (diagram-specific export chrome) instead of generic
+/// `html`. It is harmless when the file is opened directly in a browser.
+pub const DIAGRAM_MARKER: &str = "<!-- conduit:diagram -->";
+
+/// Build a hand-styled HTML/CSS diagram file. The model supplies the full
+/// HTML document; we prepend the diagram sentinel marker (so the preview pane
+/// can route it as `kind: "diagram"`), write it to the artifacts dir, and run
+/// a lightweight structural check whose result is fed back to the model.
+fn generate_diagram(artifacts_dir: &Path, args: &Value) -> ToolOutcome {
+    let filename = args.get("filename").and_then(|v| v.as_str()).unwrap_or("");
+    let html = args.get("html").and_then(|v| v.as_str()).unwrap_or("");
+
+    if filename.trim().is_empty() {
+        return ToolOutcome::text("Error: generate_diagram requires a \"filename\".");
+    }
+    if html.trim().is_empty() {
+        return ToolOutcome::text("Error: generate_diagram requires non-empty \"html\".");
+    }
+
+    // Prepend the sentinel marker (after the doctype, if present, so the file
+    // stays a valid HTML document). Falls back to prefixing the whole thing.
+    let body = prepend_diagram_marker(html);
+    let full = format!("{DIAGRAM_MARKER}\n{body}");
+
+    // Reuse the artifacts writer with the `html` format so we get the same
+    // filename-sanitization, extension-handling, and dir-creation behavior.
+    let file = match artifacts::generate(artifacts_dir, "html", filename, None, &full) {
+        Ok(f) => f,
+        Err(e) => return ToolOutcome::text(format!("generate_diagram failed: {e}")),
+    };
+
+    let report = validate_diagram_html(html);
+    let note = if report.is_clean() {
+        format!(
+            "Created diagram \"{}\" ({}). Structural check passed. It is saved and available to \
+             the user as a diagram artifact (PNG-exportable).",
+            file.filename,
+            file.path.display()
+        )
+    } else {
+        format!(
+            "Created diagram \"{}\" ({}), but the structural check found issues you should fix \
+             before considering it done:\n{}\n\nThe file is saved and visible to the user; revise \
+             and regenerate if the issues affect rendering.",
+            file.filename,
+            file.path.display(),
+            report.render()
+        )
+    };
+
+    ToolOutcome {
+        text: note,
+        artifact: Some(ArtifactRef {
+            path: file.path.display().to_string(),
+            filename: file.filename,
+        }),
+        browse_url: None,
+    }
+}
+
+/// Place the diagram sentinel marker right after the doctype declaration so
+/// the document remains valid HTML while still carrying the marker at the top.
+fn prepend_diagram_marker(html: &str) -> String {
+    let trimmed = html.trim_start();
+    if let Some(rest) = trimmed
+        .strip_prefix("<!doctype html>")
+        .or_else(|| trimmed.strip_prefix("<!DOCTYPE html>"))
+    {
+        format!("<!doctype html>\n{DIAGRAM_MARKER}\n{rest}")
+    } else {
+        format!("{DIAGRAM_MARKER}\n{trimmed}")
+    }
+}
+
+/// Lightweight, dependency-free structural check on diagram HTML. This is NOT
+/// a render — it catches the failure modes that would make the diagram render
+/// broken or empty: missing document skeleton, unclosed tags, <script>/<iframe>
+/// (disallowed in the sandboxed preview), and no visible body content. The
+/// result is fed back to the model so it can self-correct before the turn ends.
+#[derive(Default)]
+struct DiagramReport {
+    issues: Vec<String>,
+}
+
+impl DiagramReport {
+    fn is_clean(&self) -> bool {
+        self.issues.is_empty()
+    }
+    fn add(&mut self, msg: impl Into<String>) {
+        self.issues.push(msg.into());
+    }
+    fn render(&self) -> String {
+        if self.issues.is_empty() {
+            "no issues".to_string()
+        } else {
+            self.issues
+                .iter()
+                .enumerate()
+                .map(|(i, m)| format!("  {}. {m}", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    }
+}
+
+fn validate_diagram_html(html: &str) -> DiagramReport {
+    let mut r = DiagramReport::default();
+    let lower = html.to_ascii_lowercase();
+
+    // Must look like an HTML document.
+    if !lower.contains("<html") || !lower.contains("</html>") {
+        r.add("Missing <html>…</html> document skeleton.");
+    }
+    if !lower.contains("<body") || !lower.contains("</body>") {
+        r.add("Missing <body>…</body>.");
+    }
+
+    // The sandboxed preview iframe disables scripts; a <script> would silently
+    // do nothing and likely means the diagram relies on JS to render.
+    if lower.contains("<script") {
+        r.add("Contains a <script> tag — scripts are blocked in the preview iframe; \
+              render must be pure HTML/CSS.");
+    }
+    // iframes inside the diagram are a nesting/security hazard in the sandbox.
+    if lower.contains("<iframe") {
+        r.add("Contains an <iframe> — not permitted inside the diagram preview.");
+    }
+    // External resources won't load in the sandboxed srcDoc iframe.
+    if lower.contains(" src=\"http") || lower.contains(" src='http") || lower.contains("@import") {
+        r.add("References external resources (http(s) src / @import) — the sandboxed \
+              preview cannot fetch them; inline all styles.");
+    }
+
+    // Balanced-tag check for a small set of structural containers the model is
+    // most likely to leave unclosed. We count opening vs closing tags (ignoring
+    // self-closing void elements) for div/section/table/svg — a mismatch almost
+    // always means a broken layout.
+    for tag in ["div", "section", "table", "svg", "ul", "ol"] {
+        let open = count_tag(&lower, &format!("<{tag}"));
+        let close = count_tag(&lower, &format!("</{tag}>"));
+        // Subtract self-closing occurrences like <svg .../> from the open count
+        // is unnecessary for these tags in practice; a close-count of 0 with
+        // opens > 0 is the real signal.
+        if open != close {
+            r.add(format!("<{tag}> tags unbalanced: {open} open vs {close} close."));
+        }
+    }
+
+    // Body should have some visible text/nodes — an empty diagram is almost
+    // certainly a mistake. Strip tags crudely and check for non-whitespace.
+    let stripped = strip_tags(&lower);
+    if stripped.trim().is_empty() {
+        r.add("Body has no visible text content — the diagram appears empty.");
+    }
+
+    r
+}
+
+/// Count non-overlapping occurrences of `needle` in `hay` (case-insensitive
+/// already applied by the caller). Used for the balanced-tag check.
+fn count_tag(hay: &str, needle: &str) -> usize {
+    hay.matches(needle).count()
+}
+
+fn strip_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// A single search hit.
 struct SearchHit {
     title: String,
@@ -707,6 +928,98 @@ mod tests {
         let specs = openai_tool_specs(ToolCaps::default());
         assert_eq!(specs[0]["type"], "function");
         assert!(specs[0]["function"]["parameters"]["properties"]["query"].is_object());
+    }
+
+    #[test]
+    fn generate_diagram_listed_as_safe_tool() {
+        assert!(openai_names(ToolCaps::default()).contains(&GENERATE_DIAGRAM.to_string()));
+        let a = anthropic_tool_specs(ToolCaps::default());
+        assert!(a.iter().any(|s| s["name"] == GENERATE_DIAGRAM));
+        // The diagram tool must expose filename + html args.
+        let binding = openai_tool_specs(ToolCaps::default());
+        let spec = &binding
+            .iter()
+            .find(|s| s["function"]["name"] == GENERATE_DIAGRAM)
+            .unwrap()["function"]["parameters"];
+        assert!(spec["properties"]["html"].is_object());
+        assert!(spec["required"].as_array().unwrap().contains(&json!("html")));
+    }
+
+    #[test]
+    fn generate_diagram_writes_marker_and_surfaces_artifact() {
+        let client = reqwest::Client::new();
+        let dir = std::env::temp_dir();
+        let html = "<!doctype html><html><body><div>A→B</div></body></html>";
+        let out = tauri::async_runtime::block_on(execute_tool(
+            &client,
+            &dir,
+            ToolCaps::default(),
+            GENERATE_DIAGRAM,
+            &json!({ "filename": "diag_test", "html": html }),
+        ));
+        assert!(out.artifact.is_some(), "should surface an artifact");
+        let art = out.artifact.unwrap();
+        assert!(art.filename.ends_with(".html"));
+        let on_disk = std::fs::read_to_string(&art.path).unwrap();
+        assert!(on_disk.starts_with(DIAGRAM_MARKER), "file must start with the diagram marker");
+        // The structural check should pass for this clean input.
+        assert!(out.text.contains("Structural check passed"), "text was: {}", out.text);
+        let _ = std::fs::remove_file(&art.path);
+    }
+
+    #[test]
+    fn generate_diagram_rejects_empty_html() {
+        let client = reqwest::Client::new();
+        let dir = std::env::temp_dir();
+        let out = tauri::async_runtime::block_on(execute_tool(
+            &client,
+            &dir,
+            ToolCaps::default(),
+            GENERATE_DIAGRAM,
+            &json!({ "filename": "x", "html": "" }),
+        ));
+        assert!(out.artifact.is_none());
+        assert!(out.text.contains("requires non-empty"));
+    }
+
+    #[test]
+    fn validate_flags_script_and_external_refs() {
+        let bad = "<html><body><script>draw()</script><img src=\"https://x/y.png\"></body></html>";
+        let r = validate_diagram_html(bad);
+        assert!(!r.is_clean());
+        let rendered = r.render();
+        assert!(rendered.contains("<script>"));
+        assert!(rendered.contains("external resources"));
+    }
+
+    #[test]
+    fn validate_flags_unbalanced_divs() {
+        let unbalanced = "<html><body><div><div>oops</div></body></html>"; // one </div> missing
+        let r = validate_diagram_html(unbalanced);
+        assert!(r.render().contains("<div> tags unbalanced"));
+    }
+
+    #[test]
+    fn validate_flags_empty_body() {
+        let empty = "<html><body></body></html>";
+        let r = validate_diagram_html(empty);
+        assert!(r.render().contains("no visible text content"));
+    }
+
+    #[test]
+    fn validate_passes_clean_diagram() {
+        let good = "<!doctype html><html><head><style>.n{color:red}</style></head>\
+                    <body><div class=\"n\"><section>A → B</section></div></body></html>";
+        let r = validate_diagram_html(good);
+        assert!(r.is_clean(), "expected clean, got: {}", r.render());
+    }
+
+    #[test]
+    fn prepend_marker_after_doctype() {
+        let with_doctype = "<!doctype html><html><body>x</body></html>";
+        assert!(prepend_diagram_marker(with_doctype).contains("<!doctype html>\n<!-- conduit:diagram -->"));
+        let no_doctype = "<html><body>x</body></html>";
+        assert!(prepend_diagram_marker(no_doctype).starts_with("<!-- conduit:diagram -->"));
     }
 
     #[test]

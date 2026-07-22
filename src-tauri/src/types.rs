@@ -224,9 +224,9 @@ pub struct ArtifactPreview {
     pub path: String,
     pub filename: String,
     pub ext: String,
-    /// text | markdown | csv | json | html | code | image | pdf | binary
+    /// text | markdown | csv | json | html | diagram | code | image | pdf | office | binary
     pub kind: String,
-    /// Present for text-like kinds (text/markdown/csv/json/html/code).
+    /// Present for text-like kinds (text/markdown/csv/json/html/code/office/diagram).
     pub text: Option<String>,
     /// `data:` URI present for image/pdf kinds.
     pub data_uri: Option<String>,

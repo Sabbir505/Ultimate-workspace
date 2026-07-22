@@ -2209,6 +2209,78 @@ table.kv th {
   border-radius: var(--radius-xs);
 }
 
+/* Mermaid diagram block (rendered inline from a ```mermaid fence). No header
+   bar — the diagram renders full-bleed on a transparent canvas so it floats
+   on the message's glass surface. The SVG keeps its natural size (Mermaid
+   auto-sizes node boxes to fit their text), so node text is never clipped —
+   wide diagrams scroll horizontally rather than shrinking. */
+.chat-mermaid-block {
+  margin: 12px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: transparent;
+  box-shadow: var(--glass-rim-soft);
+}
+.chat-mermaid-body {
+  padding: 18px 20px;
+  max-height: 560px;
+  overflow: auto;
+  /* The SVG may be wider than the column; scroll horizontally instead of
+     scaling down (which would clip node text). */
+  overflow-x: auto;
+}
+.chat-mermaid-svg {
+  /* Center short diagrams; wide ones overflow the flex item and the
+     container scrolls. min-width keeps the flex item from collapsing. */
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-width: min-content;
+  background: transparent;
+}
+.chat-mermaid-svg svg {
+  /* Natural size: never force-shrink (that clips node text). Cap only extreme
+     heights so very tall diagrams scroll vertically. Width stays as authored
+     by Mermaid so each node box fits its full label. */
+  max-width: none;
+  max-height: 520px;
+  height: auto;
+  width: auto;
+  background: transparent !important;
+}
+.chat-mermaid-loading {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-style: italic;
+  text-align: center;
+  padding: 10px 0;
+}
+.chat-mermaid-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.chat-mermaid-error {
+  color: var(--state-error);
+  font-size: 11px;
+}
+.chat-mermaid-source {
+  margin: 0;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.28);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--text-dim);
+}
+:root[data-theme="light"] .chat-mermaid-source {
+  background: rgba(255, 255, 255, 0.4);
+}
+
 /* Composer (bottom bar) — Claude-style rounded card */
 .chat-composer {
   flex-shrink: 0;
@@ -2308,6 +2380,37 @@ table.kv th {
 .composer-tools-btn.active {
   background: color-mix(in srgb, var(--accent) 16%, transparent);
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
+}
+.composer-diagram-toggle {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+}
+.diagram-toggle-seg {
+  height: 26px;
+  padding: 0 9px;
+  font-size: 11px;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition:
+    background 0.15s var(--ease),
+    color 0.15s var(--ease);
+}
+.diagram-toggle-seg:not(:last-child) {
+  border-right: 1px solid var(--border);
+}
+.diagram-toggle-seg:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.diagram-toggle-seg.active {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
   color: var(--accent);
 }
 .chat-artifacts {
@@ -2569,6 +2672,61 @@ table.kv th {
 }
 .artifact-preview-download-btn svg {
   stroke: #fff;
+}
+
+/* Per-artifact export menu (Copy / PNG / SVG-greyed / Download-original),
+   shown in the preview header for diagram, html, and image kinds. */
+.artifact-export-menu {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.artifact-export-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.artifact-export-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--text);
+  border-color: var(--accent);
+}
+.artifact-export-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+.artifact-export-btn.svg-disabled {
+  opacity: 0.35;
+}
+.artifact-export-sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 2px;
+  background: var(--border);
+}
+.artifact-export-status {
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-left: 4px;
+  white-space: nowrap;
+}
+.artifact-export-status.ok {
+  color: var(--state-working);
+}
+.artifact-export-status.err {
+  color: var(--state-error);
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .artifact-preview-content {
   flex: 1;

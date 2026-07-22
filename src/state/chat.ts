@@ -45,6 +45,9 @@ interface ChatState {
   toolsEnabled: boolean;
   /** When true, the model may execute code (opt-in, security-sensitive). */
   codeExecEnabled: boolean;
+  /** Diagram mode override: "" = model decides, "quick" = Mermaid,
+   *  "designed" = html_diagram (generate_diagram tool). */
+  diagramMode: "" | "quick" | "designed";
   /** Generated files per chat session (chatSessionId -> artifacts). */
   artifacts: Record<string, ChatArtifact[]>;
   /** Artifacts attributed to a specific assistant message (messageId -> artifacts). */
@@ -67,6 +70,7 @@ interface ChatState {
   setEffort: (effort: string) => void;
   setToolsEnabled: (enabled: boolean) => void;
   setCodeExecEnabled: (enabled: boolean) => void;
+  setDiagramMode: (mode: "" | "quick" | "designed") => void;
   sendMessage: (content: string) => Promise<void>;
   /** Re-run the last user message to get a fresh assistant response. */
   regenerate: () => Promise<void>;
@@ -95,6 +99,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   effort: "",
   toolsEnabled: false,
   codeExecEnabled: false,
+  diagramMode: "" as "" | "quick" | "designed",
   artifacts: {},
   artifactsByMessage: {},
   pendingArtifacts: {},
@@ -186,8 +191,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setCodeExecEnabled: (codeExecEnabled) =>
     set(codeExecEnabled ? { codeExecEnabled, toolsEnabled: true } : { codeExecEnabled }),
 
+  setDiagramMode: (diagramMode) => set({ diagramMode }),
+
   sendMessage: async (content) => {
-    const { activeChatSessionId, messages, sessions, effort, toolsEnabled, codeExecEnabled } =
+    const { activeChatSessionId, messages, sessions, effort, toolsEnabled, codeExecEnabled, diagramMode } =
       get();
     if (!activeChatSessionId) return;
 
@@ -225,6 +232,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       effort || undefined,
       toolsEnabled,
       codeExecEnabled,
+      diagramMode,
     );
   },
 

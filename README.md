@@ -45,5 +45,6 @@ cd src-tauri && cargo test    # backend unit tests (adapters, db, git helpers)
 
 - Pane processes are killed only on explicit pane close or app quit — unfocused panes keep running (PRD §6.5).
 - On app launch, previously open sessions are *not* auto-resumed; click a session in the sidebar to resume it by ID.
-- The browser pane is an embedded iframe pointed at your dev server; servers that send `X-Frame-Options: DENY` will refuse to render in it (known v1 limitation).
+- The browser pane uses native Tauri child webviews on Windows/macOS (no more X-Frame-Options limitations); Linux falls back to iframes.
+- The Chat tab offers a direct LLM conversation interface: streaming responses, Mermaid diagrams, HTML/CSS diagram generation (exportable to PNG), and document generation (docx/pptx/xlsx/pdf) via the built-in tools.
 - See `BUILD_LOG.md` for build progress, test coverage, and design decisions/deviations from the PRD.

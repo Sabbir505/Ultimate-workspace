@@ -5,7 +5,8 @@
 // fixed min-height (see .settings-split / .empty-reserved) so switching
 // categories — or an empty harness list — does not reflow the modal.
 import { useEffect, useState } from "react";
-import { getSetting, setSetting, type ChatProvider, listChatModels } from "../../lib/ipc";
+import { open } from "@tauri-apps/plugin-dialog";
+import { getSetting, readFileText, setSetting, type ChatProvider, listChatModels } from "../../lib/ipc";
 import { acceleratorFromEvent, DEFAULT_KEYBINDINGS, type KeybindingAction } from "../../lib/keybindings";
 import { runLoginFlow } from "../../lib/sessionLauncher";
 import { useProjectsStore } from "../../state/projects";
@@ -346,6 +347,48 @@ function AssistantPanel() {
     ]);
   };
 
+  // Parse a `name:` value out of a YAML frontmatter block (the same minimal
+  // shape the backend's skill scanner reads). Returns null if there's no
+  // frontmatter or no name field — caller then falls back to the filename.
+  const nameFromFrontmatter = (text: string): string | null => {
+    const lines = text.split(/\r?\n/);
+    if (lines[0]?.trim() !== "---") return null;
+    for (let i = 1; i < lines.length; i++) {
+      const t = lines[i].trim();
+      if (t === "---") break;
+      const m = t.match(/^name:\s*(.*)$/);
+      if (m) return m[1].trim().replace(/^["']|["']$/g, "").trim();
+    }
+    return null;
+  };
+
+  // Filename without extension + leading dir, e.g. "C:\x\docx-skill.md" -> "docx-skill".
+  const stemFromPath = (p: string): string => {
+    const base = p.split(/[\\/]/).pop() ?? p;
+    return base.replace(/\.[^.]+$/, "");
+  };
+
+  const uploadSkill = async () => {
+    try {
+      const picked = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }],
+        title: "Upload skill (.md)",
+      });
+      if (typeof picked !== "string" || !picked) return;
+      const text = (await readFileText(picked)) ?? "";
+      if (!text) return;
+      const name = nameFromFrontmatter(text) || stemFromPath(picked);
+      persistSkills([
+        ...skills,
+        { id: `skill_${Date.now()}`, name, content: text, enabled: true },
+      ]);
+    } catch (err) {
+      console.warn("skill upload failed", err);
+    }
+  };
+
   const updateSkill = (id: string, patch: Partial<SkillItem>) => {
     persistSkills(skills.map((s) => (s.id === id ? { ...s, ...patch } : s)));
   };
@@ -380,9 +423,14 @@ function AssistantPanel() {
 
       <div className="panel-head" style={{ marginTop: 16 }}>
         <h3 style={{ fontSize: 14 }}>Skills</h3>
-        <button className="ghost" style={{ padding: "2px 8px" }} onClick={addSkill}>
-          + Add skill
-        </button>
+        <span style={{ display: "flex", gap: 6 }}>
+          <button className="ghost" style={{ padding: "2px 8px" }} onClick={() => void uploadSkill()}>
+            ↑ Upload .md
+          </button>
+          <button className="ghost" style={{ padding: "2px 8px" }} onClick={addSkill}>
+            + Add skill
+          </button>
+        </span>
       </div>
       {skills.length === 0 ? (
         <div className="empty-reserved">

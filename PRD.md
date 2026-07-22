@@ -39,6 +39,9 @@ The app must support at minimum:
 
 1. **Claude Code** (Anthropic) — supports session resume via session ID.
 2. **Kimi Code CLI** (Moonshot AI) — supports session resume via `kimi -r <session-id>` / `--session`, `kimi -c` / `--continue` for the most recent session. Single-binary distribution.
+3. **OpenCode** — added as a third adapter; resume support follows the same trait.
+
+> **Implementation note (Chat tab):** The app also includes a Chat tab (not described in this PRD) that offers direct LLM conversations via the Anthropic/OpenAI HTTP APIs — a separate feature from the CLI agent panes covered here. The Chat tab supports streaming responses, tool calling (web_search, generate_document, generate_file, generate_diagram, fetch_url, open_url, run_code), Mermaid diagram rendering, HTML/CSS diagram generation with PNG export, artifact preview/download, and skill loading. See `CONTRACT.md` Chat section for the full IPC contract.
 
 Both harnesses run as normal CLI processes; the app does **not** need to reimplement their protocols. The app spawns them in a pseudo-terminal (pty) with the working directory set to the target project folder, and lets their native TUI render inside the pane. This means:
 - Conduit does not need to parse or understand the agent's internal message format for v1's baseline experience — the pty output is rendered as terminal output (via xterm.js or equivalent), exactly as if the user ran the CLI directly.
@@ -46,6 +49,8 @@ Both harnesses run as normal CLI processes; the app does **not** need to reimple
 - The harness list must be implemented as a pluggable adapter interface (see §6.4) so a third harness (e.g. Codex, OpenCode) can be added later without rearchitecting.
 
 **Architecture implication:** because both harnesses persist session state to disk and resume by ID, Conduit does **not** need to keep agent processes resident in memory when a pane is not visible/focused. Process lifecycle is spawn-on-focus, kill-on-blur-or-close, resume-by-ID-on-reopen. This is a deliberate simplification — do not build a background process supervisor for v1.
+
+> **Implementation note:** The final implementation diverges from this section's "kill-on-blur" statement. Per §6.5 (which takes precedence), panes are killed only on explicit close or app quit, never on blur. The original "kill-on-blur-or-close" phrasing was aspirational and was corrected during implementation to match the user's expectation that unfocused parallel panes keep running.
 
 ---
 
@@ -87,6 +92,8 @@ Both harnesses run as normal CLI processes; the app does **not** need to reimple
 1. User opens a "Browser" pane (via the bottom-layout split shown in the design sketch: one cmd pane + one browser pane side-by-side, or as a standalone pane type available in the main grid).
 2. Browser pane has a URL bar (defaults to `http://localhost:3000` or last-used URL per project), refresh, and back/forward.
 3. Browser pane is a plain embedded webview — it does not need special agent integration in v1, it's for the user to visually check dev server output next to the agent that's driving it.
+
+> **Implementation note:** The browser pane uses native Tauri child webviews (`Window::add_child`) on Windows/macOS rather than a secondary `WebviewWindow`. This provides a top-level browsing context with no `X-Frame-Options` restrictions and full navigation history. Linux falls back to iframes. The webview is positioned over the pane's body div by syncing bounds from the frontend (ResizeObserver) to the backend, with occlusion logic that hides the webview when overlays/modals are open.
 
 ---
 
@@ -257,6 +264,8 @@ Rules:
 - Required Tauri config: `"transparent": true` on the window, transparent CSS background on `html, body`, `"macOSPrivateApi": true` for macOS.
 - Known issues to test for early (do not discover late): glass corner-radius misalignment on window resize/drag on some `NSGlassEffectViewStyle` variants; test resizing behavior in the first week of UI work, not at the end.
 
+> **Implementation note:** The current implementation uses `window-vibrancy` (`apply_vibrancy` on macOS, `apply_blur` on Windows) rather than the `tauri-plugin-liquid-glass` plugin (which was specified here but does not exist as a stable Tauri v2 crate). The visual result is a frosted-glass look across all supported platforms; the Tahoe-era native `NSGlassEffectView` path remains deferred to a future release when the plugin stabilizes.
+
 ### 7.2 Light / Dark Theme
 - Theme driven by tint tokens, not a flat black/white swap: dark theme uses a cool blue-gray base tint, light theme a warm off-white base tint, both layered under the glass material.
 - Default: follow macOS system appearance automatically. Manual override available in Settings (Light / Dark / System).
@@ -334,6 +343,8 @@ All shortcuts must be remappable in Settings — store overrides in `app_setting
 - Skills can be scoped globally (available in any pane/project) or to a specific project.
 - Typed into any pane's input, `/skill-name` expands to the full stored template text before being sent to the harness (simple client-side text substitution — this does not require harness-level integration, though if a harness has its own native skill/AGENTS.md mechanism, that remains a separate, complementary system the user can also use directly within the CLI itself).
 - CRUD UI: create/edit/delete skills, stored in the `skills` table.
+
+> **Implementation note (Chat tab skills):** In the Chat tab, skill loading works differently — enabled skills are appended to the system prompt on every turn (unconditional, not trigger-based). This deviates from the CLI-pane skill model described above, which uses frontend-side slash-expansion before `write_pty`.
 
 ### 7.16 Local Encrypted Secrets Store
 - Per-project key-value store for env vars/API keys used by quick actions or dev servers run in panes.

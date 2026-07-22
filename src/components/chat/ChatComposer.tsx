@@ -72,6 +72,9 @@ interface Props {
   /** Whether code execution (opt-in, security-sensitive) is enabled. */
   codeExecEnabled?: boolean;
   onCodeExecToggle?: (enabled: boolean) => void;
+  /** Diagram mode override: "" = Auto (model decides), "quick" = Mermaid, "designed" = generate_diagram. */
+  diagramMode?: "" | "quick" | "designed";
+  onDiagramModeChange?: (mode: "" | "quick" | "designed") => void;
 }
 
 export function ChatComposer({
@@ -89,6 +92,8 @@ export function ChatComposer({
   onToolsToggle,
   codeExecEnabled,
   onCodeExecToggle,
+  diagramMode,
+  onDiagramModeChange,
 }: Props) {
   const [content, setContent] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -262,6 +267,48 @@ export function ChatComposer({
               <CodeIcon />
               <span>Code</span>
             </button>
+          )}
+          {onDiagramModeChange && (
+            <div
+              className="composer-diagram-toggle"
+              title="Diagram style: Auto (model decides), Quick (Mermaid inline), Designed (full HTML diagram, PNG-exportable)"
+              role="radiogroup"
+              aria-label="Diagram mode"
+            >
+              <button
+                type="button"
+                className={`diagram-toggle-seg${!diagramMode ? " active" : ""}`}
+                aria-pressed={!diagramMode}
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  onDiagramModeChange("");
+                }}
+              >
+                Auto
+              </button>
+              <button
+                type="button"
+                className={`diagram-toggle-seg${diagramMode === "quick" ? " active" : ""}`}
+                aria-pressed={diagramMode === "quick"}
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  onDiagramModeChange("quick");
+                }}
+              >
+                Quick
+              </button>
+              <button
+                type="button"
+                className={`diagram-toggle-seg${diagramMode === "designed" ? " active" : ""}`}
+                aria-pressed={diagramMode === "designed"}
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  onDiagramModeChange("designed");
+                }}
+              >
+                Designed
+              </button>
+            </div>
           )}
           {attachError && <span className="composer-attach-error">{attachError}</span>}
           <div className="composer-footer-spacer" />

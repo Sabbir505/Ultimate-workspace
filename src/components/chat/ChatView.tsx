@@ -32,6 +32,8 @@ export function ChatView() {
   const setToolsEnabled = useChatStore((s) => s.setToolsEnabled);
   const codeExecEnabled = useChatStore((s) => s.codeExecEnabled);
   const setCodeExecEnabled = useChatStore((s) => s.setCodeExecEnabled);
+  const diagramMode = useChatStore((s) => s.diagramMode);
+  const setDiagramMode = useChatStore((s) => s.setDiagramMode);
   const config = useChatStore((s) => s.config);
   const loadConfig = useChatStore((s) => s.loadConfig);
   const newChat = useChatStore((s) => s.newChat);
@@ -255,6 +257,8 @@ export function ChatView() {
         onToolsToggle={setToolsEnabled}
         codeExecEnabled={codeExecEnabled}
         onCodeExecToggle={setCodeExecEnabled}
+        diagramMode={diagramMode}
+        onDiagramModeChange={setDiagramMode}
       />
     </div>
     {previewArtifact && (

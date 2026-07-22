@@ -536,3 +536,91 @@ src/
   Revisit if a second caller emerges.
 - **Verification:** `cargo test` → **74/74 (1 ignored)**; lib warnings 5 (all
   pre-existing, outside db/).
+
+---
+
+## Session 2026-07-21: Hermes tool-call fallback parser
+
+- **Problem:** OpenAI-compatible aggregators (e.g., ai2.18.show) serving
+  Qwen/DeepSeek/MiMo fine-tunes often do NOT translate the OpenAI `tools` field
+  into the model's native tool template. Instead of populating
+  `choices[0].message.tool_calls`, the model emits its trained Hermes-format
+  tool call as plain XML text in `content`:
+
+  ```text
+  <tool_calls>
+  <invoke name="web_search">
+  <parameter name="query" string="true">cow</parameter>
+  </invoke>
+  </tool_calls>
+  ```
+
+  This means the tool loop never sees structured `tool_calls`, so tools silently
+  don't run — the message is just streamed verbatim to the user as prose.
+- **Fix:** new functions in `chat/mod.rs`:
+  - `parse_hermes_tool_calls(content) -> Option<Vec<(String, Value)>>` — locates
+    `<tool_calls>…</tool_calls>` blocks, extracts `<invoke name="…">` with
+    `<parameter name="…">value</parameter>` children, and returns `(tool_name, args)`
+    pairs with typed value coercion (bool/int/float/json/string).
+  - `strip_hermes_tool_calls(content) -> String` — removes the raw XML markup
+    from the user-visible message and from re-sent history.
+  - `coerce_param_value(raw: &str) -> Value` — converts bare parameter text
+    to the correct JSON type.
+  - `next_synthetic_tool_id() -> String` — monotonic counter for synthesized
+    tool-call ids so the echoed assistant message and matching `tool` result
+    can pair correctly on the next request.
+  - `run_openai_tool_loop` now checks for Hermes text after receiving an empty
+    `tool_calls` array and synthesizes the same structured shape the loop already
+    handles. When calls were recovered from text, the echoed assistant message
+    has the raw markup stripped from `content` and a synthesized `tool_calls`
+    array inserted.
+- **Verification:** `cargo test` → **74+ tests** (added 6 new: single invoke
+  (web_search cow), generate_document, multiple invokes, type coercion, strip
+  with close, strip with unclosed block); `npm test` → **83/83**; `npm run build`
+  clean.
+- **Deviation:** none — this is a pure additive fallback that does not change
+  the structured tool-calling path.
+
+## Session 2026-07-21: Mermaid diagram rendering + generate_diagram tool
+
+- **Mermaid rendering:** `MessageBubble.tsx` now routes `language-mermaid` fenced
+  blocks to a new `MermaidDiagram.tsx` component (lazy-loaded `mermaid`, theme-aware
+  with light/dark re-render, debounced render on 300ms, `normalizeSvg` function
+  that strips background + pins viewBox size so node text doesn't clip). The core
+  prompt tells the model to emit diagrams as ` ```mermaid ` fenced blocks.
+- **`generate_diagram` tool:** a new tool (`tools.rs`: `GENERATE_DIAGRAM` const)
+  that writes a self-contained HTML/CSS diagram to the artifacts directory. The
+  file is prepended with `<!-- conduit:diagram -->` sentinel marker and validated
+  by `validate_diagram_html` (structural check: document skeleton, no scripts/
+  iframes, no external resources, balanced tags, non-empty body). Issues are fed
+  back so the model can self-correct. Registered in `openai_tool_specs` and
+  `anthropic_tool_specs` as a safe tool.
+- **`diagram` artifact kind:** `read_artifact_preview` classifies HTML files
+  containing the sentinel marker as `kind: "diagram"`; `ArtifactPreviewPane`
+  renders them in the same `sandbox=""` srcDoc iframe as regular HTML.
+- **ArtifactExportMenu:** new component (`ArtifactExportMenu.tsx`) shown in the
+  `ArtifactPreviewPane` header for diagram/html/image kinds. Provides Copy to
+  clipboard and Download PNG via `html-to-image` (off-DOM rasterization, because
+  `sandbox=""` makes the iframe `contentDocument` null; the diagram HTML is
+  re-rendered into a hidden DOM node that `toPng` can walk). SVG is greyed out
+  for `diagram` kind (HTML/CSS is not vector) with a tooltip explaining why.
+  The `html-to-image` npm package was added as a dependency.
+- **Diagram mode toggle:** `ChatComposer` has an Auto/Quick/Designed segmented
+  toggle. State flows: `chat.ts` store (`diagramMode`) $\rightarrow$ `sendChatMessage`
+  IPC (`diagramMode`) $\rightarrow$ Rust `send_chat_message` (`diagram_mode` param)
+  $\rightarrow$ appends a prompt directive: Quick forces a ```mermaid block,
+  Designed forces `generate_diagram`, Auto lets the model decide.
+- **Verification:** `cargo test` → **74/74 (1 ignored)** (diagram tool tests:
+  generates with marker + surfaces artifact, rejects empty html, structural
+  validator flags script/external-refs/unbalanced-divs/empty-body, passes clean
+  diagram, marker-prepend doctype handling); `npm test` → **83/83**; `npm run build`
+  clean.
+- **Deviation from earlier speculation:** an earlier Build Log entry speculated
+  about trigger-based skill loading and a headless-screenshot "verify pass" for
+  diagrams. Neither was implemented. Skill loading is unconditional (all enabled
+  skills append every turn). Diagram verification is a lightweight static
+  structural check (`validate_diagram_html`), not a headless browser render —
+  this catches broken HTML but does not detect visual defects like text-overflow
+  or misaligned connectors; the model must self-review those.
+
+---

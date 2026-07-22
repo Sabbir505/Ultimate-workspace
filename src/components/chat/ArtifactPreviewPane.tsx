@@ -13,6 +13,7 @@ import {
   type ArtifactPreview,
 } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
+import { ArtifactExportMenu } from "./ArtifactExportMenu";
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -80,7 +81,7 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
           : "artifact-preview-office docx";
     return <div className={cls} dangerouslySetInnerHTML={{ __html: text }} />;
   }
-  if (kind === "html" && text != null) {
+  if ((kind === "html" || kind === "diagram") && text != null) {
     return (
       <iframe
         className="artifact-preview-html"
@@ -192,16 +193,24 @@ export function ArtifactPreviewPane({
           {artifact.filename}
         </span>
         <div className="artifact-preview-header-actions">
-          <button
-            type="button"
-            className="artifact-preview-download-btn"
-            title="Download"
-            aria-label="Download"
-            onClick={() => void downloadArtifact(artifact.path, artifact.filename)}
-          >
-            <DownloadIcon />
-            <span>Download</span>
-          </button>
+          {preview && (preview.kind === "diagram" || preview.kind === "html" || preview.kind === "image") ? (
+            <ArtifactExportMenu
+              preview={preview}
+              path={artifact.path}
+              filename={artifact.filename}
+            />
+          ) : (
+            <button
+              type="button"
+              className="artifact-preview-download-btn"
+              title="Download"
+              aria-label="Download"
+              onClick={() => void downloadArtifact(artifact.path, artifact.filename)}
+            >
+              <DownloadIcon />
+              <span>Download</span>
+            </button>
+          )}
           <button
             type="button"
             className="artifact-preview-header-btn"

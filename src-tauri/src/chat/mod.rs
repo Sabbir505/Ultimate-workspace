@@ -37,15 +37,172 @@ never a plain text dump. Save the file to the path in the CONDUIT_OUTPUT \
 environment variable. Only use `generate_file` for plain text formats (txt, md, \
 csv, json, html). Prefer accurate, well-structured content over filler.";
 
-/// Assemble the effective system prompt from the built-in tool guidance (only
-/// when tools are on), the user's custom system prompt, and any enabled skills.
+/// Coarse classification of the active model. Frontier hosted models (Claude,
+/// GPT, etc.) follow implied instructions reliably; locally-run or
+/// small-context models do not, so they get the STRICT addendum that repeats
+/// the highest-risk rules explicitly. The prompt assembled for a turn must
+/// match what the live tool registry actually exposes — see `tools.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelClass {
+    /// Large hosted models served via an API (Claude, GPT, etc.). Lighter
+    /// instruction is sufficient; the BASE prompt alone applies.
+    Frontier,
+    /// Locally-run or small-context models. Gets the STRICT addendum appended
+    /// after BASE, because this app cannot afford silent tool-use failures.
+    Local,
+}
+
+/// Heuristic mapping from a model id string to its class. Known local/smaller
+/// open-weight families are classified `Local`; everything else (including
+/// unknown hosted models) defaults to `Frontier`. Extend this match list as
+/// new local runtimes are wired in — the default must stay optimistic for
+/// hosted models so they aren't burdened with the STRICT repeat.
+pub fn classify_model(model: &str) -> ModelClass {
+    let m = model.to_ascii_lowercase();
+    let local_markers = [
+        "llama", "qwen", "phi-", "phi3", "gemma", "mistral-7b", "mixtral",
+        "deepseek-r1", "deepseek-coder", "yi-", "starcoder", "codegemma",
+        "stablelm", "falcon", "orca", "vicuna", "wizardlm", " neural",
+        "local", "ollama",
+    ];
+    if local_markers.iter().any(|tok| m.contains(tok)) {
+        ModelClass::Local
+    } else {
+        ModelClass::Frontier
+    }
+}
+
+/// The CORE system prompt — the source-code layer, versioned with app
+/// releases and never user-editable. Concatenated FIRST, before the user's
+/// custom prompt (Settings → Assistant) and before any conditionally-loaded
+/// skills. Tool names and the artifact mechanism below must stay in sync with
+/// the live tool registry in `tools.rs` (`WEB_SEARCH`, `GENERATE_DOCUMENT`,
+/// `GENERATE_FILE`, `FETCH_URL`, `OPEN_URL`, `RUN_CODE`).
+fn core_prompt_base() -> &'static str {
+    "You are running inside Conduit, a desktop application, in the Chat tab. \
+You are a general assistant, separate from Conduit's Dev tab coding agent panes \
+(which run Claude Code / Kimi Code directly against real project repositories — \
+you do not have that access here).\n\n\
+## Tool contract\n\
+You have access to some or all of the following tools, depending on the active \
+provider's capabilities. Only call a tool if it is present in your actual tool \
+list for this turn — never assume a tool exists because it is described here.\n\n\
+- `web_search(query)` — returns search results. May be a native provider tool \
+or an injected fallback (Tavily). Call it the same way regardless of which \
+backend serves it.\n\
+- `generate_document(format, instructions)` — writes Python (python-docx, \
+python-pptx, openpyxl or reportlab) that builds a real, professionally \
+formatted file and saves it to the CONDUIT_OUTPUT path. Use for docx/pptx/xlsx/pdf. \
+Producing the file also surfaces it as a downloadable artifact in the panel.\n\
+- `generate_file(filename, content)` — for plain text formats (txt, md, csv, \
+json, html). Also surfaces the file as an artifact.\n\
+- `generate_diagram(filename, title, html)` — for a hand-styled, fully-laid-out \
+HTML/CSS diagram (nested groupings, 2-D node grids, mixed box sizes, \
+label+description two-line nodes, solid primary arrows with dashed feedback \
+lines, color-per-category). Produces a self-contained .html file surfaced as a \
+diagram artifact (PNG-exportable). Use this ONLY when the diagram needs \
+deliberate visual hierarchy Mermaid's auto-layout can't express; for ordinary \
+flowcharts/sequences use a ```mermaid block in your text response instead.\n\
+- `fetch_url(url)` — fetch a specific page's readable text by URL.\n\
+- `open_url(url)` — open a page in the app's built-in browser pane and return \
+its text.\n\
+- `run_code(language, code)` — execute a short snippet (python/javascript/bash) \
+in a sandbox. Only present when code execution is explicitly enabled for this chat.\n\n\
+If a tool described here is not actually available in a given turn, do not \
+claim to have used it. State the limitation plainly (e.g. \"the active model \
+doesn't have search available — this answer isn't verified against current \
+information\").\n\n\
+## Artifact-panel protocol\n\
+- For docx/pptx/xlsx/pdf and plain-text files, produce the file via \
+`generate_document` or `generate_file`; the file is surfaced to the artifact \
+panel automatically — there is no separate \"emit artifact\" tool to call.\n\
+- For Markdown/Mermaid/SVG/HTML meant to be read in-app, put it directly in your \
+text response (the frontend renders fenced blocks) rather than inventing a tool \
+call for it.\n\
+- Diagrams (flowcharts, sequence, state, class, ER, gantt, mindmaps, etc.): \
+emit the diagram as a fenced ```mermaid code block directly in your text \
+response — the app renders it inline as a real diagram. Whenever you decide a \
+diagram would help explain something, or the user asks you to diagram/visualize \
+it, produce a ```mermaid block. Never describe a diagram in prose without \
+emitting the block, and never try to draw it with ASCII art or raw SVG.\n\
+- Do not narrate the artifact's contents at length after producing it — a short \
+one-line acknowledgment is enough; the panel is the primary surface.\n\n\
+## Skill loading\n\
+Skill files (docx, pptx, pdf, diagram-html-svg, and any user-added skills from \
+Settings → Assistant) are user-enabled instructions. When a skill is enabled, \
+its content is appended to your context on every turn — they are not loaded \
+conditionally. Use a skill's guidance only when it applies to the current \
+request; its instructions take precedence over your general knowledge of that \
+library/format, since it encodes known failure modes and house style the \
+general knowledge doesn't.\n\n\
+## Scope boundary\n\
+You do not have access to the user's local project directories, git state, or \
+filesystem outside the sandbox's scratch directory. If a request is clearly a \
+coding/project task against a real repository, say plainly that it belongs in \
+the Dev tab, rather than attempting it without the necessary access or \
+fabricating a plausible-looking response.\n\n\
+## Session isolation\n\
+You do not have memory of the user's other Conduit sessions (other Chat \
+conversations, or Dev tab sessions) unless their content has been explicitly \
+pasted or referenced in this conversation. Do not assume continuity you don't \
+actually have context for."
+}
+
+/// STRICT addendum — appended only when `ModelClass == Local`. Restates the
+/// rules above more explicitly and repeats the highest-risk ones, because
+/// smaller/local models follow implied instructions less reliably than
+/// frontier models and this app cannot afford silent tool-use failures.
+fn core_prompt_strict() -> &'static str {
+    "\n\n## STRICT ADDENDUM (local/small-context model)\n\
+The rules above are restated more explicitly here, because you are running on a \
+smaller/local model that follows implied instructions less reliably.\n\n\
+1. Before answering, check: does this request need a tool? If it needs current \
+information, current prices, or anything you cannot know with certainty from \
+training alone, you MUST call `web_search` before answering, if it is \
+available. Do not answer from memory and imply it is current.\n\
+2. Before generating any document/deck/PDF, you MUST call `generate_document` \
+(or `generate_file` for plain text), produce an actual file, and let it surface \
+as an artifact. Describing what the file would contain, without calling these \
+tools, is an incorrect response — treat it as a failed turn, not a shortcut.\n\
+3. The tool names are EXACTLY: `web_search`, `generate_document`, \
+`generate_file`, `fetch_url`, `open_url`, `run_code`. Do not call \
+`execute_code`, `emit_artifact`, or any other name — those do not exist here.\n\
+4. If a tool call fails or is unavailable, say so in one plain sentence. Do \
+not continue as if it had succeeded.\n\
+5. Keep tool-call arguments minimal and matching the schema in your tool list — \
+do not invent additional parameters.\n\
+6. If your available tool-calling format cannot express a call, fall back to a \
+single fenced code block labeled `tool_call` containing a JSON object with \
+`tool` and `arguments` keys — the app will parse this fallback format."
+}
+
+/// Build the CORE system prompt for a given provider/model class. Always
+/// included; concatenated before the user's custom prompt and any skills.
+/// `model` is the raw model id (used only to classify Frontier vs Local);
+/// `provider` is reserved for future provider-specific tweaks but currently
+/// does not vary the base text.
+pub fn core_prompt_for(provider: ChatProviderId, model: &str) -> String {
+    let _ = provider; // reserved: no provider-specific branching yet
+    let base = core_prompt_base();
+    match classify_model(model) {
+        ModelClass::Frontier => base.to_string(),
+        ModelClass::Local => format!("{}{}", base, core_prompt_strict()),
+    }
+}
+
+/// Assemble the effective system prompt from the built-in CORE prompt (always
+/// included, provider/model-aware), the built-in tool guidance (only when
+/// tools are on), the user's custom system prompt, and any enabled skills.
 /// Returns `None` when nothing applies.
 pub fn build_system_prompt(
+    provider: ChatProviderId,
+    model: &str,
     custom: Option<&str>,
     skills: &[(String, String)],
     tools_enabled: bool,
 ) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
+    parts.push(core_prompt_for(provider, model));
     if tools_enabled {
         parts.push(TOOL_GUIDE.to_string());
     }
@@ -421,6 +578,17 @@ async fn run_tool(
     outcome.text
 }
 
+/// Monotonic counter for synthetic tool-call ids. Real OpenAI ids come from
+/// the server; when we synthesize calls from Hermes text we still need a
+/// unique id so the echoed assistant message and the matching `tool` result
+/// can be paired correctly on the next request.
+fn next_synthetic_tool_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("call_synth_{n}")
+}
+
 /// Parse the `arguments` string of an OpenAI-style tool call into a JSON
 /// object. Some providers emit malformed payloads — e.g. a stray empty object
 /// prepended (`"{}{\"query\":\"x\"}"`) or several concatenated objects. We read
@@ -445,6 +613,158 @@ fn parse_tool_args(s: &str) -> Value {
         }
     }
     Value::Object(merged)
+}
+
+/// Some OpenAI-compatible servers (and several Qwen / DeepSeek / MiMo
+/// fine-tunes served through `ai2.18.show`-style aggregators) do not translate
+/// the OpenAI `tools` field into the model's native tool template. Instead of
+/// populating `choices[0].message.tool_calls`, the model emits its trained
+/// **Hermes-format** tool call as plain text inside `content`:
+///
+/// ```text
+/// <tool_calls>
+/// <invoke name="web_search">
+/// <parameter name="query" type="string">cow</parameter>
+/// </invoke>
+/// </tool_calls>
+/// ```
+///
+/// This parser recovers those calls so the existing tool loop can execute
+/// them. It returns the list of `(tool_name, arguments)` pairs found, or
+/// `None` when the content carries no recognizable tool block. The sibling
+/// [`strip_hermes_tool_calls`] removes the raw markup so the user never sees
+/// the XML in the rendered message.
+fn parse_hermes_tool_calls(content: &str) -> Option<Vec<(String, Value)>> {
+    // Locate the outer block. Tolerate models that omit the closing tag by
+    // parsing from `<tool_calls>` to end-of-string.
+    let start_idx = content.find("<tool_calls>")?;
+    let after_open = &content[start_idx + "<tool_calls>".len()..];
+    let block = match after_open.find("</tool_calls>") {
+        Some(end) => &after_open[..end],
+        None => after_open,
+    };
+    if block.trim().is_empty() {
+        return None;
+    }
+
+    // The known shape is a series of `<invoke name="…">…</invoke>` regions,
+    // each holding `<parameter name="…" [type="…"]>value</parameter>` entries.
+    let mut calls: Vec<(String, Value)> = Vec::new();
+    let mut rest = block;
+    while let Some(inv) = rest.find("<invoke") {
+        rest = &rest[inv + "<invoke".len()..];
+        let body_end = rest.find("</invoke>").unwrap_or(rest.len());
+        let tag_and_body = &rest[..body_end];
+        rest = &rest[body_end..];
+
+        // The opening `<invoke …>` tag runs up to the first `>`; the invoke
+        // name lives in that slice (not in the parameter body that follows).
+        let invoke_open = match tag_and_body.find('>') {
+            Some(g) => &tag_and_body[..g],
+            None => "",
+        };
+        let name = extract_quoted_attr(invoke_open, "name").unwrap_or_default();
+        // The body starts after the opening `<invoke …>` tag's closing `>`.
+        let body = match tag_and_body.find('>') {
+            Some(g) => &tag_and_body[g + 1..],
+            None => "",
+        };
+
+        let mut args = serde_json::Map::new();
+        let mut pbody = body;
+        while let Some(p) = pbody.find("<parameter") {
+            pbody = &pbody[p + "<parameter".len()..];
+            let tag_end = match pbody.find('>') {
+                Some(g) => g + 1,
+                None => break,
+            };
+            let opening = &pbody[..tag_end - 1]; // text before the closing `>`
+            let pname = extract_quoted_attr(opening, "name").unwrap_or_default();
+            let val_end = pbody[tag_end..]
+                .find("</parameter>")
+                .map(|e| tag_end + e)
+                .unwrap_or(pbody.len());
+            let raw = pbody[tag_end..val_end].trim();
+            if !pname.is_empty() {
+                args.insert(pname.to_string(), coerce_param_value(raw));
+            }
+            pbody = &pbody[val_end..];
+        }
+
+        if !name.is_empty() {
+            calls.push((name, Value::Object(args)));
+        }
+    }
+
+    if calls.is_empty() {
+        None
+    } else {
+        Some(calls)
+    }
+}
+
+/// Extract the value of a `name="value"` (or `'value'`) attribute from the
+/// opening tag text. Returns the unquoted value, or `None` if the attribute
+/// isn't present.
+fn extract_quoted_attr(tag: &str, attr: &str) -> Option<String> {
+    let needle = format!("{attr}=");
+    let at = tag.find(&needle)?;
+    let after = tag[at + needle.len()..].trim_start();
+    let quote = after.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let inner = &after[quote.len_utf8()..];
+    let end = inner.find(quote)?;
+    Some(inner[..end].to_string())
+}
+
+/// Remove every `<tool_calls>…</tool_calls>` region (and the alternative
+/// ` ```tool_call … ``` ` / ` ```tool_calls … ``` ` fenced variant) from a
+/// message so the raw markup is never shown to the user or re-sent as history.
+/// A dangling `<tool_calls>` with no close (the model kept streaming) is also
+/// trimmed from that point onward.
+fn strip_hermes_tool_calls(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    while let Some(start) = rest.find("<tool_calls>") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("</tool_calls>") {
+            Some(end) => rest = &rest[start + end + "</tool_calls>".len()..],
+            None => {
+                // Unclosed block — drop the trailing remainder.
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_string()
+}
+
+/// Coerce a raw parameter string (the text between `<parameter>…</parameter>`)
+/// into a JSON value. Bare scalars that parse as bool/int/float/null are typed
+/// accordingly; JSON-looking values are parsed; everything else stays a string.
+fn coerce_param_value(raw: &str) -> Value {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Value::Null;
+    }
+    match s {
+        "true" => return Value::Bool(true),
+        "false" => return Value::Bool(false),
+        "null" => return Value::Null,
+        _ => {}
+    }
+    if let Ok(n) = s.parse::<i64>() {
+        return Value::from(n);
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return json!(f);
+    }
+    if (s.starts_with('{') || s.starts_with('[')) {
+        if let Ok(v) = serde_json::from_str::<Value>(s) {
+            return v;
+        }
+    }
+    Value::String(s.to_string())
 }
 
 /// Human-readable narration of a tool call, shown (inside the `<think>` block)
@@ -555,6 +875,35 @@ async fn run_openai_tool_loop(
             .cloned()
             .unwrap_or_default();
 
+        // Fallback for servers that don't translate the OpenAI `tools` field
+        // into the model's native tool template (common on OpenAI-compatible
+        // aggregators serving Qwen / DeepSeek / MiMo fine-tunes). The model
+        // then emits its trained Hermes-format tool call as plain text in
+        // `content`. Recover those calls and synthesize the same structured
+        // shape the loop below already handles, so the tools actually run.
+        let tool_calls: Vec<Value> = if tool_calls.is_empty() {
+            let content = message.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            match parse_hermes_tool_calls(content) {
+                Some(parsed) if !parsed.is_empty() => parsed
+                    .into_iter()
+                    .map(|(name, args)| {
+                        let id = next_synthetic_tool_id();
+                        json!({
+                            "id": id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": args.to_string(),
+                            },
+                        })
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            }
+        } else {
+            tool_calls
+        };
+
         if !tool_calls.is_empty() {
             if !in_think {
                 emit_token(app, sid, "<think>", &mut full);
@@ -566,6 +915,17 @@ async fn run_openai_tool_loop(
             // JSON here so the re-sent history doesn't confuse the model into
             // repeating the same call.
             let mut echoed = message.clone();
+            // When the calls were recovered from Hermes text, the message's
+            // `content` still holds the raw `<tool_calls>` markup. Strip it so
+            // the markup is neither re-sent nor shown to the user downstream.
+            if let Some(c) = echoed.get_mut("content").and_then(|c| c.as_str()) {
+                let stripped = strip_hermes_tool_calls(c);
+                if stripped != c {
+                    if let Some(obj) = echoed.as_object_mut() {
+                        obj.insert("content".to_string(), Value::String(stripped));
+                    }
+                }
+            }
             if let Some(arr) = echoed
                 .get_mut("tool_calls")
                 .and_then(|t| t.as_array_mut())
@@ -612,7 +972,9 @@ async fn run_openai_tool_loop(
             emit_token(app, sid, "</think>", &mut full);
         }
         let content = message.get("content").and_then(|c| c.as_str()).unwrap_or("");
-        emit_token(app, sid, content, &mut full);
+        // Never surface raw Hermes tool-call markup to the user.
+        let content = strip_hermes_tool_calls(content);
+        emit_token(app, sid, &content, &mut full);
         return Ok((full, build_usage(true, total_in, total_out, have_usage)));
     }
 
@@ -815,5 +1177,75 @@ mod tests {
     fn parse_tool_args_empty_is_object() {
         assert_eq!(parse_tool_args(""), json!({}));
         assert_eq!(parse_tool_args("   "), json!({}));
+    }
+
+    #[test]
+    fn parse_hermes_web_search_cow() {
+        // Exact payload observed from an OpenAI-compatible aggregator: the
+        // model emitted its trained Hermes tool-call format as plain text in
+        // `content` instead of populating `tool_calls`.
+        let content = "Let me search for \"cow\" in the browser.\n\n<tool_calls>\n<invoke name=\"web_search\">\n<parameter name=\"query\" string=\"true\">cow</parameter>\n</invoke>\n</tool_calls>";
+        let calls = parse_hermes_tool_calls(content).expect("should recover a call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "web_search");
+        assert_eq!(calls[0].1["query"], "cow");
+    }
+
+    #[test]
+    fn parse_hermes_generate_document_docx() {
+        // The exact docx artifact request that was being echoed as text.
+        let content = "Sure — I'll generate a clean sample Word document.\n\n<tool_calls>\n<invoke name=\"generate_document\">\n<parameter name=\"format\" type=\"string\">docx</parameter>\n<parameter name=\"instructions\" type=\"string\">Create a sample Word document with a title, sections, a bulleted list, and a 3x3 table.</parameter>\n</invoke>\n</tool_calls>";
+        let calls = parse_hermes_tool_calls(content).expect("should recover a call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "generate_document");
+        assert_eq!(calls[0].1["format"], "docx");
+        assert!(calls[0].1["instructions"].as_str().unwrap().contains("table"));
+    }
+
+    #[test]
+    fn parse_hermes_multiple_invokes() {
+        let content = "<tool_calls>\n<invoke name=\"web_search\">\n<parameter name=\"query\">one</parameter>\n</invoke>\n<invoke name=\"fetch_url\">\n<parameter name=\"url\">https://example.com</parameter>\n</invoke>\n</tool_calls>";
+        let calls = parse_hermes_tool_calls(content).expect("should recover both calls");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "web_search");
+        assert_eq!(calls[0].1["query"], "one");
+        assert_eq!(calls[1].0, "fetch_url");
+        assert_eq!(calls[1].1["url"], "https://example.com");
+    }
+
+    #[test]
+    fn parse_hermes_none_when_no_block() {
+        assert!(parse_hermes_tool_calls("Just a normal answer.").is_none());
+        assert!(parse_hermes_tool_calls("").is_none());
+    }
+
+    #[test]
+    fn parse_hermes_coerces_types() {
+        // Booleans, ints, floats and JSON values should be typed, not stringified.
+        let content = "<tool_calls>\n<invoke name=\"run_code\">\n<parameter name=\"language\">python</parameter>\n<parameter name=\"enabled\">true</parameter>\n<parameter name=\"count\">3</parameter>\n<parameter name=\"ratio\">1.5</parameter>\n<parameter name=\"opts\">{\"a\": 1}</parameter>\n</invoke>\n</tool_calls>";
+        let calls = parse_hermes_tool_calls(content).unwrap();
+        let args = &calls[0].1;
+        assert_eq!(args["language"], "python");
+        assert_eq!(args["enabled"], true);
+        assert_eq!(args["count"], 3);
+        assert!((args["ratio"].as_f64().unwrap() - 1.5).abs() < 1e-9);
+        assert_eq!(args["opts"]["a"], 1);
+    }
+
+    #[test]
+    fn strip_hermes_removes_markup_keeps_prose() {
+        let content = "Let me search for \"cow\".\n\n<tool_calls>\n<invoke name=\"web_search\">\n<parameter name=\"query\">cow</parameter>\n</invoke>\n</tool_calls>";
+        let stripped = strip_hermes_tool_calls(content);
+        assert!(stripped.contains("Let me search"));
+        assert!(!stripped.contains("tool_calls"));
+        assert!(!stripped.contains("invoke"));
+    }
+
+    #[test]
+    fn strip_hermes_handles_unclosed_block() {
+        // A model that kept streaming the call without closing the tag.
+        let content = "Thinking… <tool_calls><invoke name=\"web_search\"><parameter name=\"query\">cow";
+        let stripped = strip_hermes_tool_calls(content);
+        assert_eq!(stripped, "Thinking…");
     }
 }

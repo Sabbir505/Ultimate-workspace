@@ -107,6 +107,7 @@ pub async fn send_chat_message(
     effort: Option<String>,
     tools_enabled: Option<bool>,
     code_exec_enabled: Option<bool>,
+    diagram_mode: Option<String>,
     chat_state: State<'_, crate::ChatState>,
     db: State<'_, DbState>,
     app: AppHandle,
@@ -163,8 +164,10 @@ pub async fn send_chat_message(
     };
     let effort = effort.filter(|e| !e.trim().is_empty());
 
-    // 5b. Assemble the system prompt from the user's custom prompt + skills
-    // (global, provider-independent settings), plus built-in tool guidance.
+    // 5b. Assemble the system prompt: the CORE source-code prompt
+    // (provider/model-aware, always included) comes first, then the user's
+    // custom prompt + skills (global, provider-independent settings), plus
+    // built-in tool guidance.
     let tools_on = tools_enabled.unwrap_or(false);
     let system = {
         let conn = db.0.lock();
@@ -173,8 +176,27 @@ pub async fn send_chat_message(
         let skills_json = db::get_setting(&conn, "assistant.skills")
             .map_err(|e| e.to_string())?;
         let skills = parse_skills(skills_json.as_deref());
-        crate::chat::build_system_prompt(custom.as_deref(), &skills, tools_on)
+        crate::chat::build_system_prompt(provider_id.clone(), &model, custom.as_deref(), &skills, tools_on)
     };
+
+    // 5c. Append a diagram-mode bias directive when the user has explicitly
+    // chosen "quick" or "designed" (empty = model decides).
+    let system = match diagram_mode.as_deref() {
+        Some("quick") => {
+            let directive = "\n\n## Diagram mode (user override)\n\
+            The user wants a QUICK diagram: emit it as a ```mermaid fenced block \
+            in your text response. Do not call generate_diagram this turn.";
+            system.map(|s| s + directive).or_else(|| Some(directive.trim().to_string()))
+        }
+        Some("designed") => {
+            let directive = "\n\n## Diagram mode (user override)\n\
+            The user wants a DESIGNED diagram: call the generate_diagram tool to \
+            produce a hand-styled HTML/CSS diagram. Follow the diagram-html-svg \
+            skill's structural rules. Do not use a mermaid block this turn.";
+            system.map(|s| s + directive).or_else(|| Some(directive.trim().to_string()))
+        }
+        _ => system,
+    }; // No directive for "" or anything else — model decides.
 
     // 6. Build message history from DB.
     let messages = {
@@ -557,11 +579,20 @@ pub fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
             }
             text.truncate(cut);
         }
+        // A .html file produced by the `generate_diagram` tool carries the
+        // diagram sentinel marker at the top. Route it as `kind: "diagram"`
+        // (same srcDoc-iframe rendering as html, but diagram-specific export
+        // chrome — PNG export enabled, SVG greyed out).
+        let final_kind = if kind == "html" && text.starts_with(crate::chat::tools::DIAGRAM_MARKER) {
+            "diagram"
+        } else {
+            kind
+        };
         return Ok(ArtifactPreview {
             path,
             filename,
             ext,
-            kind: kind.to_string(),
+            kind: final_kind.to_string(),
             text: Some(text),
             data_uri: None,
             size,

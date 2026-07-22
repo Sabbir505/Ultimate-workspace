@@ -8,6 +8,7 @@ import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import type { ChatMessage } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
+import { MermaidDiagram } from "./MermaidDiagram";
 
 interface Props {
   message: ChatMessage;
@@ -311,6 +312,11 @@ export function MessageBubble({
                     {children}
                   </code>
                 );
+              }
+
+              // Mermaid diagrams render as inline SVG, not as highlighted text.
+              if (match && match[1] === "mermaid") {
+                return <MermaidDiagram code={codeString} />;
               }
 
               // Code block with language.

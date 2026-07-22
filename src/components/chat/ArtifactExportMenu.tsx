@@ -99,6 +99,69 @@ async function rasterizeHtml(html: string): Promise<string> {
   }
 }
 
+/** Intrinsic pixel size of a standalone SVG string, from its width/height or
+ *  viewBox. Returns 0s when neither is present (caller falls back to the
+ *  loaded image's natural size). */
+function svgPixelSize(svg: string): { w: number; h: number } {
+  const tag = svg.match(/<svg\b[^>]*>/i)?.[0] ?? "";
+  const w = tag.match(/\bwidth="([\d.]+)(?:px)?"/i);
+  const h = tag.match(/\bheight="([\d.]+)(?:px)?"/i);
+  if (w && h) return { w: parseFloat(w[1]), h: parseFloat(h[1]) };
+  const vb = tag.match(/viewBox="([^"]+)"/i);
+  if (vb) {
+    const p = vb[1].split(/[\s,]+/).map(Number);
+    if (p.length === 4 && p.every(Number.isFinite)) return { w: p[2], h: p[3] };
+  }
+  return { w: 0, h: 0 };
+}
+
+/** Rasterize a standalone <svg> string to a PNG data URL via an <img> + canvas.
+ *  This is reliable in the WebKitGTK/Tauri webview where html-to-image's
+ *  foreignObject capture produces a blank image. Throws on failure. */
+async function svgToPng(svg: string, scale = 2): Promise<string> {
+  const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+  try {
+    const img = new Image();
+    img.decoding = "async";
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error("could not load SVG for rasterization"));
+      img.src = url;
+    });
+    let { w, h } = svgPixelSize(svg);
+    if (!w || !h) {
+      w = img.naturalWidth || 1200;
+      h = img.naturalHeight || 800;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("no 2d canvas context");
+    ctx.fillStyle = EXPORT_BG;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/png");
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/** Produce a PNG data URL for a diagram/html artifact. Prefers rasterizing the
+ *  diagram's own root <svg> (reliable everywhere); falls back to html-to-image
+ *  for HTML/CSS diagrams that aren't authored as inline SVG. */
+async function diagramToPng(html: string): Promise<string> {
+  const rootSvg = extractRootSvg(html);
+  if (rootSvg) {
+    try {
+      return await svgToPng(rootSvg);
+    } catch {
+      // Fall through to the html-to-image path below.
+    }
+  }
+  return rasterizeHtml(html);
+}
+
 /** Extract the diagram's own root <svg> as a standalone, namespaced SVG string,
  *  or null when the diagram isn't authored as inline SVG. */
 function extractRootSvg(html: string): string | null {
@@ -187,7 +250,7 @@ export function ArtifactExportMenu({ preview, path, filename }: Props) {
       if (hasImageUri && preview.dataUri) {
         await copyDataUrlToClipboard(preview.dataUri);
       } else if (isHtmlDiagram && preview.text) {
-        const dataUrl = await rasterizeHtml(preview.text);
+        const dataUrl = await diagramToPng(preview.text);
         await copyDataUrlToClipboard(dataUrl);
       } else {
         throw new Error("nothing rasterizable to copy");
@@ -208,7 +271,7 @@ export function ArtifactExportMenu({ preview, path, filename }: Props) {
       if (hasImageUri && preview.dataUri) {
         dataUrl = preview.dataUri;
       } else if (isHtmlDiagram && preview.text) {
-        dataUrl = await rasterizeHtml(preview.text);
+        dataUrl = await diagramToPng(preview.text);
       } else {
         throw new Error("nothing rasterizable to export");
       }

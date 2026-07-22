@@ -245,6 +245,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { activeChatSessionId, messages, sessions, effort, toolsEnabled, codeExecEnabled } =
       get();
     if (!activeChatSessionId) return;
+    // Guard against a double-send while a turn is already streaming for this
+    // session (e.g. a duplicate submit during a slow tool-calling turn), which
+    // would persist the same user message twice.
+    if (get().streamingChatSessionId === activeChatSessionId) return;
 
     // Optimistic bubble mirrors what the backend will persist: the typed text
     // plus a compact note per attachment (the model gets the real content).

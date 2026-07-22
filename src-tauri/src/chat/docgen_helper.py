@@ -586,11 +586,24 @@ def _register_pdf_fonts():
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
 
+    # Cross-platform font roots. Non-existent dirs are skipped, so listing all
+    # platforms here is harmless. Windows fonts can live under the system dir
+    # (%WINDIR%\Fonts) or per-user (%LOCALAPPDATA%\Microsoft\Windows\Fonts,
+    # the default target for user-installed fonts since Windows 10).
+    win_dir = os.environ.get("WINDIR", "C:\\Windows")
+    local_app = os.environ.get("LOCALAPPDATA", "")
     search = [
+        # Linux
         "/usr/share/fonts", "/usr/local/share/fonts",
         os.path.expanduser("~/.fonts"), os.path.expanduser("~/.local/share/fonts"),
-        "C:\\Windows\\Fonts", "/Library/Fonts", "/System/Library/Fonts",
+        # Windows (system + per-user)
+        os.path.join(win_dir, "Fonts"),
+        os.path.join(local_app, "Microsoft", "Windows", "Fonts") if local_app else "",
+        # macOS (system + per-user)
+        "/Library/Fonts", "/System/Library/Fonts",
+        os.path.expanduser("~/Library/Fonts"),
     ]
+    search = [s for s in search if s]
 
     def find(names):
         low = [n.lower() for n in names]

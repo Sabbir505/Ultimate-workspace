@@ -97,13 +97,13 @@ formatted file and saves it to the CONDUIT_OUTPUT path. Use for docx/pptx/xlsx/p
 Producing the file also surfaces it as a downloadable artifact in the panel.\n\
 - `generate_file(filename, content)` — for plain text formats (txt, md, csv, \
 json, html). Also surfaces the file as an artifact.\n\
-- `generate_diagram(filename, title, html)` — for a hand-styled, fully-laid-out \
-HTML/CSS diagram (nested groupings, 2-D node grids, mixed box sizes, \
-label+description two-line nodes, solid primary arrows with dashed feedback \
-lines, color-per-category). Produces a self-contained .html file surfaced as a \
-diagram artifact (PNG-exportable). Use this ONLY when the diagram needs \
-deliberate visual hierarchy Mermaid's auto-layout can't express; for ordinary \
-flowcharts/sequences use a ```mermaid block in your text response instead.\n\
+- `generate_diagram(filename, title, html)` — the tool for EVERY diagram \
+(architecture, flowchart, sequence, feature breakdown, mind-map, anything \
+visual). Author it as ONE root inline <svg> (with xmlns, viewBox and \
+width/height): nodes as <rect rx=..>, labels as <text>, connectors as \
+<path>/<line> with an arrowhead <marker>. This is true vector, so it exports \
+crisply to SVG and PNG. Produces a self-contained .html file surfaced as a \
+diagram artifact.\n\
 - `fetch_url(url)` — fetch a specific page's readable text by URL.\n\
 - `open_url(url)` — open a page in the app's built-in browser pane and return \
 its text.\n\
@@ -117,15 +117,16 @@ information\").\n\n\
 - For docx/pptx/xlsx/pdf and plain-text files, produce the file via \
 `generate_document` or `generate_file`; the file is surfaced to the artifact \
 panel automatically — there is no separate \"emit artifact\" tool to call.\n\
-- For Markdown/Mermaid/SVG/HTML meant to be read in-app, put it directly in your \
+- For Markdown/SVG/HTML meant to be read in-app, put it directly in your \
 text response (the frontend renders fenced blocks) rather than inventing a tool \
 call for it.\n\
 - Diagrams (flowcharts, sequence, state, class, ER, gantt, mindmaps, etc.): \
-emit the diagram as a fenced ```mermaid code block directly in your text \
-response — the app renders it inline as a real diagram. Whenever you decide a \
-diagram would help explain something, or the user asks you to diagram/visualize \
-it, produce a ```mermaid block. Never describe a diagram in prose without \
-emitting the block, and never try to draw it with ASCII art or raw SVG.\n\
+ALWAYS call `generate_diagram` and author the diagram as inline <svg> — the app \
+surfaces it in the artifact panel as a real, exportable vector diagram. \
+Whenever you decide a diagram would help explain something, or the user asks \
+you to diagram/visualize it, call `generate_diagram`. Do NOT emit ```mermaid \
+blocks (Mermaid is not used here), never describe a diagram in prose without \
+producing it, and never draw it with ASCII art.\n\
 - Do not narrate the artifact's contents at length after producing it — a short \
 one-line acknowledgment is enough; the panel is the primary surface.\n\n\
 ## Skill loading\n\

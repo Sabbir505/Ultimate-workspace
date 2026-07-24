@@ -8,7 +8,7 @@ IDs are UUID strings. Timestamps are Unix epoch **seconds** (i64).
 
 ```ts
 type HarnessId = 'claude_code' | 'kimi_code' | 'opencode';
-type ChatProviderId = 'anthropic' | 'openai' | 'anthropic_compatible' | 'openai_compatible';
+type ChatProviderId = 'anthropic' | 'openai' | 'openrouter' | 'anthropic_compatible' | 'openai_compatible';
 type PaneState = 'idle' | 'working' | 'waiting' | 'diff_ready';
 
 interface Project { id: string; path: string; name: string; isGitRepo: boolean; createdAt: number; lastOpenedAt: number | null }
@@ -102,6 +102,7 @@ Event:
 - `pty:state` — payload `{ paneId: string, state: PaneState }` (backend heuristic: output activity → `working`; ~1.5s of silence after output → `waiting`; fresh spawn with no output → `idle`; harness diff-approval prompt pattern → `diff_ready`, best-effort)
 - `session:harness-id` — payload `{ sessionId: string, harnessSessionId: string }` (when adapter detects the harness's own session id in output)
 - `cost:updated` — payload `{ sessionId: string }` (after a parsed usage event is written; frontend refetches)
+- `browser:url_detected` — payload `{ paneId: string, url: string }` (when a local dev-server URL is detected in terminal output; frontend opens it in the built-in browser pane)
 
 - `chat:token` — payload `{ chatSessionId: string, token: string }` (streaming token from LLM)
 - `chat:done` — payload `{ chatSessionId: string, inputTokens: number | null, outputTokens: number | null, costUsd: number | null }` (assistant message completed and persisted)
@@ -112,7 +113,7 @@ Event:
 ## Chat (direct LLM HTTP API, separate from CLI agent panes)
 
 Types:
-- `ChatSession { id: string, title: string | null, provider: string, model: string, createdAt: number, lastActiveAt: number }`
+- `ChatSession { id: string, title: string | null, provider: string, model: string, createdAt: number, lastActiveAt: number, starred: boolean, unread: boolean }`
 - `ChatMessageRecord { id: number, chatSessionId: string, role: string, content: string, inputTokens: number | null, outputTokens: number | null, costUsd: number | null, createdAt: number }`
 - `ChatConfigPayload { provider: string | null, baseUrl: string | null, model: string | null, hasKey: boolean }`
 - `ChatModel { id: string, object: string, created: number, ownedBy: string }`
@@ -123,11 +124,15 @@ Commands:
 - `delete_chat_session(chatSessionId: string) -> ()`
 - `update_chat_session_model(chatSessionId: string, model: string) -> ()`
 - `update_chat_session_title(chatSessionId: string, title: string) -> ()`
+- `generate_chat_title(chatSessionId: string) -> string` — auto-generates a title from the first user message
+- `set_chat_session_starred(chatSessionId: string, starred: boolean) -> ()`
+- `set_chat_session_unread(chatSessionId: string, unread: boolean) -> ()`
 - `get_chat_messages(chatSessionId: string) -> ChatMessageRecord[]` (chronological by id)
 - `touch_chat_session(chatSessionId: string) -> ()` (sets lastActiveAt = now)
 - `send_chat_message(chatSessionId: string, content: string, effort?: string, toolsEnabled?: boolean, codeExecEnabled?: boolean, attachments?: ChatAttachmentInput[]) -> ()` — persists user message, looks up provider/model/api_key, assembles message history, kicks off SSE streaming. `ChatAttachmentInput = { name, kind: "image"|"text"|"doc", text?, data? (base64), mediaType?, format? }`: images are sent to the model as vision content parts (data URL for OpenAI, base64 image block for Anthropic) on the live turn only; `doc` (docx/pptx/xlsx) bytes are text-extracted server-side and inlined into the message; `text` files are inlined as fenced blocks. Emits `chat:token`, then `chat:done` or `chat:error`. All diagrams go through the `generate_diagram` (vector SVG) tool. Chat tools: `web_search`, `generate_file`, `generate_document`, `generate_diagram`, `fetch_url`, `open_url`, `run_code`, plus agentic browser control (`browser_read`/`browser_click`/`browser_type`/`browser_scroll`) that drives the active browser pane via injected JS (native webview only; no-op on the Linux iframe fallback).
 - `cancel_chat_message(chatSessionId: string) -> ()` — aborts the active stream for that session.
 - `list_artifacts() -> ArtifactRecord[]` — all persisted generated artifacts (files/diagrams), most recent first. `ArtifactRecord = { id, chatSessionId?, filename, path, kind, createdAt, expiresAt }`. Artifacts are retained 30 days; expired rows+files are swept on app startup.
+- `list_chat_artifacts(chatSessionId: string) -> ArtifactRecord[]` — artifacts for a specific chat session
 - `delete_artifact(id: string) -> ()` — removes an artifact's DB row and its on-disk file.
 - `set_chat_api_key(provider: string, key: string, baseUrl?: string, model?: string) -> ()` — stores key in OS keychain, stores baseUrl/model in app_settings. The key value is NEVER returned via any IPC command.
 - `delete_chat_api_key(provider: string) -> ()`
@@ -137,7 +142,7 @@ Commands:
 - `download_artifact(src: string, dest: string) -> ()` — copy an artifact to a user-chosen path.
 - `download_artifacts_zip(paths: string[], dest: string) -> ()` — zip multiple artifacts to a user-chosen `.zip` path.
 
-Providers: `anthropic`, `openai`, `anthropic_compatible`, `openai_compatible`.
+Providers: `anthropic`, `openai`, `openrouter`, `anthropic_compatible`, `openai_compatible`.
 
 ## Rules both sides must honor
 

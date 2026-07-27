@@ -58,7 +58,7 @@
       "endpoints": [
         "https://github.com/Sabbir505/Ultimate-workspace/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNCMjZDNzkzNUY2OEZCNDQKUldSRSsyaGZrOGNtTzZLRTlVTnkwajhkUnRRN0VWOHNTS3R4bkt0cFpRaXRXOVpWUTI4bWtkRUYK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNCMjZDNzkzNUY2OEZCNDQKUldSRSsyaGZrOGNtTzZLRTlVTnkwajhkUnRRN0VSOHNTS3R4bkt0cFpRaXRXOVpWUTI4bWtkRUYK",
       "windows": {
         "installMode": "passive"
       }

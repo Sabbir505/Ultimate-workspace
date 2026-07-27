@@ -27,6 +27,10 @@ interface UiState {
   gitPromptProjectId: string | null; // projectId that should be prompted to init git (§4.1)
   sidebarCollapsed: boolean; // hide the sidebar to give the main area full width
   sidebarMode: SidebarMode; // dev (projects) vs chat list — persists across collapse
+  /** True when ANY modal is open (artifacts library, etc.) so native webviews
+   *  know to hide themselves. Modals that use local useState should call
+   *  setModalOpen(true/false) around their open/close lifecycle. */
+  modalOpen: boolean;
 
   setActiveView: (view: ActiveView) => void;
   setPaletteOpen: (open: boolean) => void;
@@ -39,6 +43,7 @@ interface UiState {
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebar: () => void;
   setSidebarMode: (mode: SidebarMode) => void;
+  setModalOpen: (open: boolean) => void;
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -50,6 +55,7 @@ export const useUiStore = create<UiState>((set) => ({
   gitPromptProjectId: null,
   sidebarCollapsed: false,
   sidebarMode: "projects",
+  modalOpen: false,
 
   setActiveView: (activeView) => set({ activeView }),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
@@ -62,4 +68,5 @@ export const useUiStore = create<UiState>((set) => ({
   setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   setSidebarMode: (sidebarMode) => set({ sidebarMode }),
+  setModalOpen: (modalOpen) => set({ modalOpen }),
 }));

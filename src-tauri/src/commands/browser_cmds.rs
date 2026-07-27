@@ -134,3 +134,46 @@ pub fn browser_close_pane(
 ) -> CmdResult<()> {
     browser.0.close_pane_tabs(&pane_id)
 }
+
+// --- Browser pane project registry + MCP roundtrip commands ----------
+// These allow the MCP WebSocket server (Task #4) to resolve a project_id
+// to a browser pane via a frontend roundtrip, and to auto-open panes.
+
+#[tauri::command]
+pub fn register_browser_pane_project(
+    pane_id: String,
+    project_id: String,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.register_browser_pane_project(&pane_id, &project_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn unregister_browser_pane_project(
+    pane_id: String,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.unregister_browser_pane_project(&pane_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn browser_resolve_pane_result(
+    req_id: u64,
+    pane_id: Option<String>,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.resolve_pane_request_resolve(req_id, pane_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn browser_open_pane_result(
+    req_id: u64,
+    pane_id: Option<String>,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.open_pane_request_resolve(req_id, pane_id);
+    Ok(())
+}

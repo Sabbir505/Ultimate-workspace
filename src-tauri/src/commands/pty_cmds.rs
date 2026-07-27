@@ -1,9 +1,11 @@
 //! Pty and harness commands (CONTRACT.md "PTY" + "Harnesses").
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
+use crate::browser::BROWSER_MCP_PORT;
+use crate::browser_mcp_register;
 use crate::db;
 use crate::harness_adapters::{all_adapters, get_adapter, CommandSpec};
 use crate::secrets;
@@ -19,6 +21,7 @@ type CmdResult<T> = Result<T, String>;
 pub fn spawn_agent_session(
     pane_id: String,
     session_id: String,
+    app: AppHandle,
     db: State<DbState>,
     pty: State<PtyState>,
 ) -> CmdResult<()> {
@@ -34,10 +37,22 @@ pub fn spawn_agent_session(
     if !Path::new(&cwd).is_dir() {
         return Err(format!("working directory does not exist: {cwd}"));
     }
-    let spec = match &session.harness_session_id {
+    let mut spec = match &session.harness_session_id {
         Some(hid) => adapter.spawn_resume_command(hid),
         None => adapter.spawn_new_command(),
     };
+
+    // Register the conduit-browser-mcp server for Claude Code sessions so the
+    // agent can drive the in-app browser pane. Writes a Conduit-owned
+    // .mcp.json (never the project cwd) and surfaces it via --mcp-config.
+    // Kimi/OpenCode: best-effort (the flag is Claude Code's convention); a
+    // harness that ignores it simply has no browser tools (Task #6).
+    if session.harness == "claude_code" {
+        if let Some(cfg_path) = resolve_mcp_config(&app, &project.id) {
+            append_mcp_config_flag(&mut spec, &cfg_path);
+        }
+    }
+
     pty.0.spawn(&pane_id, Some(session_id.clone()), Some(adapter), Path::new(&cwd), &spec, vec![])?;
     // Resume case: the harness id is already known — bind it now so the
     // on-disk usage sync starts immediately (no probe window needed).
@@ -47,6 +62,27 @@ pub fn spawn_agent_session(
     let conn = db.0.lock();
     db::touch_session(&conn, &session_id).map_err(|e| e.to_string())
 }
+
+/// Resolve (writing if needed) the per-project `.mcp.json` for the browser MCP
+/// server. Returns the path to pass to `--mcp-config`, or None if the binary
+/// isn't present (dev build without the binary) or the write failed — both
+/// degrade silently to "no browser tools this session" rather than blocking.
+fn resolve_mcp_config(app: &AppHandle, project_id: &str) -> Option<PathBuf> {
+    let data_dir = app.path().app_data_dir().ok()?;
+    browser_mcp_register::write_mcp_config(&data_dir, project_id, BROWSER_MCP_PORT)
+}
+
+/// Append `--mcp-config <path>` to a Claude Code CommandSpec. Idempotent: if a
+/// `--mcp-config` is already present (shouldn't happen, but defensive), skip.
+fn append_mcp_config_flag(spec: &mut CommandSpec, cfg_path: &Path) {
+    if spec.args.iter().any(|a| a == "--mcp-config") {
+        return;
+    }
+    let path_str = cfg_path.to_string_lossy().replace('\\', "/");
+    spec.args.push("--mcp-config".to_string());
+    spec.args.push(path_str);
+}
+
 
 /// Spawns a login shell running `command` — used for quick actions and
 /// harness login flows. Project secrets are injected as env vars ONLY when

@@ -1,13 +1,24 @@
 [package]
 name = "conduit"
-version = "0.1.0"
+version = "0.3.0"
 description = "Conduit — a local-first, multi-pane desktop shell for AI coding agents"
 authors = ["you"]
 edition = "2021"
+# Two binaries now ship (the app + the standalone conduit-browser-mcp server).
+# `cargo run` / `tauri dev` must default to the app, not the MCP binary.
+default-run = "conduit"
 
 [lib]
 name = "conduit_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Standalone MCP server binary: speaks stdio JSON-RPC to a harness (Claude
+# Code/Kimi Code) and forwards each tool call into the running Conduit app over
+# a loopback WebSocket (see src/browser_mcp.rs + src/bin/conduit_browser_mcp.rs).
+# Shares conduit_lib only for the BROWSER_MCP_PORT constant — does NOT link Tauri.
+[[bin]]
+name = "conduit-browser-mcp"
+path = "src/bin/conduit_browser_mcp.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -20,9 +31,15 @@ tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 portable-pty = "0.8"
+# Virtual terminal screen model fed from each pane's raw output. The phone
+# app renders `Screen::contents_formatted()` (a faithful grid snapshot with
+# SGR styling) instead of the raw output stream, whose TUI redraw frames are
+# unreadable when concatenated.
+vt100 = "0.16"
 rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 once_cell = "1"
@@ -33,11 +50,48 @@ window-vibrancy = "0.5"
 reqwest = { version = "0.12", features = ["stream", "rustls-tls", "json"], default-features = false }
 async-trait = "0.1"
 futures-util = "0.3"
-tokio = { version = "1", features = ["rt", "process", "time", "sync"] }
+tokio = { version = "1", features = ["rt", "process", "time", "sync", "net", "io-util", "macros"] }
+# Loopback WebSocket bridge between the conduit-browser-mcp binary and the
+# running Tauri app (browser_mcp.rs). Used by both the in-app server and the
+# standalone binary's client.
+tokio-tungstenite = { version = "0.24", features = ["connect"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 base64 = "0.22"
+# SHA-256 for OAuth PKCE code_challenge (S256) in the Connectors OAuth flow.
+sha2 = "0.10"
+# Random bytes for PKCE code_verifier generation (Connectors OAuth flow).
+rand = "0.8"
+# Percent-encoding of OAuth authorize-URL query parameters.
+urlencoding = "2"
+# URL parsing for the OAuth redirect-callback interception.
+url = "2"
+# Official Rust MCP client SDK — connects to vendor-hosted remote MCP servers
+# (e.g. mcp.notion.com) over streamable-HTTP when a connector is attached.
+# Pinned to the 3.0 beta: the 0.1.x line lacks the streamable-HTTP client
+# transport entirely (only child-process / io / sse-server features). The
+# `reqwest` feature gives rmcp's own reqwest a rustls TLS provider so its
+# default client can reach https:// endpoints; we pass the OAuth bearer via
+# `config.auth_header(token)` rather than building our own reqwest::Client
+# (our app reqwest is pinned to 0.12, rmcp needs 0.13 — sharing a client would
+# require a cross-major bump of the app's reqwest, out of scope here).
+rmcp = { version = "=3.0.0-beta.2", features = ["client", "transport-streamable-http-client-reqwest", "reqwest"] }
 # Text extraction from PDF attachments in the Chat tab.
 pdf-extract = "0.7"
+# Text extraction from legacy binary Office attachments (.doc/.ppt/.xls) — the
+# OLE2/CFBF formats that the zip-based docx/pptx path can't read. Also covers
+# the modern OOXML formats, but the existing tolerant renderers in office.rs
+# are kept for the artifact preview (HTML fidelity); this crate is used for
+# plain-text extraction to feed the chat model.
+office_oxide = "0.1.8"
+# Local-models feature: recursive folder walk for .gguf scanning, system info
+# for memory-sanity checks, and platform-aware home-dir resolution.
+walkdir = "2"
+sysinfo = "0.32"
+dirs = "5"
+# Cross-platform system-browser opener (xdg-open / open / start) for the
+# Connectors OAuth flow (opens the vendor's authorize URL in the user's
+# default browser, then captures the redirect on a loopback server).
+open = "5"
 
 [dev-dependencies]
 tempfile = "3"

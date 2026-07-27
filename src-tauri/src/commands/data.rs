@@ -8,7 +8,7 @@ use tauri::State;
 
 use crate::db;
 use crate::secrets;
-use crate::types::{CostEvent, CostRollups, QuickAction, Skill};
+use crate::types::{CostEvent, CostRollups, QuickAction, Skill, WorkspaceRecord};
 use crate::{DbState, PtyState};
 
 type CmdResult<T> = Result<T, String>;
@@ -207,4 +207,45 @@ pub fn read_file_text(path: String) -> CmdResult<String> {
         return Err("refusing to read binary file".to_string());
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+// ---- workspaces (pane layout save/restore) ----
+
+#[tauri::command]
+pub fn list_workspaces(project_id: String, db: State<DbState>) -> CmdResult<Vec<WorkspaceRecord>> {
+    let conn = db.0.lock();
+    db::list_workspaces(&conn, &project_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_workspace(
+    project_id: String,
+    name: String,
+    data: String,
+    db: State<DbState>,
+) -> CmdResult<WorkspaceRecord> {
+    let conn = db.0.lock();
+    // Upsert by (project_id, name): if a workspace with this name exists,
+    // update it; otherwise create a new one.
+    let existing = db::list_workspaces(&conn, &project_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|w| w.name.eq_ignore_ascii_case(&name));
+
+    if let Some(ws) = existing {
+        db::update_workspace(&conn, &ws.id, &name, &data).map_err(|e| e.to_string())?;
+        // Re-read so return value is accurate.
+        db::get_workspace(&conn, &ws.id).map_err(|e| e.to_string())
+    } else {
+        let id = db::new_id();
+        db::create_workspace(&conn, &id, &project_id, &name, &data)
+            .map_err(|e| e.to_string())?;
+        db::get_workspace(&conn, &id).map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+pub fn delete_workspace(id: String, db: State<DbState>) -> CmdResult<()> {
+    let conn = db.0.lock();
+    db::delete_workspace(&conn, &id).map_err(|e| e.to_string())
 }

@@ -28,6 +28,7 @@ export function ProjectItem({ project }: Props) {
   const removeProjectById = useProjectsStore((s) => s.removeProjectById);
   const openPeek = useUiStore((s) => s.openPeek);
   const setProjectSettingsFor = useUiStore((s) => s.setProjectSettingsFor);
+  const setModalOpen = useUiStore((s) => s.setModalOpen);
 
   const installed = harnesses.filter((h) => h.installed);
   const [harness, setHarness] = useState<HarnessId>("claude_code");
@@ -37,6 +38,12 @@ export function ProjectItem({ project }: Props) {
   const [renaming, setRenaming] = useState(false);
   const [renameDraft, setRenameDraft] = useState(project.name);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  // Sync worktree modal state into UI store so native webviews hide.
+  useEffect(() => {
+    setModalOpen(worktreeOpen);
+    return () => { setModalOpen(false); };
+  }, [worktreeOpen, setModalOpen]);
 
   useEffect(() => {
     if (installed.length === 1) setHarness(installed[0].id);

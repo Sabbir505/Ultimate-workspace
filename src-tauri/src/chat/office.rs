@@ -18,11 +18,15 @@ use std::io::Read;
 // ---------------------------------------------------------------------------
 
 fn xml_unescape(s: &str) -> String {
-    s.replace("&lt;", "<")
+    // Order matters: `&amp;` must be resolved FIRST so that
+    // double-escaped sequences like `&amp;lt;` (which should become
+    // `&lt;`) don't lose their ampersand to the intermediate `<`
+    // that `&lt;` would produce.
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
-        .replace("&amp;", "&")
 }
 
 fn html_escape(s: &str) -> String {
@@ -763,15 +767,36 @@ pub fn doc_to_text(format: &str, bytes: &[u8]) -> Option<String> {
         "pptx" => pptx_bytes_to_text(bytes)?,
         "xlsx" => strip_html_to_text(&xlsx_to_html(bytes)?),
         "pdf" => pdf_bytes_to_text(bytes)?,
+        // Legacy binary Office (OLE2/CFBF): the zip-based extractors above
+        // can't read these. `office_oxide` parses the compound-file container
+        // and pulls plain text from the WordDocument / PowerPoint Document
+        // stream. Wrapped in catch_unwind because third-party parsers can
+        // panic on malformed legacy files — degrade to None like the PDF path.
+        "doc" | "ppt" | "xls" => legacy_office_bytes_to_text(format, bytes)?,
         _ => return None,
     };
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        None
-    } else {
-        // Cap to keep the prompt bounded on very large documents.
-        Some(trimmed.chars().take(50_000).collect())
+        return None;
     }
+    // Cap to keep the prompt bounded on very large documents, but make the
+    // cut visible so the model knows text continues beyond what it can see.
+    //
+    // The limit tracks the smallest context window among the providers this
+    // app supports. Claude's Sonnet/Opus family sits at 200K tokens; ChatGPT's
+    // GPT-4o line at 128K tokens (~512K chars at ~4 chars/token). 250K chars
+    // is a safe single-attachment budget that fits inside the 128K-token
+    // window even alongside the rest of the turn's conversation + tool output.
+    // Images and plain-text attachments take separate paths (vision input /
+    // direct inline) and never reach this cap.
+    const MAX_CHARS: usize = 250_000;
+    if trimmed.chars().count() <= MAX_CHARS {
+        return Some(trimmed.to_string());
+    }
+    let head: String = trimmed.chars().take(MAX_CHARS).collect();
+    Some(format!(
+        "{head}\n\n[... document truncated: showing first {MAX_CHARS} characters of a longer file ...]"
+    ))
 }
 
 /// Extract text from a PDF's bytes. Uses `pdf-extract`, which can panic on some
@@ -781,6 +806,21 @@ fn pdf_bytes_to_text(bytes: &[u8]) -> Option<String> {
     let owned = bytes.to_vec();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pdf_extract::extract_text_from_mem(&owned).ok()
+    }));
+    result.ok().flatten()
+}
+
+/// Extract text from a legacy binary Office file (`.doc` / `.ppt` / `.xls`) via
+/// `office_oxide`. `format` is the lowercase extension. Returns `None` on any
+/// parse error or panic so the chat path degrades gracefully — the caller
+/// surfaces a "could not be read as text" note rather than crashing the turn.
+fn legacy_office_bytes_to_text(format: &str, bytes: &[u8]) -> Option<String> {
+    let fmt = office_oxide::DocumentFormat::from_extension(format)?;
+    let owned = bytes.to_vec();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        office_oxide::Document::from_reader(std::io::Cursor::new(owned), fmt)
+            .ok()
+            .map(|doc| doc.plain_text())
     }));
     result.ok().flatten()
 }
@@ -955,6 +995,23 @@ mod tests {
         assert!(doc_to_text("pdf", b"").is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn doc_to_text_handles_legacy_office_garbage() {
+        // The legacy .doc/.ppt/.xls arms route through office_oxide. We can't
+        // synthetically build a valid OLE2/CFBF file here, so this guards the
+        // contract that matters for the chat path: malformed legacy bytes must
+        // degrade to None rather than panic the streaming turn (mirroring the
+        // PDF garbage test above), and the new format arms are actually
+        // reached (unknown formats still fall through to None).
+        assert!(doc_to_text("doc", b"not a real doc").is_none());
+        assert!(doc_to_text("ppt", b"not a real ppt").is_none());
+        assert!(doc_to_text("xls", b"not a real xls").is_none());
+        assert!(doc_to_text("doc", b"").is_none());
+        assert!(doc_to_text("ppt", b"").is_none());
+        // An extension office_oxide doesn't map still returns None.
+        assert!(doc_to_text("rtf", b"{\\rtf1 hi}").is_none());
     }
 
     #[test]

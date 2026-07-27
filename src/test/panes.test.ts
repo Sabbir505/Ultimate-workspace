@@ -29,6 +29,7 @@ function makePane(paneId: string, lastUsedAt: number, kind: "terminal" | "browse
     state: "idle",
     lastUsedAt,
     lastInputAt: 0,
+    activity: null,
     data:
       kind === "terminal"
         ? {

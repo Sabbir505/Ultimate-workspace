@@ -1,8 +1,8 @@
 # Conduit — AI Context Document
 
-**Last verified:** 2026-07-24  
+**Last verified:** 2026-07-26  
 **Branch:** `master`  
-**Working tree:** Clean (the `M` on `src-tauri/Cargo.toml` is a CRLF-only artifact, zero content change)
+**Working tree:** The auto-updater (Tauri plugin-updater + GitHub Releases + `UpdateBanner`), the bundled Python runtime (`chat/python_runtime.rs` staged by `scripts/fetch-bundled-python.mjs`), and message attachments (`components/chat/MessageAttachments.tsx`) are all in place. Doc set has been consolidated under `AI CONTEXT/`. On 2026-07-26 the chat backend was split into focused submodules (see BUILD_LOG): `chat/mod.rs` 2306→622 lines (extracted `prompts`/`proto`/`dispatch`/`streaming`) and `chat/tools.rs` 2394→`tools/mod.rs` 1108 (extracted `tools/{search,generate,fs}`); pure-mechanical, no behavior change.
 
 This document is the single source of truth for AI assistants working on this codebase. It is grounded in the actual source, not in PRD/BUILD_LOG summaries. When in doubt, trust this doc over the PRD.
 
@@ -28,11 +28,11 @@ A local-first, multi-pane desktop shell for AI coding agents. It does **not** im
 ### 2.1 Entry Point (`lib.rs`)
 
 - **Managed states:** `DbState` (SQLite behind `Mutex`), `PtyState` (`PtyManager`), `BrowserState` (`BrowserManager`), `ChatState` (`ChatManager`)
-- **Plugins:** dialog, notification, fs, opener
-- **Boot sequence:** open `<app_data_dir>/conduit.db` → sweep expired artifacts (30-day retention) → apply window vibrancy → register ~55 commands
+- **Plugins:** dialog, notification, fs, opener, updater
+- **Boot sequence:** open `<app_data_dir>/conduit.db` → sweep expired artifacts (30-day retention) → register Python runtime resource dir → apply window vibrancy → register 78 commands
 - **Exit cleanup** (`ExitRequested` / `Exit`): `kill_all()` PTYs, `close_all()` browsers, `cancel_all()` chat streams
 
-### 2.2 Command Surface (57 registered in `lib.rs`)
+### 2.2 Command Surface (80 registered in `lib.rs`)
 
 ```
 Projects/sessions:   list_projects, add_project, remove_project, rename_project,
@@ -57,6 +57,7 @@ Chat:                list_chat_sessions, create_chat_session, delete_chat_sessio
                      set_chat_api_key, delete_chat_api_key, get_chat_config, list_chat_models,
                      read_artifact_preview, download_artifact, download_artifacts_zip,
                      list_artifacts, list_chat_artifacts, delete_artifact
+Updater:             check_for_update, download_and_install_update
 ```
 
 ### 2.3 Events (backend → frontend)
@@ -75,6 +76,8 @@ Chat:                list_chat_sessions, create_chat_session, delete_chat_sessio
 | `chat:error` | `{ chatSessionId, message, code }` | `chat/mod.rs` |
 | `chat:artifact` | `{ chatSessionId, path, filename }` | `chat/mod.rs` |
 | `chat:open-browser` | `{ chatSessionId, url }` | `chat/mod.rs` (from `open_url` tool) |
+| `updater:progress` | `{ downloaded, total }` (`total` may be null) | `commands/updater_cmds.rs` (download stream) |
+| `updater:installed` | `{}` | `commands/updater_cmds.rs` (post-install, app restarts) |
 
 ### 2.4 PTY Subsystem (`pty/mod.rs`)
 
@@ -96,13 +99,15 @@ Chat:                list_chat_sessions, create_chat_session, delete_chat_sessio
 
 ### 2.6 Chat Subsystem (`chat/`)
 
-- **Core prompt:** `core_prompt_base()` + `core_prompt_for(provider, model)` in `chat/mod.rs` (~line 89-225). Tool names must match the `tools.rs` registry. `core_prompt_strict()` appended for local models.
+- **Core prompt:** lives in `chat/prompts.rs` — `core_prompt_base()`, `core_prompt_strict()` (appended for local models), `core_prompt_for(provider, model)`, `is_research_request()`, `build_system_prompt()`. `mod.rs` re-exports `build_system_prompt` + `is_research_request`. Tool names must match the `tools/mod.rs` registry.
 - **Providers:** `Anthropic`, `OpenAI`, `AnthropicCompatible`, `OpenAICompatible`, `OpenRouter` (`chat/providers.rs`)
-- **Tool loop:** OpenAI-style (`run_openai_tool_loop`) and Anthropic-style (`run_anthropic_tool_loop`), max 15 iterations. Hermes XML `<tool_calls>` fallback parser for aggregators that don't translate `tools` field.
-- **Tools (11):** `web_search`, `generate_file`, `generate_document`, `generate_diagram`, `fetch_url`, `run_code`, `open_url`, `browser_read`, `browser_click`, `browser_type`, `browser_scroll`
-- **Tool caps:** `code_exec` is gated per-chat; everything else is on when tools enabled
+- **Tool loop (`chat/streaming.rs`):** OpenAI-style (`run_openai_tool_loop`) and Anthropic-style (`run_anthropic_tool_loop`), capped at `MAX_TOOL_ITERS = 45` (non-research) / `RESEARCH_MAX_TOOL_ITERS = 96` (research turns). Each call streams one round (`openai_stream_round`/`anthropic_stream_round`), then runs tool calls and feeds results back until a final answer or the cap. Hermes XML `<tool_calls>` fallback parser (in `chat/proto.rs`) recovers tool calls emitted as plain text by aggregators that don't translate the `tools` field. Wire-protocol helpers (`parse_tool_args`, `parse_hermes_tool_calls`, `strip_hermes_tool_calls`, `tool_block`, `openai_message_json`/`anthropic_message_json`, `next_synthetic_tool_id`) live in `chat/proto.rs`; tool dispatch (`run_tool`, `run_gated_fs_tool`, `run_browser_tool`, `run_ledger_tool`, `emit_token`, `artifacts_dir`) in `chat/dispatch.rs`.
+- **Tools (19):** `web_search`, `generate_file`, `generate_document`, `generate_diagram`, `fetch_url`, `run_code`, `open_url`, `browser_read` (modes: `full`/`summary_only`/`section`, structured Markdown + metadata + failure reasons), `browser_click`, `browser_type`, `browser_scroll`, plus the filesystem set `list_directory`, `read_file`, `search_files` (read-only), `write_file`, `edit_file`, `delete_file`, `move_file`, `copy_file` (mutating).
+- **Tool caps:** `ToolCaps { code_exec, fs_roots }` — `code_exec` is gated per-chat; `fs_roots` is the per-session granted-root set for the auto-run permission modes. Everything else is on when tools enabled.
+- **Permission gate (`permission.rs`):** the single `check_permission(mode, tool, path, fs_roots) -> AutoRun|NeedsApproval` function every filesystem tool routes through. `PermissionMode` ∈ `read_only`/`manual`/`auto_edit`/`full_auto` (per-session, on `chat_sessions.permission_mode`, default `manual`). Hard rules enforced here, not in UI copy: reads auto-run in every mode; `delete_file` is **always** gated (every mode); `read_only` strips mutating tools from the tool schema entirely (schema-level exclusion — the model literally cannot call `write_file`); `auto_edit`/`full_auto` auto-run writes/edits within granted roots; `auto_edit` also gates move/copy while `full_auto` auto-runs them. `run_tool` calls this before executing; `NeedsApproval` registers a pending approval + emits `chat:approval-request` and **pauses the turn** on a oneshot until the UI calls `resolve_tool_action(pendingId, approved)`.
 - **Code exec:** `codeexec.rs` — python/js/bash in fresh temp dir, 20s timeout, NOT a hard sandbox
-- **Document gen:** `pygen.rs` (Python-backed docx/pptx/xlsx/pdf via python-docx/openpyxl/reportlab, 90s timeout) + `artifacts.rs` (hand-rolled minimal OpenXML/PDF)
+- **Python runtime:** `python_runtime.rs` — resolves a bundled python-build-standalone interpreter shipped in the installer's `resource_dir/python` (staged by `scripts/fetch-bundled-python.mjs`). Used by `pygen.rs` (doc gen) and `codeexec.rs` (code exec); degrades silently to system Python when not bundled (e.g. `cargo run` from source). Registered at boot in `lib.rs`.
+- **Document gen:** `pygen.rs` (Python-backed docx/pptx/xlsx/pdf via python-docx/python-pptx/openpyxl/reportlab, 90s timeout) + `artifacts.rs` (hand-rolled minimal OpenXML/PDF)
 - **Office preview:** `office.rs` — renders docx/pptx/xlsx to self-contained HTML; also extracts text for attachments
 
 ### 2.7 Browser Webviews (`browser.rs`)
@@ -110,7 +115,10 @@ Chat:                list_chat_sessions, create_chat_session, delete_chat_sessio
 - **Native child webviews** via `Window::add_child` (Windows/macOS only; Linux → iframe fallback)
 - **Label scheme:** `browser-{paneId}-tab-{tabId}`
 - **pushState monkey-patch:** injected JS wraps `history.pushState`/`replaceState` + `popstate`/`hashchange` → `browser_push_state`
-- **Agentic browser:** `read_page` tags interactive elements with `data-conduit-ref`; `click_ref`/`type_into`/`scroll_by` target by ref number; 15s timeout per action
+- **Agentic browser:** `read_page` uses a vendored Mozilla `readability.js` (Apache 2.0, v0.6.0, embedded via `include_str!`) to extract clean Markdown via the `bridge_extract.js` wrapper. Supports **four** modes: `full` (complete cleaned article), `summary_only` (headings + first ~1500 chars), `section` (CSS selector or heading text), and `interactive` (accessibility tree — full a11y records per element: role, aria-label, name, id, value, placeholder, checked, disabled, type, rect; no Readability run, markdown empty). Consent/cookie banners are auto-dismissed; lazy-loaded content is surfaced via a bounded scroll loop. Returns structured JSON (`ExtractedContent`) with `markdown`, `title`, `url`, `canonicalUrl`, `publishedDate`, `byline`, `failureReason`, and `elementRefs`. Interactive elements are tagged with `data-conduit-ref` for `browser_click`/`browser_type`. 15s timeout per eval; `ReadOpts` controls settle wait (default 1s) and max scroll steps (default 4).
+- **Agent-driven control (conduit-browser-mcp):** a standalone MCP server binary (`src/bin/conduit_browser_mcp.rs`, `[[bin]]` in Cargo.toml, does NOT link Tauri) speaks stdio JSON-RPC to a harness (Claude Code/Kimi Code) and forwards each `tools/call` over a **loopback WebSocket on fixed port 7681** (`BROWSER_MCP_PORT`) to `browser_mcp::serve` (spawned in `lib.rs` setup). Dispatch (`browser_mcp.rs`) runs against the real visible pane via `run_action_for_pane` / `read_page_for_pane` / `resolve_and_click` / `resolve_and_type` — the SAME eval bridge the chat tools use. Six tools: navigate / read_page / click / type_text / scroll / wait_for, all with optional `pane_id`. Pane resolution: explicit pane_id → `pane_active_tab` → label; else `project_id` → `browser:resolve-pane-request` frontend roundtrip (max-`lastUsedAt` browser pane, 5s) → global active. Auto-open: `browser:open-browser-request` roundtrip. Per-project registration via `--mcp-config` (Claude Code; `browser_mcp_register.rs` writes to `<app_data_dir>/mcp/<id>.mcp.json` in `spawn_agent_session`). Frontend hook `useBrowserMcpEvents.ts`. Structured error codes: not_found/nav_failure/timeout/browser_unavailable/invalid_args/pane_not_found.
+- **Visual feedback layer:** `bridge_overlay.js` (injected after every nav + lazily per action) installs synthetic cursor/ripple/highlight/caret elements (all `data-conduit-overlay`, excluded from the a11y tagger). `click_js`/`type_js` return Promises: cursor tween (400ms) → highlight → ripple / per-keystroke typing (45ms±15ms with real keydown/keyup/input per char) → real action. `action_wrapper_js` is promise-aware (awaits a returned thenable) and applies watch-mode pacing (600ms) via a `__finish` helper — the tool result reports only after the visual+action chain resolves (race guard). Watch-mode: global `watchMode` setting + per-session nullable `watch_mode` column (mirrors `permission_mode`); backgrounded panes skip pacing (`pane_is_visible`).
+- **Known open issue:** `run_action_for_pane`'s result reporting is intermittent against `browser-*` child webviews — `navigate` (tiny body) sometimes returns empty, and `read_page` (large bridge body) times out at 15s. `__TAURI_INTERNALS__.invoke('browser_action_result')` reachability in the child webview needs a devtools check; the `browser_action_result` custom command may need explicit capability allowance for `browser-*` windows.
 
 ### 2.8 DB Schema (`db/mod.rs`)
 
@@ -125,22 +133,36 @@ Chat:                list_chat_sessions, create_chat_session, delete_chat_sessio
 | `project_secrets` | `project_id` + `key` composite PK, `value_encrypted` BLOB |
 | `app_settings` | `key` PK, `value` |
 | `quick_actions` | `id` PK, `project_id` FK, `label`, `command`, `keybinding`, `run_on_worktree` |
-| `chat_sessions` | `id` PK, `title`, `provider`, `model`, `created_at`, `last_active_at`, `starred`, `unread` |
+| `chat_sessions` | `id` PK, `title`, `provider`, `model`, `created_at`, `last_active_at`, `starred`, `unread`, `permission_mode` (DEFAULT 'manual') |
 | `chat_messages` | `id` AUTOINCREMENT, `chat_session_id` FK (CASCADE), `role`, `content`, `input_tokens`, `output_tokens`, `cost_usd`, `created_at` |
 | `artifacts` | `id` PK, `chat_session_id`, `chat_message_id`, `filename`, `path`, `kind`, `created_at`, `expires_at` |
 
-**Migrations:** `migrate_chat_session_flags` (adds `starred`/`unread`), `migrate_artifacts_message_id`, `migrate_unc_paths` (Win only, strips `\\?\` prefix).
+**Migrations:** `migrate_chat_session_flags` (adds `starred`/`unread`), `migrate_chat_session_permission_mode` (adds `permission_mode`, backfills NULL→`manual`), `migrate_artifacts_message_id`, `migrate_unc_paths` (Win only, strips `\\?\` prefix).
 
 ### 2.9 Secrets (`secrets.rs`)
 
 - Windows/macOS: OS keychain via `keyring` crate
 - Linux: XOR-obfuscated SQLite fallback (documented deviation from PRD)
 
-### 2.10 Safety Notes
+### 2.10 Auto-Updater (`commands/updater_cmds.rs`)
+
+- **Plugin:** `tauri-plugin-updater` — configured in `tauri.conf.json` with a GitHub Releases endpoint and a baked-in public key for signature verification. Signing keypair lives at `.tauri/conduit-update.key` / `.key.pub` (gitignored).
+- **Commands (2):** `check_for_update` → `UpdateInfo { updateAvailable, version, notes, pubDate }` (GETs `latest.json`, semver compare; network failure treated as "no update"); `download_and_install_update` → downloads, verifies signature, installs; emits `updater:progress` during download and `updater:installed` when the verified package is on disk (app restarts automatically).
+- **Frontend:** `state/updater.ts` — Zustand store (`update`, `downloaded`, `total`, `error`, `checking`, `installing`); `wireUpdaterEvents()` hooks the two events. `components/onboarding/UpdateBanner.tsx` — banner with changelog + download/restart button. Bootstrapped in `App.tsx` via `wireUpdaterEvents()` + `check()`, re-checks every 4 hours. Windows install is passive (progress bar, no dialog gauntlet).
+- **Release tooling:** `scripts/make-latest-json.mjs` produces the `latest.json` manifest (semver + signature + notes) uploaded alongside each GitHub Release. See `RELEASE.md`.
+
+### 2.11 Bundled Python Runtime (`chat/python_runtime.rs`)
+
+- Resolves a bundled `python-build-standalone` interpreter shipped in the installer's `resource_dir/python`, pre-installed with `python-docx`, `python-pptx`, `openpyxl`, `reportlab` so docx/pptx/xlsx/pdf generation works without a system Python.
+- Used by `pygen.rs` (document generation) and `codeexec.rs` (code execution). Output path passed via `CONDUIT_OUTPUT` env var.
+- Staged at build time by `scripts/fetch-bundled-python.mjs` into `src-tauri/resources/python/` (gitignored, ~70 MB). Degrades silently to system Python when not bundled.
+- Initialized at app startup (`lib.rs` registers the resource dir).
+
+### 2.12 Safety Notes
 
 - **No `unsafe` blocks** anywhere in the Rust codebase
 - **No TODO/FIXME/HACK/XXX** anywhere
-- **Pane processes killed ONLY on explicit close or app quit** — never on blur (PRD §6.5)
+- **Pane processes killed** on explicit pane close, LRU replacement (when all 6 slots are full — the evicted pane's pty is terminated), or app quit — never on blur (PRD §6.5)
 - **Nothing auto-resumes on relaunch** — click a session to resume-by-ID
 - **Code exec is NOT a hard sandbox** — runs with app privileges
 
@@ -150,7 +172,7 @@ Chat:                list_chat_sessions, create_chat_session, delete_chat_sessio
 
 ### 3.1 Entry (`main.tsx` → `App.tsx`)
 
-- Bootstrap loads: `settingsStore.load()` → `projectsStore.loadAll()` → `skillsStore.load()` → `ensureDefaultSkills()`
+- Bootstrap loads: `settingsStore.load()` → `projectsStore.loadAll()` → `skillsStore.load()` → `ensureDefaultSkills()` → `wireUpdaterEvents()` + `updaterStore.check()` (also re-checks every 4h via `setInterval`)
 - **Active views:** `"grid"` (Dev panes), `"chat"` (Chat), `"settings"`, `"skills"`, `"cost"`
 - **Sidebar modes:** `"projects"` (Dev) / `"chats"` (Chat)
 - Hooks registered: `useTheme`, `useKeybindings`, `usePtyEvents`, `useChatEvents`, `useGitStatusPolling`
@@ -161,11 +183,12 @@ Chat:                list_chat_sessions, create_chat_session, delete_chat_sessio
 |---|---|---|
 | `projects.ts` | `projects[]`, `sessions[]`, `gitStatuses`, `harnesses[]`, `selectedProjectId` | `loadAll`, `addProjectAtPath`, `createSessionFor`, `refreshGitStatus` (polls all projects) |
 | `panes.ts` | `panes[]` (max 6 visible), `focusedPaneId`, `broadcast`, `useCounter`, `focusEpoch` | `addPane`, `closePane` (→ `disposePaneResources` → `killPty`/`browserClosePane`), `focusPane`, `setSpotlight`, multi-tab browser |
-| `chat.ts` | `sessions[]`, `activeChatSessionId`, `messages[]`, `streaming`, `artifacts` | `sendMessage` (double-send guard), `onToken`, `onDone` (auto-title after 1st & 3rd turn), `onArtifact`, `cancelStream` |
+| `chat.ts` | `sessions[]` (incl. `permissionMode`), `activeChatSessionId`, `messages[]`, `loaded`, `streamingChatSessionId`, `config`, `error`, `effort`, `toolsEnabled`, `codeExecEnabled`, `artifacts`, `artifactsByMessage`, `pendingArtifacts`, `previewArtifact`, `pendingApprovals`, `fullAutoConfirmingFor` | `sendMessage` (double-send guard), `onToken`, `onDone` (auto-title after 1st & 3rd turn), `onArtifact`, `onError`, `onApprovalRequest`/`onApprovalResolved`, `setSessionPermissionMode` (full_auto → one-time modal), `confirmFullAuto`/`cancelFullAutoConfirm`, `resolveApproval`, `cancelStream`, `regenerateLast`, `setPreviewArtifact` |
 | `artifacts.ts` | `items[]` (ArtifactRecord) | `load`, `remove` |
 | `skills.ts` | `skills[]` (Conduit prompt templates) | CRUD |
 | `settings.ts` | `theme`, `dnd`, `keybindings`, `browserUrls` | `load`, `setTheme`, `setDnd`, `setKeybinding`, `lastBrowserUrl`, `rememberBrowserUrl` |
 | `ui.ts` | `activeView`, `paletteOpen`, `peek`, `pendingReplace` | `setActiveView`, `togglePalette`, `openPeek`, `setPendingReplace` |
+| `updater.ts` | `update`, `downloaded`, `total`, `error`, `checking`, `installing` | `check` (every 4h), `startInstall`, `dismiss`, `reset`; `wireUpdaterEvents()` |
 
 **Spotlight logic** (pure functions in `state/spotlight.ts`): `activeTerminalId` (override wins, else recency), `cycleTerminalId`, `activeTerminalPair` (top+bottom), `cycleTerminalPair`.
 
@@ -179,7 +202,10 @@ Chat:                list_chat_sessions, create_chat_session, delete_chat_sessio
 ### 3.4 Chat UI (`components/chat/`)
 
 - **ChatView.tsx** — flex column: scrollable messages + composer. Smart auto-scroll (80px threshold). `ArtifactsMenu` in toolbar. `has-preview` split when `previewArtifact` set.
-- **ChatComposer.tsx** — Claude-style card. Attachments: images ≤5MB, docs ≤10MB, text ≤512KB. Enter sends, Shift+Enter newline. Auto-grow textarea (max 200px). `ModelEffortMenu`.
+- **ChatComposer.tsx** — Claude-style card. Attachments: images ≤5MB, docs ≤10MB, text ≤512KB. Enter sends, Shift+Enter newline. Auto-grow textarea (max 200px). `ModelEffortMenu` + `PermissionModeMenu`. Card gets a colored border/glow (`.composer-mode-*`) whenever a non-`manual` posture is active.
+- **PermissionModeMenu.tsx** — glass dropdown (matches `ModelEffortMenu`) listing the four postures; the trigger dot/border tint per mode so the active posture is visible at a glance. Switching INTO `full_auto` does NOT apply here — `chat.ts` opens the one-time `FullAutoConfirmModal`.
+- **ApprovalFlow.tsx** — `ApprovalCard` (per-action Approve once/Deny card rendered above the composer when `check_permission` gates a call) + `FullAutoConfirmModal` (one-time full_auto confirmation, with copy stating deletes remain gated).
+- **MessageAttachments.tsx** — renders attached images/docs under a message bubble; image thumbnails + file chips with size/type.
 - **MessageBubble.tsx** — parses `<think>` and `<tool>` segments. `ThinkingBlock` (collapsible), `ToolBlock` (emoji glyph per kind), Markdown via `react-markdown` + `remarkGfm`, Mermaid via `MermaidDiagram`, JSX via `JsxArtifactChip` (opens `JsxPreview` in pane). Hover actions: Copy/Edit/Regenerate.
 - **MermaidDiagram.tsx** — lazy-loads `mermaid`, debounced render (250ms), theme-aware, `normalizeSvg()` strips solid backgrounds.
 - **InlineDiagram.tsx** — sandboxed iframe sized to diagram intrinsic height, scaled to chat width. `ArtifactExportMenu`.
@@ -202,6 +228,7 @@ Chat:                list_chat_sessions, create_chat_session, delete_chat_sessio
 
 - `safeInvoke` / `safeListen` — no-op outside Tauri (jsdom tests, plain `vite dev`)
 - All commands grouped by subsystem (projects, PTY, browser, git, settings, chat, artifacts, installed skills)
+- Updater IPC: `UpdateInfo` / `UpdateProgressPayload` interfaces, `checkForUpdate()`, `downloadAndInstallUpdate()`, `listenUpdaterProgress()`, `listenUpdaterInstalled()`
 - `ChatProvider` union: `"anthropic" | "openai" | "openrouter" | "anthropic_compatible" | "openai_compatible"`
 - `ChatSession` interface includes `starred?: boolean`, `unread?: boolean`
 
@@ -223,7 +250,7 @@ Chat:                list_chat_sessions, create_chat_session, delete_chat_sessio
 
 ### 3.8 Tests (`src/test/`)
 
-11 vitest files: panes, spotlight, fuzzy, browserOcclusion, sessionTitle, browserHistory, skillExpansion, keybindings, keybindingPhase.repro, focusPaneShortcuts.repro, paneDomFocus.repro.
+14 vitest files: panes, spotlight, fuzzy, browserOcclusion, sessionTitle, browserHistory, skillExpansion, keybindings, keybindingPhase.repro, focusPaneShortcuts.repro, paneDomFocus.repro, artifactCardThumb, inlineDiagramGating, messageAttachments.
 
 ---
 
@@ -262,23 +289,27 @@ From BUILD_LOG.md and source inspection:
 | Backend entry | `src-tauri/src/lib.rs`, `src-tauri/src/main.rs` |
 | PTY lifecycle | `src-tauri/src/pty/mod.rs` |
 | Harness adapters | `src-tauri/src/harness_adapters/{mod,claude_code,kimi_code,opencode}.rs` |
-| Chat core | `src-tauri/src/chat/{mod,commands,providers,tools}.rs` |
-| Chat tools impl | `src-tauri/src/chat/{codeexec,office,pygen,artifacts}.rs` |
+| Chat core | `src-tauri/src/chat/{mod,commands,providers,python_runtime}.rs` |
+| Chat prompt/stream/dispatch/proto | `src-tauri/src/chat/{prompts,streaming,dispatch,proto}.rs` |
+| Chat tools (registry + impl) | `src-tauri/src/chat/tools/{mod,specs,search,generate,fs}.rs` |
+| Chat tools impl (other) | `src-tauri/src/chat/{codeexec,office,pygen,artifacts}.rs` |
+| Auto-updater | `src-tauri/src/commands/updater_cmds.rs`, `src/state/updater.ts`, `src/components/onboarding/UpdateBanner.tsx` |
+| Bundled Python | `src-tauri/src/chat/python_runtime.rs`, `scripts/fetch-bundled-python.mjs` |
 | Browser webviews | `src-tauri/src/browser.rs`, `src-tauri/src/commands/browser_cmds.rs` |
 | DB schema | `src-tauri/src/db/mod.rs` |
 | DB queries | `src-tauri/src/db/{projects,chat,cost,artifacts,settings,skills,secrets}.rs` |
 | Git helpers | `src-tauri/src/git.rs`, `src-tauri/src/commands/git_cmds.rs` |
 | Secrets | `src-tauri/src/secrets.rs` |
 | Frontend entry | `src/main.tsx`, `src/App.tsx` |
-| State stores | `src/state/{projects,panes,chat,artifacts,skills,settings,ui}.ts` |
+| State stores | `src/state/{projects,panes,chat,artifacts,skills,settings,ui,updater,spotlight}.ts` |
 | Pane components | `src/components/panes/{PaneGrid,TerminalPane,BrowserPane,BroadcastBar}.tsx` |
-| Chat components | `src/components/chat/{ChatView,ChatComposer,MessageBubble,MermaidDiagram,InlineDiagram,JsxPreview,ArtifactPreviewPane,ArtifactsMenu,ArtifactExportMenu,ModelEffortMenu,ChatSessionRow}.tsx` |
+| Chat components | `src/components/chat/{ChatView,ChatComposer,MessageAttachments,MessageBubble,MermaidDiagram,InlineDiagram,JsxPreview,ArtifactPreviewPane,ArtifactsMenu,ArtifactExportMenu,ModelEffortMenu,ChatSessionRow}.tsx` |
 | Sidebar | `src/components/sidebar/{Sidebar,ProjectItem,SessionRow,ArtifactLibrary}.tsx` |
-| Overlays | `src/components/{command-palette/CommandPalette,peek/PeekPanel,onboarding/OnboardingBanner,cost-dashboard/CostDashboard,settings/SettingsView,skills-library/SkillsLibrary,common/Modal,common/GlassSelect}.tsx` |
+| Overlays | `src/components/{command-palette/CommandPalette,peek/PeekPanel,onboarding/OnboardingBanner,onboarding/UpdateBanner,cost-dashboard/CostDashboard,settings/SettingsView,skills-library/SkillsLibrary,common/Modal,common/GlassSelect}.tsx` |
 | IPC | `src/lib/ipc.ts` |
 | Utilities | `src/lib/{id,sessionTitle,skillExpansion,diff,fuzzy,keybindings,browserHistory,browserOcclusion,defaultSkills,sessionLauncher,exportSession}.ts` |
 | Hooks | `src/hooks/{usePtyEvents,useChatEvents,useGitStatusPolling,useTheme,useKeybindings}.ts` |
-| Tests | `src/test/*.ts` |
+| Tests | `src/test/*.{ts,tsx}` |
 | Built-in skills | `skills/{docx-skill,pptx-skill,pdf-skill,diagram-html-svg-skill,conduit-chat-system-prompt}.md` |
 | Config | `src-tauri/tauri.conf.json`, `vite.config.ts`, `tsconfig.json`, `index.html` |
-| Docs | `README.md`, `PRD.md`, `CONTRACT.md`, `BUILD_LOG.md` |
+| Docs | `AI CONTEXT/{README,PRD,CONTRACT,BUILD_LOG,RELEASE,AI_CONTEXT}.md` |

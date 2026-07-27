@@ -69,6 +69,11 @@ const TRANSCRIPT_CAP: usize = 1024 * 1024;
 /// diff-prompt hints can straddle read chunk boundaries, so matching runs
 /// against this tail instead of individual chunks.
 const TAIL_LEN: usize = 4096;
+/// Scrollback kept by each pane's vt100 screen model (used for phone display).
+const SCREEN_SCROLLBACK: usize = 400;
+/// How many lines of scrollback above the live screen a phone snapshot
+/// includes. Screenfuls tile exactly, so this rounds down to whole screens.
+const PHONE_HISTORY_ROWS: usize = 150;
 /// Silence after output activity that flips a pane from working -> waiting
 /// (or diff_ready). 1.5s per CONTRACT.md `pty:state` docs.
 const SILENCE_BEFORE_WAITING: Duration = Duration::from_millis(1500);
@@ -92,6 +97,10 @@ pub struct Pane {
     /// ANSI-stripped rolling transcript for export. Raw output (with escape
     /// codes) goes to the frontend; this stripped copy is for parsing/export.
     transcript: Mutex<String>,
+    /// Virtual terminal screen fed the raw output stream. The phone app polls
+    /// a rendered snapshot of this (TUI apps redraw via cursor-movement
+    /// sequences, which are unreadable when the raw stream is concatenated).
+    screen: Mutex<vt100::Parser>,
     /// Last ~4KB of stripped output for pattern matching.
     tail: Mutex<String>,
     state: Mutex<&'static str>,
@@ -137,6 +146,39 @@ impl Pane {
             }
             tail.drain(..start);
         }
+    }
+
+    /// Render the pane's current terminal screen (plus up to
+    /// PHONE_HISTORY_ROWS of scrollback above it) as SGR-styled text rows for
+    /// the phone app. This is what a real terminal shows right now — unlike
+    /// the raw output stream, TUI redraws land in the right grid cells.
+    fn screen_snapshot(&self) -> String {
+        let mut parser = self.screen.lock();
+        let screen = parser.screen_mut();
+        let (rows, cols) = screen.size();
+        let rows = rows.max(1) as usize;
+        // Deepest available scrollback offset (clamped by vt100).
+        screen.set_scrollback(usize::MAX);
+        let max = screen.scrollback();
+        // Tile whole screenfuls from the oldest wanted offset down to the
+        // live screen (offset 0) so chunks adjoin without duplicating lines;
+        // the odd remainder of oldest lines is dropped.
+        let deepest = max.min(PHONE_HISTORY_ROWS) / rows * rows;
+        let mut out: Vec<u8> = Vec::new();
+        let mut offset = deepest;
+        loop {
+            screen.set_scrollback(offset);
+            for row in screen.rows_formatted(0, cols) {
+                out.extend_from_slice(&row);
+                out.push(b'\n');
+            }
+            if offset == 0 {
+                break;
+            }
+            offset = offset.saturating_sub(rows);
+        }
+        screen.set_scrollback(0);
+        String::from_utf8_lossy(&out).into_owned()
     }
 
     fn set_state(&self, app: &AppHandle, new_state: &'static str) {
@@ -310,6 +352,9 @@ impl Pane {
 
 pub struct PtyManager {
     panes: Arc<Mutex<HashMap<String, Arc<Pane>>>>,
+    /// Maps session_id → pane_id so the mobile relay can route messages
+    /// to the correct pty. A session_id may map to at most one live pane.
+    session_to_pane: Arc<Mutex<HashMap<String, String>>>,
     app: AppHandle,
     db: SharedDb,
 }
@@ -318,6 +363,7 @@ impl PtyManager {
     pub fn new(app: AppHandle, db: SharedDb) -> Arc<Self> {
         let mgr = Arc::new(Self {
             panes: Arc::new(Mutex::new(HashMap::new())),
+            session_to_pane: Arc::new(Mutex::new(HashMap::new())),
             app,
             db,
         });
@@ -365,12 +411,18 @@ impl PtyManager {
         // Advertise full color support: without TERM/COLORTERM, chalk-style
         // color detection in agent TUIs (Claude Code's orange, Kimi's blue)
         // degrades to monochrome — the pane is xterm.js, which is 256-color
-        // truecolor capable. Only set when the caller didn't override.
+        // truecolor capable. FORCE_COLOR=3 is the explicit override every
+        // color-detection library (chalk/supports-color/ink, and Bun's shims)
+        // honors first — Claude Code still came up monochrome with just
+        // TERM+COLORTERM. Only set when the caller didn't override.
         if !extra_env.iter().any(|(k, _)| k == "TERM") {
             cmd.env("TERM", "xterm-256color");
         }
         if !extra_env.iter().any(|(k, _)| k == "COLORTERM") {
             cmd.env("COLORTERM", "truecolor");
+        }
+        if !extra_env.iter().any(|(k, _)| k == "FORCE_COLOR") {
+            cmd.env("FORCE_COLOR", "3");
         }
         for (k, v) in extra_env {
             cmd.env(k, v);
@@ -392,15 +444,17 @@ impl PtyManager {
         // exits; keeping it open can make the read loop hang forever.
         drop(pair.slave);
 
+        let sid_for_pane = session_id.clone();
         let pane = Arc::new(Pane {
             id: pane_id.to_string(),
-            session_id,
+            session_id: sid_for_pane,
             adapter,
             cwd: cwd.to_path_buf(),
             writer_tx: Mutex::new(None),
             master: Mutex::new(pair.master),
             child: Mutex::new(child),
             transcript: Mutex::new(String::new()),
+            screen: Mutex::new(vt100::Parser::new(24, 80, SCREEN_SCROLLBACK)),
             tail: Mutex::new(String::new()),
             state: Mutex::new("idle"),
             last_output_at: Mutex::new(Instant::now()),
@@ -454,6 +508,8 @@ impl PtyManager {
                                     data: String::from_utf8_lossy(raw).into_owned(),
                                 },
                             );
+                            // Feed the virtual terminal screen (phone display).
+                            pane.screen.lock().process(raw);
                             let stripped =
                                 String::from_utf8_lossy(&strip_ansi_escapes::strip(raw))
                                     .into_owned();
@@ -475,6 +531,11 @@ impl PtyManager {
                                     // to avoid re-opening a browser pane the
                                     // user just closed.
                                     if seen_urls.insert(url.clone()) {
+                                        // Prune the set periodically to avoid
+                                        // unbounded growth across long-lived panes.
+                                        if seen_urls.len() > 1000 {
+                                            seen_urls.clear();
+                                        }
                                         let _ = app.emit(
                                             "browser:url_detected",
                                             BrowserUrlDetectedEvent {
@@ -530,6 +591,11 @@ impl PtyManager {
 
         self.panes.lock().insert(pane_id.to_string(), pane);
 
+        // Register session_id → pane_id mapping for the mobile relay.
+        if let Some(ref sid) = session_id {
+            self.session_to_pane.lock().insert(sid.clone(), pane_id.to_string());
+        }
+
         // Fresh spawn with no output yet = idle (CONTRACT.md pty:state).
         let _ = self.app.emit(
             "pty:state",
@@ -554,6 +620,8 @@ impl PtyManager {
 
     pub fn resize(&self, pane_id: &str, cols: u16, rows: u16) -> Result<(), String> {
         let pane = self.get_pane(pane_id)?;
+        // Keep the phone-display screen model in lockstep with the real pty.
+        pane.screen.lock().screen_mut().set_size(rows, cols);
         let master = pane.master.lock();
         master
             .resize(PtySize {
@@ -611,6 +679,34 @@ impl PtyManager {
             // redundantly fire report_harness_id for a resume pane.
             pane.harness_id_reported.store(true, Ordering::Relaxed);
         }
+    }
+
+    /// Resolve a session_id to the current pane_id (if the session has a
+    /// live pty). Used by the mobile relay to route `SendToSession`.
+    pub fn pane_id_for_session(&self, session_id: &str) -> Option<String> {
+        self.session_to_pane.lock().get(session_id).cloned()
+    }
+
+    /// Get the pty transcript for a session (if it has a live pane).
+    pub fn transcript_for_session(&self, session_id: &str) -> Option<String> {
+        let pane_id = self.pane_id_for_session(session_id)?;
+        self.transcript(&pane_id)
+    }
+
+    /// Rendered screen snapshot (SGR-styled rows) for a session's live pane —
+    /// what the phone app displays instead of the raw output stream. Includes
+    /// the screen size so the phone can fit the font to the terminal width.
+    pub fn screen_for_session(&self, session_id: &str) -> Option<(String, u16, u16)> {
+        let pane_id = self.pane_id_for_session(session_id)?;
+        self.panes.lock().get(&pane_id).map(|p| {
+            let size = p.screen.lock().screen().size();
+            (p.screen_snapshot(), size.0, size.1)
+        })
+    }
+
+    /// Get the current state of a pane by its pane_id.
+    pub fn pane_state(&self, pane_id: &str) -> Option<String> {
+        self.panes.lock().get(pane_id).map(|p| p.state.lock().to_string())
     }
 
     /// One monitor thread for all panes: drives the silence heuristic and the

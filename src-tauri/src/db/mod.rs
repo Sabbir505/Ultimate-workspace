@@ -9,11 +9,14 @@
 
 mod artifacts;
 mod chat;
+mod connector_credentials;
 mod cost;
 mod projects;
 mod secrets;
 mod settings;
 mod skills;
+mod source_ledger;
+mod workspaces;
 
 use rusqlite::Connection;
 use std::path::Path;
@@ -68,6 +71,8 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     init_schema(conn)?;
     migrate_chat_session_flags(conn)?;
+    migrate_chat_session_permission_mode(conn)?;
+    migrate_chat_session_watch_mode(conn)?;
     migrate_artifacts_message_id(conn)?;
     migrate_unc_paths(conn)
 }
@@ -83,6 +88,41 @@ fn migrate_chat_session_flags(conn: &Connection) -> DbResult<()> {
             if !msg.contains("duplicate column name") {
                 return Err(e);
             }
+        }
+    }
+    Ok(())
+}
+
+/// Add the `permission_mode` column to `chat_sessions` on databases created
+/// before the permission-mode selector existed. `ALTER TABLE … ADD COLUMN`
+/// errors if the column is already present, so a duplicate-column error is a
+/// no-op. Existing rows default to `'manual'` (the safe posture every new
+/// chat starts in); the column is nullable so the migration also tolerates a
+/// half-applied state.
+fn migrate_chat_session_permission_mode(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE chat_sessions ADD COLUMN permission_mode TEXT";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    // Backfill any NULL/empty rows to the explicit default.
+    conn.execute(
+        "UPDATE chat_sessions SET permission_mode = 'manual' WHERE permission_mode IS NULL OR permission_mode = ''",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Add the `watch_mode` column to `chat_sessions` on databases created before
+/// the watch-mode pacing feature existed. `ALTER TABLE … ADD COLUMN` errors if
+/// the column is already present, so a duplicate-column error is a no-op. NULL
+/// means "inherit global setting"; per-session values are `"on"` | `"off"`.
+fn migrate_chat_session_watch_mode(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE chat_sessions ADD COLUMN watch_mode TEXT";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
         }
     }
     Ok(())
@@ -177,7 +217,9 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           created_at INTEGER NOT NULL,
           last_active_at INTEGER NOT NULL,
           starred INTEGER NOT NULL DEFAULT 0,
-          unread INTEGER NOT NULL DEFAULT 0
+          unread INTEGER NOT NULL DEFAULT 0,
+          permission_mode TEXT NOT NULL DEFAULT 'manual',
+          watch_mode TEXT
         );
 
         CREATE TABLE IF NOT EXISTS chat_messages (
@@ -207,6 +249,55 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
 
         CREATE INDEX IF NOT EXISTS idx_artifacts_created ON artifacts(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_artifacts_expires ON artifacts(expires_at);
+
+        CREATE TABLE IF NOT EXISTS chat_source_notes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          chat_session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+          url TEXT NOT NULL,
+          title TEXT NOT NULL,
+          fact TEXT NOT NULL,
+          excerpt TEXT NOT NULL,
+          unavailable TEXT,
+          created_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_source_notes_session ON chat_source_notes(chat_session_id, id);
+
+        -- Prevent exact-duplicate source notes (same session + url + fact).
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_source_notes_dedup ON chat_source_notes(chat_session_id, url, fact);
+
+        -- App-scoped connector OAuth credentials. Secret token values live in
+        -- the OS keychain (secrets.rs); this row only holds non-sensitive
+        -- metadata needed to list connected connectors cheaply.
+        CREATE TABLE IF NOT EXISTS connector_credentials (
+          connector_id TEXT PRIMARY KEY,
+          expires_at INTEGER,
+          granted_scopes TEXT,
+          account_display TEXT,
+          connected_at INTEGER NOT NULL
+        );
+
+        -- Per-conversation opt-in: which connected connectors are active for a
+        -- given chat session. A connected connector is NOT globally available —
+        -- it must be attached to the session here.
+        CREATE TABLE IF NOT EXISTS chat_session_connectors (
+          chat_session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+          connector_id TEXT NOT NULL,
+          PRIMARY KEY (chat_session_id, connector_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_session_connectors ON chat_session_connectors(chat_session_id);
+
+        CREATE TABLE IF NOT EXISTS workspaces (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id),
+          name TEXT NOT NULL,
+          data TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_workspaces_project ON workspaces(project_id);
         ",
     )
 }
@@ -250,14 +341,30 @@ pub use cost::{
 // chat
 pub use chat::{
     add_chat_message, create_chat_session, delete_chat_session, get_chat_session,
-    list_chat_messages, list_chat_sessions, set_chat_session_starred, set_chat_session_unread,
-    touch_chat_session, update_chat_session_model, update_chat_session_title,
+    list_chat_messages, list_chat_sessions, list_chat_session_connectors,
+    set_chat_session_connectors, set_chat_session_starred, set_chat_session_unread,
+    touch_chat_session, update_chat_session_model, update_chat_session_permission_mode,
+    update_chat_session_provider, update_chat_session_title, update_chat_session_watch_mode,
 };
 
 // artifacts
 pub use artifacts::{
     attach_artifacts_to_message, delete_artifact, delete_expired_artifacts, insert_artifact,
     list_artifacts, list_artifacts_for_chat,
+};
+
+// source ledger (research mode)
+pub use source_ledger::{add_source_note, clear_source_notes, list_source_notes};
+
+// connector credentials (app-scoped OAuth tokens; values in keychain)
+pub use connector_credentials::{
+    delete_connector_credential_row, get_connector_credential_row,
+    list_connector_credential_rows, upsert_connector_credential_row, ConnectorCredentialRow,
+};
+
+// workspaces (pane layout save/restore)
+pub use workspaces::{
+    create_workspace, delete_workspace, get_workspace, list_workspaces, update_workspace,
 };
 
 // ---- test helpers ----

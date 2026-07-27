@@ -113,8 +113,13 @@ export function InlineDiagram({
   if (!preview) {
     return <div className="chat-diagram-loading">Loading diagram…</div>;
   }
-  // Not actually a diagram/html file — fall back to the download chip.
-  if ((preview.kind !== "diagram" && preview.kind !== "html") || preview.text == null) {
+  // Only true diagrams (authored via generate_diagram, carrying the
+  // conduit:diagram marker) render inline in the chat. A plain .html file the
+  // model produced via generate_file — a webpage, landing page, etc. — is NOT a
+  // diagram and would be cramped/broken inline, so fall back to the download
+  // chip and let the user open it in the preview pane instead. (An .svg file
+  // comes back as kind "image" and also falls back here.)
+  if (preview.kind !== "diagram" || preview.text == null) {
     return onFallback();
   }
 

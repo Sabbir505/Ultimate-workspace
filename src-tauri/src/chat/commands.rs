@@ -1,11 +1,13 @@
 //! Chat mode IPC command handlers (CONTRACT.md "Chat" section).
 
+use std::path::Path;
 use std::sync::Arc;
 
 use base64::Engine;
 use tauri::{AppHandle, State};
 
 use crate::chat::providers::*;
+use crate::chat::local_models;
 use crate::db;
 use crate::secrets;
 use crate::types::*;
@@ -124,6 +126,66 @@ pub fn update_chat_session_model(
     db::update_chat_session_model(&conn, &chat_session_id, &model).map_err(|e| e.to_string())
 }
 
+/// Switch a chat session's provider (e.g. to `local_gguf` when the user picks
+/// a local model from the selector in a cloud session, or back to a cloud
+/// provider from a local one). The caller is expected to also set a model
+/// valid for the new provider.
+#[tauri::command]
+pub fn update_chat_session_provider(
+    chat_session_id: String,
+    provider: String,
+    db: State<DbState>,
+) -> CmdResult<()> {
+    // Validate against the known providers so a bogus value can't be persisted.
+    let provider = match provider.as_str() {
+        "anthropic" | "openai" | "anthropic_compatible" | "openai_compatible" | "openrouter"
+        | "local_gguf" => provider,
+        other => return Err(format!("unknown provider: {other}")),
+    };
+    let conn = db.0.lock();
+    db::update_chat_session_provider(&conn, &chat_session_id, &provider).map_err(|e| e.to_string())
+}
+
+/// Update a chat session's filesystem permission posture
+/// (`read_only` | `manual` | `auto_edit` | `full_auto`). Per-session: persists
+/// so reopening a chat restores its last mode; new sessions start at `manual`.
+/// The frontend gates the switch to `full_auto` behind a one-time confirmation
+/// modal — this command itself is a plain setter, applied only after the user
+/// confirms (or for the other three modes, immediately).
+#[tauri::command]
+pub fn update_chat_session_permission_mode(
+    chat_session_id: String,
+    mode: String,
+    db: State<DbState>,
+) -> CmdResult<()> {
+    // Validate against the known modes so a bogus value can't be persisted.
+    let mode = match mode.as_str() {
+        "read_only" | "manual" | "auto_edit" | "full_auto" => mode,
+        other => return Err(format!("unknown permission_mode: {other}")),
+    };
+    let conn = db.0.lock();
+    db::update_chat_session_permission_mode(&conn, &chat_session_id, &mode).map_err(|e| e.to_string())
+}
+
+/// Update a chat session's watch-mode pacing override. Per-session; new sessions
+/// start with no override (NULL = inherit global setting). Valid values:
+/// `"on"` | `"off"` | null (clears the override, falls back to global).
+#[tauri::command]
+pub fn update_chat_session_watch_mode(
+    chat_session_id: String,
+    mode: Option<String>,
+    db: State<DbState>,
+) -> CmdResult<()> {
+    // Validate against the known modes when a value is provided.
+    if let Some(ref m) = mode {
+        if m != "on" && m != "off" {
+            return Err(format!("unknown watch_mode: {m} (expected 'on' or 'off')"));
+        }
+    }
+    let conn = db.0.lock();
+    db::update_chat_session_watch_mode(&conn, &chat_session_id, mode.as_deref()).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn update_chat_session_title(
     chat_session_id: String,
@@ -240,9 +302,12 @@ pub async fn generate_chat_title(
         let conn = db.0.lock();
         secrets::get_chat_api_key(&conn, &provider_str)
     };
-    let Some(api_key) = api_key else {
+    // local_gguf is keyless (runs locally); skip the key check and pass
+    // an empty string as the key (the sidecar ignores the auth header).
+    if api_key.is_none() && provider_str != "local_gguf" {
         return Ok(None);
-    };
+    }
+    let api_key = api_key.unwrap_or_default();
 
     let (base_url, model_override) = {
         let conn = db.0.lock();
@@ -304,7 +369,7 @@ pub async fn generate_chat_title(
             let base = base_url.as_deref().unwrap_or(OpenRouterProvider::DEFAULT_BASE);
             openai_oneshot(&client, &api_key, base, &model, system, &user).await?
         }
-        "openai_compatible" => {
+        "openai_compatible" | "local_gguf" => {
             let Some(base) = base_url.as_deref() else {
                 return Ok(None);
             };
@@ -439,6 +504,10 @@ pub async fn send_chat_message(
     tools_enabled: Option<bool>,
     code_exec_enabled: Option<bool>,
     attachments: Option<Vec<ChatAttachmentInput>>,
+    // Explicitly force research mode for this turn (from the composer's
+    // "+" → "Research" option), independent of the keyword heuristic. Only
+    // takes effect when tools are enabled — the scaffolding references tools.
+    force_research: Option<bool>,
     chat_state: State<'_, crate::ChatState>,
     db: State<'_, DbState>,
     app: AppHandle,
@@ -447,15 +516,34 @@ pub async fn send_chat_message(
         Some(list) => process_attachments(list),
         None => (String::new(), Vec::new()),
     };
+    // Detect research-shaped requests on the *original* (pre-attachment)
+    // message so attached prose doesn't false-trigger the research scaffolding.
+    // Research mode applies when tools are enabled (the scaffolding references
+    // web_search/browser_read/add_source_note/generate_file). The composer's
+    // "Research" button forces it on regardless of the keyword heuristic.
+    let research_mode = tools_enabled.unwrap_or(false)
+        && (force_research.unwrap_or(false) || crate::chat::is_research_request(&content));
     let content = format!("{content}{extra_text}");
     let chat_mgr = &chat_state.0;
-    // 1. Look up the session.
-    let (provider_str, model_str) = {
+    // 1. Look up the session — provider/model + the per-session permission
+    //    posture for filesystem tools (read at turn start so it governs this
+    //    turn's tool schema/approval logic).
+    let (provider_str, model_str, permission_mode_str) = {
         let conn = db.0.lock();
         let cs = db::get_chat_session(&conn, &chat_session_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "chat session not found".to_string())?;
-        (cs.provider, cs.model)
+        (cs.provider, cs.model, cs.permission_mode)
+    };
+    let permission_mode = crate::chat::permission::PermissionMode::from_db(&permission_mode_str);
+
+    // Connectors attached to THIS conversation (per-session opt-in, persisted
+    // in chat_session_connectors — read at turn start, like permission_mode).
+    // They're connected inside the spawned tool loop (see ChatManager::send);
+    // here we just resolve the id list.
+    let connector_ids: Vec<String> = {
+        let conn = db.0.lock();
+        db::list_chat_session_connectors(&conn, &chat_session_id).unwrap_or_default()
     };
 
     // 2. Persist the user message.
@@ -473,15 +561,19 @@ pub async fn send_chat_message(
         "anthropic_compatible" => ChatProviderId::AnthropicCompatible,
         "openai_compatible" => ChatProviderId::OpenAICompatible,
         "openrouter" => ChatProviderId::OpenRouter,
+        "local_gguf" => ChatProviderId::LocalGguf,
         other => return Err(format!("unknown provider: {other}")),
     };
 
-    // 4. Load API key from keychain.
-    let api_key = {
+    // 4. Load API key from keychain. local_gguf is keyless — llama-server
+    // ignores the Authorization header, so we use a dummy placeholder.
+    let api_key = if provider_str == "local_gguf" {
+        "no-key".to_string()
+    } else {
         let conn = db.0.lock();
         secrets::get_chat_api_key(&conn, &provider_str)
-    }
-    .ok_or_else(|| format!("no API key configured for provider: {provider_str}"))?;
+            .ok_or_else(|| format!("no API key configured for provider: {provider_str}"))?
+    };
 
     // 5. Load optional base_url and model override from app_settings.
     let (base_url, model_override) = {
@@ -512,8 +604,15 @@ pub async fn send_chat_message(
             .map_err(|e| e.to_string())?;
         let skills_json = db::get_setting(&conn, "assistant.skills")
             .map_err(|e| e.to_string())?;
-        let skills = parse_skills(skills_json.as_deref());
-        crate::chat::build_system_prompt(provider_id.clone(), &model, custom.as_deref(), &skills, tools_on)
+        let skills = parse_skills(skills_json.as_deref(), &content);
+        crate::chat::build_system_prompt(
+            provider_id.clone(),
+            &model,
+            custom.as_deref(),
+            &skills,
+            tools_on,
+            research_mode,
+        )
     };
 
     // 6. Build message history from DB.
@@ -543,6 +642,12 @@ pub async fn send_chat_message(
     }
 
     let shared_db = Arc::clone(&db.0);
+    // Granted filesystem roots: there is no granted-roots UI yet (the
+    // filesystem task's roots model is out of scope for the selector), so we
+    // start empty — auto-run modes gate every write outside the (empty) set
+    // until roots are granted. The selector only changes approval *defaults*
+    // within granted roots; it never expands reachability.
+    let fs_roots: Vec<String> = Vec::new();
     chat_state.0.send(
         chat_session_id,
         provider_id,
@@ -552,19 +657,28 @@ pub async fn send_chat_message(
         effort,
         tools_on,
         code_exec_enabled.unwrap_or(false),
+        permission_mode,
+        fs_roots,
+        connector_ids,
         system,
         messages,
         shared_db,
         app,
+        research_mode,
     );
 
     Ok(())
 }
 
 /// Parse the persisted skills setting (`assistant.skills`) — a JSON array of
-/// `{ name, content, enabled }` — into `(name, content)` pairs, keeping only
-/// enabled entries with non-empty content.
-fn parse_skills(json: Option<&str>) -> Vec<(String, String)> {
+/// `{ name, command?, content, enabled }` — into `(name, content)` pairs for
+/// the skills the user actually INVOKED in this message. A skill is included
+/// only when its slash token (`/command`, falling back to the slugified name)
+/// appears as a standalone token in the message. Previously every enabled
+/// skill was inlined on every turn (~7k tokens with all defaults); invoked-only
+/// injection keeps every other turn's system prompt lean. Mirrors the frontend
+/// rules in `src/lib/skillCommands.ts` — keep them in sync.
+fn parse_skills(json: Option<&str>, message: &str) -> Vec<(String, String)> {
     let Some(raw) = json else { return Vec::new() };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
         return Vec::new();
@@ -578,13 +692,74 @@ fn parse_skills(json: Option<&str>) -> Vec<(String, String)> {
             let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
             let content = s.get("content").and_then(|v| v.as_str()).unwrap_or("").trim();
             if content.is_empty() {
-                None
-            } else {
-                let name = if name.is_empty() { "Skill" } else { name };
-                Some((name.to_string(), content.to_string()))
+                return None;
             }
+            let command = s
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .trim_start_matches('/');
+            let token = if command.is_empty() {
+                slugify_command(name)
+            } else {
+                command.to_lowercase()
+            };
+            if token.is_empty() || !message_has_slash_token(message, &token) {
+                return None;
+            }
+            let name = if name.is_empty() { "Skill" } else { name };
+            Some((name.to_string(), content.to_string()))
         })
         .collect()
+}
+
+/// Derive a slash token from a skill name: lowercase, runs of
+/// non-alphanumerics collapse to `-`, edges trimmed.
+/// "Word documents (.docx)" → "word-documents-docx".
+fn slugify_command(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut last_dash = false;
+    for ch in name.chars().flat_map(|c| c.to_lowercase()) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// True when `/token` appears in the message as a standalone token: preceded
+/// by start-of-string or whitespace, followed by whitespace or end.
+/// Case-insensitive, so `/docx` never matches `/docx2` or `a/docx`.
+fn message_has_slash_token(message: &str, token: &str) -> bool {
+    let lower = message.to_lowercase();
+    let needle = format!("/{token}");
+    let mut start = 0;
+    while let Some(idx) = lower[start..].find(&needle) {
+        let abs = start + idx;
+        let before_ok = abs == 0
+            || lower[..abs]
+                .chars()
+                .last()
+                .map(|c| c.is_whitespace())
+                .unwrap_or(true);
+        let after = &lower[abs + needle.len()..];
+        let after_ok = after.is_empty()
+            || after
+                .chars()
+                .next()
+                .map(|c| c.is_whitespace())
+                .unwrap_or(true);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
 }
 
 #[tauri::command]
@@ -593,6 +768,28 @@ pub fn cancel_chat_message(
     chat_state: State<'_, crate::ChatState>,
 ) -> CmdResult<()> {
     chat_state.0.cancel(&chat_session_id);
+    Ok(())
+}
+
+// ---- Per-action tool approval ----
+
+/// Resolve a pending filesystem-tool approval card. `approved = true` lets the
+/// paused tool loop execute the action and feed its result back to the model;
+/// `false` injects a "user denied" tool result instead. The tool loop itself
+/// does the execution (it paused on the matching oneshot), so this command only
+/// delivers the decision. Unknown / already-resolved `pending_id` is a no-op
+/// (the card may have been auto-dismissed when the stream was cancelled).
+#[tauri::command]
+pub fn resolve_tool_action(
+    pending_id: String,
+    approved: bool,
+    chat_state: State<'_, crate::ChatState>,
+) -> CmdResult<()> {
+    if let Some(pending) = chat_state.0.take_pending_approval(&pending_id) {
+        // The receiver end lives in the paused tool loop. A send error means
+        // the loop already ended (stream cancelled) — ignore it.
+        let _ = pending.response_tx.send(approved);
+    }
     Ok(())
 }
 
@@ -837,13 +1034,17 @@ pub fn set_chat_api_key(
     }
 
     let conn = db.0.lock();
-    if !key.trim().is_empty() {
-        // User provided a new key — store it in the OS keychain.
-        secrets::set_chat_api_key(&conn, &provider, &key)?;
+    // local_gguf has no API key (llama-server is keyless). Skip the keychain
+    // entirely — only persist base_url/model/active_provider.
+    if provider != "local_gguf" {
+        if !key.trim().is_empty() {
+            // User provided a new key — store it in the OS keychain.
+            secrets::set_chat_api_key(&conn, &provider, &key)?;
+        }
+        // If key is empty and no existing key, we still allow saving base_url/model
+        // so the user can set up the config before entering the key.
+        // The key can be added later.
     }
-    // If key is empty and no existing key, we still allow saving base_url/model
-    // so the user can set up the config before entering the key.
-    // The key can be added later.
 
     if let Some(url) = base_url {
         db::set_setting(&conn, &format!("chat.{provider}.base_url"), &url)
@@ -853,6 +1054,9 @@ pub fn set_chat_api_key(
         db::set_setting(&conn, &format!("chat.{provider}.model"), &m)
             .map_err(|e| e.to_string())?;
     }
+    // Remember the provider the user last configured so the app reopens on it
+    // instead of falling back to the hardcoded priority order. See get_chat_config.
+    db::set_setting(&conn, "chat.active_provider", &provider).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -869,15 +1073,29 @@ pub fn delete_chat_api_key(provider: String, db: State<DbState>) -> CmdResult<()
         ],
     )
     .map_err(|e| e.to_string())?;
+    // If the deleted provider was the remembered active one, drop the marker so
+    // get_chat_config falls back to the priority scan instead of a dead provider.
+    let active = db::get_setting(&conn, "chat.active_provider").map_err(|e| e.to_string())?;
+    if active.as_deref() == Some(provider.as_str()) {
+        conn.execute(
+            "DELETE FROM app_settings WHERE key = 'chat.active_provider'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
 /// Returns non-secret config only — the API key value is NEVER returned.
 ///
-/// When `provider` is None, scans all providers in priority order and returns
-/// config for the FIRST one that has a stored key (so the UI can pre-fill the
-/// correct provider/model/baseUrl). The `has_key` field tells the API Keys
-/// panel whether Save is allowed without re-entering the key.
+/// When `provider` is None, returns config for the **last-configured** provider
+/// (the one most recently saved via `set_chat_api_key`, stored as the
+/// `chat.active_provider` setting) — so reopening the app lands on the provider
+/// the user was actually using. Falls back to a priority scan
+/// (anthropic → openai → openrouter → anthropic_compatible → openai_compatible)
+/// only when no active provider is remembered or its key was since removed. The
+/// `has_key` field tells the API Keys panel whether Save is allowed without
+/// re-entering the key.
 #[tauri::command]
 pub fn get_chat_config(provider: Option<String>, db: State<DbState>) -> CmdResult<ChatConfigPayload> {
     let conn = db.0.lock();
@@ -887,7 +1105,13 @@ pub fn get_chat_config(provider: Option<String>, db: State<DbState>) -> CmdResul
                 .map_err(|e| e.to_string())?;
             let model = db::get_setting(&conn, &format!("chat.{p}.model"))
                 .map_err(|e| e.to_string())?;
-            let has_key = secrets::has_chat_api_key(&conn, &p);
+            // local_gguf is keyless — always treat as having a "key" so the
+            // frontend doesn't block on a missing API key.
+            let has_key = if p == "local_gguf" {
+                true
+            } else {
+                secrets::has_chat_api_key(&conn, &p)
+            };
             Ok(ChatConfigPayload {
                 provider: Some(p),
                 base_url,
@@ -896,6 +1120,29 @@ pub fn get_chat_config(provider: Option<String>, db: State<DbState>) -> CmdResul
             })
         }
         None => {
+            // Prefer the provider the user last configured (saved a key/config
+            // for) — so reopening the app lands on the provider they were
+            // actually using, not whichever happens to come first in the
+            // priority list below. Falls back to that priority scan only when no
+            // active provider is remembered or its key was since removed.
+            if let Some(active) = db::get_setting(&conn, "chat.active_provider")
+                .map_err(|e| e.to_string())?
+            {
+                if !active.is_empty()
+                    && (active == "local_gguf" || secrets::has_chat_api_key(&conn, &active))
+                {
+                    let base_url = db::get_setting(&conn, &format!("chat.{active}.base_url"))
+                        .map_err(|e| e.to_string())?;
+                    let model = db::get_setting(&conn, &format!("chat.{active}.model"))
+                        .map_err(|e| e.to_string())?;
+                    return Ok(ChatConfigPayload {
+                        provider: Some(active),
+                        base_url,
+                        model,
+                        has_key: true,
+                    });
+                }
+            }
             for p in [
                 "anthropic",
                 "openai",
@@ -937,6 +1184,13 @@ pub async fn list_chat_models(
     api_key: Option<String>,
     db: State<'_, DbState>,
 ) -> CmdResult<Vec<crate::types::ChatModel>> {
+    // local_gguf models come from the scanned GGUF list, not a /v1/models
+    // endpoint. The frontend is told not to call this for local_gguf;
+    // return an empty vec as a safe no-op.
+    if provider == "local_gguf" {
+        return Ok(Vec::new());
+    }
+
     use reqwest;
 
     // Resolve base_url: prefer the passed argument, then the stored setting.
@@ -1041,6 +1295,129 @@ pub async fn list_chat_models(
     Ok(models)
 }
 
+// ---- Local models (GGUF scan / llama-server sidecar) ----
+
+/// Scan a folder (or default locations) for `.gguf` files, returning their
+/// metadata and a memory-sanity indicator.
+#[tauri::command]
+pub fn scan_local_models(
+    folder: Option<String>,
+    db: State<DbState>,
+) -> CmdResult<Vec<GgufModel>> {
+    use crate::chat::local_models::{memory_class, GgufFile};
+
+    // When a specific folder is given, scan just that one. Otherwise scan the
+    // default locations AND any user-added folders persisted via Settings
+    // (the `localModels.folders` setting) — so both the Settings panel and the
+    // Chat dropdown see the same full set of models from a bare scan_local_models().
+    let files: Vec<GgufFile> = if let Some(dir) = folder {
+        local_models::scan_folder(Path::new(&dir), "user")
+    } else {
+        let mut files = local_models::scan_default_locations();
+        let seen: std::collections::HashSet<String> =
+            files.iter().map(|f| f.id.clone()).collect();
+        // Load persisted user-added folders and scan each, deduping by file id.
+        let stored = {
+            let conn = db.0.lock();
+            db::get_setting(&conn, "localModels.folders")
+        };
+        if let Ok(Some(json)) = stored {
+            if let Ok(list) = serde_json::from_str::<Vec<String>>(&json) {
+                for f in list.into_iter().filter(|s| !s.trim().is_empty()) {
+                    for file in local_models::scan_folder(Path::new(&f), "user") {
+                        if seen.contains(&file.id) {
+                            continue;
+                        }
+                        files.push(file);
+                    }
+                }
+            }
+        }
+        files
+    };
+
+    // Total system RAM for the memory-class indicator.
+    let mut sys = sysinfo::System::new_all();
+    sys.refresh_memory();
+    let total_ram = sys.total_memory();
+
+    let models: Vec<GgufModel> = files
+        .into_iter()
+        .map(|f| {
+            let mc = memory_class(f.size_bytes, total_ram);
+            GgufModel {
+                id: f.id,
+                path: f.path,
+                filename: f.filename,
+                size_bytes: f.size_bytes,
+                name: f.meta.name,
+                architecture: f.meta.architecture,
+                param_count_label: f.meta.param_count_label,
+                quantization: f.meta.quantization,
+                memory_class: mc.as_str().to_string(),
+                source: f.source,
+                has_vision: f.has_vision,
+                mmproj_path: f.mmproj_path,
+            }
+        })
+        .collect();
+
+    Ok(models)
+}
+
+/// Start a llama-server sidecar, health-check it, and persist the base_url +
+/// model so `send_chat_message` picks it up immediately.
+#[tauri::command]
+pub async fn start_local_model(
+    model_id: String,
+    path: String,
+    ngl: Option<i32>,
+    ctx: Option<u32>,
+    mmproj_path: Option<String>,
+    db: State<'_, DbState>,
+    local: State<'_, local_models::LocalModelState>,
+) -> CmdResult<StartedModel> {
+    let started = local.0.start(model_id, &path, ngl, ctx, mmproj_path.as_deref()).await?;
+
+    // Persist the base_url + model for the send path (chat.local_gguf.*).
+    {
+        let conn = db.0.lock();
+        db::set_setting(&conn, "chat.local_gguf.base_url", &started.base_url)
+            .map_err(|e| e.to_string())?;
+        db::set_setting(&conn, "chat.local_gguf.model", &started.model_id)
+            .map_err(|e| e.to_string())?;
+        db::set_setting(&conn, "chat.active_provider", "local_gguf")
+            .map_err(|e| e.to_string())?;
+    }
+
+    // The frontend expects these exact camelCase fields (mirrors types.rs).
+    Ok(StartedModel {
+        model_id: started.model_id,
+        port: started.port,
+        base_url: started.base_url,
+    })
+}
+
+#[tauri::command]
+pub async fn stop_local_model(
+    model_id: String,
+    local: State<'_, local_models::LocalModelState>,
+) -> CmdResult<()> {
+    local.0.stop(&model_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn local_model_status(
+    local: State<'_, local_models::LocalModelState>,
+) -> CmdResult<Option<ActiveLocalModel>> {
+    Ok(local.0.status().map(|a| ActiveLocalModel {
+        model_id: a.model_id,
+        port: a.port,
+        base_url: a.base_url,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1061,5 +1438,55 @@ mod tests {
 
         // Plain content is untouched (aside from trimming).
         assert_eq!(strip_think_blocks("  just text  "), "just text");
+    }
+
+    #[test]
+    fn slugify_command_matches_frontend_rules() {
+        assert_eq!(slugify_command("Word documents (.docx)"), "word-documents-docx");
+        assert_eq!(slugify_command("Slide decks (.pptx)"), "slide-decks-pptx");
+        assert_eq!(slugify_command("PDF documents"), "pdf-documents");
+        assert_eq!(slugify_command("  Report — Style!! "), "report-style");
+        assert_eq!(slugify_command("..."), "");
+    }
+
+    #[test]
+    fn slash_token_matching_is_token_aware() {
+        assert!(message_has_slash_token("/docx write a report", "docx"));
+        assert!(message_has_slash_token("please /docx this", "docx"));
+        assert!(message_has_slash_token("/DOCX", "docx")); // case-insensitive
+        assert!(message_has_slash_token("/docx", "docx")); // end of string
+        // Must not match as a prefix of a longer token or mid-word.
+        assert!(!message_has_slash_token("/docx2 please", "docx"));
+        assert!(!message_has_slash_token("see a/docx file", "docx"));
+        assert!(!message_has_slash_token("no command here", "docx"));
+    }
+
+    #[test]
+    fn parse_skills_includes_only_invoked_enabled_skills() {
+        let json = r#"[
+            {"name": "Word documents (.docx)", "command": "docx", "content": "DOCX rules", "enabled": true},
+            {"name": "PDF documents", "command": "pdf", "content": "PDF rules", "enabled": true},
+            {"name": "Slides", "content": "PPTX rules", "enabled": true},
+            {"name": "Hidden", "command": "hidden", "content": "off", "enabled": false},
+            {"name": "Empty", "command": "empty", "content": "  ", "enabled": true}
+        ]"#;
+
+        // Explicit command token invokes; everything else is excluded.
+        let got = parse_skills(Some(json), "/docx write the report");
+        assert_eq!(got, vec![("Word documents (.docx)".to_string(), "DOCX rules".to_string())]);
+
+        // Slugified-name fallback works when no explicit command is set.
+        let got = parse_skills(Some(json), "/slides for the board meeting");
+        assert_eq!(got, vec![("Slides".to_string(), "PPTX rules".to_string())]);
+
+        // No invocation → nothing, even though skills are enabled.
+        assert!(parse_skills(Some(json), "just a normal question").is_empty());
+
+        // Disabled skills never inject, even when invoked.
+        assert!(parse_skills(Some(json), "/hidden please").is_empty());
+
+        // Multiple invocations in one message inject multiple skills.
+        let got = parse_skills(Some(json), "/docx /pdf compare these");
+        assert_eq!(got.len(), 2);
     }
 }

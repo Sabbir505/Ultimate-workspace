@@ -1,15 +1,9 @@
-/* Conduit "Liquid Glass" visual system (PRD §7.1–7.3).
-   The window itself is transparent; acrylic blur comes from the Rust side
-   (window-vibrancy apply_blur on Windows). Every surface here is therefore
-   semi-transparent so the blur shows through. Glass is built from four
-   layered effects on each surface:
-     1. a translucent fill (let the window blur read through),
-     2. a backdrop-filter blur so content *behind the surface* (another pane,
-        an overlay) softens — the "liquid" depth,
-     3. a 1px top-edge highlight (inset, white-ish, low alpha) = the glass
-        "sheen" that reads as a specular rim,
-     4. a soft outer shadow for separation from the desktop.
-   Layered together these turn a flat dark theme into glass. */
+/* Conduit theme system — warm "Claude Code" palette (cream light / warm
+   charcoal dark), terracotta accent. The window is opaque (transparent:false
+   in tauri.conf.json), so every surface here is a SOLID color rather than the
+   translucent glass of the old liquid-glass system. Surfaces still carry a
+   faint top-edge rim + soft shadow for depth, but there is no backdrop blur —
+   the theme reads as solid, high-contrast dark/light. */
 
 :root {
   --font-ui: "Space Grotesk", -apple-system, "Segoe UI", system-ui, sans-serif;
@@ -26,58 +20,76 @@
   --radius-xs: 6px;
   --sidebar-width: 250px;
 
-  /* Shared glass layer helpers. Compose surfaces with var(--glass) on the
-     `background` and var(--glass-rim) on the box-shadow top edge. */
-  --glass-rim: inset 0 1px 0 0 rgba(255, 255, 255, 0.14);
-  --glass-rim-soft: inset 0 1px 0 0 rgba(255, 255, 255, 0.08);
-  --glass-shadow: 0 8px 28px -12px rgba(0, 0, 0, 0.55), 0 2px 8px -4px rgba(0, 0, 0, 0.4);
-  --glass-shadow-lg: 0 24px 64px -16px rgba(0, 0, 0, 0.6), 0 8px 20px -10px rgba(0, 0, 0, 0.45);
+  /* Surface depth helpers. Compose surfaces with var(--glass) on the
+     `background` and var(--glass-rim) on the box-shadow top edge. On solid
+     surfaces these are subtle — a hairline sheen, not a glass refraction. */
+  --glass-rim: inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
+  --glass-rim-soft: inset 0 1px 0 0 rgba(255, 255, 255, 0.04);
+  --glass-shadow: 0 8px 28px -14px rgba(0, 0, 0, 0.4), 0 2px 8px -6px rgba(0, 0, 0, 0.3);
+  --glass-shadow-lg: 0 24px 64px -20px rgba(0, 0, 0, 0.45), 0 8px 20px -12px rgba(0, 0, 0, 0.35);
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
 }
 
 :root[data-theme="dark"] {
-  /* Cool blue-gray tint under glass */
-  --bg-tint: rgba(18, 24, 34, 0.72);
-  --surface: rgba(28, 36, 50, 0.55);
-  --surface-2: rgba(40, 50, 68, 0.5);
-  --surface-solid: #1c2432;
-  /* Stronger glass fills for elevated surfaces (toolbars, headers, popovers). */
-  --surface-glass: rgba(34, 42, 58, 0.62);
-  --surface-glass-2: rgba(46, 56, 76, 0.6);
-  --border: rgba(255, 255, 255, 0.09);
+  /* Warm charcoal with a faint brown undertone — not pure black. */
+  --bg-tint: #262624;
+  --surface: #30302e;
+  --surface-2: #3a3a37;
+  --surface-solid: #1f1f1d;
+  /* Elevated surfaces (toolbars, headers, popovers) — one step lighter. */
+  --surface-glass: #34342f;
+  --surface-glass-2: #3e3e3a;
+  --border: rgba(255, 255, 255, 0.08);
   --border-strong: rgba(255, 255, 255, 0.16);
-  --text: #e8edf4;
-  --text-dim: #93a0b4;
-  --accent: #6ea8fe;
-  --accent-soft: rgba(110, 168, 254, 0.16);
-  --accent-glow: rgba(110, 168, 254, 0.35);
+  /* Light sheen reads on dark surfaces. */
+  --glass-rim: inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
+  --glass-rim-soft: inset 0 1px 0 0 rgba(255, 255, 255, 0.04);
+  /* Folded document-card corner — lifted above the charcoal body so the
+     dog-ear reads in dark (the body surface and surface-glass-2 are <10%
+     luminance apart, which made the fold vanish before these tokens). */
+  --doc-fold-light: #4a4a44;
+  --doc-fold-dark: #6b6b62;
+  --text: #f5f1ea;
+  --text-dim: #a8a299;
+  --accent: #c15f3c;
+  --accent-soft: rgba(193, 95, 60, 0.16);
+  --accent-glow: rgba(193, 95, 60, 0.35);
+  --accent-contrast: #ffffff;
   --danger: #ff7b72;
   --shadow: rgba(0, 0, 0, 0.45);
   --diff-add-bg: rgba(52, 209, 123, 0.12);
   --diff-del-bg: rgba(255, 123, 114, 0.12);
-  --diff-hunk-bg: rgba(88, 166, 255, 0.12);
+  --diff-hunk-bg: rgba(193, 95, 60, 0.14);
 }
 
 :root[data-theme="light"] {
-  /* Warm off-white tint under glass */
-  --bg-tint: rgba(244, 241, 236, 0.78);
-  --surface: rgba(255, 255, 255, 0.55);
-  --surface-2: rgba(250, 248, 244, 0.65);
+  /* Warm off-white/cream — not pure white. */
+  --bg-tint: #faf7f2;
+  --surface: #ffffff;
+  --surface-2: #f3efe8;
   --surface-solid: #f6f3ee;
-  --surface-glass: rgba(255, 255, 255, 0.62);
-  --surface-glass-2: rgba(252, 250, 246, 0.7);
-  --border: rgba(30, 30, 40, 0.1);
-  --border-strong: rgba(30, 30, 40, 0.2);
-  --text: #2a2f3a;
-  --text-dim: #6b7280;
-  --accent: #2f6fdd;
-  --accent-soft: rgba(47, 111, 221, 0.12);
-  --accent-glow: rgba(47, 111, 221, 0.28);
+  --surface-glass: #fdfbf7;
+  --surface-glass-2: #f7f3ec;
+  --border: rgba(43, 38, 34, 0.1);
+  --border-strong: rgba(43, 38, 34, 0.2);
+  /* Dark sheen reads on light surfaces (white rim would be invisible). */
+  --glass-rim: inset 0 1px 0 0 rgba(43, 38, 34, 0.06);
+  --glass-rim-soft: inset 0 1px 0 0 rgba(43, 38, 34, 0.04);
+  /* Folded document-card corner — warm cream tones that read clearly on the
+     light card body. */
+  --doc-fold-light: #efe9df;
+  --doc-fold-dark: #d9d0c1;
+  --text: #2b2622;
+  --text-dim: #736b62;
+  --accent: #c15f3c;
+  --accent-soft: rgba(193, 95, 60, 0.12);
+  --accent-glow: rgba(193, 95, 60, 0.28);
+  --accent-contrast: #ffffff;
   --danger: #d64545;
-  --shadow: rgba(60, 60, 80, 0.18);
+  --shadow: rgba(60, 50, 40, 0.14);
   --diff-add-bg: rgba(22, 163, 74, 0.12);
   --diff-del-bg: rgba(214, 69, 69, 0.1);
-  --diff-hunk-bg: rgba(47, 111, 221, 0.12);
+  --diff-hunk-bg: rgba(193, 95, 60, 0.12);
 }
 
 * {
@@ -379,6 +391,131 @@ pre,
   box-shadow: var(--glass-rim), 0 4px 14px -6px var(--accent-glow);
 }
 
+/* ---- Workspaces dropdown (Dev-mode toolbar) ---- */
+
+.workspaces-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 260px;
+  background: var(--surface-glass-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--glass-shadow-lg);
+  z-index: 50;
+  overflow: hidden;
+}
+
+.workspaces-dropdown-header {
+  padding: 10px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+
+.workspaces-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.workspaces-empty {
+  padding: 14px;
+  font-size: 13px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.workspaces-item {
+  display: flex;
+  align-items: center;
+  padding: 6px 14px;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.workspaces-item:hover {
+  background: var(--accent-soft);
+}
+
+.workspaces-name {
+  color: var(--text);
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspaces-spacer {
+  flex: 1;
+}
+
+.workspaces-item button {
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: var(--radius-xs);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.workspaces-item button:hover {
+  background: var(--surface-2);
+}
+
+.workspaces-item .workspaces-restore {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.workspaces-item .workspaces-restore:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.workspaces-item .workspaces-delete {
+  color: var(--text-dim);
+  border-color: transparent;
+  background: transparent;
+  padding: 3px 6px;
+  font-size: 14px;
+}
+
+.workspaces-item .workspaces-delete:hover {
+  color: var(--danger);
+  background: rgba(255, 123, 114, 0.12);
+}
+
+.workspaces-dropdown-footer {
+  padding: 8px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.workspaces-dropdown-footer button {
+  width: 100%;
+  padding: 6px 0;
+  font-size: 13px;
+  font-weight: 500;
+  background: none;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-xs);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.workspaces-dropdown-footer button:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
 .grid-wrap {
   flex: 1;
   position: relative;
@@ -490,6 +627,20 @@ pre,
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
+.pane-header .pane-activity-chip {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+  flex-shrink: 0;
+}
 .pane-header .broadcast-check {
   display: flex;
   align-items: center;
@@ -524,10 +675,8 @@ pre,
   flex: 1;
   min-height: 0;
   position: relative;
-  background: rgba(0, 0, 0, 0.25);
-}
-:root[data-theme="light"] .pane-body {
-  background: rgba(255, 255, 255, 0.35);
+  /* Solid terminal backdrop — the old translucent fill was for the glass blur. */
+  background: var(--surface-solid);
 }
 .pane-body .xterm {
   height: 100%;
@@ -547,6 +696,112 @@ pre,
   -webkit-backdrop-filter: blur(8px);
   color: #fff;
   z-index: 5;
+}
+
+/* ---------- Terminal activity feed (Feature 5) ----------
+   Expandable cards below the terminal showing detected Mermaid/HTML/JSX blocks. */
+.terminal-activity-feed {
+  flex: 0 0 auto;
+  max-height: 200px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 6px;
+}
+.terminal-feed-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--surface-glass);
+  overflow: hidden;
+  box-shadow: var(--glass-rim-soft);
+}
+.terminal-feed-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 9px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: none;
+  transition: background 0.12s var(--ease);
+}
+.terminal-feed-card-header:hover {
+  background: var(--surface-2);
+}
+.terminal-feed-card-icon {
+  flex: none;
+  font-size: 12px;
+  width: 16px;
+  text-align: center;
+}
+.terminal-feed-card-label {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 5px;
+  border-radius: 99px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.terminal-feed-card-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.terminal-feed-card-chevron {
+  flex: none;
+  font-size: 10px;
+  color: var(--text-dim);
+  transition: transform 0.15s var(--ease);
+}
+.terminal-feed-card.open .terminal-feed-card-chevron {
+  transform: rotate(90deg);
+}
+.terminal-feed-card-body {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  max-height: 320px;
+  overflow: auto;
+}
+.terminal-feed-card-body .chat-mermaid-block {
+  margin: 0;
+}
+.terminal-feed-iframe {
+  width: 100%;
+  min-height: 200px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: #fff;
+}
+.terminal-feed-code {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--surface-solid);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow: auto;
 }
 
 /* Splitters */
@@ -889,34 +1144,64 @@ pre,
 }
 
 /* Artifact library (chat sidebar) */
+/* "Artifacts" entry — as prominent as the "New Chat" button (same full-width
+   rounded button, padding, font size/weight) but in a DIFFERENT accent color
+   (a slate-violet secondary accent) so it reads as a sibling, not a clone. */
+:root {
+  --accent-2: #6d6aa8;
+  --accent-2-soft: rgba(109, 106, 168, 0.16);
+  --accent-2-glow: rgba(109, 106, 168, 0.35);
+}
+:root[data-theme="light"] {
+  --accent-2: #5a5790;
+  --accent-2-soft: rgba(90, 87, 144, 0.12);
+  --accent-2-glow: rgba(90, 87, 144, 0.28);
+}
 .artifact-lib-title {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   width: 100%;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  padding: 8px 8px 6px;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  color: var(--text-dim);
-  opacity: 0.85;
-  text-align: left;
-}
-.artifact-lib-title:hover {
-  color: var(--text);
-  opacity: 1;
-}
-.artifact-lib-title-count {
-  font-size: 10px;
+  /* Inset comes from the .chat-new-btn-row wrapper (same as the New Chat
+     button), so no horizontal margin here — keeps the width identical. */
+  margin: 0;
+  padding: 6px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent-2) 70%, transparent);
+  border-radius: var(--radius-xs);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--accent-2) 92%, #fff 8%),
+    var(--accent-2)
+  );
+  color: #fff;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0;
-  padding: 0 6px;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: var(--glass-rim), 0 4px 14px -6px var(--accent-2-glow);
+  transition: filter 0.12s var(--ease), transform 0.08s var(--ease);
+}
+.artifact-lib-title:hover {
+  filter: brightness(1.08);
+}
+.artifact-lib-title:active {
+  transform: translateY(0.5px);
+}
+.artifact-lib-title-label {
+  flex: 1;
+  min-width: 0;
+}
+.artifact-lib-title-icon {
+  flex: none;
+}
+.artifact-lib-title-count {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 8px;
   border-radius: 999px;
-  background: var(--surface-2);
-  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.22);
+  color: #fff;
 }
 .artifact-lib-modal {
   display: flex;
@@ -955,75 +1240,185 @@ pre,
   outline: none;
 }
 
-/* Card grid for rich artifacts (diagrams / documents / images). */
-.artifact-lib-grid {
+/* ---------- Document-card grid (folded "dog-eared" page cards) ----------
+   Every artifact renders as one uniform document card in a 3-column grid.
+   The card has a cut/folded top-right corner (clip-path + a lighter fold
+   triangle), a top thumbnail area (~60% — faint text snippet or outline
+   icon), and a lower body with a bold title, a divider, and a muted
+   "Edited … ago" footer. Theme-aware: surfaces follow the app palette. */
+.doc-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
   padding: 2px;
 }
-.artifact-card {
+@media (max-width: 720px) {
+  .doc-card-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (max-width: 480px) {
+  .doc-card-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.doc-card {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px;
-  border-radius: 12px;
-  border: 1px solid var(--border-strong);
-  background: var(--surface-glass-2);
+  /* Cut the top-right corner for the "folded page" silhouette. The fold
+     triangle (::after) sits inside this cut and is a shade lighter. */
+  clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%);
+  border-radius: 0 0 10px 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
   cursor: pointer;
-  transition: border-color 0.12s, box-shadow 0.12s;
+  overflow: hidden;
+  transition: border-color 0.15s var(--ease), transform 0.12s var(--ease),
+    box-shadow 0.15s var(--ease);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
-.artifact-card:hover {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent-soft);
+.doc-card:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 22px -10px rgba(0, 0, 0, 0.45);
 }
-.artifact-card-preview {
-  position: relative;
+.doc-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* The folded corner — a lighter triangle that reads as the page turned down.
+   In the dark theme the fold needs enough luminance lift over the card body
+   to stay visible (the card surface and surface-glass-2 are otherwise <10%
+   apart); in light the natural contrast already reads. The --doc-fold-*
+   tokens are defined in the theme blocks at the top of this file. */
+.doc-card::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 16px;
+  height: 16px;
+  background: linear-gradient(225deg, var(--doc-fold-light) 50%, var(--doc-fold-dark) 50%);
+  box-shadow: -1px 1px 2px rgba(0, 0, 0, 0.25);
+}
+/* Delete button — top-left, hover-revealed. */
+.doc-card-del {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  width: 20px;
+  height: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 96px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg-tint);
-}
-.artifact-card-glyph {
-  font-size: 34px;
-  line-height: 1;
-  color: var(--text-dim);
-}
-.artifact-card-del {
-  position: absolute;
-  top: 4px;
-  right: 4px;
   border: none;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 16px;
+  border-radius: 99px;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 14px;
   line-height: 1;
-  padding: 0 4px;
   cursor: pointer;
   opacity: 0;
+  transition: opacity 0.12s var(--ease), background 0.12s var(--ease);
 }
-.artifact-card:hover .artifact-card-del {
+.doc-card:hover .doc-card-del {
+  opacity: 0.85;
+}
+.doc-card-del:hover {
+  opacity: 1;
+  background: var(--danger);
+}
+
+/* Upper thumbnail area — ~60% of the card, dark gray backdrop. */
+.doc-card-thumb {
+  position: relative;
+  flex: 0 0 60%;
+  min-height: 110px;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  background: var(--surface-solid);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+/* Faint formatted text snippet for text/markdown/code/json/csv. */
+.doc-card-snippet {
+  width: 100%;
+  padding: 12px 14px;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+.doc-card-snippet pre {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: 0.8;
+}
+/* Centered minimalist outline icon for non-text artifacts. */
+.doc-card-icon {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
   opacity: 0.7;
 }
-.artifact-card-del:hover {
-  opacity: 1;
-  color: var(--danger, #ff6b6b);
+.doc-card-icon svg {
+  width: 30px;
+  height: 30px;
 }
-.artifact-card-name {
-  font-size: 12.5px;
-  font-weight: 600;
+
+/* Lower body — title + divider + muted footer. */
+.doc-card-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px 12px;
+  background: var(--surface);
+}
+.doc-card-title {
+  font-size: 13px;
+  font-weight: 700;
   color: var(--text);
+  line-height: 1.3;
+  /* Lower-middle emphasis: allow up to 2 lines, ellipsis on overflow. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+.doc-card-divider {
+  height: 1px;
+  margin: 2px 0 4px;
+  background: var(--border);
+}
+.doc-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.doc-card-meta svg {
+  width: 12px;
+  height: 12px;
+  opacity: 0.8;
+  flex: none;
+}
+.doc-card-meta span {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.artifact-card-meta {
-  font-size: 10.5px;
-  color: var(--text-dim);
-}
+
 .artifact-lib-files {
   display: flex;
   flex-direction: column;
@@ -1095,6 +1490,9 @@ pre,
   gap: 2px;
 }
 .sidebar-footer button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   text-align: left;
   background: transparent;
   border: none;
@@ -1103,6 +1501,12 @@ pre,
   color: var(--text-dim);
   font-weight: 500;
   box-shadow: none;
+  cursor: pointer;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.sidebar-footer button svg {
+  flex-shrink: 0;
+  opacity: 0.7;
 }
 .sidebar-footer button:hover,
 .sidebar-footer button.active {
@@ -1392,7 +1796,7 @@ pre,
 }
 .view-body {
   flex: 1;
-  overflow: hidden; /* panels scroll internally; the body never grows past the modal */
+  overflow-y: auto;
   padding: 16px;
   display: flex;
   flex-direction: column;
@@ -1538,6 +1942,46 @@ table.kv th {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-dim);
+}
+
+/* Settings form — clean two-column layout for Appearance and similar panels */
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.settings-form-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+.settings-form-label {
+  width: 140px;
+  flex-shrink: 0;
+  padding-top: 6px;
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 500;
+}
+.settings-form-control {
+  flex: 1;
+  min-width: 0;
+}
+.settings-checkbox-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.settings-checkbox-row input[type="checkbox"] {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+.settings-checkbox-row span {
+  flex: 1;
 }
 
 /* Reserved-height empty / loading state. Keeps the surrounding layout fixed
@@ -1758,6 +2202,43 @@ table.kv th {
 .cost-chart-frame .chart {
   min-width: 100%;
 }
+/* Model chart — shorter frame since no labels under bars */
+.cost-chart-frame:has(.model-chart) {
+  min-height: 140px;
+  display: flex;
+  align-items: flex-end;
+}
+.cost-chart-frame .model-chart {
+  min-width: 100%;
+  overflow: visible;
+}
+/* Model color legend below the bar chart */
+.model-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 10px 0;
+  margin-top: 4px;
+}
+.model-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.model-legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.model-legend-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
 
 /* ---------- Onboarding banner (§9) ---------- */
 .onboarding-banner {
@@ -1806,6 +2287,123 @@ table.kv th {
   box-shadow: var(--glass-rim-soft);
 }
 
+/* Update banner — mirrors the onboarding banner's glass look, accent-tinted. */
+.update-banner {
+  margin: 10px 12px 0;
+  padding: 13px 15px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: var(--glass-rim), 0 0 24px -12px color-mix(in srgb, var(--accent) 45%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  position: relative;
+}
+.update-banner.installed {
+  border-color: color-mix(in srgb, var(--state-working) 45%, var(--border));
+  box-shadow: var(--glass-rim), 0 0 24px -12px color-mix(in srgb, var(--state-working) 45%, transparent);
+}
+.update-banner-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 0 6px;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.update-banner-close:hover {
+  color: var(--text);
+}
+.update-banner-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.update-banner-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.update-banner-version {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+  background: var(--accent-soft, var(--surface-2));
+  color: var(--accent, var(--text));
+}
+.update-banner-notes {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  max-height: 180px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.update-banner-notes h1,
+.update-banner-notes h2,
+.update-banner-notes h3 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 8px 0 4px;
+}
+.update-banner-notes ul,
+.update-banner-notes ol {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+.update-banner-notes li {
+  margin: 2px 0;
+}
+.update-banner-notes code {
+  background: var(--surface-2);
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  font-size: 11px;
+}
+.update-banner-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.update-banner-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.update-bar {
+  flex: 1;
+  height: 8px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  overflow: hidden;
+  box-shadow: var(--glass-rim-soft);
+}
+.update-bar-fill {
+  height: 100%;
+  background: var(--accent, var(--state-working));
+  border-radius: var(--radius-xs);
+  transition: width 0.15s ease;
+  min-width: 2px;
+}
+.update-bar-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  min-width: 42px;
+  text-align: right;
+}
+.update-banner-error {
+  font-size: 12px;
+  color: var(--state-waiting, var(--text-dim));
+}
+
 /* Model + effort selector (chat composer) */
 .model-effort-menu {
   position: relative;
@@ -1816,9 +2414,9 @@ table.kv th {
   gap: 6px;
   padding: 4px 10px;
   font-size: 12px;
-  border: 1px solid var(--border);
+  border: none;
   border-radius: var(--radius);
-  background: var(--surface-2);
+  background: transparent;
   color: var(--text);
   cursor: pointer;
 }
@@ -1846,9 +2444,45 @@ table.kv th {
   box-shadow: var(--glass-rim), 0 10px 30px -10px rgba(0, 0, 0, 0.5);
   z-index: 60;
 }
+.model-effort-search {
+  padding: 4px 4px 6px;
+}
+.model-effort-search input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 9px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  outline: none;
+}
+.model-effort-search input:focus {
+  border-color: var(--accent, var(--text-dim));
+}
+.model-effort-search input::placeholder {
+  color: var(--text-dim);
+}
+.model-effort-match {
+  background: var(--accent, var(--surface-2));
+  color: var(--bg-tint);
+  border-radius: 2px;
+  font-weight: 600;
+}
 .model-effort-section {
   max-height: 240px;
   overflow-y: auto;
+}
+/* Group label inside the model list (e.g. "Local models"). */
+.model-effort-section-label {
+  padding: 4px 10px 2px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
 }
 .model-effort-item {
   display: flex;
@@ -1865,7 +2499,8 @@ table.kv th {
   color: var(--text);
   cursor: pointer;
 }
-.model-effort-item:hover {
+.model-effort-item:hover,
+.model-effort-item.active {
   background: var(--surface-2);
 }
 .model-effort-item.selected {
@@ -1881,6 +2516,45 @@ table.kv th {
   height: 1px;
   margin: 5px 4px;
   background: var(--border);
+}
+/* Local-model context slider (shown only for local_gguf providers). */
+.model-effort-ctx {
+  padding: 6px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.model-effort-ctx-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12.5px;
+}
+.model-effort-ctx-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.model-effort-ctx-controls input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent);
+  height: 4px;
+}
+.model-effort-ctx-auto {
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.model-effort-ctx-auto.selected {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.model-effort-ctx-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
 }
 .model-effort-effort-row {
   position: relative;
@@ -1911,6 +2585,33 @@ table.kv th {
   border-radius: var(--radius-xs);
   background: var(--surface-2);
   color: var(--text-dim);
+}
+.model-effort-local-badge {
+  margin-left: 6px;
+  padding: 1px 5px;
+  font-size: 9px;
+  font-weight: 600;
+  border-radius: var(--radius-xs);
+  background: var(--accent);
+  color: #fff;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+/* Small inline spinner used while a local model is loading onto the GPU. */
+.local-spinner {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--text-dim);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: local-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes local-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .model-effort-empty {
   padding: 8px 10px;
@@ -2078,7 +2779,7 @@ table.kv th {
   min-height: 0;
   font-family: var(--font-mono);
   font-size: 12px;
-  background: rgba(0, 0, 0, 0.18);
+  background: var(--surface-solid);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -2239,10 +2940,11 @@ table.kv th {
   right: 6px;
   z-index: 30;
   min-width: 168px;
-  padding: 4px;
+  padding: 5px;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  /* Each option is its own bordered box, so separate them with a visible gap. */
+  gap: 5px;
   background: var(--surface-1, var(--surface-2));
   border: 1px solid var(--border);
   border-radius: var(--radius-md, 8px);
@@ -2253,19 +2955,28 @@ table.kv th {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 6px 8px;
+  padding: 7px 9px;
   font-size: 12.5px;
   text-align: left;
   border-radius: var(--radius-sm);
+  /* Each option gets its OWN border, kept transparent so the items are
+     visually separated boxes without visible border lines. */
+  border: 1px solid transparent;
   background: transparent;
   color: var(--text);
   cursor: pointer;
+  box-sizing: border-box;
 }
 .chat-session-menu button:hover {
   background: var(--surface-2);
+  border-color: var(--border);
 }
 .chat-session-menu button.danger {
   color: var(--danger, #e5484d);
+}
+.chat-session-menu button.danger:hover {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 .chat-session-menu .chat-menu-icon {
   width: 15px;
@@ -2327,6 +3038,77 @@ table.kv th {
   padding: 24px;
 }
 
+/* Claude-style welcome screen for a fresh, empty conversation. Centered
+   greeting + a grid of clickable starter prompts above the composer. */
+.chat-welcome {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px max(16px, calc((100% - 780px) / 2));
+}
+.chat-welcome-inner {
+  width: 100%;
+  max-width: 720px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+  animation: chat-welcome-in 0.24s var(--ease);
+}
+@keyframes chat-welcome-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.chat-welcome-greeting {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+.chat-welcome-question {
+  font-size: 14px;
+  color: var(--text-dim);
+  margin-bottom: 14px;
+}
+.chat-welcome-prompts {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+.chat-welcome-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 12px 14px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-glass);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  box-shadow: var(--glass-rim-soft);
+  cursor: pointer;
+  transition: border-color 0.16s var(--ease), transform 0.16s var(--ease);
+}
+.chat-welcome-prompt:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+.chat-welcome-prompt-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+.chat-welcome-prompt-sub {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
 /* Message bubbles — Claude style: user gets a compact rounded card on the
    right; assistant replies render as plain full-width text. */
 .chat-bubble {
@@ -2382,6 +3164,10 @@ table.kv th {
   line-height: 1.6;
   overflow-wrap: break-word;
   word-break: break-word;
+  /* body sets user-select: none to keep chrome/buttons non-selectable; let
+     users highlight the actual message text with left-click-drag. */
+  user-select: text;
+  -webkit-user-select: text;
 }
 .chat-bubble.user .chat-bubble-inner {
   background: var(--surface-2);
@@ -2395,6 +3181,124 @@ table.kv th {
   box-shadow: none;
   padding: 0 2px;
   width: 100%;
+}
+
+/* Keep interactive chrome inside a selectable bubble non-selectable, so a
+   text-drag over a code block or tool card doesn't grab button labels. */
+.chat-bubble-inner button,
+.chat-bubble-inner .chat-code-header,
+.chat-bubble-inner .chat-code-block pre,
+.chat-bubble-inner .chat-msg-artifacts,
+.chat-bubble-inner .chat-thinking,
+.chat-bubble-inner .chat-tool,
+.chat-bubble-inner .chat-activity,
+.chat-bubble-inner .chat-step {
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* Code block contents are the one exception inside that set — let users
+   highlight code even though the header/copy button above isn't selectable. */
+.chat-bubble-inner .chat-code-block {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* ---------- Message attachment preview cards ----------
+   Rendered ABOVE the text bubble in a horizontal flex-wrap row, separated from
+   the message text. Images show a rich thumbnail; docs/text/files show a file
+   card with an ext/label badge and an optional content preview. */
+.msg-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+  max-width: 100%;
+}
+.chat-bubble.user .msg-attachments {
+  /* User attachments sit above the right-aligned bubble. */
+  justify-content: flex-end;
+}
+.msg-attachment-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 180px;
+  max-width: 100%;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-glass);
+  box-shadow: var(--glass-rim-soft);
+  overflow: hidden;
+}
+.msg-attachment-thumb {
+  width: 100%;
+  height: 88px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-xs);
+  background: var(--surface-solid);
+  overflow: hidden;
+  color: var(--text-dim);
+}
+.msg-attachment-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.msg-attachment-thumb svg {
+  width: 26px;
+  height: 26px;
+}
+.msg-attachment-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.msg-attachment-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.msg-attachment-badge {
+  flex: none;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  border-radius: 99px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.msg-attachment-badge[data-kind="image"] {
+  background: color-mix(in srgb, var(--state-diff) 14%, transparent);
+  color: var(--state-diff);
+  border-color: color-mix(in srgb, var(--state-diff) 35%, transparent);
+}
+.msg-attachment-preview {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  background: var(--surface-solid);
+  border-radius: var(--radius-xs);
+  padding: 6px 8px;
+  max-height: 72px;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
 }
 
 /* Collapsible thinking block (reasoning models) */
@@ -2455,7 +3359,7 @@ table.kv th {
   padding: 6px 10px;
   font-size: 12.5px;
   color: var(--text-dim);
-  background: var(--surface-2);
+  background: transparent;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -2513,6 +3417,169 @@ table.kv th {
   margin-bottom: 6px;
 }
 
+/* Collapsed activity summary: one tool-call run collapses into a single
+ * synthesized line (Claude-style), expandable into a stepped list where each
+ * step is itself expandable. Replaces the old per-call flat rows. */
+.chat-activity {
+  margin: 6px 0;
+}
+.chat-activity-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.chat-activity-toggle:hover {
+  color: var(--text);
+  background: var(--surface-3, var(--surface-2));
+}
+.chat-activity-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--accent);
+  font-size: 12px;
+}
+.chat-activity-spinner {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  animation: tool-spin 0.7s linear infinite;
+}
+.chat-activity-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-activity.live .chat-activity-toggle {
+  animation: thinking-pulse 1.4s ease-in-out infinite;
+}
+.chat-activity-count {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+.chat-activity-steps {
+  margin-top: 6px;
+  padding-left: 4px;
+  border-left: 2px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.chat-step {
+  border-radius: var(--radius-xs);
+}
+.chat-step-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 4px 8px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.chat-step-toggle:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.chat-step-toggle:disabled {
+  cursor: default;
+}
+.chat-step-index {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  opacity: 0.6;
+  min-width: 14px;
+  text-align: right;
+}
+.chat-step-icon {
+  flex: none;
+  font-size: 13px;
+}
+.chat-step-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-step.live .chat-step-toggle {
+  animation: thinking-pulse 1.4s ease-in-out infinite;
+}
+.chat-step-narration {
+  padding: 2px 8px 4px 29px;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: break-word;
+}
+/* A thinking interlude folded into the activity group: indented to align
+ * with the step rows, slightly dimmer than a standalone ThinkingBlock. */
+.chat-step-think {
+  margin: 2px 0 2px 21px;
+}
+.chat-step-think .chat-thinking {
+  margin: 0;
+}
+.chat-step-body {
+  margin: 4px 0 6px 29px;
+}
+.chat-step-detail {
+  padding: 6px 10px;
+  border-left: 2px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: break-word;
+  margin-bottom: 6px;
+}
+.chat-step-result {
+  padding: 6px 10px;
+  border-left: 2px solid var(--accent);
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+.chat-activity-done {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px 2px;
+  font-size: 12px;
+  color: var(--accent);
+}
+.chat-activity-done svg {
+  width: 13px;
+  height: 13px;
+}
+
 /* Chat mode split (chat left | browser right) */
 .chat-split-left {
   min-width: 0;
@@ -2560,11 +3627,8 @@ table.kv th {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   overflow: hidden;
-  background: rgba(0, 0, 0, 0.28);
+  background: var(--surface-solid);
   box-shadow: var(--glass-rim-soft);
-}
-:root[data-theme="light"] .chat-code-block {
-  background: rgba(255, 255, 255, 0.4);
 }
 .chat-code-header {
   display: flex;
@@ -2591,11 +3655,8 @@ table.kv th {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   overflow: hidden;
-  background: rgba(0, 0, 0, 0.28);
+  background: var(--surface-solid);
   box-shadow: var(--glass-rim-soft);
-}
-:root[data-theme="light"] .chat-jsx-block {
-  background: rgba(255, 255, 255, 0.4);
 }
 .chat-jsx-header {
   display: flex;
@@ -2853,7 +3914,7 @@ table.kv th {
 .chat-mermaid-source {
   margin: 0;
   padding: 10px 12px;
-  background: rgba(0, 0, 0, 0.28);
+  background: var(--surface-solid);
   border-radius: var(--radius-xs);
   font-family: var(--font-mono);
   font-size: 12px;
@@ -2862,15 +3923,57 @@ table.kv th {
   white-space: pre;
   color: var(--text-dim);
 }
-:root[data-theme="light"] .chat-mermaid-source {
-  background: rgba(255, 255, 255, 0.4);
-}
 
 /* Composer (bottom bar) — Claude-style rounded card */
 .chat-composer {
   flex-shrink: 0;
   /* Aligned with the centered conversation column. */
   padding: 10px max(14px, calc((100% - 780px) / 2)) 14px;
+}
+.composer-slash-wrap {
+  position: relative;
+}
+.composer-slash-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.5);
+}
+.composer-slash-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-xs);
+  text-align: left;
+  cursor: pointer;
+}
+.composer-slash-item.active {
+  background: var(--surface-2);
+}
+.composer-slash-cmd {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.composer-slash-name {
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .chat-composer-card {
   display: flex;
@@ -2897,6 +4000,8 @@ table.kv th {
   outline: none;
 }
 .chat-composer-textarea {
+  width: 100%;
+  box-sizing: border-box;
   min-height: 24px;
   max-height: 200px;
   resize: none;
@@ -2913,6 +4018,11 @@ table.kv th {
 .chat-composer-textarea::placeholder {
   color: var(--text-dim);
   opacity: 0.7;
+  /* Keep the hint on a single line so it doesn't wrap mid-phrase on
+     narrow composer widths (the "type / for skills" tail must stay put). */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .chat-composer-footer {
   display: flex;
@@ -2939,6 +4049,71 @@ table.kv th {
 .composer-attach-btn:hover {
   background: var(--surface-2);
   color: var(--text);
+}
+.composer-attach-wrap {
+  position: relative;
+}
+.composer-attach-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 20;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+.composer-attach-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  font-size: 13px;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+}
+.composer-attach-menu-item:hover {
+  background: var(--surface-2);
+}
+.composer-attach-menu-item[aria-pressed="true"] {
+  color: var(--accent);
+}
+.composer-connectors-menu {
+  min-width: 200px;
+}
+.composer-attach-menu-item .connector-toggle {
+  margin-left: auto;
+  color: var(--accent, #C15F3C);
+  font-weight: 600;
+}
+.composer-attach-menu-item .connector-toggle:not(.on) {
+  visibility: hidden;
+}
+.composer-research-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.composer-research-chip:hover {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
 }
 .composer-tools-btn {
   display: flex;
@@ -3237,13 +4412,14 @@ table.kv th {
     transparent 5px
   );
 }
-/* Transform-scale zoom: the inner wrapper is scaled, and the scaler reserves a
-   scroll area matching the scaled size so zoom-in pans and zoom-out fits all. */
-.artifact-preview-scaler {
-  position: relative;
-}
+/* CSS zoom: the inner wrapper is zoomed, which reflows the document so the
+   scroll area grows and shrinks naturally. The header/toolbar are a SIBLING of
+   .artifact-preview-content, never inside this subtree, so zoom touches only
+   the document body — like a PDF viewer. */
 .artifact-preview-zoom {
-  padding: 14px 16px;
+  width: 100%;
+  flex: 1;
+  min-height: 0;
   box-sizing: border-box;
 }
 .artifact-preview-zoom-ctrls {
@@ -3389,24 +4565,29 @@ table.kv th {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 0;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
 }
 .artifact-preview-loading,
 .artifact-preview-error {
   color: var(--text-dim);
   font-size: 12.5px;
-  padding: 14px 18px;
+  padding: 8px 2px;
 }
 .artifact-preview-image {
-  max-width: 100%;
-  height: auto;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
   display: block;
-  margin: 0 auto;
   border-radius: var(--radius-xs);
 }
 .artifact-preview-pdf,
 .artifact-preview-html {
   width: 100%;
+  /* Fill the unscaled zoom box so the scaler measures a stable box. The zoom
+     wrapper clips with overflow:hidden, so the scaled visual is contained
+     inside the viewport — like a PDF viewer. */
   height: 100%;
   min-height: 480px;
   border: none;
@@ -3486,6 +4667,11 @@ table.kv th {
   top: 10px;
   right: 14px;
   z-index: 6;
+}
+/* When the artifacts toolbar is shown, give the messages column extra top
+   padding so the first chat isn't crowded under the floating button. */
+.chat-view.has-artifacts .chat-messages {
+  padding-top: 48px;
 }
 .artifacts-menu {
   position: relative;
@@ -3615,30 +4801,403 @@ table.kv th {
   padding: 8px 10px;
   border-radius: var(--radius-xs);
 }
-.skills-list {
+
+/* ---- Skills manager (Claude-style table + detail view) ---- */
+.skills-section {
+  margin-top: 16px;
+}
+.skills-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.skills-header h4 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.skills-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.skills-search {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  transition: border-color 0.15s var(--ease);
+}
+.skills-search:focus-within {
+  border-color: var(--accent);
+}
+.skills-search > svg {
+  flex-shrink: 0;
+  margin-left: 10px;
+  color: var(--text-dim);
+}
+.skills-search input {
+  border: none;
+  background: transparent;
+  outline: none;
+  font-size: 12px;
+  color: var(--text);
+  width: 120px;
+  padding: 4px 10px;
+}
+.skills-search input::placeholder {
+  color: var(--text-dim);
+}
+.skills-btn-browse,
+.skills-btn-add {
+  padding: 4px 12px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s var(--ease);
+}
+.skills-btn-browse:hover,
+.skills-btn-add:hover {
+  background: var(--surface-2);
+}
+.skills-add-chevron {
+  font-size: 9px;
+  margin-left: 2px;
+  opacity: 0.7;
+}
+
+/* Skills table */
+.skills-table {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.skills-table-head {
+  display: grid;
+  grid-template-columns: 1fr 100px 100px;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.skills-table-body {
+  display: flex;
+  flex-direction: column;
+}
+.skills-table-row {
+  display: grid;
+  grid-template-columns: 1fr 100px 100px;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  font-size: 13px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.12s var(--ease);
+}
+.skills-table-row:last-child {
+  border-bottom: none;
+}
+.skills-table-row:hover {
+  background: var(--surface-2);
+}
+.skills-col-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skills-col-date {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.skills-col-author {
+  font-size: 12px;
+}
+.skills-author-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.skills-author-badge.built-in {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* Skill detail view */
+.skill-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: skill-detail-in 0.18s var(--ease);
+}
+@keyframes skill-detail-in {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.skill-detail-head {
+  display: flex;
+  align-items: center;
+}
+.skill-detail-back {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.skill-detail-back:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.skill-detail-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.skill-detail-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.skill-detail-name-input {
+  flex: 1;
+  font-size: 16px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: var(--radius-xs);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  outline: none;
+  transition: border-color 0.15s var(--ease);
+}
+.skill-detail-name-input:focus {
+  border-color: var(--border);
+  background: var(--surface);
+}
+.skill-detail-sub {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 0 8px;
+}
+.skill-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* Toggle switch */
+.skill-detail-toggle {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  gap: 8px;
+}
+.skill-detail-toggle input {
+  display: none;
+}
+.skill-toggle-track {
+  width: 36px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--border);
+  position: relative;
+  transition: background 0.2s var(--ease);
+  flex-shrink: 0;
+}
+.skill-detail-toggle input:checked + .skill-toggle-track {
+  background: var(--accent);
+}
+.skill-toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.2s var(--ease);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+.skill-detail-toggle input:checked + .skill-toggle-track .skill-toggle-thumb {
+  transform: translateX(16px);
+}
+.skill-detail-menu-btn {
+  padding: 4px 8px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-xs);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.skill-detail-menu-btn:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.skill-detail-description {
+  margin-top: 4px;
+}
+.skill-detail-description textarea {
+  font-size: 13px;
+}
+.skill-detail-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.skill-detail-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.skill-detail-command {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.skill-command-field {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--surface);
+  transition: border-color 0.15s var(--ease);
+}
+.skill-command-field:focus-within {
+  border-color: var(--accent);
+}
+.skill-command-field .skill-command-slash {
+  padding: 6px 0 6px 10px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  user-select: none;
+}
+.skill-command-field input {
+  flex: 1;
+  padding: 6px 10px 6px 2px;
+  font-size: 13px;
+  font-family: var(--font-mono);
+  border: none;
+  background: transparent;
+  color: var(--text);
+  outline: none;
+}
+
+/* System prompt row in the skills table */
+.system-prompt-row {
+  background: var(--surface);
+}
+.system-prompt-row:hover {
+  background: var(--surface-2);
+}
+.skills-row-icon {
+  margin-right: 6px;
+  font-size: 13px;
+  opacity: 0.7;
+}
+.skills-table-empty {
+  padding: 24px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* ---- Connectors (Settings → Connectors) ---- */
+.skill-list {
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
-.skill-card {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 10px;
-  background: var(--surface-2);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.connector-icon {
+  font-size: 16px;
 }
-.skill-card-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.connector-status {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.connector-status.ok {
+  color: var(--accent, #C15F3C);
+}
+.connector-status.expired {
+  color: #c0392b;
+}
+.connector-scopes {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.connector-scopes .muted {
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+.connector-note {
+  font-size: 12px;
+  color: #c0392b;
+  background: rgba(192, 57, 43, 0.08);
+  padding: 6px 8px;
+  border-radius: var(--radius-xs);
 }
 .skill-name-input {
   flex: 1;
   font-weight: 600;
   font-size: 13px;
   padding: 5px 8px;
+  border-radius: var(--radius-xs);
+}
+.skill-command {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.skill-command-slash {
+  padding: 5px 0 5px 6px;
+  font-family: var(--font-mono);
+}
+.skill-command input {
+  width: 88px;
+  padding: 5px 6px 5px 2px;
+  font-size: 12px;
+  font-family: var(--font-mono);
   border-radius: var(--radius-xs);
 }
 .skill-enable {
@@ -3652,4 +5211,215 @@ table.kv th {
 .skill-remove {
   padding: 2px 8px;
   flex-shrink: 0;
+}
+
+/* --- Filesystem permission-mode selector (matches ModelEffortMenu) --- */
+.permission-mode-menu {
+  position: relative;
+}
+.permission-mode-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+}
+.permission-mode-trigger:hover {
+  background: var(--surface);
+}
+/* Inline variant: borderless, blends into the composer footer next to the `+`
+   attach button — no pill border, transparent background, subtle hover only.
+   The colored mode dot still marks the active posture. */
+.permission-mode-trigger.inline {
+  border: none;
+  background: transparent;
+  padding: 4px 8px;
+}
+.permission-mode-trigger.inline:hover {
+  background: var(--surface-2);
+}
+.permission-mode-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  flex-shrink: 0;
+}
+/* Per-mode accent on the dot + trigger border so the active posture is visible
+   at a glance, even before opening the menu. */
+.permission-mode-trigger.mode-read_only .permission-mode-dot { background: #6b7280; }
+.permission-mode-trigger.mode-manual .permission-mode-dot { background: var(--text-dim); }
+.permission-mode-trigger.mode-auto_edit .permission-mode-dot { background: #d4a017; }
+.permission-mode-trigger.mode-full_auto .permission-mode-dot {
+  background: var(--danger);
+  box-shadow: 0 0 0 2px rgba(214, 69, 69, 0.2);
+}
+.permission-mode-chevron {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+.permission-mode-popup {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  min-width: 280px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: var(--glass-rim), 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+  z-index: 60;
+}
+.permission-mode-hint {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+.permission-mode-divider {
+  height: 1px;
+  margin: 4px 4px;
+  background: var(--border);
+}
+.permission-mode-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 12px;
+  text-align: left;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.permission-mode-item:hover,
+.permission-mode-item.active {
+  background: var(--surface-2);
+}
+.permission-mode-item.selected {
+  font-weight: 600;
+}
+.permission-mode-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.permission-mode-item-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.permission-mode-item-desc {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  font-weight: 400;
+  line-height: 1.35;
+}
+.permission-mode-badge {
+  padding: 1px 6px;
+  font-size: 10px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  color: var(--text-dim);
+}
+.permission-mode-check {
+  color: var(--accent, var(--text));
+}
+
+/* --- Composer mode glow (non-default posture) --- */
+/* A subtle colored border/glow on the composer card whenever a non-manual mode
+   is active, so it's never ambiguous which posture governs tool calls. */
+.chat-composer-card.composer-mode-read_only {
+  border-color: #6b7280;
+  box-shadow: var(--glass-rim), 0 0 0 2px rgba(107, 114, 128, 0.18);
+}
+.chat-composer-card.composer-mode-auto_edit {
+  border-color: #d4a017;
+  box-shadow: var(--glass-rim), 0 0 0 2px rgba(212, 160, 23, 0.18);
+}
+.chat-composer-card.composer-mode-full_auto {
+  border-color: var(--danger);
+  box-shadow: var(--glass-rim), 0 0 0 3px rgba(214, 69, 69, 0.22);
+}
+
+/* --- Per-action filesystem-tool approval card --- */
+.composer-approval-wrap {
+  flex-shrink: 0;
+  padding: 0 max(14px, calc((100% - 780px) / 2)) 6px;
+}
+.approval-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  box-shadow: var(--glass-rim), 0 6px 20px -12px rgba(214, 69, 69, 0.4);
+}
+.approval-card-icon {
+  color: var(--danger);
+  font-size: 16px;
+  flex-shrink: 0;
+}
+.approval-card-body {
+  flex: 1;
+  min-width: 0;
+}
+.approval-card-title {
+  font-size: 12.5px;
+  color: var(--text);
+}
+.approval-card-title code {
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+  color: var(--text);
+  word-break: break-all;
+}
+.approval-card-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+.approval-card-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.approval-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+.approval-btn.deny {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.approval-btn.approve {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.approval-btn:hover {
+  filter: brightness(1.08);
+}
+
+/* --- Full-auto confirmation modal notes --- */
+.modal-note {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 4px;
 }

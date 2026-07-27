@@ -8,7 +8,7 @@ IDs are UUID strings. Timestamps are Unix epoch **seconds** (i64).
 
 ```ts
 type HarnessId = 'claude_code' | 'kimi_code' | 'opencode';
-type ChatProviderId = 'anthropic' | 'openai' | 'openrouter' | 'anthropic_compatible' | 'openai_compatible';
+type ChatProviderId = 'anthropic' | 'openai' | 'openrouter' | 'anthropic_compatible' | 'openai_compatible' | 'local_gguf';
 type PaneState = 'idle' | 'working' | 'waiting' | 'diff_ready';
 
 interface Project { id: string; path: string; name: string; isGitRepo: boolean; createdAt: number; lastOpenedAt: number | null }
@@ -70,6 +70,16 @@ Settings / skills / quick actions / secrets / cost:
 - `export_session_markdown(paneId: string) -> string` (formatted markdown from that pane's stripped transcript buffer)
 - `read_file_text(path: string) -> string` (capped ~512KB; for the read-only peek viewer)
 
+Installed skills / loops (harness skill directories — Claude Code `~/.claude/skills/<slug>/SKILL.md`, Kimi `~/.agents/skills/`):
+- `list_installed_skills() -> InstalledSkill[]` — skills discovered in harness skill dirs
+- `list_installed_loops() -> InstalledSkill[]` — loops discovered in harness loop dirs
+- `read_installed_skill(slug: string, kind: string) -> string | null` — reads a skill/loop file's content (`kind` accepts "skill"/"loop" singular or plural)
+- `save_installed_skill(slug: string, kind: string, content: string) -> ()` — overwrites an existing skill/loop file (mirrors to every copy that exists)
+- `create_installed_skill(name: string, kind: string, content: string) -> InstalledSkill` — creates a new skill/loop in both harness roots
+- `delete_installed_skill(slug: string, kind: string) -> ()`
+
+`InstalledSkill = { slug, name, description, source ("claude"|"kimi"|"both"), claudePath?, kimiPath?, kind ("skill"|"loop") }`.
+
 ## Browser (native child webviews, one per tab)
 
 The browser pane uses Tauri child webviews on Windows/macOS; Linux falls back to iframes.
@@ -109,29 +119,48 @@ Event:
 - `chat:error` — payload `{ chatSessionId: string, message: string, code: string | null }` (stream or request error)
 - `chat:artifact` — payload `{ chatSessionId: string, path: string, filename: string }` (a tool generated a file, surface it in the artifact panel)
 - `chat:open-browser` — payload `{ chatSessionId: string, url: string }` (the `open_url` tool asks the UI to show a page in the built-in browser pane)
+- `chat:approval-request` — payload `{ chatSessionId, pendingId, tool, summary, args }` (a filesystem tool call needs per-action approval; the turn pauses until the UI calls `resolve_tool_action`)
+- `chat:approval-resolved` — payload `{ chatSessionId, pendingId, approved }` (the user resolved the card; the backend has resumed the paused tool loop)
+- `updater:progress` — payload `{ downloaded: number, total: number | null }` (cumulative bytes downloaded during `download_and_install_update`; `total` is the Content-Length if known)
+- `updater:installed` — payload `()` (the verified update package is on disk; the app restarts automatically)
+
+## Auto-updater (Tauri plugin-updater + GitHub Releases)
+
+Types:
+- `UpdateInfo { updateAvailable: boolean, version: string | null, notes: string | null, pubDate: string | null }`
+
+Commands:
+- `check_for_update() -> UpdateInfo` — GETs the configured endpoint (`latest.json` on GitHub Releases) and semver-compares. A network failure mid-check is treated as "no update" (non-fatal) so the app keeps working. Safe to call on a timer (startup + every 4h).
+- `download_and_install_update() -> ()` — re-checks for the pending update, downloads it while streaming `updater:progress`, verifies the signature against the baked-in pubkey, runs the installer (passive — progress bar, no dialog gauntlet — on Windows), then emits `updater:installed` and restarts. Guarded by a static `INSTALLING` flag so two calls cannot spawn concurrent downloads.
+
+The endpoint URL, pubkey, and Windows install mode live in `tauri.conf.json` (`plugins.updater`). The signing keypair is at `.tauri/conduit-update.key` / `.key.pub` (gitignored); `scripts/make-latest-json.mjs` produces the `latest.json` manifest uploaded with each GitHub Release. See `RELEASE.md`.
 
 ## Chat (direct LLM HTTP API, separate from CLI agent panes)
 
 Types:
-- `ChatSession { id: string, title: string | null, provider: string, model: string, createdAt: number, lastActiveAt: number, starred: boolean, unread: boolean }`
+- `ChatSession { id: string, title: string | null, provider: string, model: string, createdAt: number, lastActiveAt: number, starred: boolean, unread: boolean, permissionMode: string }` — `permissionMode` is the per-session filesystem-tool posture (`read_only` | `manual` | `auto_edit` | `full_auto`); new sessions default to `manual`.
 - `ChatMessageRecord { id: number, chatSessionId: string, role: string, content: string, inputTokens: number | null, outputTokens: number | null, costUsd: number | null, createdAt: number }`
 - `ChatConfigPayload { provider: string | null, baseUrl: string | null, model: string | null, hasKey: boolean }`
 - `ChatModel { id: string, object: string, created: number, ownedBy: string }`
+- `ChatApprovalRequestPayload { chatSessionId: string, pendingId: string, tool: string, summary: string, args: any }` — a pending per-action filesystem-tool approval card.
+- `ChatApprovalResolvedPayload { chatSessionId: string, pendingId: string, approved: boolean }`
 
 Commands:
 - `list_chat_sessions() -> ChatSession[]` (most recent first by lastActiveAt)
 - `create_chat_session(provider: string, model: string) -> ChatSession`
 - `delete_chat_session(chatSessionId: string) -> ()`
 - `update_chat_session_model(chatSessionId: string, model: string) -> ()`
+- `update_chat_session_permission_mode(chatSessionId: string, mode: string) -> ()` — sets the per-session filesystem-tool posture (`read_only` | `manual` | `auto_edit` | `full_auto`); rejects unknown modes. The frontend gates the switch INTO `full_auto` behind a one-time confirmation modal before calling this.
 - `update_chat_session_title(chatSessionId: string, title: string) -> ()`
-- `generate_chat_title(chatSessionId: string) -> string` — auto-generates a title from the first user message
+- `generate_chat_title(chatSessionId: string) -> string | null` — auto-generates a 3–6 word title from the conversation history via the LLM; returns `null` if generation fails (no API key configured, empty transcript, or API error).
 - `set_chat_session_starred(chatSessionId: string, starred: boolean) -> ()`
 - `set_chat_session_unread(chatSessionId: string, unread: boolean) -> ()`
 - `get_chat_messages(chatSessionId: string) -> ChatMessageRecord[]` (chronological by id)
 - `touch_chat_session(chatSessionId: string) -> ()` (sets lastActiveAt = now)
-- `send_chat_message(chatSessionId: string, content: string, effort?: string, toolsEnabled?: boolean, codeExecEnabled?: boolean, attachments?: ChatAttachmentInput[]) -> ()` — persists user message, looks up provider/model/api_key, assembles message history, kicks off SSE streaming. `ChatAttachmentInput = { name, kind: "image"|"text"|"doc", text?, data? (base64), mediaType?, format? }`: images are sent to the model as vision content parts (data URL for OpenAI, base64 image block for Anthropic) on the live turn only; `doc` (docx/pptx/xlsx) bytes are text-extracted server-side and inlined into the message; `text` files are inlined as fenced blocks. Emits `chat:token`, then `chat:done` or `chat:error`. All diagrams go through the `generate_diagram` (vector SVG) tool. Chat tools: `web_search`, `generate_file`, `generate_document`, `generate_diagram`, `fetch_url`, `open_url`, `run_code`, plus agentic browser control (`browser_read`/`browser_click`/`browser_type`/`browser_scroll`) that drives the active browser pane via injected JS (native webview only; no-op on the Linux iframe fallback).
-- `cancel_chat_message(chatSessionId: string) -> ()` — aborts the active stream for that session.
-- `list_artifacts() -> ArtifactRecord[]` — all persisted generated artifacts (files/diagrams), most recent first. `ArtifactRecord = { id, chatSessionId?, filename, path, kind, createdAt, expiresAt }`. Artifacts are retained 30 days; expired rows+files are swept on app startup.
+- `send_chat_message(chatSessionId: string, content: string, effort?: string, toolsEnabled?: boolean, codeExecEnabled?: boolean, attachments?: ChatAttachmentInput[]) -> ()` — persists user message, looks up provider/model/api_key + the session's `permissionMode`, assembles message history, kicks off SSE streaming. `ChatAttachmentInput = { name, kind: "image"|"text"|"doc", text?, data? (base64), mediaType?, format? }`: images are sent to the model as vision content parts (data URL for OpenAI, base64 image block for Anthropic) on the live turn only; `doc` (docx/pptx/xlsx) bytes are text-extracted server-side and inlined into the message; `text` files are inlined as fenced blocks. Emits `chat:token`, then `chat:done` or `chat:error`. All diagrams go through the `generate_diagram` (vector SVG) tool. Chat tools: `web_search`, `generate_file`, `generate_document`, `generate_diagram`, `fetch_url`, `open_url`, `run_code`, the agentic browser control set (`browser_read`/`browser_click`/`browser_type`/`browser_scroll`), and the filesystem set (`list_directory`/`read_file`/`search_files`/`write_file`/`edit_file`/`delete_file`/`move_file`/`copy_file`). Filesystem mutating tools route through the central `check_permission` gate: under `read_only` the mutating tools are absent from the tool schema entirely; under `manual`/`auto_edit`/`full_auto` an action that needs approval emits `chat:approval-request` and pauses the turn until the UI resolves it via `resolve_tool_action`. `delete_file` is ALWAYS gated, in every mode.
+- `cancel_chat_message(chatSessionId: string) -> ()` — aborts the active stream for that session (also drops its pending approvals).
+- `resolve_tool_action(pendingId: string, approved: boolean) -> ()` — resolves a pending per-action filesystem-tool approval card. `true` lets the paused tool loop run the action and feed its result back to the model; `false` injects a "user denied" tool result. Unknown/already-resolved `pendingId` is a no-op.
+- `list_artifacts() -> ArtifactRecord[]` — all persisted generated artifacts (files/diagrams), most recent first. `ArtifactRecord = { id, chatSessionId?, chatMessageId?, filename, path, kind, createdAt, expiresAt }`. `chatMessageId` links an artifact to the specific assistant message that produced it (used to restore inline diagrams/file chips on a reopened chat). Artifacts are retained 30 days; expired rows+files are swept on app startup.
 - `list_chat_artifacts(chatSessionId: string) -> ArtifactRecord[]` — artifacts for a specific chat session
 - `delete_artifact(id: string) -> ()` — removes an artifact's DB row and its on-disk file.
 - `set_chat_api_key(provider: string, key: string, baseUrl?: string, model?: string) -> ()` — stores key in OS keychain, stores baseUrl/model in app_settings. The key value is NEVER returned via any IPC command.
@@ -142,13 +171,29 @@ Commands:
 - `download_artifact(src: string, dest: string) -> ()` — copy an artifact to a user-chosen path.
 - `download_artifacts_zip(paths: string[], dest: string) -> ()` — zip multiple artifacts to a user-chosen `.zip` path.
 
-Providers: `anthropic`, `openai`, `openrouter`, `anthropic_compatible`, `openai_compatible`.
+Providers: `anthropic`, `openai`, `openrouter`, `anthropic_compatible`, `openai_compatible`, `local_gguf`.
+
+## Mobile Relay (desktop ↔ mobile companion app WebSocket bridge)
+
+The desktop runs a localhost WebSocket relay server for the mobile companion app.
+The phone never holds API keys — every model call originates from the desktop process.
+
+Types:
+- `MobileRelayStatus { running: boolean, port: number }`
+
+Commands:
+- `start_mobile_relay() -> number` — starts the relay on a random 127.0.0.1 port, returns the port
+- `stop_mobile_relay() -> ()` — stops the relay server
+- `get_mobile_relay_status() -> MobileRelayStatus` — current relay state
+
+The relay auto-starts on app launch and auto-stops on exit. See `src-tauri/src/mobile/`
+for the full protocol (JSON over WebSocket, tagged-union message types).
 
 ## Rules both sides must honor
 
-- Pane processes are killed ONLY on explicit close or app quit — never on blur (PRD §6.5).
+- Pane processes are killed on explicit close, LRU replacement (when all 6 slots are full — the evicted pane's pty is terminated), or app quit — never on blur (PRD §6.5).
 - On app quit the backend terminates all child pty processes cleanly.
-- Session title auto-generation (first ~40 chars of first user prompt) happens in the **frontend** (it observes what the user types); it calls `update_session_title` once when a session's title is null and the first prompt is submitted.
+- CLI agent session title auto-generation (first ~40 chars of first user prompt) happens in the **frontend** (it observes what the user types); it calls `update_session_title` once when a session's title is null and the first prompt is submitted. Chat sessions instead use `generate_chat_title` (backend, LLM-based, 3–6 words).
 - Skill slash-command expansion happens in the **frontend** before `write_pty`.
 - Broadcast mode is pure frontend: it calls `write_pty` for each selected pane.
 - SQLite lives at `<app_data_dir>/conduit.db`. Schema = PRD §6.3 plus a `quick_actions` table (id TEXT PK, project_id TEXT NOT NULL REFERENCES projects(id), label TEXT NOT NULL, command TEXT NOT NULL, keybinding TEXT, run_on_worktree BOOLEAN NOT NULL DEFAULT 0).

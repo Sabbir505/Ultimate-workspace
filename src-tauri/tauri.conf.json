@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Conduit",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "identifier": "dev.conduit.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "node scripts/fetch-bundled-python.mjs && node scripts/stage-browser-mcp.mjs && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -25,11 +25,12 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; script-src 'self' 'unsafe-eval' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; img-src 'self' data: blob: https:; connect-src 'self' http://localhost:* http://127.0.0.1:* https:; font-src 'self' data:; frame-src 'self' http://localhost:* http://127.0.0.1:* https:"
     }
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
@@ -38,6 +39,29 @@
       "icons/icon.icns",
       "icons/icon.ico",
       "icons/icon.png"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine"
+      }
+    },
+    "resources": [
+      "resources/python/**/*"
+    ],
+    "externalBin": [
+      "binaries/conduit-browser-mcp"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://github.com/Sabbir505/Ultimate-workspace/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNCMjZDNzkzNUY2OEZCNDQKUldSRSsyaGZrOGNtTzZLRTlVTnkwajhkUnRRN0VWOHNTS3R4bkt0cFpRaXRXOVpWUTI4bWtkRUYK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

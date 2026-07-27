@@ -60,6 +60,20 @@ pub struct Skill {
     pub created_at: i64,
 }
 
+/// Connection status for a connector, surfaced to the Settings → Connectors UI.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorStatus {
+    pub connected: bool,
+    /// True when the stored access token's `expires_at` has passed (the MCP
+    /// client will attempt a transparent refresh on next use; if no refresh
+    /// token exists — Notion — the user must reconnect).
+    pub expired: bool,
+    pub account_display: Option<String>,
+    pub granted_scopes: Option<String>,
+    pub expires_at: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuickAction {
@@ -175,6 +189,21 @@ pub struct ChatSession {
     /// Marked-unread chats show an unread dot in the sidebar.
     #[serde(default)]
     pub unread: bool,
+    /// Per-session permission posture for filesystem tool calls
+    /// (`read_only` | `manual` | `auto_edit` | `full_auto`). New sessions
+    /// default to `manual`. See `chat::permission::PermissionMode`.
+    #[serde(default = "default_permission_mode")]
+    pub permission_mode: String,
+    /// Per-session watch-mode pacing override. None = inherit global setting;
+    /// otherwise `"on"` | `"off"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch_mode: Option<String>,
+}
+
+/// The serde default for `ChatSession::permission_mode` — `manual`, the safe
+/// posture every new chat starts in.
+fn default_permission_mode() -> String {
+    "manual".to_string()
 }
 
 /// A file attached to a chat message from the composer. Images are forwarded
@@ -232,6 +261,30 @@ pub struct ChatMessageRecord {
     pub created_at: i64,
 }
 
+/// One recorded fact/claim a research turn extracted from a single source page.
+/// Accumulated in the `chat_source_notes` table during the Execute phase and
+/// read back via `get_source_ledger` during Synthesis. `unavailable` carries
+/// the `browser_read` `failureReason` ("paywalled" / "login_required" /
+/// "extraction_failed" / "blocked") when the source could not be read, so the
+/// final Sources section can surface "consulted, unavailable" gaps honestly
+/// rather than implying coverage was complete.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceNote {
+    pub id: i64,
+    pub chat_session_id: String,
+    pub url: String,
+    pub title: String,
+    /// One concrete fact extracted from the source (a sentence, not a paragraph).
+    pub fact: String,
+    /// A short verbatim quote supporting `fact`. Stored at extraction time so
+    /// synthesis works from real excerpts, not paraphrases.
+    pub excerpt: String,
+    /// `None` when the source was usable; otherwise the failure reason string.
+    pub unavailable: Option<String>,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatTokenPayload {
@@ -263,6 +316,34 @@ pub struct ChatArtifactPayload {
 pub struct ChatOpenBrowserPayload {
     pub chat_session_id: String,
     pub url: String,
+}
+
+/// Emitted when a filesystem tool call needs per-action approval (the central
+/// `check_permission` gate returned `NeedsApproval`). The UI renders an
+/// approval card; the user's choice is sent back via `resolve_tool_action`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatApprovalRequestPayload {
+    pub chat_session_id: String,
+    /// The synthetic id of the pending approval — pass to `resolve_tool_action`.
+    pub pending_id: String,
+    /// Tool name (e.g. "write_file").
+    pub tool: String,
+    /// A short human-facing summary of the action (e.g. "write → C:/…/f.txt").
+    pub summary: String,
+    /// The verbatim JSON arguments the model produced, for display/audit.
+    pub args: serde_json::Value,
+}
+
+/// Emitted when the user has resolved a pending approval card (so the UI can
+/// dismiss the card). Carries the outcome — `approved` ran the tool, a denied
+/// card returned a "user denied" tool result instead.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatApprovalResolvedPayload {
+    pub chat_session_id: String,
+    pub pending_id: String,
+    pub approved: bool,
 }
 
 /// In-app preview of a generated artifact file (see `read_artifact_preview`).
@@ -309,4 +390,54 @@ pub struct ChatModel {
     pub object: String,
     pub created: i64,
     pub owned_by: String,
+}
+
+// ---- Local models (GGUF scan / sidecar status) ----
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GgufModel {
+    pub id: String,
+    pub path: String,
+    pub filename: String,
+    pub size_bytes: u64,
+    pub name: Option<String>,
+    pub architecture: Option<String>,
+    pub param_count_label: Option<String>,
+    pub quantization: Option<String>,
+    pub memory_class: String,
+    pub source: String,
+    /// Whether the model has a companion mmproj (vision projector) GGUF,
+    /// making it capable of image (vision) input.
+    pub has_vision: bool,
+    /// Absolute path to the companion mmproj GGUF, if found.
+    pub mmproj_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartedModel {
+    pub model_id: String,
+    pub port: u16,
+    pub base_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveLocalModel {
+    pub model_id: String,
+    pub port: u16,
+    pub base_url: String,
+}
+
+/// Saved workspace (pane layout snapshot). See db/workspaces.rs.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRecord {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub data: String, // JSON blob with full workspace state
+    pub created_at: i64,
+    pub updated_at: i64,
 }

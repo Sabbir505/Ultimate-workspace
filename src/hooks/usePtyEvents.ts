@@ -9,6 +9,7 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import { safeListen } from "../lib/ipc";
+import { openSession } from "../lib/sessionLauncher";
 import { sessionDisplayTitle } from "../lib/sessionTitle";
 import { usePanesStore } from "../state/panes";
 import { useProjectsStore } from "../state/projects";
@@ -31,6 +32,27 @@ async function notify(title: string, body: string): Promise<void> {
     if (granted) sendNotification({ title, body });
   } catch {
     // Notification plugin unavailable (e.g. dev browser) — badges still update.
+  }
+}
+
+/** Sessions currently being opened on behalf of the phone app. The relay emits
+ *  `mobile:session-open-requested` on BOTH create and spawn, which can arrive
+ *  back-to-back for the same session — this guard serializes the refresh-then-
+ *  open sequence so the session doesn't get two panes / two PTYs. */
+const mobileOpening = new Set<string>();
+
+async function openSessionFromMobile(sessionId: string): Promise<void> {
+  if (mobileOpening.has(sessionId)) return;
+  mobileOpening.add(sessionId);
+  try {
+    // The session row may have been created seconds ago on the phone — pull a
+    // fresh list before looking it up, then open it through the normal
+    // launcher path (pane in the dev-tab grid + PTY spawn).
+    await useProjectsStore.getState().refreshSessions();
+    const session = useProjectsStore.getState().sessions.find((s) => s.id === sessionId);
+    if (session) await openSession(session);
+  } finally {
+    mobileOpening.delete(sessionId);
   }
 }
 
@@ -75,6 +97,14 @@ export function usePtyEvents(): void {
       }),
     );
 
+    // Phone-started sessions: the mobile relay asks the desktop to open the
+    // session in a dev-tab pane (create + spawn both funnel through here).
+    unlistens.push(
+      safeListen<{ sessionId: string }>("mobile:session-open-requested", ({ sessionId }) => {
+        void openSessionFromMobile(sessionId);
+      }),
+    );
+
     unlistens.push(
       safeListen<CostUpdatedPayload>("cost:updated", () => {
         // The cost dashboard refetches on its own listener; nothing global to do.
@@ -90,7 +120,11 @@ export function usePtyEvents(): void {
         const panesStore = usePanesStore.getState();
         const existing = panesStore.panes.find((p) => p.data.kind === "browser");
         if (existing) {
-          // Navigate existing browser pane to the detected URL
+          // If the browser was minimized, restore it so the user sees the
+          // navigation. Then navigate the existing browser to the detected URL.
+          if (existing.data.kind === "browser" && existing.data.collapsed) {
+            panesStore.toggleBrowserCollapsed(existing.paneId);
+          }
           panesStore.setBrowserUrl(existing.paneId, url);
         } else {
           // Open a new browser pane with the detected URL

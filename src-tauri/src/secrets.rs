@@ -21,6 +21,13 @@
 //! `conduit:chat:<provider>` under service `dev.conduit.app`. These keys are
 //! NEVER returned to the frontend via any IPC command — they are only read
 //! by the Rust backend for outbound HTTP requests.
+//!
+//! Connector OAuth tokens use a third app-scoped namespace: account
+//! `conduit:connector:<connector_id>:<field>` where `<field>` is
+//! `access_token` or `refresh_token`. Only the Rust backend ever reads them
+//! (to authorize calls to the connector's remote MCP server); the frontend
+//! only ever learns the *metadata* (expiry, scopes, account name) via the
+//! `connector_credentials` table — never the token bytes.
 
 use rusqlite::Connection;
 
@@ -118,6 +125,38 @@ mod platform {
             let _ = entry.delete_credential();
         }
     }
+
+    // ---- Connector OAuth tokens (app-scoped, per-field keychain entries) ----
+
+    pub fn connector_store(
+        _conn: &Connection,
+        connector_id: &str,
+        field: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        Entry::new(SERVICE_NAME, &super::connector_account(connector_id, field))
+            .map_err(|e| e.to_string())?
+            .set_password(value)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn connector_load(
+        _conn: &Connection,
+        connector_id: &str,
+        field: &str,
+    ) -> Option<String> {
+        let entry =
+            Entry::new(SERVICE_NAME, &super::connector_account(connector_id, field)).ok()?;
+        entry.get_password().ok()
+    }
+
+    pub fn connector_remove(_conn: &Connection, connector_id: &str, field: &str) {
+        if let Ok(entry) =
+            Entry::new(SERVICE_NAME, &super::connector_account(connector_id, field))
+        {
+            let _ = entry.delete_credential();
+        }
+    }
 }
 
 // ---- Linux (and other) fallback: obfuscated-at-rest in SQLite ----
@@ -197,6 +236,62 @@ mod platform {
             rusqlite::params![provider],
         );
     }
+
+    // ---- Connector OAuth tokens (app-scoped, XOR-obfuscated in table) ----
+
+    fn ensure_connector_secrets_table(conn: &Connection) -> Result<(), String> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS connector_secrets (
+                connector_id TEXT NOT NULL,
+                field TEXT NOT NULL,
+                value_encrypted BLOB NOT NULL,
+                PRIMARY KEY (connector_id, field)
+            )",
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn connector_store(
+        conn: &Connection,
+        connector_id: &str,
+        field: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        ensure_connector_secrets_table(conn)?;
+        let blob = xor(value.as_bytes());
+        conn.execute(
+            "INSERT INTO connector_secrets (connector_id, field, value_encrypted) VALUES (?1, ?2, ?3)
+             ON CONFLICT(connector_id, field) DO UPDATE SET value_encrypted = excluded.value_encrypted",
+            rusqlite::params![connector_id, field, blob],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn connector_load(
+        conn: &Connection,
+        connector_id: &str,
+        field: &str,
+    ) -> Option<String> {
+        ensure_connector_secrets_table(conn).ok()?;
+        let blob: Vec<u8> = conn
+            .query_row(
+                "SELECT value_encrypted FROM connector_secrets
+                 WHERE connector_id = ?1 AND field = ?2",
+                rusqlite::params![connector_id, field],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()??;
+        String::from_utf8(xor(&blob)).ok()
+    }
+
+    pub fn connector_remove(conn: &Connection, connector_id: &str, field: &str) {
+        let _ = conn.execute(
+            "DELETE FROM connector_secrets WHERE connector_id = ?1 AND field = ?2",
+            rusqlite::params![connector_id, field],
+        );
+    }
 }
 
 #[allow(dead_code)]
@@ -231,6 +326,40 @@ pub fn has_chat_api_key(conn: &Connection, provider: &str) -> bool {
 
 pub fn delete_chat_api_key(conn: &Connection, provider: &str) -> Result<(), String> {
     platform::chat_remove(conn, provider);
+    Ok(())
+}
+
+// ---- Connector OAuth token store (app-scoped, third namespace) ----
+
+fn connector_account(connector_id: &str, field: &str) -> String {
+    format!("conduit:connector:{connector_id}:{field}")
+}
+
+/// Store a connector OAuth token field (`access_token` / `refresh_token`) in
+/// the OS keychain. Never returned to the frontend — read only by the Rust
+/// backend to authorize MCP server calls. On Linux the `conn` is used for
+/// the obfuscated-at-rest fallback.
+pub fn set_connector_token(
+    conn: &Connection,
+    connector_id: &str,
+    field: &str,
+    value: &str,
+) -> Result<(), String> {
+    platform::connector_store(conn, connector_id, field, value)
+}
+
+pub fn get_connector_token(
+    conn: &Connection,
+    connector_id: &str,
+    field: &str,
+) -> Option<String> {
+    platform::connector_load(conn, connector_id, field)
+}
+
+/// Best-effort removal of both access + refresh tokens for a connector.
+pub fn delete_connector_tokens(conn: &Connection, connector_id: &str) -> Result<(), String> {
+    platform::connector_remove(conn, connector_id, "access_token");
+    platform::connector_remove(conn, connector_id, "refresh_token");
     Ok(())
 }
 

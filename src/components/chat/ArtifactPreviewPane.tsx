@@ -5,6 +5,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import {
   downloadArtifact,
@@ -69,7 +72,7 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
   if (kind === "markdown" && text != null) {
     return (
       <div className="chat-markdown artifact-preview-md">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+        <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{text}</ReactMarkdown>
       </div>
     );
   }
@@ -220,35 +223,13 @@ export function ArtifactPreviewPane({
   const [error, setError] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
   const [paneWidth, setPaneWidth] = useState<number | null>(null);
-  const [baseWidth, setBaseWidth] = useState<number | null>(null);
-  const [baseHeight, setBaseHeight] = useState<number | null>(null);
   const paneRef = useRef<HTMLDivElement>(null);
-  const contentRef = useRef<HTMLDivElement>(null);
-  const innerRef = useRef<HTMLDivElement>(null);
   const inline = artifact.inline;
 
   // Reset zoom when switching to a different artifact.
   useEffect(() => {
     setZoom(1);
   }, [artifact.path, artifact.filename]);
-
-  // Track the content area's inner width (the width the artifact is laid out
-  // at when zoom = 1) and the artifact's unscaled height, so we can reserve a
-  // correctly-sized scroll area for the transform-scaled content.
-  useEffect(() => {
-    const content = contentRef.current;
-    const inner = innerRef.current;
-    if (!content || !inner) return;
-    const measure = () => {
-      setBaseWidth(content.clientWidth);
-      setBaseHeight(inner.offsetHeight);
-    };
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(content);
-    ro.observe(inner);
-    return () => ro.disconnect();
-  }, [preview, inline, artifact.path]);
 
   // Drag the left edge to resize the pane, mirroring the browser pane.
   const startResize = useCallback((e: React.PointerEvent) => {
@@ -271,18 +252,10 @@ export function ArtifactPreviewPane({
   }, []);
 
   const paneStyle = paneWidth != null ? { flex: `0 0 ${paneWidth}px` } : undefined;
-
-  // Transform-scale zoom: scale the content and reserve a scroll area sized to
-  // the scaled dimensions so zooming in lets you pan, and zooming out fits all.
-  const innerStyle: React.CSSProperties = {
-    transform: `scale(${zoom})`,
-    transformOrigin: "0 0",
-    width: baseWidth != null ? `${baseWidth}px` : "100%",
-  };
-  const scalerStyle: React.CSSProperties = {
-    width: baseWidth != null ? `${baseWidth * zoom}px` : "100%",
-    height: baseHeight != null ? `${baseHeight * zoom}px` : undefined,
-  };
+  // CSS zoom reflows the document so the scroll area grows/shrinks naturally;
+  // the header and pane chrome stay fixed because they are siblings, not
+  // descendants, of the zoomed wrapper.
+  const zoomStyle = { zoom } as React.CSSProperties;
 
   const resizer = (
     <div
@@ -334,11 +307,9 @@ export function ArtifactPreviewPane({
             </button>
           </div>
         </div>
-        <div className="artifact-preview-content" ref={contentRef}>
-          <div className="artifact-preview-scaler" style={scalerStyle}>
-            <div className="artifact-preview-zoom" ref={innerRef} style={innerStyle}>
-              <JsxPreview code={inline.code} lang={inline.kind} variant="pane" />
-            </div>
+        <div className="artifact-preview-content">
+          <div className="artifact-preview-zoom" style={zoomStyle}>
+            <JsxPreview code={inline.code} lang={inline.kind} variant="pane" />
           </div>
         </div>
       </div>
@@ -392,16 +363,14 @@ export function ArtifactPreviewPane({
           </button>
         </div>
       </div>
-      <div className="artifact-preview-content" ref={contentRef}>
+      <div className="artifact-preview-content">
         {error ? (
           <div className="artifact-preview-error">Could not open preview: {error}</div>
         ) : !preview ? (
           <div className="artifact-preview-loading">Loading preview…</div>
         ) : (
-          <div className="artifact-preview-scaler" style={scalerStyle}>
-            <div className="artifact-preview-zoom" ref={innerRef} style={innerStyle}>
-              <PreviewBody preview={preview} />
-            </div>
+          <div className="artifact-preview-zoom" style={zoomStyle}>
+            <PreviewBody preview={preview} />
           </div>
         )}
       </div>

@@ -6,264 +6,57 @@
 pub mod artifacts;
 pub mod codeexec;
 pub mod commands;
+pub mod dispatch;
+pub mod local_models;
 pub mod office;
+pub mod permission;
+pub mod prompts;
+pub mod proto;
 pub mod providers;
 pub mod pygen;
+pub mod python_runtime;
+pub mod streaming;
 pub mod tools;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use rusqlite::Connection;
-use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager};
+#[cfg(test)]
+use serde_json::json;
+use tauri::{AppHandle, Emitter};
 
-/// Max model⇄tool round-trips in a single tool-enabled turn before we stop,
-/// to bound cost and prevent runaway loops.
-const MAX_TOOL_ITERS: usize = 15;
-
-/// Built-in guidance appended to every tool-enabled turn so the model knows how
-/// to produce high-quality artifacts. The user's custom system prompt and
-/// skills are layered on top of this (never replacing it).
-const TOOL_GUIDE: &str = "You are Conduit, a local-first desktop assistant with tools. \
-When the user asks for a document, report, spreadsheet or slide deck, call \
-`generate_document` and WRITE PYTHON that builds a genuinely professional file \
-(python-docx for docx, python-pptx for pptx, openpyxl for xlsx, reportlab for \
-pdf). Design it properly: a clear title/cover, consistent typography and \
-heading hierarchy, a tasteful colour palette, tables where useful, real \
-multi-slide layouts for decks, and page numbers/footers where appropriate — \
-never a plain text dump. Save the file to the path in the CONDUIT_OUTPUT \
-environment variable. Only use `generate_file` for plain text formats (txt, md, \
-csv, json, html). Prefer accurate, well-structured content over filler. \
-When the user asks for a diagram (flowchart, architecture, mind-map, sequence, \
-etc.), call `generate_diagram` and author it as inline <svg> — it renders \
-inline in the chat, sized to its content, and can be exported to SVG/PNG. \
-When you write a React/JSX component for the user to look at, put it in a \
-single ```jsx (or ```tsx) code block as one self-contained component with a \
-default export (`export default function App() { … }`) and no external imports \
-beyond `react` — it is rendered live in a sandboxed preview.";
-
-/// Coarse classification of the active model. Frontier hosted models (Claude,
-/// GPT, etc.) follow implied instructions reliably; locally-run or
-/// small-context models do not, so they get the STRICT addendum that repeats
-/// the highest-risk rules explicitly. The prompt assembled for a turn must
-/// match what the live tool registry actually exposes — see `tools.rs`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModelClass {
-    /// Large hosted models served via an API (Claude, GPT, etc.). Lighter
-    /// instruction is sufficient; the BASE prompt alone applies.
-    Frontier,
-    /// Locally-run or small-context models. Gets the STRICT addendum appended
-    /// after BASE, because this app cannot afford silent tool-use failures.
-    Local,
-}
-
-/// Heuristic mapping from a model id string to its class. Known local/smaller
-/// open-weight families are classified `Local`; everything else (including
-/// unknown hosted models) defaults to `Frontier`. Extend this match list as
-/// new local runtimes are wired in — the default must stay optimistic for
-/// hosted models so they aren't burdened with the STRICT repeat.
-pub fn classify_model(model: &str) -> ModelClass {
-    let m = model.to_ascii_lowercase();
-    let local_markers = [
-        "llama", "qwen", "phi-", "phi3", "gemma", "mistral-7b", "mixtral",
-        "deepseek-r1", "deepseek-coder", "yi-", "starcoder", "codegemma",
-        "stablelm", "falcon", "orca", "vicuna", "wizardlm", " neural",
-        "local", "ollama",
-    ];
-    if local_markers.iter().any(|tok| m.contains(tok)) {
-        ModelClass::Local
-    } else {
-        ModelClass::Frontier
-    }
-}
-
-/// The CORE system prompt — the source-code layer, versioned with app
-/// releases and never user-editable. Concatenated FIRST, before the user's
-/// custom prompt (Settings → Assistant) and before any conditionally-loaded
-/// skills. Tool names and the artifact mechanism below must stay in sync with
-/// the live tool registry in `tools.rs` (`WEB_SEARCH`, `GENERATE_DOCUMENT`,
-/// `GENERATE_FILE`, `FETCH_URL`, `OPEN_URL`, `RUN_CODE`).
-fn core_prompt_base() -> &'static str {
-    "You are running inside Conduit, a desktop application, in the Chat tab. \
-You are a general assistant, separate from Conduit's Dev tab coding agent panes \
-(which run Claude Code / Kimi Code directly against real project repositories — \
-you do not have that access here).\n\n\
-## Tool contract\n\
-You have access to some or all of the following tools, depending on the active \
-provider's capabilities. Only call a tool if it is present in your actual tool \
-list for this turn — never assume a tool exists because it is described here.\n\n\
-- `web_search(query)` — returns search results. May be a native provider tool \
-or an injected fallback (Tavily). Call it the same way regardless of which \
-backend serves it.\n\
-- `generate_document(format, instructions)` — writes Python (python-docx, \
-python-pptx, openpyxl or reportlab) that builds a real, professionally \
-formatted file and saves it to the CONDUIT_OUTPUT path. Use for docx/pptx/xlsx/pdf. \
-Producing the file also surfaces it as a downloadable artifact in the panel.\n\
-- `generate_file(filename, content)` — for plain text formats (txt, md, csv, \
-json, html). Also surfaces the file as an artifact.\n\
-- `generate_diagram(filename, title, html)` — the tool for EVERY diagram \
-(architecture, flowchart, sequence, feature breakdown, mind-map, anything \
-visual). Author it as ONE root inline <svg> (with xmlns, viewBox and \
-width/height): nodes as <rect rx=..>, labels as <text>, connectors as \
-<path>/<line> with an arrowhead <marker>. This is true vector, so it exports \
-crisply to SVG and PNG. Produces a self-contained .html file that renders \
-inline in the chat.\n\
-- `fetch_url(url)` — fetch a specific page's readable text by URL.\n\
-- `open_url(url)` — open a page in the app's built-in browser pane and return \
-its text.\n\
-- `browser_read()` — inspect the page currently open in the browser pane: its \
-URL, title, visible text, and a numbered list of interactive elements (each \
-with a `ref`).\n\
-- `browser_click(ref)` / `browser_type(ref, text)` / `browser_scroll(amount)` — \
-drive that page: click a link/button, type into an input, or scroll. Refs come \
-from the latest `browser_read`.\n\
-- `run_code(language, code)` — execute a short snippet (python/javascript/bash) \
-in a sandbox. Only present when code execution is explicitly enabled for this chat.\n\n\
-If a tool described here is not actually available in a given turn, do not \
-claim to have used it. State the limitation plainly (e.g. \"the active model \
-doesn't have search available — this answer isn't verified against current \
-information\").\n\n\
-## Artifact-panel protocol\n\
-- For docx/pptx/xlsx/pdf and plain-text files, produce the file via \
-`generate_document` or `generate_file`; the file is surfaced to the artifact \
-panel automatically — there is no separate \"emit artifact\" tool to call.\n\
-- For Markdown/SVG/HTML meant to be read in-app, put it directly in your \
-text response (the frontend renders fenced blocks) rather than inventing a tool \
-call for it.\n\
-- Diagrams (flowcharts, sequence, state, class, ER, gantt, mindmaps, etc.): \
-ALWAYS call `generate_diagram` and author the diagram as inline <svg> — the app \
-renders it inline in the chat as a real, exportable vector diagram. \
-Whenever you decide a diagram would help explain something, or the user asks \
-you to diagram/visualize it, call `generate_diagram`. Do NOT emit ```mermaid \
-blocks (Mermaid is not used here), never describe a diagram in prose without \
-producing it, and never draw it with ASCII art.\n\
-- Do not narrate the artifact's contents at length after producing it — a short \
-one-line acknowledgment is enough; the panel is the primary surface.\n\n\
-## Browsing the web interactively\n\
-When the user asks you to *do* something on a site (search on it, follow a \
-link, fill a form, read further down a page), drive the built-in browser in an \
-observe→act loop: (1) `open_url` to load the starting page; (2) `browser_read` \
-to see the current URL, text and the numbered interactive elements; (3) act \
-with `browser_click`/`browser_type`/`browser_scroll` using a `ref` from that \
-read; (4) `browser_read` again to observe the result, and repeat until the goal \
-is met. The `ref` numbers are only valid for the most recent read — always \
-re-read after the page changes. Prefer `open_url`/`browser_read` (which return \
-page text) over `fetch_url` when the user should also *see* the page. If an \
-action reports an error or a page won't load, say so plainly rather than \
-pretending it worked.\n\n\
-## Skill loading\n\
-Skill files (docx, pptx, pdf, diagram-html-svg, and any user-added skills from \
-Settings → Assistant) are user-enabled instructions. When a skill is enabled, \
-its content is appended to your context on every turn — they are not loaded \
-conditionally. Use a skill's guidance only when it applies to the current \
-request; its instructions take precedence over your general knowledge of that \
-library/format, since it encodes known failure modes and house style the \
-general knowledge doesn't.\n\n\
-## Scope boundary\n\
-You do not have access to the user's local project directories, git state, or \
-filesystem outside the sandbox's scratch directory. If a request is clearly a \
-coding/project task against a real repository, say plainly that it belongs in \
-the Dev tab, rather than attempting it without the necessary access or \
-fabricating a plausible-looking response.\n\n\
-## Session isolation\n\
-You do not have memory of the user's other Conduit sessions (other Chat \
-conversations, or Dev tab sessions) unless their content has been explicitly \
-pasted or referenced in this conversation. Do not assume continuity you don't \
-actually have context for."
-}
-
-/// STRICT addendum — appended only when `ModelClass == Local`. Restates the
-/// rules above more explicitly and repeats the highest-risk ones, because
-/// smaller/local models follow implied instructions less reliably than
-/// frontier models and this app cannot afford silent tool-use failures.
-fn core_prompt_strict() -> &'static str {
-    "\n\n## STRICT ADDENDUM (local/small-context model)\n\
-The rules above are restated more explicitly here, because you are running on a \
-smaller/local model that follows implied instructions less reliably.\n\n\
-1. Before answering, check: does this request need a tool? If it needs current \
-information, current prices, or anything you cannot know with certainty from \
-training alone, you MUST call `web_search` before answering, if it is \
-available. Do not answer from memory and imply it is current.\n\
-2. Before generating any document/deck/PDF, you MUST call `generate_document` \
-(or `generate_file` for plain text), produce an actual file, and let it surface \
-as an artifact. Describing what the file would contain, without calling these \
-tools, is an incorrect response — treat it as a failed turn, not a shortcut.\n\
-3. The tool names are EXACTLY: `web_search`, `generate_document`, \
-`generate_file`, `generate_diagram`, `fetch_url`, `open_url`, `browser_read`, \
-`browser_click`, `browser_type`, `browser_scroll`, `run_code`. Do not call \
-`execute_code`, `emit_artifact`, or any other name — those do not exist here.\n\
-4. If a tool call fails or is unavailable, say so in one plain sentence. Do \
-not continue as if it had succeeded.\n\
-5. Keep tool-call arguments minimal and matching the schema in your tool list — \
-do not invent additional parameters.\n\
-6. If your available tool-calling format cannot express a call, fall back to a \
-single fenced code block labeled `tool_call` containing a JSON object with \
-`tool` and `arguments` keys — the app will parse this fallback format."
-}
-
-/// Build the CORE system prompt for a given provider/model class. Always
-/// included; concatenated before the user's custom prompt and any skills.
-/// `model` is the raw model id (used only to classify Frontier vs Local);
-/// `provider` is reserved for future provider-specific tweaks but currently
-/// does not vary the base text.
-pub fn core_prompt_for(provider: ChatProviderId, model: &str) -> String {
-    let _ = provider; // reserved: no provider-specific branching yet
-    let base = core_prompt_base();
-    match classify_model(model) {
-        ModelClass::Frontier => base.to_string(),
-        ModelClass::Local => format!("{}{}", base, core_prompt_strict()),
-    }
-}
-
-/// Assemble the effective system prompt from the built-in CORE prompt (always
-/// included, provider/model-aware), the built-in tool guidance (only when
-/// tools are on), the user's custom system prompt, and any enabled skills.
-/// Returns `None` when nothing applies.
-pub fn build_system_prompt(
-    provider: ChatProviderId,
-    model: &str,
-    custom: Option<&str>,
-    skills: &[(String, String)],
-    tools_enabled: bool,
-) -> Option<String> {
-    let mut parts: Vec<String> = Vec::new();
-    parts.push(core_prompt_for(provider, model));
-    if tools_enabled {
-        parts.push(TOOL_GUIDE.to_string());
-    }
-    if let Some(c) = custom {
-        let c = c.trim();
-        if !c.is_empty() {
-            parts.push(c.to_string());
-        }
-    }
-    if !skills.is_empty() {
-        let mut s = String::from(
-            "The user has provided the following reusable skills. Apply the \
-             relevant ones when they fit the request:\n",
-        );
-        for (name, body) in skills {
-            let body = body.trim();
-            if body.is_empty() {
-                continue;
-            }
-            s.push_str(&format!("\n## Skill: {}\n{}\n", name.trim(), body));
-        }
-        parts.push(s);
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("\n\n"))
-    }
-}
+// System-prompt assembly (CORE prompt, STRICT addendum, tool guide, research
+// scaffolding, and the final assembler) lives in `prompts.rs`. Re-export the
+// two entry points that `commands.rs` calls via `crate::chat::*`.
+pub use prompts::{build_system_prompt, is_research_request};
 
 use crate::db;
 use crate::types::*;
+use proto::*;
 use providers::*;
+use streaming::*;
+
+
+/// A pending per-action approval for a filesystem tool call. Created when the
+/// central `check_permission` returns `NeedsApproval`; the tool loop pauses on
+/// the matching oneshot receiver until the UI calls `resolve_tool_action`.
+#[allow(dead_code)] // `tool`/`args`/`summary` retained for auditing/future use
+pub(crate) struct PendingApproval {
+    /// The chat session this approval belongs to (so a cancelled/aborted stream
+    /// can drop all its pending approvals).
+    pub chat_session_id: String,
+    /// Tool name (e.g. `write_file`) — shown on the card.
+    pub tool: String,
+    /// The verbatim JSON arguments the model produced.
+    pub args: serde_json::Value,
+    /// A short human-facing description of the action (e.g. "write_file → C:/…").
+    pub summary: String,
+    /// Sender resumed when the UI resolves the card. `true` = approve & run,
+    /// `false` = deny. None/dropped = stream cancelled → deny.
+    pub response_tx: tokio::sync::oneshot::Sender<bool>,
+}
 
 /// Manages active chat streams. Each chat_session_id maps to a cancellation
 /// token (tokio AbortHandle). Only one stream per session is allowed — sending
@@ -271,6 +64,10 @@ use providers::*;
 pub struct ChatManager {
     pub client: reqwest::Client,
     streams: Mutex<HashMap<String, tokio::task::AbortHandle>>,
+    /// Pending per-action approvals keyed by a synthetic id. A filesystem
+    /// tool call that `check_permission` flags as `NeedsApproval` registers
+    /// here and pauses its loop on the oneshot receiver until the UI resolves.
+    pending: Mutex<HashMap<String, PendingApproval>>,
 }
 
 impl ChatManager {
@@ -278,6 +75,56 @@ impl ChatManager {
         Self {
             client: reqwest::Client::new(),
             streams: Mutex::new(HashMap::new()),
+            pending: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Register a pending approval and return its synthetic id + the receiver
+    /// the tool loop should await. The loop pauses on the receiver until
+    /// `resolve_pending_approval` is called.
+    pub(crate) fn register_pending_approval(
+        &self,
+        chat_session_id: &str,
+        tool: &str,
+        args: serde_json::Value,
+        summary: String,
+    ) -> (String, tokio::sync::oneshot::Receiver<bool>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let id = next_synthetic_tool_id();
+        self.pending.lock().insert(
+            id.clone(),
+            PendingApproval {
+                chat_session_id: chat_session_id.to_string(),
+                tool: tool.to_string(),
+                args,
+                summary,
+                response_tx: tx,
+            },
+        );
+        (id, rx)
+    }
+
+    /// Resolve a pending approval by id. Returns the chat session id + the
+    /// PendingApproval (so the caller can run the tool / build the deny
+    /// message). `None` when the id is unknown (already resolved, cancelled,
+    /// or never existed) — the UI treats that as a no-op.
+    pub(crate) fn take_pending_approval(&self, id: &str) -> Option<PendingApproval> {
+        self.pending.lock().remove(id)
+    }
+
+    /// Drop every pending approval for a session (used when its stream is
+    /// cancelled/aborted — the senders drop, the receivers error, and the
+    /// paused loops resume as "denied").
+    fn drop_pending_for_session(&self, chat_session_id: &str) {
+        let to_remove: Vec<String> = self
+            .pending
+            .lock()
+            .iter()
+            .filter(|(_, p)| p.chat_session_id == chat_session_id)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in to_remove {
+            self.pending.lock().remove(&k); // sender drops → receiver errors
         }
     }
 
@@ -290,7 +137,7 @@ impl ChatManager {
     /// The user message is assumed already persisted by the caller (commands layer).
     /// Cancelling any existing stream for this session first.
     pub fn send(
-        &self,
+        self: &Arc<Self>,
         chat_session_id: String,
         provider_id: ChatProviderId,
         model: String,
@@ -299,10 +146,19 @@ impl ChatManager {
         effort: Option<String>,
         tools_enabled: bool,
         code_exec_enabled: bool,
+        permission_mode: permission::PermissionMode,
+        fs_roots: Vec<String>,
+        // Connector ids attached to this conversation (per-session opt-in).
+        // When tools are enabled, each is connected (OAuth token refreshed,
+        // MCP session opened, tools listed + classified) at the start of the
+        // spawned turn; their remote tools are merged into the schema and
+        // routed through the connector permission gate in dispatch.
+        connector_ids: Vec<String>,
         system: Option<String>,
         messages: Vec<ChatMessage>,
         db: Arc<Mutex<Connection>>,
         app: AppHandle,
+        research_mode: bool,
     ) {
         // Cancel any existing stream for this session.
         self.cancel(&chat_session_id);
@@ -316,20 +172,22 @@ impl ChatManager {
             effort,
         };
 
-        // OpenRouter speaks the OpenAI wire format, so it rides the OpenAI
-        // request/tool path.
+        // OpenRouter and LocalGguf speak the OpenAI wire format, so they ride
+        // the OpenAI request/tool path.
         let is_openai = matches!(
             provider_id,
             ChatProviderId::OpenAI
                 | ChatProviderId::OpenAICompatible
                 | ChatProviderId::OpenRouter
+                | ChatProviderId::LocalGguf
         );
         let is_anthropic = matches!(
             provider_id,
             ChatProviderId::Anthropic | ChatProviderId::AnthropicCompatible
         );
         // Tools need a base URL; compatible providers already carry one, native
-        // providers fall back to their default endpoint.
+        // providers fall back to their default endpoint. LocalGguf requires the
+        // stored base_url (written by the sidecar-start command).
         let tool_base = base_url.clone().unwrap_or_else(|| {
             if matches!(provider_id, ChatProviderId::OpenRouter) {
                 providers::OpenRouterProvider::DEFAULT_BASE.to_string()
@@ -342,16 +200,40 @@ impl ChatManager {
 
         let client = self.client.clone();
         let sid = chat_session_id.clone();
+        let pcaps = prompts::provider_capabilities(provider_id.clone(), &chat_req.model);
         let caps = tools::ToolCaps {
             code_exec: code_exec_enabled,
+            fs_roots,
+            web_search: pcaps.native_web_search,
+            requires_local_sandbox: pcaps.requires_local_sandbox,
+            attached_connectors: Arc::new(Vec::new()),
         };
+        let mgr = Arc::clone(self);
 
         let handle = tokio::spawn(async move {
+            // When tools are enabled and the session has connectors attached,
+            // connect to each vendor's remote MCP server now (refreshing the
+            // OAuth token, listing + classifying its tools). This is per-turn
+            // network I/O; failures are non-fatal — a connector that won't
+            // connect is skipped and the turn proceeds with the rest. See
+            // connectors::session::connect_all.
+            let mut caps = caps;
+            if tools_enabled && !connector_ids.is_empty() {
+                let attached = crate::connectors::connect_all(&app, &connector_ids).await;
+                if !attached.is_empty() {
+                    caps.attached_connectors = Arc::new(attached);
+                }
+            }
             let result = if tools_enabled && is_openai {
-                run_openai_tool_loop(&client, &tool_base, &api_key, &chat_req, caps, &sid, &app).await
+                run_openai_tool_loop(
+                    &client, &tool_base, &api_key, &chat_req, &caps, permission_mode, &mgr, &sid, &app, research_mode,
+                )
+                .await
             } else if tools_enabled && is_anthropic {
-                run_anthropic_tool_loop(&client, &tool_base, &api_key, &chat_req, caps, &sid, &app)
-                    .await
+                run_anthropic_tool_loop(
+                    &client, &tool_base, &api_key, &chat_req, &caps, permission_mode, &mgr, &sid, &app, research_mode,
+                )
+                .await
             } else {
                 run_chat_stream(
                     &client,
@@ -452,10 +334,13 @@ impl ChatManager {
     }
 
     /// Cancel an active stream for the given session (no-op if none active).
+    /// Also drops any pending per-action approvals for the session so their
+    /// paused loops resume as "denied" rather than hanging forever.
     pub fn cancel(&self, chat_session_id: &str) {
         if let Some(handle) = self.streams.lock().remove(chat_session_id) {
             handle.abort();
         }
+        self.drop_pending_for_session(chat_session_id);
     }
 
     /// App-exit cleanup: cancel all active streams.
@@ -464,12 +349,17 @@ impl ChatManager {
         for handle in handles {
             handle.abort();
         }
+        // Drop all pending approvals too.
+        let ids: Vec<String> = self.pending.lock().keys().cloned().collect();
+        for id in ids {
+            self.pending.lock().remove(&id);
+        }
     }
 }
 
 /// Runs the full SSE stream lifecycle for one chat request.
 /// Returns the accumulated assistant text and optional usage info.
-async fn run_chat_stream(
+pub(crate) async fn run_chat_stream(
     client: &reqwest::Client,
     provider: &dyn ChatProvider,
     chat_session_id: &str,
@@ -557,1032 +447,108 @@ async fn run_chat_stream(
     Ok((full_text, usage))
 }
 
-/// Emit one `chat:token` event and append it to the running transcript so the
-/// persisted assistant message ends up identical to what was streamed.
-fn emit_token(app: &AppHandle, sid: &str, token: &str, full: &mut String) {
-    if token.is_empty() {
-        return;
-    }
-    full.push_str(token);
-    let _ = app.emit(
-        "chat:token",
-        ChatTokenPayload {
-            chat_session_id: sid.to_string(),
-            token: token.to_string(),
-        },
-    );
-}
-
-/// Directory where generated artifacts are written (`<Documents>/Conduit`,
-/// falling back to home, then temp). Created on demand by the artifact writer.
-fn artifacts_dir(app: &AppHandle) -> PathBuf {
-    let base = app
-        .path()
-        .document_dir()
-        .or_else(|_| app.path().home_dir())
-        .unwrap_or_else(|_| std::env::temp_dir());
-    base.join("Conduit")
-}
-
-/// Run a tool and, if it produced a file, notify the UI. Returns the text to
-/// feed back to the model.
-async fn run_tool(
-    client: &reqwest::Client,
-    artifacts_dir: &std::path::Path,
-    caps: tools::ToolCaps,
-    app: &AppHandle,
-    sid: &str,
-    name: &str,
-    args: &Value,
-) -> String {
-    // Agentic browser tools act on the live browser-pane webview, so they run
-    // here (where the AppHandle -> BrowserState is available) rather than in
-    // the provider-agnostic execute_tool dispatcher.
-    if let Some(text) = run_browser_tool(app, name, args).await {
-        return text;
-    }
-    let outcome = tools::execute_tool(client, artifacts_dir, caps, name, args).await;
-    if let Some(a) = outcome.artifact {
-        // Persist to the Artifacts sidebar (30-day retention) before notifying
-        // the UI. A DB failure must not block the chat, so errors are ignored.
-        let kind = std::path::Path::new(&a.filename)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        {
-            let db = app.state::<crate::DbState>();
-            let conn = db.0.lock();
-            let _ = db::insert_artifact(&conn, Some(sid), &a.filename, &a.path, &kind);
-        }
-        let _ = app.emit(
-            "chat:artifact",
-            ChatArtifactPayload {
-                chat_session_id: sid.to_string(),
-                path: a.path,
-                filename: a.filename,
-            },
-        );
-    }
-    if let Some(url) = outcome.browse_url {
-        let _ = app.emit(
-            "chat:open-browser",
-            ChatOpenBrowserPayload {
-                chat_session_id: sid.to_string(),
-                url,
-            },
-        );
-    }
-    outcome.text
-}
-
-/// Dispatch the agentic browser tools (`browser_read`/`browser_click`/
-/// `browser_type`/`browser_scroll`) against the active browser-pane webview.
-/// Returns `None` for any other tool name so the caller falls through to the
-/// normal tool dispatcher.
-async fn run_browser_tool(app: &AppHandle, name: &str, args: &Value) -> Option<String> {
-    use tools::{BROWSER_CLICK, BROWSER_READ, BROWSER_SCROLL, BROWSER_TYPE};
-    if !matches!(name, BROWSER_READ | BROWSER_CLICK | BROWSER_TYPE | BROWSER_SCROLL) {
-        return None;
-    }
-    let browser = app.state::<crate::BrowserState>();
-    let mgr = browser.0.clone();
-    let result = match name {
-        BROWSER_READ => mgr.read_page().await,
-        BROWSER_CLICK => match args.get("ref").and_then(|v| v.as_i64()) {
-            Some(r) => mgr.click_ref(r).await,
-            None => Err("browser_click requires an integer \"ref\" from browser_read.".to_string()),
-        },
-        BROWSER_TYPE => {
-            let r = args.get("ref").and_then(|v| v.as_i64());
-            let text = args.get("text").and_then(|v| v.as_str());
-            match (r, text) {
-                (Some(r), Some(text)) => mgr.type_into(r, text).await,
-                _ => Err("browser_type requires an integer \"ref\" and \"text\".".to_string()),
-            }
-        }
-        BROWSER_SCROLL => {
-            let dy = args.get("amount").and_then(|v| v.as_i64()).unwrap_or(600);
-            mgr.scroll_by(dy).await
-        }
-        _ => unreachable!("guarded by matches! above"),
-    };
-    Some(match result {
-        Ok(text) => text,
-        Err(e) => format!("{name} failed: {e}"),
-    })
-}
-
-/// Monotonic counter for synthetic tool-call ids. Real OpenAI ids come from
-/// the server; when we synthesize calls from Hermes text we still need a
-/// unique id so the echoed assistant message and the matching `tool` result
-/// can be paired correctly on the next request.
-fn next_synthetic_tool_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("call_synth_{n}")
-}
-
-/// Parse the `arguments` string of an OpenAI-style tool call into a JSON
-/// object. Some providers emit malformed payloads — e.g. a stray empty object
-/// prepended (`"{}{\"query\":\"x\"}"`) or several concatenated objects. We read
-/// every JSON value in the string and merge object fields (later keys win) so a
-/// leading `{}` no longer wipes out the real arguments.
-fn parse_tool_args(s: &str) -> Value {
-    let s = s.trim();
-    if s.is_empty() {
-        return json!({});
-    }
-    // Fast path: a single well-formed object.
-    if let Ok(v @ Value::Object(_)) = serde_json::from_str::<Value>(s) {
-        return v;
-    }
-    let mut merged = serde_json::Map::new();
-    let stream = serde_json::Deserializer::from_str(s).into_iter::<Value>();
-    for item in stream {
-        if let Ok(Value::Object(map)) = item {
-            for (k, v) in map {
-                merged.insert(k, v);
-            }
-        }
-    }
-    Value::Object(merged)
-}
-
-/// Some OpenAI-compatible servers (and several Qwen / DeepSeek / MiMo
-/// fine-tunes served through `ai2.18.show`-style aggregators) do not translate
-/// the OpenAI `tools` field into the model's native tool template. Instead of
-/// populating `choices[0].message.tool_calls`, the model emits its trained
-/// **Hermes-format** tool call as plain text inside `content`:
-///
-/// ```text
-/// <tool_calls>
-/// <invoke name="web_search">
-/// <parameter name="query" type="string">cow</parameter>
-/// </invoke>
-/// </tool_calls>
-/// ```
-///
-/// This parser recovers those calls so the existing tool loop can execute
-/// them. It returns the list of `(tool_name, arguments)` pairs found, or
-/// `None` when the content carries no recognizable tool block. The sibling
-/// [`strip_hermes_tool_calls`] removes the raw markup so the user never sees
-/// the XML in the rendered message.
-fn parse_hermes_tool_calls(content: &str) -> Option<Vec<(String, Value)>> {
-    // Locate the outer block. Tolerate models that omit the closing tag by
-    // parsing from `<tool_calls>` to end-of-string.
-    let start_idx = content.find("<tool_calls>")?;
-    let after_open = &content[start_idx + "<tool_calls>".len()..];
-    let block = match after_open.find("</tool_calls>") {
-        Some(end) => &after_open[..end],
-        None => after_open,
-    };
-    if block.trim().is_empty() {
-        return None;
-    }
-
-    // The known shape is a series of `<invoke name="…">…</invoke>` regions,
-    // each holding `<parameter name="…" [type="…"]>value</parameter>` entries.
-    let mut calls: Vec<(String, Value)> = Vec::new();
-    let mut rest = block;
-    while let Some(inv) = rest.find("<invoke") {
-        rest = &rest[inv + "<invoke".len()..];
-        let body_end = rest.find("</invoke>").unwrap_or(rest.len());
-        let tag_and_body = &rest[..body_end];
-        rest = &rest[body_end..];
-
-        // The opening `<invoke …>` tag runs up to the first `>`; the invoke
-        // name lives in that slice (not in the parameter body that follows).
-        let invoke_open = match tag_and_body.find('>') {
-            Some(g) => &tag_and_body[..g],
-            None => "",
-        };
-        let name = extract_quoted_attr(invoke_open, "name").unwrap_or_default();
-        // The body starts after the opening `<invoke …>` tag's closing `>`.
-        let body = match tag_and_body.find('>') {
-            Some(g) => &tag_and_body[g + 1..],
-            None => "",
-        };
-
-        let mut args = serde_json::Map::new();
-        let mut pbody = body;
-        while let Some(p) = pbody.find("<parameter") {
-            pbody = &pbody[p + "<parameter".len()..];
-            let tag_end = match pbody.find('>') {
-                Some(g) => g + 1,
-                None => break,
-            };
-            let opening = &pbody[..tag_end - 1]; // text before the closing `>`
-            let pname = extract_quoted_attr(opening, "name").unwrap_or_default();
-            let val_end = pbody[tag_end..]
-                .find("</parameter>")
-                .map(|e| tag_end + e)
-                .unwrap_or(pbody.len());
-            let raw = pbody[tag_end..val_end].trim();
-            if !pname.is_empty() {
-                args.insert(pname.to_string(), coerce_param_value(raw));
-            }
-            pbody = &pbody[val_end..];
-        }
-
-        if !name.is_empty() {
-            calls.push((name, Value::Object(args)));
-        }
-    }
-
-    if calls.is_empty() {
-        None
-    } else {
-        Some(calls)
-    }
-}
-
-/// Extract the value of a `name="value"` (or `'value'`) attribute from the
-/// opening tag text. Returns the unquoted value, or `None` if the attribute
-/// isn't present.
-fn extract_quoted_attr(tag: &str, attr: &str) -> Option<String> {
-    let needle = format!("{attr}=");
-    let at = tag.find(&needle)?;
-    let after = tag[at + needle.len()..].trim_start();
-    let quote = after.chars().next().filter(|c| *c == '"' || *c == '\'')?;
-    let inner = &after[quote.len_utf8()..];
-    let end = inner.find(quote)?;
-    Some(inner[..end].to_string())
-}
-
-/// Remove every `<tool_calls>…</tool_calls>` region (and the alternative
-/// ` ```tool_call … ``` ` / ` ```tool_calls … ``` ` fenced variant) from a
-/// message so the raw markup is never shown to the user or re-sent as history.
-/// A dangling `<tool_calls>` with no close (the model kept streaming) is also
-/// trimmed from that point onward.
-fn strip_hermes_tool_calls(content: &str) -> String {
-    let mut out = String::with_capacity(content.len());
-    let mut rest = content;
-    while let Some(start) = rest.find("<tool_calls>") {
-        out.push_str(&rest[..start]);
-        match rest[start..].find("</tool_calls>") {
-            Some(end) => rest = &rest[start + end + "</tool_calls>".len()..],
-            None => {
-                // Unclosed block — drop the trailing remainder.
-                rest = "";
-                break;
-            }
-        }
-    }
-    out.push_str(rest);
-    out.trim().to_string()
-}
-
-/// Coerce a raw parameter string (the text between `<parameter>…</parameter>`)
-/// into a JSON value. Bare scalars that parse as bool/int/float/null are typed
-/// accordingly; JSON-looking values are parsed; everything else stays a string.
-fn coerce_param_value(raw: &str) -> Value {
-    let s = raw.trim();
-    if s.is_empty() {
-        return Value::Null;
-    }
-    match s {
-        "true" => return Value::Bool(true),
-        "false" => return Value::Bool(false),
-        "null" => return Value::Null,
-        _ => {}
-    }
-    if let Ok(n) = s.parse::<i64>() {
-        return Value::from(n);
-    }
-    if let Ok(f) = s.parse::<f64>() {
-        return json!(f);
-    }
-    if (s.starts_with('{') || s.starts_with('[')) {
-        if let Ok(v) = serde_json::from_str::<Value>(s) {
-            return v;
-        }
-    }
-    Value::String(s.to_string())
-}
-
-/// Structured narration of a tool call, emitted as a `<tool>{json}</tool>`
-/// marker so the UI can render each step as its own collapsible card (tool
-/// calling, writing a script, etc.). `json` carries a `kind` (drives the icon),
-/// a `title`, an optional one-line `detail`, and — for code-producing tools —
-/// the `code`/`lang` so the user can expand and read what was written.
-///
-/// `<tool>` blocks are display-only and stripped from re-sent history exactly
-/// like `<think>` blocks.
-fn tool_block(name: &str, args: &Value) -> String {
-    let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-    // A tool's own output must never contain the closing tag or it would
-    // truncate the block on the client; neutralize it defensively.
-    let sanitize = |v: String| v.replace("</tool>", "<\\/tool>");
-
-    let meta: Value = if name == tools::WEB_SEARCH {
-        json!({ "kind": "search", "title": "Searching the web", "detail": s("query") })
-    } else if name == tools::GENERATE_FILE {
-        json!({
-            "kind": "file",
-            "title": format!("Generating {} file \"{}\"", s("format"), s("filename")),
-            "lang": s("format"),
-            "code": sanitize(s("content")),
-        })
-    } else if name == tools::GENERATE_DOCUMENT {
-        json!({
-            "kind": "code",
-            "title": format!("Building {} document \"{}\"", s("format"), s("filename")),
-            "lang": "python",
-            "code": sanitize(s("code")),
-        })
-    } else if name == tools::GENERATE_DIAGRAM {
-        json!({
-            "kind": "code",
-            "title": format!("Designing diagram \"{}\"", s("filename")),
-            "lang": "html",
-            "code": sanitize(s("html")),
-        })
-    } else if name == tools::FETCH_URL || name == tools::OPEN_URL {
-        let verb = if name == tools::OPEN_URL { "Opening" } else { "Reading" };
-        json!({ "kind": "web", "title": format!("{verb} a web page"), "detail": s("url") })
-    } else if name == tools::RUN_CODE {
-        let lang = args
-            .get("language")
-            .and_then(|v| v.as_str())
-            .unwrap_or("code")
-            .to_string();
-        json!({
-            "kind": "code",
-            "title": format!("Running {lang} code"),
-            "lang": lang,
-            "code": sanitize(s("code")),
-        })
-    } else if name == tools::BROWSER_READ {
-        json!({ "kind": "browser", "title": "Reading the browser page" })
-    } else if name == tools::BROWSER_CLICK {
-        let r = args.get("ref").and_then(|v| v.as_i64()).unwrap_or(-1);
-        json!({ "kind": "browser", "title": format!("Clicking element [{r}] in the browser") })
-    } else if name == tools::BROWSER_TYPE {
-        json!({ "kind": "browser", "title": "Typing in the browser", "detail": s("text") })
-    } else if name == tools::BROWSER_SCROLL {
-        json!({ "kind": "browser", "title": "Scrolling the browser page" })
-    } else {
-        json!({ "kind": "tool", "title": format!("Running tool {name}") })
-    };
-
-    format!("<tool>{meta}</tool>")
-}
-
-/// Build an OpenAI-style message object, using a multimodal `content` array
-/// when the message carries images (vision), otherwise a plain string.
-fn openai_message_json(m: &ChatMessage) -> Value {
-    if m.images.is_empty() {
-        return json!({ "role": m.role, "content": m.content });
-    }
-    let mut parts: Vec<Value> = Vec::new();
-    if !m.content.is_empty() {
-        parts.push(json!({ "type": "text", "text": m.content }));
-    }
-    for img in &m.images {
-        parts.push(json!({
-            "type": "image_url",
-            "image_url": { "url": format!("data:{};base64,{}", img.media_type, img.data) }
-        }));
-    }
-    json!({ "role": m.role, "content": parts })
-}
-
-/// Build an Anthropic-style message object, using a content-block array with
-/// `image` blocks when the message carries images, otherwise a plain string.
-fn anthropic_message_json(m: &ChatMessage) -> Value {
-    if m.images.is_empty() {
-        return json!({ "role": m.role, "content": m.content });
-    }
-    let mut blocks: Vec<Value> = Vec::new();
-    if !m.content.is_empty() {
-        blocks.push(json!({ "type": "text", "text": m.content }));
-    }
-    for img in &m.images {
-        blocks.push(json!({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": img.media_type,
-                "data": img.data,
-            }
-        }));
-    }
-    json!({ "role": m.role, "content": blocks })
-}
-
-/// One streaming round against an OpenAI-style `/v1/chat/completions`.
-///
-/// Emits assistant text and reasoning tokens live (reasoning wrapped in
-/// `<think>…</think>`) exactly as they arrive over SSE, accumulates any
-/// `tool_calls` deltas, and returns the reconstructed `assistant` message value
-/// plus `(input_tokens, output_tokens, have_usage)`. Live emission stops once
-/// Hermes `<tool_call…>` markup appears in the text (an OpenAI-compatible
-/// fallback shape), so that markup is never shown to the user.
-async fn openai_stream_round(
-    client: &reqwest::Client,
-    url: &str,
-    api_key: &str,
-    body: &Value,
-    app: &AppHandle,
-    sid: &str,
-    full: &mut String,
-) -> Result<(Value, i64, i64, bool), String> {
-    use futures_util::StreamExt;
-
-    let resp = client
-        .post(url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("content-type", "application/json")
-        .json(body)
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        let b = resp.text().await.unwrap_or_default();
-        return Err(format!("HTTP {status}: {b}"));
-    }
-
-    let mut stream = resp.bytes_stream();
-    let mut pending = String::new();
-
-    let mut content = String::new();
-    let mut suppress = false;
-    let mut in_think = false;
-    // Per-index accumulation of (id, name, arguments).
-    let mut calls: Vec<(String, String, String)> = Vec::new();
-    let mut input = 0i64;
-    let mut output = 0i64;
-    let mut have_usage = false;
-
-    'outer: while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("stream read error: {e}"))?;
-        pending.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(nl) = pending.find('\n') {
-            let line: String = pending.drain(..=nl).collect();
-            let line = line.trim_end();
-            let data = match line.strip_prefix("data: ") {
-                Some(d) => d,
-                None => continue,
-            };
-            if data == "[DONE]" {
-                break 'outer;
-            }
-            let v: Value = match serde_json::from_str(data) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
-                input = u.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(input);
-                output = u
-                    .get("completion_tokens")
-                    .and_then(|x| x.as_i64())
-                    .unwrap_or(output);
-                have_usage = true;
-            }
-            let delta = match v.pointer("/choices/0/delta") {
-                Some(d) => d,
-                None => continue,
-            };
-            if let Some(c) = delta.get("content").and_then(|x| x.as_str()) {
-                if !c.is_empty() {
-                    if in_think {
-                        emit_token(app, sid, "</think>", full);
-                        in_think = false;
-                    }
-                    content.push_str(c);
-                    if !suppress && content.contains("<tool_call") {
-                        suppress = true;
-                    }
-                    if !suppress {
-                        emit_token(app, sid, c, full);
-                    }
-                }
-            }
-            if let Some(r) = delta
-                .get("reasoning_content")
-                .and_then(|x| x.as_str())
-                .or_else(|| delta.get("reasoning").and_then(|x| x.as_str()))
-            {
-                if !r.is_empty() {
-                    if !in_think {
-                        emit_token(app, sid, "<think>", full);
-                        in_think = true;
-                    }
-                    emit_token(app, sid, r, full);
-                }
-            }
-            if let Some(tcs) = delta.get("tool_calls").and_then(|x| x.as_array()) {
-                for tc in tcs {
-                    let idx = tc.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
-                    while calls.len() <= idx {
-                        calls.push((String::new(), String::new(), String::new()));
-                    }
-                    if let Some(id) = tc.get("id").and_then(|x| x.as_str()) {
-                        if !id.is_empty() {
-                            calls[idx].0 = id.to_string();
-                        }
-                    }
-                    if let Some(name) = tc.pointer("/function/name").and_then(|x| x.as_str()) {
-                        if !name.is_empty() {
-                            calls[idx].1 = name.to_string();
-                        }
-                    }
-                    if let Some(a) = tc.pointer("/function/arguments").and_then(|x| x.as_str()) {
-                        calls[idx].2.push_str(a);
-                    }
-                }
-            }
-        }
-    }
-
-    if in_think {
-        emit_token(app, sid, "</think>", full);
-    }
-
-    let tool_calls: Vec<Value> = calls
-        .into_iter()
-        .filter(|(_, name, _)| !name.is_empty())
-        .map(|(id, name, args)| {
-            let id = if id.is_empty() {
-                next_synthetic_tool_id()
-            } else {
-                id
-            };
-            json!({
-                "id": id,
-                "type": "function",
-                "function": { "name": name, "arguments": args },
-            })
-        })
-        .collect();
-
-    Ok((
-        json!({ "role": "assistant", "content": content, "tool_calls": tool_calls }),
-        input,
-        output,
-        have_usage,
-    ))
-}
-
-/// One streaming round against an Anthropic `/v1/messages`.
-///
-/// Emits assistant text (and `thinking`, wrapped in `<think>…</think>`) live as
-/// it streams, accumulates `tool_use` blocks (id/name/input), and returns the
-/// reconstructed `content` block array plus `(input_tokens, output_tokens,
-/// have_usage)`.
-async fn anthropic_stream_round(
-    client: &reqwest::Client,
-    url: &str,
-    api_key: &str,
-    body: &Value,
-    app: &AppHandle,
-    sid: &str,
-    full: &mut String,
-) -> Result<(Vec<Value>, i64, i64, bool), String> {
-    use futures_util::StreamExt;
-
-    let resp = client
-        .post(url)
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(body)
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        let b = resp.text().await.unwrap_or_default();
-        return Err(format!("HTTP {status}: {b}"));
-    }
-
-    // Accumulated content blocks in stream order. kind: 0=text, 1=tool, 2=thinking.
-    struct Blk {
-        kind: u8,
-        text: String,
-        id: String,
-        name: String,
-        json: String,
-    }
-    let mut blocks: Vec<Blk> = Vec::new();
-    let mut in_think = false;
-    let mut input = 0i64;
-    let mut output = 0i64;
-    let mut have_usage = false;
-
-    let mut stream = resp.bytes_stream();
-    let mut pending = String::new();
-
-    'outer: while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("stream read error: {e}"))?;
-        pending.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(nl) = pending.find('\n') {
-            let line: String = pending.drain(..=nl).collect();
-            let line = line.trim_end();
-            let data = match line.strip_prefix("data: ") {
-                Some(d) => d,
-                None => continue,
-            };
-            let p: Value = match serde_json::from_str(data) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            match p.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-                "message_start" => {
-                    if let Some(u) = p.pointer("/message/usage") {
-                        input += u.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-                        have_usage = true;
-                    }
-                }
-                "content_block_start" => {
-                    let idx = p.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
-                    let cb = p.get("content_block");
-                    let kind = match cb.and_then(|c| c.get("type")).and_then(|t| t.as_str()) {
-                        Some("tool_use") => 1,
-                        Some("thinking") => 2,
-                        _ => 0,
-                    };
-                    let id = cb
-                        .and_then(|c| c.get("id"))
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let name = cb
-                        .and_then(|c| c.get("name"))
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    while blocks.len() <= idx {
-                        blocks.push(Blk {
-                            kind: 0,
-                            text: String::new(),
-                            id: String::new(),
-                            name: String::new(),
-                            json: String::new(),
-                        });
-                    }
-                    blocks[idx].kind = kind;
-                    blocks[idx].id = id;
-                    blocks[idx].name = name;
-                }
-                "content_block_delta" => {
-                    let idx = p.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
-                    let delta = p.get("delta");
-                    let dtype = delta
-                        .and_then(|d| d.get("type"))
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("");
-                    match dtype {
-                        "text_delta" => {
-                            if let Some(t) = delta.and_then(|d| d.get("text")).and_then(|x| x.as_str()) {
-                                if in_think {
-                                    emit_token(app, sid, "</think>", full);
-                                    in_think = false;
-                                }
-                                if let Some(b) = blocks.get_mut(idx) {
-                                    b.text.push_str(t);
-                                }
-                                emit_token(app, sid, t, full);
-                            }
-                        }
-                        "input_json_delta" => {
-                            if let Some(j) =
-                                delta.and_then(|d| d.get("partial_json")).and_then(|x| x.as_str())
-                            {
-                                if let Some(b) = blocks.get_mut(idx) {
-                                    b.json.push_str(j);
-                                }
-                            }
-                        }
-                        "thinking_delta" => {
-                            if let Some(t) =
-                                delta.and_then(|d| d.get("thinking")).and_then(|x| x.as_str())
-                            {
-                                if !in_think {
-                                    emit_token(app, sid, "<think>", full);
-                                    in_think = true;
-                                }
-                                emit_token(app, sid, t, full);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                "message_delta" => {
-                    if let Some(o) = p.pointer("/usage/output_tokens").and_then(|x| x.as_i64()) {
-                        output = o;
-                        have_usage = true;
-                    }
-                }
-                "message_stop" => break 'outer,
-                _ => {}
-            }
-        }
-    }
-
-    if in_think {
-        emit_token(app, sid, "</think>", full);
-    }
-
-    let content: Vec<Value> = blocks
-        .into_iter()
-        .filter_map(|b| match b.kind {
-            1 => {
-                let input_val = serde_json::from_str::<Value>(&b.json).unwrap_or_else(|_| json!({}));
-                Some(json!({ "type": "tool_use", "id": b.id, "name": b.name, "input": input_val }))
-            }
-            2 => None,
-            _ if !b.text.is_empty() => Some(json!({ "type": "text", "text": b.text })),
-            _ => None,
-        })
-        .collect();
-
-    Ok((content, input, output, have_usage))
-}
-
-/// Agentic tool loop for OpenAI-style providers (native + compatible).
-///
-/// Uses streaming `/v1/chat/completions` calls: request with `tools`, stream
-/// the assistant's text/reasoning live, and if the model emits `tool_calls`,
-/// run each tool, feed the results back, and repeat until it produces a final
-/// answer (or the iteration cap is hit). Each tool call is emitted as a
-/// `<tool>` marker the UI shows as a collapsible card and strips from re-sent
-/// history.
-async fn run_openai_tool_loop(
-    client: &reqwest::Client,
-    base: &str,
-    api_key: &str,
-    req: &ChatRequest,
-    caps: tools::ToolCaps,
-    sid: &str,
-    app: &AppHandle,
-) -> Result<(String, Option<ChatUsage>), String> {
-    let url = format!("{base}/v1/chat/completions");
-    let tool_specs = tools::openai_tool_specs(caps);
-    let art_dir = artifacts_dir(app);
-
-    let mut messages: Vec<Value> = Vec::new();
-    if let Some(sys) = &req.system {
-        if !sys.is_empty() {
-            messages.push(json!({ "role": "system", "content": sys }));
-        }
-    }
-    for m in &req.messages {
-        messages.push(openai_message_json(m));
-    }
-
-    let mut full = String::new();
-    let mut total_in = 0i64;
-    let mut total_out = 0i64;
-    let mut have_usage = false;
-
-    for _ in 0..MAX_TOOL_ITERS {
-        let mut body = json!({
-            "model": req.model,
-            "messages": messages,
-            "stream": true,
-            "stream_options": { "include_usage": true },
-            "tools": tool_specs,
-        });
-        if let Some(e) = &req.effort {
-            body["reasoning_effort"] = json!(e);
-        }
-
-        let (message, in_tok, out_tok, have) =
-            openai_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?;
-        total_in += in_tok;
-        total_out += out_tok;
-        have_usage = have_usage || have;
-
-        let tool_calls = message
-            .get("tool_calls")
-            .and_then(|t| t.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        // Fallback for servers that don't translate the OpenAI `tools` field
-        // into the model's native tool template (common on OpenAI-compatible
-        // aggregators serving Qwen / DeepSeek / MiMo fine-tunes). The model
-        // then emits its trained Hermes-format tool call as plain text in
-        // `content`. Recover those calls and synthesize the same structured
-        // shape the loop below already handles, so the tools actually run.
-        let tool_calls: Vec<Value> = if tool_calls.is_empty() {
-            let content = message.get("content").and_then(|c| c.as_str()).unwrap_or("");
-            match parse_hermes_tool_calls(content) {
-                Some(parsed) if !parsed.is_empty() => parsed
-                    .into_iter()
-                    .map(|(name, args)| {
-                        let id = next_synthetic_tool_id();
-                        json!({
-                            "id": id,
-                            "type": "function",
-                            "function": {
-                                "name": name,
-                                "arguments": args.to_string(),
-                            },
-                        })
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            }
-        } else {
-            tool_calls
-        };
-
-        if !tool_calls.is_empty() {
-            // The assistant turn (carrying tool_calls) must be echoed back
-            // before the matching tool results. Some providers emit malformed
-            // `arguments` (e.g. a stray `{}` prefix); we normalize them to clean
-            // JSON here so the re-sent history doesn't confuse the model into
-            // repeating the same call.
-            let mut echoed = message.clone();
-            // When the calls were recovered from Hermes text, the message's
-            // `content` still holds the raw `<tool_calls>` markup. Strip it so
-            // the markup is neither re-sent nor shown to the user downstream.
-            if let Some(c) = echoed.get_mut("content").and_then(|c| c.as_str()) {
-                let stripped = strip_hermes_tool_calls(c);
-                if stripped != c {
-                    if let Some(obj) = echoed.as_object_mut() {
-                        obj.insert("content".to_string(), Value::String(stripped));
-                    }
-                }
-            }
-            if let Some(arr) = echoed
-                .get_mut("tool_calls")
-                .and_then(|t| t.as_array_mut())
-            {
-                for tc in arr.iter_mut() {
-                    if let Some(a) = tc.get_mut("function").and_then(|f| f.get_mut("arguments")) {
-                        let cleaned = a
-                            .as_str()
-                            .map(parse_tool_args)
-                            .unwrap_or_else(|| json!({}));
-                        *a = json!(cleaned.to_string());
-                    }
-                }
-            }
-            messages.push(echoed);
-            for tc in &tool_calls {
-                let id = tc.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                let name = tc
-                    .get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let args_str = tc
-                    .get("function")
-                    .and_then(|f| f.get("arguments"))
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("{}");
-                let args = parse_tool_args(args_str);
-
-                emit_token(app, sid, &tool_block(&name, &args), &mut full);
-                let result = run_tool(client, &art_dir, caps, app, sid, &name, &args).await;
-                messages.push(json!({
-                    "role": "tool",
-                    "tool_call_id": id,
-                    "content": result,
-                }));
-            }
-            continue;
-        }
-
-        // No tool calls → final answer. The text was already streamed live in
-        // `openai_stream_round` (Hermes markup, if any, was suppressed there).
-        return Ok((full, build_usage(true, total_in, total_out, have_usage)));
-    }
-
-    emit_token(
-        app,
-        sid,
-        "\n\n_Stopped after reaching the tool-call limit._",
-        &mut full,
-    );
-    Ok((full, build_usage(true, total_in, total_out, have_usage)))
-}
-
-/// Agentic tool loop for Anthropic-style providers (native + compatible).
-async fn run_anthropic_tool_loop(
-    client: &reqwest::Client,
-    base: &str,
-    api_key: &str,
-    req: &ChatRequest,
-    caps: tools::ToolCaps,
-    sid: &str,
-    app: &AppHandle,
-) -> Result<(String, Option<ChatUsage>), String> {
-    let url = format!("{base}/v1/messages");
-    let tool_specs = tools::anthropic_tool_specs(caps);
-    let art_dir = artifacts_dir(app);
-
-    let mut messages: Vec<Value> = req
-        .messages
-        .iter()
-        .map(anthropic_message_json)
-        .collect();
-
-    let mut full = String::new();
-    let mut total_in = 0i64;
-    let mut total_out = 0i64;
-    let mut have_usage = false;
-
-    for _ in 0..MAX_TOOL_ITERS {
-        let mut body = json!({
-            "model": req.model,
-            "max_tokens": req.max_tokens.unwrap_or(4096),
-            "messages": messages,
-            "tools": tool_specs,
-            "stream": true,
-        });
-        if let Some(sys) = &req.system {
-            if !sys.is_empty() {
-                body["system"] = json!(sys);
-            }
-        }
-
-        let (content, in_tok, out_tok, have) =
-            anthropic_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?;
-        total_in += in_tok;
-        total_out += out_tok;
-        have_usage = have_usage || have;
-
-        let tool_uses: Vec<&Value> = content
-            .iter()
-            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
-            .collect();
-
-        if !tool_uses.is_empty() {
-            // Echo the assistant turn (text + tool_use blocks) verbatim.
-            messages.push(json!({ "role": "assistant", "content": content }));
-
-            let mut results: Vec<Value> = Vec::new();
-            for tu in &tool_uses {
-                let id = tu.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                let name = tu.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                let args = tu.get("input").cloned().unwrap_or_else(|| json!({}));
-
-                emit_token(app, sid, &tool_block(&name, &args), &mut full);
-                let result = run_tool(client, &art_dir, caps, app, sid, &name, &args).await;
-                results.push(json!({
-                    "type": "tool_result",
-                    "tool_use_id": id,
-                    "content": result,
-                }));
-            }
-            messages.push(json!({ "role": "user", "content": results }));
-            continue;
-        }
-
-        // No tool use → final answer. Text blocks were already streamed live in
-        // `anthropic_stream_round`.
-        return Ok((full, build_usage(false, total_in, total_out, have_usage)));
-    }
-
-    emit_token(
-        app,
-        sid,
-        "\n\n_Stopped after reaching the tool-call limit._",
-        &mut full,
-    );
-    Ok((full, build_usage(false, total_in, total_out, have_usage)))
-}
-
-/// Build a `ChatUsage` summing across all tool-loop round-trips, picking the
-/// provider's cost model.
-fn build_usage(openai: bool, input: i64, output: i64, have: bool) -> Option<ChatUsage> {
-    if !have {
-        return None;
-    }
-    let cost = if openai {
-        calculate_openai_cost(input, output)
-    } else {
-        calculate_anthropic_cost(input, output)
-    };
-    Some(ChatUsage {
-        input_tokens: input,
-        output_tokens: output,
-        cost_usd: cost,
-    })
-}
-
-fn resolve_provider(id: &ChatProviderId) -> Box<dyn ChatProvider> {
-    use providers::*;
-    match id {
-        ChatProviderId::Anthropic => Box::new(AnthropicProvider),
-        ChatProviderId::OpenAI => Box::new(OpenAIProvider),
-        ChatProviderId::AnthropicCompatible => Box::new(AnthropicCompatibleProvider),
-        ChatProviderId::OpenAICompatible => Box::new(OpenAICompatibleProvider),
-        ChatProviderId::OpenRouter => Box::new(OpenRouterProvider),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn research_trigger_fires_on_research_phrases() {
+        assert!(is_research_request("Research the history of the Rust language"));
+        assert!(is_research_request("Can you find out about WebGPU adoption?"));
+        assert!(is_research_request("What's the current state of WebGPU across browsers?"));
+        assert!(is_research_request("Compare React and Vue for a new dashboard"));
+        assert!(is_research_request("Do a survey of recent transformer papers"));
+        assert!(is_research_request("Investigate the cause of the outage"));
+        assert!(is_research_request("Deep dive on CRDTs please"));
+    }
+
+    #[test]
+    fn research_override_prefix_forces_research_mode() {
+        // /research bypasses the single-fact guards even with no trigger phrase.
+        assert!(is_research_request("/research the evolution of CPUs"));
+        assert!(is_research_request("/Research something niche"));
+    }
+
+    #[test]
+    fn single_fact_questions_do_not_trigger() {
+        assert!(!is_research_request("What is the capital of France?"));
+        assert!(!is_research_request("Who is the CEO of OpenAI?"));
+        assert!(!is_research_request("population of japan"));
+        assert!(!is_research_request("definition of recursion"));
+        assert!(!is_research_request("what time is it in Tokyo"));
+    }
+
+    #[test]
+    fn plain_questions_do_not_trigger() {
+        assert!(!is_research_request("What is 2+2?"));
+        assert!(!is_research_request("Write me a haiku about the sea"));
+        assert!(!is_research_request(""));
+        assert!(!is_research_request("   "));
+    }
+
+    #[test]
+    fn research_segment_present_only_when_research_mode_and_tools() {
+        // research_mode with tools on -> segment present.
+        let p = build_system_prompt(
+            ChatProviderId::Anthropic,
+            "claude-sonnet-5",
+            None,
+            &[],
+            true,
+            true,
+        )
+        .unwrap();
+        assert!(p.contains("Research mode (this turn)"));
+        assert!(p.contains("reset_source_ledger"));
+        // tools on but not research -> no segment.
+        let p = build_system_prompt(
+            ChatProviderId::Anthropic,
+            "claude-sonnet-5",
+            None,
+            &[],
+            true,
+            false,
+        )
+        .unwrap();
+        assert!(!p.contains("Research mode (this turn)"));
+        // research_mode true but tools off -> segment suppressed (defense-in-depth).
+        let p = build_system_prompt(
+            ChatProviderId::Anthropic,
+            "claude-sonnet-5",
+            None,
+            &[],
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(!p.contains("Research mode (this turn)"));
+    }
+
+    #[test]
+    fn research_local_addendum_for_local_models() {
+        let p = build_system_prompt(
+            ChatProviderId::OpenAICompatible,
+            "llama-3.1-8b",
+            None,
+            &[],
+            true,
+            true,
+        )
+        .unwrap();
+        assert!(p.contains("running on a local/smaller model"));
+        assert!(p.contains("cap at 8 reads"));
+        // Frontier model does not get the local addendum.
+        let pf = build_system_prompt(
+            ChatProviderId::Anthropic,
+            "claude-sonnet-5",
+            None,
+            &[],
+            true,
+            true,
+        )
+        .unwrap();
+        assert!(!pf.contains("cap at 8 reads"));
+    }
 
     #[test]
     fn parse_tool_args_plain_object() {

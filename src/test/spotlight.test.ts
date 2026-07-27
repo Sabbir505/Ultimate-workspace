@@ -8,6 +8,7 @@ function term(paneId: string, lastUsedAt: number, lastInputAt = 0): Pane {
     state: "idle",
     lastUsedAt,
     lastInputAt,
+    activity: null,
     data: {
       kind: "terminal",
       sessionId: paneId,
@@ -26,6 +27,7 @@ function browser(paneId: string, lastUsedAt: number): Pane {
     state: "idle",
     lastUsedAt,
     lastInputAt: 0,
+    activity: null,
     data: {
       kind: "browser",
       url: "http://localhost:3000",

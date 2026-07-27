@@ -4,12 +4,42 @@
 // Live streaming: accumulates tokens into an assistant bubble that updates
 // as they arrive, then swaps to the final persisted message on chat:done.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useChatStore } from "../../state/chat";
+import { useChatStore, type PermissionMode } from "../../state/chat";
 import { ChatComposer, type ChatAttachment } from "./ChatComposer";
 import { MessageBubble, TypingIndicator } from "./MessageBubble";
 import { ArtifactPreviewPane } from "./ArtifactPreviewPane";
 import { ArtifactsMenu } from "./ArtifactsMenu";
-import { listChatModels, type ChatMessage } from "../../lib/ipc";
+import { ApprovalCard, FullAutoConfirmModal } from "./ApprovalFlow";
+import { listChatModels, scanLocalModels, startLocalModel, type ChatMessage, type GgufModel } from "../../lib/ipc";
+
+// Starter prompts shown on the Claude-style welcome screen for a fresh,
+// empty conversation. Clicking one sends it immediately.
+const WELCOME_PROMPTS: Array<{ title: string; sub: string }> = [
+  { title: "Write a document", sub: "Draft a brief, memo, or report" },
+  { title: "Explain a concept", sub: "Get a clear breakdown of any topic" },
+  { title: "Write code", sub: "Build a script, fix a bug, or refactor" },
+  { title: "Research a topic", sub: "Gather and synthesize sources" },
+];
+
+/** Dedupe model ids case-insensitively — some providers return the same model
+ *  in mixed case ("GPT-4o" and "gpt-4o"); first occurrence wins. Blanks dropped. */
+function dedupeModelIds(ids: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const id of ids) {
+    const key = id.trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(id);
+  }
+  return out;
+}
+
+/** Case-insensitive membership check for model id lists. */
+function includesModelId(ids: string[], id: string): boolean {
+  const key = id.trim().toLowerCase();
+  return ids.some((i) => i.trim().toLowerCase() === key);
+}
 
 export function ChatView() {
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
@@ -26,8 +56,17 @@ export function ChatView() {
   const setPreviewArtifact = useChatStore((s) => s.setPreviewArtifact);
   const sessions = useChatStore((s) => s.sessions);
   const setSessionModel = useChatStore((s) => s.setSessionModel);
+  const setSessionProvider = useChatStore((s) => s.setSessionProvider);
+  const setSessionPermissionMode = useChatStore((s) => s.setSessionPermissionMode);
+  const confirmFullAuto = useChatStore((s) => s.confirmFullAuto);
+  const cancelFullAutoConfirm = useChatStore((s) => s.cancelFullAutoConfirm);
+  const fullAutoConfirmingFor = useChatStore((s) => s.fullAutoConfirmingFor);
+  const pendingApprovals = useChatStore((s) => s.pendingApprovals);
+  const resolveApproval = useChatStore((s) => s.resolveApproval);
   const effort = useChatStore((s) => s.effort);
   const setEffort = useChatStore((s) => s.setEffort);
+  const localCtx = useChatStore((s) => s.localCtx);
+  const setLocalCtx = useChatStore((s) => s.setLocalCtx);
   const config = useChatStore((s) => s.config);
   const loadConfig = useChatStore((s) => s.loadConfig);
   const newChat = useChatStore((s) => s.newChat);
@@ -37,41 +76,137 @@ export function ChatView() {
   const artifactsByMessage = useChatStore((s) => s.artifactsByMessage);
 
   const activeSession = sessions.find((s) => s.id === activeChatSessionId) ?? null;
-  // Providers whose model list is fetched from a `/v1/models` endpoint
-  // (the compatible providers plus OpenRouter, which has a fixed endpoint).
-  const isCompatible =
-    activeSession?.provider === "anthropic_compatible" ||
-    activeSession?.provider === "openai_compatible" ||
-    activeSession?.provider === "openrouter";
+  const isLocal = activeSession?.provider === "local_gguf";
+  // The provider whose cloud models the selector lists. For local_gguf
+  // sessions that's the configured cloud provider (so the user can switch
+  // back); for any other session it's the session's own provider. Only the
+  // compatible providers + OpenRouter have a `/v1/models` endpoint to list.
+  const cloudProvider = isLocal
+    ? config?.provider && config.provider !== "local_gguf"
+      ? config.provider
+      : null
+    : (activeSession?.provider ?? null);
+  const cloudCompatible =
+    cloudProvider === "anthropic_compatible" ||
+    cloudProvider === "openai_compatible" ||
+    cloudProvider === "openrouter";
   const [models, setModels] = useState<string[]>([]);
+  const [localModels, setLocalModels] = useState<GgufModel[]>([]);
+  const [localLoading, setLocalLoading] = useState(false);
 
-  // Fetch the model list for compatible providers (uses the stored key and
-  // base URL from Settings). Refetched when the session's provider changes.
+  // Fetch the cloud model list (uses the stored key and base URL from
+  // Settings). Refetched when the listed provider changes.
   useEffect(() => {
     setModels([]);
-    if (!activeSession || !isCompatible) return;
+    if (!cloudProvider || !cloudCompatible) return;
     let stale = false;
-    void listChatModels(activeSession.provider).then((list) => {
-      if (!stale && list) setModels(list.map((m) => m.id));
+    void listChatModels(cloudProvider).then((list) => {
+      if (!stale && list) setModels(dedupeModelIds(list.map((m) => m.id)));
     });
     return () => {
       stale = true;
     };
-  }, [activeSession?.provider, isCompatible, activeChatSessionId]);
+  }, [cloudProvider, cloudCompatible, activeChatSessionId]);
 
-  const modelIds = (() => {
-    const ids = [...models];
-    if (activeSession?.model && !ids.includes(activeSession.model)) {
+  // Scan local GGUF files (default locations + any persisted folders) for
+  // EVERY session — local models are offered in the selector regardless of
+  // the session's provider; picking one switches the session to local_gguf.
+  useEffect(() => {
+    let stale = false;
+    void scanLocalModels().then((list) => {
+      if (!stale && list) setLocalModels(list);
+    });
+    return () => {
+      stale = true;
+    };
+  }, [activeChatSessionId]);
+
+  // Cloud ids for the selector, deduped case-insensitively. The session's
+  // current cloud model is always included, even if not in the endpoint list.
+  const cloudIds = (() => {
+    const ids = dedupeModelIds(models);
+    if (!isLocal && activeSession?.model && !includesModelId(ids, activeSession.model)) {
+      ids.unshift(activeSession.model);
+    }
+    return ids;
+  })();
+  // Local ids (scanned GGUF display names), same treatment for a local
+  // session's current model.
+  const localIds = (() => {
+    const ids = dedupeModelIds(localModels.map((m) => m.name || m.filename));
+    if (isLocal && activeSession?.model && !includesModelId(ids, activeSession.model)) {
       ids.unshift(activeSession.model);
     }
     return ids;
   })();
 
   const handleModelChange = useCallback(
-    (model: string) => {
-      if (activeChatSessionId) void setSessionModel(activeChatSessionId, model);
+    async (model: string) => {
+      if (!activeChatSessionId) return;
+      const localMatch = localModels.find((m) => (m.name || m.filename) === model);
+      if (localMatch) {
+        // Local model picked (in ANY session): spawn/swap the sidecar first
+        // (start_local_model stops any existing one), then point the session
+        // at the local provider so subsequent sends hit its endpoint.
+        setLocalLoading(true);
+        try {
+          await startLocalModel(localMatch.id, localMatch.path, undefined, localCtx || undefined, localMatch.mmprojPath);
+        } catch (err) {
+          console.warn("start local model failed", err);
+          setLocalLoading(false);
+          return;
+        }
+        setLocalLoading(false);
+        if (!isLocal) await setSessionProvider(activeChatSessionId, "local_gguf");
+      } else if (isLocal) {
+        // Cloud model picked in a local session: switch the session back to
+        // the configured cloud provider before setting the model.
+        const target =
+          config?.provider && config.provider !== "local_gguf"
+            ? config.provider
+            : "openai_compatible";
+        await setSessionProvider(activeChatSessionId, target);
+      }
+      void setSessionModel(activeChatSessionId, model);
     },
-    [activeChatSessionId, setSessionModel],
+    [activeChatSessionId, setSessionModel, setSessionProvider, isLocal, localModels, localCtx, config?.provider],
+  );
+
+  // Apply context-size changes to a running local model: llama-server's -c is
+  // fixed at process start, so moving the slider reloads the model with the
+  // new value. Debounced so dragging doesn't respawn the server on every
+  // tick, and guarded so mounting/session switches don't trigger a reload.
+  const appliedCtxRef = useRef(localCtx);
+  useEffect(() => {
+    if (localCtx === appliedCtxRef.current) return;
+    if (!isLocal || !activeSession?.model) {
+      // No running local model — the value applies to the next start.
+      appliedCtxRef.current = localCtx;
+      return;
+    }
+    const model = activeSession.model;
+    const match = localModels.find((m) => (m.name || m.filename) === model);
+    if (!match) {
+      appliedCtxRef.current = localCtx;
+      return;
+    }
+    const t = setTimeout(() => {
+      appliedCtxRef.current = localCtx;
+      setLocalLoading(true);
+      startLocalModel(match.id, match.path, undefined, localCtx || undefined, match.mmprojPath)
+        .catch((err) => console.warn("restart local model with new ctx failed", err))
+        .finally(() => setLocalLoading(false));
+    }, 800);
+    return () => clearTimeout(t);
+  }, [localCtx, isLocal, activeSession?.model, localModels]);
+
+  // Switching permission mode. The store intercepts a switch INTO full_auto and
+  // opens the one-time confirmation modal instead of applying it directly.
+  const handlePermissionModeChange = useCallback(
+    (mode: PermissionMode) => {
+      if (activeChatSessionId) void setSessionPermissionMode(activeChatSessionId, mode);
+    },
+    [activeChatSessionId, setSessionPermissionMode],
   );
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -150,10 +285,10 @@ export function ChatView() {
     activeStream.length === 0;
 
   const handleSend = useCallback(
-    (content: string, attachments: ChatAttachment[]) => {
+    (content: string, attachments: ChatAttachment[], forceResearch?: boolean) => {
       // Sending always pins to the bottom so the reply is visible.
       stickToBottomRef.current = true;
-      void sendMessage(content, attachments);
+      void sendMessage(content, attachments, forceResearch);
     },
     [sendMessage],
   );
@@ -179,6 +314,7 @@ export function ChatView() {
     (m) => ({
       role: m.role as "user" | "assistant",
       content: m.content,
+      attachments: m.attachments,
       key: `msg-${m.id}`,
       id: m.id,
     }),
@@ -197,22 +333,13 @@ export function ChatView() {
 
   return (
     <div className={`chat-view-wrap${previewArtifact ? " has-preview" : ""}`}>
-    <div className="chat-view">
+    <div className={`chat-view${artifacts && artifacts.length > 0 ? " has-artifacts" : ""}`}>
       {artifacts && artifacts.length > 0 && (
         <div className="chat-artifacts-toolbar">
           <ArtifactsMenu artifacts={artifacts} onOpen={setPreviewArtifact} />
         </div>
       )}
-      {!activeChatSessionId && !hasItems ? (
-        <div className="chat-empty">
-          <div className="empty-reserved">
-            <span className="empty-icon">💬</span>
-            <span className="empty-text">
-              Start a conversation — select a chat from the sidebar or type a message below.
-            </span>
-          </div>
-        </div>
-      ) : (
+      {!activeChatSessionId || hasItems ? (
         <div className="chat-messages" ref={messagesContainerRef} onScroll={handleScroll}>
           {items.map((item) => (
             <MessageBubble
@@ -238,6 +365,48 @@ export function ChatView() {
           )}
           <div ref={messagesEndRef} />
         </div>
+      ) : (
+        <div className="chat-welcome">
+          <div className="chat-welcome-inner">
+            <div className="chat-welcome-greeting">Good to see you</div>
+            <div className="chat-welcome-question">How can I help you today?</div>
+            <div className="chat-welcome-prompts">
+              {WELCOME_PROMPTS.map((p) => (
+                <button
+                  key={p.title}
+                  type="button"
+                  className="chat-welcome-prompt"
+                  onClick={() => {
+                    // Chips send immediately. Without any model (session model
+                    // or provider default from Settings) the send would fail,
+                    // so fall back to prefilling the composer — the user picks
+                    // a model, then hits send.
+                    if (activeSession?.model || config?.model) {
+                      stickToBottomRef.current = true;
+                      void sendMessage(p.title);
+                    } else {
+                      setDraft({ text: p.title, nonce: Date.now() });
+                    }
+                  }}
+                >
+                  <span className="chat-welcome-prompt-title">{p.title}</span>
+                  <span className="chat-welcome-prompt-sub">{p.sub}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeChatSessionId && pendingApprovals[activeChatSessionId] && (
+        <div className="composer-approval-wrap">
+          <ApprovalCard
+            approval={pendingApprovals[activeChatSessionId]}
+            onResolve={(approved) =>
+              void resolveApproval(activeChatSessionId, approved)
+            }
+          />
+        </div>
       )}
 
       <ChatComposer
@@ -247,16 +416,34 @@ export function ChatView() {
         streaming={streamingChatSessionId === activeChatSessionId && streamingChatSessionId !== null}
         disabled={false}
         model={activeChatSessionId ? (activeSession?.model ?? "") : undefined}
-        models={modelIds}
+        models={cloudIds}
+        localModels={localIds}
         effort={effort}
+        provider={activeSession?.provider}
+        modelLoading={localLoading}
+        localCtx={localCtx}
         onModelChange={handleModelChange}
         onEffortChange={setEffort}
+        onLocalCtxChange={setLocalCtx}
+        permissionMode={
+          activeChatSessionId
+            ? ((activeSession?.permissionMode as PermissionMode) ?? "manual")
+            : undefined
+        }
+        onPermissionModeChange={handlePermissionModeChange}
+        chatSessionId={activeChatSessionId ?? undefined}
       />
     </div>
     {previewArtifact && (
       <ArtifactPreviewPane
         artifact={previewArtifact}
         onClose={() => setPreviewArtifact(null)}
+      />
+    )}
+    {fullAutoConfirmingFor && (
+      <FullAutoConfirmModal
+        onConfirm={() => void confirmFullAuto(fullAutoConfirmingFor)}
+        onCancel={cancelFullAutoConfirm}
       />
     )}
     </div>

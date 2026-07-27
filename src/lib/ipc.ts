@@ -120,6 +120,32 @@ export const browserClosePane = (paneId: string) =>
 export const listenBrowserNavigatedTab = (handler: (payload: BrowserNavigatedPayload) => void) =>
   safeListen<BrowserNavigatedPayload>("browser:navigated", handler);
 
+// --- Browser pane project registry + MCP roundtrip wrappers ---
+export const registerBrowserPaneProject = (paneId: string, projectId: string) =>
+  safeInvoke<void>("register_browser_pane_project", { paneId, projectId });
+export const unregisterBrowserPaneProject = (paneId: string) =>
+  safeInvoke<void>("unregister_browser_pane_project", { paneId });
+export const browserResolvePaneResult = (reqId: number, paneId: string | null) =>
+  safeInvoke<void>("browser_resolve_pane_result", { reqId, paneId: paneId ?? null });
+export const browserOpenPaneResult = (reqId: number, paneId: string | null) =>
+  safeInvoke<void>("browser_open_pane_result", { reqId, paneId: paneId ?? null });
+
+export interface BrowserResolvePaneRequestPayload {
+  reqId: number;
+  projectId: string;
+}
+export interface BrowserOpenBrowserRequestPayload {
+  reqId: number;
+  projectId: string;
+  url: string;
+}
+export const listenBrowserResolvePaneRequest = (
+  handler: (payload: BrowserResolvePaneRequestPayload) => void,
+) => safeListen<BrowserResolvePaneRequestPayload>("browser:resolve-pane-request", handler);
+export const listenBrowserOpenBrowserRequest = (
+  handler: (payload: BrowserOpenBrowserRequestPayload) => void,
+) => safeListen<BrowserOpenBrowserRequestPayload>("browser:open-browser-request", handler);
+
 // --- Harnesses ---
 export const listHarnesses = () => safeInvoke<HarnessStatus[] | null>("list_harnesses");
 export const runHarnessLogin = (paneId: string, harnessId: HarnessId, cwd: string) =>
@@ -187,7 +213,8 @@ export type ChatProvider =
   | "openai"
   | "openrouter"
   | "anthropic_compatible"
-  | "openai_compatible";
+  | "openai_compatible"
+  | "local_gguf";
 
 export interface ChatSession {
   id: string;
@@ -200,6 +227,13 @@ export interface ChatSession {
   starred?: boolean;
   /** Marked-unread chats show an unread dot in the sidebar. */
   unread?: boolean;
+  /** Per-session filesystem permission posture
+   *  (`read_only` | `manual` | `auto_edit` | `full_auto`). New sessions
+   *  start at `manual`. See chat::permission::PermissionMode. */
+  permissionMode?: string;
+  /** Per-session watch-mode pacing override. null = inherit global setting;
+   *  "on" | "off" = per-session override. */
+  watchMode?: string | null;
 }
 
 export interface ChatMessageRecord {
@@ -211,6 +245,11 @@ export interface ChatMessageRecord {
   outputTokens: number | null;
   costUsd: number | null;
   createdAt: number;
+  /** Live attachment objects for the optimistic just-sent user message, so the
+   *  bubble can show real image thumbnails before the backend persists. Not
+   *  present on persisted messages (those carry attachment text markers in
+   *  `content`). Never sent by the backend. */
+  attachments?: ChatAttachmentInput[];
 }
 
 export interface ChatConfigPayload {
@@ -225,6 +264,11 @@ export interface ChatConfigPayload {
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+  /** Live attachment objects (with image base64) for the optimistic just-sent
+   *  message, so image cards get a real thumbnail before the backend persists.
+   *  Persisted messages carry attachments as text markers inside `content`
+   *  instead (parsed by MessageAttachments). */
+  attachments?: ChatAttachmentInput[];
 }
 
 // Chat event payloads (backend -> frontend).
@@ -246,6 +290,26 @@ export interface ChatArtifactPayload {
 export interface ChatOpenBrowserPayload {
   chatSessionId: string;
   url: string;
+}
+
+/** A pending per-action filesystem-tool approval surfaced as a card.
+ *  Emitted when the central `check_permission` gate returns NeedsApproval.
+ *  The user's choice is sent back via `resolveToolAction`. */
+export interface ChatApprovalRequestPayload {
+  chatSessionId: string;
+  pendingId: string;
+  tool: string;
+  summary: string;
+  args: unknown;
+}
+
+/** Emitted when the user has resolved a pending approval card (so the UI can
+ *  dismiss the card). `approved` ran the tool; a denied card returned a
+ *  "user denied" tool result instead. */
+export interface ChatApprovalResolvedPayload {
+  chatSessionId: string;
+  pendingId: string;
+  approved: boolean;
 }
 
 /** A persisted artifact in the sidebar library (30-day retention). */
@@ -335,6 +399,7 @@ export const sendChatMessage = (
   toolsEnabled?: boolean,
   codeExecEnabled?: boolean,
   attachments?: ChatAttachmentInput[],
+  forceResearch?: boolean,
 ) =>
   safeInvoke<void>("send_chat_message", {
     chatSessionId,
@@ -343,11 +408,38 @@ export const sendChatMessage = (
     toolsEnabled: toolsEnabled ?? false,
     codeExecEnabled: codeExecEnabled ?? false,
     attachments: attachments ?? null,
+    forceResearch: forceResearch ?? false,
   });
 export const updateChatSessionModel = (chatSessionId: string, model: string) =>
   safeInvoke<void>("update_chat_session_model", { chatSessionId, model });
+
+/** Switch a chat session's provider (e.g. to/from "local_gguf" when picking a
+ *  local model from the selector in a cloud session, or vice versa). */
+export const updateChatSessionProvider = (chatSessionId: string, provider: string) =>
+  safeInvoke<void>("update_chat_session_provider", { chatSessionId, provider });
+/** Update a chat session's filesystem permission posture
+ *  (`read_only` | `manual` | `auto_edit` | `full_auto`). Per-session; new
+ *  sessions start at `manual`. The frontend gates the switch to `full_auto`
+ *  behind a one-time confirmation modal before calling this. */
+export const updateChatSessionPermissionMode = (
+  chatSessionId: string,
+  mode: "read_only" | "manual" | "auto_edit" | "full_auto",
+) =>
+  safeInvoke<void>("update_chat_session_permission_mode", { chatSessionId, mode });
+/** Update a chat session's watch-mode pacing override. null clears the
+ *  override so the session inherits the global setting; "on" | "off" set
+ *  a per-session override. */
+export const updateChatSessionWatchMode = (
+  chatSessionId: string,
+  mode: "on" | "off" | null,
+) =>
+  safeInvoke<void>("update_chat_session_watch_mode", { chatSessionId, mode });
 export const cancelChatMessage = (chatSessionId: string) =>
   safeInvoke<void>("cancel_chat_message", { chatSessionId });
+/** Resolve a pending per-action tool approval card. `approved` lets the paused
+ *  tool loop run the action; `false` injects a "user denied" tool result. */
+export const resolveToolAction = (pendingId: string, approved: boolean) =>
+  safeInvoke<void>("resolve_tool_action", { pendingId, approved });
 export const setChatApiKey = (
   provider: string,
   key: string,
@@ -376,6 +468,55 @@ export const listChatModels = (
     apiKey: apiKey ?? null,
   });
 
+// ---- Local models (GGUF scan / llama-server sidecar) ----
+
+export interface GgufModel {
+  id: string;
+  path: string;
+  filename: string;
+  sizeBytes: number;
+  name: string | null;
+  architecture: string | null;
+  paramCountLabel: string | null;
+  quantization: string | null;
+  memoryClass: "fits" | "tight" | "too_large";
+  source: string;
+  /** Whether a companion mmproj vision-projector GGUF was found next to this model. */
+  hasVision: boolean;
+  /** Absolute path to the companion mmproj GGUF, if one exists. */
+  mmprojPath: string | null;
+}
+
+export interface StartedModel {
+  modelId: string;
+  port: number;
+  baseUrl: string;
+}
+
+export interface ActiveLocalModel {
+  modelId: string;
+  port: number;
+  baseUrl: string;
+}
+
+export const scanLocalModels = (folder?: string) =>
+  safeInvoke<GgufModel[] | null>("scan_local_models", folder ? { folder } : {});
+
+export const startLocalModel = (modelId: string, path: string, ngl?: number, ctx?: number, mmprojPath?: string | null) =>
+  safeInvoke<StartedModel | null>("start_local_model", {
+    modelId,
+    path,
+    ngl: ngl ?? null,
+    ctx: ctx ?? null,
+    mmprojPath: mmprojPath ?? null,
+  });
+
+export const stopLocalModel = (modelId: string) =>
+  safeInvoke<void>("stop_local_model", { modelId });
+
+export const localModelStatus = () =>
+  safeInvoke<ActiveLocalModel | null>("local_model_status");
+
 export const listenChatToken = (handler: (payload: ChatTokenPayload) => void) =>
   safeListen<ChatTokenPayload>("chat:token", handler);
 export const listenChatDone = (handler: (payload: ChatDonePayload) => void) =>
@@ -386,6 +527,10 @@ export const listenChatArtifact = (handler: (payload: ChatArtifactPayload) => vo
   safeListen<ChatArtifactPayload>("chat:artifact", handler);
 export const listenChatOpenBrowser = (handler: (payload: ChatOpenBrowserPayload) => void) =>
   safeListen<ChatOpenBrowserPayload>("chat:open-browser", handler);
+export const listenChatApprovalRequest = (handler: (payload: ChatApprovalRequestPayload) => void) =>
+  safeListen<ChatApprovalRequestPayload>("chat:approval-request", handler);
+export const listenChatApprovalResolved = (handler: (payload: ChatApprovalResolvedPayload) => void) =>
+  safeListen<ChatApprovalResolvedPayload>("chat:approval-resolved", handler);
 
 /** Read a generated artifact for in-app preview. */
 export const readArtifactPreview = (path: string) =>
@@ -433,3 +578,135 @@ export async function downloadArtifactsZip(
   await safeInvoke<void>("download_artifacts_zip", { paths, dest });
   return true;
 }
+
+// ---- Auto-updater (Tauri updater plugin) ----
+
+/** Info about an available update, or update_available:false when current. */
+export interface UpdateInfo {
+  updateAvailable: boolean;
+  version: string | null;
+  notes: string | null;
+  pubDate: string | null;
+}
+
+export interface UpdateProgressPayload {
+  downloaded: number;
+  total: number | null;
+}
+
+/** Check the configured endpoint for a newer version. Non-throwing on network
+ *  failure — the backend returns update_available:false instead. */
+export const checkForUpdate = (): Promise<UpdateInfo | null> =>
+  safeInvoke<UpdateInfo | null>("check_for_update");
+
+/** Download + verify + install the pending update. Emits `updater:progress`
+ *  during download, then `updater:installed`. The backend restarts the app
+ *  automatically after a successful install. */
+export const downloadAndInstallUpdate = (): Promise<void> =>
+  safeInvoke<void>("download_and_install_update");
+
+export const listenUpdaterProgress = (handler: (payload: UpdateProgressPayload) => void) =>
+  safeListen<UpdateProgressPayload>("updater:progress", handler);
+
+export const listenUpdaterInstalled = (handler: () => void) =>
+  safeListen("updater:installed", () => handler());
+
+// --- Connectors (OAuth + remote MCP) ---
+
+export interface ConnectorStatus {
+  connected: boolean;
+  /** True when the stored access token has expired (the backend transparently
+   *  refreshes on next use; if no refresh token exists — Notion — the user
+   *  must reconnect). */
+  expired: boolean;
+  accountDisplay?: string | null;
+  grantedScopes?: string | null;
+  expiresAt?: number | null;
+}
+
+/** A supported connector + its current connection status. Mirrors the Rust
+ *  `ConnectorWithStatus` (the Connector fields are flattened in). */
+export interface ConnectorWithStatus {
+  id: string;
+  displayName: string;
+  icon: string;
+  mcpServerUrl: string;
+  revokeUrl?: string | null;
+  status: ConnectorStatus;
+}
+
+export interface DisconnectOutcome {
+  revoked: boolean;
+  note?: string | null;
+}
+
+export interface OAuthCallbackPayload {
+  flowId: number;
+  connectorId: string;
+  /** "connected" | "denied" | "error" */
+  status: string;
+  error?: string | null;
+  accountDisplay?: string | null;
+}
+
+export const listConnectors = () =>
+  safeInvoke<ConnectorWithStatus[] | null>("list_connectors");
+export const connectorConnect = (connectorId: string) =>
+  safeInvoke<number>("connector_connect", { connectorId });
+export const connectorDisconnect = (connectorId: string) =>
+  safeInvoke<DisconnectOutcome>("connector_disconnect", { connectorId });
+export const setSessionConnectors = (chatSessionId: string, connectorIds: string[]) =>
+  safeInvoke<void>("set_session_connectors", { chatSessionId, connectorIds });
+export const listSessionConnectors = (chatSessionId: string) =>
+  safeInvoke<string[]>("list_session_connectors", { chatSessionId });
+export const listenOAuthCallback = (handler: (payload: OAuthCallbackPayload) => void) =>
+  safeListen<OAuthCallbackPayload>("oauth:callback", handler);
+
+// ---- Workspaces (pane layout save/restore) ----
+
+export interface WorkspaceRecord {
+  id: string;
+  projectId: string;
+  name: string;
+  data: string; // JSON string
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface WorkspaceData {
+  panes: Array<{
+    kind: "terminal" | "browser";
+    harness?: string;
+    sessionId?: string;
+    label?: string;
+    url?: string;
+    cwd?: string;
+  }>;
+  splitFractions?: { colFrac?: number; rowFracs?: number[] };
+}
+
+export const listWorkspaces = (projectId: string) =>
+  safeInvoke<WorkspaceRecord[] | null>("list_workspaces", { projectId });
+
+export const saveWorkspace = (projectId: string, name: string, data: string) =>
+  safeInvoke<WorkspaceRecord | null>("save_workspace", { projectId, name, data });
+
+export const deleteWorkspace = (id: string) =>
+  safeInvoke<void>("delete_workspace", { id });
+
+// ---- Mobile relay (desktop ↔ mobile companion app) ----
+
+export interface MobileRelayStatus {
+  running: boolean;
+  port: number;
+}
+
+export const startMobileRelay = () =>
+  safeInvoke<number | null>("start_mobile_relay");
+
+export const stopMobileRelay = () =>
+  safeInvoke<void>("stop_mobile_relay");
+
+export const getMobileRelayStatus = () =>
+  safeInvoke<MobileRelayStatus | null>("get_mobile_relay_status");
+

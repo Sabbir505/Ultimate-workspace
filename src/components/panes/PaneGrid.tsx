@@ -534,6 +534,7 @@ const PaneFrame = memo(function PaneFrame({
   const title =
     pane.data.kind === "browser" ? "Browser" : pane.data.label || (isTerminal ? "Terminal" : "Pane");
   const harness = pane.data.kind === "terminal" ? pane.data.harness : null;
+  const activity = pane.activity;
 
   return (
     <div
@@ -544,6 +545,7 @@ const PaneFrame = memo(function PaneFrame({
     >
       <div className="pane-header">
         <span className="state-dot" data-state={pane.state} title={stateTitle(pane.state)} />
+        {activity && <span className="pane-activity-chip" title={activity}>{activity}</span>}
         <span className="title" title={title}>
           {index + 1} · {title}
         </span>

@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::webview::WebviewBuilder;
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Size, Webview, WebviewUrl,
@@ -48,6 +48,130 @@ pub fn browser_label(pane_id: &str, tab_id: &str) -> String {
     format!("browser-{pane_id}-tab-{tab_id}")
 }
 
+/// Fixed loopback port the `conduit-browser-mcp` binary connects to. The
+/// in-app WebSocket server (`browser_mcp::serve`) binds 127.0.0.1:{port}; the
+/// standalone MCP binary reads this from the `CONDUIT_WS_PORT` env var (set in
+/// `.mcp.json`/`--mcp-config` registration) and forwards tool calls here.
+/// Shared between the two via `conduit_lib` so they can never drift apart.
+pub const BROWSER_MCP_PORT: u16 = 7681;
+
+/// An interactive element the browser_click / browser_type tools target.
+///
+/// In `ReadMode::Interactive` (agent-driven control) the JS bridge emits the
+/// full accessibility record — role, aria-label, form-field state (value,
+/// checked, disabled, type), name/id, and the element's rect (so the visual
+/// feedback layer can compute a click point without re-measuring). In the
+/// readability read modes these a11y fields are absent (None) and only the
+/// minimal ref/tag/label/href quadruple is present.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElementRef {
+    pub r#ref: i64,
+    pub tag: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+    // --- a11y fields (interactive mode only) ---
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aria_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "type")]
+    pub r#type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rect: Option<ElementRect>,
+}
+
+/// Bounding rect of an interactive element, in viewport pixels. Emitted only
+/// in interactive mode so the visual-feedback overlay can animate a cursor to
+/// the element's centre without a second measurement pass.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElementRect {
+    pub x: i64,
+    pub y: i64,
+    pub width: i64,
+    pub height: i64,
+}
+
+/// Structured result from the readability-style extraction bridge JS.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractedContent {
+    pub markdown: String,
+    pub title: String,
+    pub url: String,
+    pub canonical_url: Option<String>,
+    pub published_date: Option<String>,
+    pub byline: Option<String>,
+    pub mode: String,
+    pub failure_reason: Option<String>,
+    pub element_refs: Vec<ElementRef>,
+}
+
+/// Read mode for browser_read: full extraction, headings-only summary, a
+/// specific section of the page, or the interactive accessibility tree
+/// (agent-driven control — roles, labels, form-field state, rects).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadMode {
+    #[default]
+    Full,
+    SummaryOnly,
+    Section,
+    Interactive,
+}
+
+/// Options controlling the read-page orchestration (settle wait, scroll loop).
+#[derive(Debug, Clone)]
+pub struct ReadOpts {
+    /// Milliseconds to wait after injection before the first extraction
+    /// (settle for JS-rendered content). Default 1000.
+    pub settle_ms: u32,
+    /// Max number of scroll-down steps for lazy-load handling. Default 4.
+    pub max_scroll_steps: u32,
+}
+
+impl Default for ReadOpts {
+    fn default() -> Self {
+        Self {
+            settle_ms: 1000,
+            max_scroll_steps: 4,
+        }
+    }
+}
+
+/// Options controlling agentic action behaviour (watch-mode pacing).
+#[derive(Debug, Clone)]
+pub struct ActionOpts {
+    /// When true, a ~PANEDELAY_MS delay is applied after the JS body resolves
+    /// and before the result is reported, so a human can follow the action.
+    pub watch_mode: bool,
+    /// Milliseconds to wait when watch_mode is true.
+    pub pane_delay_ms: u64,
+}
+
+impl Default for ActionOpts {
+    fn default() -> Self {
+        Self {
+            watch_mode: false,
+            pane_delay_ms: 600,
+        }
+    }
+}
+
 /// Child webviews are unsupported on Linux — the frontend falls back to an
 /// iframe there. Kept as a function so the failure is a clean command error,
 /// never a panic.
@@ -62,6 +186,74 @@ fn ensure_supported() -> Result<(), String> {
         Err("native browser panes are not supported on Linux; the frontend uses the iframe fallback"
             .to_string())
     }
+}
+
+// ---- Vendored JS bridge files -----------------------------------------
+// Mozilla's readability.js (Apache 2.0) is embedded at compile time via
+// include_str!. It declares a global `Readability` constructor that takes a
+// Document + options and exposes a `.parse()` method returning
+// {title, content (HTML), textContent, excerpt, byline, length, ...} or null.
+// Our own bridge wrapper (bridge_extract.js) is concatenated after it: it
+// hardens the page, runs Readability, converts to Markdown, and returns
+// structured JSON. Both are plain scripts — no module system — so they work
+// when eval'd in any webview.
+const READABILITY_JS: &str = include_str!("bridge_readability.js");
+const BRIDGE_EXTRACT_JS: &str = include_str!("bridge_extract.js");
+/// Description -> element resolution JS (Task #5): tags interactive elements,
+/// tries the description as a CSS selector, then scores a case-insensitive
+/// match against labels/aria/placeholder/name/id. Returns the resolved ref or
+/// a `not_found` error with top-10 suggestions. Injected via
+/// `run_action_for_pane`, wrapped by `action_wrapper_js`.
+const BRIDGE_RESOLVE_JS: &str = include_str!("bridge_resolve.js");
+/// Visual feedback overlay (Task #7): synthetic cursor tween, click ripple,
+/// animated typing caret, pre-action highlight. Defines globals
+/// `__conduit_injectOverlay` / `__conduit_tweenCursor` / `__conduit_showRipple`
+/// / `__conduit_highlight` / `__conduit_showCaret`. Injected after every
+/// navigation (alongside the pushState monkey-patch) and re-injected lazily by
+/// each action so a fresh page load re-installs it.
+const BRIDGE_OVERLAY_JS: &str = include_str!("bridge_overlay.js");
+
+/// Build the full extraction JS body for a given mode + optional selector.
+/// The mode and selector are JSON-escaped and interpolated into the bridge
+/// wrapper, which reads them as template placeholders.
+/// Build the full extraction JS for a `browser_read` call: the vendored
+/// readability.js followed by our bridge wrapper, with `mode` and `selector`
+/// interpolated into the wrapper's `MODE`/`SELECTOR` placeholders.
+///
+/// The placeholders are already quoted in `bridge_extract.js` (`var MODE =
+/// "MODE_PLACEHOLDER";`), so we inject the **inner** string value — the JSON
+/// encoding with its surrounding quotes stripped. This preserves escaping of
+/// special characters in a CSS `selector` (e.g. `a[href*="x"]`) while not
+/// double-quoting the value into a syntax error (`""full""`).
+fn build_extract_js(mode: &ReadMode, selector: Option<&str>) -> String {
+    // serde_json::to_string yields a quoted JSON string; strip the outer quotes
+    // to get the JS string-literal *contents* (already escaped). Fall back to
+    // the bare value if the (infallible-for-str) encoding ever surprises us.
+    let strip_quotes = |s: String| {
+        if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+            s[1..s.len() - 1].to_string()
+        } else {
+            s
+        }
+    };
+    let mode_str = strip_quotes(serde_json::to_string(&mode).unwrap_or_else(|_| "\"full\"".to_string()));
+    let sel_str = strip_quotes(serde_json::to_string(&selector.unwrap_or("")).unwrap_or_else(|_| "\"\"".to_string()));
+    // `bridge_extract.js` ends with an IIFE `(function(){ ... return extract(); })()`.
+    // `action_wrapper_js` wraps the body as `(function() { {body} })()` — WITHOUT
+    // a leading `return`, the IIFE's return value would be discarded and the
+    // wrapper would report `undefined`. Insert `return ` directly before the
+    // IIFE's opening `(function` so the outer wrapper returns the JSON string
+    // `extract()` produced. (The leading comment lines stay before the return —
+    // only a `return` immediately followed by a NEWLINE triggers ASI, and here
+    // `return (` is followed by `function` on the same line.)
+    let bridge = BRIDGE_EXTRACT_JS
+        .replace("MODE_PLACEHOLDER", &mode_str)
+        .replace("SELECTOR_PLACEHOLDER", &sel_str);
+    let bridge = match bridge.find("(function") {
+        Some(idx) => format!("{}return {}", &bridge[..idx], &bridge[idx..]),
+        None => format!("return {bridge}"),
+    };
+    format!("{}\n{}\n", READABILITY_JS, bridge)
 }
 
 /// Guard against degenerate rects: a 0x0 or NaN rect (transient layout
@@ -129,6 +321,20 @@ pub struct BrowserManager {
     /// resolves the matching oneshot so the async tool call can return.
     pending: Mutex<HashMap<u64, oneshot::Sender<String>>>,
     next_req: AtomicU64,
+    /// Maps pane_id -> project_id so the MCP WS dispatch (Task #4) can
+    /// resolve a project_id to its browser panes.
+    project_pane_registry: Mutex<HashMap<String /*pane_id*/, String /*project_id*/>>,
+    /// Per-pane visibility state (updated by `set_visible`; default true on create).
+    pane_visible: Mutex<HashMap<String /*pane_id*/, bool>>,
+    /// Most-recently-created/navigated (pane_id, tab_id) per pane, so an explicit
+    /// pane_id can resolve to the current active tab webview label.
+    pane_active_tab: Mutex<HashMap<String /*pane_id*/, String /*tab_id*/>>,
+    /// Pending resolve-pane roundtrip request id -> sender.
+    pane_resolve_pending: Mutex<HashMap<u64, oneshot::Sender<Option<String>>>>,
+    next_resolve_req: AtomicU64,
+    /// Pending open-browser roundtrip request id -> sender.
+    pane_open_pending: Mutex<HashMap<u64, oneshot::Sender<Option<String>>>>,
+    next_open_req: AtomicU64,
 }
 
 impl BrowserManager {
@@ -140,6 +346,13 @@ impl BrowserManager {
             active: Mutex::new(None),
             pending: Mutex::new(HashMap::new()),
             next_req: AtomicU64::new(1),
+            project_pane_registry: Mutex::new(HashMap::new()),
+            pane_visible: Mutex::new(HashMap::new()),
+            pane_active_tab: Mutex::new(HashMap::new()),
+            pane_resolve_pending: Mutex::new(HashMap::new()),
+            next_resolve_req: AtomicU64::new(1),
+            pane_open_pending: Mutex::new(HashMap::new()),
+            next_open_req: AtomicU64::new(1),
         }
     }
 
@@ -309,6 +522,8 @@ impl BrowserManager {
         eprintln!("[conduit:browser] create OK for label={label}");
 
         self.webviews.lock().insert(label.clone(), webview);
+        self.pane_visible.lock().insert(pane_id.to_string(), true);
+        self.pane_active_tab.lock().insert(pane_id.to_string(), tab_id.to_string());
         self.navigate(pane_id, tab_id, url)?;
         self.in_flight.lock().remove(&label);
         Ok(())
@@ -320,6 +535,7 @@ impl BrowserManager {
             .parse()
             .map_err(|e| format!("invalid url `{url}`: {e}"))?;
         *self.active.lock() = Some((pane_id.to_string(), tab_id.to_string()));
+        self.pane_active_tab.lock().insert(pane_id.to_string(), tab_id.to_string());
         let label = browser_label(pane_id, tab_id);
         let webview = self.get(&label)?;
         webview.navigate(parsed)
@@ -333,6 +549,11 @@ impl BrowserManager {
             std::thread::sleep(std::time::Duration::from_secs(1));
             if let Some(w) = app.get_webview(&label) {
                 let _ = w.eval(&pushstate_injection_js(&pid, &tid));
+                // Re-inject the visual-feedback overlay after navigation — a
+                // fresh page load clears injected DOM, so the cursor/highlight
+                // primitives must be re-installed (Task #7). Idempotent on the
+                // JS side: a no-op if already present.
+                let _ = w.eval(BRIDGE_OVERLAY_JS);
             }
         });
         Ok(())
@@ -372,6 +593,7 @@ impl BrowserManager {
     /// panes must hide their webview explicitly.
     pub fn set_visible(&self, pane_id: &str, tab_id: &str, visible: bool) -> Result<(), String> {
         ensure_supported()?;
+        self.pane_visible.lock().insert(pane_id.to_string(), visible);
         let label = browser_label(pane_id, tab_id);
         let webview = self.get(&label)?;
         let res = if visible { webview.show() } else { webview.hide() };
@@ -408,6 +630,10 @@ impl BrowserManager {
                 let _ = webview.close();
             }
         }
+        // Clean up per-pane registries on close.
+        self.project_pane_registry.lock().remove(pane_id);
+        self.pane_visible.lock().remove(pane_id);
+        self.pane_active_tab.lock().remove(pane_id);
         Ok(())
     }
 
@@ -451,13 +677,33 @@ impl BrowserManager {
     /// active page and await the string it reports back. Times out so a stuck
     /// or navigating page can't wedge the chat turn.
     async fn run_action(&self, body: &str) -> Result<String, String> {
-        ensure_supported()?;
         let label = self.active_label()?;
-        let webview = self.get(&label)?;
+        self.run_action_for_pane(&label, body).await
+    }
+
+    /// Same as `run_action` but targets an explicit webview label instead of
+    /// resolving the global active pane. Used by the MCP dispatch (Task #4) and
+    /// `read_page_for_pane`. Delegates to `run_action_for_pane_opts` with
+    /// defaults (no pacing).
+    pub async fn run_action_for_pane(&self, label: &str, body: &str) -> Result<String, String> {
+        self.run_action_for_pane_opts(label, body, ActionOpts::default()).await
+    }
+
+    /// Same as `run_action_for_pane` but accepts `ActionOpts` for watch-mode
+    /// pacing. When opts.watch_mode is true a ~PANE_DELAY_MS delay is applied
+    /// after the JS body resolves and before the result is reported.
+    pub async fn run_action_for_pane_opts(
+        &self,
+        label: &str,
+        body: &str,
+        opts: ActionOpts,
+    ) -> Result<String, String> {
+        ensure_supported()?;
+        let webview = self.get(label)?;
         let req_id = self.next_req.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel::<String>();
         self.pending.lock().insert(req_id, tx);
-        let js = action_wrapper_js(req_id, body);
+        let js = action_wrapper_js(req_id, body, &opts);
         if let Err(e) = webview.eval(&js) {
             self.pending.lock().remove(&req_id);
             return Err(e.to_string());
@@ -472,8 +718,317 @@ impl BrowserManager {
         }
     }
 
-    pub async fn read_page(&self) -> Result<String, String> {
-        self.run_action(READ_PAGE_JS).await
+    /// Read the active page with structured readability-style extraction.
+    ///
+    /// The orchestrator does three phases:
+    /// 1. Inject the vendored readability.js + our bridge wrapper (consent-banner
+    ///    dismissal, element tagging, Readability parse, HTML-to-Markdown) in a
+    ///    single eval and await the structured JSON result.
+    /// 2. If the extracted markdown is suspiciously short relative to the page's
+    ///    scrollHeight, run a bounded scroll-down loop (up to `opts.max_scroll_steps`
+    ///    steps, 600-900ms between each) to surface lazy-loaded content, then
+    ///    re-extract.
+    /// 3. Serialize the `ExtractedContent` as pretty-printed JSON, capped at 50k
+    ///    chars of markdown, and return it as the tool result string.
+    pub async fn read_page(
+        &self,
+        mode: ReadMode,
+        selector: Option<&str>,
+    ) -> Result<String, String> {
+        let label = self.active_label()?;
+        self.read_page_for_pane(&label, mode, selector).await
+    }
+
+    /// Same orchestration as `read_page` but targets an explicit webview label.
+    /// Used by the MCP dispatch (Task #4) to extract content from a specific
+    /// browser pane identified by its project/pane.
+    pub async fn read_page_for_pane(
+        &self,
+        label: &str,
+        mode: ReadMode,
+        selector: Option<&str>,
+    ) -> Result<String, String> {
+        let body = build_extract_js(&mode, selector);
+        let opts = ReadOpts::default();
+
+        // Phase 1: initial extraction with a settle wait for JS-rendered content.
+        // The settle is done via a sleep BEFORE the first eval so the page's
+        // on-load renderers have time to finish — this is a cheap heuristic that
+        // catches the common SPA loading-skeleton case.
+        if opts.settle_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(opts.settle_ms as u64)).await;
+        }
+
+        let first_json = self.run_action_for_pane(label, &body).await?;
+        let mut content: ExtractedContent = serde_json::from_str(&first_json).map_err(|e| {
+            // Surface the raw bridge output (truncated) so a JS-side throw or
+            // a non-JSON return is diagnosable instead of an opaque parse error.
+            let raw = if first_json.len() > 400 {
+                format!("{}…", &first_json[..400])
+            } else {
+                first_json.clone()
+            };
+            format!("browser_read: failed to parse extraction result: {e} (raw: {raw:?})")
+        })?;
+
+        // Phase 2: bounded scroll loop for lazy-loaded content.
+        // We check if the page scrollHeight is much larger than what we got
+        // (signalling below-the-fold lazy content), and scroll down a capped
+        // number of times, re-extracting after each scroll. Stop early if the
+        // scrollHeight stops growing (infinite feed guard).
+        if matches!(mode, ReadMode::Full) && content.failure_reason.is_none() {
+            // Ask the page for its scrollHeight and viewport height.
+            let dims_js = r#"
+var h = document.body ? document.body.scrollHeight : 0;
+var vh = window.innerHeight || 0;
+return JSON.stringify({scrollHeight: h, viewportHeight: vh});
+"#;
+            if let Ok(dims_str) = self.run_action_for_pane(label, dims_js).await {
+                if let Ok(dims) = serde_json::from_str::<serde_json::Value>(&dims_str) {
+                    let scroll_height = dims["scrollHeight"].as_f64().unwrap_or(0.0) as i64;
+                    let viewport = dims["viewportHeight"].as_f64().unwrap_or(600.0) as i64;
+                    let markdown_len = content.markdown.len() as i64;
+                    // If the page is tall but we got little content, it may have
+                    // lazy-loaded sections. Threshold: scrollHeight > 2x viewport
+                    // AND extracted content < 2000 chars.
+                    if scroll_height > viewport * 2 && markdown_len < 2000 {
+                        eprintln!(
+                            "[conduit:browser] lazy-load scroll loop: scrollHeight={scroll_height} \
+                             viewport={viewport} markdownLen={markdown_len}"
+                        );
+                        let mut prev_scroll_height = scroll_height;
+                        let scroll_step = (viewport as f64 * 0.8) as i64; // 80% viewport per step
+                        for step in 0..opts.max_scroll_steps {
+                            let scroll_js_body = format!(
+                                "window.scrollBy(0, {}); return JSON.stringify({{scrollY: Math.round(window.scrollY), scrollHeight: document.body ? Math.round(document.body.scrollHeight) : 0}});",
+                                scroll_step
+                            );
+                            let _ = self.run_action_for_pane(label, &scroll_js_body).await;
+                            tokio::time::sleep(Duration::from_millis(700)).await;
+
+                            // Re-extract
+                            if let Ok(re_json) = self.run_action_for_pane(label, &body).await {
+                                if let Ok(re_content) = serde_json::from_str::<serde_json::Value>(&re_json) {
+                                    let new_md = re_content["markdown"].as_str().unwrap_or("");
+                                    let new_len = new_md.len();
+                                    // Short-circuit: content didn't grow meaningfully
+                                    if new_len <= content.markdown.len() + 100 {
+                                        eprintln!(
+                                            "[conduit:browser] lazy-load scroll stop: no content growth at step {step}"
+                                        );
+                                        break;
+                                    }
+                                    if let Ok(updated) = serde_json::from_str::<ExtractedContent>(&re_json) {
+                                        content = updated;
+                                    }
+                                }
+                            }
+
+                            // Check scrollHeight growth
+                            let check_js = r#"return JSON.stringify({scrollHeight: document.body ? Math.round(document.body.scrollHeight) : 0});"#;
+                            if let Ok(check_str) = self.run_action_for_pane(label, check_js).await {
+                                if let Ok(check) = serde_json::from_str::<serde_json::Value>(&check_str) {
+                                    let new_sh = check["scrollHeight"].as_f64().unwrap_or(0.0) as i64;
+                                    if new_sh <= prev_scroll_height {
+                                        eprintln!(
+                                            "[conduit:browser] lazy-load scroll stop: scrollHeight stable at {new_sh}"
+                                        );
+                                        break;
+                                    }
+                                    prev_scroll_height = new_sh;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Phase 3: serialize as pretty JSON with a cap on markdown length.
+        const MAX_MD: usize = 50_000;
+        if content.markdown.len() > MAX_MD {
+            let mut cut = MAX_MD;
+            while !content.markdown.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            content.markdown.truncate(cut);
+            content.markdown.push_str("\n\n[...truncated]");
+        }
+        let json = serde_json::to_string_pretty(&content)
+            .map_err(|e| format!("browser_read: serialization failed: {e}"))?;
+        Ok(format!("EXTRACTED CONTENT (mode={}):\n```json\n{}\n```", content.mode, json))
+    }
+
+    // --- Pane registry + MCP roundtrip helpers ---------------------------
+    // The MCP WebSocket server (Task #4) needs to target a specific browser
+    // pane by pane_id, or resolve a project_id to the best pane via a
+    // frontend roundtrip. These methods wire that resolution path.
+
+    /// True if the pane is currently visible (set via `set_visible`; defaults
+    /// to true on create). Backgrounded panes skip watch-mode pacing.
+    pub fn pane_is_visible(&self, pane_id: &str) -> bool {
+        self.pane_visible.lock().get(pane_id).copied().unwrap_or(true)
+    }
+
+    /// Register a browser pane's project association (called by the frontend
+    /// after creating a browser pane).
+    pub fn register_browser_pane_project(&self, pane_id: &str, project_id: &str) {
+        self.project_pane_registry.lock().insert(pane_id.to_string(), project_id.to_string());
+    }
+
+    /// Remove a pane from the registry + visibility + active-tab maps (called
+    /// when a pane is closed).
+    pub fn unregister_browser_pane_project(&self, pane_id: &str) {
+        self.project_pane_registry.lock().remove(pane_id);
+        self.pane_visible.lock().remove(pane_id);
+        self.pane_active_tab.lock().remove(pane_id);
+    }
+
+    /// Emit a `browser:resolve-pane-request` event to the frontend, asking it
+    /// to pick the best browser pane for `project_id`. Returns a req_id the
+    /// caller awaits via `resolve_pane_request_resolve`.
+    pub fn resolve_pane_request_emit(&self, project_id: &str) -> u64 {
+        let req_id = self.next_resolve_req.fetch_add(1, Ordering::SeqCst);
+        let (tx, _rx) = oneshot::channel::<Option<String>>();
+        self.pane_resolve_pending.lock().insert(req_id, tx);
+        let payload = serde_json::json!({ "reqId": req_id, "projectId": project_id });
+        let _ = self.app.emit("browser:resolve-pane-request", payload);
+        req_id
+    }
+
+    /// Receive the frontend's answer for a resolve-pane request.
+    pub fn resolve_pane_request_resolve(&self, req_id: u64, pane_id: Option<String>) {
+        if let Some(tx) = self.pane_resolve_pending.lock().remove(&req_id) {
+            let _ = tx.send(pane_id);
+        }
+    }
+
+    /// Emit a `browser:open-browser-request` event asking the frontend to
+    /// create (or reveal) a browser pane for `project_id` pointed at `url`.
+    /// Returns a req_id the caller awaits via `open_pane_request_resolve`.
+    pub fn open_pane_request_emit(&self, project_id: &str, url: &str) -> u64 {
+        let req_id = self.next_open_req.fetch_add(1, Ordering::SeqCst);
+        let (tx, _rx) = oneshot::channel::<Option<String>>();
+        self.pane_open_pending.lock().insert(req_id, tx);
+        let payload = serde_json::json!({ "reqId": req_id, "projectId": project_id, "url": url });
+        let _ = self.app.emit("browser:open-browser-request", payload);
+        req_id
+    }
+
+    /// Receive the frontend's answer for an open-browser request.
+    pub fn open_pane_request_resolve(&self, req_id: u64, pane_id: Option<String>) {
+        if let Some(tx) = self.pane_open_pending.lock().remove(&req_id) {
+            let _ = tx.send(pane_id);
+        }
+    }
+
+    /// High-level helper used by the MCP WS dispatch (Task #4) to resolve a
+    /// `pane_id` and/or `project_id` into a concrete webview label. The label
+    /// can then be passed to `run_action_for_pane` / `read_page_for_pane`.
+    ///
+    /// Resolution order:
+    /// 1. `explicit_pane_id` -> look up its active tab from `pane_active_tab`.
+    /// 2. `project_id` -> ask the frontend for the best pane (roundtrip, 5s
+    ///    timeout), then resolve its tab. Falls back to global active if the
+    ///    roundtrip times out.
+    /// 3. Neither -> global `active_label()`.
+    pub async fn resolve_pane_label(
+        &self,
+        project_id: Option<&str>,
+        explicit_pane_id: Option<&str>,
+    ) -> Result<String, String> {
+        // Case 1: explicit pane_id — look up its active tab.
+        if let Some(pid) = explicit_pane_id {
+            let tab = self
+                .pane_active_tab
+                .lock()
+                .get(pid)
+                .cloned()
+                .ok_or_else(|| format!("no active tab for pane {pid}"))?;
+            return Ok(browser_label(pid, &tab));
+        }
+
+        // Case 2: project_id — roundtrip through the frontend.
+        if let Some(pid) = project_id {
+            // Create our own channel for this async resolution. The emit
+            // method creates its own sender (for the resolve command path),
+            // but here we need to await the receiver directly.
+            let req_id = self.next_resolve_req.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = oneshot::channel::<Option<String>>();
+            self.pane_resolve_pending.lock().insert(req_id, tx);
+            let payload = serde_json::json!({ "reqId": req_id, "projectId": pid });
+            let _ = self.app.emit("browser:resolve-pane-request", payload);
+
+            match tokio::time::timeout(Duration::from_secs(5), rx).await {
+                Ok(Ok(Some(best_pane_id))) => {
+                    let tab = self
+                        .pane_active_tab
+                        .lock()
+                        .get(&best_pane_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            format!("no active tab for resolved pane {best_pane_id}")
+                        })?;
+                    return Ok(browser_label(&best_pane_id, &tab));
+                }
+                Ok(Ok(None)) => {
+                    // No pane exists for this project — caller should auto-open.
+                    return Err("pane_not_found".to_string());
+                }
+                Ok(Err(_)) | Err(_) => {
+                    // Channel closed or timeout — fall through to global active.
+                }
+            }
+            // Fallback: try the global active pane.
+            return self.active_label();
+        }
+
+        // Case 3: neither — use the global active pane.
+        self.active_label()
+    }
+
+    /// Convenience helper: ask the frontend to open a new browser pane for
+    /// `project_id` pointed at `url`, wait for the pane to be created (5s
+    /// timeout), and return the new pane's webview label. Used by the MCP WS
+    /// dispatch (Task #4) for auto-open on navigate when no pane exists.
+    pub async fn open_pane_for_project(
+        &self,
+        project_id: &str,
+        url: &str,
+    ) -> Result<String, String> {
+        let req_id = self.next_open_req.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel::<Option<String>>();
+        self.pane_open_pending.lock().insert(req_id, tx);
+        let payload = serde_json::json!({ "reqId": req_id, "projectId": project_id, "url": url });
+        let _ = self.app.emit("browser:open-browser-request", payload);
+
+        match tokio::time::timeout(Duration::from_secs(5), rx).await {
+            Ok(Ok(Some(new_pane_id))) => {
+                // The frontend created the pane and returned its id, but the
+                // native webview (`browser_create` → `create()`) may still be
+                // initializing async on the main thread — `pane_active_tab` /
+                // `webviews` aren't populated until `create()` finishes. Poll
+                // for the predictable default-tab label to appear in the
+                // webviews map (create() inserts it last), up to ~3s, rather
+                // than relying on a fixed sleep that races the webview init.
+                let label = browser_label(&new_pane_id, "default");
+                let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                loop {
+                    if self.webviews.lock().contains_key(&label) {
+                        return Ok(label);
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(format!(
+                            "open_pane_for_project: pane {new_pane_id} webview did not register within 3s"
+                        ));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+            Ok(Ok(None)) => Err("open_pane_for_project: frontend returned null pane_id".to_string()),
+            Ok(Err(_)) => Err("open_pane_for_project: channel closed".to_string()),
+            Err(_) => Err("open_pane_for_project: timed out waiting for pane creation".to_string()),
+        }
     }
 
     pub async fn click_ref(&self, r: i64) -> Result<String, String> {
@@ -495,35 +1050,150 @@ impl BrowserManager {
             .cloned()
             .ok_or_else(|| format!("no browser webview with label {label}"))
     }
+
+    // --- Agent-driven description resolution (Task #5) ---------------------
+    // These resolve a `selector_or_description` string to a concrete element
+    // via bridge_resolve.js, then act on it. Used by the MCP WS dispatch
+    // (browser_mcp::op_click / op_type_text). The click/type bodies are the
+    // sync versions from click_js/type_js for now; Task #2 swaps in the
+    // animated Promise-returning overlays on top of the same resolution.
+
+    /// Resolve `desc` to an element ref in the pane labelled `label`. Returns
+    /// the raw JSON the bridge emits: `{"ok":true,"ref":..,...}` or
+    /// `{"ok":false,"error":"not_found","suggestions":[...]}`.
+    pub async fn resolve_element(&self, label: &str, desc: &str, action: &str) -> Result<String, String> {
+        let body = build_resolve_js(desc, action);
+        self.run_action_for_pane(label, &body).await
+    }
+
+    /// Resolve + click. Returns the bridge JSON (ok or not_found with
+    /// suggestions) when resolution succeeds/fails; the click result string is
+    /// folded into the ok payload's `result` field so the caller can surface
+    /// both.
+    pub async fn resolve_and_click(&self, label: &str, desc: &str) -> Result<String, String> {
+        self.resolve_and_click_opts(label, desc, &ActionOpts::default()).await
+    }
+
+    /// Resolve + click with pacing opts. Same shape as resolve_and_click.
+    pub async fn resolve_and_click_opts(&self, label: &str, desc: &str, opts: &ActionOpts) -> Result<String, String> {
+        let resolved = self.resolve_element(label, desc, "click").await?;
+        let v: serde_json::Value = serde_json::from_str(&resolved)
+            .map_err(|e| format!("resolve_and_click: bad resolution json: {e}"))?;
+        if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
+            let r = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(-1);
+            let click_result = self.run_action_for_pane_opts(label, &click_js(r), opts.clone()).await?;
+            Ok(format!(
+                r#"{{"ok":true,"clicked":{{"ref":{r},"tag":{},"label":{}}},"result":{}}}"#,
+                serde_json::to_string(v.get("tag").and_then(|x| x.as_str()).unwrap_or("")).unwrap_or_default(),
+                serde_json::to_string(v.get("label").and_then(|x| x.as_str()).unwrap_or("")).unwrap_or_default(),
+                serde_json::to_string(&click_result).unwrap_or_default()
+            ))
+        } else {
+            Ok(resolved)
+        }
+    }
+
+    /// Resolve + type. Same shape as resolve_and_click.
+    pub async fn resolve_and_type(&self, label: &str, desc: &str, text: &str) -> Result<String, String> {
+        self.resolve_and_type_opts(label, desc, text, &ActionOpts::default()).await
+    }
+
+    /// Resolve + type with pacing opts. Same shape as resolve_and_type.
+    pub async fn resolve_and_type_opts(&self, label: &str, desc: &str, text: &str, opts: &ActionOpts) -> Result<String, String> {
+        let resolved = self.resolve_element(label, desc, "type").await?;
+        let v: serde_json::Value = serde_json::from_str(&resolved)
+            .map_err(|e| format!("resolve_and_type: bad resolution json: {e}"))?;
+        if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
+            let r = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(-1);
+            let type_result = self.run_action_for_pane_opts(label, &type_js(r, text), opts.clone()).await?;
+            Ok(format!(
+                r#"{{"ok":true,"typed":{{"ref":{r},"tag":{},"label":{}}},"result":{}}}"#,
+                serde_json::to_string(v.get("tag").and_then(|x| x.as_str()).unwrap_or("")).unwrap_or_default(),
+                serde_json::to_string(v.get("label").and_then(|x| x.as_str()).unwrap_or("")).unwrap_or_default(),
+                serde_json::to_string(&type_result).unwrap_or_default()
+            ))
+        } else {
+            Ok(resolved)
+        }
+    }
 }
 
-/// Wrap an agentic action `body` (a JS block that `return`s a string) so it
-/// runs in the page and reports its result — or an error message — back to the
-/// backend via the `browser_action_result` command keyed by `req_id`.
-fn action_wrapper_js(req_id: u64, body: &str) -> String {
+/// Build the description-resolution JS body for `run_action_for_pane`. The
+/// bridge reads `DESC` (the selector/description) and `ACTION` ("click" |
+/// "type") as interpolated literals — JSON-escaped so special characters in a
+/// CSS selector or a label can't break out of the string. Returns the bridge's
+/// JSON: `{"ok":true,"ref":..,"tag":..,"label":..,"matchType":..,"confidence":..}`
+/// or `{"ok":false,"error":"not_found","desc":..,"suggestions":[..]}`.
+fn build_resolve_js(desc: &str, action: &str) -> String {
+    let desc_js = serde_json::to_string(desc).unwrap_or_else(|_| "\"\"".to_string());
+    let action_js = serde_json::to_string(action).unwrap_or_else(|_| "\"click\"".to_string());
+    BRIDGE_RESOLVE_JS
+        .replace("DESC_PLACEHOLDER", &desc_js)
+        .replace("ACTION_PLACEHOLDER", &action_js)
+}
+
+/// Wrap an agentic action `body` (a JS block that `return`s a string OR a
+/// Promise that resolves to a string) so it runs in the page and reports its
+/// result — or an error message — back to the backend via the
+/// `browser_action_result` command keyed by `req_id`.
+///
+/// The wrapper is promise-aware: if the body returns a thenable, the wrapper
+/// awaits it before reporting. This lets the visual-feedback layer (Task 2)
+/// run an async sequence (cursor tween → highlight → real click → pacing)
+/// and only report once the whole chain resolves — the race guard that keeps
+/// a tool result from being read before the on-screen action completes.
+/// Synchronous bodies (the existing `click_js`/`type_js`/`scroll_js`) keep
+/// working unchanged: their non-thenable return is reported immediately.
+///
+/// When `WATCH_MODE` is true the wrapper applies a `PANE_DELAY_MS` pacing
+/// delay via setTimeout before calling `__report`, so a human watching can
+/// follow the action at a comfortable pace. The delay gates the final report
+/// (race guard): the caller reading the tool result knows the action AND
+/// pacing both completed.
+fn action_wrapper_js(req_id: u64, body: &str, opts: &ActionOpts) -> String {
+    let watch_mode = opts.watch_mode;
+    let pane_delay_ms = opts.pane_delay_ms;
     format!(
         r#"(function() {{
+    var WATCH_MODE = {watch_mode};
+    var PANE_DELAY_MS = {pane_delay_ms};
     var __report = function(res) {{
         try {{
             window.__TAURI_INTERNALS__.invoke('browser_action_result', {{
                 reqId: {req_id},
-                result: String(res)
+                result: res === undefined ? 'undefined' : String(res)
             }}).catch(function() {{}});
         }} catch(e) {{}}
     }};
+    var __finish = function(res) {{
+        if (WATCH_MODE) {{
+            setTimeout(function() {{ __report(res); }}, PANE_DELAY_MS);
+        }} else {{
+            __report(res);
+        }}
+    }};
     try {{
-        __report((function() {{ {body} }})());
+        var __result = (function() {{ {body} }})();
+        if (__result && typeof __result.then === 'function') {{
+            __result.then(
+                function(v) {{ __finish(v); }},
+                function(e) {{ __finish('ERROR: ' + (e && e.message ? e.message : e)); }}
+            );
+        }} else {{
+            __finish(__result);
+        }}
     }} catch(e) {{
-        __report('ERROR: ' + (e && e.message ? e.message : e));
+        __finish('ERROR: ' + (e && e.message ? e.message : e));
     }}
 }})();"#
     )
 }
 
-/// Read the active page: URL, title, a numbered list of interactive elements
-/// (each tagged with a `data-conduit-ref` the click/type tools target) and the
-/// visible text. Only elements with a non-zero box are listed, so hidden menus
-/// don't pollute the map.
+/// Legacy flat-text read JS (replaced by the readability-style bridge above,
+/// but kept for the click_js / type_js tests that check the ref-tagging pattern).
+/// The interactive-element ref scheme (data-conduit-ref + non-zero-bounding-rect
+/// guard) is preserved in the new bridge_extract.js.
+#[allow(dead_code)]
 const READ_PAGE_JS: &str = r#"
 var sel = 'a[href], button, input, textarea, select, [role=button], [onclick]';
 var els = Array.prototype.slice.call(document.querySelectorAll(sel));
@@ -551,33 +1221,99 @@ return 'URL: ' + location.href + '\nTITLE: ' + document.title +
     '\n\nPAGE TEXT:\n' + text;
 "#;
 
+/// Click the element tagged with `data-conduit-ref="{r}"`. Returns a JS body
+/// (for `action_wrapper_js`) that returns a PROMISE: it tweens the synthetic
+/// cursor to the element, shows a ripple, THEN fires the real click — so a
+/// human watching can follow the action, and the tool result is only reported
+/// once the whole sequence (and the real DOM click) completes (Task #7 race
+/// guard). The overlay primitives come from bridge_overlay.js (injected after
+/// navigation + lazily by __conduit_injectOverlay).
 fn click_js(r: i64) -> String {
     format!(
         r#"
 var el = document.querySelector('[data-conduit-ref="{r}"]');
 if (!el) return 'ERROR: no element with ref {r}. Call browser_read first to refresh the element map.';
-el.scrollIntoView({{block: 'center'}});
-el.click();
-return 'Clicked ref {r}. Current URL: ' + location.href + '. Call browser_read to see the resulting page.';
+function doClick() {{
+    el.scrollIntoView({{block: 'center'}});
+    el.click();
+    return 'Clicked ref {r}. Current URL: ' + location.href + '. Call browser_read to see the resulting page.';
+}}
+// Graceful degradation: if the visual overlay isn't installed yet (page loaded
+// before the post-nav injection fired, or the primitives got cleared), skip the
+// cursor/ripple and just click. Functionality never depends on the visuals.
+if (typeof __conduit_tweenCursor !== 'function') {{ return doClick(); }}
+var rect = el.getBoundingClientRect();
+var cx = rect.left + rect.width / 2;
+var cy = rect.top + rect.height / 2;
+__conduit_highlight(rect);
+return __conduit_tweenCursor(cx, cy, 400).then(function() {{
+    __conduit_showRipple(cx, cy);
+    return doClick();
+}}).then(function(msg) {{
+    setTimeout(function() {{ __conduit_fadeHighlight(); }}, 250);
+    return msg;
+}});
 "#
     )
 }
 
+/// Type `text` into the element tagged with `data-conduit-ref="{r}"`. Returns a
+/// JS body that returns a PROMISE: it tweens the cursor to the field, shows a
+/// caret, then inserts the text CHARACTER BY CHARACTER (~45ms±15ms per char,
+/// randomized) dispatching real keydown/keyup/input events per keystroke —
+/// this is functionally required (not just visual) so React/Vue controlled
+/// inputs register the change the same way a real user typing does. The tool
+/// result reports only after the last keystroke (Task #7 race guard).
 fn type_js(r: i64, text: &str) -> String {
     let js_text = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
     format!(
         r#"
 var el = document.querySelector('[data-conduit-ref="{r}"]');
 if (!el) return 'ERROR: no element with ref {r}. Call browser_read first to refresh the element map.';
-el.focus();
-if ('value' in el) {{
-    el.value = {js_text};
-}} else {{
-    el.textContent = {js_text};
+var text = {js_text};
+function doTypePlain() {{
+    el.focus();
+    if ('value' in el && typeof el.value === 'string') {{ el.value = text; }} else {{ el.textContent = text; }}
+    el.dispatchEvent(new Event('input', {{bubbles: true}}));
+    el.dispatchEvent(new Event('change', {{bubbles: true}}));
+    return 'Typed into ref {r}.';
 }}
-el.dispatchEvent(new Event('input', {{bubbles: true}}));
-el.dispatchEvent(new Event('change', {{bubbles: true}}));
-return 'Typed into ref {r}.';
+// Graceful degradation when the overlay primitives aren't installed yet.
+if (typeof __conduit_tweenCursor !== 'function') {{ return doTypePlain(); }}
+var rect = el.getBoundingClientRect();
+var cx = rect.left + rect.width / 2;
+var cy = rect.top + rect.height / 2;
+__conduit_highlight(rect);
+return __conduit_tweenCursor(cx, cy, 400).then(function() {{
+    el.focus();
+    __conduit_showCaret(cx + rect.width / 2 - 2, cy);
+    var existing = ('value' in el && typeof el.value === 'string') ? el.value : '';
+    var i = 0;
+    function next() {{
+        if (i >= text.length) {{
+            el.dispatchEvent(new Event('input', {{bubbles: true}}));
+            el.dispatchEvent(new Event('change', {{bubbles: true}}));
+            __conduit_hideCaret();
+            setTimeout(function() {{ __conduit_fadeHighlight(); }}, 200);
+            return 'Typed into ref {r}.';
+        }}
+        var ch = text[i];
+        try {{ el.dispatchEvent(new KeyboardEvent('keydown', {{key: ch, bubbles: true}})); }} catch(e) {{}}
+        if ('value' in el && typeof el.value === 'string') {{
+            el.value = existing + text.slice(0, i + 1);
+        }} else {{
+            el.textContent = existing + text.slice(0, i + 1);
+        }}
+        try {{ el.dispatchEvent(new KeyboardEvent('keyup', {{key: ch, bubbles: true}})); }} catch(e) {{}}
+        el.dispatchEvent(new Event('input', {{bubbles: true}}));
+        var r2 = el.getBoundingClientRect();
+        __conduit_showCaret(r2.left + Math.min(r2.width, 8), r2.top + r2.height / 2 - 9);
+        i++;
+        var delay = 30 + Math.random() * 30;
+        return new Promise(function(resolve) {{ setTimeout(function() {{ resolve(next()); }}, delay); }});
+    }}
+    return next();
+}});
 "#
     )
 }
@@ -598,12 +1334,48 @@ mod tests {
 
     #[test]
     fn action_wrapper_reports_via_command_with_req_id() {
-        let js = action_wrapper_js(42, "return 'hi';");
+        let js = action_wrapper_js(42, "return 'hi';", &ActionOpts::default());
         assert!(js.contains("browser_action_result"));
         assert!(js.contains("reqId: 42"));
         assert!(js.contains("return 'hi';"));
         // Errors are reported too, not swallowed.
         assert!(js.contains("'ERROR: '"));
+    }
+
+    #[test]
+    fn action_wrapper_awaits_promise_results() {
+        // A body that returns a Promise (the visual-feedback path) must be
+        // detected and awaited, not reported as "[object Promise]".
+        let js = action_wrapper_js(7, "return new Promise(function(r){ r('done'); });", &ActionOpts::default());
+        assert!(js.contains("typeof __result.then === 'function'"));
+        assert!(js.contains("browser_action_result"));
+        assert!(js.contains("reqId: 7"));
+        // Promise rejection path still maps to the ERROR prefix.
+        assert!(js.contains("'ERROR: '"));
+    }
+
+    #[test]
+    fn action_wrapper_includes_pacing_when_watch_mode_true() {
+        let opts = ActionOpts { watch_mode: true, pane_delay_ms: 600 };
+        let js = action_wrapper_js(1, "return 'ok';", &opts);
+        // The JS must interpolate WATCH_MODE = true and PANE_DELAY_MS = 600
+        // as literal values, not strings.
+        assert!(js.contains("var WATCH_MODE = true;"));
+        assert!(js.contains("var PANE_DELAY_MS = 600;"));
+        assert!(js.contains("if (WATCH_MODE)"));
+        assert!(js.contains("setTimeout(function() { __report(res); }, PANE_DELAY_MS)"));
+        assert!(js.contains("__finish(__result)"));
+    }
+
+    #[test]
+    fn action_wrapper_skips_pacing_when_watch_mode_false() {
+        let opts = ActionOpts::default();
+        let js = action_wrapper_js(1, "return 'ok';", &opts);
+        assert!(js.contains("var WATCH_MODE = false;"));
+        assert!(js.contains("var PANE_DELAY_MS = 600;"));
+        assert!(js.contains("if (WATCH_MODE)"));
+        // __finish still wraps the report (unified path), but the setTimeout
+        // branch won't fire.
     }
 
     #[test]
@@ -691,5 +1463,186 @@ mod tests {
     fn rect_deserializes_from_frontend_shape() {
         let r: Rect = serde_json::from_str(r#"{"x":1.0,"y":2.0,"width":3.0,"height":4.0}"#).unwrap();
         assert_eq!((r.x, r.y, r.width, r.height), (1.0, 2.0, 3.0, 4.0));
+    }
+
+    // ---- New extraction tests ----
+
+    #[test]
+    fn read_mode_deserializes_from_snake_case() {
+        let full: ReadMode = serde_json::from_str("\"full\"").unwrap();
+        assert!(matches!(full, ReadMode::Full));
+        let summary: ReadMode = serde_json::from_str("\"summary_only\"").unwrap();
+        assert!(matches!(summary, ReadMode::SummaryOnly));
+        let section: ReadMode = serde_json::from_str("\"section\"").unwrap();
+        assert!(matches!(section, ReadMode::Section));
+    }
+
+    #[test]
+    fn read_mode_defaults_to_full() {
+        let mode = ReadMode::default();
+        assert!(matches!(mode, ReadMode::Full));
+    }
+
+    #[test]
+    fn read_mode_serializes_to_snake_case() {
+        let json = serde_json::to_string(&ReadMode::Full).unwrap();
+        assert_eq!(json, "\"full\"");
+        let json = serde_json::to_string(&ReadMode::SummaryOnly).unwrap();
+        assert_eq!(json, "\"summary_only\"");
+        let json = serde_json::to_string(&ReadMode::Section).unwrap();
+        assert_eq!(json, "\"section\"");
+        let json = serde_json::to_string(&ReadMode::Interactive).unwrap();
+        assert_eq!(json, "\"interactive\"");
+    }
+
+    #[test]
+    fn build_extract_js_with_interactive_mode() {
+        // Interactive mode must reach the bridge as "interactive" so the
+        // extract() short-circuit (accessibility tree, no Readability) fires.
+        let js = build_extract_js(&ReadMode::Interactive, None);
+        assert!(js.contains("var MODE = \"interactive\";"));
+    }
+
+    #[test]
+    fn build_resolve_js_injects_desc_and_action_escaped() {
+        // The description must be a JSON-escaped JS string literal so a CSS
+        // selector or label containing quotes can't break out.
+        let js = build_resolve_js("a[href*=\"x\"]", "click");
+        assert!(js.contains("var DESC = \"a[href*=\\\"x\\\"]\";"));
+        assert!(js.contains("var ACTION = \"click\";"));
+    }
+
+    #[test]
+    fn extracted_content_round_trips_sample_json() {
+        // Sample JSON matching what the bridge emits for a full extraction.
+        // Use actual newlines in the raw string, not \n escapes, and avoid
+        // quote sequences that could conflict with the r#" delimiter.
+        let sample = r##"{
+  "markdown": "# Hello\n\nWorld\n\n- item 1\n- item 2\n\n[Link](https://example.com)",
+  "title": "Example Page",
+  "url": "https://example.com/page",
+  "canonicalUrl": "https://example.com/canonical",
+  "publishedDate": "2026-01-15",
+  "byline": "Jane Doe",
+  "mode": "full",
+  "failureReason": null,
+  "elementRefs": [
+    {"ref": 0, "tag": "a", "label": "Home", "href": "/"},
+    {"ref": 1, "tag": "button", "label": "Search", "href": null}
+  ]
+}"##;
+        let content: ExtractedContent = serde_json::from_str(sample).unwrap();
+        assert_eq!(content.title, "Example Page");
+        assert_eq!(content.url, "https://example.com/page");
+        assert_eq!(content.canonical_url.as_deref(), Some("https://example.com/canonical"));
+        assert_eq!(content.published_date.as_deref(), Some("2026-01-15"));
+        assert_eq!(content.byline.as_deref(), Some("Jane Doe"));
+        assert_eq!(content.mode, "full");
+        assert!(content.failure_reason.is_none());
+        assert_eq!(content.element_refs.len(), 2);
+        assert_eq!(content.element_refs[0].r#ref, 0);
+        assert_eq!(content.element_refs[0].tag, "a");
+        assert_eq!(content.element_refs[0].href.as_deref(), Some("/"));
+        assert_eq!(content.element_refs[1].r#ref, 1);
+        assert_eq!(content.element_refs[1].tag, "button");
+        assert!(content.element_refs[1].href.is_none());
+        // Round-trip: serialize back and verify
+        let json = serde_json::to_string_pretty(&content).unwrap();
+        let reparse: ExtractedContent = serde_json::from_str(&json).unwrap();
+        assert_eq!(reparse.title, content.title);
+        assert_eq!(reparse.markdown, content.markdown);
+    }
+
+    #[test]
+    fn extracted_content_with_failure_reason() {
+        let sample = r##"{
+  "markdown": "",
+  "title": "Paywall Site",
+  "url": "https://example.com/paywall",
+  "canonicalUrl": null,
+  "publishedDate": null,
+  "byline": "",
+  "mode": "full",
+  "failureReason": "paywalled",
+  "elementRefs": []
+}"##;
+        let content: ExtractedContent = serde_json::from_str(sample).unwrap();
+        assert_eq!(content.failure_reason.as_deref(), Some("paywalled"));
+        assert_eq!(content.markdown, "");
+        assert!(content.element_refs.is_empty());
+    }
+
+    #[test]
+    fn bridge_js_includes_readability_constructor() {
+        // The vendored readability.js must be non-empty and contain the
+        // Readability constructor function.
+        assert!(READABILITY_JS.len() > 1000, "readability.js should be > 1KB");
+        assert!(READABILITY_JS.contains("function Readability"));
+        assert!(READABILITY_JS.contains("Readability.prototype"));
+    }
+
+    #[test]
+    fn build_extract_js_embeds_mode_and_selector() {
+        let js = build_extract_js(&ReadMode::Full, None);
+        assert!(js.contains("function Readability")); // readability.js is prepended
+        // The placeholders are quoted in bridge_extract.js; the injected value
+        // must be the *inner* string, NOT re-quoted into `""full""` (a syntax
+        // error that would break every browser_read call in the live webview).
+        assert!(js.contains("var MODE = \"full\";"));
+        assert!(js.contains("var SELECTOR = \"\";"));
+        // No double-quoting / triple-quote sequence (the old bug).
+        assert!(!js.contains("\"\"\""), "selector was double-quoted into a syntax error");
+        assert!(!js.contains("\"\"full\"\""), "mode was double-quoted into a syntax error");
+        // Placeholders fully replaced.
+        assert!(!js.contains("MODE_PLACEHOLDER"), "MODE placeholder not replaced");
+        assert!(!js.contains("SELECTOR_PLACEHOLDER"), "SELECTOR placeholder not replaced");
+    }
+
+    #[test]
+    fn build_extract_js_with_section_mode() {
+        // A selector with embedded quotes must be escaped, not double-quoted,
+        // so the resulting JS string literal is still valid.
+        let js = build_extract_js(&ReadMode::Section, Some("#content"));
+        assert!(js.contains("var MODE = \"section\";"));
+        assert!(js.contains("var SELECTOR = \"#content\";"));
+        // No double-quoting on the MODE/SELECTOR lines specifically (the
+        // readability.js vendored blob legitimately contains `""` elsewhere, so
+        // we can't assert absence over the whole string — only the lines we own).
+        for line in js.lines() {
+            if line.contains("var MODE") || line.contains("var SELECTOR") {
+                assert!(
+                    !line.contains("\"\"") && !line.contains("\"\"\""),
+                    "injected line was double-quoted into a syntax error: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_extract_js_escapes_quotes_in_selector() {
+        // A selector containing a double-quote must be backslash-escaped so the
+        // injected JS string literal parses — regression guard for the
+        // double-quote bug that broke live browser_read calls.
+        let js = build_extract_js(&ReadMode::Section, Some("a[href*=\"foo\"]"));
+        // The injected literal must contain the escaped quote, and the whole
+        // `var SELECTOR = ...;` line must be a syntactically valid JS statement.
+        assert!(js.contains("a[href*=\\\"foo\\\"]"));
+        let line = js
+            .lines()
+            .find(|l| l.contains("var SELECTOR"))
+            .expect("SELECTOR line present");
+        // Exactly one unescaped pair of surrounding quotes.
+        let trimmed = line.trim_start();
+        assert!(
+            trimmed.starts_with("var SELECTOR = \"") && trimmed.trim_end().ends_with("\";"),
+            "SELECTOR line is not a valid JS string-literal assignment: {line}"
+        );
+    }
+
+    #[test]
+    fn read_opts_default_values() {
+        let opts = ReadOpts::default();
+        assert_eq!(opts.settle_ms, 1000);
+        assert_eq!(opts.max_scroll_steps, 4);
     }
 }

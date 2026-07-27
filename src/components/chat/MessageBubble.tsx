@@ -5,11 +5,15 @@
 import { useCallback, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import "katex/dist/katex.min.css";
 import type { ChatMessage } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { MermaidDiagram } from "./MermaidDiagram";
 import { InlineDiagram } from "./InlineDiagram";
+import { MessageAttachments, parseAttachments } from "./MessageAttachments";
 
 interface Props {
   message: ChatMessage;
@@ -116,8 +120,11 @@ function ArtifactChip({
   );
 }
 
-/** The files an assistant message produced. Diagrams (and other .html/.svg
- *  visuals) render inline in the chat; every other file is a download chip. */
+/** The files an assistant message produced. .html/.svg artifacts are probed via
+ *  InlineDiagram, which renders ONLY true diagrams (kind "diagram", authored by
+ *  generate_diagram) inline; a plain .html webpage or .svg image falls back to
+ *  a download chip so it opens in the preview pane instead. Every other file is
+ *  always a download chip. */
 function MessageArtifacts({
   artifacts,
   onPreviewArtifact,
@@ -247,6 +254,12 @@ interface ToolData {
   detail?: string;
   lang?: string;
   code?: string;
+  /** Optional result text rendered once the call completes. The backend
+   *  doesn't populate this today (tool output is summarized by the model in
+   *  the following narration), but the expandable step detail shows args/code
+   *  regardless — `result` is reserved so a future backend field flows
+   *  straight into the same disclosure. */
+  result?: string;
 }
 
 type Segment =
@@ -330,39 +343,125 @@ function toolGlyph(kind?: string): string {
   }
 }
 
-/** A collapsible "process" card for a single tool call (tool calling, writing
- *  a script, …). Collapsed by default; expands to reveal detail/code. */
-function ToolBlock({ data, done }: { data: ToolData | null; done: boolean }) {
+/** A short, *specific* label for one tool step. The backend emits a generic
+ *  `title` ("Reading a web page", "Searching the web") repeated identically
+ *  down a multi-step run, but also a `detail` carrying the call's actual
+ *  target (url / query / filename / code snippet). We prefer the detail so
+ *  each step reads as what it actually touched, falling back to the title
+ *  only when no detail is available. */
+function stepLabel(data: ToolData | null): string {
+  if (!data) return "Working…";
+  const title = data.title?.trim() || "Working…";
+  const detail = data.detail?.trim();
+  if (!detail) return title;
+  // For code-producing tools the "detail" is sometimes the full code body —
+  // too long for a row label; in that case keep the title (which already
+  // names the file/format) and let the expandable body show the code.
+  if (data.code && detail.length > 80) return title;
+  // Compose: "Reading a web page — rust-lang.org/learn" reads better than
+  // either piece alone, and disambiguates repeated identical titles.
+  return `${title} — ${detail}`;
+}
+
+/** A one-line synthesized summary of what a whole tool-call group accomplished.
+ *  This is generated client-side from the step set — the backend has no
+ *  model-emitted summary string today. The heuristic leans on the most
+ *  meaningful step (the "produced" step if present, else the dominant verb)
+ *  so the summary is task-aware rather than a generic "Ran N tool calls".
+ *  Quality is a judgment call (PRD §13); prefer specifics from `detail`. */
+function summarizeGroup(steps: ActivityStep[]): string {
+  if (steps.length === 0) return "Working…";
+
+  // If any step generated a file/document/diagram, lead with what was
+  // produced — that's the group's actual deliverable.
+  const produced = steps.find(
+    (s) => s.data?.kind === "file" || s.data?.kind === "code",
+  );
+  if (produced?.data?.title) {
+    // "Building docx document \"report.docx\"" → summarize the deliverable.
+    const producedCount = steps.filter(
+      (s) => s.data?.kind === "file" || s.data?.kind === "code",
+    ).length;
+    const base = produced.data.title.replace(/^[A-Z][a-z]+ /, "");
+    return producedCount > 1
+      ? `Generated ${producedCount} files — ${base}`
+      : base;
+  }
+
+  // Research-style runs: searches + page reads. Summarize the breadth.
+  const searches = steps.filter((s) => s.data?.kind === "search").length;
+  const reads = steps.filter((s) => s.data?.kind === "web").length;
+  const browser = steps.filter((s) => s.data?.kind === "browser").length;
+  if (searches && reads) {
+    return `Researched across ${reads} page${reads > 1 ? "s" : ""} (${searchsPlural(searches)})`;
+  }
+  if (searches) return searchsPlural(searches);
+  if (reads) return `Read ${reads} web page${reads > 1 ? "s" : ""}`;
+  if (browser) return `Drove the browser through ${browser} step${browser > 1 ? "s" : ""}`;
+
+  // Generic fallback: still name the tools rather than a bare count.
+  const toolNames = new Set(
+    steps.map((s) => s.data?.title).filter(Boolean) as string[],
+  );
+  if (toolNames.size === 1) return [...toolNames][0];
+  return `Completed ${steps.length} steps`;
+}
+function searchsPlural(n: number): string {
+  return `Searched the web${n > 1 ? ` (${n} queries)` : ""}`;
+}
+
+/** A single tool-call row inside an expanded ActivitySummary. Renders the
+ *  step's type icon + a specific label (the actual URL/query/filename, not a
+ *  repeated generic title). Any narration text the model produced around
+ *  this step is folded into the row above/below the label. The whole row is
+ *  itself expandable (a second, nested disclosure) to reveal full detail:
+ *  exact tool kind, detail string, and the code block for code-producing
+ *  tools. */
+function ActivityStepRow({
+  step,
+  done,
+  index,
+}: {
+  step: ActivityStep;
+  done: boolean;
+  index: number;
+}) {
   const [open, setOpen] = useState(false);
-  const title = data?.title ?? "Working…";
-  const hasBody = Boolean(data?.code || data?.detail);
+  const hasBody = Boolean(
+    step.data?.code || step.data?.detail || step.data?.result,
+  );
   return (
-    <div className={`chat-tool${done ? "" : " live"}`}>
+    <div className={`chat-step${done ? "" : " live"}`}>
       <button
-        className="chat-tool-toggle"
+        className="chat-step-toggle"
         onClick={() => hasBody && setOpen((o) => !o)}
-        title={open ? "Hide details" : "Show details"}
+        title={hasBody ? (open ? "Hide details" : "Show details") : undefined}
         disabled={!hasBody}
       >
-        <span className="chat-tool-icon">{toolGlyph(data?.kind)}</span>
-        <span className="chat-tool-title">{title}</span>
-        {!done && <span className="chat-tool-spinner" aria-hidden="true" />}
+        <span className="chat-step-index">{index + 1}</span>
+        <span className="chat-step-icon">{toolGlyph(step.data?.kind)}</span>
+        <span className="chat-step-label">{stepLabel(step.data)}</span>
         {hasBody && (
           <span className={`chat-thinking-chevron${open ? " open" : ""}`}>›</span>
         )}
       </button>
+      {step.before && step.before.trim().length > 0 && (
+        <div className="chat-step-narration">{step.before}</div>
+      )}
       {open && hasBody && (
-        <div className="chat-tool-body">
-          {data?.detail && <div className="chat-tool-detail">{data.detail}</div>}
-          {data?.code && (
+        <div className="chat-step-body">
+          {step.data?.detail && (
+            <div className="chat-step-detail">{step.data.detail}</div>
+          )}
+          {step.data?.code && (
             <div className="chat-code-block">
               <div className="chat-code-header">
-                <span className="chat-code-lang">{data.lang || "text"}</span>
-                <CopyButton code={data.code} />
+                <span className="chat-code-lang">{step.data.lang || "text"}</span>
+                <CopyButton code={step.data.code} />
               </div>
               <SyntaxHighlighter
                 style={{}}
-                language={data.lang || "text"}
+                language={step.data.lang || "text"}
                 PreTag="div"
                 customStyle={{
                   margin: 0,
@@ -375,8 +474,72 @@ function ToolBlock({ data, done }: { data: ToolData | null; done: boolean }) {
                 }}
                 codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
               >
-                {data.code}
+                {step.data.code}
               </SyntaxHighlighter>
+            </div>
+          )}
+          {step.data?.result && (
+            <div className="chat-step-result">{step.data.result}</div>
+          )}
+        </div>
+      )}
+      {step.after && step.after.trim().length > 0 && !open && (
+        <div className="chat-step-narration">{step.after}</div>
+      )}
+    </div>
+  );
+}
+
+/** One collapsed activity group: a synthesized one-line summary of what the
+ *  whole turn accomplished, expandable into the ordered step list. Tool steps
+ *  render as ActivityStepRow (each itself further expandable); think steps
+ *  render as compact nested ThinkingBlocks. A "Done" checkmark appears once
+ *  the run has no live step remaining.
+ *
+ *  Grouping boundary: the caller folds the turn's ENTIRE tool activity —
+ *  including thinking interludes — into this one container, so a multi-step
+ *  task takes up a single collapsed row by default. A trailing plain-text
+ *  answer renders outside this block. */
+function ActivitySummary({ group }: { group: ActivityGroup }) {
+  const [open, setOpen] = useState(false);
+  const live = group.steps.some((s) => !s.done);
+  const summary = summarizeGroup(group.steps);
+  return (
+    <div className={`chat-activity${live ? " live" : ""}`}>
+      <button
+        className="chat-activity-toggle"
+        onClick={() => setOpen((o) => !o)}
+        title={open ? "Collapse activity" : "Show activity steps"}
+      >
+        <span className="chat-activity-icon" aria-hidden="true">
+          {live ? <span className="chat-activity-spinner" /> : "✓"}
+        </span>
+        <span className="chat-activity-summary">{live ? "Working…" : summary}</span>
+        <span className={`chat-thinking-chevron${open ? " open" : ""}`}>›</span>
+        <span className="chat-activity-count">{group.steps.length}</span>
+      </button>
+      {open && (
+        <div className="chat-activity-steps">
+          {group.steps.map((step, i) =>
+            step.think != null ? (
+              <div className="chat-step-think" key={i}>
+                {step.before && step.before.trim().length > 0 && (
+                  <div className="chat-step-narration">{step.before}</div>
+                )}
+                <ThinkingBlock thinking={step.think} done={step.done} />
+              </div>
+            ) : (
+              <ActivityStepRow
+                key={i}
+                step={step}
+                done={step.done}
+                index={i}
+              />
+            ),
+          )}
+          {!live && (
+            <div className="chat-activity-done">
+              <CheckIcon /> Done
             </div>
           )}
         </div>
@@ -484,7 +647,8 @@ function Markdown({
   return (
     <div className="chat-markdown">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeKatex]}
         components={{
           code({ className, children, ...props }) {
             const match = /language-(\w+)/.exec(className || "");
@@ -564,6 +728,111 @@ function Markdown({
   );
 }
 
+/** One step inside an activity group. Tool steps carry the call's `ToolData`;
+ *  think steps (`think` set, `data` null) are reasoning interludes folded into
+ *  the SAME group so a turn renders as one outer container instead of
+ *  alternating activity/thinking blocks. `before`/`after` carry narration
+ *  text the model produced around the call — folded into the step instead of
+ *  floating as standalone text nodes between rows (the source of the old flat
+ *  layout's noise). */
+interface ActivityStep {
+  data: ToolData | null;
+  done: boolean;
+  before?: string;
+  after?: string;
+  /** Reasoning text when this step is a thinking interlude. */
+  think?: string;
+}
+
+/** A grouped run of tool steps, collapsed into one summary line by default. */
+interface ActivityGroup {
+  steps: ActivityStep[];
+}
+
+/** A render block: either a standalone text/think segment (rendered as
+ *  before) or a collapsed activity group spanning a contiguous tool run. */
+type Block =
+  | { kind: "text"; text: string }
+  | { kind: "think"; text: string; done: boolean }
+  | { kind: "activity"; group: ActivityGroup };
+
+/** Walk the parsed segments and collapse ALL of a turn's tool activity into a
+ *  single ActivityGroup block — including any `<think>` reasoning interludes,
+ *  which become think steps inside the group rather than breaking it (the old
+ *  break-at-think rule produced one top-level activity block + one "Thought
+ *  process" block per tool call, scrolling forever on multi-step tasks).
+ *
+ *  Boundary rules:
+ *  - Text before the first tool/think renders ABOVE the container as markdown.
+ *  - A group starts at the first `tool` or `think` segment and absorbs every
+ *    following `tool`/`think`/`text` segment to the end of the message —
+ *    at most ONE activity block per turn.
+ *  - Mid-run text is narration: it folds into the next step's `before`.
+ *  - Text trailing the last tool/think is the model's synthesized answer and
+ *    renders OUTSIDE the group as markdown, after the summary.
+ *  - A turn with thinking but NO tool calls keeps the old behavior: the think
+ *    segment stays its own standalone disclosure. */
+function groupSegments(segments: Segment[]): Block[] {
+  // No tool activity at all → pass through (a lone thinking block stays its
+  // own disclosure, text renders as markdown).
+  if (!segments.some((s) => s.type === "tool")) {
+    return segments.map((seg) =>
+      seg.type === "think"
+        ? { kind: "think", text: seg.text, done: seg.done }
+        : { kind: "text", text: seg.type === "text" ? seg.text : "" },
+    );
+  }
+
+  const blocks: Block[] = [];
+  const steps: ActivityStep[] = [];
+  let pendingText: string | null = null; // narration held for the next step
+  let started = false;
+
+  for (const seg of segments) {
+    if (seg.type === "text" && !started) {
+      // Leading text before any activity: renders above the container.
+      blocks.push({ kind: "text", text: seg.text });
+      continue;
+    }
+    if (seg.type === "tool") {
+      started = true;
+      steps.push({
+        data: seg.data,
+        done: seg.done,
+        before: pendingText ?? undefined,
+      });
+      pendingText = null;
+      continue;
+    }
+    if (seg.type === "think") {
+      started = true;
+      // Skip empty think shells (e.g. an opening tag that just started
+      // streaming); any pending narration stays held for the next step.
+      if (seg.text.length > 0) {
+        steps.push({
+          data: null,
+          done: seg.done,
+          think: seg.text,
+          before: pendingText ?? undefined,
+        });
+        pendingText = null;
+      }
+      continue;
+    }
+    // text while active: narration between calls — hold until the next step
+    // claims it as `before`, or it becomes the trailing answer.
+    pendingText = (pendingText ?? "") + seg.text;
+  }
+
+  if (steps.length > 0) {
+    blocks.push({ kind: "activity", group: { steps } });
+  }
+  if (pendingText != null && pendingText.trim().length > 0) {
+    blocks.push({ kind: "text", text: pendingText });
+  }
+  return blocks;
+}
+
 export function MessageBubble({
   message,
   live,
@@ -573,11 +842,18 @@ export function MessageBubble({
   onPreviewArtifact,
 }: Props) {
   const isUser = message.role === "user";
+  // Parse attachment markers (e.g. "[Attached image: x]") out of the content
+  // so they render as visual cards above the text instead of inline strings.
+  // Live attachments (optimistic message) carry image base64 for thumbnails.
+  const { attachments: msgAttachments, text: cleanContent } = parseAttachments(
+    message.content,
+    message.attachments,
+  );
   // User messages are rendered verbatim; assistant messages are split into
   // reasoning / tool-call / answer segments (Claude-style process view).
   const segments: Segment[] = isUser
-    ? [{ type: "text", text: message.content }]
-    : parseSegments(message.content);
+    ? [{ type: "text", text: cleanContent }]
+    : parseSegments(cleanContent);
 
   // Copy action yields the visible answer text only (no process markup).
   const plainText = segments
@@ -586,22 +862,31 @@ export function MessageBubble({
     .join("")
     .trim();
 
+  // Fold the turn's entire tool activity (including thinking interludes and
+  // mid-run narration) into ONE ActivitySummary container. A trailing
+  // plain-text answer renders as normal markdown OUTSIDE the group — the core
+  // fix for the noisy per-call rows + interleaved-blocks layout.
+  const blocks = isUser ? null : groupSegments(segments);
+
   return (
     <div className={`chat-bubble${isUser ? " user" : " assistant"}`}>
+      {msgAttachments.length > 0 && <MessageAttachments attachments={msgAttachments} />}
       <div className="chat-bubble-inner">
-        {segments.map((seg, i) => {
-          if (seg.type === "think") {
-            return seg.text.length > 0 ? (
-              <ThinkingBlock key={i} thinking={seg.text} done={seg.done} />
-            ) : null;
-          }
-          if (seg.type === "tool") {
-            return <ToolBlock key={i} data={seg.data} done={seg.done} />;
-          }
-          return seg.text.trim().length > 0 ? (
-            <Markdown key={i} content={seg.text} onPreviewArtifact={onPreviewArtifact} />
-          ) : null;
-        })}
+        {isUser
+          ? cleanContent.trim().length > 0 && (
+              <Markdown content={cleanContent} onPreviewArtifact={onPreviewArtifact} />
+            )
+          : blocks!.map((b, i) =>
+              b.kind === "activity" ? (
+                <ActivitySummary key={i} group={b.group} />
+              ) : b.kind === "think" ? (
+                b.text.length > 0 ? (
+                  <ThinkingBlock key={i} thinking={b.text} done={b.done} />
+                ) : null
+              ) : b.text.trim().length > 0 ? (
+                <Markdown key={i} content={b.text} onPreviewArtifact={onPreviewArtifact} />
+              ) : null,
+            )}
         {!isUser && artifacts && artifacts.length > 0 && (
           <MessageArtifacts artifacts={artifacts} onPreviewArtifact={onPreviewArtifact} />
         )}

@@ -1,11 +1,11 @@
 ---
 name: diagram-html-svg
-description: "Use this skill when generating a diagram that needs deliberate visual hierarchy, nested groupings, custom colors, or precise layout — not a quick flowchart. Triggers: requests for architecture diagrams, feature-breakdown diagrams, anything described as 'polished,' 'presentation-ready,' or where Mermaid's auto-layout would fight the requested structure (nested boxes, nested color groups, mixed box sizes, titles outside the flow)."
+description: "Use this skill for EVERY diagram in Conduit — architecture, flowchart, sequence, feature breakdown, mind-map, anything visual. Conduit does not use Mermaid; all diagrams go through the `generate_diagram` tool as hand-authored SVG/HTML. Triggers: any request for a diagram, schematic, flow, breakdown, or visual representation."
 ---
 
 # HTML/SVG Diagram Generation (full manual control)
 
-Use this when Mermaid's auto-layout can't express the structure — nested groupings, precise spacing, mixed box sizes, a title sitting outside the flow, an export/action menu, or deliberate color-coding by category. Default to Mermaid for anything simpler (a plain flowchart or sequence diagram); reach for this only when the request needs actual visual design, not just boxes-and-arrows.
+Use this for every diagram — Mermaid is not used in Conduit (the core prompt explicitly forbids ` ```mermaid ` blocks), so every visual goes through `generate_diagram` as hand-authored markup. A clean hand-authored SVG reads better than auto-layout output at any complexity level — even a simple flowchart benefits from deliberate spacing, a title that sits outside the flow, and color-coding by meaning. Reach for HTML/CSS boxes (instead of pure SVG) only when a node genuinely needs multi-line text reflow.
 
 ## Output format
 
@@ -16,7 +16,7 @@ Wrap the single `<svg>` in a minimal complete HTML document and call `generate_d
 ## Structure pattern (matches the reference style)
 
 - **Title** sits above the diagram as a plain heading, outside any box — not inside the flow itself.
-- **Nodes** are rounded-rectangle divs (`border-radius: 8-10px`), each with a **bold label line** and an optional **smaller, dimmer description line** underneath (label = what it is, description = one short clarifying detail — never more than one line each).
+- **Nodes** are rounded-rectangle SVG `<rect rx="10">` elements (or rounded `div`s with `border-radius: 8-10px` when you're in the HTML/CSS fallback), each with a **bold `<text>`/label line** and an optional **smaller, dimmer description line** underneath (label = what it is, description = one short clarifying detail — never more than one line each). Prefer SVG primitives; use `div` nodes only when a node needs multi-line text reflow.
 - **Color = category, applied consistently.** Pick a small palette (3-5 colors max) and assign each color to a *meaning* (e.g. entry point, processing step, data store, output) — use that mapping consistently across every node in the diagram, not decoratively per-node.
 - **Grouping via nested containers**: a lighter/duller-toned outer box can contain a grid of smaller, brighter inner boxes when several items belong to one parent concept (e.g. "6 dimensions captured" as one container holding a 2×3 grid of category boxes). The outer container needs its own label at the top, separate from the inner nodes' labels.
 - **Connectors**: simple straight or elbowed lines between node edges (CSS borders positioned absolutely, or SVG `<path>`/`<line>` elements) with a small arrowhead (CSS triangle or SVG `<marker>`). Avoid curved/bezier connectors unless a specific line needs to route around another element (e.g. a dashed feedback line looping back — see below).
@@ -25,7 +25,7 @@ Wrap the single `<svg>` in a minimal complete HTML document and call `generate_d
 
 ## Color and contrast rules
 
-- Dark background canvas (match the app's void-black theme by default: `#08080C`–`#0B0B12`) unless the user specifies a light/print context.
+- The diagram renders inside the artifact panel, which uses a light/white canvas by default and adapts to the app's theme. Don't bake in a hard dark background — let the panel's canvas show through, or pick a background that matches the user's stated context (dark canvas for a "dark mode / presentation" ask, light/white for print or default).
 - Text inside colored boxes must stay high-contrast — white or near-white text on saturated fills; never place mid-tone text on a mid-tone background.
 - Description sub-lines use a lighter-weight/dimmer variant of the box's own text color (e.g. `opacity: 0.75`), not a completely different color — keeps them visually subordinate without looking disconnected.
 - Container/grouping boxes should be a duller, less saturated version of a color, with the nested boxes inside using the fuller-saturation versions — this is what creates the "grouping" read at a glance.

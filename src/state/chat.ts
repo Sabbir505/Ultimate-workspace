@@ -15,13 +15,19 @@ import {
   getChatMessages,
   listChatArtifacts,
   listChatSessions,
+  resolveToolAction,
   sendChatMessage,
   setChatApiKey,
   setChatSessionStarred,
   setChatSessionUnread,
   touchChatSession,
   updateChatSessionModel,
+  updateChatSessionPermissionMode,
+  updateChatSessionProvider,
   updateChatSessionTitle,
+  updateChatSessionWatchMode,
+  type ChatApprovalRequestPayload,
+  type ChatApprovalResolvedPayload,
   type ChatAttachmentInput,
   type ChatArtifactPayload,
   type ChatConfigPayload,
@@ -30,8 +36,74 @@ import {
 } from "../lib/ipc";
 import { useArtifactsStore } from "./artifacts";
 
-/** Sessions the user manually renamed — never auto-summarize their title. */
+/** Sessions the user manually renamed — never auto-summarize their title.
+ *  Capped at 1000 entries to prevent unbounded growth across long sessions. */
 const manuallyRenamed = new Set<string>();
+
+/** Sessions deleted during this app run. Background session-list refreshes
+ *  (`selectSession`'s touch-then-relist, `onDone`'s relist) fetch the list
+ *  over IPC and can race the user's delete: the fetch starts before the
+ *  DELETE commits but its payload is applied after — resurrecting the deleted
+ *  chat in the sidebar. Every refresh path filters this tombstone set so a
+ *  stale payload can never bring a deleted session back.
+ *  Capped at 1000 entries to prevent unbounded growth. */
+const deletedSessions = new Set<string>();
+
+/** Session list with tombstoned (deleted-this-run) sessions removed. */
+function withoutDeleted(sessions: ChatSession[]): ChatSession[] {
+  return sessions.filter((s) => !deletedSessions.has(s.id));
+}
+
+/** Cap a Set to `max` entries by evicting oldest (iteration-order) entries. */
+function capSet<T>(set: Set<T>, max: number) {
+  if (set.size > max) {
+    let toDelete = set.size - max;
+    for (const entry of set) {
+      if (toDelete <= 0) break;
+      set.delete(entry);
+      toDelete--;
+    }
+  }
+}
+const SET_CAP = 1000;
+
+function markDeleted(sid: string) {
+  deletedSessions.add(sid);
+  capSet(deletedSessions, SET_CAP);
+}
+
+function markManuallyRenamed(sid: string) {
+  manuallyRenamed.add(sid);
+  capSet(manuallyRenamed, SET_CAP);
+}
+
+/** The four filesystem permission postures a chat session can be in. Mirrors
+ *  `chat::permission::PermissionMode` in the Rust backend. */
+export type PermissionMode = "read_only" | "manual" | "auto_edit" | "full_auto";
+
+/** Default posture for every new chat session (per the task spec). */
+export const DEFAULT_PERMISSION_MODE: PermissionMode = "manual";
+
+/** Watch-mode pacing for browser actions. "on" | "off". */
+export type WatchMode = "on" | "off";
+
+/** A pending per-action filesystem-tool approval card, one per chat session. */
+export interface PendingApproval {
+  pendingId: string;
+  tool: string;
+  summary: string;
+  args: unknown;
+}
+
+/** Sessions in which the user has already confirmed the full_auto modal this
+ *  session — the one-time confirmation isn't re-shown within the same session.
+ *  (The mode itself persists in the DB; this set only suppresses re-prompting.) */
+const fullAutoConfirmed = new Set<string>();
+
+function markFullAutoConfirmed(sid: string) {
+  fullAutoConfirmed.add(sid);
+  capSet(fullAutoConfirmed, SET_CAP);
+}
 
 /** A file the model generated during a chat, surfaced as a download chip. */
 export interface ChatArtifact {
@@ -63,6 +135,9 @@ interface ChatState {
   error: string | null;
   /** Reasoning effort sent with messages ("" = provider default). */
   effort: string;
+  /** Context size (tokens) for local GGUF models; 0 = auto (picked from the
+   *  GGUF file size). Applied when the llama-server sidecar (re)starts. */
+  localCtx: number;
   /** When true, the model may call tools (web search, …) during a turn. */
   toolsEnabled: boolean;
   /** When true, the model may execute code (opt-in, security-sensitive). */
@@ -76,6 +151,11 @@ interface ChatState {
   pendingArtifacts: Record<string, ChatArtifact[]>;
   /** The artifact currently shown in the preview pane (null = pane closed). */
   previewArtifact: ChatArtifact | null;
+  /** Pending per-action filesystem-tool approvals, keyed by chat session. A
+   *  session has at most one card at a time (the tool loop pauses on it). */
+  pendingApprovals: Record<string, PendingApproval>;
+  /** True while the full_auto confirmation modal is open for a session. */
+  fullAutoConfirmingFor: string | null;
 
   // Actions
   loadSessions: () => Promise<void>;
@@ -90,15 +170,39 @@ interface ChatState {
   /** Mark a chat read/unread (shows an unread dot in the sidebar). */
   setUnread: (chatSessionId: string, unread: boolean) => Promise<void>;
   setSessionModel: (chatSessionId: string, model: string) => Promise<void>;
+  /** Switch a session's provider (e.g. to "local_gguf" when a local model is
+   *  picked from the selector in a cloud session, or back again). */
+  setSessionProvider: (chatSessionId: string, provider: string) => Promise<void>;
   setEffort: (effort: string) => void;
+  setLocalCtx: (ctx: number) => void;
   setToolsEnabled: (enabled: boolean) => void;
   setCodeExecEnabled: (enabled: boolean) => void;
-  sendMessage: (content: string, attachments?: ChatAttachmentInput[]) => Promise<void>;
+  sendMessage: (
+    content: string,
+    attachments?: ChatAttachmentInput[],
+    forceResearch?: boolean,
+  ) => Promise<void>;
   /** Re-run the last user message to get a fresh assistant response. */
   regenerate: () => Promise<void>;
   cancelStream: () => Promise<void>;
   /** Open/close the artifact preview pane. */
   setPreviewArtifact: (artifact: ChatArtifact | null) => void;
+  /** Set the active session's filesystem permission posture. Switching INTO
+   *  `full_auto` first opens a one-time confirmation modal (per session);
+   *  switching OUT of it applies immediately. Returns true if applied, false
+   *  if a confirmation modal was opened instead. */
+  setSessionPermissionMode: (chatSessionId: string, mode: PermissionMode) => Promise<boolean>;
+  /** Set a session's watch-mode pacing override. on/off = per-session override;
+   *  null clears the override so the session inherits the global setting. */
+  setSessionWatchMode: (chatSessionId: string, mode: WatchMode | null) => Promise<void>;
+  /** Confirm the full_auto modal — applies the mode and records that this
+   *  session has confirmed, so it isn't re-prompted. */
+  confirmFullAuto: (chatSessionId: string) => Promise<void>;
+  /** Dismiss the full_auto modal without applying (mode unchanged). */
+  cancelFullAutoConfirm: () => void;
+  /** Resolve a pending per-action approval card (Approve/Deny). Sends the
+   *  decision to the backend; the paused tool loop resumes. */
+  resolveApproval: (chatSessionId: string, approved: boolean) => Promise<void>;
   saveApiKey: (provider: string, key: string, baseUrl?: string, model?: string) => Promise<void>;
   clearApiKey: (provider: string) => Promise<void>;
 
@@ -107,6 +211,8 @@ interface ChatState {
   onDone: (chatSessionId: string, inputTokens: number | null, outputTokens: number | null, costUsd: number | null) => void;
   onError: (chatSessionId: string, message: string, code: string | null) => void;
   onArtifact: (payload: ChatArtifactPayload) => void;
+  onApprovalRequest: (payload: ChatApprovalRequestPayload) => void;
+  onApprovalResolved: (payload: ChatApprovalResolvedPayload) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -119,6 +225,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   config: null,
   error: null,
   effort: "",
+  localCtx: 0,
   // Tools are on by default so the model itself decides when to web-search,
   // generate a file/document/diagram, fetch a URL or run code — the user no
   // longer has to arm them manually before each relevant request.
@@ -128,10 +235,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   artifactsByMessage: {},
   pendingArtifacts: {},
   previewArtifact: null,
+  pendingApprovals: {},
+  fullAutoConfirmingFor: null,
 
   loadSessions: async () => {
     const sessions = await listChatSessions();
-    set({ loaded: true, sessions: sessions ?? [] });
+    set({ loaded: true, sessions: withoutDeleted(sessions ?? []) });
   },
 
   loadMessages: async (chatSessionId) => {
@@ -147,6 +256,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   selectSession: async (chatSessionId) => {
+    // Ignore selects for sessions deleted this run (stale sidebar row, in-
+    // flight click). The tombstone is the source of truth until restart.
+    if (deletedSessions.has(chatSessionId)) return;
     // Opening a chat clears its unread mark (persisted only if it was set).
     const wasUnread = get().sessions.find((s) => s.id === chatSessionId)?.unread ?? false;
     set((s) => ({
@@ -191,7 +303,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Touch and reorder in the background.
     void touchChatSession(chatSessionId).then(async () => {
       const sessions = await listChatSessions();
-      if (sessions) set({ sessions });
+      if (sessions) set({ sessions: withoutDeleted(sessions) });
     });
   },
 
@@ -212,19 +324,38 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   deleteChat: async (chatSessionId) => {
     await deleteChatSession(chatSessionId);
-    set((s) => ({
-      sessions: s.sessions.filter((sess) => sess.id !== chatSessionId),
-      activeChatSessionId: s.activeChatSessionId === chatSessionId ? null : s.activeChatSessionId,
-      messages: s.activeChatSessionId === chatSessionId ? [] : s.messages,
-      // Don't clear streaming state for another session if it happens to be the same ID
-      // (unlikely but safe).
-      streamingChatSessionId:
-        s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
-    }));
+    // Tombstone this session for the rest of the app run so background
+    // session-list refreshes (selectSession's touch-then-relist, onDone's
+    // relist) can't resurrect it via a stale IPC payload that raced the
+    // DELETE. Cleared on a full app restart.
+    markDeleted(chatSessionId);
+    set((s) => {
+      // Drop any per-session state too, so switching sessions never briefly
+      // shows this chat's old messages/artifacts.
+      const nextStreaming = { ...s.streaming };
+      delete nextStreaming[chatSessionId];
+      const nextArtifacts = { ...s.artifacts };
+      delete nextArtifacts[chatSessionId];
+      const nextPendingArtifacts = { ...s.pendingArtifacts };
+      delete nextPendingArtifacts[chatSessionId];
+      const nextPendingApprovals = { ...s.pendingApprovals };
+      delete nextPendingApprovals[chatSessionId];
+      return {
+        sessions: s.sessions.filter((sess) => sess.id !== chatSessionId),
+        activeChatSessionId: s.activeChatSessionId === chatSessionId ? null : s.activeChatSessionId,
+        messages: s.activeChatSessionId === chatSessionId ? [] : s.messages,
+        streaming: nextStreaming,
+        streamingChatSessionId:
+          s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
+        artifacts: nextArtifacts,
+        pendingArtifacts: nextPendingArtifacts,
+        pendingApprovals: nextPendingApprovals,
+      };
+    });
   },
 
   renameChat: async (chatSessionId, title) => {
-    manuallyRenamed.add(chatSessionId);
+    markManuallyRenamed(chatSessionId);
     await updateChatSessionTitle(chatSessionId, title);
     set((s) => ({
       sessions: s.sessions.map((sess) =>
@@ -262,7 +393,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
+  setSessionProvider: async (chatSessionId, provider) => {
+    await updateChatSessionProvider(chatSessionId, provider);
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === chatSessionId ? { ...sess, provider } : sess,
+      ),
+    }));
+  },
+
   setEffort: (effort) => set({ effort }),
+
+  setLocalCtx: (localCtx) => set({ localCtx }),
 
   setToolsEnabled: (toolsEnabled) =>
     set(toolsEnabled ? { toolsEnabled } : { toolsEnabled, codeExecEnabled: false }),
@@ -271,10 +413,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setCodeExecEnabled: (codeExecEnabled) =>
     set(codeExecEnabled ? { codeExecEnabled, toolsEnabled: true } : { codeExecEnabled }),
 
-  sendMessage: async (content, attachments) => {
+  sendMessage: async (content, attachments, forceResearch) => {
     const { activeChatSessionId, messages, sessions, effort, toolsEnabled, codeExecEnabled } =
       get();
     if (!activeChatSessionId) return;
+    if (deletedSessions.has(activeChatSessionId)) return;
     // Guard against a double-send while a turn is already streaming for this
     // session (e.g. a duplicate submit during a slow tool-calling turn), which
     // would persist the same user message twice.
@@ -295,6 +438,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       chatSessionId: activeChatSessionId,
       role: "user",
       content: displayContent,
+      // Carry the live attachments so the bubble can render real image
+      // thumbnails before the backend persists (persisted messages parse
+      // attachment markers out of `content` instead).
+      attachments: attachments ?? undefined,
       inputTokens: null,
       outputTokens: null,
       costUsd: null,
@@ -327,6 +474,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       toolsEnabled,
       codeExecEnabled,
       attachments,
+      forceResearch,
     );
   },
 
@@ -341,6 +489,59 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setPreviewArtifact: (previewArtifact) => set({ previewArtifact }),
+
+  setSessionPermissionMode: async (chatSessionId, mode) => {
+    // Switching INTO full_auto opens a one-time confirmation modal first
+    // (per session — `fullAutoConfirmed` suppresses re-prompting within the
+    // same session). All other transitions apply immediately.
+    if (mode === "full_auto" && !fullAutoConfirmed.has(chatSessionId)) {
+      set({ fullAutoConfirmingFor: chatSessionId });
+      return false;
+    }
+    await updateChatSessionPermissionMode(chatSessionId, mode);
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === chatSessionId ? { ...sess, permissionMode: mode } : sess,
+      ),
+      fullAutoConfirmingFor: null,
+    }));
+    return true;
+  },
+
+  setSessionWatchMode: async (chatSessionId, mode) => {
+    await updateChatSessionWatchMode(chatSessionId, mode);
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === chatSessionId ? { ...sess, watchMode: mode } : sess,
+      ),
+    }));
+  },
+
+  confirmFullAuto: async (chatSessionId) => {
+    markFullAutoConfirmed(chatSessionId);
+    await updateChatSessionPermissionMode(chatSessionId, "full_auto");
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === chatSessionId ? { ...sess, permissionMode: "full_auto" } : sess,
+      ),
+      fullAutoConfirmingFor: null,
+    }));
+  },
+
+  cancelFullAutoConfirm: () => set({ fullAutoConfirmingFor: null }),
+
+  resolveApproval: async (chatSessionId, approved) => {
+    const pending = get().pendingApprovals[chatSessionId];
+    if (!pending) return;
+    // Optimistically remove the card; the backend's `chat:approval-resolved`
+    // would also clear it, but this avoids a flicker if the event is slow.
+    set((s) => {
+      const next = { ...s.pendingApprovals };
+      delete next[chatSessionId];
+      return { pendingApprovals: next };
+    });
+    await resolveToolAction(pending.pendingId, approved);
+  },
 
   cancelStream: async () => {
     const { streamingChatSessionId } = get();
@@ -445,7 +646,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // Refresh the session list (title may have been updated by the backend).
     const sessions = await listChatSessions();
-    if (sessions) set({ sessions });
+    if (sessions) set({ sessions: withoutDeleted(sessions) });
   },
 
   onArtifact: ({ chatSessionId, path, filename }) => {
@@ -493,6 +694,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
         error:
           s.activeChatSessionId === chatSessionId ? message : s.error,
       };
+    });
+  },
+
+  onApprovalRequest: ({ chatSessionId, pendingId, tool, summary, args }) => {
+    // Surface the per-action approval card for this session. Only one card is
+    // shown at a time (the tool loop pauses on it); a new request replaces any
+    // stale one (the prior would already have been resolved or cancelled).
+    set((s) => ({
+      pendingApprovals: {
+        ...s.pendingApprovals,
+        [chatSessionId]: { pendingId, tool, summary, args },
+      },
+    }));
+  },
+
+  onApprovalResolved: ({ chatSessionId }) => {
+    // The backend resumed the paused tool loop — dismiss the card.
+    set((s) => {
+      const next = { ...s.pendingApprovals };
+      delete next[chatSessionId];
+      return { pendingApprovals: next };
     });
   },
 }));

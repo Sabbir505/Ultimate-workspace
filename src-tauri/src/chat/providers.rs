@@ -15,6 +15,7 @@ pub enum ChatProviderId {
     AnthropicCompatible,
     OpenAICompatible,
     OpenRouter,
+    LocalGguf,
 }
 
 /// A base64-encoded image attached to a user message, sent to vision-capable
@@ -590,6 +591,50 @@ impl ChatProvider for OpenRouterProvider {
         Ok(openai_request(client, req, api_key, base)
             .header("HTTP-Referer", "https://conduit.app")
             .header("X-Title", "Conduit"))
+    }
+
+    fn parse_sse_chunk(
+        &self,
+        line: &str,
+        buf: &mut String,
+    ) -> Result<(Option<String>, bool), String> {
+        OpenAIProvider.parse_sse_chunk(line, buf)
+    }
+
+    fn parse_usage(&self, buf: &str) -> Option<ChatUsage> {
+        OpenAIProvider.parse_usage(buf)
+    }
+}
+
+// ---- LocalGguf ----
+//
+// llama-server speaks the OpenAI-compatible wire format at
+// `http://127.0.0.1:<port>/v1/chat/completions`, so LocalGgufProvider reuses
+// `openai_request` and delegates SSE parsing / usage extraction to
+// `OpenAIProvider`. The base_url is REQUIRED (stored by the sidecar-start
+// command); the API key is a dummy placeholder since llama-server ignores it.
+
+pub struct LocalGgufProvider;
+
+impl ChatProvider for LocalGgufProvider {
+    fn id(&self) -> ChatProviderId {
+        ChatProviderId::LocalGguf
+    }
+
+    fn default_model(&self) -> &'static str {
+        "local"
+    }
+
+    fn build_request(
+        &self,
+        client: &reqwest::Client,
+        req: &ChatRequest,
+        api_key: &str,
+        base_url: Option<&str>,
+    ) -> Result<reqwest::RequestBuilder, String> {
+        let base =
+            base_url.ok_or_else(|| "base_url is required for LocalGguf".to_string())?;
+        Ok(openai_request(client, req, api_key, base))
     }
 
     fn parse_sse_chunk(

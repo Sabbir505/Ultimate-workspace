@@ -6,12 +6,16 @@
 //! agent processes after the app closes).
 
 mod browser;
+mod browser_mcp;
+mod browser_mcp_register;
 mod chat;
 mod commands;
+mod connectors;
 mod db;
 mod git;
 mod harness_adapters;
 mod installed_skills;
+mod mobile;
 mod pty;
 mod secrets;
 mod types;
@@ -38,6 +42,19 @@ pub struct BrowserState(pub Arc<browser::BrowserManager>);
 /// Chat mode manager (see chat/mod.rs).
 pub struct ChatState(pub Arc<chat::ChatManager>);
 
+/// Mobile relay server state (see mobile/relay.rs).
+pub struct MobileRelayState(pub Arc<mobile::relay::MobileRelayState>);
+
+/// In-flight OAuth flows for the Connectors feature (see connectors/oauth.rs).
+/// Registered as Tauri state so the auth webview's `on_navigation` hook can
+/// look up a pending flow by id and resolve it.
+pub struct OAuthFlowsState(pub Arc<connectors::oauth::OAuthFlows>);
+
+// Note: LocalModelState is defined in chat::local_models (next to the
+// registry it wraps) and registered via app.manage below. The commands in
+// chat::commands declare `State<local_models::LocalModelState>`, so the
+// managed type MUST be that same one — Tauri matches state by concrete type.
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
@@ -45,6 +62,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data_dir = app.path().app_data_dir().map_err(|e| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, format!("no app data dir: {e}"))
@@ -54,12 +72,56 @@ pub fn run() {
             let shared_db = Arc::new(Mutex::new(conn));
             // Sweep artifacts past their 30-day retention window on startup.
             chat::commands::sweep_expired_artifacts(&shared_db);
+            // Register the bundled, relocatable Python (shipped in
+            // bundle.resources → resource_dir/python) so document generation
+            // works on machines that have no system Python. Missing bundle
+            // (e.g. `cargo run` from source) degrades silently to system
+            // Python — see chat::python_runtime.
+            let resource_dir = app.path().resource_dir().ok();
+            chat::python_runtime::set_resource_dir(resource_dir);
             app.manage(DbState(Arc::clone(&shared_db)));
-            app.manage(PtyState(PtyManager::new(app.handle().clone(), shared_db)));
+            app.manage(PtyState(PtyManager::new(app.handle().clone(), Arc::clone(&shared_db))));
             app.manage(BrowserState(Arc::new(browser::BrowserManager::new(
                 app.handle().clone(),
             ))));
             app.manage(ChatState(Arc::new(chat::ChatManager::new())));
+            app.manage(MobileRelayState(Arc::new(mobile::relay::MobileRelayState::new())));
+            app.manage(OAuthFlowsState(Arc::new(
+                connectors::oauth::OAuthFlows::default(),
+            )));
+            app.manage(chat::local_models::LocalModelState(Arc::new(
+                chat::local_models::LocalModelRegistry::new(),
+            )));
+
+            // Spawn the mobile relay server on a random localhost port so the
+            // companion mobile app can connect and route chat requests through
+            // the desktop (the phone never holds API keys).
+            {
+                let db = Arc::clone(&shared_db);
+                let chat_mgr = Arc::clone(&app.state::<ChatState>().inner().0);
+                let relay_state = Arc::clone(&app.state::<MobileRelayState>().inner().0);
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = mobile::relay::start_relay(app_handle, relay_state, db, chat_mgr).await;
+                });
+            }
+
+            // Spawn the loopback WebSocket server that the standalone
+            // conduit-browser-mcp binary connects to (agent-driven browser
+            // control). Bind is non-fatal: if port BROWSER_MCP_PORT is taken
+            // the MCP binary just gets connection-refused and reports
+            // `browser_unavailable` — the rest of the app is unaffected.
+            {
+                let browser_mgr = app
+                    .state::<BrowserState>()
+                    .inner()
+                    .0
+                    .clone();
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    browser_mcp::serve(browser_mgr, app_handle).await;
+                });
+            }
 
             // Native vibrancy (PRD §7.1): acrylic blur on Windows, frosted
             // vibrancy on macOS, nothing on Linux (flat theme is the correct
@@ -114,6 +176,11 @@ pub fn run() {
             commands::browser_cmds::browser_set_visible,
             commands::browser_cmds::browser_close,
             commands::browser_cmds::browser_close_pane,
+            // browser pane project registry + MCP roundtrip
+            commands::browser_cmds::register_browser_pane_project,
+            commands::browser_cmds::unregister_browser_pane_project,
+            commands::browser_cmds::browser_resolve_pane_result,
+            commands::browser_cmds::browser_open_pane_result,
             // git
             commands::git_cmds::get_git_status,
             commands::git_cmds::create_worktree,
@@ -136,6 +203,10 @@ pub fn run() {
             commands::data::get_cost_rollups,
             commands::data::export_session_markdown,
             commands::data::read_file_text,
+            // workspaces (pane layout save/restore)
+            commands::data::list_workspaces,
+            commands::data::save_workspace,
+            commands::data::delete_workspace,
             // installed skills / loops (harness skill directories)
             commands::skills_cmds::list_installed_skills,
             commands::skills_cmds::list_installed_loops,
@@ -152,10 +223,14 @@ pub fn run() {
             commands::chat_cmds::set_chat_session_starred,
             commands::chat_cmds::set_chat_session_unread,
             commands::chat_cmds::update_chat_session_model,
+            commands::chat_cmds::update_chat_session_provider,
+            commands::chat_cmds::update_chat_session_permission_mode,
+            commands::chat_cmds::update_chat_session_watch_mode,
             commands::chat_cmds::get_chat_messages,
             commands::chat_cmds::touch_chat_session,
             commands::chat_cmds::send_chat_message,
             commands::chat_cmds::cancel_chat_message,
+            commands::chat_cmds::resolve_tool_action,
             commands::chat_cmds::set_chat_api_key,
             commands::chat_cmds::delete_chat_api_key,
             commands::chat_cmds::get_chat_config,
@@ -166,6 +241,24 @@ pub fn run() {
             commands::chat_cmds::list_artifacts,
             commands::chat_cmds::list_chat_artifacts,
             commands::chat_cmds::delete_artifact,
+            // local models (GGUF scan / llama-server sidecar)
+            commands::chat_cmds::scan_local_models,
+            commands::chat_cmds::start_local_model,
+            commands::chat_cmds::stop_local_model,
+            commands::chat_cmds::local_model_status,
+            // connectors (OAuth + remote MCP): Settings → Connectors + per-chat attach
+            commands::connectors_cmds::list_connectors,
+            commands::connectors_cmds::connector_connect,
+            commands::connectors_cmds::connector_disconnect,
+            commands::connectors_cmds::set_session_connectors,
+            commands::connectors_cmds::list_session_connectors,
+            // auto-updater (Tauri updater plugin)
+            commands::updater_cmds::check_for_update,
+            commands::updater_cmds::download_and_install_update,
+            // mobile relay
+            mobile::commands::start_mobile_relay,
+            mobile::commands::stop_mobile_relay,
+            mobile::commands::get_mobile_relay_status,
         ]);
 
     let app = builder
@@ -191,6 +284,14 @@ pub fn run() {
             }
             if let Some(state) = handle.try_state::<ChatState>() {
                 state.0.cancel_all();
+            }
+            // Stop any running local-model sidecars (llama-server processes).
+            if let Some(state) = handle.try_state::<chat::local_models::LocalModelState>() {
+                tauri::async_runtime::block_on(state.0.stop_all());
+            }
+            // Stop the mobile relay server.
+            if let Some(state) = handle.try_state::<MobileRelayState>() {
+                mobile::relay::stop_relay(&state.0);
             }
         }
     });

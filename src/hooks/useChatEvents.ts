@@ -9,6 +9,8 @@
 import { useEffect } from "react";
 import {
   browserNavigateTab,
+  listenChatApprovalRequest,
+  listenChatApprovalResolved,
   listenChatArtifact,
   listenChatDone,
   listenChatError,
@@ -72,6 +74,21 @@ export function useChatEvents(): void {
     unlistens.push(
       listenChatOpenBrowser(({ url }) => {
         openInBrowserPane(url);
+      }),
+    );
+
+    // Per-action filesystem-tool approval cards. `chat:approval-request`
+    // surfaces a card the user Approves/Denies; `chat:approval-resolved`
+    // dismisses it (the backend has already resumed the paused tool loop).
+    unlistens.push(
+      listenChatApprovalRequest((payload) => {
+        useChatStore.getState().onApprovalRequest(payload);
+      }),
+    );
+
+    unlistens.push(
+      listenChatApprovalResolved((payload) => {
+        useChatStore.getState().onApprovalResolved(payload);
       }),
     );
 

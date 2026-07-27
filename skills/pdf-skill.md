@@ -7,6 +7,23 @@ description: "Use this skill whenever generating a PDF in Conduit's Chat tab san
 
 Two real paths — pick based on what's actually being asked for, don't default to one blindly.
 
+## Path 0 — `conduit_docgen` helper (preferred for styled PDFs)
+
+A styling toolkit named `conduit_docgen` is pre-installed in every `generate_document("pdf", ...)` run (it ships reportlab under the hood). For a styled report/one-pager/brief, prefer it over hand-rolling reportlab — it handles fonts, spacing, headings, tables, and callouts with consistent typography:
+
+```python
+import conduit_docgen as cd
+pdf = cd.Pdf(title="Report", subtitle="Q2", theme="plum", author="Acme")
+pdf.heading("Overview")
+pdf.paragraph("Body text…")
+pdf.bullets(["a", "b"])
+pdf.table(["Key", "Value"], [["x", "1"]])
+pdf.callout("Bottom line.")
+pdf.save()  # writes to os.environ["CONDUIT_OUTPUT"]
+```
+
+This is the preferred path for styled PDFs — it avoids the `soffice` conversion step (Path A) and the low-level reportlab gotchas (Path B). Drop down to Path B only when you need pixel-exact layout the helper can't express (form fields, label sheets, fixed-position flyers).
+
 ## Path A — Generate via docx/pptx, then convert (preferred for most requests)
 
 If the content is a normal document or slide deck and the user just wants the final format to be PDF, it is almost always easier and higher-quality to build it with `python-docx` or `python-pptx` (see those skills) and convert at the end:

@@ -110,10 +110,7 @@ export function BrowserPane({ pane, visible = true }: Props) {
   const activeView = useUiStore((s) => s.activeView);
   const paletteOpen = useUiStore((s) => s.paletteOpen);
   const peekOpen = useUiStore((s) => s.peek.open);
-  const modalOpen = useUiStore(
-    (s) =>
-      s.pendingReplace !== null || s.projectSettingsFor !== null || s.gitPromptProjectId !== null,
-  );
+  const modalOpen = useUiStore((s) => s.modalOpen);
 
   // Per-tab state: Map<tabId, TabState>. Lazily populated.
   const [tabStates, setTabStates] = useState<Map<string, TabState>>(() => {

@@ -9,6 +9,7 @@ export type ThemeSetting = "light" | "dark" | "system";
 
 const K_THEME = "theme";
 const K_DND = "doNotDisturb";
+const K_WATCH_MODE = "watchMode";
 const K_KEYBINDINGS = "keybindingOverrides";
 const K_BROWSER_URLS = "browserLastUrls"; // JSON: { global: string, perProject: Record<string, string> }
 const K_BROWSER_PANE_STATE = "browserPaneState"; // JSON: { paneTabs: Record<string, BrowserPaneTabState> }
@@ -35,6 +36,7 @@ interface SettingsState {
   loaded: boolean;
   theme: ThemeSetting;
   dnd: boolean;
+  watchMode: boolean;
   keybindings: KeybindingMap;
   browserUrls: BrowserUrlState;
   browserPaneState: PersistedBrowserPaneState;
@@ -42,6 +44,7 @@ interface SettingsState {
   load: () => Promise<void>;
   setTheme: (theme: ThemeSetting) => void;
   setDnd: (dnd: boolean) => void;
+  setWatchMode: (watchMode: boolean) => void;
   setKeybinding: (action: KeybindingAction, accelerator: string) => void;
   resetKeybindings: () => void;
   lastBrowserUrl: (projectId: string | null) => string;
@@ -65,14 +68,16 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   loaded: false,
   theme: "system",
   dnd: false,
+  watchMode: false,
   keybindings: { ...DEFAULT_KEYBINDINGS },
   browserUrls: { global: "https://www.google.com", perProject: {} },
   browserPaneState: { paneTabs: {} },
 
   load: async () => {
-    const [theme, dnd, kbJson, urlsJson, paneStateJson] = await Promise.all([
+    const [theme, dnd, watchMode, kbJson, urlsJson, paneStateJson] = await Promise.all([
       getSetting(K_THEME),
       getSetting(K_DND),
+      getSetting(K_WATCH_MODE),
       getSetting(K_KEYBINDINGS),
       getSetting(K_BROWSER_URLS),
       getSetting(K_BROWSER_PANE_STATE),
@@ -81,6 +86,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       const next = { ...state, loaded: true };
       if (theme === "light" || theme === "dark" || theme === "system") next.theme = theme;
       if (dnd === "true" || dnd === "false") next.dnd = dnd === "true";
+      if (watchMode === "true" || watchMode === "false") next.watchMode = watchMode === "true";
       if (kbJson) {
         try {
           const overrides = JSON.parse(kbJson) as Partial<KeybindingMap>;
@@ -122,6 +128,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setDnd: (dnd) => {
     set({ dnd });
     void setSetting(K_DND, String(dnd));
+  },
+
+  setWatchMode: (watchMode) => {
+    set({ watchMode });
+    void setSetting(K_WATCH_MODE, String(watchMode));
   },
 
   setKeybinding: (action, accelerator) => {

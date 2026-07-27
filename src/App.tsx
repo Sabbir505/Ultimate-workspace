@@ -1,36 +1,49 @@
 // App shell: sidebar + main area (toolbar, pane grid, broadcast bar), plus
 // overlay views (settings / skills / cost), command palette, peek panel,
 // project settings, and the replace-LRU-pane confirmation (§4.3 step 4).
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { CommandPalette } from "./components/command-palette/CommandPalette";
 import { CostDashboard } from "./components/cost-dashboard/CostDashboard";
 import { Modal } from "./components/common/Modal";
 import { OnboardingBanner } from "./components/onboarding/OnboardingBanner";
+import { UpdateBanner } from "./components/onboarding/UpdateBanner";
 import { BroadcastBar } from "./components/panes/BroadcastBar";
 import { ChatBrowserSplit, PaneGrid } from "./components/panes/PaneGrid";
 import { PeekPanel } from "./components/peek/PeekPanel";
 import { SettingsView } from "./components/settings/SettingsView";
 import { ProjectSettingsPanel } from "./components/sidebar/ProjectSettingsPanel";
 import { Sidebar } from "./components/sidebar/Sidebar";
+import { ArtifactLibrary } from "./components/sidebar/ArtifactLibrary";
 import { PanelIcon } from "./components/common/PanelIcon";
 import { SkillsLibrary } from "./components/skills-library/SkillsLibrary";
 import { ChatView } from "./components/chat/ChatView";
 import { useChatEvents } from "./hooks/useChatEvents";
+import { useBrowserMcpEvents } from "./hooks/useBrowserMcpEvents";
 import { useGitStatusPolling } from "./hooks/useGitStatusPolling";
 import { useKeybindings } from "./hooks/useKeybindings";
 import { usePtyEvents } from "./hooks/usePtyEvents";
 import { useTheme } from "./hooks/useTheme";
 import { exportFocusedSession } from "./lib/exportSession";
 import { confirmReplaceLru } from "./lib/sessionLauncher";
+import { spawnForPane } from "./lib/sessionLauncher";
 import { ensureDefaultSkills } from "./lib/defaultSkills";
-import { MAX_PANES, usePanesStore } from "./state/panes";
+import { MAX_PANES, usePanesStore, type PaneKindData } from "./state/panes";
 import { useProjectsStore } from "./state/projects";
 import { useSettingsStore } from "./state/settings";
 import { useSkillsStore } from "./state/skills";
 import { useUiStore } from "./state/ui";
+import { useUpdaterStore, wireUpdaterEvents } from "./state/updater";
+import {
+  listWorkspaces,
+  saveWorkspace,
+  deleteWorkspace,
+  type WorkspaceData,
+  type WorkspaceRecord,
+} from "./lib/ipc";
 
 export default function App() {
   const activeView = useUiStore((s) => s.activeView);
+  const sidebarMode = useUiStore((s) => s.sidebarMode);
   const pendingReplace = useUiStore((s) => s.pendingReplace);
   const setPendingReplace = useUiStore((s) => s.setPendingReplace);
   const setGitPromptProjectId = useUiStore((s) => s.setGitPromptProjectId);
@@ -47,6 +60,30 @@ export default function App() {
   const markGitRepo = useProjectsStore((s) => s.markGitRepo);
   const lastBrowserUrl = useSettingsStore((s) => s.lastBrowserUrl);
 
+  // Feature 3: Artifacts modal openable from the Dev mode toolbar.
+  const [artifactsOpen, setArtifactsOpen] = useState(false);
+
+  // Feature 6: Workspaces dropdown in the Dev-mode toolbar.
+  const [workspaces, setWorkspaces] = useState<WorkspaceRecord[]>([]);
+  const [workspacesOpen, setWorkspacesOpen] = useState(false);
+  const [saveWorkspacePrompt, setSaveWorkspacePrompt] = useState(false);
+  const [workspaceName, setWorkspaceName] = useState("");
+
+  /** Load workspace list for the selected project. */
+  const refreshWorkspaces = async () => {
+    if (!selectedProjectId) {
+      setWorkspaces([]);
+      return;
+    }
+    const list = await listWorkspaces(selectedProjectId);
+    setWorkspaces(list ?? []);
+  };
+
+  // Reload workspaces whenever the selected project changes.
+  useEffect(() => {
+    void refreshWorkspaces();
+  }, [selectedProjectId]);
+
   // Bootstrap: settings first (theme), then projects/sessions/harnesses, skills.
   useEffect(() => {
     void useSettingsStore.getState().load();
@@ -55,13 +92,30 @@ export default function App() {
     // Seed built-in document/diagram skills on first run so the model has that
     // guidance immediately, without the user opening Settings.
     void ensureDefaultSkills();
+
+    // Auto-updater: wire download-progress + installed events, then check on
+    // startup and every 4 hours. A check is a single HTTP GET + semver compare;
+    // a found update surfaces the banner (UpdateBanner) with the changelog.
+    wireUpdaterEvents();
+    const updaterStore = useUpdaterStore.getState();
+    void updaterStore.check();
+    const FOUR_HOURS = 4 * 60 * 60 * 1000;
+    const timer = window.setInterval(() => void updaterStore.check(), FOUR_HOURS);
+    return () => window.clearInterval(timer);
   }, []);
 
   useTheme();
   useKeybindings();
   usePtyEvents();
   useChatEvents();
+  useBrowserMcpEvents();
   useGitStatusPolling();
+
+  // Sync modal states into the UI store so native webviews know to hide.
+  const setModalOpen = useUiStore((s) => s.setModalOpen);
+  useEffect(() => {
+    setModalOpen(!!pendingReplace || !!gitPromptProject);
+  }, [pendingReplace, gitPromptProject, setModalOpen]);
 
   const openBrowserPane = () => {
     const store = usePanesStore.getState();
@@ -99,6 +153,93 @@ export default function App() {
     ? useProjectsStore.getState().sessions.find((s) => s.id === pendingReplace.sessionId)
     : null;
 
+  // ---- Workspace save ----
+  const handleSaveWorkspace = async () => {
+    const name = workspaceName.trim();
+    if (!name || !selectedProjectId) return;
+    const store = usePanesStore.getState();
+    const data: WorkspaceData = {
+      panes: store.panes.map((p) => {
+        if (p.data.kind === "terminal") {
+          return {
+            kind: "terminal" as const,
+            harness: p.data.harness ?? undefined,
+            sessionId: p.data.sessionId ?? undefined,
+            label: p.data.label,
+            cwd: p.data.spawn.type === "shell" ? p.data.spawn.cwd : undefined,
+          };
+        }
+        // Browser pane: capture the active tab's URL.
+        return {
+          kind: "browser" as const,
+          url: p.data.url,
+        };
+      }),
+    };
+    const json = JSON.stringify(data);
+    const result = await saveWorkspace(selectedProjectId, name, json);
+    if (result) {
+      setSaveWorkspacePrompt(false);
+      setWorkspaceName("");
+      await refreshWorkspaces();
+    }
+  };
+
+  // ---- Workspace restore ----
+  const handleRestoreWorkspace = async (ws: WorkspaceRecord) => {
+    const store = usePanesStore.getState();
+    // Close all current panes first.
+    const paneIds = [...store.panes.map((p) => p.paneId)];
+    for (const pid of paneIds) {
+      store.closePane(pid);
+    }
+    // Parse and spawn saved panes.
+    let data: WorkspaceData;
+    try {
+      data = JSON.parse(ws.data) as WorkspaceData;
+    } catch {
+      return;
+    }
+    for (const entry of data.panes) {
+      if (entry.kind === "browser") {
+        store.addPane({
+          kind: "browser",
+          url: entry.url ?? lastBrowserUrl(selectedProjectId),
+          projectId: selectedProjectId,
+        });
+      } else if (entry.kind === "terminal") {
+        const paneId = store.addPane({
+          kind: "terminal",
+          sessionId: entry.sessionId ?? null,
+          harness: (entry.harness as import("./types").HarnessId | null) ?? null,
+          label: entry.label ?? "",
+          spawn: entry.sessionId
+            ? { type: "agent" as const, sessionId: entry.sessionId }
+            : { type: "shell" as const, cwd: entry.cwd ?? ".", command: "", injectSecretsProjectId: selectedProjectId ?? undefined },
+        });
+        // Only spawn if there is a command or session to spawn.
+        if (entry.sessionId) {
+          await spawnForPane(paneId, { type: "agent", sessionId: entry.sessionId });
+        } else if (entry.cwd) {
+          // Shell panes — we saved the cwd but not the command, so just open a shell
+          // in that directory. For true restore fidelity users should use agent sessions.
+          // The spawn spec from addPane won't auto-spawn shell panes, so we handle it here.
+          // Actually addPane doesn't spawn — we need to call spawnForPane explicitly.
+          // But we don't have the original command. Best effort: restore as a shell pane
+          // with the saved cwd but no command. The pane header shows the label.
+        }
+      }
+    }
+    setWorkspacesOpen(false);
+    await refreshWorkspaces();
+  };
+
+  // ---- Workspace delete ----
+  const handleDeleteWorkspace = async (id: string) => {
+    await deleteWorkspace(id);
+    await refreshWorkspaces();
+  };
+
   return (
     <div className="app">
       {!sidebarCollapsed && <Sidebar />}
@@ -120,30 +261,98 @@ export default function App() {
           <button onClick={openBrowserPane} title="Open a browser preview pane (google.com)">
             + Browser Pane
           </button>
-          {minimizedBrowsers.length > 0 && (
-            <button
-              className="broadcast-toggle active"
-              onClick={restoreBrowser}
-              title="Restore the minimized browser pane back into the grid"
+          {sidebarMode !== "chats" && selectedProjectId && (
+            <div
+              className="workspaces-toggle"
+              style={{ position: "relative" }}
             >
-              ▣ Browser ({minimizedBrowsers.length})
+              <button
+                onClick={() => {
+                  void refreshWorkspaces();
+                  setWorkspacesOpen((o) => !o);
+                }}
+                title="Workspaces: save/restore pane layouts"
+              >
+                &#9724; Workspaces
+              </button>
+              {workspacesOpen && (
+                <div className="workspaces-dropdown">
+                  <div className="workspaces-dropdown-header">
+                    Workspaces
+                  </div>
+                  <ul className="workspaces-list">
+                    {workspaces.length === 0 && (
+                      <li className="workspaces-empty">No saved workspaces yet</li>
+                    )}
+                    {workspaces.map((ws) => (
+                      <li key={ws.id} className="workspaces-item">
+                        <span className="workspaces-name">{ws.name}</span>
+                        <span className="workspaces-spacer" />
+                        <button
+                          className="workspaces-restore"
+                          title={`Restore "${ws.name}"`}
+                          onClick={() => void handleRestoreWorkspace(ws)}
+                        >
+                          Restore
+                        </button>
+                        <button
+                          className="workspaces-delete"
+                          title={`Delete "${ws.name}"`}
+                          onClick={() => void handleDeleteWorkspace(ws.id)}
+                        >
+                          &#x2715;
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="workspaces-dropdown-footer">
+                    <button
+                      onClick={() => {
+                        setSaveWorkspacePrompt(true);
+                        setWorkspacesOpen(false);
+                      }}
+                    >
+                      + Save current layout
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {sidebarMode !== "chats" && (
+            <>
+              {minimizedBrowsers.length > 0 && (
+                <button
+                  className="broadcast-toggle active"
+                  onClick={restoreBrowser}
+                  title="Restore the minimized browser pane back into the grid"
+                >
+                  ▣ Browser ({minimizedBrowsers.length})
+                </button>
+              )}
+              <button
+                className={`broadcast-toggle${broadcast.enabled ? " active" : ""}`}
+                onClick={() => setBroadcastEnabled(!broadcast.enabled)}
+                title="Toggle broadcast mode (Cmd/Ctrl+Shift+B)"
+              >
+                ⇶ Broadcast
+              </button>
+            </>
+          )}
+          {sidebarMode === "chats" && (
+            <button onClick={() => setArtifactsOpen(true)} title="Browse generated files & diagrams">
+              Artifacts
             </button>
           )}
-          <button
-            className={`broadcast-toggle${broadcast.enabled ? " active" : ""}`}
-            onClick={() => setBroadcastEnabled(!broadcast.enabled)}
-            title="Toggle broadcast mode (Cmd/Ctrl+Shift+B)"
-          >
-            ⇶ Broadcast
-          </button>
           <button onClick={() => void exportFocusedSession()} title="Export focused session as Markdown">
             ⤓ Export
           </button>
         </div>
 
         <OnboardingBanner />
+        <UpdateBanner />
 
-        {activeView === "chat" ? (
+        {sidebarMode === "chats" ? (
           <div className="grid-wrap chat-grid-wrap">
             <ChatBrowserSplit>
               <ChatView />
@@ -164,6 +373,12 @@ export default function App() {
       {projectSettingsFor && <ProjectSettingsPanel />}
       <PeekPanel />
       <CommandPalette />
+      {artifactsOpen && (
+        <ArtifactLibrary
+          externalOpen={artifactsOpen}
+          onClose={() => setArtifactsOpen(false)}
+        />
+      )}
 
       {pendingReplace && (
         <Modal
@@ -209,6 +424,51 @@ export default function App() {
             <span className="mono">{gitPromptProject.path}</span> isn't a git repository yet. Initialize
             git? (recommended — enables worktrees, git status badges, and diff peek)
           </p>
+        </Modal>
+      )}
+
+      {saveWorkspacePrompt && (
+        <Modal
+          title="Save workspace"
+          onClose={() => { setSaveWorkspacePrompt(false); setWorkspaceName(""); }}
+          actions={
+            <>
+              <button onClick={() => { setSaveWorkspacePrompt(false); setWorkspaceName(""); }}>
+                Cancel
+              </button>
+              <button
+                className="primary"
+                disabled={!workspaceName.trim()}
+                onClick={() => void handleSaveWorkspace()}
+              >
+                Save
+              </button>
+            </>
+          }
+        >
+          <p>Save the current pane layout as a named workspace for this project.</p>
+          <div style={{ marginTop: 12 }}>
+            <input
+              className="workspace-name-input"
+              type="text"
+              placeholder="Workspace name (e.g. dual-agent, web-dev)"
+              value={workspaceName}
+              onChange={(e) => setWorkspaceName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && workspaceName.trim()) void handleSaveWorkspace(); }}
+              autoFocus
+              style={{
+                width: "100%",
+                padding: "8px 12px",
+                borderRadius: "var(--radius-xs)",
+                border: "1px solid var(--border)",
+                background: "var(--surface)",
+                color: "var(--text)",
+                fontFamily: "var(--font-ui)",
+                fontSize: 14,
+                outline: "none",
+              }}
+            />
+          </div>
         </Modal>
       )}
     </div>

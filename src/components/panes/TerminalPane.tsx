@@ -8,7 +8,9 @@
 //  - Ctrl+scroll zooms the font (standard terminal behavior)
 //  - text color follows the app theme: dark text on light theme (default
 //    xterm foreground is white, which is invisible on light glass)
-import { useEffect, useRef } from "react";
+//  - Activity feed below the terminal: detects ```mermaid, ```html, ```jsx/tsx
+//    blocks in PTY output and renders them as expandable cards.
+import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -20,6 +22,7 @@ import { usePanesStore, type Pane } from "../../state/panes";
 import { useProjectsStore } from "../../state/projects";
 import { useSkillsStore } from "../../state/skills";
 import { useSettingsStore } from "../../state/settings";
+import { MermaidDiagram } from "../chat/MermaidDiagram";
 import type { PtyOutputPayload } from "../../types";
 
 const MIN_FONT_SIZE = 8;
@@ -28,16 +31,31 @@ const MAX_FONT_SIZE = 28;
  *  grid and cause the cursor to flicker/jump during active output. Matches the
  *  BrowserPane BOUNDS_DEBOUNCE_MS pattern. */
 const RESIZE_DEBOUNCE_MS = 50;
+/** Max number of activity-feed cards to keep per terminal. */
+const MAX_FEED_ITEMS = 5;
 
-/** xterm theme per app theme: only fg/cursor differ; ANSI colors pass through. */
+/** A structured block detected in the terminal output stream. */
+interface DetectedBlock {
+  id: string;
+  kind: "mermaid" | "html" | "jsx" | "tsx";
+  code: string;
+  firstLine: string;
+  createdAt: number;
+}
+
+let feedIdSeq = 0;
+
+/** xterm theme per app theme: opaque warm backdrop, warm fg/cursor; ANSI
+ *  colors pass through. Matches the Claude Code warm-charcoal/cream palette. */
 function xtermTheme(appTheme: string): Record<string, string> {
   const light = appTheme === "light";
   return {
-    background: "#00000000", // let the glass show through
-    foreground: light ? "#1e2235" : "#e6e8f2",
-    cursor: light ? "#1e2235" : "#e6e8f2",
-    cursorAccent: light ? "#f5f1e8" : "#1e2235",
-    selectionBackground: light ? "rgba(30, 34, 53, 0.25)" : "rgba(230, 232, 242, 0.25)",
+    // Solid terminal backdrop (was transparent for the old glass blur).
+    background: light ? "#f6f3ee" : "#1f1f1d",
+    foreground: light ? "#2b2622" : "#f5f1ea",
+    cursor: light ? "#2b2622" : "#f5f1ea",
+    cursorAccent: light ? "#f6f3ee" : "#1f1f1d",
+    selectionBackground: light ? "rgba(43, 38, 34, 0.2)" : "rgba(245, 241, 234, 0.2)",
   };
 }
 
@@ -84,6 +102,114 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
   const exited = pane.data.kind === "terminal" ? pane.data.exited : false;
   const exitCode = pane.data.kind === "terminal" ? pane.data.exitCode : null;
   const sessionId = pane.data.kind === "terminal" ? pane.data.sessionId : null;
+
+  // --- Activity feed: detected fenced code blocks from PTY output ---
+  // Accumulate Mermaid/HTML/JSX blocks rendered as expandable cards below the
+  // terminal. Max 5 items; auto-scrolls to newest on add. Cleared on exit/respawn.
+  const [feedItems, setFeedItems] = useState<DetectedBlock[]>([]);
+  const feedEndRef = useRef<HTMLDivElement>(null);
+
+  // --- Per-pane activity parsing from PTY output ---
+  // Recognises known harness output patterns to show what the agent is doing
+  // in the pane header (e.g. "Editing 3 files"). Debounced to 500ms to avoid
+  // thrashing the store on rapid streaming output.
+  const activityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function parseActivity(text: string): string | null {
+    // Claude Code patterns: "⏺ Reading …", "⏺ Writing …", "⏺ Editing …"
+    const ccOps = text.match(/[⏺●▶]\s*(Reading|Writing|Editing|Searching|Thinking)/g);
+    if (ccOps && ccOps.length > 0) {
+      const counts: Record<string, number> = {};
+      for (const op of ccOps) {
+        const verb = op.replace(/[⏺●▶]\s*/, "");
+        counts[verb] = (counts[verb] || 0) + 1;
+      }
+      const parts = Object.entries(counts).map(([k, v]) =>
+        v > 1 ? `${k} ${v} files` : k,
+      );
+      return parts.slice(0, 2).join(", ");
+    }
+    // Kimi Code patterns
+    const kcOps = text.match(/(?:Reading|Writing|Searching|Running):/g);
+    if (kcOps && kcOps.length > 0) {
+      const verbs = [...new Set(kcOps.map((s) => s.replace(":", "")))];
+      return verbs.slice(0, 2).join(", ");
+    }
+    return null;
+  }
+
+  /** Extract completed fenced code blocks from the output buffer. Only
+   *  detects Mermaid, HTML, JSX, and TSX blocks (the renderable types). */
+  function parseFeedBlocks(buf: string): DetectedBlock[] {
+    const blocks: DetectedBlock[] = [];
+    // Match complete fenced blocks: ```lang ... ```
+    const re = /```(mermaid|html|jsx|tsx)\s*\n([\s\S]*?)```/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(buf)) !== null) {
+      const lang = m[1].toLowerCase() as DetectedBlock["kind"];
+      const code = m[2].trim();
+      if (!code) continue;
+      const firstLine = code.split("\n")[0]?.trim() || code.slice(0, 60);
+      blocks.push({
+        id: `feed-${++feedIdSeq}`,
+        kind: lang,
+        code,
+        firstLine: firstLine.length > 80 ? firstLine.slice(0, 80) + "…" : firstLine,
+        createdAt: Date.now(),
+      });
+    }
+    return blocks;
+  }
+
+  // Listen to pty:output for this pane to detect activity patterns.
+  // Debounce: update the store at most once per 500ms; only set when changed.
+  // Also scan for completed fenced code blocks (```mermaid, ```html, ```jsx/tsx)
+  // and accumulate them in the activity feed below the terminal.
+  useEffect(() => {
+    let buf = "";
+    const unlisten = safeListen<PtyOutputPayload>("pty:output", ({ paneId: id, data }) => {
+      if (id !== paneId) return;
+      buf += data;
+      // Keep the buffer bounded to recent output (~8KB tail).
+      if (buf.length > 8192) buf = buf.slice(-8192);
+      if (activityTimerRef.current) return; // already scheduled
+      activityTimerRef.current = setTimeout(() => {
+        activityTimerRef.current = null;
+        const detected = parseActivity(buf);
+        const store = usePanesStore.getState();
+        const p = store.panes.find((pp) => pp.paneId === paneId);
+        if (p && p.activity !== detected) {
+          store.setPaneActivity(paneId, detected);
+        }
+        // Scan for new feed blocks in the accumulated buffer.
+        const newBlocks = parseFeedBlocks(buf);
+        if (newBlocks.length > 0) {
+          setFeedItems((prev) => {
+            const merged = [...prev, ...newBlocks];
+            return merged.slice(-MAX_FEED_ITEMS);
+          });
+        }
+      }, 500);
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+      if (activityTimerRef.current) clearTimeout(activityTimerRef.current);
+    };
+  }, [paneId]);
+
+  // Clear activity when the pane goes idle.
+  useEffect(() => {
+    if (pane.state === "idle" && pane.activity !== null) {
+      usePanesStore.getState().setPaneActivity(paneId, null);
+    }
+  }, [pane.state, pane.activity, paneId]);
+
+  // Clear the activity feed when the process exits or is respawned, so stale
+  // blocks from the previous session don't linger.
+  useEffect(() => {
+    if (exited) setFeedItems([]);
+  }, [exited]);
+  // --- end activity parsing ---
 
   useEffect(() => {
     const container = containerRef.current;
@@ -287,6 +413,15 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
   return (
     <>
       <div className="pane-body" ref={containerRef} />
+      {/* Activity feed: detected Mermaid/HTML/JSX blocks from terminal output. */}
+      {feedItems.length > 0 && (
+        <div className="terminal-activity-feed">
+          {feedItems.map((item) => (
+            <FeedCard key={item.id} block={item} />
+          ))}
+          <div ref={feedEndRef} />
+        </div>
+      )}
       {exited && (
         <div className="pane-exit-overlay">
           <div>Process exited{exitCode !== null ? ` (code ${exitCode})` : ""}</div>
@@ -330,4 +465,44 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
     const project = useProjectsStore.getState().projectById(session?.projectId ?? null);
     return project?.name ?? "?";
   }
+}
+
+/** An expandable card in the terminal activity feed showing a detected code
+ *  block (Mermaid diagram, HTML preview, or JSX/TSX code). */
+function FeedCard({ block }: { block: DetectedBlock }) {
+  const [open, setOpen] = useState(false);
+
+  const icon = block.kind === "mermaid" ? "◉" : block.kind === "html" ? "🌐" : "⚛";
+  const label = block.kind === "mermaid" ? "Diagram" : block.kind === "html" ? "HTML" : block.kind.toUpperCase();
+
+  return (
+    <div className={`terminal-feed-card${open ? " open" : ""}`}>
+      <button
+        className="terminal-feed-card-header"
+        onClick={() => setOpen(!open)}
+        title={open ? "Collapse" : "Expand"}
+      >
+        <span className="terminal-feed-card-icon">{icon}</span>
+        <span className="terminal-feed-card-label">{label}</span>
+        <span className="terminal-feed-card-title">{block.firstLine}</span>
+        <span className="terminal-feed-card-chevron">{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+        <div className="terminal-feed-card-body">
+          {block.kind === "mermaid" ? (
+            <MermaidDiagram code={block.code} />
+          ) : block.kind === "html" ? (
+            <iframe
+              className="terminal-feed-iframe"
+              title="HTML preview"
+              sandbox=""
+              srcDoc={block.code}
+            />
+          ) : (
+            <pre className="terminal-feed-code">{block.code}</pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }

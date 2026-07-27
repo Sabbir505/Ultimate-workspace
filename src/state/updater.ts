@@ -1,0 +1,98 @@
+// Auto-updater store. Holds the latest available update (if any), the
+// download/install state, and progress. A user who dismisses an update is not
+// re-prompted for that same version until the app restarts.
+import { create } from "zustand";
+import {
+  checkForUpdate,
+  downloadAndInstallUpdate,
+  listenUpdaterInstalled,
+  listenUpdaterProgress,
+  type UpdateInfo,
+  type UpdateProgressPayload,
+} from "../lib/ipc";
+
+export type InstallState = "idle" | "downloading" | "installed" | "error";
+
+interface UpdaterState {
+  /** Non-null update info when a newer version exists and hasn't been dismissed. */
+  update: UpdateInfo | null;
+  install: InstallState;
+  downloaded: number;
+  total: number | null;
+  error: string | null;
+  /** True while a check is in flight (avoids overlapping timer checks). */
+  checking: boolean;
+
+  /** Query the endpoint. Called on startup + every 4h, and manually from Settings. */
+  check: () => Promise<void>;
+  /** Start the download + install flow. Progress arrives via events. */
+  startInstall: () => Promise<void>;
+  /** "Later" — hide the banner for this version until restart. */
+  dismiss: () => void;
+  reset: () => void;
+}
+
+export const useUpdaterStore = create<UpdaterState>((set, get) => ({
+  update: null,
+  install: "idle",
+  downloaded: 0,
+  total: null,
+  error: null,
+  checking: false,
+
+  check: async () => {
+    if (get().checking) return;
+    set({ checking: true });
+    try {
+      const info = await checkForUpdate();
+      if (info && info.updateAvailable) {
+        // If the user dismissed this exact version already, don't resurface it.
+        const current = get().update;
+        if (current?.version === info.version && get().install === "idle") {
+          // Already dismissed (update is null after dismiss); leave it hidden.
+        } else if (get().install === "idle") {
+          set({ update: info });
+        }
+      } else if (info && !info.updateAvailable) {
+        // App is current — clear any stale banner (e.g. after an update).
+        if (get().install === "idle") set({ update: null });
+      }
+    } finally {
+      set({ checking: false });
+    }
+  },
+
+  startInstall: async () => {
+    if (get().install === "downloading") return;
+    set({ install: "downloading", downloaded: 0, total: null, error: null });
+    try {
+      await downloadAndInstallUpdate();
+      // On success the plugin restarts the app; if it doesn't, the
+      // `updater:installed` event flips state so the UI can prompt a restart.
+    } catch (e: any) {
+      set({ install: "error", error: e?.message || String(e) });
+    }
+  },
+
+  dismiss: () => set({ update: null }),
+
+  reset: () =>
+    set({
+      update: null,
+      install: "idle",
+      downloaded: 0,
+      total: null,
+      error: null,
+    }),
+}));
+
+/** Register the download-progress + installed event listeners. Call once at the
+ *  app root (next to the other event hooks). */
+export function wireUpdaterEvents(): void {
+  listenUpdaterProgress((p: UpdateProgressPayload) => {
+    useUpdaterStore.setState({ downloaded: p.downloaded, total: p.total });
+  });
+  listenUpdaterInstalled(() => {
+    useUpdaterStore.setState({ install: "installed" });
+  });
+}

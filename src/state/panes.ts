@@ -13,7 +13,7 @@
 // for backward compat.
 import { create } from "zustand";
 import { uuid } from "../lib/id";
-import { browserClosePane, browserCloseTab, killPty } from "../lib/ipc";
+import { browserClosePane, browserCloseTab, killPty, registerBrowserPaneProject, unregisterBrowserPaneProject } from "../lib/ipc";
 import type { HarnessId, PaneState } from "../types";
 
 export const MAX_PANES = 6;
@@ -68,6 +68,9 @@ export interface Pane {
   /** Monotonic counter of the last time the user sent input into this pane
    *  (0 = never). Primary signal for the split-layout spotlight default. */
   lastInputAt: number;
+  /** Current detected activity (e.g. "Editing 3 files", "Searching codebase").
+   *  Set by the terminal pane's output parser; cleared when idle. */
+  activity: string | null;
   data: PaneKindData;
 }
 
@@ -113,6 +116,8 @@ interface PanesState {
   toggleBrowserCollapsed: (paneId: string) => void;
   /** Record that the user sent input into a terminal pane (typing/paste). */
   notePaneInput: (paneId: string) => void;
+  /** Set a human-readable activity label for a pane (parsed from terminal output). */
+  setPaneActivity: (paneId: string, activity: string | null) => void;
   setSpotlight: (paneId: string | null) => void;
 
   // --- Multi-tab browser actions ---
@@ -205,8 +210,11 @@ function disposePaneResources(pane: Pane): void {
   if (pane.data.kind === "terminal") {
     void killPty(pane.paneId);
   } else {
-    // Browser panes: close ALL tab webviews (not just a single tab).
+    // Browser panes: close ALL tab webviews + unregister from the
+    // backend's project-pane registry so the MCP dispatch doesn't
+    // try to target a dead pane.
     void browserClosePane(pane.paneId);
+    void unregisterBrowserPaneProject(pane.paneId).catch(() => {});
   }
 }
 
@@ -247,7 +255,7 @@ const DEFAULT_BROWSER_TAB = (url: string): BrowserTabData => ({
 });
 
 function makePane(desc: PaneDescriptor, lastUsedAt: number): Pane {
-  const base = { paneId: uuid(), state: "idle" as PaneState, lastUsedAt, lastInputAt: 0 };
+  const base = { paneId: uuid(), state: "idle" as PaneState, lastUsedAt, lastInputAt: 0, activity: null };
   if (desc.kind === "terminal") {
     const { kind: _kind, ...rest } = desc;
     return {
@@ -299,6 +307,11 @@ export const usePanesStore = create<PanesState>((set, get) => ({
         useCounter: counter + 1,
       };
     });
+    // If this is a browser pane with a projectId, register it so the MCP
+    // dispatch (Task #4) can resolve the project to its browser panes.
+    if (desc.kind === "browser" && desc.projectId) {
+      void registerBrowserPaneProject(pane.paneId, desc.projectId).catch(() => {});
+    }
     return pane.paneId;
   },
 
@@ -431,6 +444,13 @@ export const usePanesStore = create<PanesState>((set, get) => ({
       ),
     }));
   },
+
+  setPaneActivity: (paneId, activity) =>
+    set((s) => ({
+      panes: s.panes.map((p) =>
+        p.paneId === paneId ? { ...p, activity } : p,
+      ),
+    })),
 
   setSpotlight: (paneId) => {
     set({ spotlightOverride: paneId });

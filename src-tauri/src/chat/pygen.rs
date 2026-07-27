@@ -47,23 +47,14 @@ pub fn is_supported(format: &str) -> bool {
     matches!(format, "docx" | "pptx" | "xlsx" | "pdf")
 }
 
-/// Resolve the Python interpreter command. Prefers `python3`, falling back to
-/// `python` (common on Windows, where `python3` often isn't on PATH). Returns
-/// `python3` when neither responds, so the failure message stays sensible.
-pub fn python_program() -> &'static str {
-    for cand in ["python3", "python"] {
-        let ok = std::process::Command::new(cand)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if ok {
-            return cand;
-        }
-    }
-    "python3"
+/// Resolve the Python interpreter to run model-authored document-generation
+/// code with. Delegates to [`super::python_runtime::interpreter`], which
+/// prefers the bundled, relocatable Python shipped in the installer and falls
+/// back to a system `py` / `python3` / `python`. Kept as a thin wrapper so the
+/// existing call site reads naturally; the resolution logic lives in one place
+/// (shared with `codeexec`).
+fn python_program() -> String {
+    super::python_runtime::interpreter()
 }
 
 /// Run `code` (Python) to produce `filename` (a `format` document) inside
@@ -121,7 +112,7 @@ pub async fn generate(
     };
 
     let python = python_program();
-    let mut cmd = Command::new(python);
+    let mut cmd = Command::new(&python);
     cmd.arg(&script)
         .current_dir(dir)
         .env("CONDUIT_OUTPUT", &out_path)
@@ -141,7 +132,9 @@ pub async fn generate(
             )),
         },
         Err(e) => Err(format!(
-            "could not start {python} (is Python installed and on PATH?): {e}"
+            "could not start the Python interpreter ({python}): {e}. \
+             Conduit ships a bundled Python; if it is missing or damaged, install \
+             Python 3 with python-docx / python-pptx / openpyxl / reportlab and retry."
         )),
     };
 

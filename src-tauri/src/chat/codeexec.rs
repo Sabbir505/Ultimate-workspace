@@ -24,13 +24,15 @@ const EXEC_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_OUTPUT: usize = 12_000;
 
 /// Languages the tool understands. Returns the interpreter program and the
-/// temp source-file extension. Python resolves to `python3` or `python`
-/// (whichever is on PATH) so it works on Windows too.
-fn interpreter(language: &str) -> Option<(&'static str, &'static str)> {
+/// temp source-file extension. Python resolves to the bundled interpreter
+/// (when shipped) or a system `py` / `python3` / `python` otherwise — see
+/// `python_runtime`. The program is an owned `String` because the bundled
+/// path is absolute (not a PATH-resolved name).
+fn interpreter(language: &str) -> Option<(String, &'static str)> {
     match language.to_lowercase().as_str() {
-        "python" | "py" | "python3" => Some((super::pygen::python_program(), "py")),
-        "javascript" | "js" | "node" => Some(("node", "js")),
-        "bash" | "sh" | "shell" => Some(("bash", "sh")),
+        "python" | "py" | "python3" => Some((super::python_runtime::interpreter(), "py")),
+        "javascript" | "js" | "node" => Some(("node".to_string(), "js")),
+        "bash" | "sh" | "shell" => Some(("bash".to_string(), "sh")),
         _ => None,
     }
 }
@@ -62,7 +64,7 @@ pub async fn run_code(language: &str, code: &str) -> String {
         return format!("Error: could not write source: {e}");
     }
 
-    let mut cmd = Command::new(program);
+    let mut cmd = Command::new(&program);
     cmd.arg(&src)
         .current_dir(&dir)
         .stdin(Stdio::null())

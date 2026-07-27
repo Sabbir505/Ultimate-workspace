@@ -4,8 +4,10 @@
 
 pub mod browser_cmds;
 pub mod chat_cmds;
+pub mod connectors_cmds;
 pub mod data;
 pub mod git_cmds;
 pub mod projects;
 pub mod pty_cmds;
 pub mod skills_cmds;
+pub mod updater_cmds;

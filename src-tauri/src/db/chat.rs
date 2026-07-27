@@ -19,6 +19,14 @@ fn map_chat_session(row: &rusqlite::Row) -> rusqlite::Result<ChatSession> {
         last_active_at: row.get("last_active_at")?,
         starred: row.get::<_, i64>("starred")? != 0,
         unread: row.get::<_, i64>("unread")? != 0,
+        // Falls back to "manual" for rows written before the column existed
+        // (the migration adds it nullable); the app treats unknown as manual.
+        permission_mode: row
+            .get::<_, Option<String>>("permission_mode")?
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "manual".to_string()),
+        // NULL = inherit global setting; per-session values are "on" | "off".
+        watch_mode: row.get::<_, Option<String>>("watch_mode")?,
     })
 }
 
@@ -65,8 +73,8 @@ pub fn create_chat_session(
     let now = now_ts();
     let id = new_id();
     conn.execute(
-        "INSERT INTO chat_sessions (id, title, provider, model, created_at, last_active_at)
-         VALUES (?1, NULL, ?2, ?3, ?4, ?4)",
+        "INSERT INTO chat_sessions (id, title, provider, model, created_at, last_active_at, permission_mode, watch_mode)
+         VALUES (?1, NULL, ?2, ?3, ?4, ?4, 'manual', NULL)",
         params![id, provider, model, now],
     )?;
     conn.query_row(
@@ -118,12 +126,93 @@ pub fn update_chat_session_model(
     Ok(())
 }
 
+/// Switch a session's provider (e.g. to `local_gguf` when a local model is
+/// picked from the selector in a cloud session, or back again). The caller is
+/// expected to also set a model valid for the new provider.
+pub fn update_chat_session_provider(
+    conn: &Connection,
+    chat_session_id: &str,
+    provider: &str,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE chat_sessions SET provider = ?2 WHERE id = ?1",
+        params![chat_session_id, provider],
+    )?;
+    Ok(())
+}
+
+/// Update a session's permission posture
+/// (`read_only` | `manual` | `auto_edit` | `full_auto`). Persisted per-session
+/// so reopening a chat restores its last mode; new sessions start at `manual`.
+pub fn update_chat_session_permission_mode(
+    conn: &Connection,
+    chat_session_id: &str,
+    mode: &str,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE chat_sessions SET permission_mode = ?2 WHERE id = ?1",
+        params![chat_session_id, mode],
+    )?;
+    Ok(())
+}
+
+/// Update a session's watch-mode pacing override (`"on"` | `"off"` | None).
+/// None clears the override so the session falls back to the global setting.
+pub fn update_chat_session_watch_mode(
+    conn: &Connection,
+    chat_session_id: &str,
+    mode: Option<&str>,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE chat_sessions SET watch_mode = ?2 WHERE id = ?1",
+        params![chat_session_id, mode],
+    )?;
+    Ok(())
+}
+
 pub fn touch_chat_session(conn: &Connection, chat_session_id: &str) -> DbResult<()> {
     conn.execute(
         "UPDATE chat_sessions SET last_active_at = ?2 WHERE id = ?1",
         params![chat_session_id, now_ts()],
     )?;
     Ok(())
+}
+
+// ---- per-conversation connector opt-in ----
+
+/// Replace the set of connectors attached to a chat session. A connected
+/// connector is not globally available — it must be attached to the session
+/// here for its tools to be registered into that conversation's tool loop.
+pub fn set_chat_session_connectors(
+    conn: &Connection,
+    chat_session_id: &str,
+    connector_ids: &[String],
+) -> DbResult<()> {
+    conn.execute(
+        "DELETE FROM chat_session_connectors WHERE chat_session_id = ?1",
+        params![chat_session_id],
+    )?;
+    for id in connector_ids {
+        conn.execute(
+            "INSERT OR IGNORE INTO chat_session_connectors (chat_session_id, connector_id)
+             VALUES (?1, ?2)",
+            params![chat_session_id, id],
+        )?;
+    }
+    Ok(())
+}
+
+/// The connector ids attached to a session, ordered for stable display.
+pub fn list_chat_session_connectors(
+    conn: &Connection,
+    chat_session_id: &str,
+) -> DbResult<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT connector_id FROM chat_session_connectors
+         WHERE chat_session_id = ?1 ORDER BY connector_id",
+    )?;
+    let rows = stmt.query_map(params![chat_session_id], |r| r.get::<_, String>(0))?;
+    rows.collect()
 }
 
 // ---- chat messages ----
@@ -193,11 +282,14 @@ mod tests {
         assert_eq!(cs.provider, "anthropic");
         assert_eq!(cs.model, "claude-sonnet-4-5");
         assert!(cs.title.is_none());
+        // New sessions always start at the manual permission posture.
+        assert_eq!(cs.permission_mode, "manual");
 
         update_chat_session_title(&conn, &cs.id, "my chat").unwrap();
         touch_chat_session(&conn, &cs.id).unwrap();
         let cs2 = get_chat_session(&conn, &cs.id).unwrap().unwrap();
         assert_eq!(cs2.title.as_deref(), Some("my chat"));
+        assert_eq!(cs2.permission_mode, "manual");
         assert!(cs2.last_active_at >= cs.last_active_at);
 
         let m1 = add_chat_message(&conn, &cs.id, "user", "hello", None, None, None).unwrap();
@@ -220,5 +312,57 @@ mod tests {
         delete_chat_session(&conn, &cs.id).unwrap();
         assert!(get_chat_session(&conn, &cs.id).unwrap().is_none());
         assert!(list_chat_messages(&conn, &cs.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn permission_mode_persists_and_restores() {
+        let conn = super::super::mem();
+        let cs = create_chat_session(&conn, "openai", "gpt-4o").unwrap();
+        // Starts at manual.
+        assert_eq!(cs.permission_mode, "manual");
+
+        // Switch to full_auto and re-read — persists.
+        update_chat_session_permission_mode(&conn, &cs.id, "full_auto").unwrap();
+        let reloaded = get_chat_session(&conn, &cs.id).unwrap().unwrap();
+        assert_eq!(reloaded.permission_mode, "full_auto");
+
+        // list_chat_sessions also surfaces the persisted mode.
+        let listed = list_chat_sessions(&conn).unwrap();
+        assert_eq!(listed[0].permission_mode, "full_auto");
+
+        // Switch to read_only and confirm it sticks too.
+        update_chat_session_permission_mode(&conn, &cs.id, "read_only").unwrap();
+        assert_eq!(
+            get_chat_session(&conn, &cs.id).unwrap().unwrap().permission_mode,
+            "read_only"
+        );
+    }
+
+    #[test]
+    fn watch_mode_persists_and_restores() {
+        let conn = super::super::mem();
+        let cs = create_chat_session(&conn, "openai", "gpt-4o").unwrap();
+        // Starts at None (inherit global).
+        assert!(cs.watch_mode.is_none());
+
+        // Set to "on" and re-read — persists.
+        update_chat_session_watch_mode(&conn, &cs.id, Some("on")).unwrap();
+        let reloaded = get_chat_session(&conn, &cs.id).unwrap().unwrap();
+        assert_eq!(reloaded.watch_mode.as_deref(), Some("on"));
+
+        // list_chat_sessions also surfaces the persisted mode.
+        let listed = list_chat_sessions(&conn).unwrap();
+        assert_eq!(listed[0].watch_mode.as_deref(), Some("on"));
+
+        // Clear override (None) and confirm it falls back to NULL.
+        update_chat_session_watch_mode(&conn, &cs.id, None).unwrap();
+        assert!(get_chat_session(&conn, &cs.id).unwrap().unwrap().watch_mode.is_none());
+
+        // Switch to "off" and confirm it sticks.
+        update_chat_session_watch_mode(&conn, &cs.id, Some("off")).unwrap();
+        assert_eq!(
+            get_chat_session(&conn, &cs.id).unwrap().unwrap().watch_mode.as_deref(),
+            Some("off")
+        );
     }
 }

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+**Fix auto-updater signing key** — corrected the updater public key baked into the app so it matches the signing keypair. v0.3.0 installs could not verify update signatures because of a one-character mismatch in the embedded public key; this release restores the auto-update chain. (Existing v0.2.0 and v0.3.0 installs should manually install 0.3.1 once; updates work automatically after that.)
+
 ## What's new in 0.3.0
 
 **Connectors framework** — a new connectors framework (OAuth sign-in, encrypted credential storage, remote-MCP tool bridging, per-tool permission gating), with Notion as the first connector. Heads-up: Notion sign-in isn't active in this build — it switches on in the next patch release; everything else is ready.

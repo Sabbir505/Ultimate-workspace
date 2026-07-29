@@ -121,6 +121,14 @@ pub async fn generate(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Suppress the console-window flash on Windows (GUI app shelling out to the
+    // bundled/system Python interpreter). tokio::process::Command exposes
+    // `creation_flags` as an inherent method — no trait import needed.
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
 
     let run = match cmd.spawn() {
         Ok(child) => match timeout(GEN_TIMEOUT, child.wait_with_output()).await {

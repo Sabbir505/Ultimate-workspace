@@ -24,6 +24,7 @@ pub fn openai_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -> V
         openai_fn(GENERATE_DIAGRAM, GENERATE_DIAGRAM_DESC, generate_diagram_parameters()),
         openai_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
         openai_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
+        openai_fn(GET_SKILL, GET_SKILL_DESC, get_skill_parameters()),
         openai_fn(BROWSER_READ, BROWSER_READ_DESC, browser_read_parameters()),
         openai_fn(BROWSER_CLICK, BROWSER_CLICK_DESC, browser_ref_parameters()),
         openai_fn(BROWSER_TYPE, BROWSER_TYPE_DESC, browser_type_parameters()),
@@ -85,6 +86,7 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -
         anthropic_fn(GENERATE_DIAGRAM, GENERATE_DIAGRAM_DESC, generate_diagram_parameters()),
         anthropic_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
         anthropic_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
+        anthropic_fn(GET_SKILL, GET_SKILL_DESC, get_skill_parameters()),
         anthropic_fn(BROWSER_READ, BROWSER_READ_DESC, browser_read_parameters()),
         anthropic_fn(BROWSER_CLICK, BROWSER_CLICK_DESC, browser_ref_parameters()),
         anthropic_fn(BROWSER_TYPE, BROWSER_TYPE_DESC, browser_type_parameters()),
@@ -327,6 +329,19 @@ fn fetch_url_parameters() -> Value {
             }
         },
         "required": ["url"],
+    })
+}
+
+fn get_skill_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "slug": {
+                "type": "string",
+                "description": "The skill's slash-command slug, e.g. \"docx\", \"pptx\", \"pdf\", or \"diagram\". One of the Available skills listed in the system prompt."
+            }
+        },
+        "required": ["slug"],
     })
 }
 

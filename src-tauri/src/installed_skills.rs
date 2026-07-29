@@ -12,9 +12,12 @@
 //! discover it by its slash-command name — that is the whole point of the
 //! feature.
 
+use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +31,39 @@ pub struct InstalledSkill {
     pub kimi_path: Option<String>,
     /// "skill" | "loop"
     pub kind: String,
+}
+
+/// A skill surfaced to the chat `/` menu — either an on-disk harness skill or
+/// a built-in (embedded via `include_str!`). On a slug collision the on-disk
+/// copy wins so a user can override a built-in by creating
+/// `~/.claude/skills/<slug>/SKILL.md`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableSkill {
+    pub slug: String,
+    pub name: String,
+    pub description: String,
+    /// "installed" (on-disk) | "builtin"
+    pub origin: String,
+}
+
+/// In-memory snapshot used by the backend injection path (no filesystem reads
+/// per turn). Body is frontmatter-stripped.
+#[derive(Debug, Clone)]
+pub struct SkillSnapshot {
+    pub slug: String,
+    pub name: String,
+    pub body: String,
+}
+
+/// Built-in skill embedded at compile time. Slugs match the old
+/// `assistant.skills` `command` fields so existing `/docx`, `/pptx`, `/pdf`,
+/// `/diagram` invocations keep working.
+#[derive(Debug, Clone)]
+struct BuiltinSkill {
+    slug: &'static str,
+    name: &'static str,
+    body: &'static str,
 }
 
 /// Root dirs per harness for a given kind ("skills" | "loops").
@@ -60,31 +96,56 @@ fn doc_file(dir: &PathBuf) -> Option<PathBuf> {
     mds.into_iter().next()
 }
 
-/// Pull `name:` / `description:` out of the YAML frontmatter block. Simple
-/// line parsing — no yaml dependency for two keys.
-fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>) {
+/// Pull `name:` / `description:` out of the YAML frontmatter block and return
+/// the frontmatter-stripped body. Simple line parsing — no yaml dependency
+/// for two keys. If there is no leading `---` block, returns the whole
+/// content as the body with `None` name/desc.
+fn strip_frontmatter(content: &str) -> (String, Option<String>, Option<String>) {
     let mut name = None;
     let mut desc = None;
     let mut in_fm = false;
+    let mut body_start = 0usize;
     for (i, line) in content.lines().enumerate() {
         let t = line.trim();
         if i == 0 && t == "---" {
             in_fm = true;
             continue;
         }
-        if in_fm && t == "---" {
-            break;
-        }
-        if !in_fm {
-            break;
-        }
-        let unquote = |v: &str| v.trim().trim_matches('"').trim_matches('\'').to_string();
-        if let Some(v) = t.strip_prefix("name:") {
-            name = Some(unquote(v));
-        } else if let Some(v) = t.strip_prefix("description:") {
-            desc = Some(unquote(v));
+        if in_fm {
+            if t == "---" {
+                // Body starts after this line. `lines()` strips the trailing
+                // newline, so advance past the second `---` + its newline.
+                body_start = content
+                    .lines()
+                    .take(i + 1)
+                    .map(|l| l.len() + 1)
+                    .sum::<usize>()
+                    .min(content.len());
+                break;
+            }
+            let unquote = |v: &str| v.trim().trim_matches('"').trim_matches('\'').to_string();
+            if let Some(v) = t.strip_prefix("name:") {
+                name = Some(unquote(v));
+            } else if let Some(v) = t.strip_prefix("description:") {
+                desc = Some(unquote(v));
+            }
+        } else {
+            // No frontmatter; whole content is the body.
+            return (content.to_string(), None, None);
         }
     }
+    let body = if in_fm {
+        content[body_start..].trim().to_string()
+    } else {
+        // Had `---` on line 0 but no closing `---` — treat whole content as body.
+        content.trim().to_string()
+    };
+    (body, name, desc)
+}
+
+/// Back-compat thin wrapper for callers that only want name/description.
+fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>) {
+    let (_, name, desc) = strip_frontmatter(content);
     (name, desc)
 }
 
@@ -142,6 +203,138 @@ pub fn read_installed(slug: &str, kind: &str) -> Option<String> {
     fs::read_to_string(path).ok()
 }
 
+/// The four built-in skills, embedded at compile time. Bodies are the raw
+/// markdown (frontmatter stripped at read time by `strip_frontmatter`).
+fn builtins() -> Vec<BuiltinSkill> {
+    vec![
+        BuiltinSkill {
+            slug: "docx",
+            name: "Word documents (.docx)",
+            body: include_str!("../../skills/docx-skill.md"),
+        },
+        BuiltinSkill {
+            slug: "pptx",
+            name: "Slide decks (.pptx)",
+            body: include_str!("../../skills/pptx-skill.md"),
+        },
+        BuiltinSkill {
+            slug: "pdf",
+            name: "PDF documents",
+            body: include_str!("../../skills/pdf-skill.md"),
+        },
+        BuiltinSkill {
+            slug: "diagram",
+            name: "Diagrams (vector SVG)",
+            body: include_str!("../../skills/diagram-html-svg-skill.md"),
+        },
+    ]
+}
+
+/// Every skill the chat `/` menu can offer: on-disk harness skills merged with
+/// the built-ins. On a slug collision the on-disk copy wins, so a user can
+/// override a built-in by creating `~/.claude/skills/<slug>/SKILL.md`.
+pub fn list_all_skills() -> Vec<AvailableSkill> {
+    let mut out: Vec<AvailableSkill> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // On-disk first so they shadow built-ins on slug collision.
+    for s in scan("skills") {
+        seen.insert(s.slug.clone());
+        out.push(AvailableSkill {
+            slug: s.slug,
+            name: s.name,
+            description: s.description,
+            origin: "installed".into(),
+        });
+    }
+    for b in builtins() {
+        if seen.contains(b.slug) {
+            continue;
+        }
+        let (_, name, desc) = strip_frontmatter(b.body);
+        out.push(AvailableSkill {
+            slug: b.slug.into(),
+            name: name.unwrap_or_else(|| b.name.into()),
+            description: desc.unwrap_or_else(|| b.name.into()),
+            origin: "builtin".into(),
+        });
+    }
+    out
+}
+
+/// Frontmatter-stripped body of a skill by slug: on-disk first, then built-in.
+/// Used by the backend injection path.
+#[allow(dead_code)]
+pub fn read_skill_body(slug: &str) -> Option<String> {
+    if let Some(raw) = read_installed(slug, "skills") {
+        let (body, _, _) = strip_frontmatter(&raw);
+        return Some(body);
+    }
+    builtins()
+        .into_iter()
+        .find(|b| b.slug == slug)
+        .map(|b| strip_frontmatter(b.body).0)
+}
+
+/// Per-process cache of skill snapshots for the injection hot path. Refreshes
+/// after `SKILL_CACHE_TTL` so edits made in Skills Library are picked up
+/// promptly; `invalidate_skill_cache()` clears it immediately on write ops.
+const SKILL_CACHE_TTL: Duration = Duration::from_secs(5);
+static SKILL_CACHE: Lazy<Mutex<Option<(Instant, Vec<SkillSnapshot>)>>> =
+    Lazy::new(|| Mutex::new(None));
+
+/// Clear the cached skill snapshots. Called after any create/save/delete so
+/// the next chat send and `/` menu query see fresh disk state.
+pub fn invalidate_skill_cache() {
+    if let Ok(mut g) = SKILL_CACHE.lock() {
+        *g = None;
+    }
+}
+
+/// Cached, frontmatter-stripped skill snapshots (slug/name/body) for the
+/// backend injection path. Re-scans the filesystem only if the cache is empty
+/// or older than `SKILL_CACHE_TTL`.
+pub fn cached_skills() -> Vec<SkillSnapshot> {
+    if let Ok(mut g) = SKILL_CACHE.lock() {
+        if let Some((at, snap)) = g.as_ref() {
+            if at.elapsed() < SKILL_CACHE_TTL {
+                return snap.clone();
+            }
+        }
+        let mut snaps: Vec<SkillSnapshot> = scan("skills")
+            .into_iter()
+            .filter_map(|s| {
+                // Read straight from the path the scan already resolved, rather
+                // than re-scanning per skill (avoids an N+1 of `read_installed`).
+                let path = s.claude_path.as_ref().or(s.kimi_path.as_ref())?;
+                let raw = fs::read_to_string(path).ok()?;
+                let (body, name, _) = strip_frontmatter(&raw);
+                Some(SkillSnapshot {
+                    slug: s.slug,
+                    name: name.unwrap_or_else(|| s.name),
+                    body,
+                })
+            })
+            .collect();
+        // Built-ins only when not shadowed by an on-disk skill of the same slug.
+        let on_disk_slugs: std::collections::HashSet<String> =
+            snaps.iter().map(|s| s.slug.clone()).collect();
+        for b in builtins() {
+            if on_disk_slugs.contains(b.slug) {
+                continue;
+            }
+            let (body, name, _) = strip_frontmatter(b.body);
+            snaps.push(SkillSnapshot {
+                slug: b.slug.into(),
+                name: name.unwrap_or_else(|| b.name.into()),
+                body,
+            });
+        }
+        *g = Some((Instant::now(), snaps.clone()));
+        return snaps;
+    }
+    Vec::new()
+}
+
 /// Write content back to every copy that exists (keeps mirrored skills in sync).
 pub fn save_installed(slug: &str, kind: &str, content: &str) -> Result<(), String> {
     let s = scan(kind)
@@ -154,6 +347,7 @@ pub fn save_installed(slug: &str, kind: &str, content: &str) -> Result<(), Strin
         wrote = true;
     }
     if wrote {
+        invalidate_skill_cache();
         Ok(())
     } else {
         Err("no file on disk for this entry".into())
@@ -185,6 +379,7 @@ pub fn create_installed(name: &str, kind: &str, content: &str) -> Result<Install
             kimi_path = Some(doc.to_string_lossy().into_owned());
         }
     }
+    invalidate_skill_cache();
     Ok(InstalledSkill {
         slug: slug.clone(),
         name: slug,
@@ -209,6 +404,7 @@ pub fn delete_installed(slug: &str, kind: &str) -> Result<(), String> {
             }
         }
     }
+    invalidate_skill_cache();
     Ok(())
 }
 

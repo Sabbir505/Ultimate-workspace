@@ -227,6 +227,7 @@ fn map_chat_message(row: &rusqlite::Row) -> rusqlite::Result<ChatMessageRecord> 
         output_tokens: row.get("output_tokens")?,
         cost_usd: row.get("cost_usd")?,
         created_at: row.get("created_at")?,
+        superseded_by: row.get("superseded_by")?,
     })
 }
 
@@ -255,6 +256,7 @@ pub fn add_chat_message(
         output_tokens,
         cost_usd,
         created_at: now,
+        superseded_by: None,
     })
 }
 
@@ -268,6 +270,46 @@ pub fn list_chat_messages(
     )?;
     let rows = stmt.query_map(params![chat_session_id], map_chat_message)?;
     rows.collect()
+}
+
+/// The subset of messages the send path feeds to the model: every row NOT
+/// folded into a `[compacted context]` summary (i.e. `superseded_by IS NULL`).
+/// The compaction framework soft-deletes summarized turns by setting
+/// `superseded_by`; the full `list_chat_messages` still returns them for the UI.
+pub fn list_active_chat_messages(
+    conn: &Connection,
+    chat_session_id: &str,
+) -> DbResult<Vec<ChatMessageRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM chat_messages WHERE chat_session_id = ?1 AND superseded_by IS NULL ORDER BY id",
+    )?;
+    let rows = stmt.query_map(params![chat_session_id], map_chat_message)?;
+    rows.collect()
+}
+
+/// Mark the given message rows as superseded by `summary_id` (the id of the
+/// `[compacted context]` summary row that folded them in). Used both for the
+/// aged-out real turns AND any prior summary row, so re-compaction collapses
+/// everything into a single running summary instead of stacking blocks.
+/// No-op for an empty id list.
+pub fn mark_superseded(conn: &Connection, ids: &[i64], summary_id: i64) -> DbResult<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    // Build a positional placeholder list (?, ?, …) and bind ids + summary_id.
+    let placeholders: Vec<&str> = ids.iter().map(|_| "?").collect();
+    let sql = format!(
+        "UPDATE chat_messages SET superseded_by = ? WHERE id IN ({})",
+        placeholders.join(", ")
+    );
+    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(ids.len() + 1);
+    params_vec.push(Box::new(summary_id));
+    for id in ids {
+        params_vec.push(Box::new(*id));
+    }
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+    conn.execute(&sql, param_refs.as_slice())?;
+    Ok(())
 }
 
 #[cfg(test)]

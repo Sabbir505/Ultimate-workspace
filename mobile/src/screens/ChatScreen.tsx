@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Send, Paperclip, Bot, User, ChevronDown, ChevronUp, FileText, XCircle, Square, Sparkles, Code2, Bug, Lightbulb } from 'lucide-react-native';
-import { useRelay, onChatToken, onChatDone, onChatError, type ChatUsage } from '../hooks/useRelay';
+import { useRelay, onChatToken, onChatDone, onChatError, onLocalModelReady, onLocalModelError, type ChatUsage } from '../hooks/useRelay';
 import { theme, useTheme } from '../theme';
 import ModelSelector from '../components/ModelSelector';
 import ConnectionIndicator from '../components/ConnectionIndicator';
@@ -140,7 +140,7 @@ function MessageBubble({ message }: { message: ChatMessageUI }) {
 // ---------------------------------------------------------------------------
 
 export default function ChatScreen() {
-  const { connected, desktopUnreachable, providers, sendChatTurn, cancelChatTurn, connect, refreshProviders } = useRelay();
+  const { connected, desktopUnreachable, providers, sendChatTurn, cancelChatTurn, connect, refreshProviders, startLocalModel } = useRelay();
   useTheme(); // subscribe to theme changes so theme.colors is reactive
   const c = theme.colors;
   const [messages, setMessages] = useState<ChatMessageUI[]>([]);
@@ -232,10 +232,17 @@ export default function ChatScreen() {
       });
     });
 
+    // Clear the "Loading local model…" banner once the desktop acks the
+    // StartLocalModel request (success or failure).
+    const unsubReady = onLocalModelReady.on(() => setLocalModelStarting(false));
+    const unsubModelErr = onLocalModelError.on(() => setLocalModelStarting(false));
+
     return () => {
       unsubToken();
       unsubDone();
       unsubError();
+      unsubReady();
+      unsubModelErr();
     };
   }, []);
 
@@ -286,11 +293,15 @@ export default function ChatScreen() {
     setSelectedModel(model);
     setSelectedGgufPath(ggufPath);
     if (ggufPath) {
+      // Tell the desktop to spawn the sidecar now, so it's ready by the time
+      // the user sends their first message. The banner stays up until the
+      // LocalModelReady / LocalModelError ack comes back.
       setLocalModelStarting(true);
+      startLocalModel(model, ggufPath);
     } else {
       setLocalModelStarting(false);
     }
-  }, []);
+  }, [startLocalModel]);
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.background }]} edges={['top']}>

@@ -124,6 +124,13 @@ pub struct Pane {
 }
 
 impl Pane {
+    /// The spawned child's OS process id, if still resolvable. Used by the
+    /// dev-mode memory counter (`pane_memory`) to look up the process's RSS
+    /// via sysinfo. Returns None for panes whose child has already exited.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.lock().process_id()
+    }
+
     fn append_stripped(&self, text: &str) {
         {
             let mut t = self.transcript.lock();
@@ -707,6 +714,11 @@ impl PtyManager {
     /// Get the current state of a pane by its pane_id.
     pub fn pane_state(&self, pane_id: &str) -> Option<String> {
         self.panes.lock().get(pane_id).map(|p| p.state.lock().to_string())
+    }
+
+    /// Get the spawned child's PID for a pane (dev-mode memory counter).
+    pub fn pane_pid(&self, pane_id: &str) -> Option<u32> {
+        self.panes.lock().get(pane_id).and_then(|p| p.pid())
     }
 
     /// One monitor thread for all panes: drives the silence heuristic and the

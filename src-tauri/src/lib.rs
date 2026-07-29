@@ -162,6 +162,7 @@ pub fn run() {
             commands::pty_cmds::write_pty,
             commands::pty_cmds::resize_pty,
             commands::pty_cmds::kill_pty,
+            commands::pty_cmds::pane_memory,
             commands::pty_cmds::list_harnesses,
             commands::pty_cmds::run_harness_login,
             // native browser panes (child webviews)
@@ -214,6 +215,7 @@ pub fn run() {
             commands::skills_cmds::save_installed_skill,
             commands::skills_cmds::create_installed_skill,
             commands::skills_cmds::delete_installed_skill,
+            commands::skills_cmds::list_chat_skills,
             // chat mode
             commands::chat_cmds::list_chat_sessions,
             commands::chat_cmds::create_chat_session,

@@ -1747,3 +1747,59 @@ on tasks (Google Drive/Calendar, Gmail, Canva, Slack) scope accurately:
 - Relay has no authentication (bound to 127.0.0.1 — local-only, but should add a pairing token for production)
 - `gguf_path` in `build_available_providers` lists all scanned models as separate `ProviderInfo` entries (one per model) rather than grouping under a single "local_gguf" provider — mobile UI needs to handle this
 - The mobile `App.tsx` is still the Expo template — needs to be replaced with the actual navigation structure
+
+## Automatic context compaction for local models (2026-07-29)
+
+Local GGUF sessions run against hardware-constrained context windows (4K–16K
+tokens, set at sidecar spawn via `auto_ctx_size`). A long conversation
+eventually overflows that window and either 400-errors mid-task or silently
+truncates via llama-server's crude oldest-token-dropping context-shifting
+(no regard for importance). Added threshold-triggered, summarization-based
+compaction (`src-tauri/src/chat/compaction.rs`) so long local-model sessions
+keep working instead of breaking or silently losing early context.
+
+**Strategy — hybrid pin + summarize.** Before each LocalGguf turn, the send
+path (`chat/commands.rs::send_chat_message`) counts tokens via llama-server's
+`/tokenize` endpoint; if `(tokens + 512 response headroom) / n_ctx` crosses the
+threshold, it summarizes everything between the system prompt and the pinned
+recent tail (a separate non-streaming `/v1/chat/completions` call to the same
+sidecar), persists the summary as a `[compacted context]` `role="system"` DB
+row, soft-deletes the folded turns (`superseded_by` column on `chat_messages`),
+and sends the compacted history. Re-compaction folds any prior summary into
+the new summarization call and supersedes the old summary row, so exactly one
+running summary ever exists — no stacking. The system prompt is never touched.
+If counting or summarization fails, the original history passes through
+unchanged (logged via `tracing::warn!`); if the resulting request still
+overflows, llama-server's context-shifting degrades rather than breaking.
+Scoped to `ChatProviderId::LocalGguf` only — the hook is gated, so API
+providers see no overhead and no compaction.
+
+**Tunable defaults (revisitable, not fixed):**
+- **Threshold 0.75** — deliberately below Claude Code's own 0.92 reference
+  point: local models have proportionally less total headroom to begin with,
+  and the summarization call itself needs to fit in what's left. Tunable in
+  Settings → Local Models → Compaction (0.25–0.99).
+- **Pin 6 exchanges** (1 exchange = user+assistant pair = 2 messages) — the
+  recency-coherence sweet spot; recency dominates coherence so the recent
+  tail goes through verbatim. Tunable (1–50).
+- **Response headroom 512 tokens** — added to the current count before
+  comparing against the threshold so a turn that would itself push the window
+  over the line triggers compaction a step early.
+
+`n_ctx` is now stored on `SidecarHandle`/`StartedModel`/`ActiveLocalModel`
+(populated at spawn, surfaced via `status()`) so the threshold is always
+relative to the window the model actually has, not a hardcoded constant.
+
+The compaction marker renders in the timeline as a muted, tappable
+"— earlier context compacted —" line (reusing the `.chat-activity-done` /
+`.chat-status-notice` aesthetic); expanding it reveals the actual summary text.
+
+### Known issues / follow-ups
+- Compaction for API providers is explicitly out of scope (large windows);
+  note as a possible future enhancement if very long research/dev sessions
+  against API providers ever prove to need it.
+- No manual-trigger UI (automatic/threshold-based only, by design).
+- `/tokenize` is a synchronous loopback round-trip before every local-model
+  send (~ms); revisit a char-heuristic pre-check gated behind `/tokenize` only
+  near the threshold if this ever shows up in profiles.
+

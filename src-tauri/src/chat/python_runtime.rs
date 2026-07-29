@@ -110,11 +110,18 @@ fn system_interpreter() -> &'static str {
 /// Run `<candidate> --version` and return true only if it exits successfully —
 /// a non-zero exit (e.g. the Windows Store stub) disqualifies the candidate.
 fn probe(prog: &str) -> bool {
-    std::process::Command::new(prog)
-        .arg("--version")
+    let mut cmd = std::process::Command::new(prog);
+    cmd.arg("--version")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::null());
+    // Avoid a console-window flash when the GUI app probes for Python.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.status()
         .map(|s| s.success())
         .unwrap_or(false)
 }

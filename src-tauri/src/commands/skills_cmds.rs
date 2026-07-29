@@ -1,6 +1,6 @@
 //! Installed skills/loops commands — see installed_skills.rs for the design.
 
-use crate::installed_skills::{self, InstalledSkill};
+use crate::installed_skills::{self, AvailableSkill, InstalledSkill};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -12,6 +12,13 @@ pub fn list_installed_skills() -> CmdResult<Vec<InstalledSkill>> {
 #[tauri::command]
 pub fn list_installed_loops() -> CmdResult<Vec<InstalledSkill>> {
     Ok(installed_skills::list_installed("loops"))
+}
+
+/// Every skill the chat `/` menu can offer: on-disk harness skills merged with
+/// the built-in doc/pptx/pdf/diagram skills (on-disk wins on slug collision).
+#[tauri::command]
+pub fn list_chat_skills() -> CmdResult<Vec<AvailableSkill>> {
+    Ok(installed_skills::list_all_skills())
 }
 
 #[tauri::command]

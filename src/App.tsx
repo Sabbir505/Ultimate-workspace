@@ -1,7 +1,7 @@
 // App shell: sidebar + main area (toolbar, pane grid, broadcast bar), plus
 // overlay views (settings / skills / cost), command palette, peek panel,
 // project settings, and the replace-LRU-pane confirmation (§4.3 step 4).
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CommandPalette } from "./components/command-palette/CommandPalette";
 import { CostDashboard } from "./components/cost-dashboard/CostDashboard";
 import { Modal } from "./components/common/Modal";
@@ -13,7 +13,6 @@ import { PeekPanel } from "./components/peek/PeekPanel";
 import { SettingsView } from "./components/settings/SettingsView";
 import { ProjectSettingsPanel } from "./components/sidebar/ProjectSettingsPanel";
 import { Sidebar } from "./components/sidebar/Sidebar";
-import { ArtifactLibrary } from "./components/sidebar/ArtifactLibrary";
 import { PanelIcon } from "./components/common/PanelIcon";
 import { SkillsLibrary } from "./components/skills-library/SkillsLibrary";
 import { ChatView } from "./components/chat/ChatView";
@@ -22,11 +21,11 @@ import { useBrowserMcpEvents } from "./hooks/useBrowserMcpEvents";
 import { useGitStatusPolling } from "./hooks/useGitStatusPolling";
 import { useKeybindings } from "./hooks/useKeybindings";
 import { usePtyEvents } from "./hooks/usePtyEvents";
+import { usePaneMemory } from "./hooks/usePaneMemory";
 import { useTheme } from "./hooks/useTheme";
-import { exportFocusedSession } from "./lib/exportSession";
 import { confirmReplaceLru } from "./lib/sessionLauncher";
 import { spawnForPane } from "./lib/sessionLauncher";
-import { ensureDefaultSkills } from "./lib/defaultSkills";
+import { useChatStore } from "./state/chat";
 import { MAX_PANES, usePanesStore, type PaneKindData } from "./state/panes";
 import { useProjectsStore } from "./state/projects";
 import { useSettingsStore } from "./state/settings";
@@ -60,9 +59,6 @@ export default function App() {
   const markGitRepo = useProjectsStore((s) => s.markGitRepo);
   const lastBrowserUrl = useSettingsStore((s) => s.lastBrowserUrl);
 
-  // Feature 3: Artifacts modal openable from the Dev mode toolbar.
-  const [artifactsOpen, setArtifactsOpen] = useState(false);
-
   // Feature 6: Workspaces dropdown in the Dev-mode toolbar.
   const [workspaces, setWorkspaces] = useState<WorkspaceRecord[]>([]);
   const [workspacesOpen, setWorkspacesOpen] = useState(false);
@@ -89,9 +85,6 @@ export default function App() {
     void useSettingsStore.getState().load();
     void useProjectsStore.getState().loadAll();
     void useSkillsStore.getState().load();
-    // Seed built-in document/diagram skills on first run so the model has that
-    // guidance immediately, without the user opening Settings.
-    void ensureDefaultSkills();
 
     // Auto-updater: wire download-progress + installed events, then check on
     // startup and every 4 hours. A check is a single HTTP GET + semver compare;
@@ -108,8 +101,23 @@ export default function App() {
   useKeybindings();
   usePtyEvents();
   useChatEvents();
+  usePaneMemory();
   useBrowserMcpEvents();
   useGitStatusPolling();
+
+  // Leaving the Chat tab: drop the active chat if it's still empty (no turns
+  // sent). Without this, an auto-started new chat lingers as an empty stub in
+  // the sidebar, and returning to Chat reopens that stub (or spawns a
+  // duplicate) instead of starting fresh. Only fires on the chat -> non-chat
+  // transition, so it never deletes a chat the user actually used.
+  const prevView = useRef(activeView);
+  useEffect(() => {
+    const was = prevView.current;
+    prevView.current = activeView;
+    if (was === "chat" && activeView !== "chat") {
+      void useChatStore.getState().deleteActiveIfEmpty();
+    }
+  }, [activeView]);
 
   // Sync modal states into the UI store so native webviews know to hide.
   const setModalOpen = useUiStore((s) => s.setModalOpen);
@@ -258,9 +266,11 @@ export default function App() {
           )}
           <strong style={{ fontSize: 14 }}>Conduit</strong>
           <span className="spacer" />
-          <button onClick={openBrowserPane} title="Open a browser preview pane (google.com)">
-            + Browser Pane
-          </button>
+          {sidebarMode !== "chats" && (
+            <button onClick={openBrowserPane} title="Open a browser preview pane (google.com)">
+              + Browser Pane
+            </button>
+          )}
           {sidebarMode !== "chats" && selectedProjectId && (
             <div
               className="workspaces-toggle"
@@ -340,13 +350,12 @@ export default function App() {
             </>
           )}
           {sidebarMode === "chats" && (
-            <button onClick={() => setArtifactsOpen(true)} title="Browse generated files & diagrams">
-              Artifacts
-            </button>
+            <>
+              <button onClick={openBrowserPane} title="Open a browser preview pane (google.com)">
+                + Browser Pane
+              </button>
+            </>
           )}
-          <button onClick={() => void exportFocusedSession()} title="Export focused session as Markdown">
-            ⤓ Export
-          </button>
         </div>
 
         <OnboardingBanner />
@@ -373,12 +382,6 @@ export default function App() {
       {projectSettingsFor && <ProjectSettingsPanel />}
       <PeekPanel />
       <CommandPalette />
-      {artifactsOpen && (
-        <ArtifactLibrary
-          externalOpen={artifactsOpen}
-          onClose={() => setArtifactsOpen(false)}
-        />
-      )}
 
       {pendingReplace && (
         <Modal

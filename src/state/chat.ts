@@ -131,6 +131,10 @@ interface ChatState {
   messages: ChatMessageRecord[];
   streaming: Record<string, string>; // chatSessionId -> accumulating assistant text
   streamingChatSessionId: string | null; // which session is currently streaming
+  /** Pre-token status notice per session (chatSessionId -> reason+message),
+   *  e.g. a local model cold-starting after a restart. Cleared on the first
+   *  token / done / error. */
+  chatStatus: Record<string, { reason: string; message: string }>;
   config: ChatConfigPayload | null;
   error: string | null;
   /** Reasoning effort sent with messages ("" = provider default). */
@@ -164,6 +168,13 @@ interface ChatState {
   selectSession: (chatSessionId: string) => Promise<void>;
   newChat: (provider: string, model: string) => Promise<ChatSession | null>;
   deleteChat: (chatSessionId: string) => Promise<void>;
+  /** Delete the active chat session if it has no turns (no persisted
+   *  messages). Used when leaving the Chat tab so an untouched new chat
+   *  doesn't linger as an empty session — returning to Chat starts fresh
+   *  instead of reopening the empty stub (or spawning a duplicate). No-op
+   *  when the active chat has any messages, or none is active. Returns the
+   *  id of the deleted session (null if nothing was deleted). */
+  deleteActiveIfEmpty: () => Promise<string | null>;
   renameChat: (chatSessionId: string, title: string) => Promise<void>;
   /** Star/unstar a chat (pins it to the top of the sidebar). */
   setStarred: (chatSessionId: string, starred: boolean) => Promise<void>;
@@ -208,6 +219,7 @@ interface ChatState {
 
   // Called by the event hook (useChatEvents) — not meant for direct component use.
   onToken: (chatSessionId: string, token: string) => void;
+  onStatus: (chatSessionId: string, reason: string, message: string) => void;
   onDone: (chatSessionId: string, inputTokens: number | null, outputTokens: number | null, costUsd: number | null) => void;
   onError: (chatSessionId: string, message: string, code: string | null) => void;
   onArtifact: (payload: ChatArtifactPayload) => void;
@@ -222,6 +234,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   streaming: {},
   streamingChatSessionId: null,
+  chatStatus: {},
   config: null,
   error: null,
   effort: "",
@@ -308,6 +321,37 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   newChat: async (provider, model) => {
+    // Reuse the active session when it already has no turns — clicking "New
+    // Chat" while sitting in a fresh empty chat should not spawn yet another
+    // empty session. If the caller wants a different provider/model than the
+    // empty session already has (e.g. Settings → "Use this model"), update it
+    // in place rather than creating a duplicate.
+    const { activeChatSessionId, messages, sessions } = get();
+    const active = activeChatSessionId
+      ? sessions.find((s) => s.id === activeChatSessionId)
+      : undefined;
+    if (active && messages.length === 0) {
+      if (provider && active.provider !== provider) {
+        await updateChatSessionProvider(active.id, provider);
+      }
+      if (model && active.model !== model) {
+        await updateChatSessionModel(active.id, model);
+      }
+      set((s) => ({
+        sessions: s.sessions.map((sess) =>
+          sess.id === active.id
+            ? {
+                ...sess,
+                provider: provider || sess.provider,
+                model: model || sess.model,
+              }
+            : sess,
+        ),
+        error: null,
+      }));
+      return active;
+    }
+
     const session = await createChatSession(provider, model);
     if (session) {
       // Insert at the top so it appears immediately in the sidebar (below
@@ -352,6 +396,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
         pendingApprovals: nextPendingApprovals,
       };
     });
+  },
+
+  deleteActiveIfEmpty: async () => {
+    const { activeChatSessionId, messages } = get();
+    if (!activeChatSessionId) return null;
+    // Only delete when there are genuinely no persisted messages — a chat the
+    // user typed into (even if the turn errored before an assistant reply)
+    // keeps its user message and should persist.
+    if (messages.length > 0) return null;
+    await get().deleteChat(activeChatSessionId);
+    return activeChatSessionId;
   },
 
   renameChat: async (chatSessionId, title) => {
@@ -451,6 +506,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       messages: [...messages, userMsg],
       streamingChatSessionId: activeChatSessionId,
       streaming: { ...get().streaming, [activeChatSessionId]: "" },
+      chatStatus: { ...get().chatStatus, [activeChatSessionId]: { reason: "thinking", message: "" } },
       // Start a fresh artifact buffer for this turn.
       pendingArtifacts: { ...get().pendingArtifacts, [activeChatSessionId]: [] },
       error: null,
@@ -570,13 +626,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // ---- Event handlers (called by useChatEvents) ----
 
   onToken: (chatSessionId, token) => {
+    set((s) => {
+      const nextStatus = { ...s.chatStatus };
+      delete nextStatus[chatSessionId];
+      return {
+        streaming: {
+          ...s.streaming,
+          [chatSessionId]: (s.streaming[chatSessionId] ?? "") + token,
+        },
+        // First token arrived — drop any pre-token status notice (e.g. the
+        // "local model loading" line) since the wait is over.
+        chatStatus: nextStatus,
+        // Don't change streamingChatSessionId — it stays on the session that
+        // sent the message, not the currently viewed session.
+      };
+    });
+  },
+
+  onStatus: (chatSessionId, reason, message) => {
     set((s) => ({
-      streaming: {
-        ...s.streaming,
-        [chatSessionId]: (s.streaming[chatSessionId] ?? "") + token,
-      },
-      // Don't change streamingChatSessionId — it stays on the session that
-      // sent the message, not the currently viewed session.
+      chatStatus: { ...s.chatStatus, [chatSessionId]: { reason, message } },
     }));
   },
 
@@ -590,8 +659,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => {
       const nextStreaming = { ...s.streaming };
       delete nextStreaming[chatSessionId];
+      const nextStatus = { ...s.chatStatus };
+      delete nextStatus[chatSessionId];
       return {
         streaming: nextStreaming,
+        chatStatus: nextStatus,
         streamingChatSessionId:
           s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
       };
@@ -687,8 +759,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => {
       const nextStreaming = { ...s.streaming };
       delete nextStreaming[chatSessionId];
+      const nextStatus = { ...s.chatStatus };
+      delete nextStatus[chatSessionId];
       return {
         streaming: nextStreaming,
+        chatStatus: nextStatus,
         streamingChatSessionId:
           s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
         error:

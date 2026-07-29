@@ -27,7 +27,9 @@ type DesktopMessage =
   | { type: 'Transcript'; session_id: string; text: string; cols: number; rows: number }
   | { type: 'SessionCreated'; session: SessionInfo }
   | { type: 'CostSummary'; today: number; week: number }
-  | { type: 'CostDetails'; daily: DailyCostEntry[]; per_project: ProjectCostEntry[]; local_models: LocalModelUsageEntry[] };
+  | { type: 'CostDetails'; daily: DailyCostEntry[]; per_project: ProjectCostEntry[]; local_models: LocalModelUsageEntry[] }
+  | { type: 'LocalModelReady'; model: string; base_url: string }
+  | { type: 'LocalModelError'; model: string; error: string };
 interface MobileChatTurn {
   type: 'ChatTurn'; provider_id: string; model: string;
   messages: ChatMessage[]; system?: string; effort?: string; gguf_path?: string;
@@ -40,7 +42,8 @@ type MobileMessagePlain =
   | { type: 'CreateSession'; project_id: string; harness: string }
   | { type: 'SpawnSession'; session_id: string }
   | { type: 'GetCostSummary' }
-  | { type: 'GetCostDetails' };
+  | { type: 'GetCostDetails' }
+  | { type: 'StartLocalModel'; model: string; gguf_path: string };
 
 export interface Session {
   id: string; projectId: string; projectName: string; title: string;
@@ -79,6 +82,8 @@ export const onSessionList = new EventBus<Session[]>();
 export const onTranscript  = new EventBus<{ sessionId: string; text: string; cols: number; rows: number }>();
 export const onSessionCreated = new EventBus<Session>();
 export const onCostDetails = new EventBus<CostDetails>();
+export const onLocalModelReady = new EventBus<{ model: string; baseUrl: string }>();
+export const onLocalModelError = new EventBus<{ model: string; error: string }>();
 
 let _ws: WebSocket | null = null;
 let _url = DEFAULT_RELAY_URL;
@@ -148,6 +153,8 @@ function _doConnect(target: string) {
             per_project: msg.per_project || [],
             local_models: msg.local_models || [],
           }); break;
+          case 'LocalModelReady': onLocalModelReady.emit({ model: msg.model, baseUrl: msg.base_url }); break;
+          case 'LocalModelError': onLocalModelError.emit({ model: msg.model, error: msg.error }); break;
         }
       } catch (e) { console.error('parse error', e); }
     };
@@ -193,5 +200,6 @@ export function useRelay() {
     refreshCostDetails: () => _send({ type: 'GetCostDetails' }),
     createSession: (pid: string, h: string) => _send({ type: 'CreateSession', project_id: pid, harness: h }),
     spawnSession: (sid: string) => _send({ type: 'SpawnSession', session_id: sid }),
+    startLocalModel: (model: string, ggufPath: string) => _send({ type: 'StartLocalModel', model, gguf_path: ggufPath }),
   };
 }

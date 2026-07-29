@@ -9,10 +9,20 @@ export type ThemeSetting = "light" | "dark" | "system";
 
 const K_THEME = "theme";
 const K_DND = "doNotDisturb";
+const K_NOTIFY_SOUND = "notifySound";
 const K_WATCH_MODE = "watchMode";
 const K_KEYBINDINGS = "keybindingOverrides";
 const K_BROWSER_URLS = "browserLastUrls"; // JSON: { global: string, perProject: Record<string, string> }
 const K_BROWSER_PANE_STATE = "browserPaneState"; // JSON: { paneTabs: Record<string, BrowserPaneTabState> }
+
+// Local-GGUF context-compaction (advanced). Threshold is a 0.25–0.99 fraction
+// of the model's context window at which older turns get summarized; pin is
+// the number of recent *exchanges* (user+assistant pairs) kept verbatim.
+// Defaults mirror the Rust `compaction.rs` constants.
+const K_LOCAL_COMPACTION_THRESHOLD = "chat.local_gguf.compaction_threshold";
+const K_LOCAL_PIN_EXCHANGES = "chat.local_gguf.compaction_pin_exchanges";
+export const DEFAULT_LOCAL_COMPACTION_THRESHOLD = 0.75;
+export const DEFAULT_LOCAL_PIN_EXCHANGES = 6;
 
 interface BrowserUrlState {
   global: string;
@@ -36,14 +46,21 @@ interface SettingsState {
   loaded: boolean;
   theme: ThemeSetting;
   dnd: boolean;
+  /** Play a subtle sound when a PTY notification fires (alongside the OS toast). */
+  notifySound: boolean;
   watchMode: boolean;
   keybindings: KeybindingMap;
   browserUrls: BrowserUrlState;
   browserPaneState: PersistedBrowserPaneState;
+  /** Local-GGUF: fraction of the context window that triggers compaction. */
+  localCompactionThreshold: number;
+  /** Local-GGUF: recent exchanges (user+assistant pairs) pinned verbatim. */
+  localPinExchanges: number;
 
   load: () => Promise<void>;
   setTheme: (theme: ThemeSetting) => void;
   setDnd: (dnd: boolean) => void;
+  setNotifySound: (on: boolean) => void;
   setWatchMode: (watchMode: boolean) => void;
   setKeybinding: (action: KeybindingAction, accelerator: string) => void;
   resetKeybindings: () => void;
@@ -53,6 +70,8 @@ interface SettingsState {
   persistBrowserPaneTabs: (paneId: string, tabs: PersistedTabData[], activeTabIndex: number) => void;
   /** Restore saved tab state for a browser pane (returns null if nothing saved). */
   restoreBrowserPaneTabs: (paneId: string) => { tabs: PersistedTabData[]; activeTabIndex: number } | null;
+  setLocalCompactionThreshold: (threshold: number) => void;
+  setLocalPinExchanges: (exchanges: number) => void;
 }
 
 function persistKeybindings(map: KeybindingMap) {
@@ -68,24 +87,31 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   loaded: false,
   theme: "system",
   dnd: false,
+  notifySound: true,
   watchMode: false,
   keybindings: { ...DEFAULT_KEYBINDINGS },
   browserUrls: { global: "https://www.google.com", perProject: {} },
   browserPaneState: { paneTabs: {} },
+  localCompactionThreshold: DEFAULT_LOCAL_COMPACTION_THRESHOLD,
+  localPinExchanges: DEFAULT_LOCAL_PIN_EXCHANGES,
 
   load: async () => {
-    const [theme, dnd, watchMode, kbJson, urlsJson, paneStateJson] = await Promise.all([
+    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin] = await Promise.all([
       getSetting(K_THEME),
       getSetting(K_DND),
+      getSetting(K_NOTIFY_SOUND),
       getSetting(K_WATCH_MODE),
       getSetting(K_KEYBINDINGS),
       getSetting(K_BROWSER_URLS),
       getSetting(K_BROWSER_PANE_STATE),
+      getSetting(K_LOCAL_COMPACTION_THRESHOLD),
+      getSetting(K_LOCAL_PIN_EXCHANGES),
     ]);
     set((state) => {
       const next = { ...state, loaded: true };
       if (theme === "light" || theme === "dark" || theme === "system") next.theme = theme;
       if (dnd === "true" || dnd === "false") next.dnd = dnd === "true";
+      if (notifySound === "true" || notifySound === "false") next.notifySound = notifySound === "true";
       if (watchMode === "true" || watchMode === "false") next.watchMode = watchMode === "true";
       if (kbJson) {
         try {
@@ -116,6 +142,16 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
           /* keep defaults */
         }
       }
+      // Compaction: parse + clamp to the same band the Rust loader enforces;
+      // a bad stored value falls back to the default rather than breaking chat.
+      if (threshold) {
+        const v = Number(threshold);
+        if (Number.isFinite(v) && v >= 0.25 && v <= 0.99) next.localCompactionThreshold = v;
+      }
+      if (pin) {
+        const v = Number(pin);
+        if (Number.isInteger(v) && v >= 1 && v <= 50) next.localPinExchanges = v;
+      }
       return next;
     });
   },
@@ -128,6 +164,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setDnd: (dnd) => {
     set({ dnd });
     void setSetting(K_DND, String(dnd));
+  },
+
+  setNotifySound: (on) => {
+    set({ notifySound: on });
+    void setSetting(K_NOTIFY_SOUND, String(on));
   },
 
   setWatchMode: (watchMode) => {
@@ -177,5 +218,17 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   restoreBrowserPaneTabs: (paneId) => {
     const entry = get().browserPaneState.paneTabs[paneId];
     return entry ?? null;
+  },
+
+  setLocalCompactionThreshold: (threshold) => {
+    if (!Number.isFinite(threshold) || threshold < 0.25 || threshold > 0.99) return;
+    set({ localCompactionThreshold: threshold });
+    void setSetting(K_LOCAL_COMPACTION_THRESHOLD, String(threshold));
+  },
+
+  setLocalPinExchanges: (exchanges) => {
+    if (!Number.isInteger(exchanges) || exchanges < 1 || exchanges > 50) return;
+    set({ localPinExchanges: exchanges });
+    void setSetting(K_LOCAL_PIN_EXCHANGES, String(exchanges));
   },
 }));

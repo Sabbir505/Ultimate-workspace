@@ -508,17 +508,6 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
       )}
       {done && !error && <span className="artifact-export-status ok">{done}</span>}
       {error && <span className="artifact-export-status err" title={error}>{error}</span>}
-      {/* Raw-file download still available via the pane's main Download button. */}
-      <span className="artifact-export-sep" />
-      <button
-        type="button"
-        className="artifact-export-btn"
-        title="Download original file"
-        aria-label="Download original file"
-        onClick={() => void downloadArtifact(path, filename)}
-      >
-        ↓
-      </button>
     </div>
   );
 }

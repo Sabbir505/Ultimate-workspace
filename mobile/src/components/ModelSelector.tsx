@@ -40,7 +40,8 @@ function ProviderSection({
 }) {
   const isLocal = !!provider.is_local;
   const isRunning = !!provider.is_running;
-  const disabled = isLocal && !isRunning;
+  // Stopped local models are NOT disabled here: tapping one sends a
+  // StartLocalModel message so the desktop spawns the sidecar on demand.
   const models = provider.models || [];
   const matchCount = models.length;
 
@@ -92,7 +93,6 @@ function ProviderSection({
             models.map((model) => {
               const isSelected =
                 provider.id === selectedProvider && model === selectedModel;
-              const modelDisabled = disabled;
               return (
                 <TouchableOpacity
                   key={model}
@@ -100,17 +100,15 @@ function ProviderSection({
                     styles.modelItem,
                     { backgroundColor: colors.background },
                     isSelected && { backgroundColor: 'rgba(193, 95, 60, 0.12)' },
-                    modelDisabled && styles.modelItemDisabled,
                   ]}
                   onPress={() => onSelect(provider.id, model, provider.gguf_path)}
-                  disabled={modelDisabled}
                 >
                   <Text
                     style={[
                       styles.modelText,
                       { color: colors.text },
                       isSelected && { color: colors.primary, fontWeight: '600' },
-                      modelDisabled && { color: colors.textSecondary },
+                      !isRunning && { color: colors.textSecondary },
                     ]}
                     numberOfLines={1}
                   >
@@ -141,25 +139,23 @@ function SearchResultRow({
   onSelect: () => void;
   colors: typeof theme.colors;
 }) {
-  const disabled = provider.is_local && !provider.is_running;
+  // Stopped local models remain tappable: selecting one triggers a
+  // StartLocalModel warm-up on the desktop.
   return (
     <TouchableOpacity
       style={[
         styles.modelItem,
         { backgroundColor: colors.background },
         isSelected && { backgroundColor: 'rgba(193, 95, 60, 0.12)' },
-        disabled && styles.modelItemDisabled,
       ]}
       onPress={onSelect}
-      disabled={disabled}
     >
       <View style={{ flex: 1 }}>
         <Text
           style={[
             styles.modelText,
-            { color: colors.text },
+            { color: provider.is_local && !provider.is_running ? colors.textSecondary : colors.text },
             isSelected && { color: colors.primary, fontWeight: '600' },
-            disabled && { color: colors.textSecondary },
           ]}
           numberOfLines={1}
         >

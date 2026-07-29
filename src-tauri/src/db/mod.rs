@@ -74,6 +74,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_session_permission_mode(conn)?;
     migrate_chat_session_watch_mode(conn)?;
     migrate_artifacts_message_id(conn)?;
+    migrate_chat_messages_superseded(conn)?;
     migrate_unc_paths(conn)
 }
 
@@ -133,6 +134,22 @@ fn migrate_chat_session_watch_mode(conn: &Connection) -> DbResult<()> {
 /// A duplicate-column error is treated as a no-op.
 fn migrate_artifacts_message_id(conn: &Connection) -> DbResult<()> {
     let sql = "ALTER TABLE artifacts ADD COLUMN chat_message_id INTEGER";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Add the `superseded_by` column to `chat_messages` on databases created
+/// before the local-model context-compaction feature existed. When a compaction
+/// summarizes older turns, those rows get `superseded_by = <summary_row_id>` so
+/// the send path (which feeds the model) can filter them out while the full
+/// `list_chat_messages` (used by the UI timeline) still returns them. A
+/// duplicate-column error is treated as a no-op so existing DBs upgrade in place.
+fn migrate_chat_messages_superseded(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE chat_messages ADD COLUMN superseded_by INTEGER";
     if let Err(e) = conn.execute(sql, []) {
         if !e.to_string().contains("duplicate column name") {
             return Err(e);
@@ -230,7 +247,8 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           input_tokens INTEGER,
           output_tokens INTEGER,
           cost_usd REAL,
-          created_at INTEGER NOT NULL
+          created_at INTEGER NOT NULL,
+          superseded_by INTEGER
         );
 
         CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(chat_session_id, id);
@@ -341,9 +359,10 @@ pub use cost::{
 // chat
 pub use chat::{
     add_chat_message, create_chat_session, delete_chat_session, get_chat_session,
-    list_chat_messages, list_chat_sessions, list_chat_session_connectors,
-    set_chat_session_connectors, set_chat_session_starred, set_chat_session_unread,
-    touch_chat_session, update_chat_session_model, update_chat_session_permission_mode,
+    list_active_chat_messages, list_chat_messages, list_chat_sessions,
+    list_chat_session_connectors, mark_superseded, set_chat_session_connectors,
+    set_chat_session_starred, set_chat_session_unread, touch_chat_session,
+    update_chat_session_model, update_chat_session_permission_mode,
     update_chat_session_provider, update_chat_session_title, update_chat_session_watch_mode,
 };
 

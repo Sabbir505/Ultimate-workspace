@@ -125,14 +125,6 @@ export function InlineDiagram({
 
   return (
     <div className="chat-diagram-block" ref={blockRef}>
-      <div className="chat-diagram-actions">
-        <ArtifactExportMenu
-          preview={preview}
-          path={artifact.path}
-          filename={artifact.filename}
-          variant="kebab"
-        />
-      </div>
       <iframe
         className="chat-diagram-frame"
         title={artifact.filename}

@@ -127,3 +127,11 @@ export interface InstalledSkill {
   kimiPath: string | null;
   kind: "skill" | "loop";
 }
+
+/** A skill surfaced in the chat `/` menu — on-disk harness skill or built-in. */
+export interface AvailableSkill {
+  slug: string;
+  name: string;
+  description: string;
+  origin: "installed" | "builtin";
+}

@@ -524,6 +524,9 @@ const PaneFrame = memo(function PaneFrame({
   const focusPane = usePanesStore((s) => s.focusPane);
   const toggleBroadcastPane = usePanesStore((s) => s.toggleBroadcastPane);
   const toggleBrowserCollapsed = usePanesStore((s) => s.toggleBrowserCollapsed);
+  // Dev-only live memory reading for this pane (bytes). Selected per-pane so a
+  // single header re-renders when its value changes, not the whole grid.
+  const memBytes = usePanesStore((s) => s.paneMemory[pane.paneId] ?? 0);
   const openPeek = useUiStore((s) => s.openPeek);
 
   const isTerminal = pane.data.kind === "terminal";
@@ -561,9 +564,17 @@ const PaneFrame = memo(function PaneFrame({
             tx
           </label>
         )}
+        {import.meta.env.DEV && memBytes > 0 && (
+          <span
+            className="pane-memory-chip"
+            title={`Resident memory of this pane's process (dev only)`}
+          >
+            {(memBytes / (1024 * 1024)).toFixed(memBytes >= 10 * 1024 * 1024 ? 0 : 1)} MB
+          </span>
+        )}
         {sessionId && (
           <button
-            className="ghost"
+            className="ghost pane-action"
             title="Peek at project diff (read-only)"
             onClick={(e) => {
               e.stopPropagation();
@@ -575,7 +586,7 @@ const PaneFrame = memo(function PaneFrame({
         )}
         {isBrowser && (
           <button
-            className="ghost"
+            className="ghost pane-action"
             title={browserCollapsed ? "Show browser" : "Minimize browser"}
             onClick={(e) => {
               e.stopPropagation();
@@ -586,7 +597,7 @@ const PaneFrame = memo(function PaneFrame({
           </button>
         )}
         <button
-          className="ghost"
+          className="ghost pane-action pane-close"
           title="Close pane"
           onClick={(e) => {
             e.stopPropagation();

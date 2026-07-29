@@ -71,6 +71,15 @@ pub async fn run_code(language: &str, code: &str) -> String {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Suppress the console-window flash that a GUI app causes on Windows when
+    // shelling out to a console interpreter (python/node/bash). tokio::process
+    // ::Command exposes `creation_flags` as an inherent method, so no trait
+    // import is needed here. See chat/local_models.rs for the same pattern.
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
 
     let result = match cmd.spawn() {
         Ok(child) => match timeout(EXEC_TIMEOUT, child.wait_with_output()).await {

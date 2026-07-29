@@ -37,9 +37,12 @@ export function ChatSessionRow({
   onSetUnread,
 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [menuAbove, setMenuAbove] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState(session.title);
   const rowRef = useRef<HTMLDivElement>(null);
+  const menuBtnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const truncated =
@@ -70,6 +73,33 @@ export function ChatSessionRow({
       inputRef.current?.select();
     }
   }, [editing]);
+
+  // Flip the context menu upward when opening it downward would overflow the
+  // sidebar's scroll viewport (e.g. the row is the last in the list). The
+  // sidebar clips overflow, so a downward menu at the bottom is invisible —
+  // measure the button's position against the nearest scroll container and
+  // place the menu above the button when there's more room up than down.
+  useLayoutEffect(() => {
+    if (!menuOpen) return;
+    const btn = menuBtnRef.current;
+    const menu = menuRef.current;
+    if (!btn || !menu) return;
+    const btnRect = btn.getBoundingClientRect();
+    // Walk up to the first scrollable ancestor to get the clipping viewport.
+    let scrollEl: HTMLElement | null = btn.parentElement;
+    while (scrollEl) {
+      const style = getComputedStyle(scrollEl);
+      if (/(auto|scroll)/.test(style.overflowY) && scrollEl.scrollHeight > scrollEl.clientHeight) {
+        break;
+      }
+      scrollEl = scrollEl.parentElement;
+    }
+    const view = scrollEl ?? document.documentElement;
+    const viewRect = view.getBoundingClientRect();
+    const spaceBelow = viewRect.bottom - btnRect.bottom;
+    const menuHeight = menu.offsetHeight;
+    setMenuAbove(spaceBelow < menuHeight + 8 && btnRect.top - viewRect.top > menuHeight + 8);
+  }, [menuOpen]);
 
   const openMenu = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -140,6 +170,7 @@ export function ChatSessionRow({
       </div>
 
       <button
+        ref={menuBtnRef}
         className="ghost chat-session-menu-btn"
         onClick={openMenu}
         title="Chat options"
@@ -151,7 +182,13 @@ export function ChatSessionRow({
       </button>
 
       {menuOpen && (
-        <div className="chat-session-menu" role="menu" onClick={(e) => e.stopPropagation()}>
+        <div
+          ref={menuRef}
+          className="chat-session-menu"
+          data-above={menuAbove ? "" : undefined}
+          role="menu"
+          onClick={(e) => e.stopPropagation()}
+        >
           <button
             role="menuitem"
             onClick={(e) => menuAction(e, () => onToggleStar(session.id, !session.starred))}

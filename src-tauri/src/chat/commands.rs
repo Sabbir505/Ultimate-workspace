@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use base64::Engine;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::chat::providers::*;
 use crate::chat::local_models;
@@ -565,6 +565,156 @@ pub async fn send_chat_message(
         other => return Err(format!("unknown provider: {other}")),
     };
 
+    // 3b. Local model auto-warm on restart. After an app restart the
+    // llama-server sidecar is gone, but the session still remembers the model
+    // name and the stale chat.local_gguf.base_url — so the first send into a
+    // local_gguf session would hit a dead endpoint ("error sending request for
+    // URL …/v1/chat/completions"). When no sidecar is running, re-scan the GGUF
+    // folders, find the file whose name/filename matches the session's model,
+    // and (re)spawn llama-server so the send proceeds against a live endpoint.
+    // A chat:status notice keeps the "Loading local model…" indicator up while
+    // the sidecar warms; it clears on the first token / done / error.
+    if provider_str == "local_gguf" {
+        let local_state = app
+            .try_state::<crate::chat::local_models::LocalModelState>()
+            .map(|s| s.0.clone());
+        let sidecar_running = local_state
+            .as_ref()
+            .map(|l| l.status().is_some())
+            .unwrap_or(false);
+        if !sidecar_running {
+            let _ = app.emit(
+                "chat:status",
+                crate::types::ChatStatusPayload {
+                    chat_session_id: chat_session_id.clone(),
+                    reason: "local_model_loading".to_string(),
+                    message: "Local model is starting up — this can take a moment before the first token arrives.".to_string(),
+                },
+            );
+            if let Some(local) = local_state {
+                // Resolve the GGUF file path from the session's stored model
+                // name (scan default locations + user-added folders, matching
+                // scan_local_models so the same models are reachable). Falls
+                // through silently if the model file can't be found — the send
+                // then surfaces the real connection error to the user.
+                let want = model_str.trim();
+                eprintln!("[local-warmup] provider=local_gguf, session model name = {:?}", want);
+                if !want.is_empty() {
+                    let mut files = crate::chat::local_models::scan_default_locations();
+                    let seen: std::collections::HashSet<String> =
+                        files.iter().map(|f| f.id.clone()).collect();
+                    let stored_folders = {
+                        let conn = db.0.lock();
+                        db::get_setting(&conn, "localModels.folders")
+                    };
+                    if let Ok(Some(json)) = stored_folders {
+                        if let Ok(list) = serde_json::from_str::<Vec<String>>(&json) {
+                            for f in list.into_iter().filter(|s| !s.trim().is_empty()) {
+                                for file in crate::chat::local_models::scan_folder(
+                                    std::path::Path::new(&f),
+                                    "user",
+                                ) {
+                                    if seen.contains(&file.id) {
+                                        continue;
+                                    }
+                                    files.push(file);
+                                }
+                            }
+                        }
+                    }
+                    eprintln!(
+                        "[local-warmup] scanned {} gguf files; candidates:",
+                        files.len()
+                    );
+                    for f in &files {
+                        eprintln!(
+                            "  - name={:?} filename={:?} path={:?}",
+                            f.meta.name, f.filename, f.path
+                        );
+                    }
+                    // Match by exact name, exact filename, or quant-stripped
+                    // name equality (the session may have stored a display name
+                    // that omits the .gguf / quant tag, or vice-versa).
+                    let want_lower = want.to_lowercase();
+                    let strip = |s: &str| -> String {
+                        s.trim_end_matches(".gguf")
+                            .trim_end_matches(".GGUF")
+                            .to_string()
+                    };
+                    let matched = files.into_iter().find(|f| {
+                        let name = f.meta.name.as_deref().unwrap_or("");
+                        // The session most often stores the full file path as
+                        // the model name (start_local_model is called with the
+                        // path), so compare against f.path / f.id first.
+                        f.path == want
+                            || f.id == want
+                            || f.path.to_lowercase() == want_lower
+                            || name == want
+                            || f.filename == want
+                            || name.to_lowercase() == want_lower
+                            || f.filename.to_lowercase() == want_lower
+                            || strip(name) == want
+                            || strip(&f.filename) == want
+                            || strip(name).to_lowercase() == want_lower
+                            || strip(&f.filename).to_lowercase() == want_lower
+                    });
+                    if let Some(g) = matched {
+                        eprintln!(
+                            "[local-warmup] matched — starting sidecar for path={:?}",
+                            g.path
+                        );
+                        // (Re)spawn the sidecar. start() health-checks and
+                        // returns the fresh base_url + model. We must PERSIST
+                        // them to settings ourselves — start() only inserts into
+                        // the in-memory registry; the persistence is done by the
+                        // start_local_model command wrapper, which we're not
+                        // going through here. Without this write, step 5 below
+                        // reads the stale chat.local_gguf.base_url (the dead port
+                        // from before the restart) and the send fails.
+                        match local
+                            .start(
+                                g.meta.name.unwrap_or(g.filename).clone(),
+                                &g.path,
+                                None,
+                                None,
+                                g.mmproj_path.as_deref(),
+                            )
+                            .await
+                        {
+                            Ok(started) => {
+                                let conn = db.0.lock();
+                                let _ = db::set_setting(
+                                    &conn,
+                                    "chat.local_gguf.base_url",
+                                    &started.base_url,
+                                );
+                                let _ = db::set_setting(
+                                    &conn,
+                                    "chat.local_gguf.model",
+                                    &started.model_id,
+                                );
+                                let _ =
+                                    db::set_setting(&conn, "chat.active_provider", "local_gguf");
+                                eprintln!(
+                                    "[local-warmup] sidecar started OK, persisted base_url={:?}",
+                                    started.base_url
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("[local-warmup] start FAILED: {e}");
+                                return Err(format!(
+                                    "The local model \"{want}\" could not be started after restart: {e}"
+                                ));
+                            }
+                        }
+                    } else {
+                        eprintln!("[local-warmup] NO MATCH for {:?} — send will hit the stale URL", want);
+                    }
+                }
+            }
+        }
+    }
+
     // 4. Load API key from keychain. local_gguf is keyless — llama-server
     // ignores the Authorization header, so we use a dummy placeholder.
     let api_key = if provider_str == "local_gguf" {
@@ -584,6 +734,12 @@ pub async fn send_chat_message(
             .map_err(|e| e.to_string())?;
         (base, mo)
     };
+    if provider_str == "local_gguf" {
+        eprintln!(
+            "[local-warmup] send using base_url={:?} model_override={:?}",
+            base_url, model_override
+        );
+    }
     // Per-session model wins; the Settings model is only a default for
     // sessions created without one.
     let model = if model_str.trim().is_empty() {
@@ -602,9 +758,7 @@ pub async fn send_chat_message(
         let conn = db.0.lock();
         let custom = db::get_setting(&conn, "assistant.systemPrompt")
             .map_err(|e| e.to_string())?;
-        let skills_json = db::get_setting(&conn, "assistant.skills")
-            .map_err(|e| e.to_string())?;
-        let skills = parse_skills(skills_json.as_deref(), &content);
+        let skills = parse_invoked_skills(&content);
         crate::chat::build_system_prompt(
             provider_id.clone(),
             &model,
@@ -616,17 +770,32 @@ pub async fn send_chat_message(
     };
 
     // 6. Build message history from DB.
-    let mut messages = {
+    //
+    // For local-model sessions, only the *active* (non-superseded) rows feed
+    // the model — the compaction framework soft-deletes summarized turns via
+    // `superseded_by`. API providers never compact, so their history has no
+    // superseded rows and `list_active_chat_messages` returns the same set as
+    // `list_chat_messages`. We carry each row's DB id alongside so compaction
+    // can mark the rows it folds into a summary.
+    let mut messages: Vec<crate::chat::compaction::CompactionEntry> = {
         let conn = db.0.lock();
-        let records = db::list_chat_messages(&conn, &chat_session_id)
-            .map_err(|e| e.to_string())?;
+        let records = if matches!(provider_id, ChatProviderId::LocalGguf) {
+            db::list_active_chat_messages(&conn, &chat_session_id)
+                .map_err(|e| e.to_string())?
+        } else {
+            db::list_chat_messages(&conn, &chat_session_id)
+                .map_err(|e| e.to_string())?
+        };
         records
             .into_iter()
-            .map(|r| ChatMessage {
-                role: r.role,
-                // Thinking blocks are for display only — never re-sent.
-                content: strip_think_blocks(&r.content),
-                images: Vec::new(),
+            .map(|r| crate::chat::compaction::CompactionEntry {
+                id: r.id,
+                message: ChatMessage {
+                    role: r.role,
+                    // Thinking blocks are for display only — never re-sent.
+                    content: strip_think_blocks(&r.content),
+                    images: Vec::new(),
+                },
             })
             .collect::<Vec<_>>()
     };
@@ -635,10 +804,114 @@ pub async fn send_chat_message(
     // the live turn (not to regenerated/older turns).
     if !images.is_empty() {
         if let Some(last) = messages.last_mut() {
-            if last.role == "user" {
-                last.images = images;
+            if last.message.role == "user" {
+                last.message.images = images;
             }
         }
+    }
+
+    // 6b. Local-model context compaction. Before sending a turn to a
+    // LocalGguf session with a running sidecar, check whether the assembled
+    // history crosses the configured threshold of the model's context window.
+    // If so, summarize the aged-out middle (pinning the most recent turns
+    // verbatim), persist the summary as a `[compacted context]` system row,
+    // soft-delete the folded turns, emit a low-weight `chat:status` marker so
+    // the user understands why scrolling back shows condensed detail, and send
+    // the compacted history instead. API providers are unaffected — the hook
+    // is gated on `LocalGguf`, so it adds no overhead for non-local providers.
+    let mut compacted_system_notice: Option<(String, String)> = None;
+    let messages: Vec<ChatMessage> = if matches!(provider_id, ChatProviderId::LocalGguf) {
+        if let Some(status) = app
+            .try_state::<crate::chat::local_models::LocalModelState>()
+            .and_then(|s| s.0.status())
+        {
+            let cfg = {
+                let conn = db.0.lock();
+                crate::chat::compaction::load_compaction_config(&conn)
+            };
+            let outcome = crate::chat::compaction::maybe_compact(
+                &chat_mgr.client,
+                &status.base_url,
+                status.n_ctx,
+                &model,
+                &system,
+                &messages,
+                &cfg,
+            )
+            .await;
+            match outcome {
+                Ok(o) if o.did_compact => {
+                    // Persist the summary as a real system row with the
+                    // summarization call's token usage attributed to it (so
+                    // the CostDashboard counts the compaction tokens), then
+                    // soft-delete the folded turns + any prior summary.
+                    let summary_content = format!(
+                        "{}\n\n{}",
+                        crate::chat::compaction::COMPACTED_PREFIX,
+                        o.summary_text
+                    );
+                    let summary_id = {
+                        let conn = db.0.lock();
+                        let row = db::add_chat_message(
+                            &conn,
+                            &chat_session_id,
+                            "system",
+                            &summary_content,
+                            Some(o.summary_input_tokens),
+                            Some(o.summary_output_tokens),
+                            None,
+                        )
+                        .map_err(|e| e.to_string())?;
+                        if !o.superseded_ids.is_empty() {
+                            db::mark_superseded(&conn, &o.superseded_ids, row.id)
+                                .map_err(|e| e.to_string())?;
+                        }
+                        row.id
+                    };
+                    eprintln!(
+                        "[local-compaction] compacted {} exchange(s) into summary row {} ({}→{} tokens); {} messages now active",
+                        o.compacted_exchange_count,
+                        summary_id,
+                        o.summary_input_tokens,
+                        o.summary_output_tokens,
+                        o.messages.len()
+                    );
+                    compacted_system_notice = Some((
+                        "context_compacted".to_string(),
+                        "— earlier context compacted —".to_string(),
+                    ));
+                    o.messages
+                }
+                // Below threshold, nothing aged out, or compaction failed and
+                // fell back — maybe_compact already returned the original
+                // history (as ChatMessages) in its passthrough outcome.
+                Ok(_noop) => _noop.messages,
+                // Unreachable in practice (maybe_compact never returns Err),
+                // but rebuild from the caller's messages if it ever does.
+                Err(e) => {
+                    eprintln!("[local-compaction] gave up, passing history through: {e}");
+                    messages.iter().map(|e| e.message.clone()).collect()
+                }
+            }
+        } else {
+            messages.iter().map(|e| e.message.clone()).collect()
+        }
+    } else {
+        messages.into_iter().map(|e| e.message).collect()
+    };
+
+    // Emit the compaction marker (if any) before the stream starts so the
+    // frontend shows it in the timeline. Reuses the existing chat:status
+    // event + ChatStatusPayload the local-model-loading notice uses.
+    if let Some((reason, message)) = compacted_system_notice {
+        let _ = app.emit(
+            "chat:status",
+            crate::types::ChatStatusPayload {
+                chat_session_id: chat_session_id.clone(),
+                reason,
+                message,
+            },
+        );
     }
 
     let shared_db = Arc::clone(&db.0);
@@ -670,66 +943,19 @@ pub async fn send_chat_message(
     Ok(())
 }
 
-/// Parse the persisted skills setting (`assistant.skills`) — a JSON array of
-/// `{ name, command?, content, enabled }` — into `(name, content)` pairs for
-/// the skills the user actually INVOKED in this message. A skill is included
-/// only when its slash token (`/command`, falling back to the slugified name)
-/// appears as a standalone token in the message. Previously every enabled
-/// skill was inlined on every turn (~7k tokens with all defaults); invoked-only
-/// injection keeps every other turn's system prompt lean. Mirrors the frontend
-/// rules in `src/lib/skillCommands.ts` — keep them in sync.
-fn parse_skills(json: Option<&str>, message: &str) -> Vec<(String, String)> {
-    let Some(raw) = json else { return Vec::new() };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
-        return Vec::new();
-    };
-    let Some(arr) = value.as_array() else {
-        return Vec::new();
-    };
-    arr.iter()
-        .filter(|s| s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true))
-        .filter_map(|s| {
-            let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
-            let content = s.get("content").and_then(|v| v.as_str()).unwrap_or("").trim();
-            if content.is_empty() {
-                return None;
-            }
-            let command = s
-                .get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim()
-                .trim_start_matches('/');
-            let token = if command.is_empty() {
-                slugify_command(name)
-            } else {
-                command.to_lowercase()
-            };
-            if token.is_empty() || !message_has_slash_token(message, &token) {
-                return None;
-            }
-            let name = if name.is_empty() { "Skill" } else { name };
-            Some((name.to_string(), content.to_string()))
-        })
+/// Resolve which skills the user INVOKED in this message — `(name, body)`
+/// pairs for every on-disk or built-in skill whose slash token (`/<slug>`)
+/// appears as a standalone token in the message. The skill catalog lives on
+/// disk (`~/.claude/skills/`, `~/.agents/skills/`) plus the built-in
+/// doc/pptx/pdf/diagram skills; `installed_skills::cached_skills()` reads it
+/// through a short-TTL cache invalidated on Skills Library edits. Invoked-only
+/// injection keeps every other turn's system prompt lean.
+fn parse_invoked_skills(message: &str) -> Vec<(String, String)> {
+    crate::installed_skills::cached_skills()
+        .into_iter()
+        .filter(|s| message_has_slash_token(message, &s.slug))
+        .map(|s| (s.name, s.body))
         .collect()
-}
-
-/// Derive a slash token from a skill name: lowercase, runs of
-/// non-alphanumerics collapse to `-`, edges trimmed.
-/// "Word documents (.docx)" → "word-documents-docx".
-fn slugify_command(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    let mut last_dash = false;
-    for ch in name.chars().flat_map(|c| c.to_lowercase()) {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch);
-            last_dash = false;
-        } else if !last_dash {
-            out.push('-');
-            last_dash = true;
-        }
-    }
-    out.trim_matches('-').to_string()
 }
 
 /// True when `/token` appears in the message as a standalone token: preceded
@@ -1394,6 +1620,7 @@ pub async fn start_local_model(
     Ok(StartedModel {
         model_id: started.model_id,
         port: started.port,
+        n_ctx: started.n_ctx,
         base_url: started.base_url,
     })
 }
@@ -1414,6 +1641,7 @@ pub fn local_model_status(
     Ok(local.0.status().map(|a| ActiveLocalModel {
         model_id: a.model_id,
         port: a.port,
+        n_ctx: a.n_ctx,
         base_url: a.base_url,
     }))
 }

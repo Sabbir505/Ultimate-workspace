@@ -34,7 +34,7 @@ import {
   browserReloadTab,
   browserSetBoundsTab,
   browserSetVisibleTab,
-  browserCloseTab,
+  browserClosePane,
   listenBrowserNavigatedTab,
   tauriRuntimeAvailable,
   type BrowserRect,
@@ -220,15 +220,17 @@ export function BrowserPane({ pane, visible = true }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paneId, activeTabId]);
 
-  // --- Close tab webviews on pane unmount. ---
+  // --- Destroy native webviews on pane unmount. ---
+  // The store's closePane already calls browserClosePane, but React may unmount
+  // this component before that finishes (or after a stale `tabs` snapshot),
+  // leaving the native webview — a separate OS child window positioned over
+  // the body div — floating above the UI as a frozen overlay. Calling the
+  // full-pane close here too is idempotent on the backend (close_pane_tabs
+  // drains all `browser-{paneId}-tab-*` webviews) and closes the race.
   useEffect(() => {
     return () => {
-      // Close all tab webviews for this pane. Idempotent.
-      for (const tab of tabs) {
-        void browserCloseTab(paneId, tab.tabId).catch(() => {});
-      }
+      void browserClosePane(paneId).catch(() => {});
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paneId]);
 
   // --- Native bounds: track the body div, debounced. Set bounds for ALL tabs. ---
@@ -601,6 +603,10 @@ export function BrowserPane({ pane, visible = true }: Props) {
             const addr = tabStates.get(activeTabId)?.address ?? "";
             if (addr && normalizeUrl(addr) !== frameSrc) navigate(addr);
           }}
+          // Select the whole URL on focus/click so a single keystroke replaces it
+          // — matches a normal browser's address bar behavior.
+          onFocus={(e) => e.currentTarget.select()}
+          onClick={(e) => e.currentTarget.select()}
           spellCheck={false}
         />
         {activeTabState?.loading && <span className="browser-spinner" title="Loading…" />}

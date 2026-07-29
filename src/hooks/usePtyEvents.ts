@@ -10,6 +10,7 @@ import {
 } from "@tauri-apps/plugin-notification";
 import { safeListen } from "../lib/ipc";
 import { openSession } from "../lib/sessionLauncher";
+import { playNotifyChime } from "../lib/sound";
 import { sessionDisplayTitle } from "../lib/sessionTitle";
 import { usePanesStore } from "../state/panes";
 import { useProjectsStore } from "../state/projects";
@@ -21,6 +22,18 @@ import type {
   PtyExitPayload,
   PtyStatePayload,
 } from "../types";
+
+/** Per-pane notification cooldown: once a pane has notified, suppress further
+ *  notifications for it until the cooldown elapses OR the user focuses it
+ *  (focusing clears the cooldown so the next completion re-notifies). Stops a
+ *  pane that flaps working→waiting→working→waiting from firing a toast + chime
+ *  on every transition. Maps paneId -> last-notified epoch ms. */
+const notifyCooldownMs = 30_000;
+const lastNotifiedAt = new Map<string, number>();
+
+function clearNotifyCooldown(paneId: string): void {
+  lastNotifiedAt.delete(paneId);
+}
 
 async function notify(title: string, body: string): Promise<void> {
   try {
@@ -68,18 +81,26 @@ export function usePtyEvents(): void {
         panesStore.setPaneState(paneId, state);
 
         // §7.13: notify on working -> waiting/diff_ready for unfocused panes,
-        // unless Do Not Disturb is on.
+        // unless Do Not Disturb is on. Throttled per-pane so a flapping pane
+        // (working→waiting→working→waiting) doesn't spam toasts + chimes.
         if (prev === "working" && (state === "waiting" || state === "diff_ready")) {
           const paneIsFocused =
             panesStore.focusedPaneId === paneId && typeof document !== "undefined" && document.hasFocus();
-          if (!paneIsFocused && !useSettingsStore.getState().dnd && pane && pane.data.kind === "terminal") {
-            const sessionId = pane.data.sessionId;
-            const session = sessionId
-              ? useProjectsStore.getState().sessions.find((s) => s.id === sessionId)
-              : null;
-            const name = session ? sessionDisplayTitle(session.title) : pane.data.label;
-            const verb = state === "diff_ready" ? "has a diff ready for review" : "is waiting for input";
-            void notify("Conduit", `${name} ${verb}`);
+          const settings = useSettingsStore.getState();
+          if (!paneIsFocused && !settings.dnd && pane && pane.data.kind === "terminal") {
+            const now = Date.now();
+            const last = lastNotifiedAt.get(paneId) ?? 0;
+            if (now - last >= notifyCooldownMs) {
+              lastNotifiedAt.set(paneId, now);
+              const sessionId = pane.data.sessionId;
+              const session = sessionId
+                ? useProjectsStore.getState().sessions.find((s) => s.id === sessionId)
+                : null;
+              const name = session ? sessionDisplayTitle(session.title) : pane.data.label;
+              const verb = state === "diff_ready" ? "has a diff ready for review" : "is waiting for input";
+              void notify("Conduit", `${name} ${verb}`);
+              if (settings.notifySound) playNotifyChime();
+            }
           }
         }
       }),

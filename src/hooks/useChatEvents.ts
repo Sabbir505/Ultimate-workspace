@@ -15,6 +15,7 @@ import {
   listenChatDone,
   listenChatError,
   listenChatOpenBrowser,
+  listenChatStatus,
   listenChatToken,
 } from "../lib/ipc";
 import { useChatStore } from "../state/chat";
@@ -50,6 +51,12 @@ export function useChatEvents(): void {
     unlistens.push(
       listenChatToken(({ chatSessionId, token }) => {
         useChatStore.getState().onToken(chatSessionId, token);
+      }),
+    );
+
+    unlistens.push(
+      listenChatStatus(({ chatSessionId, reason, message }) => {
+        useChatStore.getState().onStatus(chatSessionId, reason, message);
       }),
     );
 

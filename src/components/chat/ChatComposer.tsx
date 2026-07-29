@@ -7,10 +7,10 @@
 // inlined into the message.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ModelEffortMenu } from "./ModelEffortMenu";
+import { ContextMeter } from "./ContextMeter";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import type { PermissionMode } from "../../state/chat";
-import { getSetting, listConnectors, listSessionConnectors, setSessionConnectors, type ConnectorWithStatus } from "../../lib/ipc";
-import { skillCommand } from "../../lib/skillCommands";
+import { listChatSkills, listConnectors, listSessionConnectors, setSessionConnectors, type ConnectorWithStatus } from "../../lib/ipc";
 
 const MAX_TEXT_BYTES = 512 * 1024;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
@@ -155,6 +155,9 @@ interface Props {
   /** Active chat session id — used to load + persist the per-conversation
    *  connector opt-in (attached connectors are scoped to this session only). */
   chatSessionId?: string;
+  /** Input tokens of the last assistant turn (the full prompt size the
+   *  provider counted). Drives the context meter; null/0 hides it. */
+  usedTokens?: number | null;
 }
 
 export function ChatComposer({
@@ -176,6 +179,7 @@ export function ChatComposer({
   permissionMode,
   onPermissionModeChange,
   chatSessionId,
+  usedTokens,
 }: Props) {
   const [content, setContent] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
@@ -197,12 +201,13 @@ export function ChatComposer({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Slash-command skill popup: typing "/" as the first character opens a list
-  // of enabled skills (from the Assistant settings tab); picking one inserts
-  // its `/command` token, which the backend uses to inject that skill's
-  // instructions for this turn only.
+  // of every available skill (on-disk harness skills + the built-in
+  // doc/pptx/pdf/diagram skills); picking one inserts its `/slug` token,
+  // which the backend uses to inject that skill's instructions for this turn
+  // only. Skills are managed in the Skills Library, not Settings → Assistant.
   interface SlashSkill {
     name: string;
-    command: string;
+    slug: string;
   }
   const [slashSkills, setSlashSkills] = useState<SlashSkill[]>([]);
   const [slashIndex, setSlashIndex] = useState(0);
@@ -212,32 +217,15 @@ export function ChatComposer({
   const slashQuery = /^\/(\S*)$/.exec(content)?.[1]?.toLowerCase() ?? null;
   const slashOpen = slashQuery !== null;
 
-  // (Re)load the enabled skills every time the popup opens, so edits made in
-  // Settings → Assistant are picked up immediately.
+  // (Re)load skills every time the popup opens, so edits made in the Skills
+  // Library are picked up immediately (the backend cache is invalidated on
+  // every create/save/delete).
   useEffect(() => {
     if (!slashOpen) return;
     let stale = false;
-    void getSetting("assistant.skills").then((raw) => {
-      if (stale) return;
-      const list: SlashSkill[] = [];
-      try {
-        const parsed = raw ? (JSON.parse(raw) as unknown[]) : [];
-        if (Array.isArray(parsed)) {
-          for (const s of parsed) {
-            const item = s as { name?: string; command?: string; enabled?: boolean };
-            if (item && item.enabled !== false) {
-              const command = skillCommand({
-                name: item.name ?? "",
-                command: item.command,
-              });
-              if (command) list.push({ name: item.name ?? command, command });
-            }
-          }
-        }
-      } catch {
-        /* corrupt setting — no skills */
-      }
-      setSlashSkills(list);
+    void listChatSkills().then((list) => {
+      if (stale || !list) return;
+      setSlashSkills(list.map((s) => ({ name: s.name, slug: s.slug })));
     });
     return () => {
       stale = true;
@@ -247,7 +235,7 @@ export function ChatComposer({
   const slashFiltered = slashQuery !== null
     ? slashSkills.filter(
         (s) =>
-          s.command.startsWith(slashQuery) ||
+          s.slug.startsWith(slashQuery) ||
           s.name.toLowerCase().includes(slashQuery),
       )
     : [];
@@ -418,7 +406,7 @@ export function ChatComposer({
         }
         if (e.key === "Enter" || e.key === "Tab") {
           e.preventDefault();
-          applySlashCommand(slashFiltered[Math.min(slashIndex, slashFiltered.length - 1)].command);
+          applySlashCommand(slashFiltered[Math.min(slashIndex, slashFiltered.length - 1)].slug);
           return;
         }
         if (e.key === "Escape") {
@@ -468,7 +456,7 @@ export function ChatComposer({
             <div className="composer-slash-menu" role="listbox" aria-label="Skills">
               {slashFiltered.map((s, i) => (
                 <button
-                  key={s.command}
+                  key={s.slug}
                   type="button"
                   role="option"
                   aria-selected={i === slashIndex}
@@ -476,11 +464,11 @@ export function ChatComposer({
                   // onMouseDown + preventDefault keeps textarea focus.
                   onMouseDown={(e) => {
                     e.preventDefault();
-                    applySlashCommand(s.command);
+                    applySlashCommand(s.slug);
                   }}
                   onMouseEnter={() => setSlashIndex(i)}
                 >
-                  <span className="composer-slash-cmd">/{s.command}</span>
+                  <span className="composer-slash-cmd">/{s.slug}</span>
                   <span className="composer-slash-name">{s.name}</span>
                 </button>
               ))}
@@ -627,26 +615,35 @@ export function ChatComposer({
               onLocalCtxChange={onLocalCtxChange}
             />
           )}
-          {streaming ? (
-            <button
-              className="composer-send-btn stop"
-              onClick={onStop}
-              title="Stop generating"
-              aria-label="Stop generating"
-            >
-              ■
-            </button>
-          ) : (
-            <button
-              className="composer-send-btn"
-              onClick={handleSend}
-              disabled={isEmpty || disabled || needsModel}
-              title={needsModel ? "Select a model first" : "Send message"}
-              aria-label="Send message"
-            >
-              ↑
-            </button>
-          )}
+          <div className="composer-send-wrap">
+            {streaming ? (
+              <button
+                className="composer-send-btn stop"
+                onClick={onStop}
+                title="Stop generating"
+                aria-label="Stop generating"
+              >
+                ■
+              </button>
+            ) : (
+              <button
+                className="composer-send-btn"
+                onClick={handleSend}
+                disabled={isEmpty || disabled || needsModel}
+                title={needsModel ? "Select a model first" : "Send message"}
+                aria-label="Send message"
+              >
+                ↑
+              </button>
+            )}
+            {/* Context meter sits directly below the send button */}
+            <ContextMeter
+              usedTokens={usedTokens ?? null}
+              model={model}
+              isLocal={provider === "local_gguf"}
+              localCtx={localCtx}
+            />
+          </div>
         </div>
       </div>
     </div>

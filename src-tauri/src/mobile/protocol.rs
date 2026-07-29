@@ -46,6 +46,15 @@ pub enum MobileMessage {
     /// daily spend (last 14 days), per-project totals, and per-local-model
     /// token usage. Mirrors what the desktop CostDashboard shows.
     GetCostDetails,
+    /// Warm up (spawn) a local GGUF sidecar on the desktop without sending a
+    /// chat turn. Lets the phone start a stopped model the moment the user taps
+    /// it in the model selector, instead of waiting for the first message.
+    /// `gguf_path` is the absolute path returned in `ProviderInfo::gguf_path`;
+    /// `model` is the display name to pass to the sidecar.
+    StartLocalModel {
+        model: String,
+        gguf_path: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -92,6 +101,17 @@ pub enum DesktopMessage {
         daily: Vec<DailyCostEntry>,
         per_project: Vec<ProjectCostEntry>,
         local_models: Vec<LocalModelUsageEntry>,
+    },
+    /// Ack for `StartLocalModel`: the sidecar is up and serving at `base_url`,
+    /// so the phone can clear its "Loading local model…" banner.
+    LocalModelReady {
+        model: String,
+        base_url: String,
+    },
+    /// Ack for `StartLocalModel`: the sidecar failed to start.
+    LocalModelError {
+        model: String,
+        error: String,
     },
 }
 

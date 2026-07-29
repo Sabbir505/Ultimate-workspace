@@ -18,6 +18,7 @@ export function SessionRow({ session, projectName }: Props) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const panes = usePanesStore((s) => s.panes);
+  const closePane = usePanesStore((s) => s.closePane);
   const setSessionTitle = useProjectsStore((s) => s.setSessionTitle);
   const removeSession = useProjectsStore((s) => s.removeSession);
 
@@ -72,6 +73,14 @@ export function SessionRow({ session, projectName }: Props) {
             title="Delete session from history"
             onClick={(e) => {
               e.stopPropagation();
+              // §6.5: closing the live pane is the only path that kills the
+              // pty. If we only drop the session row, the pane (and process)
+              // would linger on the dev tab pointing at a deleted session.
+              for (const p of usePanesStore.getState().panes) {
+                if (p.data.kind === "terminal" && p.data.sessionId === session.id) {
+                  closePane(p.paneId);
+                }
+              }
               void removeSession(session.id);
             }}
           >

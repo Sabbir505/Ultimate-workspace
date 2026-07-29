@@ -11,7 +11,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import "katex/dist/katex.min.css";
 import type { ChatMessage } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
-import { MermaidDiagram } from "./MermaidDiagram";
+import { parseUnifiedDiff } from "../../lib/diff";
 import { InlineDiagram } from "./InlineDiagram";
 import { MessageAttachments, parseAttachments } from "./MessageAttachments";
 
@@ -231,18 +231,42 @@ function MessageActions({
   );
 }
 
-/** Claude-style pre-token "thinking" animation: three pulsing dots shown
- *  while the request is in flight but no content has streamed yet. */
+/** Codex-style pre-token indicator: a single quiet monospace pulse — no
+ *  bouncing dots, just a subtle "working…" line that recedes visually. */
 export function TypingIndicator() {
   return (
     <div className="chat-bubble assistant">
       <div className="chat-bubble-inner">
         <div className="chat-typing" aria-label="Assistant is responding" role="status">
-          <span className="chat-typing-dot" />
-          <span className="chat-typing-dot" />
-          <span className="chat-typing-dot" />
+          <span className="chat-typing-prompt">›</span>
+          <span className="chat-typing-cursor" />
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Low-weight, tappable marker shown in the timeline where older context was
+ *  condensed by the local-model compaction framework. Expands to reveal the
+ *  actual summary that replaced the original turns. Reuses the muted aesthetic
+ *  of `.chat-status-notice` / `.chat-activity-done`. */
+function CompactedContextMarker({ summary }: { summary: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="chat-compacted-marker">
+      <button
+        type="button"
+        className="chat-compacted-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="chat-compacted-dash" aria-hidden="true">—</span>
+        earlier context compacted
+        <span className={`chat-thinking-chevron${open ? " open" : ""}`}>›</span>
+      </button>
+      {open && summary && (
+        <div className="chat-compacted-summary">{summary}</div>
+      )}
     </div>
   );
 }
@@ -317,97 +341,121 @@ function ThinkingBlock({ thinking, done }: { thinking: string; done: boolean }) 
         onClick={() => setOpen((o) => !o)}
         title={open ? "Hide thinking" : "Show thinking"}
       >
-        <span className="chat-thinking-icon">✵</span>
-        {done ? "Thought process" : "Thinking…"}
-        <span className={`chat-thinking-chevron${open ? " open" : ""}`}>›</span>
+        <span className="chat-thinking-icon">›</span>
+        {done ? "Thinking" : "Thinking…"}
       </button>
       {open && <div className="chat-thinking-body">{thinking}</div>}
     </div>
   );
 }
 
-/** Emoji glyph for a tool step, keyed by the backend-provided `kind`. */
+/** Minimal text glyph for a tool step, keyed by the backend-provided `kind`.
+ *  Uses monochrome symbols instead of colorful emoji for the Codex aesthetic. */
 function toolGlyph(kind?: string): string {
   switch (kind) {
     case "search":
-      return "🔎";
+      return "◦";
     case "web":
-      return "🌐";
+      return "◦";
     case "browser":
-      return "🖥";
+      return "◦";
     case "file":
     case "code":
-      return "‹›";
+      return "◦";
     default:
-      return "⚙";
+      return "◦";
   }
 }
 
-/** A short, *specific* label for one tool step. The backend emits a generic
- *  `title` ("Reading a web page", "Searching the web") repeated identically
- *  down a multi-step run, but also a `detail` carrying the call's actual
- *  target (url / query / filename / code snippet). We prefer the detail so
- *  each step reads as what it actually touched, falling back to the title
- *  only when no detail is available. */
+/** A short, *specific* label for one tool step — rendered in monospace like a
+ *  terminal log entry. The backend emits a generic `title` ("Reading a web page",
+ *  "Searching the web") but also a `detail` carrying the actual target (url /
+ *  query / filename). We prefer the detail so each step reads as what it
+ *  actually touched, falling back to the title only when no detail is available.
+ *  Format: `command  target` (two-space separation, log-style). */
 function stepLabel(data: ToolData | null): string {
-  if (!data) return "Working…";
-  const title = data.title?.trim() || "Working…";
+  if (!data) return "working…";
+  const title = data.title?.trim() || "working…";
   const detail = data.detail?.trim();
   if (!detail) return title;
   // For code-producing tools the "detail" is sometimes the full code body —
-  // too long for a row label; in that case keep the title (which already
-  // names the file/format) and let the expandable body show the code.
+  // too long for a row label; in that case keep the title.
   if (data.code && detail.length > 80) return title;
-  // Compose: "Reading a web page — rust-lang.org/learn" reads better than
-  // either piece alone, and disambiguates repeated identical titles.
-  return `${title} — ${detail}`;
+  // Log-style: "write_file  src/main.rs" rather than "Writing file — src/main.rs"
+  const cmd = title.toLowerCase().replace(/\s+/g, "_").replace(/ing$/, "");
+  return `${cmd}  ${detail}`;
 }
 
 /** A one-line synthesized summary of what a whole tool-call group accomplished.
- *  This is generated client-side from the step set — the backend has no
- *  model-emitted summary string today. The heuristic leans on the most
- *  meaningful step (the "produced" step if present, else the dominant verb)
- *  so the summary is task-aware rather than a generic "Ran N tool calls".
+ *  Generated client-side from the step set — minimal, log-like, monochrome.
  *  Quality is a judgment call (PRD §13); prefer specifics from `detail`. */
 function summarizeGroup(steps: ActivityStep[]): string {
-  if (steps.length === 0) return "Working…";
+  if (steps.length === 0) return "working…";
 
-  // If any step generated a file/document/diagram, lead with what was
-  // produced — that's the group's actual deliverable.
+  // If any step generated a file/document/diagram, lead with what was produced.
   const produced = steps.find(
     (s) => s.data?.kind === "file" || s.data?.kind === "code",
   );
   if (produced?.data?.title) {
-    // "Building docx document \"report.docx\"" → summarize the deliverable.
     const producedCount = steps.filter(
       (s) => s.data?.kind === "file" || s.data?.kind === "code",
     ).length;
-    const base = produced.data.title.replace(/^[A-Z][a-z]+ /, "");
+    const base = produced.data.detail?.trim() || produced.data.title;
     return producedCount > 1
-      ? `Generated ${producedCount} files — ${base}`
+      ? `${producedCount} files  ${base}`
       : base;
   }
 
-  // Research-style runs: searches + page reads. Summarize the breadth.
+  // Research-style runs: searches + page reads.
   const searches = steps.filter((s) => s.data?.kind === "search").length;
   const reads = steps.filter((s) => s.data?.kind === "web").length;
   const browser = steps.filter((s) => s.data?.kind === "browser").length;
   if (searches && reads) {
-    return `Researched across ${reads} page${reads > 1 ? "s" : ""} (${searchsPlural(searches)})`;
+    return `${reads} page${reads > 1 ? "s" : ""}  ${searches} query${searches > 1 ? "ies" : "y"}`;
   }
-  if (searches) return searchsPlural(searches);
-  if (reads) return `Read ${reads} web page${reads > 1 ? "s" : ""}`;
-  if (browser) return `Drove the browser through ${browser} step${browser > 1 ? "s" : ""}`;
+  if (searches) return `${searches} query${searches > 1 ? "ies" : "y"}`;
+  if (reads) return `${reads} page${reads > 1 ? "s" : ""}`;
+  if (browser) return `${browser} browser step${browser > 1 ? "s" : ""}`;
 
-  // Generic fallback: still name the tools rather than a bare count.
+  // Generic fallback.
   const toolNames = new Set(
     steps.map((s) => s.data?.title).filter(Boolean) as string[],
   );
   if (toolNames.size === 1) return [...toolNames][0];
-  return `Completed ${steps.length} steps`;
+  return `${steps.length} steps`;
 }
-function searchsPlural(n: number): string {
-  return `Searched the web${n > 1 ? ` (${n} queries)` : ""}`;
+
+/** Detect whether a string looks like a unified diff. */
+function looksLikeDiff(text: string): boolean {
+  return text.startsWith("diff --git") || text.startsWith("--- ") || text.includes("\n@@ ");
+}
+
+/** Render a unified diff inline inside a tool step body. Reuses the existing
+ *  diff parser and CSS classes for a terminal-native look. */
+function InlineDiff({ diffText }: { diffText: string }) {
+  const files = useMemo(() => parseUnifiedDiff(diffText), [diffText]);
+  if (files.length === 0) return <div className="chat-step-detail">{diffText}</div>;
+  return (
+    <div className="chat-diff-inline">
+      {files.map((file, i) => (
+        <div className="diff-file" key={`${file.newPath || file.oldPath || i}-${i}`}>
+          <div className="diff-file-header">
+            {file.oldPath === file.newPath || file.newPath === ""
+              ? file.oldPath || file.newPath || `file ${i + 1}`
+              : `${file.oldPath} → ${file.newPath}`}
+          </div>
+          {file.lines
+            .filter((l) => l.type !== "meta")
+            .map((line, j) => (
+              <div key={j} className={`diff-line ${line.type}`}>
+                {line.type === "add" ? "+ " : line.type === "del" ? "- " : line.type === "hunk" ? "" : "  "}
+                {line.text}
+              </div>
+            ))}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 /** A single tool-call row inside an expanded ActivitySummary. Renders the
@@ -416,7 +464,7 @@ function searchsPlural(n: number): string {
  *  this step is folded into the row above/below the label. The whole row is
  *  itself expandable (a second, nested disclosure) to reveal full detail:
  *  exact tool kind, detail string, and the code block for code-producing
- *  tools. */
+ *  tools. File edits that contain a unified diff render as an inline diff. */
 function ActivityStepRow({
   step,
   done,
@@ -454,32 +502,40 @@ function ActivityStepRow({
             <div className="chat-step-detail">{step.data.detail}</div>
           )}
           {step.data?.code && (
-            <div className="chat-code-block">
-              <div className="chat-code-header">
-                <span className="chat-code-lang">{step.data.lang || "text"}</span>
-                <CopyButton code={step.data.code} />
+            looksLikeDiff(step.data.code) ? (
+              <InlineDiff diffText={step.data.code} />
+            ) : (
+              <div className="chat-code-block">
+                <div className="chat-code-header">
+                  <span className="chat-code-lang">{step.data.lang || "text"}</span>
+                  <CopyButton code={step.data.code} />
+                </div>
+                <SyntaxHighlighter
+                  style={{}}
+                  language={step.data.lang || "text"}
+                  PreTag="div"
+                  customStyle={{
+                    margin: 0,
+                    background: "transparent",
+                    padding: "12px 16px",
+                    fontSize: "12px",
+                    fontFamily: "var(--font-mono)",
+                    lineHeight: 1.5,
+                    overflowX: "auto",
+                  }}
+                  codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
+                >
+                  {step.data.code}
+                </SyntaxHighlighter>
               </div>
-              <SyntaxHighlighter
-                style={{}}
-                language={step.data.lang || "text"}
-                PreTag="div"
-                customStyle={{
-                  margin: 0,
-                  background: "transparent",
-                  padding: "12px 16px",
-                  fontSize: "12px",
-                  fontFamily: "var(--font-mono)",
-                  lineHeight: 1.5,
-                  overflowX: "auto",
-                }}
-                codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
-              >
-                {step.data.code}
-              </SyntaxHighlighter>
-            </div>
+            )
           )}
           {step.data?.result && (
-            <div className="chat-step-result">{step.data.result}</div>
+            looksLikeDiff(step.data.result) ? (
+              <InlineDiff diffText={step.data.result} />
+            ) : (
+              <div className="chat-step-result">{step.data.result}</div>
+            )
           )}
         </div>
       )}
@@ -512,9 +568,9 @@ function ActivitySummary({ group }: { group: ActivityGroup }) {
         title={open ? "Collapse activity" : "Show activity steps"}
       >
         <span className="chat-activity-icon" aria-hidden="true">
-          {live ? <span className="chat-activity-spinner" /> : "✓"}
+          {live ? <span className="chat-activity-spinner" /> : "◦"}
         </span>
-        <span className="chat-activity-summary">{live ? "Working…" : summary}</span>
+        <span className="chat-activity-summary">{live ? "working…" : summary}</span>
         <span className={`chat-thinking-chevron${open ? " open" : ""}`}>›</span>
         <span className="chat-activity-count">{group.steps.length}</span>
       </button>
@@ -537,9 +593,9 @@ function ActivitySummary({ group }: { group: ActivityGroup }) {
               />
             ),
           )}
-          {!live && (
+          {!live && group.steps.length > 0 && (
             <div className="chat-activity-done">
-              <CheckIcon /> Done
+              <span>—</span> done
             </div>
           )}
         </div>
@@ -842,6 +898,18 @@ export function MessageBubble({
   onPreviewArtifact,
 }: Props) {
   const isUser = message.role === "user";
+
+  // A persisted compaction-summary row renders as a low-weight "earlier context
+  // compacted" marker (not a real bubble) so the user understands why
+  // scrolling back shows condensed rather than verbatim detail. Tapping
+  // reveals the actual summary text that replaced the original turns.
+  // Sentinel must match the `COMPACTED_PREFIX` constant in
+  // src-tauri/src/chat/compaction.rs.
+  const COMPACTED_PREFIX = "[compacted context]";
+  if (message.role === "system" && message.content.trimStart().startsWith(COMPACTED_PREFIX)) {
+    const summary = message.content.trimStart().slice(COMPACTED_PREFIX.length).replace(/^[\s:\n]+/, "");
+    return <CompactedContextMarker summary={summary} />;
+  }
   // Parse attachment markers (e.g. "[Attached image: x]") out of the content
   // so they render as visual cards above the text instead of inline strings.
   // Live attachments (optimistic message) carry image base64 for thumbnails.

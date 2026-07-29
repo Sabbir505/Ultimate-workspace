@@ -11,6 +11,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  AvailableSkill,
   CostEvent,
   CostRollups,
   GitStatusInfo,
@@ -79,6 +80,9 @@ export const writePty = (paneId: string, data: string) => safeInvoke<void>("writ
 export const resizePty = (paneId: string, cols: number, rows: number) =>
   safeInvoke<void>("resize_pty", { paneId, cols, rows });
 export const killPty = (paneId: string) => safeInvoke<void>("kill_pty", { paneId });
+/** Dev-only: resident memory (bytes) of a pane's child process. 0 when the
+ *  process is gone or unknown. */
+export const paneMemory = (paneId: string) => safeInvoke<number>("pane_memory", { paneId });
 
 // --- Native browser panes (child webviews; Linux falls back to iframe) ---
 //
@@ -204,6 +208,11 @@ export const createInstalledSkill = (name: string, kind: string, content: string
 export const deleteInstalledSkill = (slug: string, kind: string) =>
   safeInvoke<void>("delete_installed_skill", { slug, kind });
 
+// --- Chat `/` menu: on-disk harness skills merged with the built-in
+// doc/pptx/pdf/diagram skills (on-disk wins on slug collision). ---
+export const listChatSkills = () =>
+  safeInvoke<AvailableSkill[] | null>("list_chat_skills");
+
 // --- Chat mode (direct LLM HTTP API, separate from CLI agent panes) ---
 // Command names and arg shapes are binding per CONTRACT.md — do not rename
 // without updating the Rust backend in lockstep. Types mirror the serde
@@ -260,9 +269,11 @@ export interface ChatConfigPayload {
   hasKey: boolean;
 }
 
-/** View-model type used by MessageBubble — lightweight { role, content }. */
+/** View-model type used by MessageBubble — lightweight { role, content }. The
+ *  `system` role is used only by compaction-summary rows, which MessageBubble
+ *  renders as a muted "earlier context compacted" marker (not a real bubble). */
 export interface ChatMessage {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   content: string;
   /** Live attachment objects (with image base64) for the optimistic just-sent
    *  message, so image cards get a real thumbnail before the backend persists.
@@ -275,6 +286,14 @@ export interface ChatMessage {
 export interface ChatTokenPayload {
   chatSessionId: string;
   token: string;
+}
+/** Pre-token status notice (e.g. a local model is cold-starting). */
+export interface ChatStatusPayload {
+  chatSessionId: string;
+  /** "local_model_loading" | "thinking" */
+  reason: string;
+  /** Human-facing line shown next to the spinner. */
+  message: string;
 }
 export interface ChatDonePayload {
   chatSessionId: string;
@@ -519,6 +538,8 @@ export const localModelStatus = () =>
 
 export const listenChatToken = (handler: (payload: ChatTokenPayload) => void) =>
   safeListen<ChatTokenPayload>("chat:token", handler);
+export const listenChatStatus = (handler: (payload: ChatStatusPayload) => void) =>
+  safeListen<ChatStatusPayload>("chat:status", handler);
 export const listenChatDone = (handler: (payload: ChatDonePayload) => void) =>
   safeListen<ChatDonePayload>("chat:done", handler);
 export const listenChatError = (handler: (payload: ChatErrorPayload) => void) =>

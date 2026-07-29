@@ -5,6 +5,7 @@
 
 pub mod artifacts;
 pub mod codeexec;
+pub mod compaction;
 pub mod commands;
 pub mod dispatch;
 pub mod local_models;

@@ -243,6 +243,8 @@ pub(crate) fn tool_block(name: &str, args: &Value) -> String {
     } else if name == tools::FETCH_URL || name == tools::OPEN_URL {
         let verb = if name == tools::OPEN_URL { "Opening" } else { "Reading" };
         json!({ "kind": "web", "title": format!("{verb} a web page"), "detail": s("url") })
+    } else if name == tools::GET_SKILL {
+        json!({ "kind": "tool", "title": "Loading skill", "detail": format!("/{}", s("slug")) })
     } else if name == tools::RUN_CODE {
         let lang = args
             .get("language")

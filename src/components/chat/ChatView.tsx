@@ -3,14 +3,40 @@
 // Shows an empty state when no chat session is selected.
 // Live streaming: accumulates tokens into an assistant bubble that updates
 // as they arrive, then swaps to the final persisted message on chat:done.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChatStore, type PermissionMode } from "../../state/chat";
 import { ChatComposer, type ChatAttachment } from "./ChatComposer";
 import { MessageBubble, TypingIndicator } from "./MessageBubble";
 import { ArtifactPreviewPane } from "./ArtifactPreviewPane";
-import { ArtifactsMenu } from "./ArtifactsMenu";
 import { ApprovalCard, FullAutoConfirmModal } from "./ApprovalFlow";
 import { listChatModels, scanLocalModels, startLocalModel, type ChatMessage, type GgufModel } from "../../lib/ipc";
+
+/** Format a backend error message for display. Strips raw JSON blobs,
+ *  extracts the human-readable message, and keeps it to one line. */
+function formatChatError(raw: string): string {
+  // If the error looks like JSON, try to extract a readable message.
+  if (raw.trimStart().startsWith("{")) {
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const msg =
+        parsed.message ||
+        parsed.error?.message ||
+        parsed.error ||
+        parsed.detail ||
+        parsed.msg ||
+        parsed.error_message;
+      if (typeof msg === "string" && msg.trim()) return msg.trim();
+    } catch {
+      /* not valid JSON — fall through */
+    }
+  }
+  // Strip verbose provider error prefixes.
+  return raw
+    .replace(/^Error:\s*/i, "")
+    .replace(/^HTTP \d+:\s*/, "")
+    .replace(/\{[^}]*\}/g, "") // remove any inline JSON objects
+    .trim();
+}
 
 // Starter prompts shown on the Claude-style welcome screen for a fresh,
 // empty conversation. Clicking one sends it immediately.
@@ -46,6 +72,7 @@ export function ChatView() {
   const messages = useChatStore((s) => s.messages);
   const streaming = useChatStore((s) => s.streaming);
   const streamingChatSessionId = useChatStore((s) => s.streamingChatSessionId);
+  const chatStatus = useChatStore((s) => s.chatStatus);
   const error = useChatStore((s) => s.error);
   const loaded = useChatStore((s) => s.loaded);
   const loadSessions = useChatStore((s) => s.loadSessions);
@@ -134,11 +161,63 @@ export function ChatView() {
   // session's current model.
   const localIds = (() => {
     const ids = dedupeModelIds(localModels.map((m) => m.name || m.filename));
-    if (isLocal && activeSession?.model && !includesModelId(ids, activeSession.model)) {
-      ids.unshift(activeSession.model);
+    if (isLocal && activeSession?.model) {
+      // The session's stored local model can be keyed three ways depending on
+      // how it was set: the GGUF metadata `name`, the `filename`, OR the
+      // registry id-slug that start_local_model persists to
+      // chat.local_gguf.model (which seeds "New Chat"). If ANY of those match
+      // a scanned model, that model is already listed — don't prepend a stale
+      // second row (the "selected + non-selected duplicate" bug). Only prepend
+      // when the stored model is genuinely not in the scan (e.g. the file was
+      // removed from the scan folders but the session still references it).
+      const stored = activeSession.model.trim().toLowerCase();
+      const alreadyListed =
+        includesModelId(ids, activeSession.model) ||
+        localModels.some(
+          (m) =>
+            (m.id && m.id.toLowerCase() === stored) ||
+            (m.filename && m.filename.toLowerCase() === stored) ||
+            (m.name && m.name.toLowerCase() === stored),
+        );
+      if (!alreadyListed) ids.unshift(activeSession.model);
     }
     return ids;
   })();
+
+  // The model id shown as "selected" in the selector. The session may store a
+  // local model under its registry id-slug (persisted by start_local_model),
+  // but the selector lists local models by `name || filename`. Resolve the
+  // stored value to that same form so the right row gets the ✓ instead of no
+  // row matching (or a stale slug row appearing alongside the real one).
+  const resolvedModel = (() => {
+    const stored = activeSession?.model;
+    if (!stored) return stored;
+    if (isLocal) {
+      const match = localModels.find(
+        (m) =>
+          (m.id && m.id === stored) ||
+          (m.filename && m.filename === stored) ||
+          (m.name && m.name === stored),
+      );
+      if (match) return match.name || match.filename;
+    }
+    return stored;
+  })();
+
+  // Context meter "used" figure: the input_tokens of the most recent assistant
+  // turn. That value is the full prompt size the provider counted (system +
+  // all history + current message + tool results), so it represents how much of
+  // the context window the conversation is actually consuming. Null until the
+  // first turn completes (the optimistic assistant bubble has no usage yet).
+  const lastInputTokens = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === "assistant" && m.inputTokens != null && m.inputTokens > 0) {
+        return m.inputTokens;
+      }
+    }
+    return null;
+  }, [messages]);
 
   const handleModelChange = useCallback(
     async (model: string) => {
@@ -157,6 +236,12 @@ export function ChatView() {
           return;
         }
         setLocalLoading(false);
+        // start_local_model persists chat.local_gguf.model + chat.active_provider
+        // in settings. Reload config so chatConfig reflects the running model —
+        // "New Chat" seeds the new session from chatConfig.model, and without
+        // this refresh the selector on a fresh chat would look empty (as if the
+        // local model had been ejected).
+        void loadConfig("local_gguf");
         if (!isLocal) await setSessionProvider(activeChatSessionId, "local_gguf");
       } else if (isLocal) {
         // Cloud model picked in a local session: switch the session back to
@@ -243,8 +328,13 @@ export function ChatView() {
     if (!loaded || !config || activeChatSessionId || autoStarted.current) return;
     autoStarted.current = true;
     const provider = config.provider ?? "openai_compatible";
-    // No model is selected by default — the user must pick one before sending.
-    void newChat(provider, "");
+    // Seed the new session with the provider's persisted default model
+    // (chat.<provider>.model) so the model selector stays populated instead of
+    // snapping to empty — which previously made it look like the selected
+    // model (including a running local sidecar) had been ejected. Falls back
+    // to "" only when no default model is configured for the provider, in
+    // which case the user must still pick one before sending.
+    void newChat(provider, config.model ?? "");
   }, [loaded, activeChatSessionId, config, newChat]);
 
   // Track whether the user is pinned near the bottom. Runs on every scroll
@@ -283,6 +373,10 @@ export function ChatView() {
     streamingChatSessionId === activeChatSessionId &&
     streamingChatSessionId !== null &&
     activeStream.length === 0;
+  // A pre-token status notice (chat:status) explains *why* it's waiting — e.g.
+  // a local model is cold-starting after an app restart. When present, render
+  // its message next to a spinner instead of the generic thinking dots.
+  const statusNotice = activeChatSessionId ? chatStatus[activeChatSessionId] : undefined;
 
   const handleSend = useCallback(
     (content: string, attachments: ChatAttachment[], forceResearch?: boolean) => {
@@ -312,7 +406,7 @@ export function ChatView() {
   // map ChatMessageRecord to that shape.
   const items: Array<ChatMessage & { key: string; id?: number; live?: boolean }> = messages.map(
     (m) => ({
-      role: m.role as "user" | "assistant",
+      role: m.role as "user" | "assistant" | "system",
       content: m.content,
       attachments: m.attachments,
       key: `msg-${m.id}`,
@@ -334,17 +428,12 @@ export function ChatView() {
   return (
     <div className={`chat-view-wrap${previewArtifact ? " has-preview" : ""}`}>
     <div className={`chat-view${artifacts && artifacts.length > 0 ? " has-artifacts" : ""}`}>
-      {artifacts && artifacts.length > 0 && (
-        <div className="chat-artifacts-toolbar">
-          <ArtifactsMenu artifacts={artifacts} onOpen={setPreviewArtifact} />
-        </div>
-      )}
       {!activeChatSessionId || hasItems ? (
         <div className="chat-messages" ref={messagesContainerRef} onScroll={handleScroll}>
           {items.map((item) => (
             <MessageBubble
               key={item.key}
-              message={{ role: item.role as "user" | "assistant", content: item.content }}
+              message={{ role: item.role as "user" | "assistant" | "system", content: item.content }}
               live={item.live}
               onEdit={item.role === "user" ? handleEdit : undefined}
               onRepeat={
@@ -356,11 +445,19 @@ export function ChatView() {
               onPreviewArtifact={setPreviewArtifact}
             />
           ))}
-          {waitingForFirstToken && <TypingIndicator />}
+          {waitingForFirstToken &&
+            (statusNotice && statusNotice.message ? (
+              <div className="chat-status-notice" role="status">
+                <span className="local-spinner" aria-hidden="true" />
+                <span>{statusNotice.message}</span>
+              </div>
+            ) : (
+              <TypingIndicator />
+            ))}
           {error && (
             <div className="chat-error">
               <span className="chat-error-icon">⚠</span>
-              <span>{error}</span>
+              <span className="chat-error-text">{formatChatError(error)}</span>
             </div>
           )}
           <div ref={messagesEndRef} />
@@ -415,7 +512,7 @@ export function ChatView() {
         onStop={handleStop}
         streaming={streamingChatSessionId === activeChatSessionId && streamingChatSessionId !== null}
         disabled={false}
-        model={activeChatSessionId ? (activeSession?.model ?? "") : undefined}
+        model={activeChatSessionId ? (resolvedModel ?? "") : undefined}
         models={cloudIds}
         localModels={localIds}
         effort={effort}
@@ -432,6 +529,7 @@ export function ChatView() {
         }
         onPermissionModeChange={handlePermissionModeChange}
         chatSessionId={activeChatSessionId ?? undefined}
+        usedTokens={lastInputTokens}
       />
     </div>
     {previewArtifact && (

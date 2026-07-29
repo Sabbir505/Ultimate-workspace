@@ -641,6 +641,29 @@ pre,
   max-width: 160px;
   flex-shrink: 0;
 }
+/* Dev-only live memory counter (PTY child RSS, or app RSS for browser panes).
+   Rendered only in dev builds via import.meta.env.DEV. Green monospace so it
+   stands out as a diagnostic without competing with the accent color. */
+.pane-header .pane-memory-chip {
+  font-size: 10px;
+  font-family: var(--mono, ui-monospace, monospace);
+  padding: 2px 6px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--state-working, #34d17b) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--state-working, #34d17b) 30%, transparent);
+  color: var(--state-working, #34d17b);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+/* Header action buttons (peek, minimize, close). They sit right of the flex:1
+   title so they cluster at the right edge regardless of title length — the
+   title absorbs width changes, so the close button's x position stays put as
+   the session title or other header messages (activity chip, memory chip)
+   appear/disappear or grow. flex-shrink:0 keeps the buttons from being
+   squeezed when the title is long. */
+.pane-header .pane-action {
+  flex-shrink: 0;
+}
 .pane-header .broadcast-check {
   display: flex;
   align-items: center;
@@ -1765,6 +1788,7 @@ pre,
   border-radius: 14px;
   box-shadow: var(--glass-rim), var(--glass-shadow-lg);
   animation: modal-in 0.22s var(--ease);
+  overflow: hidden;
 }
 @keyframes modal-in {
   from { opacity: 0; transform: scale(0.97); }
@@ -1779,6 +1803,13 @@ pre,
   display: flex;
   flex-direction: column;
   box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+}
+/* Centered modals (settings, skills library, cost dashboard) need full
+   border-radius — the side-panel border-left would create a sharp edge on
+   the left while the right rounds. Override to a uniform border. */
+.view-overlay.modal-centered .view-panel {
+  border: 1px solid var(--border-strong);
+  border-left: 1px solid var(--border-strong);
 }
 .view-header {
   display: flex;
@@ -1984,6 +2015,171 @@ table.kv th {
   flex: 1;
 }
 
+/* ── Local Models panel ───────────────────────────────────────────────
+   Clean card-based list with status indicators, folder chips, and an
+   active-server banner. Uses the app's theme variables throughout. */
+.local-models-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--surface);
+  border-radius: var(--radius-xs);
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+.local-models-banner .status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--state-working);
+  flex-shrink: 0;
+}
+.local-models-folder-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.local-models-folder-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 11px;
+  background: var(--surface);
+  color: var(--text-dim);
+  max-width: 100%;
+}
+.local-models-folder-chip .chip-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.local-models-folder-chip .chip-remove {
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.local-models-folder-chip .chip-remove:hover {
+  color: var(--text);
+}
+
+/* Model card inside the local-models list */
+.local-model-card {
+  padding: 10px 12px;
+  background: var(--surface-glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+}
+.local-model-card .model-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.local-model-card .model-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+.local-model-card .model-info {
+  flex: 1;
+  min-width: 0;
+}
+.local-model-card .model-name {
+  font-weight: 600;
+  font-size: 13px;
+  word-break: break-all;
+  color: var(--text);
+}
+.local-model-card .model-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+.local-model-card .model-tag {
+  font-size: 11px;
+  margin-top: 2px;
+}
+.local-model-card .model-tag.memory-status {
+  font-size: 10px;
+  margin-top: 0;
+  opacity: 0.85;
+}
+/* Memory-class indicator dot shown under the "Use this model" button.
+   Green = fits, yellow = tight, red = too large. */
+.model-memory-indicator {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.local-model-card .model-tag.vision {
+  color: var(--accent);
+}
+.local-model-card .model-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+.local-model-card .model-loading-note {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.local-model-card .model-error {
+  font-size: 11px;
+  color: var(--danger);
+  margin-top: 6px;
+}
+.local-model-card .model-advanced {
+  margin-top: 6px;
+  font-size: 12px;
+}
+.local-model-card .model-advanced summary {
+  cursor: pointer;
+  color: var(--text-dim);
+}
+.local-model-card .model-advanced-fields {
+  display: flex;
+  gap: 12px;
+  margin-top: 6px;
+}
+.local-model-card .model-advanced-fields label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.local-model-card .model-advanced-fields input {
+  width: 60px;
+  padding: 2px 4px;
+}
+/* Hide number input spinners (up/down arrows) — they clutter the compact
+   advanced fields and the user can type values directly. */
+.local-model-card .model-advanced-fields input::-webkit-outer-spin-button,
+.local-model-card .model-advanced-fields input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.local-model-card .model-advanced-fields input[type="number"] {
+  -moz-appearance: textfield;
+}
+
 /* Reserved-height empty / loading state. Keeps the surrounding layout fixed
    whether the region is empty, loading, or full. */
 .empty-reserved {
@@ -2159,6 +2355,49 @@ table.kv th {
 .diff-line.del { background: var(--diff-del-bg); }
 .diff-line.hunk { background: var(--diff-hunk-bg); color: var(--accent); }
 .diff-line.meta { color: var(--text-dim); }
+
+/* ── Inline diff inside chat messages (Codex-style) ─────────────────
+   Unified diff rendered directly in the message stream. File path as a
+   small monospace header, then red/green +/- lines. Compact, no border
+   card — just the raw diff with color-coded backgrounds. */
+.chat-diff-inline {
+  margin: 4px 0 8px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.chat-diff-inline .diff-file-header {
+  padding: 2px 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 2px;
+  opacity: 0.8;
+}
+.chat-diff-inline .diff-line {
+  padding: 0 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+.chat-diff-inline .diff-line.add {
+  background: var(--diff-add-bg);
+  color: #34d17b;
+}
+.chat-diff-inline .diff-line.del {
+  background: var(--diff-del-bg);
+  color: #ff7b72;
+}
+.chat-diff-inline .diff-line.hunk {
+  background: var(--diff-hunk-bg);
+  color: var(--accent);
+  font-weight: 600;
+}
+.chat-diff-inline .diff-line.context {
+  color: var(--text-dim);
+  opacity: 0.7;
+}
 
 /* ---------- Cost dashboard ---------- */
 .chart {
@@ -2539,6 +2778,27 @@ table.kv th {
   accent-color: var(--accent);
   height: 4px;
 }
+/* Manual context-size entry — sits below the slider, full width, no spinner. */
+.model-effort-ctx input[type="number"].model-effort-ctx-number {
+  width: 100%;
+  margin-top: 6px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  padding: 3px 8px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.model-effort-ctx input[type="number"].model-effort-ctx-number::-webkit-inner-spin-button,
+.model-effort-ctx input[type="number"].model-effort-ctx-number::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.model-effort-ctx input[type="number"].model-effort-ctx-number {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
 .model-effort-ctx-auto {
   font-size: 11px;
   padding: 2px 8px;
@@ -2612,6 +2872,24 @@ table.kv th {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* Subtle pre-token status line shown while waiting for the first token when
+   the backend sent a chat:status notice (e.g. a local model is cold-starting
+   after an app restart). Replaces the generic thinking dots with a one-line
+   reason + spinner so the user knows the wait is a model load, not a hang. */
+.chat-status-notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 2px 2px;
+  padding: 5px 10px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  max-width: max-content;
 }
 .model-effort-empty {
   padding: 8px 10px;
@@ -2950,6 +3228,17 @@ table.kv th {
   border-radius: var(--radius-md, 8px);
   box-shadow: var(--glass-rim-soft), 0 8px 24px -8px rgba(0, 0, 0, 0.5);
 }
+/* When the row sits near the bottom of the sidebar's scroll viewport, the
+   downward menu would be clipped. Flip it to open upward from the row's top
+   edge instead (chat-session-menu-btn is ~30px tall; bottom: 100% anchors the
+   menu's bottom to the row's top, growing upward). */
+.chat-session-menu[data-above] {
+  top: auto;
+  bottom: 100%;
+  margin-bottom: 2px;
+  /* Invert the shadow direction so the shadow reads naturally above. */
+  box-shadow: var(--glass-rim-soft), 0 -8px 24px -8px rgba(0, 0, 0, 0.5);
+}
 .chat-session-menu button {
   display: flex;
   align-items: center;
@@ -3192,7 +3481,8 @@ table.kv th {
 .chat-bubble-inner .chat-thinking,
 .chat-bubble-inner .chat-tool,
 .chat-bubble-inner .chat-activity,
-.chat-bubble-inner .chat-step {
+.chat-bubble-inner .chat-step,
+.chat-bubble-inner .chat-diff-inline {
   user-select: none;
   -webkit-user-select: none;
 }
@@ -3301,9 +3591,12 @@ table.kv th {
   -webkit-box-orient: vertical;
 }
 
-/* Collapsible thinking block (reasoning models) */
+/* ── Codex-style thinking / reasoning ───────────────────────────────
+   Quiet, secondary text that visually recedes behind the actual response.
+   Collapsed by default; a small "Thinking" label toggles it. No colorful
+   card — just muted gray italic text with a subtle left border. */
 .chat-thinking {
-  margin-bottom: 10px;
+  margin: 4px 0 8px;
 }
 .chat-thinking-toggle {
   display: inline-flex;
@@ -3312,9 +3605,12 @@ table.kv th {
   background: transparent;
   border: none;
   padding: 2px 0;
-  font-size: 12.5px;
+  font-size: 11px;
+  font-family: var(--font-mono);
   color: var(--text-dim);
   cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 .chat-thinking-toggle:hover {
   color: var(--text);
@@ -3323,142 +3619,86 @@ table.kv th {
   animation: thinking-pulse 1.4s ease-in-out infinite;
 }
 @keyframes thinking-pulse {
-  0%, 100% { opacity: 0.55; }
-  50% { opacity: 1; }
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 0.85; }
 }
 .chat-thinking-icon {
-  font-size: 13px;
+  font-size: 10px;
+  opacity: 0.6;
 }
 .chat-thinking-chevron {
   display: inline-block;
   transition: transform 0.15s var(--ease);
+  font-size: 10px;
+  opacity: 0.5;
 }
 .chat-thinking-chevron.open {
   transform: rotate(90deg);
 }
 .chat-thinking-body {
-  margin-top: 6px;
-  padding: 10px 12px;
+  margin-top: 4px;
+  padding: 6px 10px;
   border-left: 2px solid var(--border);
   color: var(--text-dim);
-  font-size: 12.5px;
+  font-size: 12px;
+  font-style: italic;
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: break-word;
+  opacity: 0.75;
 }
 
-/* Collapsible tool-call / script-writing process cards (Claude-style). */
-.chat-tool {
-  margin: 6px 0;
-}
-.chat-tool-toggle {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
-  padding: 6px 10px;
-  font-size: 12.5px;
-  color: var(--text-dim);
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  text-align: left;
-  transition: color 0.15s var(--ease), background 0.15s var(--ease);
-}
-.chat-tool-toggle:hover:not(:disabled) {
-  color: var(--text);
-  background: var(--surface-3, var(--surface-2));
-}
-.chat-tool-toggle:disabled {
-  cursor: default;
-}
-.chat-tool-icon {
-  font-size: 13px;
-  flex: none;
-}
-.chat-tool-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.chat-tool .chat-thinking-chevron {
-  flex: none;
-}
-.chat-tool.live .chat-tool-toggle {
-  animation: thinking-pulse 1.4s ease-in-out infinite;
-}
-.chat-tool-spinner {
-  flex: none;
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent);
-  animation: tool-spin 0.7s linear infinite;
-}
-@keyframes tool-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-.chat-tool-body {
-  margin-top: 6px;
-}
-.chat-tool-detail {
-  padding: 8px 12px;
-  border-left: 2px solid var(--border);
-  color: var(--text-dim);
-  font-size: 12.5px;
-  line-height: 1.5;
-  overflow-wrap: break-word;
-  margin-bottom: 6px;
-}
+/* ── Codex-style activity / tool-call grouping ──────────────────────
+   Compact, monochrome, terminal-native. A single synthesized summary line
+   (minimal padding, no full border) expands into a stepped list where each
+   step is a single monospace row with a subtle left-rail accent. Color is
+   reserved only for live-state spinners and diff output. */
 
-/* Collapsed activity summary: one tool-call run collapses into a single
- * synthesized line (Claude-style), expandable into a stepped list where each
- * step is itself expandable. Replaces the old per-call flat rows. */
+/* Collapsed outer summary */
 .chat-activity {
-  margin: 6px 0;
+  margin: 4px 0;
 }
 .chat-activity-toggle {
   display: flex;
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 6px 10px;
-  font-size: 12.5px;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-family: var(--font-mono);
   color: var(--text-dim);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  border-left: 2px solid var(--border);
+  border-radius: 0;
   cursor: pointer;
   text-align: left;
-  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+  transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
 }
 .chat-activity-toggle:hover {
   color: var(--text);
-  background: var(--surface-3, var(--surface-2));
+  border-left-color: var(--text-dim);
 }
 .chat-activity-icon {
   flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 14px;
-  height: 14px;
-  color: var(--accent);
-  font-size: 12px;
+  width: 12px;
+  height: 12px;
+  color: var(--text-dim);
+  font-size: 11px;
 }
 .chat-activity-spinner {
-  width: 11px;
-  height: 11px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent);
+  border: 1.5px solid var(--border);
+  border-top-color: var(--text);
   animation: tool-spin 0.7s linear infinite;
+}
+@keyframes tool-spin {
+  to { transform: rotate(360deg); }
 }
 .chat-activity-summary {
   flex: 1;
@@ -3468,36 +3708,42 @@ table.kv th {
   white-space: nowrap;
 }
 .chat-activity.live .chat-activity-toggle {
-  animation: thinking-pulse 1.4s ease-in-out infinite;
+  border-left-color: var(--text-dim);
 }
 .chat-activity-count {
   flex: none;
-  font-size: 11px;
+  font-size: 10px;
+  font-family: var(--font-mono);
   color: var(--text-dim);
-  opacity: 0.7;
+  opacity: 0.5;
 }
+
+/* Expanded step list */
 .chat-activity-steps {
-  margin-top: 6px;
-  padding-left: 4px;
+  margin-top: 2px;
+  padding-left: 8px;
   border-left: 2px solid var(--border);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
+
+/* Individual step row */
 .chat-step {
-  border-radius: var(--radius-xs);
+  border-radius: 0;
 }
 .chat-step-toggle {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   width: 100%;
-  padding: 4px 8px;
-  font-size: 12.5px;
+  padding: 2px 6px;
+  font-size: 11.5px;
+  font-family: var(--font-mono);
   color: var(--text-dim);
   background: transparent;
   border: none;
-  border-radius: var(--radius-xs);
+  border-radius: 0;
   cursor: pointer;
   text-align: left;
   transition: color 0.15s var(--ease), background 0.15s var(--ease);
@@ -3511,15 +3757,17 @@ table.kv th {
 }
 .chat-step-index {
   flex: none;
-  font-size: 10.5px;
+  font-size: 10px;
+  font-family: var(--font-mono);
   color: var(--text-dim);
-  opacity: 0.6;
-  min-width: 14px;
+  opacity: 0.4;
+  min-width: 16px;
   text-align: right;
 }
 .chat-step-icon {
   flex: none;
-  font-size: 13px;
+  font-size: 11px;
+  opacity: 0.7;
 }
 .chat-step-label {
   flex: 1;
@@ -3529,40 +3777,44 @@ table.kv th {
   white-space: nowrap;
 }
 .chat-step.live .chat-step-toggle {
-  animation: thinking-pulse 1.4s ease-in-out infinite;
+  color: var(--text);
 }
 .chat-step-narration {
-  padding: 2px 8px 4px 29px;
+  padding: 2px 6px 3px 28px;
   color: var(--text-dim);
-  font-size: 12.5px;
+  font-size: 12px;
   line-height: 1.5;
   overflow-wrap: break-word;
 }
-/* A thinking interlude folded into the activity group: indented to align
- * with the step rows, slightly dimmer than a standalone ThinkingBlock. */
+
+/* Thinking interlude inside an activity group */
 .chat-step-think {
-  margin: 2px 0 2px 21px;
+  margin: 1px 0 1px 18px;
 }
 .chat-step-think .chat-thinking {
   margin: 0;
 }
+
+/* Step detail / code / result bodies */
 .chat-step-body {
-  margin: 4px 0 6px 29px;
+  margin: 2px 0 4px 28px;
 }
 .chat-step-detail {
-  padding: 6px 10px;
+  padding: 4px 8px;
   border-left: 2px solid var(--border);
   color: var(--text-dim);
-  font-size: 12.5px;
+  font-size: 11.5px;
+  font-family: var(--font-mono);
   line-height: 1.5;
   overflow-wrap: break-word;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 .chat-step-result {
-  padding: 6px 10px;
-  border-left: 2px solid var(--accent);
+  padding: 4px 8px;
+  border-left: 2px solid var(--border);
   color: var(--text-dim);
-  font-size: 12.5px;
+  font-size: 11.5px;
+  font-family: var(--font-mono);
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: break-word;
@@ -3571,13 +3823,65 @@ table.kv th {
   display: flex;
   align-items: center;
   gap: 5px;
-  padding: 4px 8px 2px;
-  font-size: 12px;
-  color: var(--accent);
+  padding: 3px 6px 2px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  opacity: 0.6;
 }
 .chat-activity-done svg {
-  width: 13px;
-  height: 13px;
+  width: 11px;
+  height: 11px;
+}
+
+/* Compaction marker — a low-weight, tappable line in the timeline shown where
+   older context was summarized by the local-model compaction framework. Reuses
+   the muted tokens of .chat-activity-done so it reads as ambient meta-info. */
+.chat-compacted-marker {
+  margin: 4px 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: max-content;
+}
+.chat-compacted-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 2px;
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  opacity: 0.62;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.chat-compacted-toggle:hover {
+  opacity: 0.9;
+}
+.chat-compacted-dash {
+  letter-spacing: -1px;
+}
+.chat-compacted-summary {
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  max-width: 560px;
+  white-space: pre-wrap;
+}
+/* Settings: compaction hint under each input. */
+.local-compaction-hint {
+  display: block;
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.7;
+  margin-top: 2px;
 }
 
 /* Chat mode split (chat left | browser right) */
@@ -3926,9 +4230,12 @@ table.kv th {
 
 /* Composer (bottom bar) — Claude-style rounded card */
 .chat-composer {
+  position: relative;
   flex-shrink: 0;
-  /* Aligned with the centered conversation column. */
-  padding: 10px max(14px, calc((100% - 780px) / 2)) 14px;
+  /* Aligned with the centered conversation column. Extra bottom padding
+     leaves room for the circular context meter that sits below the send
+     button, inside the composer bounds. */
+  padding: 10px max(14px, calc((100% - 780px) / 2)) 30px;
 }
 .composer-slash-wrap {
   position: relative;
@@ -4031,6 +4338,107 @@ table.kv th {
 }
 .composer-footer-spacer {
   flex: 1;
+}
+
+.composer-send-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Context-window meter: a small circular ring positioned below the send
+   button (right-aligned under it). An SVG ring fills clockwise; the fill
+   percentage shows in the center, and the full "used / max" appears on hover
+   (title). Always rendered — 0% until the first turn's input_tokens are known.
+   Green normally, amber past 70%, red past 90% so the user sees when they're
+   about to overflow the context window. */
+.context-meter-circle {
+  position: relative;
+  margin-top: 4px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  z-index: 2;
+}
+
+/* Styled tooltip that appears on hover */
+.context-meter-tooltip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%) scale(0.95);
+  transform-origin: bottom center;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--surface-1, #1e1e1e);
+  border: 1px solid var(--surface-3, #333);
+  color: var(--text-main, #eee);
+  font-size: 11px;
+  font-weight: 500;
+  font-family: var(--sans, system-ui, sans-serif);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  z-index: 10;
+}
+
+/* Little arrow pointing down to the circle */
+.context-meter-tooltip::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border-width: 5px;
+  border-style: solid;
+  border-color: var(--surface-3, #333) transparent transparent transparent;
+}
+
+.context-meter-circle:hover .context-meter-tooltip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) scale(1);
+}
+.context-meter-ring {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.context-meter-track {
+  stroke: var(--surface-3, var(--surface-2));
+  opacity: 0.7;
+}
+.context-meter-progress {
+  stroke: var(--text-dim);
+  transition: stroke-dasharray 0.3s var(--ease, ease), stroke 0.2s var(--ease, ease);
+}
+.context-meter-circle.warn .context-meter-progress {
+  stroke: var(--state-waiting, #f2c14e);
+}
+.context-meter-circle.crit .context-meter-progress {
+  stroke: var(--danger, #e5484d);
+}
+.context-meter-pct {
+  position: absolute;
+  font-size: 7px;
+  font-weight: 600;
+  font-family: var(--mono, ui-monospace, monospace);
+  color: var(--text-dim);
+  line-height: 1;
+  pointer-events: none;
+}
+.context-meter-circle.warn .context-meter-pct {
+  color: var(--state-waiting, #f2c14e);
+}
+.context-meter-circle.crit .context-meter-pct {
+  color: var(--danger, #e5484d);
 }
 .composer-attach-btn {
   width: 28px;
@@ -4301,25 +4709,33 @@ table.kv th {
   display: block;
 }
 
-/* --- Claude-style pre-token typing animation --- */
+/* ── Codex-style pre-token typing indicator ───────────────────────────
+   A single quiet monospace line with a blinking cursor — no bouncing dots.
+   Looks like a terminal prompt waiting for output. */
 .chat-typing {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 4px 2px;
+  gap: 6px;
+  padding: 2px 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
 }
-.chat-typing-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+.chat-typing-prompt {
+  opacity: 0.5;
+  user-select: none;
+}
+.chat-typing-cursor {
+  display: inline-block;
+  width: 6px;
+  height: 13px;
   background: var(--text-dim);
-  animation: chat-typing-bounce 1.2s ease-in-out infinite;
+  opacity: 0.6;
+  animation: cursor-blink 1s step-end infinite;
 }
-.chat-typing-dot:nth-child(2) { animation-delay: 0.18s; }
-.chat-typing-dot:nth-child(3) { animation-delay: 0.36s; }
-@keyframes chat-typing-bounce {
-  0%, 60%, 100% { opacity: 0.35; transform: translateY(0); }
-  30% { opacity: 1; transform: translateY(-3px); }
+@keyframes cursor-blink {
+  0%, 100% { opacity: 0; }
+  50% { opacity: 0.6; }
 }
 
 /* --- GFM markdown: tables, task lists, strikethrough --- */
@@ -5136,6 +5552,19 @@ table.kv th {
   text-align: center;
   font-size: 12px;
   color: var(--text-dim);
+}
+
+/* Assistant panel: small hint under the system-prompt row pointing users at
+   the Skills Library (skills are no longer configured here). */
+.skills-section-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.75;
+  margin: 10px 4px 0;
+  line-height: 1.45;
+}
+.skills-section-hint code {
+  font-size: 11px;
 }
 
 /* ---- Connectors (Settings → Connectors) ---- */

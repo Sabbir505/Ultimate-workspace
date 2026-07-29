@@ -333,6 +333,11 @@ pub struct SidecarHandle {
     pub child: tokio::process::Child,
     pub port: u16,
     pub model_id: String,
+    /// The effective context window (`-c`) the sidecar was launched with. The
+    /// compaction framework reads this (via `status()`) so its threshold is
+    /// always relative to the window the model actually has, not a hardcoded
+    /// constant.
+    pub n_ctx: u32,
 }
 
 pub struct LocalModelRegistry {
@@ -409,6 +414,25 @@ impl LocalModelRegistry {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+
+        // On Windows, suppress the child's console window. In a production
+        // (release) Tauri build the app has no console of its own, so spawning
+        // a console subprocess like llama-server.exe causes Windows to allocate
+        // a brand-new visible console for the child. The user sees a terminal
+        // pop up, and closing it kills llama-server — which silently breaks the
+        // local model. CREATE_NO_WINDOW keeps the process fully backgrounded.
+        // The dev build already inherits the parent's console so this is a
+        // no-op there, but applying it unconditionally is harmless and keeps
+        // dev/prod behavior consistent.
+        #[cfg(windows)]
+        {
+            // tokio::process::Command exposes `creation_flags` as an inherent
+            // method (it forwards to the inner std Command), so no trait import
+            // is needed here — unlike the std::process::Command call sites in
+            // git.rs / harness_adapters, which must import CommandExt.
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
 
         // CUDA DLL path injection: a source-built llama.cpp with CUDA support
         // links `ggml-cuda.dll`, which in turn needs the NVIDIA CUDA runtime
@@ -493,12 +517,14 @@ impl LocalModelRegistry {
             child,
             port,
             model_id: model_id.clone(),
+            n_ctx: ctx,
         };
         self.handles.lock().insert(model_id.clone(), handle);
 
         Ok(StartedModel {
             model_id,
             port,
+            n_ctx: ctx,
             base_url: format!("http://127.0.0.1:{port}"),
         })
     }
@@ -526,6 +552,7 @@ impl LocalModelRegistry {
         self.handles.lock().values().next().map(|h| ActiveLocalModel {
             model_id: h.model_id.clone(),
             port: h.port,
+            n_ctx: h.n_ctx,
             base_url: format!("http://127.0.0.1:{}", h.port),
         })
     }
@@ -578,6 +605,7 @@ async fn take_streams(child: &mut tokio::process::Child) -> String {
 pub struct StartedModel {
     pub model_id: String,
     pub port: u16,
+    pub n_ctx: u32,
     pub base_url: String,
 }
 
@@ -586,6 +614,7 @@ pub struct StartedModel {
 pub struct ActiveLocalModel {
     pub model_id: String,
     pub port: u16,
+    pub n_ctx: u32,
     pub base_url: String,
 }
 

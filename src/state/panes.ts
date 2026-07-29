@@ -96,6 +96,9 @@ interface PanesState {
   /** Explicit user choice for the split-layout spotlight terminal; null means
    *  "derive from recency" (see activeTerminalId). */
   spotlightOverride: string | null;
+  /** Dev-only live memory (bytes) per pane, populated by usePaneMemory's poll.
+   *  Empty in production builds (no polling, no chip rendered). */
+  paneMemory: Record<string, number>;
 
   /** Pure add; returns the new paneId. Does not spawn anything. */
   addPane: (desc: PaneDescriptor) => string;
@@ -118,6 +121,8 @@ interface PanesState {
   notePaneInput: (paneId: string) => void;
   /** Set a human-readable activity label for a pane (parsed from terminal output). */
   setPaneActivity: (paneId: string, activity: string | null) => void;
+  /** Dev-only: set the latest memory reading (bytes) for a pane. */
+  setPaneMemory: (paneId: string, bytes: number) => void;
   setSpotlight: (paneId: string | null) => void;
 
   // --- Multi-tab browser actions ---
@@ -283,6 +288,7 @@ export const usePanesStore = create<PanesState>((set, get) => ({
   useCounter: 1,
   focusEpoch: 0,
   spotlightOverride: null,
+  paneMemory: {},
 
   addPane: (desc) => {
     const counter = get().useCounter;
@@ -342,12 +348,15 @@ export const usePanesStore = create<PanesState>((set, get) => ({
     disposePaneResources(pane);
     set((state) => {
       const panes = state.panes.filter((p) => p.paneId !== paneId);
+      const paneMemory = { ...state.paneMemory };
+      delete paneMemory[paneId];
       const focusedPaneId =
         state.focusedPaneId === paneId
           ? (panes[panes.length - 1]?.paneId ?? null)
           : state.focusedPaneId;
       return {
         panes,
+        paneMemory,
         focusedPaneId,
         spotlightOverride: state.spotlightOverride === paneId ? null : state.spotlightOverride,
         broadcast: {
@@ -451,6 +460,9 @@ export const usePanesStore = create<PanesState>((set, get) => ({
         p.paneId === paneId ? { ...p, activity } : p,
       ),
     })),
+
+  setPaneMemory: (paneId, bytes) =>
+    set((s) => ({ paneMemory: { ...s.paneMemory, [paneId]: bytes } })),
 
   setSpotlight: (paneId) => {
     set({ spotlightOverride: paneId });

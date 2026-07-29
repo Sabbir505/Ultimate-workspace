@@ -4,6 +4,7 @@
 // command palette) and an "Effort" row that expands a side submenu.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { fuzzyFilter, type FuzzyResult } from "../../lib/fuzzy";
+import { shortModelName } from "../../lib/modelLabel";
 
 export const EFFORT_LABELS: Record<string, string> = {
   "": "Default",
@@ -57,6 +58,81 @@ function highlight(text: string, res: FuzzyResult | null): JSX.Element {
   return <>{out}</>;
 }
 
+/** Manual context-size entry for a local model. Keeps a local text buffer so
+ *  the user can freely type a multi-digit number (e.g. "32768") without the
+ *  per-keystroke clamp snapping "2" → 4096 mid-entry. The clamped value is
+ *  committed only on blur or Enter; 0 / cleared / "auto" means Auto.
+ *  Range + step mirror the slider (4096–131072, step 4096). */
+const CTX_MIN = 4096;
+const CTX_MAX = 131072;
+const CTX_STEP = 4096;
+
+function LocalContextInput({
+  localCtx,
+  onLocalCtxChange,
+}: {
+  localCtx: number | undefined;
+  onLocalCtxChange: (ctx: number) => void;
+}) {
+  // The committed value from the slider/parent (0 or undefined = Auto). The
+  // input shows this when the user isn't actively typing.
+  const committed = localCtx ?? 0;
+  const [draft, setDraft] = useState<string | null>(null);
+
+  // What the input displays: the user's in-progress draft, else the committed
+  // value (or "0" for Auto so the field isn't empty when not focused).
+  const value = draft ?? String(committed);
+
+  const commit = () => {
+    const trimmed = (draft ?? "").trim().toLowerCase();
+    if (trimmed === "" || trimmed === "0" || trimmed === "auto") {
+      onLocalCtxChange(0);
+    } else {
+      const v = Number(trimmed);
+      if (Number.isFinite(v)) {
+        // Clamp to the slider range; round to the step so the slider + number
+        // never disagree. 0 means Auto.
+        const clamped = v <= 0 ? 0 : Math.min(CTX_MAX, Math.max(CTX_MIN, v));
+        const snapped = clamped === 0 ? 0 : Math.round(clamped / CTX_STEP) * CTX_STEP;
+        onLocalCtxChange(snapped);
+      }
+    }
+    setDraft(null);
+  };
+
+  return (
+    <input
+      type="number"
+      className="model-effort-ctx-number"
+      min={0}
+      max={CTX_MAX}
+      step={CTX_STEP}
+      value={value}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          (e.target as HTMLInputElement).blur();
+        } else if (e.key === "Escape") {
+          // Discard the in-progress edit.
+          setDraft(null);
+          (e.target as HTMLInputElement).blur();
+        }
+      }}
+      onFocus={(e) => {
+        // Seed the draft with the current committed value so the user edits
+        // from a clean base, and select it for quick replacement.
+        setDraft(String(committed));
+        requestAnimationFrame(() => e.target.select());
+      }}
+      aria-label="Context size in tokens (manual)"
+      title="Context size in tokens (0 = Auto; Enter to apply)"
+      placeholder="Auto"
+    />
+  );
+}
+
 export function ModelEffortMenu({
   model,
   models,
@@ -98,28 +174,42 @@ export function ModelEffortMenu({
   );
   const totalCount = cloudItems.length + localItems.length;
 
+  // A ranked row carries the full model id (the value passed to chooseModel /
+  // stored on the session / used to spawn the sidecar) AND a display label.
+  // For local models the label is the shortened base name (no quant suffix /
+  // .gguf); for cloud models id === label. Deriving the label from the id
+  // guarantees the same model renders the same label in every chat.
+  interface Ranked {
+    id: string;
+    label: string;
+    matches: number[];
+    score: number;
+  }
+
   // Fuzzy-filter each section by the search query (empty query shows all).
   // Keyboard navigation spans the concatenation: cloud items first, local after.
-  const rankedCloud = useMemo(() => {
+  const rankedCloud = useMemo<Ranked[]>(() => {
     if (query.trim().length === 0) {
-      return cloudItems.map((m) => ({ item: m, matches: [] as number[], score: 0 }));
+      return cloudItems.map((m) => ({ id: m, label: m, matches: [], score: 0 }));
     }
     const hits = fuzzyFilter(query, cloudItems, (m) => m);
-    return hits.map((h) => ({ item: h.item, matches: h.matches, score: h.score }));
+    return hits.map((h) => ({ id: h.item, label: h.item, matches: h.matches, score: h.score }));
   }, [query, models, localModels]);
 
-  const rankedLocal = useMemo(() => {
+  const rankedLocal = useMemo<Ranked[]>(() => {
     if (query.trim().length === 0) {
-      return localItems.map((m) => ({ item: m, matches: [] as number[], score: 0 }));
+      return localItems.map((m) => ({ id: m, label: shortModelName(m), matches: [], score: 0 }));
     }
-    const hits = fuzzyFilter(query, localItems, (m) => m);
-    return hits.map((h) => ({ item: h.item, matches: h.matches, score: h.score }));
+    // Filter against the shortened label so typing the base name matches, and
+    // the highlight indices (into the label) line up with the rendered text.
+    const hits = fuzzyFilter(query, localItems, (m) => shortModelName(m));
+    return hits.map((h) => ({ id: h.item, label: shortModelName(h.item), matches: h.matches, score: h.score }));
   }, [query, models, localModels]);
 
-  const ranked = useMemo(
-    () => [...rankedCloud, ...rankedLocal],
-    [rankedCloud, rankedLocal],
-  );
+  const ranked = useMemo<Ranked[]>(() => [...rankedCloud, ...rankedLocal], [
+    rankedCloud,
+    rankedLocal,
+  ]);
 
   // Keep the active index in range as the filtered set changes.
   useEffect(() => {
@@ -160,7 +250,7 @@ export function ModelEffortMenu({
     } else if (e.key === "Enter") {
       e.preventDefault();
       const pick = ranked[activeIndex];
-      if (pick) chooseModel(pick.item);
+      if (pick) chooseModel(pick.id);
     } else if (e.key === "Escape") {
       if (query.length > 0) {
         setQuery("");
@@ -172,36 +262,34 @@ export function ModelEffortMenu({
 
   // One model row. `i` is the index into the concatenated ranked list (cloud
   // first, local after) used for keyboard navigation and scroll-into-view.
-  const renderItem = (
-    r: { item: string; matches: number[]; score: number },
-    i: number,
-    local = false,
-  ) => (
+  // `r.id` is the value (passed to chooseModel / matched against the session's
+  // stored model); `r.label` is what the user sees (shortened for local models).
+  const renderItem = (r: Ranked, i: number, local = false) => (
     <button
-      key={`${local ? "local:" : ""}${r.item}`}
+      key={`${local ? "local:" : ""}${r.id}`}
       ref={(el) => {
         itemRefs.current[i] = el;
       }}
       type="button"
       role="menuitemradio"
-      aria-checked={r.item === model}
-      className={`model-effort-item${r.item === model ? " selected" : ""}${
+      aria-checked={r.id === model}
+      className={`model-effort-item${r.id === model ? " selected" : ""}${
         i === activeIndex ? " active" : ""
       }`}
-      onClick={() => chooseModel(r.item)}
+      onClick={() => chooseModel(r.id)}
       onPointerEnter={() => setActiveIndex(i)}
     >
-      <span>
+      <span title={local ? r.id : undefined}>
         {query.trim().length > 0
-          ? highlight(r.item, {
+          ? highlight(r.label, {
               score: r.score,
               matches: r.matches,
             })
-          : r.item}
+          : r.label}
       </span>
       <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
         {local && <span className="model-effort-local-badge">Local</span>}
-        {r.item === model && <span className="model-effort-check">✓</span>}
+        {r.id === model && <span className="model-effort-check">✓</span>}
       </span>
     </button>
   );
@@ -225,7 +313,9 @@ export function ModelEffortMenu({
               <span className="local-spinner" /> Loading…
             </span>
           ) : (
-            model || "Select model"
+            // Show the shortened base name for local models (no quant suffix /
+            // .gguf) so the pill stays readable; cloud ids are already short.
+            provider === "local_gguf" && model ? shortModelName(model) : model || "Select model"
           )}
           {provider === "local_gguf" && !modelLoading && (
             <span className="model-effort-local-badge">Local</span>
@@ -339,6 +429,16 @@ export function ModelEffortMenu({
                           aria-label="Context size in tokens"
                         />
                       </div>
+                      {/* Manual entry so an exact context size can be typed
+                          instead of dragged to. Sits below the slider, full
+                          width of the controls row. Keeps a local draft so a
+                          multi-digit value can be typed without the clamp
+                          snapping mid-entry; commits on blur/Enter. 0/Auto =
+                          inherit the default. Spinner arrows are hidden. */}
+                      <LocalContextInput
+                        localCtx={localCtx}
+                        onLocalCtxChange={onLocalCtxChange!}
+                      />
                       <div className="model-effort-ctx-hint">
                         Reloads the local model — context is fixed when the server starts.
                       </div>

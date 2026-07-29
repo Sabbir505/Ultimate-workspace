@@ -146,6 +146,39 @@ pub fn kill_pty(pane_id: String, pty: State<PtyState>) -> CmdResult<()> {
     Ok(())
 }
 
+/// Dev-mode memory counter: return the resident memory (bytes) of a pane's
+/// child process. For a terminal pane this is the PTY child's RSS via sysinfo
+/// (looked up by PID). For a browser pane there is no per-pane PID exposed by
+/// Tauri's Webview, so we fall back to the conduit app process's own RSS — a
+/// rough proxy that at least surfaces "the browser is eating memory" growth.
+/// Returns 0 when the pane/PID is gone or memory can't be read (e.g. the
+/// process already exited). Intended for a dev-only header chip; not a
+/// production metric.
+#[tauri::command]
+pub fn pane_memory(pane_id: String, pty: State<PtyState>) -> CmdResult<u64> {
+    use sysinfo::{get_current_pid, ProcessesToUpdate, ProcessRefreshKind, Pid, System};
+
+    let pid = match pty.0.pane_pid(&pane_id) {
+        Some(pid) => Pid::from_u32(pid),
+        // Browser pane (no PTY child): fall back to the app process's own RSS.
+        None => match get_current_pid() {
+            Ok(pid) => pid,
+            Err(_) => return Ok(0),
+        },
+    };
+
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        false,
+        ProcessRefreshKind::new().with_memory(),
+    );
+    match sys.process(pid) {
+        Some(proc_) => Ok(proc_.memory() as u64),
+        None => Ok(0),
+    }
+}
+
 #[tauri::command]
 pub fn list_harnesses() -> CmdResult<Vec<HarnessStatus>> {
     Ok(all_adapters()

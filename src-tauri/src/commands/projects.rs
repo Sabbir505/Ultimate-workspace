@@ -62,9 +62,16 @@ pub fn init_git_repo(project_id: String, db: State<DbState>) -> CmdResult<()> {
             .ok_or_else(|| "project not found".to_string())?
             .path
     };
-    let out = std::process::Command::new("git")
-        .arg("init")
-        .current_dir(&path)
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("init").current_dir(&path);
+    // Suppress the console-window flash on Windows (GUI app shelling out to git).
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd
         .output()
         .map_err(|e| format!("failed to run git init: {e}"))?;
     if !out.status.success() {

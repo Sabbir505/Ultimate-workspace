@@ -42,6 +42,7 @@ pub const GENERATE_DIAGRAM: &str = "generate_diagram";
 pub const FETCH_URL: &str = "fetch_url";
 pub const RUN_CODE: &str = "run_code";
 pub const OPEN_URL: &str = "open_url";
+pub const GET_SKILL: &str = "get_skill";
 pub const BROWSER_READ: &str = "browser_read";
 
 pub const BROWSER_CLICK: &str = "browser_click";
@@ -170,13 +171,17 @@ impl ToolOutcome {
 }
 
 const WEB_SEARCH_DESC: &str = "Search the public web for up-to-date information. \
-    Returns a list of result titles, URLs and snippets. Your training data has a \
-    cutoff, so CALL THIS before answering any question whose answer may have \
-    changed since then: software/library/framework versions or 'latest'/'current' \
-    releases, API signatures/behavior, recent events or news, current prices, \
-    stats, or anything about 'now'/'today'/'recently'. For stable knowledge or \
-    pure reasoning (math, definitions, mature syntax), do NOT search — just answer. \
-    For a single-fact question, one targeted search is enough; only escalate to a \
+    Returns a list of result titles, URLs and snippets. This is the DEFAULT \
+    search tool: a bare request like \"search X\", \"look up X\", or \"find \
+    out about X\" means the WEB, not the user's files â€” use this, not \
+    search_files, unless the user explicitly named a local file/extension/path. \
+    Your training data has a cutoff, so CALL THIS before answering any \
+    question whose answer may have changed since then: software/library/framework \
+    versions or 'latest'/'current' releases, API signatures/behavior, recent \
+    events or news, current prices, stats, or anything about \
+    'now'/'today'/'recently'. For stable knowledge or pure reasoning (math, \
+    definitions, mature syntax), do NOT search â€” just answer. For a \
+    single-fact question, one targeted search is enough; only escalate to a \
     multi-source research flow if the user asked for research.";
 
 const GENERATE_FILE_DESC: &str = "Generate a simple downloadable text-based \
@@ -260,6 +265,14 @@ const RUN_CODE_DESC: &str = "Execute a short snippet of code and return its \
     time limit in a temporary directory. Use for calculations, data wrangling \
     or quick scripts.";
 
+const GET_SKILL_DESC: &str = "Load a skill's detailed instructions into your \
+    context by its slug. Call this when the user's request fits one of the \
+    Available skills listed in the system prompt (e.g. they ask for a Word doc \
+    → get_skill(\"docx\")) and you need that skill's specific guidance, failure \
+    modes, or house style before proceeding. Returns the skill body as text. \
+    Only call it when a skill genuinely applies — do not call it for general \
+    questions.";
+
 const LIST_DIRECTORY_DESC: &str = "List the immediate children of a directory \
     (files and subdirectories, one per line). Pass an absolute path. Read-only.";
 
@@ -267,9 +280,12 @@ const READ_FILE_DESC: &str = "Read a file's text contents and return them \
     (truncated to a reasonable length). Pass an absolute path. Read-only. Best \
     for text/code files; binary files are not decoded.";
 
-const SEARCH_FILES_DESC: &str = "Recursively find files under a directory whose \
+const SEARCH_FILES_DESC: &str = "Recursively find LOCAL files under a directory whose \
     path/name contains a substring (case-insensitive). Returns matching paths, \
-    capped to a reasonable number. Read-only.";
+    capped to a reasonable number. Read-only. Use this ONLY for the user's local \
+    files â€” NOT for web/knowledge lookups; a bare topic like \"cow\" is a web \
+    search, not a file search. Call web_search instead unless the user named a \
+    file/extension/path or clearly means local content.";
 
 const WRITE_FILE_DESC: &str = "Create or overwrite a file with the given text \
     content. Pass an absolute path. Mutating — may require approval depending \
@@ -394,6 +410,23 @@ pub async fn execute_tool(
                     artifact: None,
                     browse_url: Some(normalized),
                 },
+            }
+        }
+        GET_SKILL => {
+            // Auto-trigger: let the model pull a skill's body on demand when a
+            // request fits one, instead of requiring the user to type `/slug`.
+            // Read-only (no FS/DB mutation) so it stays available under every
+            // permission mode. See `installed_skills::read_skill_body`.
+            let slug = args.get("slug").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if slug.is_empty() {
+                ToolOutcome::text("Error: get_skill requires a \"slug\" argument.")
+            } else {
+                match crate::installed_skills::read_skill_body(slug) {
+                    Some(body) => ToolOutcome::text(body),
+                    None => ToolOutcome::text(format!(
+                        "No skill named \"{slug}\". The available skills are listed in the system prompt under \"## Available skills\"."
+                    )),
+                }
             }
         }
         RUN_CODE => {

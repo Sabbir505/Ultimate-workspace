@@ -259,6 +259,12 @@ pub struct ChatMessageRecord {
     pub output_tokens: Option<i64>,
     pub cost_usd: Option<f64>,
     pub created_at: i64,
+    /// Non-null only for turns folded into a `[compacted context]` summary row
+    /// by the local-model context-compaction framework. Points at the summary
+    /// row's `id`. The send path excludes superseded rows; the UI timeline
+    /// still lists them behind the compaction marker.
+    #[serde(default)]
+    pub superseded_by: Option<i64>,
 }
 
 /// One recorded fact/claim a research turn extracted from a single source page.
@@ -290,6 +296,21 @@ pub struct SourceNote {
 pub struct ChatTokenPayload {
     pub chat_session_id: String,
     pub token: String,
+}
+
+/// A pre-token status notice for a streaming turn — emitted before the first
+/// token to tell the frontend *why* it is waiting (e.g. a local model is
+/// cold-starting after an app restart, so the wait can be tens of seconds).
+/// The frontend shows this as a subtle loading line in place of the generic
+/// thinking dots until the first `chat:token` arrives.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatStatusPayload {
+    pub chat_session_id: String,
+    /// Machine-readable reason tag: "local_model_loading" | "thinking".
+    pub reason: String,
+    /// Human-facing line shown next to the spinner.
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -419,6 +440,8 @@ pub struct GgufModel {
 pub struct StartedModel {
     pub model_id: String,
     pub port: u16,
+    #[serde(default)]
+    pub n_ctx: u32,
     pub base_url: String,
 }
 
@@ -427,6 +450,8 @@ pub struct StartedModel {
 pub struct ActiveLocalModel {
     pub model_id: String,
     pub port: u16,
+    #[serde(default)]
+    pub n_ctx: u32,
     pub base_url: String,
 }
 

@@ -287,6 +287,34 @@ async fn handle_connection(
                     local_models: details.2,
                 }).await;
             }
+            MobileMessage::StartLocalModel { model, gguf_path } => {
+                // The user tapped a (possibly stopped) local model in the
+                // selector. Spawn the sidecar now so it's ready by the time
+                // they send their first message — instead of wedging warm-up
+                // into the first ChatTurn, which left the phone's "Loading…"
+                // banner spinning with no work actually started.
+                match warm_up_local_model(&app, &gguf_path, &model).await {
+                    Ok(base_url) => {
+                        // Persist so the LocalGguf provider adapter + a later
+                        // ChatTurn both pick up the live endpoint.
+                        {
+                            let conn = db.lock();
+                            let _ = db::set_setting(&conn, "chat.local_gguf.base_url", &base_url);
+                            let _ = db::set_setting(&conn, "chat.local_gguf.model", &model);
+                        }
+                        let _ = send_msg(&mut write, &DesktopMessage::LocalModelReady {
+                            model,
+                            base_url,
+                        }).await;
+                    }
+                    Err(e) => {
+                        let _ = send_msg(&mut write, &DesktopMessage::LocalModelError {
+                            model,
+                            error: e,
+                        }).await;
+                    }
+                }
+            }
             MobileMessage::SpawnSession { session_id } => {
                 // Delegate spawning to the desktop frontend: it opens the session
                 // in a pane via the normal session-launcher path (frontend-owned
@@ -1030,36 +1058,13 @@ pub async fn build_available_providers(
             });
         }
 
-        // If nothing was scanned and nothing is running, don't add an empty
-        // "local_gguf" entry — the user has no local models configured.
-        // BUT: if there's a persisted base_url from a previous local_gguf session,
-        // probe it — the sidecar may still be running from a prior desktop chat.
-        if scanned.is_empty() && running_id.is_none() {
-            let (base_url, model_name) = {
-                let conn = db.lock();
-                let base = db::get_setting(&conn, "chat.local_gguf.base_url").ok().flatten();
-                let model = db::get_setting(&conn, "chat.local_gguf.model").ok().flatten();
-                (base, model)
-            };
-            if let Some(base) = base_url {
-                // Probe the endpoint to see if it's still alive.
-                let health_url = format!("{}/health", base.trim_end_matches('/'));
-                if let Ok(resp) = client.get(&health_url).timeout(std::time::Duration::from_secs(2)).send().await {
-                    if resp.status().is_success() {
-                        let model_name = model_name.unwrap_or_else(|| "local-model".to_string());
-                        eprintln!("[mobile-relay]   detected running sidecar at {} (model={})", base, model_name);
-                        providers.push(ProviderInfo {
-                            id: "local_gguf".to_string(),
-                            display_name: format!("Local — {}", model_name),
-                            models: vec![model_name],
-                            is_local: true,
-                            is_running: true,
-                            gguf_path: None,
-                        });
-                    }
-                }
-            }
-        }
+        // If nothing was scanned and nothing is running, don't add a local_gguf
+        // entry. We deliberately do NOT probe a persisted `chat.local_gguf.base_url`
+        // here: that emitted a pathless "running" phantom that the phone couldn't
+        // restart (no gguf_path → ChatTurn warm-up + StartLocalModel both skip it),
+        // and a stale /health 200 advertised a model as running when the sidecar
+        // had actually died on desktop restart. Scanned files are the source of
+        // truth; a stopped one is now startable from the phone via StartLocalModel.
     } else {
         eprintln!("[mobile-relay]   LocalModelState NOT found in app state — local models unavailable");
     }

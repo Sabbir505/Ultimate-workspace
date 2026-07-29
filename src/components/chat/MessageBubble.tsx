@@ -13,6 +13,7 @@ import type { ChatMessage } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { parseUnifiedDiff } from "../../lib/diff";
 import { InlineDiagram } from "./InlineDiagram";
+import { MermaidDiagram } from "./MermaidDiagram";
 import { MessageAttachments, parseAttachments } from "./MessageAttachments";
 
 interface Props {

@@ -20,7 +20,7 @@ function formatChatError(raw: string): string {
       const parsed = JSON.parse(raw) as Record<string, unknown>;
       const msg =
         parsed.message ||
-        parsed.error?.message ||
+        (parsed.error as { message?: string })?.message ||
         parsed.error ||
         parsed.detail ||
         parsed.msg ||

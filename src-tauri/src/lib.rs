@@ -92,6 +92,9 @@ pub fn run() {
             app.manage(chat::local_models::LocalModelState(Arc::new(
                 chat::local_models::LocalModelRegistry::new(),
             )));
+            app.manage(std::sync::Arc::new(
+                commands::local_model_market::DownloadRegistry::default(),
+            ));
 
             // Spawn the mobile relay server on a random localhost port so the
             // companion mobile app can connect and route chat requests through
@@ -261,6 +264,15 @@ pub fn run() {
             mobile::commands::start_mobile_relay,
             mobile::commands::stop_mobile_relay,
             mobile::commands::get_mobile_relay_status,
+            // local model market (Hugging Face browse + download)
+            commands::local_model_market::fetch_model_catalog,
+            commands::local_model_market::get_market_settings,
+            commands::local_model_market::set_models_directory,
+            commands::local_model_market::pick_models_directory,
+            commands::local_model_market::set_hugging_face_token,
+            commands::local_model_market::clear_hugging_face_token,
+            commands::local_model_market::start_model_download,
+            commands::local_model_market::cancel_model_download,
         ]);
 
     let app = builder

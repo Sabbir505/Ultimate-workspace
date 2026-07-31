@@ -15,6 +15,7 @@ import { useSettingsStore, type ThemeSetting } from "../../state/settings";
 import { useUiStore } from "../../state/ui";
 import { GlassSelect } from "../common/GlassSelect";
 import { useChatStore } from "../../state/chat";
+import { ModelMarket } from "./ModelMarket";
 
 const ACTION_LABELS: Record<KeybindingAction, string> = {
   openPalette: "Open command palette",
@@ -657,6 +658,16 @@ function LocalModelsPanel() {
       <details className="model-advanced local-compaction-advanced">
         <summary>Compaction (advanced)</summary>
         <LocalCompactionControls />
+      </details>
+
+      <details className="model-market-section" open>
+        <summary>Model Market (Hugging Face)</summary>
+        <ModelMarket
+          onDownloadComplete={() => {
+            setLoading(true);
+            setLoaded(false);
+          }}
+        />
       </details>
     </>
   );

@@ -731,3 +731,101 @@ export const stopMobileRelay = () =>
 export const getMobileRelayStatus = () =>
   safeInvoke<MobileRelayStatus | null>("get_mobile_relay_status");
 
+
+// ---- Local Models market (Hugging Face browse + download) ----
+
+export type ModelSort = "downloads" | "likes" | "modified";
+
+export interface CatalogEntry {
+  id: string;
+  displayName: string;
+  author: string;
+  repoId: string;
+  filename: string;
+  downloads: number;
+  likes: number;
+  lastModified?: string | null;
+  sizeBytes: number;
+  description?: string | null;
+  tags: string[];
+  sha256?: string | null;
+  downloadUrl: string;
+  vision: boolean;
+  paramsLabel?: string | null;
+  quantization?: string | null;
+  license?: string | null;
+  gated: boolean;
+}
+
+export interface FetchCatalogResult {
+  entries: CatalogEntry[];
+  hasHuggingFaceToken: boolean;
+  defaultModelsDir?: string | null;
+}
+
+export interface MarketSettings {
+  modelsDir?: string | null;
+  defaultModelsDir?: string | null;
+  hasHuggingFaceToken: boolean;
+}
+
+export type DownloadState =
+  | "starting"
+  | "downloading"
+  | "verifying"
+  | "done"
+  | "error"
+  | "cancelled";
+
+export interface DownloadProgress {
+  id: string;
+  downloadedBytes: number;
+  totalBytes?: number | null;
+  state: DownloadState;
+  bytesPerSecond: number;
+  finalPath?: string | null;
+  error?: string | null;
+}
+
+export interface FetchCatalogArgs {
+  query?: string;
+  sort?: ModelSort;
+  limit?: number;
+}
+
+export interface StartDownloadArgs {
+  id: string;
+  repoId: string;
+  filename: string;
+  downloadUrl: string;
+  expectedSha256?: string | null;
+  destDir?: string | null;
+}
+
+export const fetchModelCatalog = (args: FetchCatalogArgs = {}) =>
+  safeInvoke<FetchCatalogResult | null>("fetch_model_catalog", { args });
+
+export const getMarketSettings = () =>
+  safeInvoke<MarketSettings | null>("get_market_settings");
+
+export const setModelsDirectory = (dir: string) =>
+  safeInvoke<void>("set_models_directory", { dir });
+
+export const pickModelsDirectory = () =>
+  safeInvoke<string | null>("pick_models_directory");
+
+export const setHuggingFaceToken = (token: string) =>
+  safeInvoke<void>("set_hugging_face_token", { token });
+
+export const clearHuggingFaceToken = () =>
+  safeInvoke<void>("clear_hugging_face_token");
+
+export const startModelDownload = (args: StartDownloadArgs) =>
+  safeInvoke<void>("start_model_download", { args });
+
+export const cancelModelDownload = (id: string) =>
+  safeInvoke<void>("cancel_model_download", { id });
+
+export const onModelDownloadProgress = (
+  handler: (p: DownloadProgress) => void,
+) => safeListen<DownloadProgress>("local-model:download:progress", handler);

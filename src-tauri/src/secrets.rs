@@ -77,7 +77,7 @@ pub fn secrets_for_injection(
 
 // ---- OS keychain backend (Windows / macOS) ----
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod platform {
     use super::{account, KEYRING_MARKER, SERVICE_NAME};
     use keyring::Entry;
@@ -157,13 +157,50 @@ mod platform {
             let _ = entry.delete_credential();
         }
     }
+
+    // ---- Arbitrary app-scoped namespace/key store ----
+
+    pub fn generic_store(
+        _conn: &Connection,
+        namespace: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        Entry::new(SERVICE_NAME, &super::generic_account(namespace, key))
+            .map_err(|e| e.to_string())?
+            .set_password(value)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn generic_load(
+        _conn: &Connection,
+        namespace: &str,
+        key: &str,
+    ) -> Option<String> {
+        let entry = Entry::new(SERVICE_NAME, &super::generic_account(namespace, key)).ok()?;
+        entry.get_password().ok()
+    }
+
+    pub fn generic_remove(_conn: &Connection, namespace: &str, key: &str) {
+        if let Ok(entry) = Entry::new(SERVICE_NAME, &super::generic_account(namespace, key)) {
+            let _ = entry.delete_credential();
+        }
+    }
 }
 
-// ---- Linux (and other) fallback: obfuscated-at-rest in SQLite ----
-// NOT encryption — there is no enabled keyring backend for this target.
-// Deviation from PRD §7.16 logged in BUILD_LOG.md.
+// ---- Fallback (no keyring backend) : obfuscated-at-rest in SQLite ----
+// Linux: now uses the OS keyring (Secret Service via D-Bus) via the
+// keychain `mod platform` block above (cfg includes target_os = "linux").
+// The XOR fallback below only applies to platforms where no keyring crate
+// backend is configured. Today: none — every supported target has a real
+// keychain, so this `cfg` excludes all of them and the block is dead code.
+//
+// XOR is NOT encryption; it just hides values from a casual `strings | grep`
+// pass. The table is the encrypted-at-rest source of truth on keychain
+// platforms (the keychain is the real source; the table holds a marker blob
+// to enumerate keys cheaply without enumerating the OS keychain).
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 mod platform {
     use super::account;
     use crate::db;
@@ -292,6 +329,57 @@ mod platform {
             rusqlite::params![connector_id, field],
         );
     }
+
+    // ---- Arbitrary app-scoped namespace/key store ----
+
+    pub fn generic_store(
+        conn: &Connection,
+        namespace: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        ensure_generic_secrets_table(conn)?;
+        let blob = xor(value.as_bytes());
+        conn.execute(
+            "INSERT INTO generic_secrets (namespace, key, value_encrypted) VALUES (?1, ?2, ?3)
+             ON CONFLICT(namespace, key) DO UPDATE SET value_encrypted = excluded.value_encrypted",
+            rusqlite::params![namespace, key, blob],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn generic_load(conn: &Connection, namespace: &str, key: &str) -> Option<String> {
+        ensure_generic_secrets_table(conn).ok()?;
+        let blob: Vec<u8> = conn
+            .query_row(
+                "SELECT value_encrypted FROM generic_secrets WHERE namespace = ?1 AND key = ?2",
+                rusqlite::params![namespace, key],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()??;
+        String::from_utf8(xor(&blob)).ok()
+    }
+
+    pub fn generic_remove(conn: &Connection, namespace: &str, key: &str) {
+        let _ = conn.execute(
+            "DELETE FROM generic_secrets WHERE namespace = ?1 AND key = ?2",
+            rusqlite::params![namespace, key],
+        );
+    }
+
+    fn ensure_generic_secrets_table(conn: &Connection) -> Result<(), String> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS generic_secrets (
+                namespace TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value_encrypted BLOB NOT NULL,
+                PRIMARY KEY (namespace, key)
+            )",
+        )
+        .map_err(|e| e.to_string())
+    }
 }
 
 #[allow(dead_code)]
@@ -361,6 +449,40 @@ pub fn delete_connector_tokens(conn: &Connection, connector_id: &str) -> Result<
     platform::connector_remove(conn, connector_id, "access_token");
     platform::connector_remove(conn, connector_id, "refresh_token");
     Ok(())
+}
+
+// ---- Arbitrary namespace/key secret store (app-scoped) ----
+//
+// Used by features that don't fit the per-project or per-chat namespaces
+// above — e.g. the Hugging Face token for the Local Models market. Like
+// the other stores, values are kept out of the SQLite table on platforms
+// with a real keychain and obfuscated as a last-resort fallback.
+fn generic_account(namespace: &str, key: &str) -> String {
+    format!("conduit:{namespace}:{key}")
+}
+
+/// Store an arbitrary app-scoped secret in the OS keychain (or the
+/// obfuscated table on platforms without one). The value is never
+/// returned to the frontend.
+pub fn platform_store(
+    conn: &Connection,
+    namespace: &str,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    platform::generic_store(conn, namespace, key, value)
+}
+
+pub fn platform_load(
+    conn: &Connection,
+    namespace: &str,
+    key: &str,
+) -> Option<String> {
+    platform::generic_load(conn, namespace, key)
+}
+
+pub fn platform_remove(conn: &Connection, namespace: &str, key: &str) {
+    platform::generic_remove(conn, namespace, key);
 }
 
 #[cfg(test)]

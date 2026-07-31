@@ -79,6 +79,7 @@ export function ChatView() {
   const sendMessage = useChatStore((s) => s.sendMessage);
   const regenerate = useChatStore((s) => s.regenerate);
   const cancelStream = useChatStore((s) => s.cancelStream);
+  const deleteMessage = useChatStore((s) => s.deleteMessage);
   const previewArtifact = useChatStore((s) => s.previewArtifact);
   const setPreviewArtifact = useChatStore((s) => s.setPreviewArtifact);
   const sessions = useChatStore((s) => s.sessions);
@@ -94,6 +95,8 @@ export function ChatView() {
   const setEffort = useChatStore((s) => s.setEffort);
   const localCtx = useChatStore((s) => s.localCtx);
   const setLocalCtx = useChatStore((s) => s.setLocalCtx);
+  const thinking = useChatStore((s) => s.thinking);
+  const setThinking = useChatStore((s) => s.setThinking);
   const config = useChatStore((s) => s.config);
   const loadConfig = useChatStore((s) => s.loadConfig);
   const newChat = useChatStore((s) => s.newChat);
@@ -104,6 +107,18 @@ export function ChatView() {
 
   const activeSession = sessions.find((s) => s.id === activeChatSessionId) ?? null;
   const isLocal = activeSession?.provider === "local_gguf";
+  // Extended thinking is exposed by:
+  //  - Anthropic (and anthropic_compatible proxies that forward the field),
+  //  - Local GGUF models whose template honors chat_template_kwargs (Qwen3,
+  //    DeepSeek-R1 family; older templates ignore it silently),
+  //  - OpenAI reasoning models — but those read `reasoning_effort` (the
+  //    `effort` selector), so the explicit thinking flag is redundant. We
+  //    only show the brain button for providers where the flag actually
+  //    changes the request body.
+  const thinkingSupported =
+    activeSession?.provider === "anthropic" ||
+    activeSession?.provider === "anthropic_compatible" ||
+    activeSession?.provider === "local_gguf";
   // The provider whose cloud models the selector lists. For local_gguf
   // sessions that's the configured cloud provider (so the user can switch
   // back); for any other session it's the session's own provider. Only the
@@ -237,11 +252,16 @@ export function ChatView() {
         }
         setLocalLoading(false);
         // start_local_model persists chat.local_gguf.model + chat.active_provider
-        // in settings. Reload config so chatConfig reflects the running model —
-        // "New Chat" seeds the new session from chatConfig.model, and without
-        // this refresh the selector on a fresh chat would look empty (as if the
-        // local model had been ejected).
-        void loadConfig("local_gguf");
+        // in settings. We DON'T call loadConfig("local_gguf") here because that
+        // would overwrite `config.provider` with "local_gguf" and break the
+        // cloud-model list (see cloudProvider below) — once the active provider
+        // is local, the selector would only show local models because the
+        // cloud fetch returns [] and the local fetch is the only source of
+        // models. The cloud provider's config (the user's API key + base URL
+        // + model) is independent of which sidecar is running and must be
+        // preserved so the user can switch back without re-entering keys.
+        // The next "New Chat" reads chat.local_gguf.model directly (not via
+        // chatConfig), so this is also safe for the auto-start path.
         if (!isLocal) await setSessionProvider(activeChatSessionId, "local_gguf");
       } else if (isLocal) {
         // Cloud model picked in a local session: switch the session back to
@@ -401,6 +421,17 @@ export function ChatView() {
     void regenerate();
   }, [regenerate]);
 
+  // Delete a single message from the active chat. The store handles local
+  // state and the backend round-trip; we just feed it the message id from
+  // the rendered bubble. Skipped on the live streaming bubble (no id yet).
+  const handleDelete = useCallback(
+    (messageId?: number) => {
+      if (messageId == null) return;
+      void deleteMessage(messageId);
+    },
+    [deleteMessage],
+  );
+
   // Convert persisted messages for the bubble component.
   // MessageBubble expects { role, content } (its own ChatMessage type), so we
   // map ChatMessageRecord to that shape.
@@ -441,6 +472,7 @@ export function ChatView() {
                   ? handleRepeat
                   : undefined
               }
+              onDelete={!item.live ? () => handleDelete(item.id) : undefined}
               artifacts={item.id != null ? artifactsByMessage[item.id] : undefined}
               onPreviewArtifact={setPreviewArtifact}
             />
@@ -530,6 +562,9 @@ export function ChatView() {
         onPermissionModeChange={handlePermissionModeChange}
         chatSessionId={activeChatSessionId ?? undefined}
         usedTokens={lastInputTokens}
+        thinking={thinking}
+        onThinkingChange={setThinking}
+        thinkingSupported={thinkingSupported}
       />
     </div>
     {previewArtifact && (

@@ -358,8 +358,8 @@ pub use cost::{
 
 // chat
 pub use chat::{
-    add_chat_message, create_chat_session, delete_chat_session, get_chat_session,
-    list_active_chat_messages, list_chat_messages, list_chat_sessions,
+    add_chat_message, create_chat_session, delete_chat_message, delete_chat_session,
+    get_chat_session, list_active_chat_messages, list_chat_messages, list_chat_sessions,
     list_chat_session_connectors, mark_superseded, set_chat_session_connectors,
     set_chat_session_starred, set_chat_session_unread, touch_chat_session,
     update_chat_session_model, update_chat_session_permission_mode,

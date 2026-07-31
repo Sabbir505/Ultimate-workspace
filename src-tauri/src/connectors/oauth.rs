@@ -277,7 +277,8 @@ fn accept_one_callback(listener: &TcpListener, expected_state: &str) -> Result<S
     }
 
     let (status, body): (&str, String) = if let Some(err) = query.get("error") {
-        ("Authorization denied", format!("The authorization was denied. Reason: {err}"))
+        ("Authorization denied", format!("The authorization was denied. Reason: {}",
+            html_escape(err)))
     } else if query.contains_key("code") {
         ("Connected!", "Authorization successful. You may close this window.".to_string())
     } else {
@@ -304,6 +305,23 @@ fn accept_one_callback(listener: &TcpListener, expected_state: &str) -> Result<S
     }
     query.get("code").cloned()
         .ok_or_else(|| "redirect callback missing `code` parameter".into())
+}
+
+/// Minimal HTML-entity escaper for the OAuth callback page. Replaces the five
+/// characters that can break out of element / attribute / script context.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Build the authorization URL: vendor endpoint + client_id + redirect_uri +

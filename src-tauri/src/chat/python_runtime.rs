@@ -157,15 +157,27 @@ mod tests {
     /// hasn't run scripts/fetch-bundled-python.mjs).
     #[test]
     fn staged_bundle_imports_document_libs() {
+        // The test only runs when a real python-build-standalone bundle is
+        // staged at src-tauri/resources/python/. In CI / dev without
+        // `node scripts/fetch-bundled-python.mjs` having been run, the
+        // placeholder file is present but not a real ELF — skip rather
+        // than panic on `Exec format error`.
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let dir = std::path::Path::new(manifest_dir).join("resources").join("python");
-        let exe = match bundled_interpreter_in(&dir) {
-            Some(e) => e,
-            None => {
-                eprintln!("bundled python not staged at {dir:?} — skipping");
-                return;
-            }
+        let Some(exe) = bundled_interpreter_in(&dir) else {
+            eprintln!("bundled python not staged at {dir:?} — skipping");
+            return;
         };
+        // Cheap magic-byte probe: a real python interpreter is an ELF /
+        // Mach-O / PE binary. A 0-byte placeholder is neither.
+        let Ok(meta) = std::fs::metadata(&exe) else {
+            eprintln!("bundled python not accessible at {exe:?} — skipping");
+            return;
+        };
+        if meta.len() < 1024 {
+            eprintln!("bundled python placeholder at {exe:?} ({meta_len} bytes) — skipping", meta_len = meta.len());
+            return;
+        }
         let out = std::process::Command::new(&exe)
             .args(["-c", "import docx,pptx,openpyxl,reportlab"])
             .output()

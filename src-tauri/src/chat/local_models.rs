@@ -637,6 +637,22 @@ fn resolve_llama_server_binary() -> Result<ResolvedBinary, String> {
         ResolvedBinary { path: p.to_string_lossy().to_string(), dir }
     };
 
+    // 0. Bundled sidecar (highest priority). The `llama-server-<triple>`
+    //    launcher Tauri stages as an externalBin, with the sibling .so /
+    //    .dll / .dylib files in the same dir (from bundle.resources). The
+    //    launcher uses RUNPATH $ORIGIN to find them, so the dir returned
+    //    here MUST be used as current_dir at spawn time.
+    if let Some(dir) = bundled_llama_server_dir() {
+        let bin_name = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+        let launcher = dir.join(bin_name);
+        if launcher.is_file() {
+            return Ok(ResolvedBinary {
+                path: launcher.to_string_lossy().to_string(),
+                dir,
+            });
+        }
+    }
+
     // 1. LLAMA_SERVER_PATH env var: a file, or a directory containing the binary.
     if let Ok(path) = std::env::var("LLAMA_SERVER_PATH") {
         let p = Path::new(&path);
@@ -777,3 +793,101 @@ fn auto_ctx_size(gguf_path: &str) -> u32 {
 
 /// Arc-wrapped registry managed by Tauri (injected via `app.manage()`).
 pub struct LocalModelState(pub Arc<LocalModelRegistry>);
+
+// ---- Bundled binary resolution (sidecar) ----
+
+/// Host target triple, baked at compile time the same way
+/// `browser_mcp_register.rs` does it. Used to find the bundled
+/// `llama-server-<triple>` launcher that Tauri stages as an externalBin.
+const HOST_TRIPLE: &str = if cfg!(target_os = "windows") {
+    if cfg!(target_arch = "aarch64") {
+        "aarch64-pc-windows-msvc"
+    } else {
+        "x86_64-pc-windows-msvc"
+    }
+} else if cfg!(target_os = "macos") {
+    if cfg!(target_arch = "aarch64") {
+        "aarch64-apple-darwin"
+    } else {
+        "x86_64-apple-darwin"
+    }
+} else if cfg!(target_os = "linux") {
+    if cfg!(target_arch = "aarch64") {
+        "aarch64-unknown-linux-gnu"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    }
+} else {
+    "unknown-target"
+};
+
+/// `bin/` directory next to the running main exe where Tauri stages
+/// externalBin sidecars in a packaged install. Same layout as
+/// `browser_mcp_register.rs::mcp_binary_path()` — checked first because the
+/// installer always drops sidecars there.
+fn bundled_sidecar_dir() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    // Tauri 2 externalBin layout: <exe_dir>/<name>-<triple>[.exe].
+    // browser_mcp_register looks under "binaries/" because that's how
+    // the dev-source binary is laid out, but Tauri's actual sidecar
+    // location is right next to the main exe.
+    let sidecar_name = if cfg!(windows) {
+        format!("llama-server-{}.exe", HOST_TRIPLE)
+    } else {
+        format!("llama-server-{}", HOST_TRIPLE)
+    };
+    let sidecar = dir.join(&sidecar_name);
+    if sidecar.is_file() {
+        Some(dir.to_path_buf())
+    } else {
+        // Fallback: dev layout / NSIS root where binaries/ holds the sidecars.
+        let nested = dir.join("binaries").join(&sidecar_name);
+        if nested.is_file() {
+            return nested.parent().map(|p| p.to_path_buf());
+        }
+        if let Some(install_root) = dir.parent() {
+            let nested_root = install_root.join("binaries").join(&sidecar_name);
+            if nested_root.is_file() {
+                return nested_root.parent().map(|p| p.to_path_buf());
+            }
+        }
+        None
+    }
+}
+
+/// Resolve the bundled `llama-server` sidecar shipped alongside the main
+/// executable. The sidecar is just a small launcher that dlopens several
+/// sibling .so / .dll / .dylib files via `RUNPATH: $ORIGIN`, so the caller
+/// must spawn it with `current_dir` set to the directory returned here
+/// (the directory containing the launcher AND the .so files).
+///
+/// Returns `None` if no bundled sidecar is found — in that case the caller
+/// falls back to the env-var / PATH / hardcoded-location chain in
+/// `resolve_llama_server_binary()`.
+pub fn bundled_llama_server_dir() -> Option<std::path::PathBuf> {
+    bundled_sidecar_dir()
+}
+
+#[cfg(test)]
+mod bundled_tests {
+    use super::*;
+
+    #[test]
+    fn host_triple_is_not_unknown() {
+        // The const is set for the four supported triples (Windows,
+        // macOS arm64/x64, Linux arm64/x64). A compile-time build of any
+        // other target would still compile but should fail at runtime.
+        assert_ne!(HOST_TRIPLE, "unknown-target", "host triple must be set");
+    }
+
+    #[test]
+    fn bundled_dir_returns_none_or_existing() {
+        // On dev machines (no bundle), returns None. On packaged installs,
+        // returns the directory the sidecar lives in. Either is fine — this
+        // test just makes sure the helper doesn't panic.
+        if let Some(d) = bundled_llama_server_dir() {
+            assert!(d.is_dir(), "bundled dir must be a real directory");
+        }
+    }
+}

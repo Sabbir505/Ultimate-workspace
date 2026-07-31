@@ -73,6 +73,25 @@ async fn openai_stream_round(
     let mut content = String::new();
     let mut suppress = false;
     let mut in_think = false;
+    // Sanitize: drop ANY untrusted content that could break out of the chat
+    // bubble once persisted. The model is the source of `content` and is not
+    // trusted — strip control characters (BOM, zero-width space, NULs, ASCII
+    // controls) that have no business in user-visible text and that some
+    // React/HTML renderers handle in surprising ways. Newlines and tabs are
+    // preserved (the bubble uses them for layout).
+    let sanitize = |s: &str| -> String {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                // Keep the printable whitespace the bubble actually uses.
+                '\n' | '\r' | '\t' => out.push(c),
+                // Drop everything else in the C0 control range + DEL.
+                c if (c as u32) < 0x20 || (c as u32) == 0x7f => {}
+                c => out.push(c),
+            }
+        }
+        out
+    };
     // Per-index accumulation of (id, name, arguments).
     let mut calls: Vec<(String, String, String)> = Vec::new();
     let mut input = 0i64;
@@ -126,12 +145,13 @@ async fn openai_stream_round(
                         emit_token(app, sid, "</think>", full);
                         in_think = false;
                     }
-                    content.push_str(c);
+                    let clean = sanitize(c);
+                    content.push_str(&clean);
                     if !suppress && content.contains("<tool_call") {
                         suppress = true;
                     }
                     if !suppress {
-                        emit_token(app, sid, c, full);
+                        emit_token(app, sid, &clean, full);
                     }
                 }
             }
@@ -145,7 +165,8 @@ async fn openai_stream_round(
                         emit_token(app, sid, "<think>", full);
                         in_think = true;
                     }
-                    emit_token(app, sid, r, full);
+                    let clean = sanitize(r);
+                    emit_token(app, sid, &clean, full);
                 }
             }
             if let Some(tcs) = delta.get("tool_calls").and_then(|x| x.as_array()) {
@@ -443,6 +464,14 @@ pub(crate) async fn run_openai_tool_loop(
         });
         if let Some(e) = &req.effort {
             body["reasoning_effort"] = json!(e);
+        }
+        // Local GGUF (llama.cpp) uses `chat_template_kwargs.enable_thinking`
+        // for Qwen3 / DeepSeek-R1 thinking. Cloud OpenAI reasoning models
+        // read `reasoning_effort` (above) and ignore this flag. Only emit
+        // when the user has explicitly toggled thinking — None leaves the
+        // model at its default.
+        if let Some(on) = req.thinking {
+            body["chat_template_kwargs"] = json!({ "enable_thinking": on });
         }
 
         let (message, in_tok, out_tok, have) =

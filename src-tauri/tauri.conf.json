@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "node scripts/fetch-bundled-python.mjs && node scripts/stage-browser-mcp.mjs && npm run build",
+    "beforeBuildCommand": "node scripts/fetch-bundled-python.mjs && node scripts/stage-browser-mcp.mjs && node scripts/stage-llama-server.mjs && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -25,13 +25,13 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; script-src 'self' 'unsafe-eval' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; img-src 'self' data: blob: https:; connect-src 'self' http://localhost:* http://127.0.0.1:* https:; font-src 'self' data:; frame-src 'self' http://localhost:* http://127.0.0.1:* https:"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob: https:; connect-src 'self' http://localhost:* http://127.0.0.1:* https: api.huggingface.co huggingface.co; font-src 'self' data:; frame-src 'self' http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'"
     }
   },
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": true,
-    "targets": "nsis",
+    "targets": ["appimage", "deb", "nsis"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -45,11 +45,19 @@
         "installMode": "perMachine"
       }
     },
+    "linux": {
+      "deb": {
+        "depends": []
+      }
+    },
     "resources": [
-      "resources/python/**/*"
+      "resources/python/**/*",
+      "binaries/llama-server-x86_64-unknown-linux-gnu/lib*.so*",
+      "binaries/llama-server-x86_64-unknown-linux-gnu/lib*.so"
     ],
     "externalBin": [
-      "binaries/conduit-browser-mcp"
+      "binaries/conduit-browser-mcp",
+      "binaries/llama-server-x86_64-unknown-linux-gnu/llama-server"
     ]
   },
   "plugins": {

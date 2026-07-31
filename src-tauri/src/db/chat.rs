@@ -287,6 +287,28 @@ pub fn list_active_chat_messages(
     rows.collect()
 }
 
+/// Delete a single chat message row by id. Returns `true` if a row was
+/// removed, `false` if the id was unknown. Artifacts attributed to this
+/// message are detached (their `chat_message_id` is nulled) rather than
+/// deleted — the file artifacts themselves stay around and can be re-attributed
+/// or expired on the normal 30-day sweep, so a user who deletes the last
+/// assistant message of a turn doesn't lose generated files.
+pub fn delete_chat_message(conn: &Connection, message_id: i64) -> DbResult<bool> {
+    let changed = conn.execute(
+        "DELETE FROM chat_messages WHERE id = ?1",
+        params![message_id],
+    )?;
+    if changed > 0 {
+        // Drop any FK-style link to this message; the artifact row/file
+        // itself stays (see doc comment above).
+        let _ = conn.execute(
+            "UPDATE artifacts SET chat_message_id = NULL WHERE chat_message_id = ?1",
+            params![message_id],
+        );
+    }
+    Ok(changed > 0)
+}
+
 /// Mark the given message rows as superseded by `summary_id` (the id of the
 /// `[compacted context]` summary row that folded them in). Used both for the
 /// aged-out real turns AND any prior summary row, so re-compaction collapses
@@ -406,5 +428,65 @@ mod tests {
             get_chat_session(&conn, &cs.id).unwrap().unwrap().watch_mode.as_deref(),
             Some("off")
         );
+    }
+
+    #[test]
+    fn delete_chat_message_removes_row_and_detaches_artifacts() {
+        let conn = super::super::mem();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5").unwrap();
+        let m1 = add_chat_message(&conn, &cs.id, "user", "hi", None, None, None).unwrap();
+        let m2 =
+            add_chat_message(&conn, &cs.id, "assistant", "hello", None, None, None).unwrap();
+
+        // Attach an artifact to the assistant message we'll delete.
+        let art = super::super::insert_artifact(
+            &conn,
+            Some(&cs.id),
+            "report.docx",
+            "/tmp/report.docx",
+            "docx",
+        )
+        .unwrap();
+        super::super::attach_artifacts_to_message(&conn, &cs.id, m2.id).unwrap();
+        let linked: Option<i64> = conn
+            .query_row(
+                "SELECT chat_message_id FROM artifacts WHERE id = ?1",
+                rusqlite::params![art.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked, Some(m2.id));
+
+        // Delete m2 — row gone, artifact row+file preserved but unlinked.
+        assert!(delete_chat_message(&conn, m2.id).unwrap());
+        assert!(list_chat_messages(&conn, &cs.id)
+            .unwrap()
+            .iter()
+            .all(|m| m.id != m2.id));
+        let after: Option<i64> = conn
+            .query_row(
+                "SELECT chat_message_id FROM artifacts WHERE id = ?1",
+                rusqlite::params![art.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, None);
+        // Artifact file path still in the table.
+        let still_present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM artifacts WHERE id = ?1",
+                rusqlite::params![art.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(still_present, 1);
+
+        // m1 is untouched.
+        let remaining = list_chat_messages(&conn, &cs.id).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, m1.id);
+
+        // Unknown id is a no-op, not an error.
+        assert!(!delete_chat_message(&conn, 9999).unwrap());
     }
 }

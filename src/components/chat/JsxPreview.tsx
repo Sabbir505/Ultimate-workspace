@@ -26,10 +26,22 @@ function loadBabel(): Promise<BabelStandalone> {
   return babelPromise;
 }
 
-/** Transpile JSX/TSX to sandbox-runnable CommonJS. Throws on syntax errors. */
+/** Transpile JSX/TSX to sandbox-runnable CommonJS. Throws on syntax errors.
+ *
+ *  SECURITY: we cap the source size at compile time so a misbehaving model
+ *  can't ship a pathologically large JSX/TSX payload that bogs down Babel's
+ *  parser. 1 MB is well above any realistic React component (the whole
+ *  react-dom bundle is ~140 KB minified — anything larger than 1 MB is
+ *  almost certainly adversarial or broken). */
+const MAX_JSX_SOURCE_BYTES = 1_000_000;
+
 async function transpile(code: string, isTsx: boolean): Promise<string> {
   const Babel = await loadBabel();
-  const result = Babel.transform(code, {
+  const source =
+    code.length > MAX_JSX_SOURCE_BYTES
+      ? code.slice(0, MAX_JSX_SOURCE_BYTES) + "\n/* [source truncated for safety] */"
+      : code;
+  const result = Babel.transform(source, {
     filename: isTsx ? "artifact.tsx" : "artifact.jsx",
     presets: [
       "react",

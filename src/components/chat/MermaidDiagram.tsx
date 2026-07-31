@@ -83,6 +83,14 @@ async function loadMermaid(theme: string): Promise<MermaidModule> {
 /// surface) and pin width/height to the viewBox's pixel size (so node boxes
 /// keep their natural dimensions and node text is never clipped by a forced
 /// shrink-to-fit).
+///
+/// SECURITY: the output of this function is fed to `dangerouslySetInnerHTML`
+/// (see the JSX below). The mermaid renderer runs with `securityLevel:"loose"`
+/// which can emit arbitrary HTML inside `<foreignObject>` for some diagram
+/// types. We don't try to filter the output (that's the renderer's job) but
+/// we cap the input source to bound the work Mermaid does on untrusted model
+/// output, and we wrap the render in a try/catch so a malformed diagram
+/// surfaces a clear error instead of a broken page.
 function normalizeSvg(svg: string): string {
   let out = svg
     // `background: #fff;` / `background-color: ...;` inside the inline <style>.
@@ -205,6 +213,13 @@ export function MermaidDiagram({ code }: MermaidDiagramProps) {
     // Debounce: render only after the source stops changing for 250ms.
     // During streaming this means we render the final diagram once it lands,
     // not on every partial token (which would throw parse errors).
+    //
+    // SECURITY: cap the diagram source to a sane size before handing it to
+    // mermaid. Mermaid's parser is JS and is not designed for hostile input;
+    // a 10 MB diagram block from a misbehaving model would block the
+    // renderer thread (no streaming parse). 256 KB is well above any
+    // legitimate diagram and bounds the worst case.
+    const MAX_DIAGRAM_SOURCE_BYTES = 256 * 1024;
     const timer = setTimeout(() => {
       if (cancelled) return;
       (async () => {
@@ -214,12 +229,17 @@ export function MermaidDiagram({ code }: MermaidDiagramProps) {
           const mermaid = await loadMermaid(theme);
           if (cancelled) return;
           const id = `mermaid-${Date.now()}-${diagramSeq++}`;
+          const source =
+            trimmed.length > MAX_DIAGRAM_SOURCE_BYTES
+              ? trimmed.slice(0, MAX_DIAGRAM_SOURCE_BYTES) +
+                "\n%% [diagram source truncated for safety]"
+              : trimmed;
           // mermaid.render returns { svg, bindFunctions }; we only need svg.
-          const result = (await mermaid.render(id, trimmed)) as RenderResult;
+          const result = (await mermaid.render(id, source)) as RenderResult;
           if (cancelled) return;
           setSvg(normalizeSvg(result.svg));
           setError(null);
-          setRenderedFrom(trimmed);
+          setRenderedFrom(source);
         } catch (e) {
           if (cancelled) return;
           setSvg(null);

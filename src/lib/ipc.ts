@@ -355,6 +355,13 @@ export const listChatArtifacts = (chatSessionId: string) =>
 export const deleteArtifact = (id: string) =>
   safeInvoke<void>("delete_artifact", { id });
 
+/** Delete a single chat message (user or assistant) by id. No-op on the
+ *  backend for unknown ids; the optimistic just-sent message (negative id)
+ *  simply doesn't match anything server-side. The UI removes the bubble
+ *  from local state regardless. */
+export const deleteChatMessage = (messageId: number) =>
+  safeInvoke<void>("delete_chat_message", { messageId });
+
 /** In-app preview of a generated artifact (see `read_artifact_preview`). */
 export interface ArtifactPreview {
   path: string;
@@ -419,6 +426,9 @@ export const sendChatMessage = (
   codeExecEnabled?: boolean,
   attachments?: ChatAttachmentInput[],
   forceResearch?: boolean,
+  // Extended-thinking toggle from the composer "brain" button. undefined
+  // means "leave at provider default"; true/false forces on/off.
+  thinking?: boolean,
 ) =>
   safeInvoke<void>("send_chat_message", {
     chatSessionId,
@@ -428,6 +438,7 @@ export const sendChatMessage = (
     codeExecEnabled: codeExecEnabled ?? false,
     attachments: attachments ?? null,
     forceResearch: forceResearch ?? false,
+    thinking: thinking ?? null,
   });
 export const updateChatSessionModel = (chatSessionId: string, model: string) =>
   safeInvoke<void>("update_chat_session_model", { chatSessionId, model });

@@ -18,18 +18,24 @@ export const API_CONTEXT_WINDOW = 256_000;
 export const LOCAL_DEFAULT_CONTEXT = 16_384;
 
 /** Resolve the max context window (tokens) for the active model.
- *  - localCtx > 0 (local model with an explicit slider value) wins outright.
- *  - isLocal true but no explicit ctx: LOCAL_DEFAULT_CONTEXT.
- *  - anything else (cloud/API): API_CONTEXT_WINDOW.
- *  (`_model` is reserved for future per-model refinement; sizing is currently
- *  flat per the two-path decision above.) */
+ *  - isLocal true, localCtx > 0: the slider value (the sidecar's real -c).
+ *  - isLocal true, slider at Auto (0/undefined): LOCAL_DEFAULT_CONTEXT.
+ *  - isLocal false: API_CONTEXT_WINDOW. A stale `localCtx` from a previous
+ *    local session is intentionally ignored here — the slider is global UI
+ *    state, not per-session, and the auto-compact path (gated on LocalGguf)
+ *    never reads this value anyway, so leaking it onto an API session's
+ *    meter would just mislead the user. (`_model` is reserved for future
+ *    per-model refinement; sizing is currently flat per the two-path
+ *    decision above.) */
 export function contextWindowFor(
   _model: string | undefined | null,
   isLocal: boolean,
   localCtx?: number,
 ): number {
-  if (localCtx && localCtx > 0) return localCtx;
-  if (isLocal) return LOCAL_DEFAULT_CONTEXT;
+  if (isLocal) {
+    if (localCtx && localCtx > 0) return localCtx;
+    return LOCAL_DEFAULT_CONTEXT;
+  }
   return API_CONTEXT_WINDOW;
 }
 

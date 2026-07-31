@@ -116,6 +116,18 @@ pub fn delete_chat_session(
     db::delete_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())
 }
 
+/// Delete a single chat message (user or assistant). The optimistic
+/// just-sent message in the UI has a negative id; the backend ignores it
+/// because the SQL `DELETE` simply matches zero rows. No-op if the id is
+/// unknown (the UI tolerates a stale id and removes the bubble locally
+/// either way).
+#[tauri::command]
+pub fn delete_chat_message(message_id: i64, db: State<DbState>) -> CmdResult<()> {
+    let conn = db.0.lock();
+    db::delete_chat_message(&conn, message_id).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn update_chat_session_model(
     chat_session_id: String,
@@ -508,6 +520,10 @@ pub async fn send_chat_message(
     // "+" → "Research" option), independent of the keyword heuristic. Only
     // takes effect when tools are enabled — the scaffolding references tools.
     force_research: Option<bool>,
+    // Extended-thinking toggle from the composer "brain" button. None leaves
+    // the model at its default; Some(true)/Some(false) explicitly enable or
+    // disable thinking for this turn.
+    thinking: Option<bool>,
     chat_state: State<'_, crate::ChatState>,
     db: State<'_, DbState>,
     app: AppHandle,
@@ -915,11 +931,18 @@ pub async fn send_chat_message(
     }
 
     let shared_db = Arc::clone(&db.0);
-    // Granted filesystem roots: there is no granted-roots UI yet (the
-    // filesystem task's roots model is out of scope for the selector), so we
-    // start empty — auto-run modes gate every write outside the (empty) set
-    // until roots are granted. The selector only changes approval *defaults*
-    // within granted roots; it never expands reachability.
+    // Granted filesystem roots: until the granted-roots UI ships, an empty
+    // set is the safe default — every mutating tool call routed through
+    // `dispatch::run_tool` is then rejected by `permission::path_within_scope`
+    // unless the path lies under a granted root. The selector only changes
+    // approval *defaults* within granted roots; combined with the scope
+    // check, it can never expand reachability.
+    //
+    // The pre-grant-roots flow still works: mutating actions under
+    // `manual` / `auto_edit` / `full_auto` modes pause for a per-action
+    // approval card. The card is the user's explicit "yes, write here" for
+    // THIS one action; the path-scope gate is the backstop that prevents
+    // a path outside any granted root from being auto-run after approval.
     let fs_roots: Vec<String> = Vec::new();
     chat_state.0.send(
         chat_session_id,
@@ -938,6 +961,7 @@ pub async fn send_chat_message(
         shared_db,
         app,
         research_mode,
+        thinking,
     );
 
     Ok(())
@@ -1670,11 +1694,13 @@ mod tests {
 
     #[test]
     fn slugify_command_matches_frontend_rules() {
-        assert_eq!(slugify_command("Word documents (.docx)"), "word-documents-docx");
-        assert_eq!(slugify_command("Slide decks (.pptx)"), "slide-decks-pptx");
-        assert_eq!(slugify_command("PDF documents"), "pdf-documents");
-        assert_eq!(slugify_command("  Report — Style!! "), "report-style");
-        assert_eq!(slugify_command("..."), "");
+        // The function lives in `installed_skills`; verify it produces the
+        // same slugged names the frontend uses for slash-token matching.
+        assert_eq!(crate::installed_skills::slugify("Word documents (.docx)"), "word-documents-docx");
+        assert_eq!(crate::installed_skills::slugify("Slide decks (.pptx)"), "slide-decks-pptx");
+        assert_eq!(crate::installed_skills::slugify("PDF documents"), "pdf-documents");
+        assert_eq!(crate::installed_skills::slugify("  Report — Style!! "), "report-style");
+        assert_eq!(crate::installed_skills::slugify("..."), "");
     }
 
     #[test]
@@ -1691,30 +1717,27 @@ mod tests {
 
     #[test]
     fn parse_skills_includes_only_invoked_enabled_skills() {
-        let json = r#"[
-            {"name": "Word documents (.docx)", "command": "docx", "content": "DOCX rules", "enabled": true},
-            {"name": "PDF documents", "command": "pdf", "content": "PDF rules", "enabled": true},
-            {"name": "Slides", "content": "PPTX rules", "enabled": true},
-            {"name": "Hidden", "command": "hidden", "content": "off", "enabled": false},
-            {"name": "Empty", "command": "empty", "content": "  ", "enabled": true}
-        ]"#;
+        // Verify `parse_invoked_skills` correctly applies slash-token
+        // matching against the live built-in skill catalog. The four
+        // built-in skills (docx, pptx, pdf, diagram) are bundled at compile
+        // time, so they always exist regardless of what's on disk.
+        //
+        // The SkillSnapshot uses the skill's slug as the name (not the
+        // human-friendly "Word documents (.docx)" label) because the
+        // snapshot schema is the lightweight `(slug, name, body)` triple
+        // used for prompt injection.
+        let got = parse_invoked_skills("/docx write the report");
+        assert_eq!(got.len(), 1, "expected exactly 1 docx skill match, got: {got:?}");
+        assert_eq!(got[0].0, "docx", "expected the docx slug, got: {got:?}");
 
-        // Explicit command token invokes; everything else is excluded.
-        let got = parse_skills(Some(json), "/docx write the report");
-        assert_eq!(got, vec![("Word documents (.docx)".to_string(), "DOCX rules".to_string())]);
-
-        // Slugified-name fallback works when no explicit command is set.
-        let got = parse_skills(Some(json), "/slides for the board meeting");
-        assert_eq!(got, vec![("Slides".to_string(), "PPTX rules".to_string())]);
-
-        // No invocation → nothing, even though skills are enabled.
-        assert!(parse_skills(Some(json), "just a normal question").is_empty());
-
-        // Disabled skills never inject, even when invoked.
-        assert!(parse_skills(Some(json), "/hidden please").is_empty());
+        // No invocation → nothing, even though skills are present.
+        assert!(parse_invoked_skills("just a normal question").is_empty());
 
         // Multiple invocations in one message inject multiple skills.
-        let got = parse_skills(Some(json), "/docx /pdf compare these");
-        assert_eq!(got.len(), 2);
+        let got = parse_invoked_skills("/docx /pdf compare these");
+        assert_eq!(got.len(), 2, "expected 2 skills, got: {got:?}");
+        let slugs: std::collections::HashSet<&str> = got.iter().map(|(s, _)| s.as_str()).collect();
+        assert!(slugs.contains("docx"), "expected docx slug, got: {got:?}");
+        assert!(slugs.contains("pdf"), "expected pdf slug, got: {got:?}");
     }
 }

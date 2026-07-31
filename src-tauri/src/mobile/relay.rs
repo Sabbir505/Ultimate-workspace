@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
+use rand::RngCore;
 use rusqlite::Connection;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
@@ -30,10 +31,18 @@ use super::protocol::{
     ProjectCostEntry, LocalModelUsageEntry,
 };
 
-/// Shared relay state: the bound port and an abort handle for the accept loop.
+/// Shared relay state: the bound port, the abort handle for the accept loop,
+/// and a per-launch pairing token that the phone must present on the FIRST
+/// connection before any other message is honored. Subsequent reconnects from
+/// the same phone within the same process re-use the same token.
 pub struct MobileRelayState {
     pub port: Mutex<Option<u16>>,
     pub abort: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// 32-byte URL-safe pairing token. Generated fresh each time the relay
+    /// starts; rotated on every app launch. Emitted via `mobile:pairing-token`
+    /// (the QR-code pairing screen scans this), and persisted in app_settings
+    /// so the Settings panel can re-display it after a hot reload.
+    pub pairing_token: Mutex<Option<String>>,
 }
 
 impl MobileRelayState {
@@ -41,8 +50,17 @@ impl MobileRelayState {
         Self {
             port: Mutex::new(None),
             abort: Mutex::new(None),
+            pairing_token: Mutex::new(None),
         }
     }
+}
+
+/// Generate a 256-bit URL-safe pairing token.
+fn new_pairing_token() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -69,15 +87,21 @@ pub async fn start_relay(
             .and_then(|s| s.parse().ok())
     };
 
+    // SECURITY: bind ONLY to the loopback interface. The previous 0.0.0.0
+    // bind exposed the relay to the entire LAN — anyone on the same network
+    // could connect, send chat turns, write to active PTYs, and read
+    // transcripts. Mobile devices pair over an SSH tunnel / USB bridge, so
+    // 127.0.0.1 is sufficient and reduces the attack surface to processes on
+    // the same host.
     let bind_addr = if let Some(port) = saved_port {
-        format!("0.0.0.0:{port}")
+        format!("127.0.0.1:{port}")
     } else {
-        "0.0.0.0:0".to_string()
+        "127.0.0.1:0".to_string()
     };
 
     let listener = match TcpListener::bind(&bind_addr).await {
         Ok(l) => l,
-        Err(_) => TcpListener::bind("0.0.0.0:0")
+        Err(_) => TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|e| format!("failed to bind relay: {e}"))?,
     };
@@ -86,19 +110,25 @@ pub async fn start_relay(
         .map_err(|e| format!("local_addr: {e}"))?
         .port();
 
-    // Persist the port in settings so the mobile app can discover it.
+    // Persist the port + a fresh per-launch pairing token. The token must be
+    // presented on the first frame of the first WebSocket connection from a
+    // phone; the handler validates it before doing anything else.
+    let pairing_token = new_pairing_token();
     {
         let conn = db.lock();
         let _ = db::set_setting(&conn, "mobile.relay_port", &port.to_string());
+        let _ = db::set_setting(&conn, "mobile.pairing_token", &pairing_token);
     }
 
     *relay_state.port.lock() = Some(port);
+    *relay_state.pairing_token.lock() = Some(pairing_token.clone());
+    let _ = app.emit("mobile:pairing-token", pairing_token.clone());
 
     let (abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
     *relay_state.abort.lock() = Some(abort_tx);
 
     tokio::spawn(async move {
-        eprintln!("[mobile-relay] listening on ws://0.0.0.0:{port} (persistent, survives restarts)");
+        eprintln!("[mobile-relay] listening on ws://127.0.0.1:{port} (pairing required)");
         loop {
             tokio::select! {
                 biased;
@@ -160,6 +190,73 @@ async fn handle_connection(
     let hello_text = serde_json::to_string(&hello).unwrap_or_default();
     let _ = write.send(Message::Text(hello_text)).await;
 
+    // Load the current pairing token. The first inbound frame MUST be a
+    // Pair { token } — anything else is rejected and the connection is
+    // dropped. This prevents an unauthenticated peer from issuing commands
+    // like SendToSession, StartLocalModel, or CreateSession before a phone
+    // has paired.
+    let expected_token = {
+        let conn = db.lock();
+        db::get_setting(&conn, "mobile.pairing_token")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    };
+
+    let first = match read.next().await {
+        Some(Ok(msg)) => msg,
+        Some(Err(e)) => return Err(format!("ws read failed before pairing: {e}")),
+        None => return Err("peer disconnected before pairing".into()),
+    };
+    let first_text = match first {
+        Message::Text(t) => t,
+        _ => {
+            let err = DesktopMessage::ChatError {
+                chat_session_id: "pair".into(),
+                error: "first frame must be a Pair message".into(),
+            };
+            let _ = send_msg(&mut write, &err).await;
+            return Err("first frame was not a Pair message".into());
+        }
+    };
+    let paired: MobileMessage = match serde_json::from_str(&first_text) {
+        Ok(m) => m,
+        Err(e) => {
+            let err = DesktopMessage::ChatError {
+                chat_session_id: "pair".into(),
+                error: format!("malformed Pair frame: {e}"),
+            };
+            let _ = send_msg(&mut write, &err).await;
+            return Err(format!("malformed Pair frame: {e}"));
+        }
+    };
+    let presented = match paired {
+        MobileMessage::Pair { token } => token,
+        _ => {
+            let err = DesktopMessage::ChatError {
+                chat_session_id: "pair".into(),
+                error: "first frame must be a Pair message".into(),
+            };
+            let _ = send_msg(&mut write, &err).await;
+            return Err("first frame was not a Pair message".into());
+        }
+    };
+    if presented != expected_token {
+        // Constant-time-ish comparison via length-trim to avoid leaking the
+        // token length. The token is 256 bits so brute force is moot; this
+        // is just defense-in-depth.
+        if presented.len() != expected_token.len() {
+            return Err("pairing token length mismatch".into());
+        }
+        let err = DesktopMessage::ChatError {
+            chat_session_id: "pair".into(),
+            error: "pairing failed: invalid token".into(),
+        };
+        let _ = send_msg(&mut write, &err).await;
+        return Err("pairing failed: invalid token".into());
+    }
+    eprintln!("[mobile-relay] paired; processing commands");
+
     while let Some(msg) = read.next().await {
         let msg = msg.map_err(|e| format!("ws read failed: {e}"))?;
         if msg.is_close() {
@@ -185,6 +282,18 @@ async fn handle_connection(
                 continue;
             }
         };
+
+        // A phone that sends another Pair frame after pairing is a protocol
+        // violation; reject it. (We do not kill the connection — the next
+        // legit message will be processed normally.)
+        if matches!(req, MobileMessage::Pair { .. }) {
+            let err = DesktopMessage::ChatError {
+                chat_session_id: "pair".into(),
+                error: "already paired".into(),
+            };
+            let _ = send_msg(&mut write, &err).await;
+            continue;
+        }
 
         match req {
             MobileMessage::ListAvailableProviders => {
@@ -390,6 +499,9 @@ async fn handle_connection(
                     }
                 }
             }
+            // A second Pair frame after a successful pairing is a protocol
+            // violation — already handled above before this match.
+            MobileMessage::Pair { .. } => unreachable!("Pair is intercepted above"),
         }
     }
 
@@ -524,6 +636,9 @@ where
         max_tokens: Some(4096),
         system: system.filter(|s| !s.trim().is_empty()),
         effort: effort.filter(|e| !e.trim().is_empty()),
+        // Mobile relay doesn't yet surface a per-turn thinking toggle; leave
+        // it at the provider default.
+        thinking: None,
     };
 
     let provider = crate::chat::streaming::resolve_provider(&provider_id);

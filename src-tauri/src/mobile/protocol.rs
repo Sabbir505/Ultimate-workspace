@@ -11,6 +11,11 @@ use crate::chat::providers::ChatMessage;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum MobileMessage {
+    /// First frame every WebSocket connection MUST send. The desktop compares
+    /// `token` against the per-launch pairing token it generated when the
+    /// relay started; mismatch closes the connection before any command is
+    /// honored. The token is rotated on every app launch.
+    Pair { token: String },
     /// Query the current state of all providers.
     ListAvailableProviders,
     /// Query active CLI sessions running on the desktop.

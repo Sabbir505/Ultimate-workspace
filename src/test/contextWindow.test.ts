@@ -25,10 +25,13 @@ describe("contextWindowFor (two-path sizing)", () => {
     expect(contextWindowFor("some-unknown-model", false, undefined)).toBe(API_CONTEXT_WINDOW);
   });
 
-  it("an explicit localCtx wins even for a non-local provider (slider is authoritative)", () => {
-    // The slider value represents the real sidecar -c cap; if a session reports
-    // a ctx it should be honored over the flat API default.
-    expect(contextWindowFor("claude-sonnet-4-5", false, 64000)).toBe(64000);
+  it("ignores a stale localCtx on an API/cloud session (slider is global UI state)", () => {
+    // After dragging the Context slider on a local model, that value stays in
+    // the global store when the user switches to an API session. It must not
+    // bleed into the API meter — the auto-compact path is LocalGguf-only and
+    // never reads this value, so honoring it here would just mislead the user.
+    expect(contextWindowFor("claude-sonnet-4-5", false, 8192)).toBe(API_CONTEXT_WINDOW);
+    expect(contextWindowFor("gpt-4o", false, 131072)).toBe(API_CONTEXT_WINDOW);
   });
 });
 

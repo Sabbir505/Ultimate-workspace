@@ -71,6 +71,66 @@ function ConnectorsIcon() {
   );
 }
 
+/** Brain / lightbulb icon for the extended-thinking toggle. Filled when
+ *  thinking is on (state is locked-in to a "think harder" request), outlined
+ *  when off. The switch between filled/outlined is handled via `fill`
+ *  rather than a separate SVG. */
+function ThinkingIcon({ on }: { on: boolean }) {
+  return (
+    <svg
+      width={16}
+      height={16}
+      viewBox="0 0 24 24"
+      fill={on ? "currentColor" : "none"}
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M9.5 2a3.5 3.5 0 0 0-3.4 4.2 3 3 0 0 0-1.6 4.6 3 3 0 0 0 1 4.3 3 3 0 0 0 3 3.4h.2a1 1 0 0 0 1-.8l.3-1.7h2l.3 1.7a1 1 0 0 0 1 .8h.2a3 3 0 0 0 3-3.4 3 3 0 0 0 1-4.3 3 3 0 0 0-1.6-4.6A3.5 3.5 0 0 0 14.5 2 3.4 3.4 0 0 0 12 3.1 3.4 3.4 0 0 0 9.5 2Z" />
+      <path d="M12 3.1V18" />
+      <path d="M10 18h4" />
+    </svg>
+  );
+}
+
+/** Tri-state thinking toggle button:
+ *  - default (`null`) — provider decides. Outlined icon, neutral label.
+ *  - on (`true`) — explicit "think more". Filled icon, accent color.
+ *  - off (`false`) — explicit "no thinking". Faded icon, struck-through.
+ *
+ *  Clicking cycles null → true → false → null. Each press applies to the
+ *  NEXT message only — the store resets to null on session change. */
+function ThinkingToggle({
+  value,
+  onChange,
+}: {
+  value: boolean | null;
+  onChange: (next: boolean | null) => void;
+}) {
+  const on = value === true;
+  const off = value === false;
+  const next: boolean | null = value === null ? true : value === true ? false : null;
+  const title = value === null
+    ? "Extended thinking: provider default. Click to force ON."
+    : value === true
+      ? "Extended thinking: ON. Click to force OFF."
+      : "Extended thinking: OFF. Click to clear override.";
+  return (
+    <button
+      type="button"
+      className={`composer-thinking-btn${on ? " on" : ""}${off ? " off" : ""}`}
+      title={title}
+      aria-label={title}
+      aria-pressed={on}
+      onClick={() => onChange(next)}
+    >
+      <ThinkingIcon on={on} />
+    </button>
+  );
+}
+
 /** Compact attachment card shown in the composer before sending — a file
  *  icon, the (truncated) name, a type badge, and a remove button. */
 function AttachmentCard({
@@ -152,6 +212,14 @@ interface Props {
    *  undefined (no active session). */
   permissionMode?: PermissionMode;
   onPermissionModeChange?: (mode: PermissionMode) => void;
+  /** Per-session extended-thinking toggle. `null` (default) lets the provider
+   *  decide; `true` / `false` forces it. Hidden entirely when the active
+   *  provider is one that doesn't expose thinking (e.g. plain OpenAI). */
+  thinking?: boolean | null;
+  onThinkingChange?: (thinking: boolean | null) => void;
+  /** When true, the active provider supports extended thinking and the
+   *  "brain" button is shown. */
+  thinkingSupported?: boolean;
   /** Active chat session id — used to load + persist the per-conversation
    *  connector opt-in (attached connectors are scoped to this session only). */
   chatSessionId?: string;
@@ -180,6 +248,9 @@ export function ChatComposer({
   onPermissionModeChange,
   chatSessionId,
   usedTokens,
+  thinking,
+  onThinkingChange,
+  thinkingSupported,
 }: Props) {
   const [content, setContent] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
@@ -594,6 +665,12 @@ export function ChatComposer({
               mode={permissionMode!}
               onModeChange={onPermissionModeChange!}
               variant="inline"
+            />
+          )}
+          {thinkingSupported && onThinkingChange && (
+            <ThinkingToggle
+              value={thinking ?? null}
+              onChange={onThinkingChange}
             />
           )}
           {attachError && <span className="composer-attach-error">{attachError}</span>}

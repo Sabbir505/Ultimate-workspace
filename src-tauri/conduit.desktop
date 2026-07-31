@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Conduit
+GenericName=AI Coding Workspace
+Comment=Local-first, multi-pane desktop shell for AI coding agents
+Exec=conduit %F
+Icon=conduit
+Terminal=false
+Type=Application
+Categories=Development;IDE;
+StartupNotify=true
+StartupWMClass=conduit
+MimeType=text/plain;text/markdown;application/x-shellscript;
+Keywords=AI;Agent;IDE;Development;Terminal;

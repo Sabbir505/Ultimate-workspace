@@ -46,14 +46,24 @@ const LIBS = ["python-docx", "python-pptx", "openpyxl", "reportlab"];
 
 // One entry per build target we ship. `archive` is the python-build-standalone
 // tarball filename; `exe`/`pip` are the interpreter path RELATIVE to DEST after
-// extraction (the tarball's leading `python/` dir is stripped with
-// --strip-components=1, so python.exe lands at <DEST>/python.exe — matching
-// python_runtime.rs, which looks for <resource_dir>/python/python.exe).
+// extraction. The tarball's leading `python/` dir is stripped with
+// --strip-components=1; Windows lands at <DEST>/python.exe, Linux at
+// <DEST>/bin/python3. python_runtime.rs looks for the right path per OS.
 const TARGETS = {
   "x86_64-pc-windows-msvc": {
     archive: `cpython-${PBS_PY}+${PBS_TAG}-x86_64-pc-windows-msvc-install_only_stripped.tar.gz`,
     exe: "python.exe",
     pip: "python.exe",
+  },
+  "x86_64-unknown-linux-gnu": {
+    archive: `cpython-${PBS_PY}+${PBS_TAG}-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz`,
+    exe: "bin/python3",
+    pip: "bin/python3",
+  },
+  "aarch64-unknown-linux-gnu": {
+    archive: `cpython-${PBS_PY}+${PBS_TAG}-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz`,
+    exe: "bin/python3",
+    pip: "bin/python3",
   },
 };
 
@@ -70,6 +80,7 @@ function hostTarget() {
   if (platform === "darwin" && arch === "x64") return "x86_64-apple-darwin";
   if (platform === "darwin" && arch === "arm64") return "aarch64-apple-darwin";
   if (platform === "linux" && arch === "x64") return "x86_64-unknown-linux-gnu";
+  if (platform === "linux" && arch === "arm64") return "aarch64-unknown-linux-gnu";
   return null;
 }
 

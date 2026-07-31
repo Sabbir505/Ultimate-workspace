@@ -113,6 +113,14 @@ pub fn spawn_shell(
 /// Runs a command string through a shell: `cmd.exe /C` on Windows, a POSIX
 /// login shell (`$SHELL -lc`, fallback `sh -lc`) elsewhere — login mode so
 /// the user's PATH/profile tweaks (nvm, homebrew, …) apply to quick actions.
+///
+/// SECURITY: the `command` is a string the frontend passed in from a
+/// quick-action or harness login. The shell will interpret it (pipes,
+/// redirects, expansions, …) so this is intentionally a shell — a
+/// well-structured CommandSpec with argv would silently swallow shell
+/// features. Callers are responsible for not letting untrusted model
+/// output flow into this argument; the frontend wires it from user-curated
+/// quick actions and explicit input only.
 fn shell_spec(command: &str) -> CommandSpec {
     #[cfg(windows)]
     {

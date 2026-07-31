@@ -137,6 +137,11 @@ impl ChatManager {
     ///
     /// The user message is assumed already persisted by the caller (commands layer).
     /// Cancelling any existing stream for this session first.
+    ///
+    /// `thinking` toggles extended thinking on the request:
+    /// - Anthropic: emits `thinking: {"type":"enabled","budget_tokens":…}`.
+    /// - OpenAI / OpenRouter: ignored (reasoning is gated by `effort`).
+    /// - Local GGUF: emits `chat_template_kwargs.enable_thinking`.
     pub fn send(
         self: &Arc<Self>,
         chat_session_id: String,
@@ -160,6 +165,7 @@ impl ChatManager {
         db: Arc<Mutex<Connection>>,
         app: AppHandle,
         research_mode: bool,
+        thinking: Option<bool>,
     ) {
         // Cancel any existing stream for this session.
         self.cancel(&chat_session_id);
@@ -171,6 +177,7 @@ impl ChatManager {
             max_tokens: Some(4096),
             system: system.filter(|s| !s.trim().is_empty()),
             effort,
+            thinking,
         };
 
         // OpenRouter and LocalGguf speak the OpenAI wire format, so they ride

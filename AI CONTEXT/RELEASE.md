@@ -22,6 +22,24 @@ This doc is the exact recipe. Follow it top-to-bottom each time you release.
   — a file Tauri generates automatically on build and you attach to a GitHub
   Release. GitHub serves the latest release's assets at that stable URL.
 
+## Platforms
+
+Conduit ships for **Windows (NSIS)** and **Linux (AppImage + deb)**. The
+GitHub Actions workflow (`.github/workflows/build.yml`) builds both on tag
+push (`v*`) and publishes a single release with artifacts for every platform,
+plus a shared cross-platform `latest.json` (one `platforms` entry per OS).
+
+- **Windows** installs download the signed `.exe` updater package; the updater
+  runs it in `passive` mode (a progress UI, no manual steps).
+- **Linux AppImage** updates: the Tauri updater plugin surfaces "a new version
+  is available" and links to the release; AppImage auto-replace is best-effort
+  (the `.AppImage` is a portable single-file binary — to update, download the
+  new one and replace the old file). The `latest.json` `linux-x86_64` entry
+  carries the download URL for this.
+- **Linux deb** packages are for apt-based distros; `sudo dpkg -i` installs,
+  but the updater plugin does not auto-replace debs — treat deb as the
+  install-once path; use the AppImage for auto-updates.
+
 ## Prerequisites
 
 - The private key on the machine that builds releases. It's already at

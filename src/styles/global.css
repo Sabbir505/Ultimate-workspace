@@ -3446,6 +3446,12 @@ table.kv th {
   color: var(--text);
   background: var(--surface-2);
 }
+/* Destructive action (delete) — turns red on hover so it reads as a
+ * "this removes content" gesture rather than a neutral toggle. */
+.chat-msg-action-danger:hover {
+  color: #d44;
+  background: rgba(220, 60, 60, 0.12);
+}
 .chat-bubble-inner {
   padding: 10px 14px;
   border-radius: var(--radius);

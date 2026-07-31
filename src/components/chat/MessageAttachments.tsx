@@ -110,7 +110,17 @@ export function parseAttachments(
         (la) => la.kind === "image" && la.name === a.name,
       );
       if (live?.data && live.mediaType) {
-        a.thumbDataUri = `data:${live.mediaType};base64,${live.data}`;
+        // MIME allowlist: only forward known image media types to a data:
+        // URI. An attacker who controls the `mediaType` field (a model
+        // replying to the user with a synthetic attachment marker) could
+        // otherwise set text/html, image/svg+xml-with-script, or
+        // application/javascript, which a permissive renderer would treat
+        // as active content. The frontend receives the marker from the
+        // backend (which in turn trusts the user) but defensively the
+        // frontend double-checks.
+        if (/^image\/(png|jpe?g|gif|webp|bmp)$/i.test(live.mediaType)) {
+          a.thumbDataUri = `data:${live.mediaType};base64,${live.data}`;
+        }
       }
     }
   }

@@ -37,6 +37,7 @@ pub fn openai_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -> V
         openai_fn(LIST_DIRECTORY, LIST_DIRECTORY_DESC, list_directory_parameters()),
         openai_fn(READ_FILE, READ_FILE_DESC, read_file_parameters()),
         openai_fn(SEARCH_FILES, SEARCH_FILES_DESC, search_files_parameters()),
+        openai_fn(SEARCH_CONTENT, SEARCH_CONTENT_DESC, search_content_parameters()),
     ]);
     // Mutating filesystem tools — stripped from the schema under read_only.
     if mode != permission::PermissionMode::ReadOnly {
@@ -98,6 +99,7 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -
         anthropic_fn(LIST_DIRECTORY, LIST_DIRECTORY_DESC, list_directory_parameters()),
         anthropic_fn(READ_FILE, READ_FILE_DESC, read_file_parameters()),
         anthropic_fn(SEARCH_FILES, SEARCH_FILES_DESC, search_files_parameters()),
+        anthropic_fn(SEARCH_CONTENT, SEARCH_CONTENT_DESC, search_content_parameters()),
     ]);
     if mode != permission::PermissionMode::ReadOnly {
         specs.push(anthropic_fn(WRITE_FILE, WRITE_FILE_DESC, path_content_parameters()));
@@ -405,7 +407,7 @@ fn edit_file_parameters() -> Value {
             },
             "find": {
                 "type": "string",
-                "description": "The exact substring to replace (first occurrence).",
+                "description": "The exact substring to replace. Must be unique in the file unless expected_matches or all_occurrences is also set.",
             },
             "replace": {
                 "type": "string",
@@ -414,6 +416,15 @@ fn edit_file_parameters() -> Value {
             "append": {
                 "type": "string",
                 "description": "If set, append this text to the end of the file instead of find/replace.",
+            },
+            "expected_matches": {
+                "type": "integer",
+                "description": "How many times 'find' should occur. If the actual count differs, the edit is REJECTED with a line-numbered list of all matches so you can disambiguate. Omit to require uniqueness by default (the safest path).",
+            },
+            "all_occurrences": {
+                "type": "boolean",
+                "default": false,
+                "description": "If true, replace every occurrence of 'find' (bulk rename / refactor). If false (default), the find must be unique OR match expected_matches exactly — a multi-match is an error so you don't silently mis-edit.",
             }
         },
         "required": ["path"],
@@ -474,6 +485,47 @@ fn search_files_parameters() -> Value {
             "query": {
                 "type": "string",
                 "description": "Substring to match against file/directory names (case-insensitive).",
+            }
+        },
+        "required": ["path", "query"],
+    })
+}
+
+fn search_content_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Absolute path of the directory to search under.",
+            },
+            "query": {
+                "type": "string",
+                "description": "Substring (default) or regex (when regex: true) to match inside files.",
+            },
+            "regex": {
+                "type": "boolean",
+                "default": false,
+                "description": "If true, query is a regex (regex crate syntax). Otherwise the query is matched as a literal substring.",
+            },
+            "glob": {
+                "type": "string",
+                "description": "Optional file-name glob filter, e.g. '*.rs' or '**/test_*.py'.",
+            },
+            "case_insensitive": {
+                "type": "boolean",
+                "default": false,
+                "description": "Match case-insensitively.",
+            },
+            "max_results": {
+                "type": "integer",
+                "default": 100,
+                "description": "Cap on matches returned. Set higher for broad sweeps, lower for tight loops.",
+            },
+            "include_hidden": {
+                "type": "boolean",
+                "default": false,
+                "description": "Include dotfile/dotdir entries. Note: build/cache dirs (node_modules, .git, target, etc.) are skipped regardless.",
             }
         },
         "required": ["path", "query"],

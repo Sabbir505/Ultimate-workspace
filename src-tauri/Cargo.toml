@@ -92,6 +92,13 @@ dirs = "5"
 # Connectors OAuth flow (opens the vendor's authorize URL in the user's
 # default browser, then captures the redirect on a loopback server).
 open = "5"
+# Pure-Rust ripgrep-style regex engine for the `search_content` chat tool.
+# The `grep` crate provides a streaming `Searcher` so memory stays bounded
+# by line length, not file size, even when scanning huge source files.
+grep = "0.3"
+# Glob pattern matching for the `search_content` tool's `glob` parameter
+# (`*.rs`, `**/test_*.py`, etc.). Pure-Rust, no native deps.
+globset = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
@@ -104,6 +111,13 @@ keyring = { version = "3", features = ["windows-native"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
+
+# Linux: Secret Service API via D-Bus (gnome-keyring, KWallet, KeePassXC, etc.)
+# The user must have a Secret Service implementation running on their session.
+# Falls back gracefully if no service is available (keyring crate logs a warning
+# and operations return Err — secrets.rs surfaces the error to the caller).
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["linux-native", "sync-secret-service"] }
 
 [profile.dev]
 incremental = true

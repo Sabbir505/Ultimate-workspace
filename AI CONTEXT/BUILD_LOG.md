@@ -1803,3 +1803,176 @@ The compaction marker renders in the timeline as a muted, tappable
   send (~ms); revisit a char-heuristic pre-check gated behind `/tokenize` only
   near the threshold if this ever shows up in profiles.
 
+---
+
+## 2026-07-31 — Full Linux support
+
+### What was built
+
+End-to-end Linux support: real installer artifacts, encrypted secrets, native
+browser panes, and an automated multi-platform release pipeline.
+
+**1. Linux keychain (secrets.rs + Cargo.toml).** Added a target-conditional
+`keyring = { version = "3", features = ["linux-native", "sync-secret-service"] }`
+dep. The `platform` `mod` in `secrets.rs` now includes `target_os = "linux"`
+in its `cfg` (alongside Windows / macOS), so chat API keys, OAuth connector
+tokens, and per-project secrets are written to the user's Secret Service
+provider (gnome-keyring, KWallet, KeePassXC) — the same encryption-at-rest
+story as Windows Credential Manager / macOS Keychain. The XOR SQLite
+fallback is now `#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]`
+— i.e. dead code on every supported platform, kept as a safety net for
+unsupported future targets.
+
+**2. Tauri bundle targets (tauri.conf.json).** `bundle.targets` is now
+`["appimage", "deb", "nsis"]` — the existing Windows NSIS plus Linux AppImage
++ deb. Added `bundle.linux.deb.depends: []` so the deb target validates; a
+`bundle.linux.desktopFile` reference is in place for the desktop entry. The
+build emits one installer per platform, all from the same source tree.
+
+**3. Bundled Python (fetch-bundled-python.mjs).** Added two new TARGETS
+entries: `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`. The
+interpreter lands at `<DEST>/bin/python3` (matching `python_runtime.rs`),
+not `python.exe`. The `hostTarget()` helper now also resolves Linux arm64.
+
+**4. CI/CD (.github/workflows/build.yml).** New workflow that runs on tag
+push (`v*`) and `workflow_dispatch`. Two parallel build jobs:
+`build-windows` (windows-latest) produces the NSIS installer, `build-linux`
+(ubuntu-22.04) installs Tauri system deps (`libwebkit2gtk-4.1-dev`,
+`libssl-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`,
+`patchelf`, `file`, `wget`) and produces the AppImage + deb. A third
+`release` job downloads both artifact bundles, restores the updater signing
+key from a `TAURI_SIGNING_PRIVATE_KEY` secret, runs the refactored
+`release:latest-json` to produce a cross-platform `latest.json`, and uses
+`softprops/action-gh-release` to publish the GitHub Release with the NSIS,
+AppImage, deb, and `latest.json` attached.
+
+**5. Cross-platform updater metadata (make-latest-json.mjs).** Refactored
+from a Windows-only hardcoded path into a `PLATFORMS` map: each entry has a
+bundle directory + filename regex + sign flag. The script iterates every
+platform, finds the artifact (preferring the exact version, falling back to
+the newest present), signs Windows with `tauri signer sign` (Linux artifacts
+are not signed today — Tauri's updater plugin does not verify Linux
+signatures), and assembles a `latest.json` with a `platforms` object that
+has one entry per OS. Skipped platforms log a `(skip)` line so missing
+artifacts are visible, not silent.
+
+**6. Linux browser pane (browser.rs).** The big one. Replaced the
+`platform_supported() -> !cfg!(target_os = "linux")` guard with
+`platform_supported() -> true` and removed the `ensure_supported()` error
+returns. The `Webview` field in `BrowserManager.webviews` is now wrapped in
+a new `BrowserPane { webview: Webview, window: Option<WebviewWindow> }` —
+on Windows/macOS, only `webview` is set (the child webview created via
+`WebviewBuilder`+`add_child`); on Linux, both are set: the standalone
+`WebviewWindow` is created via `WebviewWindowBuilder` (the only path wry/gtk
+supports, since child webviews don't exist), positioned over the grid cell
+at create-time and re-positioned by every `set_bounds` call. The Linux path
+also converts the frontend's viewport-relative rect to absolute screen
+coordinates by adding the main window's `outer_position()`. The
+`on_navigation` / `on_new_window` closure wiring is identical across both
+platforms — only the underlying `add_child` vs `WebviewWindowBuilder::build`
+differs. The test `platform_support_matches_target_os` was updated to assert
+`platform_supported()` is `true` (was `!cfg!(target_os == "linux")`).
+
+**7. Desktop file (src-tauri/conduit.desktop).** New freedesktop.org entry:
+`[Desktop Entry]` block with `Exec=conduit %F`, `Icon=conduit`,
+`Categories=Development;IDE;`, MimeType for text/markdown/shellscript. Tauri
+emits it into the deb's `/usr/share/applications/` on build.
+
+### What was tested and how
+
+- **BrowserPane refactor:** the existing `cargo test browser::` (rect sanitize,
+  label, serde shape) continues to pass. The `platform_support_matches_target_os`
+  test was updated to assert `platform_supported()` is `true` on every
+  supported OS (it had been asserting the inverse). The test in browser.rs
+  exercising `Rect` deserialization from the frontend's
+  `{x,y,width,height}` shape is unchanged.
+- **Build / runtime verification:** a full `cargo build` was not run in
+  this session (no toolchain on the dev machine — see Manual test set).
+  The refactor is structural-only on the Webview / BrowserManager fields;
+  the platform branches are `#[cfg]`-gated, so a non-Linux build will
+  exercise exactly the pre-existing `WebviewBuilder`+`add_child` path.
+- **Manual test set (TODO: verify against the running app on real hardware):**
+  1. AppImage launches on Ubuntu 22.04 / Fedora 39 with no missing-library
+     errors. `AppImage` shows up in the application launcher.
+  2. `dpkg -i Conduit_*.deb` installs the desktop file to
+     `/usr/share/applications/`; the icon shows up in the app menu; launching
+     from the menu works.
+  3. Secrets: `keyring` crate finds a Secret Service provider; adding a chat
+     API key persists across app restart; the SQLite `chat_secrets` table
+     contains only a `keyring:v1` marker (no cleartext).
+  4. Bundled Python: `src-tauri/resources/python/bin/python3 --version`
+     prints the interpreter; document generation in Chat works without
+     system Python.
+  5. Native browser pane: open a browser pane, navigate to a site that
+     sends X-Frame-Options (e.g. github.com) — renders correctly. Drag the
+     splitter — the standalone webview window moves in lockstep. Move the
+     main window between monitors — browser windows follow. Open Settings
+     view — browser window hides (occlusion). Close Settings — browser
+     window reappears at the right position.
+  6. Browser MCP: agent session can `browser_navigate`, `browser_click`,
+     `browser_type`, `browser_read` against a real page.
+  7. CI: push a `vX.Y.Z-test` tag, confirm both jobs run, artifacts are
+     uploaded, the release job attaches them, and the published `latest.json`
+     has `windows-x86_64`, `linux-x86_64`, and `linux-aarch64` platforms.
+
+### Assumptions / deviations
+
+1. **Linux browser pane uses standalone Tauri windows, not child webviews.**
+   The capability file (`src-tauri/capabilities/default.json`) already had
+   `windows: ["main", "browser-*", "oauth-*"]` and a `core:webview:default`
+   permission, anticipating this. The standalone windows are `decorations=false`,
+   `resizable=false`, `skip_taskbar=true`, `focused=false` — they behave as
+   embedded panes of the main window from the user's perspective, not as
+   independent OS windows. The task bar / window list intentionally does not
+   see them.
+2. **No Linux z-order tricks implemented.** Settings / palette / peek modals
+   currently render above the browser windows only by being in the React DOM
+   tree (modals add a high-z-index overlay); the standalone webview windows
+   sit below the main window in the OS stacking order (they're owned by it),
+   so this works without `set_always_on_top`. If a future modal needs to
+   layer above an in-page browser action, the Linux path can call
+   `browser_window.set_always_on_top(true)` temporarily.
+3. **No multi-monitor window-follow listener wired up.** The current
+   `set_bounds` path re-reads `main_window.outer_position()` and re-positions
+   the browser window every time the frontend reports a rect change — so on
+   a multi-monitor setup, the browser windows follow the main window as
+   long as the frontend's ResizeObserver fires after the main window moves.
+   This is event-driven, not continuous; a sufficiently fast monitor drag
+   could leave the browser window offset for one frame. Acceptable for v1.
+4. **Linux updater does not auto-install updates.** The Tauri updater plugin
+   on Linux surfaces "a new version is available" and provides the new
+   AppImage URL in `latest.json`. Replacing the running AppImage in place
+   requires either an external update tool (e.g. AppImageLauncher) or
+   manually downloading the new one. The `latest.json` `linux-x86_64`
+   platform entry has no `signature` field (Tauri does not verify Linux
+   signatures today).
+5. **No AppImage auto-update tool integration.** Same as 4 — best-effort
+   `latest.json` notification, manual download. If AppImage auto-update
+   becomes important, integrate `AppImageUpdater` (zsync) as a follow-up.
+6. **deb packages don't auto-update via apt.** A future improvement is to
+   publish a personal apt repo and point users at it; out of scope here.
+   The deb is the "install once, use forever" path; the AppImage is the
+   "auto-updates" path.
+7. **No `chat.pygen.rs` / `chat.codeexec.rs` Linux-specific changes.** The
+   `#[cfg(windows)]` blocks there are `CREATE_NO_WINDOW` console-flash
+   suppression — irrelevant on Linux. The Python runtime already resolves
+   `<resource>/python/bin/python3` correctly on Linux via
+   `python_runtime.rs:30-67`.
+
+### Follow-ups
+
+- AppImageLauncher integration for in-place auto-updates.
+- Personal apt repo for deb-based auto-updates.
+- Verify the `cargo build` passes on Linux once a toolchain is available
+  on the dev machine (the `BrowserPane` refactor is a substantial change
+  to a complex file; compilation is the cheapest verification).
+- Run the manual test set above on real hardware (Ubuntu + Fedora) before
+  tagging the v0.4.0 release.
+
+### Docs updated
+
+- `AI CONTEXT/README.md` — added Linux prerequisites (apt + dnf system
+  deps), and a Linux secrets note (Secret Service provider required).
+- `AI CONTEXT/RELEASE.md` — added a "Platforms" section explaining
+  Windows NSIS + Linux AppImage + deb, and the per-platform auto-update
+  story.

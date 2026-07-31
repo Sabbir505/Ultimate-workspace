@@ -9,6 +9,7 @@ import {
   cancelChatMessage,
   createChatSession,
   deleteChatApiKey,
+  deleteChatMessage,
   deleteChatSession,
   generateChatTitle,
   getChatConfig,
@@ -139,6 +140,11 @@ interface ChatState {
   error: string | null;
   /** Reasoning effort sent with messages ("" = provider default). */
   effort: string;
+  /** Per-session extended-thinking toggle. `true` enables the thinking
+   *  block on Anthropic / `chat_template_kwargs.enable_thinking` on local
+   *  GGUF (Qwen3, DeepSeek-R1); cloud OpenAI ignores it. `false` explicitly
+   *  suppresses thinking; `null` falls back to the provider default. */
+  thinking: boolean | null;
   /** Context size (tokens) for local GGUF models; 0 = auto (picked from the
    *  GGUF file size). Applied when the llama-server sidecar (re)starts. */
   localCtx: number;
@@ -186,6 +192,7 @@ interface ChatState {
   setSessionProvider: (chatSessionId: string, provider: string) => Promise<void>;
   setEffort: (effort: string) => void;
   setLocalCtx: (ctx: number) => void;
+  setThinking: (thinking: boolean | null) => void;
   setToolsEnabled: (enabled: boolean) => void;
   setCodeExecEnabled: (enabled: boolean) => void;
   sendMessage: (
@@ -195,6 +202,11 @@ interface ChatState {
   ) => Promise<void>;
   /** Re-run the last user message to get a fresh assistant response. */
   regenerate: () => Promise<void>;
+  /** Delete one message (user or assistant) from the active chat, both in
+   *  the local state and the backend. The optimistic just-sent message has
+   *  a negative id and the backend's DELETE matches zero rows; we still
+   *  drop it locally so the bubble disappears immediately. */
+  deleteMessage: (messageId: number) => Promise<void>;
   cancelStream: () => Promise<void>;
   /** Open/close the artifact preview pane. */
   setPreviewArtifact: (artifact: ChatArtifact | null) => void;
@@ -238,6 +250,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   config: null,
   error: null,
   effort: "",
+  // null = no override (provider default). The composer's "brain" button
+  // flips this to true/false and resets to null on session change.
+  thinking: null,
   localCtx: 0,
   // Tools are on by default so the model itself decides when to web-search,
   // generate a file/document/diagram, fetch a URL or run code — the user no
@@ -274,10 +289,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (deletedSessions.has(chatSessionId)) return;
     // Opening a chat clears its unread mark (persisted only if it was set).
     const wasUnread = get().sessions.find((s) => s.id === chatSessionId)?.unread ?? false;
+    // Reset the per-session thinking override to the provider default
+    // whenever the user switches chats. The "brain" button is per-session.
     set((s) => ({
       activeChatSessionId: chatSessionId,
       error: null,
       previewArtifact: null,
+      thinking: null,
       sessions: s.sessions.map((sess) =>
         sess.id === chatSessionId && sess.unread ? { ...sess, unread: false } : sess,
       ),
@@ -461,6 +479,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setLocalCtx: (localCtx) => set({ localCtx }),
 
+  /** Toggle the extended-thinking flag for the next message. `null` clears
+   *  the override so the provider default is used. */
+  setThinking: (thinking) => set({ thinking }),
+
   setToolsEnabled: (toolsEnabled) =>
     set(toolsEnabled ? { toolsEnabled } : { toolsEnabled, codeExecEnabled: false }),
 
@@ -469,8 +491,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set(codeExecEnabled ? { codeExecEnabled, toolsEnabled: true } : { codeExecEnabled }),
 
   sendMessage: async (content, attachments, forceResearch) => {
-    const { activeChatSessionId, messages, sessions, effort, toolsEnabled, codeExecEnabled } =
-      get();
+    const {
+      activeChatSessionId,
+      messages,
+      sessions,
+      effort,
+      toolsEnabled,
+      codeExecEnabled,
+      thinking,
+    } = get();
     if (!activeChatSessionId) return;
     if (deletedSessions.has(activeChatSessionId)) return;
     // Guard against a double-send while a turn is already streaming for this
@@ -531,6 +560,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       codeExecEnabled,
       attachments,
       forceResearch,
+      thinking === null ? undefined : thinking,
     );
   },
 
@@ -542,6 +572,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const lastUser = [...messages].reverse().find((m) => m.role === "user");
     if (!lastUser) return;
     await get().sendMessage(lastUser.content);
+  },
+
+  // Delete a single chat message by id. Optimistically removes the bubble
+  // from the active session's message list, then asks the backend to
+  // confirm. Persisted artifacts attributed to the message are detached
+  // server-side (not deleted) so a user wiping a turn doesn't lose their
+  // generated files — the artifact library still lists them.
+  deleteMessage: async (messageId) => {
+    set((s) => {
+      // Drop the bubble from the local list. Negative ids are optimistic
+      // just-sent bubbles that never round-tripped to the DB, so a missing
+      // match here is fine — the local filter simply doesn't remove anything.
+      const nextMessages = s.messages.filter((m) => m.id !== messageId);
+      // If the deleted message had attributed artifacts, clear the local
+      // attribution map. The artifact rows/files stay (the backend detaches
+      // them, not deletes) but the per-message chip row is gone.
+      if (nextMessages.length !== s.messages.length) {
+        const nextByMessage = { ...s.artifactsByMessage };
+        delete nextByMessage[messageId];
+        return { messages: nextMessages, artifactsByMessage: nextByMessage };
+      }
+      return {};
+    });
+    try {
+      await deleteChatMessage(messageId);
+    } catch (err) {
+      console.warn("deleteMessage failed", err);
+    }
   },
 
   setPreviewArtifact: (previewArtifact) => set({ previewArtifact }),

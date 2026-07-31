@@ -94,7 +94,7 @@ pub enum PermissionDecision {
 /// The mutating filesystem tools — the ones that change disk state. Used to
 /// classify a tool name without a giant `matches!` sprinkled through the
 /// check function. Kept in sync with the tool-name constants in `tools.rs`.
-fn is_mutating_fs_tool(name: &str) -> bool {
+pub fn is_mutating_fs_tool(name: &str) -> bool {
     matches!(
         name,
         WRITE_FILE | EDIT_FILE | DELETE_FILE | MOVE_FILE | COPY_FILE
@@ -272,6 +272,28 @@ pub fn path_within_granted_roots(path: &str, granted_roots: &[String]) -> bool {
         .iter()
         .map(|r| canonicalize(r))
         .any(|root| needle == root || needle.starts_with(&root))
+}
+
+/// Hard scope check: a mutating tool call is only allowed when its target
+/// `path` lies within a granted root. Used in addition to the approval gate
+/// so that a single approval cannot be re-used (intentionally or by mistake)
+/// to write to an arbitrary absolute path. This is the wire that the
+/// filesystem task's "granted roots" model needs: without it, `check_permission`
+/// only changed approval *defaults*, not what's reachable.
+///
+/// Reads (list_directory / read_file / search_files / search_content) remain
+/// unscoped — a user explicitly opening a file is a deliberate act and reading
+/// a file the model can see the path of is needed for legitimate workflows
+/// (e.g. "summarize this CSV"). Mutating actions are the dangerous ones, and
+/// the read-then-write flow is gated behind a per-action approval card on top.
+pub fn path_within_scope(path: &str, granted_roots: &[String]) -> bool {
+    if granted_roots.is_empty() {
+        // No roots granted → no mutating tool is allowed to touch disk.
+        // (Approval cards still fire under Manual mode, but the write is
+        // rejected at the gate.)
+        return false;
+    }
+    path_within_granted_roots(path, granted_roots)
 }
 
 /// Normalize a path for comparison: lowercase, strip the Windows drive `\\?\`

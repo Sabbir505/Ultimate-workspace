@@ -53,6 +53,17 @@ pub struct ChatRequest {
     /// `reasoning_effort` on OpenAI-style requests; ignored by Anthropic.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Extended-thinking toggle from the composer.
+    ///
+    /// - `Some(true)`  — enable extended thinking (Anthropic) /
+    ///   `chat_template_kwargs.enable_thinking` (Qwen3 / DeepSeek-R1 GGUF).
+    /// - `Some(false)` — explicitly turn it off (omits the request fields).
+    /// - `None`        — leave the field at the provider default (no override).
+    ///
+    /// OpenAI reasoning models (o-series, DeepSeek-R1) read `reasoning_effort`
+    /// instead and ignore this flag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -120,6 +131,22 @@ struct AnthropicWireBody {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<String>,
+    /// Anthropic extended thinking. Only emitted when the user has explicitly
+    /// toggled it on (composer "brain" icon). `budget_tokens` is bounded by
+    /// `max_tokens` so the thinking block can't blow past the model's
+    /// generation cap; we leave 1024 tokens of room for the visible answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<AnthropicThinking>,
+}
+
+/// Anthropic extended-thinking config. Sent as `{"type": "enabled",
+/// "budget_tokens": N}`. `budget_tokens` must be < `max_tokens`.
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+struct AnthropicThinking {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    budget_tokens: i64,
 }
 
 #[derive(Serialize)]
@@ -146,6 +173,13 @@ fn anthropic_request(
     base: &str,
 ) -> reqwest::RequestBuilder {
     let url = format!("{base}/v1/messages");
+    let max_tokens = req.max_tokens.unwrap_or(4096);
+    // Reserve at least 1024 tokens for the visible answer; cap the thinking
+    // budget at the rest. Anthropic requires `budget_tokens < max_tokens`.
+    let thinking = req.thinking.unwrap_or(false).then(|| AnthropicThinking {
+        kind: "enabled",
+        budget_tokens: (max_tokens - 1024).max(1024),
+    });
     let body = AnthropicWireBody {
         model: req.model.clone(),
         messages: req
@@ -156,9 +190,10 @@ fn anthropic_request(
                 content: m.content.clone(),
             })
             .collect(),
-        max_tokens: req.max_tokens.unwrap_or(4096),
+        max_tokens,
         stream: true,
         system: req.system.clone(),
+        thinking,
     };
     client
         .post(&url)

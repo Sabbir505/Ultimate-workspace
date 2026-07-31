@@ -328,7 +328,19 @@ pub(crate) async fn run_tool(
             return run_gated_fs_tool(client, artifacts_dir, caps, mgr, app, sid, name, args)
                 .await;
         }
-        // AutoRun: fall through to execute_tool below.
+        // AutoRun: a mutating tool call still has to lie within a granted
+        // root. The check below is the hard scope gate that turns
+        // `fs_roots` from advisory into authoritative. Reads are exempt
+        // (the user explicitly opened a file → reading is intentional).
+        if permission::is_mutating_fs_tool(name)
+            && !permission::path_within_scope(&target, &caps.fs_roots)
+        {
+            return format!(
+                "Error: {name} is gated — path is outside the granted roots. \
+                 Add the directory under Settings → Filesystem permissions \
+                 and retry, or pick a path inside an already-granted root."
+            );
+        }
     }
 
     let outcome = tools::execute_tool(client, artifacts_dir, caps, name, args).await;

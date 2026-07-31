@@ -1,21 +1,32 @@
-//! Native child-webview browser panes (Windows/macOS).
+//! Native browser panes (Windows / macOS / Linux).
 //!
 //! The browser pane used to be an <iframe> pointed at a URL, which breaks on
 //! real browsing: sites sending X-Frame-Options refuse to render, and
-//! cross-origin history reads are blocked by Chromium. On Windows/macOS we
-//! instead attach a Tauri child webview to the main window — a top-level
-//! browsing context, so XFO doesn't apply and full navigation works. The
-//! webview is positioned over the pane's body div using the logical-pixel
-//! rect the frontend measures with getBoundingClientRect (Tauri handles the
-//! HiDPI logical -> physical conversion).
+//! cross-origin history reads are blocked by Chromium. We instead attach a
+//! native webview to the main window — a top-level browsing context, so XFO
+//! doesn't apply and full navigation works. The webview is positioned over
+//! the pane's body div using the logical-pixel rect the frontend measures
+//! with getBoundingClientRect (Tauri handles the HiDPI logical -> physical
+//! conversion).
 //!
-//! Two hazards this module is designed around:
+//! Platform split:
+//! - **Windows / macOS**: child webview (`WebviewBuilder` + `window.add_child`)
+//!   — embedded in the main window, floats above the DOM. Works because
+//!   WebView2 (Windows) and WKWebView (macOS) support multi-webview.
+//! - **Linux**: wry/gtk has NO multi-webview support, so we spawn a separate
+//!   Tauri `WebviewWindow` per pane+tab, position it over the grid cell, and
+//!   keep it in lockstep with the frontend's reported rect. The window is
+//!   frameless (`decorations=false`), excluded from the taskbar
+//!   (`skip_taskbar=true`), and never shown to the OS as a top-level app
+//!   window — it visually behaves as a pane of the main window.
+//!
+//! Two hazards this module is designed around (both platforms):
 //! - Native webviews render ABOVE the page content (they are not composited
-//!   with the DOM), so the frontend must call browser_set_visible(false)
+//!   with the DOM), so the frontend must call `browser_set_visible(false)`
 //!   whenever an overlay opens or the pane is hidden in split mode.
-//! - Linux: Tauri child webviews are unsupported there (wry/gtk has no
-//!   multi-webview support), so every entry point returns a clean error and
-//!   the frontend falls back to the iframe implementation.
+//! - On Linux, the standalone windows must be repositioned whenever the
+//!   main window moves or the grid is resized; the frontend's ResizeObserver
+//!   already drives this through the existing `browser_set_bounds` IPC.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,7 +36,10 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
 use serde::{Deserialize, Serialize};
+#[cfg(any(windows, target_os = "macos"))]
 use tauri::webview::WebviewBuilder;
+#[cfg(target_os = "linux")]
+use tauri::webview::WebviewWindowBuilder;
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Size, Webview, WebviewUrl,
 };
@@ -46,6 +60,74 @@ pub struct Rect {
 /// avoid collisions with the "main" webview window.
 pub fn browser_label(pane_id: &str, tab_id: &str) -> String {
     format!("browser-{pane_id}-tab-{tab_id}")
+}
+
+/// One per (pane_id, tab_id). Wraps the underlying native handle (child
+/// `Webview` on Windows/macOS, standalone `Webview` from a `WebviewWindow`
+/// on Linux) so the rest of the manager can use one unified type. On Linux
+/// we also keep a clone of the `WebviewWindow` itself for show/hide/close
+/// operations, since `Webview` doesn't expose those.
+#[derive(Clone)]
+pub struct BrowserPane {
+    /// The inner webview used for navigate / eval. On Windows/macOS this is
+    /// the same handle as the underlying child webview. On Linux this is
+    /// the webview of the standalone `WebviewWindow`.
+    pub webview: Webview,
+    /// Only populated on Linux — the standalone `WebviewWindow` that hosts
+    /// the webview. Needed for show/hide/close and for keeping the OS
+    /// window in lockstep with the main grid.
+    #[cfg(target_os = "linux")]
+    pub window: tauri::WebviewWindow,
+}
+
+impl BrowserPane {
+    fn show(&self) -> tauri::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            self.window.show()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.webview.show()
+        }
+    }
+
+    fn hide(&self) -> tauri::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            self.window.hide()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.webview.hide()
+        }
+    }
+
+    fn close(self) -> tauri::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            self.window.close()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.webview.close()
+        }
+    }
+
+    fn set_position_size(&self, pos: LogicalPosition<f64>, size: LogicalSize<f64>) -> tauri::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            self.window.set_position(Position::Logical(pos))?;
+            self.window.set_size(Size::Logical(size))?;
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.webview.set_position(Position::Logical(pos))?;
+            self.webview.set_size(Size::Logical(size))?;
+            Ok(())
+        }
+    }
 }
 
 /// Fixed loopback port the `conduit-browser-mcp` binary connects to. The
@@ -172,20 +254,21 @@ impl Default for ActionOpts {
     }
 }
 
-/// Child webviews are unsupported on Linux — the frontend falls back to an
-/// iframe there. Kept as a function so the failure is a clean command error,
-/// never a panic.
+/// Platform support: native browser panes work on every supported platform
+/// today. The implementation path differs:
+///   - Windows / macOS: child webview (WebviewBuilder + window.add_child) —
+///     embedded in the main window, floats above the DOM. Works because
+///     WebView2 (Windows) and WKWebView (macOS) support multi-webview.
+///   - Linux: child webviews are unsupported in wry/gtk (no multi-webview),
+///     so we instead spawn a separate Tauri `WebviewWindow` per pane+tab,
+///     position it over the grid cell, and keep it in lockstep with the
+///     frontend's reported rect (ResizeObserver).
 pub fn platform_supported() -> bool {
-    !cfg!(target_os = "linux")
+    true
 }
 
 fn ensure_supported() -> Result<(), String> {
-    if platform_supported() {
-        Ok(())
-    } else {
-        Err("native browser panes are not supported on Linux; the frontend uses the iframe fallback"
-            .to_string())
-    }
+    Ok(())
 }
 
 // ---- Vendored JS bridge files -----------------------------------------
@@ -308,7 +391,7 @@ fn pushstate_injection_js(pane_id: &str, tab_id: &str) -> String {
 
 pub struct BrowserManager {
     app: AppHandle,
-    webviews: Mutex<HashMap<String, Webview>>,
+    webviews: Mutex<HashMap<String, BrowserPane>>,
     /// Panes currently being created (so concurrent creates for the same paneId
     /// don't race — the second one waits for the first). Key = pane_id string.
     in_flight: Mutex<std::collections::HashSet<String>>,
@@ -413,120 +496,208 @@ impl BrowserManager {
                 eprintln!("[conduit:browser] url parse FAILED: {msg}");
                 msg
             })?;
-        let window = self
-            .app
-            .get_window("main")
-            .ok_or_else(|| {
-                let known: Vec<String> = self
-                    .app
-                    .windows()
-                    .iter()
-                    .map(|(label, _)| label.to_string())
-                    .collect();
-                let msg = "main window not found".to_string();
-                eprintln!("[conduit:browser] get_window('main') FAILED: {msg} — known window labels: {known:?}");
-                msg
-            })?;
-
-        let app = self.app.clone();
-        let event_pane_id = pane_id.to_string();
-        let event_tab_id = tab_id.to_string();
-        let app2 = self.app.clone();
-        let event_pane_id2 = pane_id.to_string();
-        let event_tab_id2 = tab_id.to_string();
-        let blank: tauri::Url = "about:blank".parse().expect("about:blank is a valid url");
-        // Clone before the on_navigation closure captures label.
-        let label_for_nav = label.clone();
-        let builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(blank))
-            .on_navigation(move |nav_url| {
-                eprintln!("[conduit:browser] navigation: {nav_url}");
-                let _ = app.emit(
-                    "browser:navigated",
-                    BrowserNavigatedEvent {
-                        pane_id: event_pane_id.clone(),
-                        tab_id: event_tab_id.clone(),
-                        url: nav_url.to_string(),
-                    },
-                );
-                // Inject the pushState monkey-patch via JS setTimeout so it
-                // fires after the new page's DOM is ready. This is a pure
-                // eval — it doesn't navigate, so no feedback loop.
-                let lbl = label_for_nav.clone();
-                let app_ref = app.clone();
-                let pid = event_pane_id.clone();
-                let tid = event_tab_id.clone();
-                // We use a thread + delay here because on_navigation fires
-                // BEFORE the new page loads. The 1.5s delay gives the page
-                // time to render before we inject the monkey-patch.
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(1500));
-                    if let Some(w) = app_ref.get_webview(&lbl) {
-                        let _ = w.eval(&pushstate_injection_js(&pid, &tid));
-                    }
-                });
-                true
-            })
-            .on_new_window(move |url, _label| {
-                // Intercept new-window requests (target=_blank, window.open()).
-                // Navigate the existing webview to this URL in-place instead of
-                // opening a system popup. We navigate via the app handle (by
-                // label) since we don't have the Webview handle in this closure.
-                eprintln!("[conduit:browser] new_window: {url} — navigating in-place");
-                let _ = app2.emit(
-                    "browser:navigated",
-                    BrowserNavigatedEvent {
-                        pane_id: event_pane_id2.clone(),
-                        tab_id: event_tab_id2.clone(),
-                        url: url.to_string(),
-                    },
-                );
-                // Deny the popup — the frontend's event handler will call
-                // browser_navigate to actually load the URL in the existing
-                // webview (see BrowserPane.tsx).
-                tauri::webview::NewWindowResponse::Deny
-            });
-
         let rect = sanitize(rect);
-        eprintln!(
-            "[conduit:browser] add_child at ({},{}) {}x{} (main-thread scheduled)",
-            rect.x, rect.y, rect.width, rect.height
-        );
 
-        let (tx, rx) = mpsc::sync_channel::<Result<Webview, String>>(1);
-        let window_ref = window.clone();
-        let pos = LogicalPosition::new(rect.x, rect.y);
-        let size = LogicalSize::new(rect.width, rect.height);
-        let label_owned = label.clone();
-        self.app.run_on_main_thread(move || {
-            let res = window_ref
-                .add_child(builder, pos, size)
-                .map_err(|e| format!("failed to create browser webview: {e}"));
-            match &res {
-                Ok(_) => eprintln!("[conduit:browser] add_child OK on main thread for label={label_owned}"),
-                Err(msg) => eprintln!("[conduit:browser] add_child FAILED on main thread: {msg}"),
-            }
-            let _ = tx.send(res);
-        });
-
-        let webview = match rx.recv() {
-            Ok(Ok(w)) => w,
-            Ok(Err(msg)) => {
-                self.in_flight.lock().remove(&label);
-                return Err(msg);
-            }
-            Err(_) => {
-                self.in_flight.lock().remove(&label);
-                return Err("browser webview create thread dropped".to_string());
-            }
-        };
+        // Build the webview (or webview window on Linux) on the main thread
+        // then return the handle to the calling worker. The two paths
+        // produce a `BrowserPane` whose API is uniform for the rest of
+        // this module. See `build_pane_on_main_thread` for the platform
+        // split.
+        let pane = self.build_pane_on_main_thread(pane_id, tab_id, url, rect)?;
         eprintln!("[conduit:browser] create OK for label={label}");
 
-        self.webviews.lock().insert(label.clone(), webview);
+        self.webviews.lock().insert(label.clone(), pane);
         self.pane_visible.lock().insert(pane_id.to_string(), true);
         self.pane_active_tab.lock().insert(pane_id.to_string(), tab_id.to_string());
         self.navigate(pane_id, tab_id, url)?;
         self.in_flight.lock().remove(&label);
         Ok(())
+    }
+
+    /// Build the underlying webview (Windows/macOS: child webview via
+    /// `WebviewBuilder`+`add_child`; Linux: standalone `WebviewWindow` per
+    /// pane+tab). Runs on the main thread because Tauri webview APIs
+    /// require it. Returns a uniform `BrowserPane` regardless of platform.
+    fn build_pane_on_main_thread(
+        &self,
+        pane_id: &str,
+        tab_id: &str,
+        url: &str,
+        rect: Rect,
+    ) -> Result<BrowserPane, String> {
+        let label = browser_label(pane_id, tab_id);
+        let event_pane_id = pane_id.to_string();
+        let event_tab_id = tab_id.to_string();
+        let app_for_emit = self.app.clone();
+
+        // --- Windows / macOS: child webview (existing path) ---
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            let main_window = self
+                .app
+                .get_window("main")
+                .ok_or_else(|| {
+                    let known: Vec<String> = self
+                        .app
+                        .windows()
+                        .iter()
+                        .map(|(l, _)| l.to_string())
+                        .collect();
+                    let msg = "main window not found".to_string();
+                    eprintln!("[conduit:browser] get_window('main') FAILED: {msg} — known: {known:?}");
+                    msg
+                })?;
+
+            let app = self.app.clone();
+            let app2 = self.app.clone();
+            let event_pane_id2 = event_pane_id.clone();
+            let event_tab_id2 = event_tab_id.clone();
+            let label_for_nav = label.clone();
+            let blank: tauri::Url = "about:blank".parse().expect("about:blank is a valid url");
+            let builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(blank))
+                .on_navigation(move |nav_url| {
+                    eprintln!("[conduit:browser] navigation: {nav_url}");
+                    let _ = app.emit(
+                        "browser:navigated",
+                        BrowserNavigatedEvent {
+                            pane_id: event_pane_id.clone(),
+                            tab_id: event_tab_id.clone(),
+                            url: nav_url.to_string(),
+                        },
+                    );
+                    let lbl = label_for_nav.clone();
+                    let app_ref = app.clone();
+                    let pid = event_pane_id.clone();
+                    let tid = event_tab_id.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(1500));
+                        if let Some(w) = app_ref.get_webview(&lbl) {
+                            let _ = w.eval(&pushstate_injection_js(&pid, &tid));
+                        }
+                    });
+                    true
+                })
+                .on_new_window(move |new_url, _label| {
+                    eprintln!("[conduit:browser] new_window: {new_url} — navigating in-place");
+                    let _ = app2.emit(
+                        "browser:navigated",
+                        BrowserNavigatedEvent {
+                            pane_id: event_pane_id2.clone(),
+                            tab_id: event_tab_id2.clone(),
+                            url: new_url.to_string(),
+                        },
+                    );
+                    tauri::webview::NewWindowResponse::Deny
+                });
+
+            eprintln!(
+                "[conduit:browser] add_child at ({},{}) {}x{} (main-thread scheduled)",
+                rect.x, rect.y, rect.width, rect.height
+            );
+
+            let (tx, rx) = mpsc::sync_channel::<Result<Webview, String>>(1);
+            let window_ref = main_window.clone();
+            let pos = LogicalPosition::new(rect.x, rect.y);
+            let size = LogicalSize::new(rect.width, rect.height);
+            let label_owned = label.clone();
+            self.app.run_on_main_thread(move || {
+                let res = window_ref
+                    .add_child(builder, pos, size)
+                    .map_err(|e| format!("failed to create browser webview: {e}"));
+                match &res {
+                    Ok(_) => eprintln!("[conduit:browser] add_child OK on main thread for label={label_owned}"),
+                    Err(msg) => eprintln!("[conduit:browser] add_child FAILED on main thread: {msg}"),
+                }
+                let _ = tx.send(res);
+            });
+            let webview = match rx.recv() {
+                Ok(Ok(w)) => w,
+                Ok(Err(msg)) => return Err(msg),
+                Err(_) => return Err("browser webview create thread dropped".to_string()),
+            };
+            return Ok(BrowserPane { webview });
+        }
+
+        // --- Linux: standalone WebviewWindow per pane+tab ---
+        #[cfg(target_os = "linux")]
+        {
+            // The frontend reports the pane's rect in viewport-relative
+            // logical pixels. We need to convert that to absolute screen
+            // coordinates by adding the main window's position. If the main
+            // window hasn't been measured yet (e.g. very first call), we
+            // defer the position update via `set_position` after the window
+            // is built — the frontend's ResizeObserver will sync it again
+            // moments later.
+            let main = self.app.get_window("main");
+            let (abs_x, abs_y) = match main.as_ref().and_then(|w| w.outer_position().ok()) {
+                Some(pos) => (pos.x as f64 + rect.x, pos.y as f64 + rect.y),
+                None => (rect.x, rect.y),
+            };
+
+            let (tx, rx) = mpsc::sync_channel::<Result<tauri::WebviewWindow, String>>(1);
+            let app = self.app.clone();
+            let label_for_win = label.clone();
+            let pos = LogicalPosition::new(abs_x, abs_y);
+            let size = LogicalSize::new(rect.width.max(1.0), rect.height.max(1.0));
+            self.app.run_on_main_thread(move || {
+                // Re-resolve the main window position on the main thread so
+                // the value is current (the previous read may have raced with
+                // a recent window-move event).
+                let final_pos = if let Some(m) = app.get_window("main") {
+                    if let Ok(op) = m.outer_position() {
+                        LogicalPosition::new(op.x as f64 + rect.x, op.y as f64 + rect.y)
+                    } else {
+                        pos
+                    }
+                } else {
+                    pos
+                };
+
+                let res = WebviewWindowBuilder::new(
+                    &app,
+                    &label_for_win,
+                    WebviewUrl::External("about:blank".parse().expect("about:blank is a valid url")),
+                )
+                .title(format!("Browser - {label_for_win}"))
+                .decorations(false)
+                .resizable(false)
+                .skip_taskbar(true)
+                .always_on_top(false)
+                .focused(false)
+                .inner_size(size.width, size.height)
+                .position(final_pos.x, final_pos.y)
+                .build()
+                .map_err(|e| format!("failed to create browser webview window: {e}"));
+                match &res {
+                    Ok(_) => eprintln!("[conduit:browser] WebviewWindow OK for label={label_for_win}"),
+                    Err(msg) => eprintln!("[conduit:browser] WebviewWindow FAILED for label={label_for_win}: {msg}"),
+                }
+                let _ = tx.send(res);
+            });
+
+            let window = match rx.recv() {
+                Ok(Ok(w)) => w,
+                Ok(Err(msg)) => return Err(msg),
+                Err(_) => return Err("browser webview window create thread dropped".to_string()),
+            };
+
+            // The webview is the inner webview of the WebviewWindow.
+            // `Manager::get_webview` resolves by label across all windows.
+            let webview = self
+                .app
+                .get_webview(&label)
+                .ok_or_else(|| format!("created webview window but could not resolve webview for label {label}"))?;
+
+            // Suppress the unused-emit capture on this code path.
+            let _ = app_for_emit;
+
+            // Hide by default until the frontend calls set_visible(true).
+            // On creation we treat the pane as visible — the frontend will
+            // call set_visible(false) if the pane is occluded.
+            let _ = window.show();
+
+            return Ok(BrowserPane { webview, window });
+        }
     }
 
     pub fn navigate(&self, pane_id: &str, tab_id: &str, url: &str) -> Result<(), String> {
@@ -537,8 +708,8 @@ impl BrowserManager {
         *self.active.lock() = Some((pane_id.to_string(), tab_id.to_string()));
         self.pane_active_tab.lock().insert(pane_id.to_string(), tab_id.to_string());
         let label = browser_label(pane_id, tab_id);
-        let webview = self.get(&label)?;
-        webview.navigate(parsed)
+        let pane = self.get(&label)?;
+        pane.webview.navigate(parsed)
             .map_err(|e| e.to_string())?;
         // Inject the pushState monkey-patch after a delay so the new page's
         // DOM has loaded. The eval fires on whatever document is current.
@@ -580,12 +751,30 @@ impl BrowserManager {
         ensure_supported()?;
         let rect = sanitize(rect);
         let label = browser_label(pane_id, tab_id);
-        self.get(&label)?
-            .set_bounds(tauri::Rect {
-                position: Position::Logical(LogicalPosition::new(rect.x, rect.y)),
-                size: Size::Logical(LogicalSize::new(rect.width, rect.height)),
-            })
-            .map_err(|e| e.to_string())
+        let pane = self
+            .webviews
+            .lock()
+            .get(&label)
+            .cloned()
+            .ok_or_else(|| format!("no browser webview with label {label}"))?;
+        // On Windows/macOS the webview's coords are viewport-relative (the
+        // child floats above the DOM). On Linux the standalone window
+        // needs absolute screen coords — we convert here by adding the
+        // main window's current outer position. If we can't read it, fall
+        // back to passing the rect as-is (Tauri will clamp/position based
+        // on the parent context).
+        #[cfg(target_os = "linux")]
+        let (final_x, final_y) = match self.app.get_window("main").and_then(|m| m.outer_position().ok()) {
+            Some(pos) => (pos.x as f64 + rect.x, pos.y as f64 + rect.y),
+            None => (rect.x, rect.y),
+        };
+        #[cfg(not(target_os = "linux"))]
+        let (final_x, final_y) = (rect.x, rect.y);
+        pane.set_position_size(
+            LogicalPosition::new(final_x, final_y),
+            LogicalSize::new(rect.width, rect.height),
+        )
+        .map_err(|e| e.to_string())
     }
 
     /// Occlusion control: native webviews float above the DOM, so overlays
@@ -595,8 +784,13 @@ impl BrowserManager {
         ensure_supported()?;
         self.pane_visible.lock().insert(pane_id.to_string(), visible);
         let label = browser_label(pane_id, tab_id);
-        let webview = self.get(&label)?;
-        let res = if visible { webview.show() } else { webview.hide() };
+        let pane = self
+            .webviews
+            .lock()
+            .get(&label)
+            .cloned()
+            .ok_or_else(|| format!("no browser webview with label {label}"))?;
+        let res = if visible { pane.show() } else { pane.hide() };
         res.map_err(|e| e.to_string())
     }
 
@@ -605,9 +799,9 @@ impl BrowserManager {
     pub fn close(&self, pane_id: &str, tab_id: &str) -> Result<(), String> {
         let label = browser_label(pane_id, tab_id);
         self.in_flight.lock().remove(&label);
-        let webview = self.webviews.lock().remove(&label);
-        if let Some(webview) = webview {
-            webview.close().map_err(|e| e.to_string())?;
+        let pane = self.webviews.lock().remove(&label);
+        if let Some(pane) = pane {
+            pane.close().map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -626,8 +820,8 @@ impl BrowserManager {
             .collect();
         for label in &labels {
             self.in_flight.lock().remove(label);
-            if let Some(webview) = self.webviews.lock().remove(label) {
-                let _ = webview.close();
+            if let Some(pane) = self.webviews.lock().remove(label) {
+                let _ = pane.close();
             }
         }
         // Clean up per-pane registries on close.
@@ -640,15 +834,16 @@ impl BrowserManager {
     /// App-exit cleanup, wired next to PtyManager::kill_all in lib.rs.
     pub fn close_all(&self) {
         self.in_flight.lock().clear();
-        let webviews: Vec<Webview> = self.webviews.lock().drain().map(|(_, w)| w).collect();
-        for webview in webviews {
-            let _ = webview.close();
+        let panes: Vec<BrowserPane> = self.webviews.lock().drain().map(|(_, p)| p).collect();
+        for pane in panes {
+            let _ = pane.close();
         }
     }
 
     fn eval(&self, label: &str, js: &str) -> Result<(), String> {
         ensure_supported()?;
-        self.get(label)?.eval(js).map_err(|e| e.to_string())
+        let pane = self.get(label)?;
+        pane.webview.eval(js).map_err(|e| e.to_string())
     }
 
     // --- Agentic browser control ---------------------------------------
@@ -699,12 +894,12 @@ impl BrowserManager {
         opts: ActionOpts,
     ) -> Result<String, String> {
         ensure_supported()?;
-        let webview = self.get(label)?;
+        let pane = self.get(label)?;
         let req_id = self.next_req.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel::<String>();
         self.pending.lock().insert(req_id, tx);
         let js = action_wrapper_js(req_id, body, &opts);
-        if let Err(e) = webview.eval(&js) {
+        if let Err(e) = pane.webview.eval(&js) {
             self.pending.lock().remove(&req_id);
             return Err(e.to_string());
         }
@@ -1043,7 +1238,7 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
         self.run_action(&scroll_js(dy)).await
     }
 
-    fn get(&self, label: &str) -> Result<Webview, String> {
+    fn get(&self, label: &str) -> Result<BrowserPane, String> {
         self.webviews
             .lock()
             .get(label)
@@ -1456,7 +1651,9 @@ mod tests {
 
     #[test]
     fn platform_support_matches_target_os() {
-        assert_eq!(platform_supported(), !cfg!(target_os = "linux"));
+        // All supported platforms now provide a native browser pane (Linux
+        // uses standalone WebviewWindows instead of child webviews).
+        assert!(platform_supported());
     }
 
     #[test]

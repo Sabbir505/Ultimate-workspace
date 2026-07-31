@@ -137,6 +137,15 @@ pub(super) fn fs_write_file(args: &Value) -> ToolOutcome {
 }
 
 /// Edit a file: find/replace the first occurrence, or append.
+///
+/// Safety: if `find` matches more than once in the file, the edit is REJECTED
+/// by default — the model gets back a line-numbered list of all matches so it
+/// can disambiguate instead of silently editing the wrong place. To proceed
+/// in a multi-match case, the model must pass either:
+///   * `all_occurrences: true`  — replace every match (bulk refactor), OR
+///   * `expected_matches: N`    — confirm the count is N before replacing.
+///
+/// Single-match and zero-match paths are unchanged from the prior behavior.
 pub(super) fn fs_edit_file(args: &Value) -> ToolOutcome {
     let path = arg_str(args, "path");
     if path.is_empty() {
@@ -155,16 +164,70 @@ pub(super) fn fs_edit_file(args: &Value) -> ToolOutcome {
         if find.is_empty() {
             return ToolOutcome::text("Error: edit_file requires either \"append\" or a non-empty \"find\".");
         }
-        if let Some(idx) = text.find(find) {
+        // Count every match. `match_indices` gives us both the byte offset and
+        // the matched substring, so we can build a "lines 12, 45, 102"
+        // conflict report.
+        let occurrences: Vec<(usize, &str)> = text.match_indices(find).collect();
+        if occurrences.is_empty() {
+            return ToolOutcome::text(format!(
+                "edit_file: \"find\" substring not found in {path}."
+            ));
+        }
+        let all_occurrences = args
+            .get("all_occurrences")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let expected_matches: Option<usize> = args
+            .get("expected_matches")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
+        if occurrences.len() > 1 && !all_occurrences {
+            // Honor expected_matches = N exactly: the model has confirmed it
+            // really meant all of them.
+            let allowed = match expected_matches {
+                Some(n) if n == occurrences.len() => true,
+                _ => false,
+            };
+            if !allowed {
+                // Build a line-numbered conflict list so the model can pick
+                // a unique chunk (or set expected_matches / all_occurrences).
+                let lines: Vec<String> = occurrences
+                    .iter()
+                    .map(|(byte_off, _)| {
+                        // Convert byte offset → 1-based line number.
+                        let before = &text[..*byte_off];
+                        let line = before.bytes().filter(|&b| b == b'\n').count() + 1;
+                        format!("line {line}")
+                    })
+                    .collect();
+                return ToolOutcome::text(format!(
+                    "edit_file: \"find\" matched {} times in {path} ({}). \
+                     Refine the \"find\" string to be unique to one location, \
+                     or pass `all_occurrences: true` to replace all of them, \
+                     or pass `expected_matches: {}` to confirm you meant all of them.",
+                    occurrences.len(),
+                    lines.join(", "),
+                    occurrences.len(),
+                ));
+            }
+        }
+        // We either have a single match, or the model explicitly opted in.
+        if all_occurrences || occurrences.len() > 1 {
+            // Single read-modify-write pass: replace every occurrence
+            // left-to-right. `replacen` with count = all replaces
+            // non-overlapping matches in one shot. This branch is taken for:
+            //   (a) all_occurrences = true (explicit bulk rename), or
+            //   (b) occurrences.len() > 1 AND expected_matches == N
+            //       (model confirmed it really meant all of them).
+            text = text.replacen(find, replace, occurrences.len());
+        } else {
+            // Single match, the only remaining path.
+            let idx = occurrences[0].0;
             let mut out = String::with_capacity(text.len() + replace.len());
             out.push_str(&text[..idx]);
             out.push_str(replace);
             out.push_str(&text[idx + find.len()..]);
             text = out;
-        } else {
-            return ToolOutcome::text(format!(
-                "edit_file: \"find\" substring not found in {path}."
-            ));
         }
     }
     match std::fs::write(p, &text) {
@@ -324,6 +387,115 @@ mod tests {
         let out = fs_search_files(&json!({ "path": dir.display().to_string(), "query": "report" }));
         assert!(out.text.contains("report_q1.md"), "{}", out.text);
         assert!(!out.text.contains("notes.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- edit_file uniqueness / safety tests ----
+    //
+    // The default find/replace is now strict: a multi-match is rejected
+    // unless the model opts in via all_occurrences or expected_matches.
+    // These tests pin down that behavior so future changes don't silently
+    // regress to "first match wins" (which used to mis-edit comments).
+
+    fn two_duplicate_lines_file(dir: &std::path::Path) -> std::path::PathBuf {
+        let f = dir.join("dup.txt");
+        std::fs::write(
+            &f,
+            "alpha\nthe needle is here\nbeta\nthe needle is here\ngamma\n",
+        )
+        .unwrap();
+        f
+    }
+
+    #[test]
+    fn edit_file_rejects_ambiguous_find_with_line_numbers() {
+        let dir = std::env::temp_dir().join(format!("conduit_edit_amb_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = two_duplicate_lines_file(&dir);
+
+        // No all_occurrences / expected_matches → must error and not write.
+        let out = fs_edit_file(&json!({
+            "path": f.display().to_string(),
+            "find": "the needle is here",
+            "replace": "REPLACED"
+        }));
+        assert!(out.text.contains("matched 2 times"), "got: {}", out.text);
+        assert!(out.text.contains("line 2") && out.text.contains("line 4"),
+            "expected both line numbers in conflict report, got: {}", out.text);
+        // File is unchanged.
+        let after = std::fs::read_to_string(&f).unwrap();
+        assert_eq!(after, "alpha\nthe needle is here\nbeta\nthe needle is here\ngamma\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_file_all_occurrences_replaces_every_match() {
+        let dir = std::env::temp_dir().join(format!("conduit_edit_all_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = two_duplicate_lines_file(&dir);
+
+        let out = fs_edit_file(&json!({
+            "path": f.display().to_string(),
+            "find": "the needle is here",
+            "replace": "X",
+            "all_occurrences": true
+        }));
+        assert!(out.text.contains("Edited"), "got: {}", out.text);
+        let after = std::fs::read_to_string(&f).unwrap();
+        assert_eq!(after, "alpha\nX\nbeta\nX\ngamma\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_file_expected_matches_disambiguates() {
+        let dir = std::env::temp_dir().join(format!("conduit_edit_exp_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = two_duplicate_lines_file(&dir);
+
+        // Confirm "yes, I meant both" — the edit goes through.
+        let out = fs_edit_file(&json!({
+            "path": f.display().to_string(),
+            "find": "the needle is here",
+            "replace": "X",
+            "expected_matches": 2
+        }));
+        assert!(out.text.contains("Edited"), "got: {}", out.text);
+        let after = std::fs::read_to_string(&f).unwrap();
+        assert_eq!(after, "alpha\nX\nbeta\nX\ngamma\n");
+
+        // A wrong expected_matches is itself a conflict: build a fresh
+        // file (the previous edit replaced all the needles, so a 2nd
+        // call would now see 0 matches) and pass expected_matches: 3.
+        let f2 = two_duplicate_lines_file(&dir);
+        let out = fs_edit_file(&json!({
+            "path": f2.display().to_string(),
+            "find": "the needle is here",
+            "replace": "Y",
+            "expected_matches": 3
+        }));
+        assert!(out.text.contains("matched 2 times"), "got: {}", out.text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_file_unique_find_still_works() {
+        // Regression: a single-match find (the old happy path) is unchanged.
+        let dir = std::env::temp_dir().join(format!("conduit_edit_ok_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("ok.txt");
+        std::fs::write(&f, "alpha\nbeta\ngamma\n").unwrap();
+
+        let out = fs_edit_file(&json!({
+            "path": f.display().to_string(),
+            "find": "beta",
+            "replace": "BETA"
+        }));
+        assert!(out.text.contains("Edited"), "got: {}", out.text);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "alpha\nBETA\ngamma\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

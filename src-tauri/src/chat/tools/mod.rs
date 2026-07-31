@@ -27,6 +27,8 @@ use fs::{
     fs_copy_file, fs_delete_file, fs_edit_file, fs_list_directory, fs_move_file, fs_read_file,
     fs_search_files, fs_write_file,
 };
+mod search_content;
+use search_content::fs_search_content;
 
 mod specs;
 /// Re-exported so `streaming.rs` can render the tool registry via
@@ -79,6 +81,11 @@ pub const LIST_DIRECTORY: &str = "list_directory";
 pub const READ_FILE: &str = "read_file";
 /// Search for files under a directory by name/glob substring. Read-only.
 pub const SEARCH_FILES: &str = "search_files";
+/// Search for a substring or regex inside file CONTENTS under a directory
+/// (read-only). The "find where X is defined / where X is used" tool —
+/// prefer this over `search_files` whenever the user means content, not
+/// filenames. Returns `path:line:col: matched-line` rows.
+pub const SEARCH_CONTENT: &str = "search_content";
 /// Create or overwrite a file. Mutating — gated by the permission mode.
 pub const WRITE_FILE: &str = "write_file";
 /// Edit part of a file (find/replace or append). Mutating.
@@ -285,7 +292,17 @@ const SEARCH_FILES_DESC: &str = "Recursively find LOCAL files under a directory 
     capped to a reasonable number. Read-only. Use this ONLY for the user's local \
     files â€” NOT for web/knowledge lookups; a bare topic like \"cow\" is a web \
     search, not a file search. Call web_search instead unless the user named a \
-    file/extension/path or clearly means local content.";
+    file/extension/path or clearly means local content. For searching the \
+    **contents** of files (where is X defined / used), prefer `search_content`.";
+
+const SEARCH_CONTENT_DESC: &str = "Search the **content** of files under a directory for a \
+    substring (default) or regex. Returns matches as `path:line:col: matched-line`, one per \
+    line, capped to max_results (default 100). This is the DEFAULT tool for 'find where X \
+    is defined/used' and 'grep through my code' — call this whenever the user is looking \
+    inside files, not at their names. Supports `glob` (e.g. `*.rs`, `**/test_*.py`), \
+    `case_insensitive`, and a `regex` mode (regex crate syntax). Skips build/cache \
+    directories (node_modules, .git, target, dist, __pycache__, vendor, etc.) so a \
+    broad sweep stays fast. Read-only.";
 
 const WRITE_FILE_DESC: &str = "Create or overwrite a file with the given text \
     content. Pass an absolute path. Mutating — may require approval depending \
@@ -451,6 +468,7 @@ pub async fn execute_tool(
         LIST_DIRECTORY => fs_list_directory(args),
         READ_FILE => fs_read_file(args),
         SEARCH_FILES => fs_search_files(args),
+        SEARCH_CONTENT => fs_search_content(args),
         WRITE_FILE => fs_write_file(args),
         EDIT_FILE => fs_edit_file(args),
         DELETE_FILE => fs_delete_file(args),

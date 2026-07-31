@@ -16,6 +16,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   cancelModelDownload,
   clearHuggingFaceToken,
+  downloadMmproj,
   fetchModelCatalog,
   getMarketSettings,
   onModelDownloadProgress,
@@ -124,6 +125,33 @@ export function ModelMarket({ onDownloadComplete }: ModelMarketProps) {
       }));
       if (p.state === "done") {
         onDownloadComplete();
+        // Auto-fetch the mmproj for vision-capable models. The
+        // main .gguf just finished; the projector is what makes the
+        // model actually accept image inputs in the chat. The mmproj
+        // download fires its own progress events with id
+        // "{repo}::mmproj::...", so the user's card list will show a
+        // second in-progress entry next to the now-done one.
+        if (p.id.startsWith("vision::") || p.id.includes("::mmproj::") === false) {
+          // The leading "vision::" prefix is a tag the card sets when
+          // it kicks off a vision download (see onStartDownload).
+          // Otherwise: any non-mmproj completion that looks like a
+          // catalog id ({repo}::{filename}) might be a vision model
+          // and we should try the mmproj fetch.
+          const sep = p.id.indexOf("::");
+          if (sep > 0) {
+            const repoId = p.id.slice(0, sep);
+            const filename = p.id.slice(sep + 2);
+            const card = entries.find(
+              (e) => e.id === p.id || (e.repoId === repoId && e.filename === filename),
+            );
+            if (card?.vision) {
+              // Idempotent: backend short-circuits if already in-flight.
+              void downloadMmproj(card.repoId).catch((e) =>
+                console.warn("mmproj auto-download failed", e),
+              );
+            }
+          }
+        }
       }
     }).then((u) => {
       if (stale) {

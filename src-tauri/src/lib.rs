@@ -273,6 +273,8 @@ pub fn run() {
             commands::local_model_market::clear_hugging_face_token,
             commands::local_model_market::start_model_download,
             commands::local_model_market::cancel_model_download,
+            commands::local_model_market::delete_downloaded_model,
+            commands::local_model_market::download_mmproj,
         ]);
 
     let app = builder

@@ -829,3 +829,15 @@ export const cancelModelDownload = (id: string) =>
 export const onModelDownloadProgress = (
   handler: (p: DownloadProgress) => void,
 ) => safeListen<DownloadProgress>("local-model:download:progress", handler);
+
+// ---- Local Models market: file management + auto-sidecar download ----
+
+export const deleteDownloadedModel = (path: string) =>
+  safeInvoke<void>("delete_downloaded_model", { path });
+
+export const downloadMmproj = (
+  repoId: string,
+  mmprojFilename?: string,
+) =>
+  safeInvoke<void>("download_mmproj", { repoId, mmprojFilename });
+

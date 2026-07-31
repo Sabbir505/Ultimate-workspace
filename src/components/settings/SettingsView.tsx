@@ -6,7 +6,7 @@
 // categories — or an empty harness list — does not reflow the modal.
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload } from "../../lib/ipc";
+import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel } from "../../lib/ipc";
 import { acceleratorFromEvent, DEFAULT_KEYBINDINGS, type KeybindingAction } from "../../lib/keybindings";
 import { runLoginFlow } from "../../lib/sessionLauncher";
 import { shortModelName } from "../../lib/modelLabel";
@@ -600,6 +600,22 @@ function LocalModelsPanel() {
                   ) : (
                     "Use this model"
                   )}
+                </button>
+                <button
+                  className="ghost"
+                  style={{ padding: "2px 10px", whiteSpace: "nowrap", flexShrink: 0, fontSize: 11 }}
+                  title="Delete this model file from disk"
+                  onClick={async () => {
+                    if (!confirm(`Delete ${m.filename || m.id} from disk?`)) return;
+                    try {
+                      await deleteDownloadedModel(m.path);
+                      await runScan();
+                    } catch (e) {
+                      console.warn("delete failed", e);
+                    }
+                  }}
+                >
+                  Delete
                 </button>
                 <span
                   className="model-memory-indicator"

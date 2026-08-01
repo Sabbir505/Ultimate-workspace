@@ -60,6 +60,26 @@ pub enum MobileMessage {
         model: String,
         gguf_path: String,
     },
+    GetSessionMessages {
+        session_id: String,
+        before_id: Option<i64>,
+        limit: u32,
+    },
+    SendChatMessage {
+        session_id: String,
+        text: String,
+        attachments: Vec<ChatAttachment>,
+    },
+    CancelSessionStream { session_id: String },
+    ResolveSessionApproval {
+        session_id: String,
+        pending_id: String,
+        decision: String,
+    },
+    RenameSession {
+        session_id: String,
+        title: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +137,40 @@ pub enum DesktopMessage {
     LocalModelError {
         model: String,
         error: String,
+    },
+    SessionMessages {
+        session_id: String,
+        messages: Vec<SessionMessageRecord>,
+        has_more: bool,
+    },
+    SessionChatToken {
+        session_id: String,
+        token: String,
+    },
+    SessionChatDone {
+        session_id: String,
+        usage: Option<MobileChatUsage>,
+    },
+    SessionChatError {
+        session_id: String,
+        error: String,
+    },
+    SessionChatStatus {
+        session_id: String,
+        reason: String,
+        message: String,
+    },
+    SessionApprovalRequest {
+        session_id: String,
+        pending_id: String,
+        tool: String,
+        summary: String,
+        args: serde_json::Value,
+    },
+    SessionArtifact {
+        session_id: String,
+        message_id: Option<i64>,
+        artifact: ChatArtifactPayload,
     },
 }
 
@@ -201,4 +255,62 @@ pub struct ChatUsage {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cost_usd: f64,
+}
+
+// ---------------------------------------------------------------------------
+// Session-scoped chat (Task 2)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatAttachment {
+    pub name: String,
+    pub kind: String, // "text" | "image" | "doc"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>, // base64, no data: prefix
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMessageRecord {
+    pub id: i64,
+    pub role: String, // "user" | "assistant" | "system"
+    pub content: String,
+    pub created_at: i64,
+    #[serde(default)]
+    pub input_tokens: Option<i64>,
+    #[serde(default)]
+    pub output_tokens: Option<i64>,
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub tool_calls: Option<serde_json::Value>,
+    #[serde(default)]
+    pub artifact_paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MobileChatUsage {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatArtifactPayload {
+    pub path: String,
+    pub filename: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline: Option<ChatArtifactInline>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatArtifactInline {
+    pub kind: String, // "jsx" | "tsx"
+    pub code: String,
 }

@@ -9,3 +9,6 @@
 pub mod commands;
 pub mod protocol;
 pub mod relay;
+
+#[cfg(test)]
+mod session_chat_tests;

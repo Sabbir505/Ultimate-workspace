@@ -502,6 +502,15 @@ async fn handle_connection(
             // A second Pair frame after a successful pairing is a protocol
             // violation — already handled above before this match.
             MobileMessage::Pair { .. } => unreachable!("Pair is intercepted above"),
+            // Session-scoped chat variants are handled in later tasks; for now
+            // the desktop acknowledges them with a not-implemented status so
+            // the phone doesn't time out.
+            _ => {
+                let _ = send_msg(&mut write, &DesktopMessage::ChatError {
+                    chat_session_id: "session-chat".to_string(),
+                    error: "session chat not yet wired up".to_string(),
+                }).await;
+            }
         }
     }
 

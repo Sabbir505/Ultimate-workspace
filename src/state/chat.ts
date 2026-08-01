@@ -125,7 +125,7 @@ function sortSessions(list: ChatSession[]): ChatSession[] {
   return [...starred, ...rest];
 }
 
-interface ChatState {
+export interface ChatState {
   loaded: boolean;
   sessions: ChatSession[];
   activeChatSessionId: string | null;
@@ -148,6 +148,11 @@ interface ChatState {
   /** Context size (tokens) for local GGUF models; 0 = auto (picked from the
    *  GGUF file size). Applied when the llama-server sidecar (re)starts. */
   localCtx: number;
+  /** Monotonic counter bumped every time a `context_compacted` chat:status
+   *  event lands for the active session. Drives an immediate context-meter
+   *  re-poll so the ring ticks down right after compaction instead of
+   *  waiting up to one polling interval (2s). */
+  compactionRevision: number;
   /** When true, the model may call tools (web search, …) during a turn. */
   toolsEnabled: boolean;
   /** When true, the model may execute code (opt-in, security-sensitive). */
@@ -166,6 +171,15 @@ interface ChatState {
   pendingApprovals: Record<string, PendingApproval>;
   /** True while the full_auto confirmation modal is open for a session. */
   fullAutoConfirmingFor: string | null;
+  /** Per-turn owner session id (mobile app's session identifier) keyed by
+   *  chatSessionId. Set by `sendMessage` when invoked from the mobile relay
+   *  so the chat:token / chat:done / chat:error / chat:status / chat:artifact
+   *  / chat:approval-request event listeners can re-broadcast a corresponding
+   *  `mobile:session_chat_event` Tauri event. The relay's `start_relay`
+   *  listener picks that event up and writes the matching `DesktopMessage`
+   *  variant onto the WS that originated the message. Cleared on the
+   *  terminal `chat:done` / `chat:error` for the session. */
+  ownerSessionByChatId: Record<string, string>;
 
   // Actions
   loadSessions: () => Promise<void>;
@@ -254,6 +268,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // flips this to true/false and resets to null on session change.
   thinking: null,
   localCtx: 0,
+  // Bumped on every `chat:status` event with reason="context_compacted" so
+  // the context meter re-polls immediately when compaction shortens the
+  // history. Without this, the meter can keep showing the pre-compaction
+  // count for up to one polling interval (2s), which is long enough for the
+  // user to send another turn that re-triggers compaction on the same stale
+  // number. ChatView derives a per-session value from chatStatus and feeds
+  // it to useContextMeter as `compactionRevision`.
+  compactionRevision: 0,
   // Tools are on by default so the model itself decides when to web-search,
   // generate a file/document/diagram, fetch a URL or run code — the user no
   // longer has to arm them manually before each relevant request.
@@ -702,9 +724,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   onStatus: (chatSessionId, reason, message) => {
-    set((s) => ({
-      chatStatus: { ...s.chatStatus, [chatSessionId]: { reason, message } },
-    }));
+    set((s) => {
+      // An empty reason is the backend's "clear this notice" signal — used
+      // when compaction was a no-op or errored so the "Compacting earlier
+      // context…" spinner doesn't linger past the chat:done.
+      if (!reason) {
+        const next = { ...s.chatStatus };
+        delete next[chatSessionId];
+        return { chatStatus: next };
+      }
+      // A compaction that actually shortened the history triggers an
+      // immediate re-poll of the context meter so the ring ticks down
+      // right away. We bump `compactionRevision` only for the active
+      // session — other sessions' compactions shouldn't churn this.
+      const compactionBump =
+        reason === "context_compacted" && s.activeChatSessionId === chatSessionId
+          ? { compactionRevision: s.compactionRevision + 1 }
+          : {};
+      return {
+        chatStatus: { ...s.chatStatus, [chatSessionId]: { reason, message } },
+        ...compactionBump,
+      };
+    });
   },
 
   onDone: async (chatSessionId, inputTokens, outputTokens, costUsd) => {

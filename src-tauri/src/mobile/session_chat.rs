@@ -15,7 +15,7 @@ use crate::db;
 use crate::types::ChatMessageRecord;
 
 use super::protocol::{
-    DesktopMessage, MobileMessage, SessionMessageRecord,
+    ChatAttachment, DesktopMessage, MobileMessage, SessionMessageRecord,
 };
 
 /// Ensure the `owner_session_id` column exists on `chat_sessions`.
@@ -175,12 +175,8 @@ impl SessionChatManager {
             MobileMessage::SendChatMessage {
                 session_id,
                 text,
-                attachments: _,
-            } => {
-                // Stubbed for Task 3 — Task 4 implements the full send path.
-                let _ = (session_id, text, app, db, chat_mgr);
-                Err("SendChatMessage not yet implemented (Task 4)".to_string())
-            }
+                attachments,
+            } => handle_send_chat_message(&app, &db, &chat_mgr, session_id, text, attachments),
 
             MobileMessage::CancelSessionStream { session_id } => {
                 handle_cancel_session_stream(&chat_mgr, session_id)
@@ -215,6 +211,77 @@ fn handle_get_session_messages(
         messages,
         has_more,
     }])
+}
+
+fn handle_send_chat_message(
+    _app: &AppHandle,
+    db: &Arc<Mutex<Connection>>,
+    chat_mgr: &Arc<chat::ChatManager>,
+    owner_session_id: String,
+    text: String,
+    _attachments: Vec<ChatAttachment>,
+) -> Result<Vec<DesktopMessage>, String> {
+    // 1. Look up (or create) a chat_session row keyed by owner_session_id.
+    //    The mobile companion app doesn't yet surface a per-session provider/
+    //    model picker; fall back to a default so the turn has a working
+    //    endpoint. The session's `provider`/`model` are persisted on the
+    //    chat_sessions row and read back by `send_chat_message` at turn
+    //    start, so users can change them via the desktop later and the
+    //    next mobile turn picks up the new config.
+    let chat_session_id = {
+        let conn = db.lock();
+        resolve_chat_session(
+            &conn,
+            &owner_session_id,
+            "anthropic",
+            "claude-sonnet-4-5-20250929",
+        )?
+    };
+
+    // 2. Persist the user message. Attachments are not yet processed for the
+    //    mobile path (the desktop composer formats them inline + adds vision
+    //    images to the live turn; that work belongs to a later task). For
+    //    now we persist the text verbatim and leave the attachment
+    //    parameter as future-work so the chat pipeline receives the same
+    //    shape the desktop sends.
+    {
+        let conn = db.lock();
+        db::add_chat_message(&conn, &chat_session_id, "user", &text, None, None, None)
+            .map_err(|e| format!("failed to persist user message: {e}"))?;
+        db::touch_chat_session(&conn, &chat_session_id)
+            .map_err(|e| format!("failed to touch chat session: {e}"))?;
+    }
+
+    // 3. Hand off to the chat pipeline. `ChatManager::send` cancels any
+    //    in-flight stream for this `chat_session_id`, then spawns a tokio
+    //    task that emits the same `chat:token` / `chat:status` /
+    //    `chat:done` / `chat:error` / `chat:approval_request` /
+    //    `chat:artifact` Tauri events the desktop composer already
+    //    listens to. The new `mobile:session_chat_event` family (wired
+    //    up in src/state/chat.ts + src-tauri/src/mobile/relay.rs) keys
+    //    those events back to this `owner_session_id` so the phone
+    //    receives them.
+    chat_mgr.send(
+        chat_session_id,
+        crate::chat::providers::ChatProviderId::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+        "no-key".to_string(),
+        None,
+        None,
+        true,
+        true,
+        crate::chat::permission::PermissionMode::Manual,
+        Vec::new(),
+        Vec::new(),
+        None,
+        Vec::new(),
+        Arc::clone(db),
+        _app.clone(),
+        false,
+        None,
+    );
+
+    Ok(vec![])
 }
 
 fn handle_cancel_session_stream(

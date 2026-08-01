@@ -12,6 +12,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Settings, Moon, DollarSign, Wifi, Monitor, ChevronRight, Cpu } from 'lucide-react-native';
 import { useRelay, type CostDetails, type DailyCostEntry, type ProjectCostEntry, type LocalModelUsageEntry } from '../hooks/useRelay';
 import { theme, useTheme } from '../theme';
+import { useUseChatSession, setUseChatSession } from '../lib/featureFlags';
 import ConnectionIndicator from '../components/ConnectionIndicator';
 
 // Distinct warm palette for local-model bars — same colors the desktop
@@ -223,14 +224,30 @@ function LocalModelList({ data }: { data: LocalModelUsageEntry[] }) {
 export default function SettingsScreen() {
   const { connected, costSummary, costDetails, connect, disconnect } = useRelay();
   const { isDark, toggle: toggleDarkMode } = useTheme();
+  const chatSession = useUseChatSession();
   const c = theme.colors;
 
   // Relay URL override — the phone needs the desktop's LAN IP, not 127.0.0.1.
   const [relayUrl, setRelayUrl] = useState('');
 
+  // 5-tap easter egg on the version row to reveal the developer toggle.
+  const [tapCount, setTapCount] = useState(0);
+  const [devVisible, setDevVisible] = useState(chatSession);
+
   const handleConnect = useCallback(() => {
     connect(relayUrl.trim() || undefined);
   }, [connect, relayUrl]);
+
+  const handleVersionTap = useCallback(() => {
+    setTapCount(prev => {
+      const next = prev + 1;
+      if (next >= 5) {
+        setDevVisible(v => !v);
+        return 0;
+      }
+      return next;
+    });
+  }, []);
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.background }]} edges={['top']}>
@@ -375,10 +392,10 @@ export default function SettingsScreen() {
         <View style={styles.section}>
           <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>About</Text>
           <View style={[styles.card, { backgroundColor: c.surface, borderColor: c.border }]}>
-            <View style={styles.aboutRow}>
+            <TouchableOpacity style={styles.aboutRow} onPress={handleVersionTap} activeOpacity={0.6}>
               <Text style={[styles.aboutLabel, { color: c.text }]}>Version</Text>
               <Text style={[styles.aboutValue, { color: c.textSecondary }]}>1.0.0</Text>
-            </View>
+            </TouchableOpacity>
             <View style={[styles.divider, { backgroundColor: c.border }]} />
             <View style={styles.aboutRow}>
               <Text style={[styles.aboutLabel, { color: c.text }]}>App</Text>
@@ -386,6 +403,32 @@ export default function SettingsScreen() {
             </View>
           </View>
         </View>
+
+        {devVisible && (
+          <View style={styles.section}>
+            <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>Developer</Text>
+            <View style={[styles.card, { backgroundColor: c.surface, borderColor: c.border }]}>
+              <View style={styles.aboutRow}>
+                <Text style={[styles.aboutLabel, { color: c.text }]}>Chat session UI</Text>
+                <Text style={[styles.aboutValue, { color: chatSession ? c.success : c.textSecondary }]}>
+                  {chatSession ? 'ON' : 'OFF'}
+                </Text>
+              </View>
+              <View style={[styles.divider, { backgroundColor: c.border }]} />
+              <View style={styles.connectionActions}>
+                <TouchableOpacity
+                  style={[styles.connectButton, { backgroundColor: c.primary }]}
+                  onPress={() => setUseChatSession(!chatSession)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.connectButtonText}>
+                    {chatSession ? 'Disable' : 'Enable'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        )}
       </ScrollView>
     </SafeAreaView>
   );

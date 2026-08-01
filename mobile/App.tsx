@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useEffect } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -6,6 +6,7 @@ import { Home, MessageSquare, Bell, Settings } from 'lucide-react-native';
 import { StatusBar } from 'expo-status-bar';
 import { useRelay } from './src/hooks/useRelay';
 import { ThemeProvider, useTheme } from './src/theme';
+import { getUseChatSession } from './src/lib/featureFlags';
 import BottomNav from './src/components/BottomNav';
 import HomeScreen from './src/screens/HomeScreen';
 import SessionScreen from './src/screens/SessionScreen';
@@ -55,6 +56,11 @@ function AppTabs() {
 }
 
 export default function App() {
+  // Resolve the feature flag once on mount so the synchronous
+  // `useUseChatSession()` hook can return a stable initial value.
+  useEffect(() => {
+    void getUseChatSession();
+  }, []);
   return (
     <ThemeProvider>
       <AppTabs />

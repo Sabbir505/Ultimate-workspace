@@ -1,0 +1,277 @@
+//! Session-scoped chat manager (history + dispatch).
+//!
+//! Handles mobile companion app session-scoped chat:
+//! - History pagination (`fetch_page`)
+//! - Message dispatch (`handle`) that routes through ChatManager
+
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+use rusqlite::Connection;
+use tauri::AppHandle;
+
+use crate::chat;
+use crate::db;
+use crate::types::ChatMessageRecord;
+
+use super::protocol::{
+    DesktopMessage, MobileMessage, SessionMessageRecord,
+};
+
+/// Ensure the `owner_session_id` column exists on `chat_sessions`.
+/// Called lazily from fetch_page / handle — safe to call multiple times.
+pub fn ensure_chat_session_owner_column(conn: &Connection) -> Result<(), String> {
+    let sql = "ALTER TABLE chat_sessions ADD COLUMN owner_session_id TEXT";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(format!("failed to add owner_session_id column: {e}"));
+        }
+    }
+    Ok(())
+}
+
+/// Look up or create a chat session row keyed by `owner_session_id` (the
+/// mobile app's session identifier). Returns the chat session's internal DB id.
+#[allow(dead_code)] // Wired up in Task 4.
+fn resolve_chat_session(
+    conn: &Connection,
+    owner_session_id: &str,
+    provider: &str,
+    model: &str,
+) -> Result<String, String> {
+    // Ensure the column exists first.
+    ensure_chat_session_owner_column(conn)?;
+
+    // Try to find an existing session with this owner_session_id.
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM chat_sessions WHERE owner_session_id = ?1",
+            rusqlite::params![owner_session_id],
+            |r| r.get(0),
+        )
+        .ok();
+
+    if let Some(chat_session_id) = existing {
+        Ok(chat_session_id)
+    } else {
+        // Create a new chat session and link it to owner_session_id.
+        let cs = db::create_chat_session(conn, provider, model)
+            .map_err(|e| format!("failed to create chat session: {e}"))?;
+        conn.execute(
+            "UPDATE chat_sessions SET owner_session_id = ?2 WHERE id = ?1",
+            rusqlite::params![&cs.id, owner_session_id],
+        )
+        .map_err(|e| format!("failed to link owner_session_id: {e}"))?;
+        Ok(cs.id)
+    }
+}
+
+/// Fetch a page of session-scoped chat messages for history pagination.
+/// Returns (records, has_more) where `has_more` indicates another page exists.
+pub fn fetch_page(
+    db: &Connection,
+    owner_session_id: &str,
+    before_id: Option<i64>,
+    limit: u32,
+) -> Result<(Vec<SessionMessageRecord>, bool), String> {
+    ensure_chat_session_owner_column(db)?;
+
+    // Resolve the chat_session_id from owner_session_id.
+    let chat_session_id: Option<String> = db
+        .query_row(
+            "SELECT id FROM chat_sessions WHERE owner_session_id = ?1",
+            rusqlite::params![owner_session_id],
+            |r| r.get(0),
+        )
+        .ok();
+
+    let chat_session_id = match chat_session_id {
+        Some(id) => id,
+        None => return Ok((vec![], false)), // No session yet, return empty.
+    };
+
+    // Fetch limit+1 rows to detect if there's more.
+    let limit_plus_one = (limit + 1) as i64;
+    let mut stmt = db.prepare(
+        "SELECT id, role, content, created_at, input_tokens, output_tokens, cost_usd
+         FROM chat_messages
+         WHERE chat_session_id = ?1 AND (?2 IS NULL OR id < ?2)
+         ORDER BY id DESC
+         LIMIT ?3",
+    )
+    .map_err(|e| format!("failed to prepare fetch_page query: {e}"))?;
+
+    let rows: Vec<ChatMessageRecord> = stmt
+        .query_map(
+            rusqlite::params![&chat_session_id, before_id, limit_plus_one],
+            |row| {
+                Ok(ChatMessageRecord {
+                    id: row.get(0)?,
+                    chat_session_id: chat_session_id.clone(),
+                    role: row.get(1)?,
+                    content: row.get(2)?,
+                    created_at: row.get(3)?,
+                    input_tokens: row.get(4)?,
+                    output_tokens: row.get(5)?,
+                    cost_usd: row.get(6)?,
+                    superseded_by: None, // Not used for session-chat history.
+                })
+            },
+        )
+        .map_err(|e| format!("failed to fetch messages: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("failed to map messages: {e}"))?;
+
+    // If we got limit+1 rows, has_more = true and pop the extra.
+    let has_more = rows.len() > limit as usize;
+    let records = if has_more {
+        rows.into_iter().take(limit as usize).collect()
+    } else {
+        rows
+    };
+
+    // Convert ChatMessageRecord → SessionMessageRecord (different shapes).
+    // Note: SessionMessageRecord has tool_calls (Option<Value>) and artifact_paths (Option<Vec<String>>),
+    // while ChatMessageRecord does not. These are left as None for now — Task 4 will populate them.
+    let session_records: Vec<SessionMessageRecord> = records
+        .into_iter()
+        .map(|r| SessionMessageRecord {
+            id: r.id,
+            role: r.role,
+            content: r.content,
+            created_at: r.created_at,
+            input_tokens: r.input_tokens,
+            output_tokens: r.output_tokens,
+            cost_usd: r.cost_usd,
+            tool_calls: None,
+            artifact_paths: None,
+        })
+        .collect();
+
+    Ok((session_records, has_more))
+}
+
+/// Session-scoped chat message dispatcher. Routes mobile messages to the
+/// ChatManager and streams responses back via Tauri events.
+pub struct SessionChatManager;
+
+impl SessionChatManager {
+    /// Dispatch a mobile message and return desktop messages to send over the relay.
+    /// For streaming responses (SendChatMessage), this emits events via `app.emit`
+    /// and returns an empty vec; the relay will forward the events to the mobile app.
+    pub fn handle(
+        msg: MobileMessage,
+        app: &AppHandle,
+        db: Arc<Mutex<Connection>>,
+        chat_mgr: Arc<chat::ChatManager>,
+    ) -> Result<Vec<DesktopMessage>, String> {
+        match msg {
+            MobileMessage::GetSessionMessages {
+                session_id,
+                before_id,
+                limit,
+            } => handle_get_session_messages(&db, session_id, before_id, limit),
+
+            MobileMessage::SendChatMessage {
+                session_id,
+                text,
+                attachments: _,
+            } => {
+                // Stubbed for Task 3 — Task 4 implements the full send path.
+                let _ = (session_id, text, app, db, chat_mgr);
+                Err("SendChatMessage not yet implemented (Task 4)".to_string())
+            }
+
+            MobileMessage::CancelSessionStream { session_id } => {
+                handle_cancel_session_stream(&chat_mgr, session_id)
+            }
+
+            MobileMessage::ResolveSessionApproval {
+                session_id: _,
+                pending_id,
+                decision,
+            } => handle_resolve_session_approval(&chat_mgr, pending_id, decision),
+
+            MobileMessage::RenameSession { session_id, title } => {
+                handle_rename_session(&db, session_id, title)
+            }
+
+            // Other variants are not session-scoped chat and are handled by the relay.
+            _ => Err(format!("message not handled by SessionChatManager: {:?}", msg)),
+        }
+    }
+}
+
+fn handle_get_session_messages(
+    db: &Arc<Mutex<Connection>>,
+    owner_session_id: String,
+    before_id: Option<i64>,
+    limit: u32,
+) -> Result<Vec<DesktopMessage>, String> {
+    let conn = db.lock();
+    let (messages, has_more) = fetch_page(&conn, &owner_session_id, before_id, limit)?;
+    Ok(vec![DesktopMessage::SessionMessages {
+        session_id: owner_session_id,
+        messages,
+        has_more,
+    }])
+}
+
+fn handle_cancel_session_stream(
+    chat_mgr: &Arc<chat::ChatManager>,
+    owner_session_id: String,
+) -> Result<Vec<DesktopMessage>, String> {
+    // TODO: Resolve the internal chat_session_id from owner_session_id via DB lookup.
+    // For now, we use owner_session_id directly. Task 4 will add the DB parameter
+    // and proper owner_session_id → chat_session_id resolution.
+    chat_mgr.cancel(&owner_session_id);
+    Ok(vec![DesktopMessage::SessionChatDone {
+        session_id: owner_session_id,
+        usage: None,
+    }])
+}
+
+fn handle_resolve_session_approval(
+    chat_mgr: &Arc<chat::ChatManager>,
+    pending_id: String,
+    decision: String,
+) -> Result<Vec<DesktopMessage>, String> {
+    let approved = match decision.as_str() {
+        "approve" | "approved" | "yes" => true,
+        "deny" | "denied" | "no" => false,
+        _ => return Err(format!("invalid decision: {decision}")),
+    };
+
+    let pending = chat_mgr.take_pending_approval(&pending_id)
+        .ok_or_else(|| format!("unknown pending approval id: {pending_id}"))?;
+
+    // Deliver the decision via the oneshot channel. A send error means the
+    // loop already ended (stream cancelled) — ignore it.
+    let _ = pending.response_tx.send(approved);
+
+    Ok(vec![])
+}
+
+fn handle_rename_session(
+    db: &Arc<Mutex<Connection>>,
+    owner_session_id: String,
+    title: String,
+) -> Result<Vec<DesktopMessage>, String> {
+    let chat_session_id = {
+        let conn = db.lock();
+        let id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM chat_sessions WHERE owner_session_id = ?1",
+                rusqlite::params![&owner_session_id],
+                |r| r.get(0),
+            )
+            .ok();
+        id.ok_or_else(|| format!("session not found: {owner_session_id}"))?
+    };
+
+    let conn = db.lock();
+    db::update_chat_session_title(&conn, &chat_session_id, &title)
+        .map_err(|e| format!("failed to update title: {e}"))?;
+
+    Ok(vec![]) // No response needed — success is implicit.
+}

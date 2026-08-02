@@ -12,6 +12,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AvailableSkill,
+  ChangedFile,
   CostEvent,
   CostRollups,
   GitStatusInfo,
@@ -160,6 +161,12 @@ export const getGitStatus = (path: string) => safeInvoke<GitStatusInfo | null>("
 export const createWorktree = (projectId: string, branchName: string) =>
   safeInvoke<string | null>("create_worktree", { projectId, branchName });
 export const getGitDiff = (path: string) => safeInvoke<string | null>("get_git_diff", { path });
+/** Per-pane change list for the Dev-tab side panel. The argument is the
+ *  pane's actual working directory (project root or worktree path), not the
+ *  project root alone — worktree-scoped sessions (PRD §7.10) must see the
+ *  worktree's own diff, not the parent repo's. */
+export const getChangedFiles = (path: string) =>
+  safeInvoke<ChangedFile[] | null>("get_changed_files", { path });
 
 // --- Settings / skills / quick actions / secrets / cost ---
 export const getSetting = (key: string) => safeInvoke<string | null>("get_setting", { key });
@@ -520,12 +527,23 @@ export interface GgufModel {
 export interface StartedModel {
   modelId: string;
   port: number;
+  /** Effective context window the sidecar was launched with. */
+  nCtx: number;
+  /**
+   * Effective `--n-gpu-layers` value the sidecar launched with after the
+   * stepwise GPU-fallback ladder. 0 = CPU-only, >0 = partial or full offload.
+   * The UI surfaces this so the user understands the offload decision.
+   */
+  nGpuLayers: number;
   baseUrl: string;
 }
 
 export interface ActiveLocalModel {
   modelId: string;
   port: number;
+  nCtx: number;
+  /** Effective `--n-gpu-layers` of the running sidecar. */
+  nGpuLayers: number;
   baseUrl: string;
 }
 
@@ -547,6 +565,17 @@ export const stopLocalModel = (modelId: string) =>
 export const localModelStatus = () =>
   safeInvoke<ActiveLocalModel | null>("local_model_status");
 
+/** Live context-window usage for a local-model session, returned by
+ *  `count_context_tokens`. `usedTokens` is null when no sidecar is running
+ *  or the tokenizer errored; `maxTokens` is the sidecar's `-c` cap (0 for
+ *  non-local / no-sidecar). */
+export interface ContextUsage {
+  usedTokens: number | null;
+  maxTokens: number;
+}
+export const countContextTokens = (chatSessionId: string) =>
+  safeInvoke<ContextUsage | null>("count_context_tokens", { chatSessionId });
+
 export const listenChatToken = (handler: (payload: ChatTokenPayload) => void) =>
   safeListen<ChatTokenPayload>("chat:token", handler);
 export const listenChatStatus = (handler: (payload: ChatStatusPayload) => void) =>
@@ -563,6 +592,29 @@ export const listenChatApprovalRequest = (handler: (payload: ChatApprovalRequest
   safeListen<ChatApprovalRequestPayload>("chat:approval-request", handler);
 export const listenChatApprovalResolved = (handler: (payload: ChatApprovalResolvedPayload) => void) =>
   safeListen<ChatApprovalResolvedPayload>("chat:approval-resolved", handler);
+
+/** Re-broadcast a chat event to the mobile relay. Used from useChatEvents.ts to
+ *  forward chat:token, chat:status, chat:done, chat:error, chat:approval-request,
+ *  and chat:artifact events to the per-session mobile connection. */
+export const emitMobileSessionChatEvent = (
+  sessionId: string,
+  kind: string,
+  payload: Record<string, unknown>,
+) => {
+  if (!tauriAvailable()) return Promise.resolve();
+  return import("@tauri-apps/api/event")
+    .then(({ emit }) =>
+      emit("mobile:session_chat_event", { session_id: sessionId, kind, payload }),
+    )
+    .catch((err) => console.warn("[conduit] emitMobileSessionChatEvent failed", err));
+};
+
+export interface ChatOwnerPayload {
+  chatSessionId: string;
+  ownerSessionId: string;
+}
+export const listenChatOwner = (handler: (payload: ChatOwnerPayload) => void) =>
+  safeListen<ChatOwnerPayload>("mobile:session_chat_owner", handler);
 
 /** Read a generated artifact for in-app preview. */
 export const readArtifactPreview = (path: string) =>
@@ -814,7 +866,14 @@ export interface StartDownloadArgs {
 }
 
 export const fetchModelCatalog = (args: FetchCatalogArgs = {}) =>
-  safeInvoke<FetchCatalogResult | null>("fetch_model_catalog", { args });
+  // Flat payload — the Rust command takes top-level `query`/`sort`/`limit`
+  // params, not a nested `args` object. (Nesting silently broke search/sort
+  // and made every download fail with "missing required argument id".)
+  safeInvoke<FetchCatalogResult | null>("fetch_model_catalog", {
+    query: args.query ?? null,
+    sort: args.sort ?? null,
+    limit: args.limit ?? null,
+  });
 
 export const getMarketSettings = () =>
   safeInvoke<MarketSettings | null>("get_market_settings");
@@ -832,7 +891,15 @@ export const clearHuggingFaceToken = () =>
   safeInvoke<void>("clear_hugging_face_token");
 
 export const startModelDownload = (args: StartDownloadArgs) =>
-  safeInvoke<void>("start_model_download", { args });
+  // Flat payload — see fetchModelCatalog note above.
+  safeInvoke<void>("start_model_download", {
+    id: args.id,
+    repoId: args.repoId,
+    filename: args.filename,
+    downloadUrl: args.downloadUrl,
+    expectedSha256: args.expectedSha256 ?? null,
+    destDir: args.destDir ?? null,
+  });
 
 export const cancelModelDownload = (id: string) =>
   safeInvoke<void>("cancel_model_download", { id });

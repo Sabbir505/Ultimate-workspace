@@ -200,6 +200,13 @@ export interface ChatState {
   setStarred: (chatSessionId: string, starred: boolean) => Promise<void>;
   /** Mark a chat read/unread (shows an unread dot in the sidebar). */
   setUnread: (chatSessionId: string, unread: boolean) => Promise<void>;
+  /** Record the owner session id for a chat session, set when the mobile
+   *  relay invokes a session-scoped chat message. Used to re-broadcast chat
+   *  events back over the relay's per-session WebSocket. */
+  setOwnerSessionId: (chatSessionId: string, ownerSessionId: string) => void;
+  /** Look up the owner session id for a chat session (returns undefined if
+   *  no mobile relay turn is in flight for this chat session). */
+  getOwnerSessionId: (chatSessionId: string) => string | undefined;
   setSessionModel: (chatSessionId: string, model: string) => Promise<void>;
   /** Switch a session's provider (e.g. to "local_gguf" when a local model is
    *  picked from the selector in a cloud session, or back again). */
@@ -665,6 +672,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   cancelFullAutoConfirm: () => set({ fullAutoConfirmingFor: null }),
+
+  setOwnerSessionId: (chatSessionId, ownerSessionId) =>
+    set((s) => ({
+      ownerSessionByChatId: { ...s.ownerSessionByChatId, [chatSessionId]: ownerSessionId },
+    })),
+
+  getOwnerSessionId: (chatSessionId) => get().ownerSessionByChatId[chatSessionId],
 
   resolveApproval: async (chatSessionId, approved) => {
     const pending = get().pendingApprovals[chatSessionId];

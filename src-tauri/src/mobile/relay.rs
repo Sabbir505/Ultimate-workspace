@@ -26,10 +26,12 @@ use crate::chat::ChatManager;
 use crate::db;
 use crate::secrets;
 
+use super::dispatch::dispatch_mobile;
 use super::protocol::{
     ChatUsage as MobileChatUsage, DesktopMessage, MobileMessage, ProviderInfo,
     ProjectCostEntry, LocalModelUsageEntry,
 };
+use super::relay_ws::OwnerMap;
 
 /// Shared relay state: the bound port, the abort handle for the accept loop,
 /// and a per-launch pairing token that the phone must present on the FIRST
@@ -43,6 +45,10 @@ pub struct MobileRelayState {
     /// (the QR-code pairing screen scans this), and persisted in app_settings
     /// so the Settings panel can re-display it after a hot reload.
     pub pairing_token: Mutex<Option<String>>,
+    /// Tracks which WebSocket connection owns which mobile session id.
+    /// Used to route `mobile:session_chat_event` Tauri events back to the
+    /// right phone.
+    pub owner_map: OwnerMap,
 }
 
 impl MobileRelayState {
@@ -51,6 +57,7 @@ impl MobileRelayState {
             port: Mutex::new(None),
             abort: Mutex::new(None),
             pairing_token: Mutex::new(None),
+            owner_map: OwnerMap::default(),
         }
     }
 }
@@ -127,6 +134,16 @@ pub async fn start_relay(
     let (abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
     *relay_state.abort.lock() = Some(abort_tx);
 
+    // Start the Tauri event listener that forwards `mobile:session_chat_event`
+    // payloads to the right WebSocket connection via the owner map.
+    let owner_map = relay_state.owner_map.clone();
+    let app_handle = app.clone();
+    tokio::spawn(async move {
+        if let Err(e) = super::relay_owner::start_session_chat_event_listener(&app_handle, owner_map) {
+            eprintln!("[mobile-relay] failed to start session_chat_event listener: {e}");
+        }
+    });
+
     tokio::spawn(async move {
         eprintln!("[mobile-relay] listening on ws://127.0.0.1:{port} (pairing required)");
         loop {
@@ -142,8 +159,9 @@ pub async fn start_relay(
                             let app = app.clone();
                             let db = Arc::clone(&db);
                             let chat_mgr = Arc::clone(&chat_mgr);
+                            let owner_map = relay_state.owner_map.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = handle_connection(stream, peer, app, db, chat_mgr).await {
+                                if let Err(e) = handle_connection(stream, peer, app, db, chat_mgr, owner_map).await {
                                     eprintln!("[mobile-relay] connection error: {e}");
                                 }
                             });
@@ -179,6 +197,7 @@ async fn handle_connection(
     app: AppHandle,
     db: Arc<Mutex<Connection>>,
     chat_mgr: Arc<ChatManager>,
+    owner_map: OwnerMap,
 ) -> Result<(), String> {
     let ws_stream = tokio_tungstenite::accept_async(stream)
         .await
@@ -499,18 +518,149 @@ async fn handle_connection(
                     }
                 }
             }
+            MobileMessage::GetSessionMessages {
+                session_id,
+                before_id,
+                limit,
+            } => {
+                match dispatch_mobile(
+                    MobileMessage::GetSessionMessages {
+                        session_id,
+                        before_id,
+                        limit,
+                    },
+                    &app,
+                    Arc::clone(&db),
+                    Arc::clone(&chat_mgr),
+                    owner_map.clone(),
+                ) {
+                    Ok(msgs) => {
+                        for m in msgs {
+                            let _ = send_msg(&mut write, &m).await;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = send_msg(&mut write, &DesktopMessage::ChatError {
+                            chat_session_id: "session-chat".to_string(),
+                            error: e,
+                        }).await;
+                    }
+                }
+            }
+            MobileMessage::SendChatMessage {
+                session_id,
+                text,
+                attachments,
+            } => {
+                // Register this session in the owner map BEFORE dispatching,
+                // so streaming events (re-broadcast by the React side as
+                // `mobile:session_chat_event` and forwarded by the listener in
+                // relay_owner.rs) have a destination WS sender. The sender here
+                // is the one the listener pushes DesktopMessages onto; the
+                // receiver is pumped to the WS by a per-connection task (see
+                // below). We drop the receiver for now — the current forwarding
+                // path routes through the React re-broadcast, which calls
+                // `send` on this same `tx` registered above.
+                let (tx, _rx) = super::relay_ws::make_channel();
+                super::relay_owner::register_owner(&owner_map, session_id.clone(), tx);
+                match dispatch_mobile(
+                    MobileMessage::SendChatMessage {
+                        session_id,
+                        text,
+                        attachments,
+                    },
+                    &app,
+                    Arc::clone(&db),
+                    Arc::clone(&chat_mgr),
+                    owner_map.clone(),
+                ) {
+                    Ok(msgs) => {
+                        for m in msgs {
+                            let _ = send_msg(&mut write, &m).await;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = send_msg(&mut write, &DesktopMessage::ChatError {
+                            chat_session_id: "session-chat".to_string(),
+                            error: e,
+                        }).await;
+                    }
+                }
+            }
+            MobileMessage::CancelSessionStream { session_id } => {
+                match dispatch_mobile(
+                    MobileMessage::CancelSessionStream { session_id },
+                    &app,
+                    Arc::clone(&db),
+                    Arc::clone(&chat_mgr),
+                    owner_map.clone(),
+                ) {
+                    Ok(msgs) => {
+                        for m in msgs {
+                            let _ = send_msg(&mut write, &m).await;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = send_msg(&mut write, &DesktopMessage::ChatError {
+                            chat_session_id: "session-chat".to_string(),
+                            error: e,
+                        }).await;
+                    }
+                }
+            }
+            MobileMessage::ResolveSessionApproval {
+                session_id,
+                pending_id,
+                decision,
+            } => {
+                match dispatch_mobile(
+                    MobileMessage::ResolveSessionApproval {
+                        session_id,
+                        pending_id,
+                        decision,
+                    },
+                    &app,
+                    Arc::clone(&db),
+                    Arc::clone(&chat_mgr),
+                    owner_map.clone(),
+                ) {
+                    Ok(msgs) => {
+                        for m in msgs {
+                            let _ = send_msg(&mut write, &m).await;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = send_msg(&mut write, &DesktopMessage::ChatError {
+                            chat_session_id: "session-chat".to_string(),
+                            error: e,
+                        }).await;
+                    }
+                }
+            }
+            MobileMessage::RenameSession { session_id, title } => {
+                match dispatch_mobile(
+                    MobileMessage::RenameSession { session_id, title },
+                    &app,
+                    Arc::clone(&db),
+                    Arc::clone(&chat_mgr),
+                    owner_map.clone(),
+                ) {
+                    Ok(msgs) => {
+                        for m in msgs {
+                            let _ = send_msg(&mut write, &m).await;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = send_msg(&mut write, &DesktopMessage::ChatError {
+                            chat_session_id: "session-chat".to_string(),
+                            error: e,
+                        }).await;
+                    }
+                }
+            }
             // A second Pair frame after a successful pairing is a protocol
             // violation — already handled above before this match.
             MobileMessage::Pair { .. } => unreachable!("Pair is intercepted above"),
-            // Session-scoped chat variants are handled in later tasks; for now
-            // the desktop acknowledges them with a not-implemented status so
-            // the phone doesn't time out.
-            _ => {
-                let _ = send_msg(&mut write, &DesktopMessage::ChatError {
-                    chat_session_id: "session-chat".to_string(),
-                    error: "session chat not yet wired up".to_string(),
-                }).await;
-            }
         }
     }
 

@@ -7,7 +7,7 @@
 use super::relay_ws::OwnerMap;
 use super::protocol::DesktopMessage;
 use serde::Deserialize;
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::Listener;
 
 /// Payload structure for the `mobile:session_chat_event` Tauri event emitted by
 /// the React side. The relay listens for these and forwards them to the
@@ -32,7 +32,20 @@ pub fn register_owner(owner: &OwnerMap, session_id: String, sender: super::relay
     owner.lock().insert(session_id, sender);
 }
 
+/// Create a new channel for a connection, register the sender in the owner map,
+/// and return the receiver so the caller can spawn `pump_to_ws`.
+#[allow(dead_code)] // Reserved for the per-connection pump wiring (Task 6).
+pub fn register_connection(
+    owner: &OwnerMap,
+    session_id: String,
+) -> tokio::sync::mpsc::UnboundedReceiver<super::protocol::DesktopMessage> {
+    let (tx, rx) = super::relay_ws::make_channel();
+    register_owner(owner, session_id, tx);
+    rx
+}
+
 /// Remove a mobile session from the owner map.
+#[allow(dead_code)] // Called on disconnect in Task 6.
 pub fn unregister_owner(owner: &OwnerMap, session_id: &str) {
     owner.lock().remove(session_id);
 }
@@ -156,11 +169,11 @@ pub fn forward_session_chat_event(
 /// to the appropriate WebSocket connection via the owner map.
 /// Returns a handle that can be used to stop the listener (currently a no-op
 /// since the listener runs for the lifetime of the relay).
-pub fn start_session_chat_event_listener<R: Runtime>(
-    app: &AppHandle<R>,
+pub fn start_session_chat_event_listener(
+    app: &tauri::AppHandle,
     owner: OwnerMap,
 ) -> Result<(), String> {
-    let app_clone = app.clone();
+    let _app_clone = app.clone();
     app.listen("mobile:session_chat_event", move |event| {
         let payload_str = event.payload();
         let payload: SessionChatEventPayload = match serde_json::from_str(payload_str) {

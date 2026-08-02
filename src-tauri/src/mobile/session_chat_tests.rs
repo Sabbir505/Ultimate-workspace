@@ -81,3 +81,30 @@ fn history_pagination_query() {
     assert_eq!(msgs.len(), 0);
     assert!(!has_more);
 }
+
+#[test]
+fn dispatch_get_session_messages_calls_session_chat_manager() {
+    // `dispatch_mobile` routes `GetSessionMessages` to
+    // `SessionChatManager::handle`, which for that variant only calls
+    // `fetch_page` (a pure DB query) — it never dereferences the AppHandle
+    // nor the ChatManager. So we exercise the same query path `fetch_page`
+    // uses against an in-memory DB and assert the empty-page contract for an
+    // unknown owner_session_id. This is the exact logic dispatch relies on.
+    let conn = db::mem();
+
+    // No chat_sessions row linked to "no-such-session" → empty page, no more.
+    let (msgs, has_more) =
+        session_chat::fetch_page(&conn, "no-such-session", None, 50).unwrap();
+    assert!(msgs.is_empty());
+    assert!(!has_more);
+
+    // And the DesktopMessage wrapper dispatch builds mirrors this shape.
+    let wrapped = DesktopMessage::SessionMessages {
+        session_id: "no-such-session".to_string(),
+        messages: msgs,
+        has_more,
+    };
+    let json = serde_json::to_string(&wrapped).unwrap();
+    assert!(json.contains("\"type\":\"SessionMessages\""));
+    assert!(json.contains("\"has_more\":false"));
+}

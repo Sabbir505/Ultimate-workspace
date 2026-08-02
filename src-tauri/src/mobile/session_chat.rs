@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use rusqlite::Connection;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 use crate::chat;
 use crate::db;
@@ -17,6 +17,7 @@ use crate::types::ChatMessageRecord;
 use super::protocol::{
     ChatAttachment, DesktopMessage, MobileMessage, SessionMessageRecord,
 };
+use super::relay_owner::SessionChatOwnerPayload;
 
 /// Ensure the `owner_session_id` column exists on `chat_sessions`.
 /// Called lazily from fetch_page / handle — safe to call multiple times.
@@ -214,7 +215,7 @@ fn handle_get_session_messages(
 }
 
 fn handle_send_chat_message(
-    _app: &AppHandle,
+    app: &AppHandle,
     db: &Arc<Mutex<Connection>>,
     chat_mgr: &Arc<chat::ChatManager>,
     owner_session_id: String,
@@ -262,7 +263,7 @@ fn handle_send_chat_message(
     //    those events back to this `owner_session_id` so the phone
     //    receives them.
     chat_mgr.send(
-        chat_session_id,
+        chat_session_id.clone(),
         crate::chat::providers::ChatProviderId::Anthropic,
         "claude-sonnet-4-5-20250929".to_string(),
         "no-key".to_string(),
@@ -276,9 +277,21 @@ fn handle_send_chat_message(
         None,
         Vec::new(),
         Arc::clone(db),
-        _app.clone(),
+        app.clone(),
         false,
         None,
+    );
+
+    // 4. Tell the React side which chat_session_id maps to this owner_session_id,
+    //    so the re-broadcast in useChatEvents.ts can route streaming events back
+    //    to the right phone via the owner map. Without this, getOwnerSessionId()
+    //    always returns undefined and the re-broadcast is a no-op.
+    let _ = app.emit(
+        "mobile:session_chat_owner",
+        SessionChatOwnerPayload {
+            chat_session_id: chat_session_id.clone(),
+            owner_session_id: owner_session_id.clone(),
+        },
     );
 
     Ok(vec![])

@@ -35,7 +35,10 @@ export async function getUseChatSession(): Promise<boolean> {
   if (cache !== null) return cache;
   const store = await loadStorage();
   const raw = await store.getItem(KEY);
-  cache = raw === '1';
+  // Default: ON. The cursor-style session chat has replaced the old
+  // terminal-style SessionScreen; users who somehow still have a "0"
+  // value from the beta period get opted in on next launch.
+  cache = raw !== '0';
   return cache;
 }
 
@@ -51,7 +54,7 @@ function useStateLocal(initial: boolean): [boolean, (v: boolean) => void] {
 }
 
 export function useUseChatSession(): boolean {
-  const [v, setV] = useStateLocal(cache ?? false);
+  const [v, setV] = useStateLocal(cache ?? true);
   useEffect(() => {
     const fn = (next: boolean) => setV(next);
     listeners.add(fn);

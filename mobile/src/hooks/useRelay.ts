@@ -29,11 +29,32 @@ type DesktopMessage =
   | { type: 'CostSummary'; today: number; week: number }
   | { type: 'CostDetails'; daily: DailyCostEntry[]; per_project: ProjectCostEntry[]; local_models: LocalModelUsageEntry[] }
   | { type: 'LocalModelReady'; model: string; base_url: string }
-  | { type: 'LocalModelError'; model: string; error: string };
+  | { type: 'LocalModelError'; model: string; error: string }
+  // Session-scoped chat events (Task 2). All keyed by `session_id` (the
+  // mobile app's session id, NOT an ephemeral chat_session_id) so the
+  // phone-side store can route them to the right conversation without
+  // knowing about the desktop's internal chat_session_id mapping.
+  | { type: 'SessionMessages'; session_id: string; messages: SessionMessageRecord[]; has_more: boolean }
+  | { type: 'SessionChatToken'; session_id: string; token: string }
+  | { type: 'SessionChatDone'; session_id: string; usage?: { input_tokens: number; output_tokens: number; cost_usd?: number } }
+  | { type: 'SessionChatError'; session_id: string; error: string }
+  | { type: 'SessionChatStatus'; session_id: string; reason: string; message: string }
+  | { type: 'SessionApprovalRequest'; session_id: string; pending_id: string; tool: string; summary: string; args: unknown }
+  | { type: 'SessionArtifact'; session_id: string; message_id?: number; artifact: { path: string; filename: string; inline?: { kind: 'jsx' | 'tsx'; code: string } } };
 interface MobileChatTurn {
   type: 'ChatTurn'; provider_id: string; model: string;
   messages: ChatMessage[]; system?: string; effort?: string; gguf_path?: string;
 }
+// Session-scoped chat senders (Task 2). These run on the SAME persistent WS
+// as everything else, but they key off the mobile app's session id
+// (`session_id`) so the desktop's SessionChatManager can route them through
+// the existing ChatManager pipeline + owner-map streaming.
+type SessionChatMessage =
+  | { type: 'GetSessionMessages'; session_id: string; before_id?: number; limit: number }
+  | { type: 'SendChatMessage'; session_id: string; text: string; attachments: SessionChatAttachment[] }
+  | { type: 'CancelSessionStream'; session_id: string }
+  | { type: 'ResolveSessionApproval'; session_id: string; pending_id: string; decision: 'approve' | 'deny' }
+  | { type: 'RenameSession'; session_id: string; title: string };
 type MobileMessagePlain =
   | { type: 'ListAvailableProviders' } | { type: 'ListSessions' }
   | MobileChatTurn | { type: 'CancelChatTurn'; chat_session_id: string }
@@ -43,7 +64,8 @@ type MobileMessagePlain =
   | { type: 'SpawnSession'; session_id: string }
   | { type: 'GetCostSummary' }
   | { type: 'GetCostDetails' }
-  | { type: 'StartLocalModel'; model: string; gguf_path: string };
+  | { type: 'StartLocalModel'; model: string; gguf_path: string }
+  | SessionChatMessage;
 
 export interface Session {
   id: string; projectId: string; projectName: string; title: string;
@@ -84,6 +106,27 @@ export const onSessionCreated = new EventBus<Session>();
 export const onCostDetails = new EventBus<CostDetails>();
 export const onLocalModelReady = new EventBus<{ model: string; baseUrl: string }>();
 export const onLocalModelError = new EventBus<{ model: string; error: string }>();
+
+// Session-scoped chat event buses (Task 6). Keyed by the mobile session id.
+export const onSessionMessages = new EventBus<{ sessionId: string; messages: SessionMessageRecord[]; hasMore: boolean }>();
+export const onSessionChatToken = new EventBus<{ sessionId: string; token: string }>();
+export const onSessionChatDone = new EventBus<{ sessionId: string; usage?: SessionChatUsage }>();
+export const onSessionChatError = new EventBus<{ sessionId: string; error: string }>();
+export const onSessionChatStatus = new EventBus<{ sessionId: string; reason: string; message: string }>();
+export const onSessionApprovalRequest = new EventBus<{ sessionId: string; pendingId: string; tool: string; summary: string; args: unknown }>();
+export const onSessionArtifact = new EventBus<{ sessionId: string; messageId?: number; artifact: SessionArtifact }>();
+
+export interface SessionMessageRecord {
+  id: number; role: string; content: string; created_at: number;
+  input_tokens?: number; output_tokens?: number; cost_usd?: number;
+  tool_calls?: unknown; artifact_paths?: string[];
+}
+export interface SessionChatUsage { input_tokens: number; output_tokens: number; cost_usd?: number; }
+export interface SessionArtifact { path: string; filename: string; inline?: { kind: 'jsx' | 'tsx'; code: string }; }
+export interface SessionChatAttachment {
+  name: string; kind: 'text' | 'image' | 'doc';
+  text?: string; data?: string; media_type?: string; format?: string;
+}
 
 let _ws: WebSocket | null = null;
 let _url = DEFAULT_RELAY_URL;
@@ -155,6 +198,14 @@ function _doConnect(target: string) {
           }); break;
           case 'LocalModelReady': onLocalModelReady.emit({ model: msg.model, baseUrl: msg.base_url }); break;
           case 'LocalModelError': onLocalModelError.emit({ model: msg.model, error: msg.error }); break;
+          // Session-scoped chat events (Task 6). Route to the new event buses.
+          case 'SessionMessages': onSessionMessages.emit({ sessionId: msg.session_id, messages: msg.messages, hasMore: msg.has_more }); break;
+          case 'SessionChatToken': onSessionChatToken.emit({ sessionId: msg.session_id, token: msg.token }); break;
+          case 'SessionChatDone': onSessionChatDone.emit({ sessionId: msg.session_id, usage: msg.usage }); break;
+          case 'SessionChatError': onSessionChatError.emit({ sessionId: msg.session_id, error: msg.error }); break;
+          case 'SessionChatStatus': onSessionChatStatus.emit({ sessionId: msg.session_id, reason: msg.reason, message: msg.message }); break;
+          case 'SessionApprovalRequest': onSessionApprovalRequest.emit({ sessionId: msg.session_id, pendingId: msg.pending_id, tool: msg.tool, summary: msg.summary, args: msg.args }); break;
+          case 'SessionArtifact': onSessionArtifact.emit({ sessionId: msg.session_id, messageId: msg.message_id, artifact: msg.artifact }); break;
         }
       } catch (e) { console.error('parse error', e); }
     };
@@ -193,6 +244,39 @@ export function useRelay() {
   const sendToSession = useCallback((sid: string, text: string) => { _send({ type: 'SendToSession', session_id: sid, text }); }, []);
   const getTranscript = useCallback((sid: string) => { _send({ type: 'GetTranscript', session_id: sid }); }, []);
   useEffect(() => { if (!_ws && !_connecting) globalConnect(); }, []);
+
+  // Session-scoped chat senders (Task 6). These go on the same WS connection
+  // but route through SessionChatManager on the desktop, which manages the
+  // owner map and persists messages on the chat_sessions table.
+  const getSessionMessages = useCallback(
+    (sessionId: string, beforeId?: number, limit = 50) => {
+      _send({ type: 'GetSessionMessages', session_id: sessionId, before_id: beforeId, limit } as SessionChatMessage);
+    },
+    [],
+  );
+  const sendSessionChat = useCallback(
+    (sessionId: string, text: string, attachments: SessionChatAttachment[] = []) => {
+      _send({ type: 'SendChatMessage', session_id: sessionId, text, attachments } as SessionChatMessage);
+    },
+    [],
+  );
+  const cancelSessionStream = useCallback(
+    (sessionId: string) => { _send({ type: 'CancelSessionStream', session_id: sessionId } as SessionChatMessage); },
+    [],
+  );
+  const resolveSessionApproval = useCallback(
+    (sessionId: string, pendingId: string, decision: 'approve' | 'deny') => {
+      _send({ type: 'ResolveSessionApproval', session_id: sessionId, pending_id: pendingId, decision } as SessionChatMessage);
+    },
+    [],
+  );
+  const renameSession = useCallback(
+    (sessionId: string, title: string) => {
+      _send({ type: 'RenameSession', session_id: sessionId, title } as SessionChatMessage);
+    },
+    [],
+  );
+
   return { connected, desktopUnreachable: !connected, sessions, providers, costSummary, costDetails, connect, disconnect, sendChatTurn, sendToSession, getTranscript,
     cancelChatTurn: (id: string) => _send({ type: 'CancelChatTurn', chat_session_id: id }),
     refreshProviders: () => _send({ type: 'ListAvailableProviders' }),
@@ -201,5 +285,11 @@ export function useRelay() {
     createSession: (pid: string, h: string) => _send({ type: 'CreateSession', project_id: pid, harness: h }),
     spawnSession: (sid: string) => _send({ type: 'SpawnSession', session_id: sid }),
     startLocalModel: (model: string, ggufPath: string) => _send({ type: 'StartLocalModel', model, gguf_path: ggufPath }),
+    // Session-scoped chat (Task 6).
+    getSessionMessages,
+    sendSessionChat,
+    cancelSessionStream,
+    resolveSessionApproval,
+    renameSession,
   };
 }

@@ -173,12 +173,11 @@ if (isZip) {
 }
 
 // Find the extracted top-level directory (usually `llama-<RELEASE>/`).
-const extractedTop = readdirSync(cacheDir).find((d) => d.startsWith("llama-") && d !== asset);
-if (!extractedTop) {
-  console.error(`✗ could not find extracted top-level dir in ${cacheDir}`);
-  process.exit(1);
-}
-const extractedDir = join(cacheDir, extractedTop);
+// The win-cpu/win-cuda zips are FLAT (no parent dir) — fall back to the
+// cache dir itself in that case.
+const topCandidates = readdirSync(cacheDir, { withFileTypes: true });
+const extractedTop = topCandidates.find((d) => d.isDirectory() && d.name.startsWith("llama-"))?.name;
+const extractedDir = extractedTop ? join(cacheDir, extractedTop) : cacheDir;
 
 // Copy the launcher + all .so / .dylib / .dll siblings into binaries/llama-server-<triple>/.
 const entries = readdirSync(extractedDir);
@@ -216,15 +215,22 @@ try {
 // Also copy the flat launcher to the top of binaries/ for easier inspection
 // (the actual bundled layout inside the installer will be
 // `<exe_dir>/llama-server-<triple>` + bundled-resources for .so files).
+// On Linux the flat name `llama-server-<triple>` collides with the staged
+// directory of the same name — skip the top-level copy there (it's only for
+// inspection; externalBin uses the nested path).
 const flatTop = join(binariesDir, flatName);
-copyFileSync(renamedInDir, flatTop);
-if (!isWin) chmodSync(flatTop, 0o755);
-console.log(`✓ staged flat launcher at binaries/${flatName}`);
+if (!existsSync(flatTop) || statSync(flatTop).isFile()) {
+  copyFileSync(renamedInDir, flatTop);
+  if (!isWin) chmodSync(flatTop, 0o755);
+  console.log(`✓ staged flat launcher at binaries/${flatName}`);
+} else {
+  console.log(`ℹ flat launcher name collides with the staged dir on this target — skipping top-level copy`);
+}
 
 function stageFlatExternalBin() {
   // Already-staged path: just ensure the flat externalBin file exists.
   const flatTop = join(binariesDir, flatName);
-  if (existsSync(finalLauncher) && !existsSync(flatTop)) {
+  if (existsSync(finalLauncher) && (!existsSync(flatTop) || statSync(flatTop).isFile())) {
     copyFileSync(finalLauncher, flatTop);
     if (!isWin) chmodSync(flatTop, 0o755);
     console.log(`✓ staged flat externalBin at binaries/${flatName}`);

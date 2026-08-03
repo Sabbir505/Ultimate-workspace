@@ -154,6 +154,8 @@ async function stage(target) {
   // --no-warn-script-location: the Scripts dir isn't on PATH and we don't need
   // the entry-point exes; suppress the noise. --no-input: never block.
   run(pipPath, [
+    "-m",
+    "pip",
     "install",
     "--disable-pip-version-check",
     "--no-warn-script-location",

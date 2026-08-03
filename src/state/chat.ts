@@ -316,6 +316,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingApprovals: {},
   fullAutoConfirmingFor: null,
   tasks: {},
+  ownerSessionByChatId: {},
 
   loadSessions: async () => {
     const sessions = await listChatSessions();

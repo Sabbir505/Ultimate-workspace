@@ -635,7 +635,7 @@ export const listenChatTaskProgress = (handler: (payload: ChatTaskProgressPayloa
 export const emitMobileSessionChatEvent = (
   sessionId: string,
   kind: string,
-  payload: Record<string, unknown>,
+  payload: unknown,
 ) => {
   if (!tauriAvailable()) return Promise.resolve();
   return import("@tauri-apps/api/event")

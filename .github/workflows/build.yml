@@ -60,6 +60,7 @@ jobs:
       # sidecar must be built explicitly so stage-browser-mcp.mjs (run inside
       # beforeBuildCommand) finds it in target/release/.
       - name: Build browser-mcp sidecar
+        working-directory: src-tauri
         run: cargo build --release --bin conduit-browser-mcp
 
       # Note: the sidecar is staged by beforeBuildCommand during `npm run tauri
@@ -128,6 +129,7 @@ jobs:
       # sidecar must be built explicitly so stage-browser-mcp.mjs (run inside
       # beforeBuildCommand) finds it in target/release/.
       - name: Build browser-mcp sidecar
+        working-directory: src-tauri
         run: cargo build --release --bin conduit-browser-mcp
 
       # Note: the sidecar is staged by beforeBuildCommand during `npm run tauri

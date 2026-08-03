@@ -56,11 +56,9 @@ jobs:
       - name: Install npm deps
         run: npm ci
 
-      - name: Stage browser-mcp sidecar
-        run: node scripts/stage-browser-mcp.mjs
-
-      - name: Stage bundled Python
-        run: node scripts/fetch-bundled-python.mjs
+      # Note: the sidecar is staged by beforeBuildCommand during `npm run tauri
+      # build` (after cargo build --release has produced the binary), so no
+      # separate staging step is needed here.
 
       - name: Build (do NOT set signing env vars — the release job signs)
         env:
@@ -120,11 +118,9 @@ jobs:
       - name: Install npm deps
         run: npm ci
 
-      - name: Stage browser-mcp sidecar
-        run: node scripts/stage-browser-mcp.mjs
-
-      - name: Stage bundled Python
-        run: node scripts/fetch-bundled-python.mjs
+      # Note: the sidecar is staged by beforeBuildCommand during `npm run tauri
+      # build` (after cargo build --release has produced the binary), so no
+      # separate staging step is needed here.
 
       - name: Build
         env:

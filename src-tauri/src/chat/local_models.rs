@@ -220,13 +220,34 @@ fn skip_gguf_value(file: &mut fs::File, value_type: u32, count: u64) {
 
 // ---- Scanner ----
 
+/// Quick GGUF magic check — reads just the 4-byte header. Used for candidate
+/// files that don't carry a `.gguf` extension (Ollama blobs are named
+/// `sha256-<digest>` with no extension at all).
+fn has_gguf_magic(path: &Path) -> bool {
+    let mut file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut magic = [0u8; 4];
+    if file.read_exact(&mut magic).is_err() {
+        return false;
+    }
+    u32::from_le_bytes(magic) == 0x46554747 // "GGUF"
+}
+
 /// Recursively scan a directory for `.gguf` files.
+///
+/// When `source` is `"ollama"` the extension filter is relaxed: blob files
+/// have no extension, so any file whose header carries the GGUF magic is a
+/// candidate (the metadata parser still rejects non-GGUF content).
 pub fn scan_folder(dir: &Path, source: &str) -> Vec<GgufFile> {
     let mut files = Vec::new();
     let walker = match walkdir::WalkDir::new(dir).max_depth(6).into_iter().collect::<Result<Vec<_>, _>>() {
         Ok(entries) => entries,
         Err(_) => return files,
     };
+
+    let extensionless_ok = source == "ollama";
 
     // First pass: collect all .gguf paths, then pair mmproj files with their
     // companion model. The mmproj file usually lives in the same directory as
@@ -240,7 +261,10 @@ pub fn scan_folder(dir: &Path, source: &str) -> Vec<GgufFile> {
         }
         let name = entry.file_name().to_string_lossy().to_lowercase();
         if !name.ends_with(".gguf") {
-            continue;
+            // Ollama blobs have no extension — fall back to the magic check.
+            if !(extensionless_ok && has_gguf_magic(entry.path())) {
+                continue;
+            }
         }
         let path = entry.path();
         let meta = parse_gguf(path);
@@ -304,6 +328,13 @@ pub fn scan_default_locations() -> Vec<GgufFile> {
         all.extend(scan_folder(&lm_studio, "lm-studio"));
     }
 
+    // LM Studio cache (new-style path, LM Studio ≥0.3 — the layout current
+    // installs actually use: ~/.lmstudio/models/<publisher>/<model>/*.gguf).
+    if let Some(home) = dirs::home_dir() {
+        let lm_studio_new = home.join(".lmstudio").join("models");
+        all.extend(scan_folder(&lm_studio_new, "lm-studio"));
+    }
+
     // LM Studio cache (Windows %LOCALAPPDATA% variant).
     if let Some(local_data) = dirs::data_local_dir() {
         let lm_studio_win = local_data.join("lm-studio").join("models");
@@ -338,6 +369,9 @@ pub struct SidecarHandle {
     /// always relative to the window the model actually has, not a hardcoded
     /// constant.
     pub n_ctx: u32,
+    /// The effective `--n-gpu-layers` value that succeeded. Exposed to the UI
+    /// so users can see partial offload (e.g., 32 layers on GPU, rest on CPU).
+    pub n_gpu_layers: i32,
 }
 
 pub struct LocalModelRegistry {
@@ -378,8 +412,8 @@ impl LocalModelRegistry {
         let port = listener.local_addr().map_err(|e| format!("local addr: {e}"))?.port();
         drop(listener);
 
-        // Auto-detect GPU layers.
-        let ngl = ngl_override.unwrap_or_else(|| auto_ngl());
+        // Auto-detect GPU layers (now GGUF+VRAM-aware).
+        let ngl = ngl_override.unwrap_or_else(|| auto_ngl(gguf_path));
 
         // Auto-pick context size.
         let ctx = ctx_override.unwrap_or_else(|| auto_ctx_size(gguf_path));
@@ -393,140 +427,223 @@ impl LocalModelRegistry {
         // as a health-check timeout. Omitting it keeps the default path
         // universal and fast. (A future iteration can add it as an opt-in once
         // we detect a CUDA/Metal build.)
-        let mut cmd = tokio::process::Command::new(&bin);
-        // Build the arg list dynamically — --mmproj is optional (only passed
-        // when a vision projector companion was found next to the model).
-        let mut args: Vec<String> = vec![
-            "--model".to_string(), gguf_path.to_string(),
-            "--port".to_string(), port.to_string(),
-            "--host".to_string(), "127.0.0.1".to_string(),
-            "--n-gpu-layers".to_string(), ngl.to_string(),
-            "-c".to_string(), ctx.to_string(),
-        ];
-        if let Some(mp) = mmproj_path {
-            if !mp.is_empty() {
-                args.push("--mmproj".to_string());
-                args.push(mp.to_string());
+        let args_template: Vec<String> = {
+            let mut v = vec![
+                "--model".to_string(), gguf_path.to_string(),
+                "--port".to_string(), port.to_string(),
+                "--host".to_string(), "127.0.0.1".to_string(),
+                "-c".to_string(), ctx.to_string(),
+            ];
+            if let Some(mp) = mmproj_path {
+                if !mp.is_empty() {
+                    v.push("--mmproj".to_string());
+                    v.push(mp.to_string());
+                }
             }
-        }
-        cmd.args(&args)
-        .current_dir(&resolved.dir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-        // On Windows, suppress the child's console window. In a production
-        // (release) Tauri build the app has no console of its own, so spawning
-        // a console subprocess like llama-server.exe causes Windows to allocate
-        // a brand-new visible console for the child. The user sees a terminal
-        // pop up, and closing it kills llama-server — which silently breaks the
-        // local model. CREATE_NO_WINDOW keeps the process fully backgrounded.
-        // The dev build already inherits the parent's console so this is a
-        // no-op there, but applying it unconditionally is harmless and keeps
-        // dev/prod behavior consistent.
-        #[cfg(windows)]
-        {
-            // tokio::process::Command exposes `creation_flags` as an inherent
-            // method (it forwards to the inner std Command), so no trait import
-            // is needed here — unlike the std::process::Command call sites in
-            // git.rs / harness_adapters, which must import CommandExt.
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-
-        // CUDA DLL path injection: a source-built llama.cpp with CUDA support
-        // links `ggml-cuda.dll`, which in turn needs the NVIDIA CUDA runtime
-        // DLLs (cudart64_*.dll, cublas64_*.dll, cublasLt64_*.dll, …). Those live
-        // in the CUDA Toolkit's `bin` dir, which Windows does NOT search by
-        // default — so the child exits with 0xC0000135 (STATUS_DLL_NOT_FOUND)
-        // before producing any output. Prepend the resolved CUDA bin to the
-        // child's PATH so the DLLs resolve. No-op on non-Windows / no CUDA.
-        if let Some(cuda_bin) = cuda_toolkit_bin() {
-            let existing_path = std::env::var("PATH").unwrap_or_default();
-            let new_path = if existing_path.is_empty() {
-                cuda_bin.to_string_lossy().to_string()
-            } else {
-                format!("{};{}", cuda_bin.to_string_lossy(), existing_path)
-            };
-            cmd.env("PATH", new_path);
-        }
-
-        let mut child = cmd.spawn().map_err(|e| {
-            format!("failed to spawn llama-server at {bin}: {e}. \
-                     Install llama.cpp and ensure llama-server is on PATH, or set LLAMA_SERVER_PATH.")
-        })?;
-
-        // Health-check: poll GET /health. The timeout scales with model size
-        // because startup is dominated by reading the GGUF from disk — a ~4GB
-        // file on a slow/nearly-full drive needs well over 30s just to map
-        // vocab + tensors (observed: 23s to load the vocab alone). Base 30s +
-        // 15s per GB, capped at 180s. Bail early if the child has already
-        // exited — that means startup failed fast (bad flag, unsupported
-        // architecture, missing model file) rather than the model just taking
-        // time to load. Surfacing stderr immediately keeps a broken model from
-        // burning the full timeout budget.
-        let timeout_secs: u64 = {
-            let gb = fs::metadata(gguf_path)
-                .map(|m| m.len())
-                .unwrap_or(0) as f64
-                / (1024.0 * 1024.0 * 1024.0);
-            (30.0 + gb * 15.0).clamp(30.0, 180.0) as u64
+            v
         };
-        let health_url = format!("http://127.0.0.1:{port}/health");
-        let client = reqwest::Client::new();
-        let mut ready = false;
-        for _ in 0..timeout_secs * 2 {
-            // If the process died, /health will never answer. Give the pipes a
-            // moment to flush (llama-server buffers), then drain BOTH stdout and
-            // stderr — the load error (e.g. "unsupported model architecture:
-            // 'clip'") is usually on stdout, not stderr.
-            match child.try_wait() {
-                Ok(Some(_status)) => {
-                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-                    let output = take_streams(&mut child).await;
+
+        // Stepwise GPU-fallback ladder. We start with the smart-picked (or
+        // user-override) ngl, then descend through 64 → 32 → 16 → 8 → 4 → 0
+        // on OOM. Each step is a full spawn+health-check cycle. This handles
+        // the case where the smart pick overshot (e.g., the VRAM probe
+        // underestimated system VRAM usage at load time, or llama.cpp's
+        // allocator rejected the requested count for fragmentation reasons).
+        //
+        // Why linear and not binary search? llama.cpp's allocation behavior
+        // isn't strictly monotonic with --n-gpu-layers: a model may fail at
+        // ngl=32 but succeed at ngl=64 (or vice versa) due to how KV-cache
+        // blocks are placed. Linear descent from high to low is safer, and
+        // the health-check timeout (30–180s) dominates per-iteration cost.
+        let oom_markers = [
+            "ErrorOutOfDeviceMemory",
+            "failed to allocate",
+            "vk::Device::allocateMemory",
+            "ggml_gallocr_reserve_n_impl",
+            "CUDA_ERROR_OUT_OF_MEMORY",
+            "out of memory",
+        ];
+
+        // Build the attempt ladder. Dedupe (e.g., user_ngl=32 mustn't try 32 twice).
+        let ladder_raw: Vec<i32> = if let Some(user_ngl) = ngl_override {
+            vec![user_ngl, 64, 32, 16, 8, 4, 0]
+        } else {
+            vec![ngl, 64, 32, 16, 8, 4, 0]
+        };
+        let mut seen = std::collections::HashSet::new();
+        let attempt_ngls: Vec<i32> = ladder_raw
+            .into_iter()
+            .filter(|x| seen.insert(*x))
+            .collect();
+
+        for (attempt_idx, try_ngl) in attempt_ngls.iter().enumerate() {
+            let try_ngl = *try_ngl;
+            eprintln!(
+                "[local-models] Attempt {}/{}: --n-gpu-layers={} (gguf={})",
+                attempt_idx + 1,
+                attempt_ngls.len(),
+                try_ngl,
+                gguf_path
+            );
+
+            let mut cmd = tokio::process::Command::new(&bin);
+            let mut args = args_template.clone();
+            // Insert/overwrite --n-gpu-layers at its original position. The
+            // template omits it so we control placement; pop and push keeps
+            // arg order stable for llama-server.
+            args.retain(|a| a != "--n-gpu-layers");
+            args.push("--n-gpu-layers".to_string());
+            args.push(try_ngl.to_string());
+            cmd.args(&args)
+                .current_dir(&resolved.dir)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+
+            #[cfg(windows)]
+            {
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+
+            if let Some(cuda_bin) = cuda_toolkit_bin() {
+                let existing_path = std::env::var("PATH").unwrap_or_default();
+                let new_path = if existing_path.is_empty() {
+                    cuda_bin.to_string_lossy().to_string()
+                } else {
+                    format!("{};{}", cuda_bin.to_string_lossy(), existing_path)
+                };
+                cmd.env("PATH", new_path);
+            }
+
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    if attempt_idx + 1 < attempt_ngls.len() {
+                        // Try the next ngl value in the ladder.
+                        eprintln!(
+                            "[local-models] spawn failed with n-gpu-layers={}: {}; trying next step.",
+                            try_ngl, e
+                        );
+                        continue;
+                    }
                     return Err(format!(
-                        "llama-server exited during startup.\n{output}"
+                        "failed to spawn llama-server at {bin}: {e}. \
+                         Install llama.cpp and ensure llama-server is on PATH, or set LLAMA_SERVER_PATH."
                     ));
                 }
-                Ok(None) => {} // still running — keep polling
-                Err(_) => {}
-            }
-            match client.get(&health_url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    ready = true;
-                    break;
-                }
-                _ => {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                }
-            }
-        }
+            };
 
-        if !ready {
-            // Kill the process and collect stdout+stderr for diagnostics.
-            let _ = child.kill().await;
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            let output = take_streams(&mut child).await;
-            let _ = child.wait().await;
+            // Health-check loop. Bail early if the child died; capture its
+            // output to decide whether the failure was an OOM (retry on CPU)
+            // or a real error (return to caller).
+            let timeout_secs: u64 = {
+                let gb = fs::metadata(gguf_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0) as f64
+                    / (1024.0 * 1024.0 * 1024.0);
+                (30.0 + gb * 15.0).clamp(30.0, 180.0) as u64
+            };
+            let health_url = format!("http://127.0.0.1:{port}/health");
+            // Loopback-only client: never route local GGUF server checks
+            // through a system proxy.
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap_or_default();
+            let mut ready = false;
+            let mut early_exit_output: Option<String> = None;
+            for _ in 0..timeout_secs * 2 {
+                match child.try_wait() {
+                    Ok(Some(_status)) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                        early_exit_output = Some(take_streams(&mut child).await);
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(_) => {}
+                }
+                match client.get(&health_url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        ready = true;
+                        break;
+                    }
+                    _ => {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
+            }
+
+            if ready {
+                let handle = SidecarHandle {
+                    child,
+                    port,
+                    model_id: model_id.clone(),
+                    n_ctx: ctx,
+                    n_gpu_layers: try_ngl,
+                };
+                self.handles.lock().insert(model_id.clone(), handle);
+                if try_ngl == 0 {
+                    eprintln!("[local-models] Model loaded on CPU only (--n-gpu-layers=0).");
+                } else {
+                    eprintln!(
+                        "[local-models] Model loaded successfully with --n-gpu-layers={}.",
+                        try_ngl
+                    );
+                }
+                return Ok(StartedModel {
+                    model_id,
+                    port,
+                    n_ctx: ctx,
+                    n_gpu_layers: try_ngl,
+                    base_url: format!("http://127.0.0.1:{port}"),
+                });
+            }
+
+            // Not ready — either timed out, or the process exited early.
+            // Drain streams and decide whether to retry.
+            let (output, had_early_exit) = if let Some(ref o) = early_exit_output {
+                (o.clone(), true)
+            } else {
+                let _ = child.kill().await;
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                let o = take_streams(&mut child).await;
+                let _ = child.wait().await;
+                (o, false)
+            };
+
+            let is_oom = oom_markers.iter().any(|m| output.contains(m));
+            let is_last_attempt = attempt_idx + 1 == attempt_ngls.len();
+
+            if is_oom && !is_last_attempt {
+                let snippet: String = output
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                eprintln!(
+                    "[local-models] n-gpu-layers={} hit OOM; stepping down. Snippet: {}",
+                    try_ngl, snippet
+                );
+                continue;
+            }
+
+            // Non-OOM early exit: real error (bad model, wrong mmproj, etc.)
+            if !is_oom && had_early_exit {
+                return Err(format!(
+                    "llama-server exited during startup with --n-gpu-layers={}.\n{}",
+                    try_ngl, output
+                ));
+            }
+            // Timeout without early exit: model never became healthy.
             return Err(format!(
-                "llama-server did not become healthy within {timeout_secs}s.\n{output}"
+                "llama-server did not become healthy within {timeout_secs}s with --n-gpu-layers={}.\n{}",
+                try_ngl, output
             ));
         }
 
-        let handle = SidecarHandle {
-            child,
-            port,
-            model_id: model_id.clone(),
-            n_ctx: ctx,
-        };
-        self.handles.lock().insert(model_id.clone(), handle);
-
-        Ok(StartedModel {
-            model_id,
-            port,
-            n_ctx: ctx,
-            base_url: format!("http://127.0.0.1:{port}"),
-        })
+        Err("llama-server: all startup attempts failed (all n-gpu-layers in the fallback ladder exhausted)".to_string())
     }
 
     /// Stop a specific sidecar by model_id.
@@ -553,6 +670,7 @@ impl LocalModelRegistry {
             model_id: h.model_id.clone(),
             port: h.port,
             n_ctx: h.n_ctx,
+            n_gpu_layers: h.n_gpu_layers,
             base_url: format!("http://127.0.0.1:{}", h.port),
         })
     }
@@ -606,6 +724,10 @@ pub struct StartedModel {
     pub model_id: String,
     pub port: u16,
     pub n_ctx: u32,
+    /// Effective `--n-gpu-layers` that succeeded. 0 = CPU-only, >0 = partial
+    /// or full GPU offload. The UI uses this to show "X layers on GPU" so the
+    /// user understands why a model that was too big is now working.
+    pub n_gpu_layers: i32,
     pub base_url: String,
 }
 
@@ -615,6 +737,8 @@ pub struct ActiveLocalModel {
     pub model_id: String,
     pub port: u16,
     pub n_ctx: u32,
+    /// Effective `--n-gpu-layers` of the running sidecar.
+    pub n_gpu_layers: i32,
     pub base_url: String,
 }
 
@@ -648,6 +772,22 @@ fn resolve_llama_server_binary() -> Result<ResolvedBinary, String> {
         if launcher.is_file() {
             return Ok(ResolvedBinary {
                 path: launcher.to_string_lossy().to_string(),
+                dir,
+            });
+        }
+    }
+
+    // 0.5. CUDA build at D:\llama-cuda\ (preferred over Vulkan for
+    //      NVIDIA GPUs). The user installed this build to enable proper
+    //      GPU offload on the GTX 1660 Ti — Vulkan offloads the layer
+    //      plan but allocates a 0-byte buffer, leaving the model on CPU
+    //      while claiming GPU utilization. CUDA actually moves the data.
+    if cfg!(windows) {
+        let cuda_path = PathBuf::from(r"D:\llama-cuda\llama-server.exe");
+        if cuda_path.is_file() {
+            let dir = cuda_path.parent().map(|d| d.to_path_buf()).unwrap();
+            return Ok(ResolvedBinary {
+                path: cuda_path.to_string_lossy().to_string(),
                 dir,
             });
         }
@@ -709,6 +849,22 @@ fn resolve_llama_server_binary() -> Result<ResolvedBinary, String> {
             candidates.push(PathBuf::from(format!("{drive}:\\llama.cpp\\build\\bin\\llama-server.exe")));
             candidates.push(PathBuf::from(format!("{drive}:\\llama.cpp\\build\\bin\\Release\\llama-server.exe")));
         }
+        // Prebuilt release zips from the llama.cpp GitHub release page are
+        // typically extracted to a single folder (often spelled "Llma.cpp",
+        // "llama.cpp-bin", etc.) with the binary at the root rather than under
+        // `build/bin/`. Check a few common spellings on every drive before
+        // giving up — without this, the user has to set LLAMA_SERVER_PATH
+        // manually even though the binary is right there on the filesystem.
+        for drive in ['D', 'E', 'F', 'G'] {
+            for dir in [
+                "Llma.cpp",
+                "llama.cpp-bin",
+                "llama.cpp_release",
+                "llama-bin",
+            ] {
+                candidates.push(PathBuf::from(format!("{drive}:\\{dir}\\llama-server.exe")));
+            }
+        }
     } else {
         candidates.push(PathBuf::from("/usr/local/bin/llama-server"));
         candidates.push(PathBuf::from("/opt/llama.cpp/build/bin/llama-server"));
@@ -759,33 +915,209 @@ fn cuda_toolkit_bin() -> Option<PathBuf> {
     best.map(|v| root.join(v).join("bin"))
 }
 
-fn auto_ngl() -> i32 {
-    // Default to offloading all layers. llama-server clamps to available GPU
-    // memory gracefully if it can't allocate, and falls back to CPU for the
-    // rest. A future iteration could use sysinfo's Components to detect CUDA
-    // or Metal devices.
+/// Default: try full GPU offload first. We always start with 999 unless the user
+/// explicitly set a lower override. The stepwise ladder in `start()` handles
+/// the case where 999 OOMs — it will step down through 64/32/16/8/4/0.
+/// The VRAM probe is only used for logging / heuristics; it no longer gates the
+/// default behavior because the fallback ladder is fast enough.
+fn auto_ngl(gguf_path: &str) -> i32 {
+    // Read GGUF size for logging.
+    let gguf_bytes = match fs::metadata(gguf_path).map(|m| m.len()) {
+        Ok(b) if b > 0 => b,
+        _ => {
+            eprintln!("[local-models] auto_ngl: cannot stat {gguf_path}; using CPU-only.");
+            return 0;
+        }
+    };
+
+    // Query free VRAM for logging.
+    let free_vram_bytes = query_free_vram_bytes().unwrap_or(0);
+
+    if free_vram_bytes > 0 {
+        eprintln!(
+            "[local-models] auto_ngl: GGUF={} MiB, free VRAM={} MiB, trying full offload (999).",
+            gguf_bytes / (1024 * 1024),
+            free_vram_bytes / (1024 * 1024)
+        );
+    } else {
+        eprintln!(
+            "[local-models] auto_ngl: GGUF={} MiB, no VRAM probe, trying full offload (999).",
+            gguf_bytes / (1024 * 1024)
+        );
+    }
+
     999
 }
 
+/// Query free GPU VRAM via NVML (Windows). NVML ships with every NVIDIA driver
+/// and is at C:\Windows\System32\nvml.dll. We don't link the official
+/// nvml-wrapper crate (it drags in CUDA toolkit build deps). Instead we
+/// dynamically load the DLL, resolve four function pointers, and call them.
+///
+/// Returns the largest free VRAM across all NVIDIA GPUs in bytes, or None if
+/// NVML is unavailable (no NVIDIA GPU, no driver, or function resolution
+/// failed). On non-Windows, returns None; on Windows the call is wrapped in
+/// `OnceLock` so we don't repeatedly LoadLibraryA on every model load.
+#[cfg(windows)]
+fn query_free_vram_bytes() -> Option<u64> {
+    use std::os::raw::{c_int, c_uint};
+    use std::ptr;
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::{FARPROC, HMODULE};
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+
+    // Opaque NVML device handle (we never dereference it; we just pass it back).
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct nvmlDevice_t {
+        _private: [u8; 0],
+    }
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct nvmlMemory_t {
+        total: u64,
+        free: u64,
+        used: u64,
+    }
+
+    type NvmlInit = unsafe extern "system" fn() -> c_int;
+    type NvmlDeviceGetHandleByIndex =
+        unsafe extern "system" fn(c_uint, *mut *mut nvmlDevice_t) -> c_int;
+    type NvmlDeviceGetMemoryInfo =
+        unsafe extern "system" fn(*mut nvmlDevice_t, *mut nvmlMemory_t) -> c_int;
+    type NvmlShutdown = unsafe extern "system" fn() -> c_int;
+
+    struct NvmlFns {
+        init: NvmlInit,
+        device_get_handle_by_index: NvmlDeviceGetHandleByIndex,
+        device_get_memory_info: NvmlDeviceGetMemoryInfo,
+        shutdown: NvmlShutdown,
+    }
+
+    static NVML: OnceLock<Option<NvmlFns>> = OnceLock::new();
+
+    let fns = NVML.get_or_init(|| unsafe {
+        // "nvml.dll\0" — LoadLibraryA takes PCSTR (a *const u8 in windows-sys 0.61).
+        let lib_name: [u8; 9] = *b"nvml.dll\0";
+        let lib: HMODULE = LoadLibraryA(lib_name.as_ptr());
+        if lib.is_null() {
+            eprintln!("[local-models] nvml.dll not found (no NVIDIA driver?).");
+            return None;
+        }
+
+        // GetProcAddress takes PCSTR (function name). NVML exports unversioned
+        // names like nvmlInit, nvmlDeviceGetHandleByIndex — every consumer
+        // (nvidia-smi, etc.) uses these. We append \0 inline.
+        let resolve = |name: &[u8]| -> Option<FARPROC> {
+            if name.len() + 1 > 64 {
+                return None;
+            }
+            let mut cstr = [0u8; 64];
+            cstr[..name.len()].copy_from_slice(name);
+            let p = GetProcAddress(lib, cstr.as_ptr());
+            if p.is_none() {
+                eprintln!(
+                    "[local-models] nvml: GetProcAddress failed for {}",
+                    std::str::from_utf8(name).unwrap_or("?")
+                );
+                None
+            } else {
+                Some(p)
+            }
+        };
+
+        // Transmute FARPROC → the typed function pointer. FARPROC is *mut c_void
+        // in windows-sys 0.61. The transmute is sound because the resolved
+        // address points at a real function with the signature we declare.
+        let init_addr = resolve(b"nvmlInit\0")?;
+        let dhbi_addr = resolve(b"nvmlDeviceGetHandleByIndex\0")?;
+        let dgmi_addr = resolve(b"nvmlDeviceGetMemoryInfo\0")?;
+        let shutdown_addr = resolve(b"nvmlShutdown\0")?;
+
+        Some(NvmlFns {
+            init: std::mem::transmute::<FARPROC, NvmlInit>(init_addr),
+            device_get_handle_by_index: std::mem::transmute::<FARPROC, NvmlDeviceGetHandleByIndex>(dhbi_addr),
+            device_get_memory_info: std::mem::transmute::<FARPROC, NvmlDeviceGetMemoryInfo>(dgmi_addr),
+            shutdown: std::mem::transmute::<FARPROC, NvmlShutdown>(shutdown_addr),
+        })
+    });
+
+    let fns = fns.as_ref()?;
+
+    unsafe {
+        if (fns.init)() != 0 {
+            // NVML init failed (driver not loaded, no GPUs visible). Stay
+            // silent here — the caller logs a fallback message.
+            return None;
+        }
+
+        // Walk device indexes 0..8 and pick the largest free VRAM. NVML doesn't
+        // expose a "device count" without nvmlDeviceGetCount, which would mean
+        // resolving one more symbol. Probing by index is fine — invalid indexes
+        // return NVML_ERROR_NOT_FOUND and we stop.
+        let mut max_free: u64 = 0;
+        let mut found_any = false;
+        for idx in 0..8u32 {
+            let mut dev: *mut nvmlDevice_t = ptr::null_mut();
+            let rc = (fns.device_get_handle_by_index)(idx, &mut dev);
+            if rc != 0 {
+                break; // No more devices.
+            }
+            let mut mem = nvmlMemory_t {
+                total: 0,
+                free: 0,
+                used: 0,
+            };
+            let rc = (fns.device_get_memory_info)(dev, &mut mem);
+            if rc == 0 {
+                if mem.free > max_free {
+                    max_free = mem.free;
+                }
+                found_any = true;
+            }
+        }
+
+        let _ = (fns.shutdown)();
+
+        if !found_any {
+            return None;
+        }
+        Some(max_free)
+    }
+}
+
+/// Non-Windows stub: NVML probe is Windows-only in this build. The stepwise
+/// fallback still works — the only loss is the smart first guess.
+#[cfg(not(windows))]
+fn query_free_vram_bytes() -> Option<u64> {
+    None
+}
+
 fn auto_ctx_size(gguf_path: &str) -> u32 {
-    // Read the file size. Very small models (< 4GB) get 16384; medium models
-    // (4-16GB) get 8192; large models get 4096. KV-cache memory scales with
-    // ctx but stays modest at these tiers even on CPU-only machines, and
-    // 4096 proved too small in practice — a medium-length chat already
-    // overflows it (llama-server then rejects the request with a 400).
-    // The model's own config.json (if separate) could provide a better
-    // max_seq_len, but the GGUF file size is a reliable fallback.
+    // The context must fit the app's OWN prompt overhead, not just the chat
+    // history: tool-mode turns add the full tool schema (~10k tokens for the
+    // built-in tool set) plus the system prompt on top of the conversation,
+    // and llama-server hard-rejects any prompt that exceeds n_ctx with a 400
+    // (exceed_context_size_error). 8192 was too small for even a SHORT
+    // tool-enabled chat — the first message already overflowed it. Tiering:
+    // models <= 8GB get 32768, larger models 16384 / 8192. KV-cache memory
+    // scales with ctx, but at these tiers it stays practical on CPU-only and
+    // low-VRAM machines (excess KV spills to CPU; llama-server handles the
+    // mixed placement). All locally-supported models carry n_ctx_train >=
+    // 32768, so these sizes load cleanly. 4096 proved far too small in
+    // practice — a medium-length chat already overflows it (llama-server
+    // then rejects the request with a 400).
     let size = match fs::metadata(gguf_path) {
         Ok(m) => m.len(),
-        Err(_) => return 16384,
+        Err(_) => return 32768,
     };
     let gb = size as f64 / (1024.0 * 1024.0 * 1024.0);
-    if gb < 4.0 {
-        16384
+    if gb < 8.0 {
+        32768
     } else if gb < 16.0 {
-        8192
+        16384
     } else {
-        4096
+        8192
     }
 }
 
@@ -888,6 +1220,92 @@ mod bundled_tests {
         // test just makes sure the helper doesn't panic.
         if let Some(d) = bundled_llama_server_dir() {
             assert!(d.is_dir(), "bundled dir must be a real directory");
+        }
+    }
+}
+
+#[cfg(test)]
+mod scanner_tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Minimal GGUF header: magic + version + tensor_count + kv_count(0).
+    fn tiny_gguf_bytes() -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"GGUF"); // magic
+        v.extend_from_slice(&3u32.to_le_bytes()); // version
+        v.extend_from_slice(&0u64.to_le_bytes()); // tensor count
+        v.extend_from_slice(&0u64.to_le_bytes()); // metadata kv count
+        v
+    }
+
+    #[test]
+    fn scan_folder_finds_gguf_by_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("model.Q4_K_M.gguf");
+        fs::File::create(&p).unwrap().write_all(&tiny_gguf_bytes()).unwrap();
+        let found = scan_folder(dir.path(), "user");
+        assert_eq!(found.len(), 1, "should detect .gguf by extension");
+        assert_eq!(found[0].filename, "model.Q4_K_M.gguf");
+    }
+
+    #[test]
+    fn scan_folder_skips_extensionless_for_normal_sources() {
+        // A GGUF-magic file WITHOUT the .gguf extension must NOT be picked
+        // up for user/lm-studio/downloads scans — only Ollama's blob store
+        // gets the magic-byte fallback.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sha256-abcd1234");
+        fs::File::create(&p).unwrap().write_all(&tiny_gguf_bytes()).unwrap();
+        assert!(scan_folder(dir.path(), "user").is_empty());
+        assert!(scan_folder(dir.path(), "lm-studio").is_empty());
+    }
+
+    #[test]
+    fn scan_folder_ollama_detects_extensionless_blob_via_magic() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sha256-abcd1234");
+        fs::File::create(&p).unwrap().write_all(&tiny_gguf_bytes()).unwrap();
+        let found = scan_folder(dir.path(), "ollama");
+        assert_eq!(found.len(), 1, "ollama blobs must be detected via GGUF magic");
+    }
+
+    #[test]
+    fn scan_folder_ollama_rejects_non_gguf_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sha256-notreallyagguf");
+        fs::File::create(&p).unwrap().write_all(b"{\"json\":\"manifest\"}").unwrap();
+        assert!(scan_folder(dir.path(), "ollama").is_empty());
+    }
+
+    #[test]
+    fn default_locations_includes_new_lmstudio_path() {
+        // Regression: LM Studio ≥0.3 stores models in ~/.lmstudio/models —
+        // the scanner must look there, not just the legacy .cache path.
+        // We can't create dirs in the real home from a test, so assert on
+        // the path-join logic indirectly: if the dir exists on this machine
+        // the scan must find its .gguf files; if it doesn't exist the scan
+        // must not error either way.
+        let _ = scan_default_locations(); // must not panic
+        if let Some(home) = dirs::home_dir() {
+            let new_path = home.join(".lmstudio").join("models");
+            if new_path.is_dir() {
+                let found = scan_folder(&new_path, "lm-studio");
+                let has_gguf = walkdir::WalkDir::new(&new_path)
+                    .max_depth(6)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .any(|e| {
+                        e.file_type().is_file()
+                            && e.file_name().to_string_lossy().to_lowercase().ends_with(".gguf")
+                    });
+                if has_gguf {
+                    assert!(
+                        !found.is_empty(),
+                        "~/.lmstudio/models contains .gguf files but scan found none"
+                    );
+                }
+            }
         }
     }
 }

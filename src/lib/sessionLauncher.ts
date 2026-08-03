@@ -68,6 +68,11 @@ export async function openSession(session: SessionRecord): Promise<void> {
   );
   if (existing) {
     panesStore.focusPane(existing.paneId);
+    // Bump last_active_at + refresh the sidebar so reusing a session reorders
+    // it to the top — without this the session list is frozen at creation
+    // order and "recent" sessions look stale (the persistence bug).
+    void touchSession(session.id);
+    void useProjectsStore.getState().refreshSessions();
     return;
   }
 
@@ -86,6 +91,7 @@ export async function openSession(session: SessionRecord): Promise<void> {
     );
     await spawnForPane(paneId, { type: "agent", sessionId: session.id });
     void touchSession(session.id);
+    void useProjectsStore.getState().refreshSessions();
     return;
   }
 

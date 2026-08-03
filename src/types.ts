@@ -51,6 +51,16 @@ export interface GitStatusInfo {
   behind: number;
 }
 
+/** A changed file from the per-pane diff panel, as parsed from `git status --porcelain -z`. */
+export interface ChangedFile {
+  status: string; // XY porcelain code (" M", "M ", "??", "A ", "D ", "R ", …)
+  kind: string; // Single-letter UI group: "M" modified, "A" added, "D" deleted, "R" renamed, "C" copied, "U" untracked
+  path: string; // Repo-relative path (new path on renames)
+  oldPath: string | null; // Original path on renames/copies; null otherwise
+  added: number; // Added line count from git diff --numstat
+  deleted: number; // Deleted line count from git diff --numstat
+}
+
 export interface Skill {
   id: string;
   name: string;

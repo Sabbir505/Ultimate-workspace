@@ -410,6 +410,12 @@ impl PtyManager {
         for arg in &resolved.args {
             cmd.arg(arg);
         }
+        // Inherit the full parent environment so tools like Claude Code receive
+        // their config (e.g. CLAUDE_CODE_CHILD_SESSION, API keys, PATH tweaks).
+        cmd.env_clear();
+        for (k, v) in std::env::vars() {
+            cmd.env(k, v);
+        }
         // Legacy DB rows may hold \\?\ extended-length paths; cmd.exe rejects
         // those as cwd ("UNC paths are not supported"), so sanitize here too —
         // this is the single choke point every pane spawn goes through.

@@ -1,7 +1,7 @@
-// Update banner: shown at the top of the app when the updater detected a newer
-// version. Displays the new version, the release notes (markdown), a download
-// progress bar, and Download & restart / Later actions. Stays out of the way
-// when there's nothing to report.
+// Update modal: centered overlay shown when the updater detects a newer version.
+// Replaces the old top banner with a focused, centered modal that appears on app
+// startup. Displays the new version, release notes (markdown), a download
+// progress bar, and Download & restart / Later actions.
 import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -30,13 +30,21 @@ export function UpdateBanner() {
 
   // Nothing to show when there's no update and no in-flight install.
   if (!update && install === "idle") return null;
+
   // After install: show a "restart" notice until the plugin restarts the app.
   if (install === "installed") {
     return (
-      <div className="update-banner installed">
-        <span className="update-banner-title">
-          ✅ Update installed — restarting…
-        </span>
+      <div className="update-modal-overlay">
+        <div className="update-modal installed">
+          <div className="update-modal-icon installed">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+              <polyline points="22 4 12 14.01 9 11.01"/>
+            </svg>
+          </div>
+          <h2 className="update-modal-title">Update installed</h2>
+          <p className="update-modal-subtitle">Conduit is restarting to apply the update…</p>
+        </div>
       </div>
     );
   }
@@ -44,64 +52,85 @@ export function UpdateBanner() {
   const downloading = install === "downloading";
 
   return (
-    <div className={`update-banner${downloading ? " downloading" : ""}`}>
-      {!downloading && (
-        <button
-          className="update-banner-close"
-          onClick={dismiss}
-          title="Later — I'll update next time"
-          aria-label="Dismiss update notification"
-        >
-          ×
-        </button>
-      )}
-      <div className="update-banner-head">
-        <span className="update-banner-title">
-          🔄 A new version of Conduit is available
-        </span>
-        {update?.version && (
-          <span className="update-banner-version">v{update.version}</span>
+    <div className="update-modal-overlay">
+      <div className={`update-modal${downloading ? " downloading" : ""}`}>
+        {/* Header */}
+        <div className="update-modal-header">
+          <div className="update-modal-icon">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+              <path d="M3 3v5h5"/>
+              <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
+              <path d="M16 21h5v-5"/>
+            </svg>
+          </div>
+          <h2 className="update-modal-title">A new version is available</h2>
+          {update?.version && (
+            <span className="update-modal-version">v{update.version}</span>
+          )}
+        </div>
+
+        {/* Release notes */}
+        {update?.notes && (
+          <div className="update-modal-notes">
+            <div className="update-modal-notes-header">What&apos;s new</div>
+            <div className="update-modal-notes-body">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{update.notes}</ReactMarkdown>
+            </div>
+          </div>
+        )}
+
+        {/* Progress */}
+        {downloading ? (
+          <div className="update-modal-progress">
+            <div className="update-modal-progress-top">
+              <span className="update-modal-progress-label">Downloading update…</span>
+              <span className="update-modal-progress-value">
+                {pct != null ? `${pct}%` : formatBytes(downloaded)}
+              </span>
+            </div>
+            <div className="update-modal-bar">
+              <div
+                className="update-modal-bar-fill"
+                style={{ width: pct != null ? `${pct}%` : "0%" }}
+              />
+            </div>
+            {total != null && (
+              <div className="update-modal-progress-meta">
+                {formatBytes(downloaded)} of {formatBytes(total)}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="update-modal-actions">
+            <button
+              className="primary"
+              onClick={() => void startInstall()}
+              disabled={downloading}
+            >
+              Download &amp; restart
+            </button>
+            <button className="ghost" onClick={dismiss}>
+              Later
+            </button>
+          </div>
+        )}
+
+        {/* Error */}
+        {install === "error" && error && (
+          <div className="update-modal-error">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="8" x2="12" y2="12"/>
+              <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+            <span>
+              Update failed: {error}. You can retry or download it manually from
+              GitHub Releases.
+            </span>
+          </div>
         )}
       </div>
-      {update?.notes && (
-        <div className="update-banner-notes">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{update.notes}</ReactMarkdown>
-        </div>
-      )}
-      {downloading ? (
-        <div className="update-banner-progress">
-          <div className="update-bar">
-            <div
-              className="update-bar-fill"
-              style={{ width: pct != null ? `${pct}%` : undefined }}
-            />
-          </div>
-          <span className="update-bar-label">
-            {pct != null
-              ? `${pct}%`
-              : formatBytes(downloaded) + (total ? ` / ${formatBytes(total)}` : "")}
-          </span>
-        </div>
-      ) : (
-        <div className="update-banner-actions">
-          <button
-            className="primary"
-            onClick={() => void startInstall()}
-            disabled={downloading}
-          >
-            Download &amp; restart
-          </button>
-          <button className="ghost" onClick={dismiss}>
-            Later
-          </button>
-        </div>
-      )}
-      {install === "error" && error && (
-        <div className="update-banner-error">
-          Update failed: {error}. You can retry or download it manually from
-          GitHub Releases.
-        </div>
-      )}
     </div>
   );
 }

@@ -27,6 +27,11 @@ pub struct AttachedConnector {
     pub session: McpSession,
     /// tool name → (kind, description) for every tool the server listed.
     pub tools: HashMap<String, (ConnectorToolKind, Option<String>)>,
+    /// Tool names implemented locally via the Gmail REST fallback
+    /// (`gmail_api`), routed by the dispatcher instead of the MCP session.
+    /// Currently only populated for gmail while Google's MCP service layer
+    /// denies every `tools/call` (see `gmail_api` module docs).
+    pub fallback: std::collections::HashSet<String>,
 }
 
 impl AttachedConnector {
@@ -93,11 +98,32 @@ pub async fn connect_all(
                     let kind = permission::classify_connector_tool(&t.name, t.description.as_deref());
                     map.insert(t.name.clone(), (kind, t.description.clone()));
                 }
+                // REST fallbacks: Google's MCP service layer denies every
+                // `tools/call` while the project isn't fully enrolled in the
+                // Workspace MCP Developer Preview, so also advertise local
+                // tools backed by the base Google APIs (gmail: `gmail_*`,
+                // the Workspace products: `gdrive_*`/`gdocs_*`/… — explicit
+                // Read/Write kinds — reads auto-run, writes approval-gate).
+                let fallback_defs: &[crate::connectors::gmail_api::FallbackTool] = if id == "gmail"
+                {
+                    crate::connectors::gmail_api::fallback_tool_defs()
+                } else {
+                    crate::connectors::google_rest::fallback_tool_defs(id).unwrap_or(&[])
+                };
+                let mut fallback = std::collections::HashSet::new();
+                for def in fallback_defs {
+                    map.insert(
+                        def.name.to_string(),
+                        (def.kind, Some(def.description.to_string())),
+                    );
+                    fallback.insert(def.name.to_string());
+                }
                 out.push(AttachedConnector {
                     connector_id: id.to_string(),
                     display_name: cfg.display_name.to_string(),
                     session,
                     tools: map,
+                    fallback,
                 });
             }
             Err(e) => {

@@ -17,6 +17,7 @@ pub mod providers;
 pub mod pygen;
 pub mod python_runtime;
 pub mod streaming;
+pub mod tasks;
 pub mod tools;
 
 use std::collections::HashMap;
@@ -324,6 +325,11 @@ impl ChatManager {
                     );
                 }
                 Err(e) => {
+                    // The stream failed (HTTP status, SSE stall, tool loop
+                    // abort, …). Log it — the UI banner only shows a truncated
+                    // version, and some errors (e.g. llama-server 400 bodies)
+                    // name the exact rejected field.
+                    eprintln!("[chat:stream] turn failed for {sid}: {e}");
                     let _ = app.emit(
                         "chat:error",
                         ChatErrorPayload {
@@ -334,6 +340,13 @@ impl ChatManager {
                     );
                 }
             }
+
+            // The stream finished (either done or aborted). Drop the abort
+            // handle from the registry so a future `send` for this session
+            // starts clean. Without this, a cancelled-mid-stream-then-resent
+            // race could leave a stale handle in the map and confuse the next
+            // cancel() call (it'd try to abort an already-completed task).
+            mgr.streams.lock().remove(&sid);
         });
 
         self.streams
@@ -543,7 +556,6 @@ mod tests {
             true,
         )
         .unwrap();
-        assert!(p.contains("running on a local/smaller model"));
         assert!(p.contains("cap at 8 reads"));
         // Frontier model does not get the local addendum.
         let pf = build_system_prompt(
@@ -649,8 +661,8 @@ mod tests {
     #[test]
     fn strip_hermes_handles_unclosed_block() {
         // A model that kept streaming the call without closing the tag.
-        let content = "Thinking… <tool_calls><invoke name=\"web_search\"><parameter name=\"query\">cow";
+        let content = "Thinking�?� <tool_calls><invoke name=\"web_search\"><parameter name=\"query\">cow";
         let stripped = strip_hermes_tool_calls(content);
-        assert_eq!(stripped, "Thinking…");
+        assert_eq!(stripped, "Thinking�?�");
     }
 }

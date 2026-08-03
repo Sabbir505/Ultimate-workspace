@@ -78,6 +78,17 @@ export const spawnAgentSession = (paneId: string, sessionId: string) =>
 export const spawnShell = (paneId: string, cwd: string, command: string, injectSecretsProjectId?: string) =>
   safeInvoke<void>("spawn_shell", { paneId, cwd, command, injectSecretsProjectId });
 export const writePty = (paneId: string, data: string) => safeInvoke<void>("write_pty", { paneId, data });
+/** Send a full prompt to a harness and SUBMIT it: writes the text, then a
+ *  separate `\r` write shortly after. A trailing `\r` merged into the text
+ *  write does not reliably register as Enter for TUI harnesses (opencode /
+ *  Claude Code / Kimi) through the ConPTY input path, so the Enter must be
+ *  its own write — the same shape a real user produces by pressing Enter
+ *  (xterm.js emits "\r" as a standalone chunk). The delay lets the TUI
+ *  render the typed text before the submit key arrives. */
+export const writePtySubmit = (paneId: string, text: string) => {
+  void writePty(paneId, text);
+  window.setTimeout(() => void writePty(paneId, "\r"), 250);
+};
 export const resizePty = (paneId: string, cols: number, rows: number) =>
   safeInvoke<void>("resize_pty", { paneId, cols, rows });
 export const killPty = (paneId: string) => safeInvoke<void>("kill_pty", { paneId });
@@ -161,6 +172,12 @@ export const getGitStatus = (path: string) => safeInvoke<GitStatusInfo | null>("
 export const createWorktree = (projectId: string, branchName: string) =>
   safeInvoke<string | null>("create_worktree", { projectId, branchName });
 export const getGitDiff = (path: string) => safeInvoke<string | null>("get_git_diff", { path });
+/** Per-file diff for the Dev-tab side panel. Returns the unified diff for a
+ *  single file in the working tree (or an empty string when the file has no
+ *  changes / isn't a git repo). Used when the user clicks a file row in the
+ *  right-side Files panel — we want THAT file's diff, not the whole tree. */
+export const getGitFileDiff = (path: string, filePath: string) =>
+  safeInvoke<string | null>("get_git_file_diff", { path, filePath });
 /** Per-pane change list for the Dev-tab side panel. The argument is the
  *  pane's actual working directory (project root or worktree path), not the
  *  project root alone — worktree-scoped sessions (PRD §7.10) must see the
@@ -336,6 +353,22 @@ export interface ChatApprovalResolvedPayload {
   chatSessionId: string;
   pendingId: string;
   approved: boolean;
+}
+
+/** Live progress for a background chat task (download_file / run_shell),
+ *  pushed as `chat:task-progress` while the task runs and on completion. */
+export interface ChatTaskProgressPayload {
+  chatSessionId: string;
+  taskId: string;
+  /** "download" | "shell" */
+  kind: string;
+  /** running | completed | failed | cancelled */
+  state: "running" | "completed" | "failed" | "cancelled";
+  message: string;
+  downloaded: number;
+  total: number | null;
+  speedBps: number;
+  destPath: string | null;
 }
 
 /** A persisted artifact in the sidebar library (30-day retention). */
@@ -593,6 +626,9 @@ export const listenChatApprovalRequest = (handler: (payload: ChatApprovalRequest
 export const listenChatApprovalResolved = (handler: (payload: ChatApprovalResolvedPayload) => void) =>
   safeListen<ChatApprovalResolvedPayload>("chat:approval-resolved", handler);
 
+export const listenChatTaskProgress = (handler: (payload: ChatTaskProgressPayload) => void) =>
+  safeListen<ChatTaskProgressPayload>("chat:task-progress", handler);
+
 /** Re-broadcast a chat event to the mobile relay. Used from useChatEvents.ts to
  *  forward chat:token, chat:status, chat:done, chat:error, chat:approval-request,
  *  and chat:artifact events to the per-session mobile connection. */
@@ -714,6 +750,8 @@ export interface ConnectorWithStatus {
   id: string;
   displayName: string;
   icon: string;
+  /** Product family the Settings UI groups this connector under (e.g. "google"). */
+  family: string;
   mcpServerUrl: string;
   revokeUrl?: string | null;
   status: ConnectorStatus;
@@ -737,6 +775,9 @@ export const listConnectors = () =>
   safeInvoke<ConnectorWithStatus[] | null>("list_connectors");
 export const connectorConnect = (connectorId: string) =>
   safeInvoke<number>("connector_connect", { connectorId });
+/** One OAuth flow for a whole connector family ("google") — connects every member. */
+export const connectorConnectFamily = (family: string) =>
+  safeInvoke<number>("connector_connect_family", { family });
 export const connectorDisconnect = (connectorId: string) =>
   safeInvoke<DisconnectOutcome>("connector_disconnect", { connectorId });
 export const setSessionConnectors = (chatSessionId: string, connectorIds: string[]) =>

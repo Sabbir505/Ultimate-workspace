@@ -50,6 +50,16 @@ pub fn list_connectors(db: State<DbState>) -> CmdResult<Vec<ConnectorWithStatus>
         .map(|c| {
             let row = rows.iter().find(|r| r.connector_id == c.id);
             let status = match row {
+                // Public connectors (Kiwi) keep no credential row — their
+                // connection state is inherent (public endpoint, nothing to
+                // configure), so they always read as connected.
+                None if c.is_public() => ConnectorStatus {
+                    connected: c.configured(),
+                    expired: false,
+                    account_display: c.configured().then(|| c.display_name.to_string()),
+                    granted_scopes: None,
+                    expires_at: None,
+                },
                 None => ConnectorStatus {
                     connected: false,
                     expired: false,
@@ -82,6 +92,13 @@ pub async fn connector_connect(
     flows: State<'_, OAuthFlowsState>,
     app: AppHandle,
 ) -> CmdResult<u64> {
+    // Public connectors (Kiwi) have no OAuth flow — fail fast with a clear
+    // message instead of opening a blank authorize URL.
+    if let Some(c) = connector_by_id(&connector_id) {
+        if c.is_public() {
+            return Err(crate::connectors::config::no_oauth_flow_reason(c));
+        }
+    }
     let flows_arc = flows.0.clone();
     let id = flows_arc.next_id();
     let app_clone = app.clone();
@@ -91,6 +108,27 @@ pub async fn connector_connect(
     // detached so this command returns immediately.
     tauri::async_runtime::spawn(async move {
         let _ = flows_arc.start(&app_clone, &cid).await;
+    });
+    Ok(id)
+}
+
+/// Kick off the OAuth flow for a whole connector FAMILY (e.g. "google"): one
+/// browser consent screen covering every member's scopes, then the resulting
+/// token is stored under each member — a single click connects them all. Same
+/// `oauth:callback` contract as `connector_connect`, with the family id as
+/// `connector_id`.
+#[tauri::command]
+pub async fn connector_connect_family(
+    family: String,
+    flows: State<'_, OAuthFlowsState>,
+    app: AppHandle,
+) -> CmdResult<u64> {
+    let flows_arc = flows.0.clone();
+    let id = flows_arc.next_id();
+    let app_clone = app.clone();
+    let fam = family.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = flows_arc.start_family(&app_clone, &fam).await;
     });
     Ok(id)
 }
@@ -148,13 +186,17 @@ pub struct DisconnectOutcome {
 }
 
 /// Call a vendor's token revocation endpoint with the stored access token.
-/// Notion's revocation endpoint takes a JSON body `{"token": "..."}` with
-/// `Authorization: Basic base64(client_id:client_secret)` — see BUILD_LOG.md.
-/// Other vendors (RFC 7009 style) take form-encoded `token`/`token_type_hint`;
-/// we try JSON first (Notion) and fall back to form encoding.
+/// Notion's MCP AS revokes at /token with a form-encoded `token` +
+/// `token_type_hint` + registered `client_id` (verified live: JSON is
+/// rejected). Other vendors (RFC 7009 style) take the same form shape; legacy
+/// REST-API vendors take a JSON body with Basic auth. We try the
+/// client-appropriate shape first and fall back to the other.
 async fn revoke_token(app: &AppHandle, connector_id: &str, url: &str) -> Result<(), String> {
     let connector = connector_by_id(connector_id)
         .ok_or_else(|| format!("unknown connector `{connector_id}`"))?;
+    let client = crate::connectors::oauth::resolve_oauth_client(app, connector)
+        .await
+        .map_err(|e| e.to_string())?;
     let token = {
         let db = app.state::<DbState>();
         let conn = db.0.lock();
@@ -162,37 +204,43 @@ async fn revoke_token(app: &AppHandle, connector_id: &str, url: &str) -> Result<
     }
     .ok_or_else(|| "no access token to revoke".to_string())?;
 
-    let client = reqwest::Client::new();
-    let mut req = client.post(url).json(&serde_json::json!({ "token": token }));
-    // Confidential clients (Notion) authenticate the revoke with Basic auth.
-    if connector.confidential() {
-        let basic = base64::engine::general_purpose::STANDARD
-            .encode(format!("{}:{}", connector.client_id, connector.client_secret));
+    let http = reqwest::Client::new();
+    let mut req = http.post(url).form(&[
+        ("token", token.as_str()),
+        ("token_type_hint", "access_token"),
+        ("client_id", client.client_id.as_str()),
+    ]);
+    if client.token_endpoint_auth_method == "client_secret_basic" {
+        let basic = base64::engine::general_purpose::STANDARD.encode(format!(
+            "{}:{}",
+            client.client_id,
+            client.client_secret.as_deref().unwrap_or("")
+        ));
         req = req.header("Authorization", format!("Basic {basic}"));
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let resp = req.send().await.map_err(|e| e.to_string())?;
     if resp.status().is_success() {
+        return Ok(());
+    }
+    // Some vendors are RFC 7009 with a JSON body (legacy REST-API AS). Retry
+    // that shape if form was rejected — non-fatal if this also fails
+    // (Disconnect proceeds).
+    let mut req2 = http
+        .post(url)
+        .json(&serde_json::json!({ "token": token }));
+    if client.token_endpoint_auth_method == "client_secret_basic" {
+        let basic = base64::engine::general_purpose::STANDARD.encode(format!(
+            "{}:{}",
+            client.client_id,
+            client.client_secret.as_deref().unwrap_or("")
+        ));
+        req2 = req2.header("Authorization", format!("Basic {basic}"));
+    }
+    let resp2 = req2.send().await.map_err(|e| e.to_string())?;
+    if resp2.status().is_success() {
         Ok(())
     } else {
-        // Some vendors are RFC 7009 (form-encoded). Retry that shape if JSON
-        // was rejected — non-fatal if this also fails (Disconnect proceeds).
-        let mut req2 = client
-            .post(url)
-            .form(&[("token", token.as_str()), ("token_type_hint", "access_token")]);
-        if connector.confidential() {
-            let basic = base64::engine::general_purpose::STANDARD
-                .encode(format!("{}:{}", connector.client_id, connector.client_secret));
-            req2 = req2.header("Authorization", format!("Basic {basic}"));
-        }
-        let resp2 = req2.send().await.map_err(|e| e.to_string())?;
-        if resp2.status().is_success() {
-            Ok(())
-        } else {
-            Err(format!("revoke HTTP {} / {}", resp.status(), resp2.status()))
-        }
+        Err(format!("revoke HTTP {} / {}", resp.status(), resp2.status()))
     }
 }
 

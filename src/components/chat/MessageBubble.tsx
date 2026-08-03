@@ -15,6 +15,7 @@ import { parseUnifiedDiff } from "../../lib/diff";
 import { InlineDiagram } from "./InlineDiagram";
 import { MermaidDiagram } from "./MermaidDiagram";
 import { MessageAttachments, parseAttachments } from "./MessageAttachments";
+import { useSyntaxTheme } from "../../hooks/useSyntaxTheme";
 
 interface Props {
   message: ChatMessage;
@@ -499,6 +500,32 @@ function InlineDiff({ diffText }: { diffText: string }) {
  *  itself expandable (a second, nested disclosure) to reveal full detail:
  *  exact tool kind, detail string, and the code block for code-producing
  *  tools. File edits that contain a unified diff render as an inline diff. */
+/** Syntax highlighter component for tool-step and markdown code blocks.
+ *  Uses the current theme's CSS custom properties (--syntax-*) for token
+ *  colors, switching instantly when data-theme changes. */
+function StepCodeHighlighter({ code, language }: { code: string; language: string }) {
+  const theme = useSyntaxTheme();
+  return (
+    <SyntaxHighlighter
+      style={theme}
+      language={language}
+      PreTag="div"
+      customStyle={{
+        margin: 0,
+        background: "transparent",
+        padding: "12px 16px",
+        fontSize: "12px",
+        fontFamily: "var(--font-mono)",
+        lineHeight: 1.5,
+        overflowX: "auto",
+      }}
+      codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
+    >
+      {code}
+    </SyntaxHighlighter>
+  );
+}
+
 function ActivityStepRow({
   step,
   done,
@@ -544,23 +571,7 @@ function ActivityStepRow({
                   <span className="chat-code-lang">{step.data.lang || "text"}</span>
                   <CopyButton code={step.data.code} />
                 </div>
-                <SyntaxHighlighter
-                  style={{}}
-                  language={step.data.lang || "text"}
-                  PreTag="div"
-                  customStyle={{
-                    margin: 0,
-                    background: "transparent",
-                    padding: "12px 16px",
-                    fontSize: "12px",
-                    fontFamily: "var(--font-mono)",
-                    lineHeight: 1.5,
-                    overflowX: "auto",
-                  }}
-                  codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
-                >
-                  {step.data.code}
-                </SyntaxHighlighter>
+                <StepCodeHighlighter code={step.data.code} language={step.data.lang || "text"} />
               </div>
             )
           )}
@@ -792,23 +803,7 @@ function Markdown({
                   <span className="chat-code-lang">{match ? match[1] : "text"}</span>
                   <CopyButton code={codeString} />
                 </div>
-                <SyntaxHighlighter
-                  style={{}}
-                  language={match ? match[1] : "text"}
-                  PreTag="div"
-                  customStyle={{
-                    margin: 0,
-                    background: "transparent",
-                    padding: "12px 16px",
-                    fontSize: "12px",
-                    fontFamily: "var(--font-mono)",
-                    lineHeight: 1.5,
-                    overflowX: "auto",
-                  }}
-                  codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
-                >
-                  {codeString}
-                </SyntaxHighlighter>
+                <StepCodeHighlighter code={codeString} language={match ? match[1] : "text"} />
               </div>
             );
           },

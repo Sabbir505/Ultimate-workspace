@@ -42,6 +42,9 @@ pub struct BrowserState(pub Arc<browser::BrowserManager>);
 /// Chat mode manager (see chat/mod.rs).
 pub struct ChatState(pub Arc<chat::ChatManager>);
 
+/// Background chat tasks (download_file / run_shell) — see chat/tasks.rs.
+pub struct TaskState(pub Arc<chat::tasks::TaskManager>);
+
 /// Mobile relay server state (see mobile/relay.rs).
 pub struct MobileRelayState(pub Arc<mobile::relay::MobileRelayState>);
 
@@ -85,6 +88,7 @@ pub fn run() {
                 app.handle().clone(),
             ))));
             app.manage(ChatState(Arc::new(chat::ChatManager::new())));
+            app.manage(TaskState(Arc::new(chat::tasks::TaskManager::new())));
             app.manage(MobileRelayState(Arc::new(mobile::relay::MobileRelayState::new())));
             app.manage(OAuthFlowsState(Arc::new(
                 connectors::oauth::OAuthFlows::default(),
@@ -187,8 +191,10 @@ pub fn run() {
             commands::browser_cmds::browser_open_pane_result,
             // git
             commands::git_cmds::get_git_status,
+            commands::git_cmds::get_changed_files,
             commands::git_cmds::create_worktree,
             commands::git_cmds::get_git_diff,
+            commands::git_cmds::get_git_file_diff,
             // settings / skills / quick actions / secrets / cost / misc
             commands::data::get_setting,
             commands::data::set_setting,
@@ -252,9 +258,11 @@ pub fn run() {
             commands::chat_cmds::start_local_model,
             commands::chat_cmds::stop_local_model,
             commands::chat_cmds::local_model_status,
+            commands::chat_cmds::count_context_tokens,
             // connectors (OAuth + remote MCP): Settings → Connectors + per-chat attach
             commands::connectors_cmds::list_connectors,
             commands::connectors_cmds::connector_connect,
+            commands::connectors_cmds::connector_connect_family,
             commands::connectors_cmds::connector_disconnect,
             commands::connectors_cmds::set_session_connectors,
             commands::connectors_cmds::list_session_connectors,

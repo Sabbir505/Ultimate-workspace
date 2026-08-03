@@ -26,52 +26,57 @@ let lastTheme: string | null = null;
 async function loadMermaid(theme: string): Promise<MermaidModule> {
   const mod = await import("mermaid");
   const mermaid = mod.default;
+  // Read token values from CSS custom properties so diagrams track the
+  // app's data-theme instead of being pinned to one palette.
+  const cs = typeof document !== "undefined" ? getComputedStyle(document.documentElement) : null;
+  const tok = (name: string, fallback: string) =>
+    cs ? cs.getPropertyValue(name).trim() || fallback : fallback;
   // Re-init only when the theme actually changes — cheap no-op otherwise.
   if (lastTheme !== theme) {
+    const isDark = theme === "dark";
     mermaid.initialize({
       startOnLoad: false,
       securityLevel: "loose",
-      theme: theme === "dark" ? "dark" : "default",
+      theme: isDark ? "dark" : "default",
       fontFamily: "var(--font-sans)",
-      themeVariables:
-        theme === "dark"
-          ? {
-              // Transparent canvas so the diagram floats on the app surface.
-              background: "transparent",
-              mainBkg: "#34342f",
-              secondBkg: "#3e3e3a",
-              tertiaryBkg: "#3a3a37",
-              // Warm off-white edges/text; terracotta primary accent.
-              lineColor: "#a8a299",
-              textColor: "#f5f1ea",
-              edgeLabelBackground: "transparent",
-              primaryColor: "#c15f3c",
-              primaryTextColor: "#f5f1ea",
-              primaryBorderColor: "#d97a55",
-              secondaryColor: "#4a4a45",
-              secondaryTextColor: "#f5f1ea",
-              secondaryBorderColor: "#b9b3a8",
-              tertiaryColor: "#403c36",
-              tertiaryTextColor: "#f5f1ea",
-              tertiaryBorderColor: "#9c958a",
-              fontSize: "14px",
-            }
-          : {
-              background: "transparent",
-              lineColor: "#736b62",
-              textColor: "#2b2622",
-              edgeLabelBackground: "transparent",
-              primaryColor: "#c15f3c",
-              primaryTextColor: "#ffffff",
-              primaryBorderColor: "#a84d2d",
-              secondaryColor: "#f3efe8",
-              secondaryTextColor: "#2b2622",
-              secondaryBorderColor: "#9c958a",
-              tertiaryColor: "#fdfbf7",
-              tertiaryTextColor: "#2b2622",
-              tertiaryBorderColor: "#b9b3a8",
-              fontSize: "14px",
-            },
+      themeVariables: isDark
+        ? {
+            // Transparent canvas so the diagram floats on the app surface.
+            background: "transparent",
+            mainBkg: tok("--surface-2", "#1f1f1f"),
+            secondBkg: tok("--surface-glass-2", "#252525"),
+            tertiaryBkg: tok("--surface-glass", "#1e1e1e"),
+            // Cool neutral edges/text; cyan primary accent.
+            lineColor: tok("--syntax-operator", "#d4d4d4"),
+            textColor: tok("--text", "#e4e4e4"),
+            edgeLabelBackground: "transparent",
+            primaryColor: tok("--accent", "#88C0D0"),
+            primaryTextColor: tok("--editor-bg", "#1a1a1a"),
+            primaryBorderColor: tok("--accent", "#88C0D0"),
+            secondaryColor: tok("--surface-glass-2", "#252525"),
+            secondaryTextColor: tok("--text", "#e4e4e4"),
+            secondaryBorderColor: tok("--border-strong", "#3a3a3a"),
+            tertiaryColor: tok("--surface-2", "#1f1f1f"),
+            tertiaryTextColor: tok("--text", "#e4e4e4"),
+            tertiaryBorderColor: tok("--border", "#2a2a2a"),
+            fontSize: "14px",
+          }
+        : {
+            background: "transparent",
+            lineColor: tok("--text", "#1a1a1a"),
+            textColor: tok("--text", "#1a1a1a"),
+            edgeLabelBackground: "transparent",
+            primaryColor: tok("--accent", "#0078a8"),
+            primaryTextColor: "#ffffff",
+            primaryBorderColor: tok("--accent", "#0078a8"),
+            secondaryColor: tok("--surface-2", "#f3f3f3"),
+            secondaryTextColor: tok("--text", "#1a1a1a"),
+            secondaryBorderColor: tok("--border", "#e0e0e0"),
+            tertiaryColor: tok("--surface", "#ffffff"),
+            tertiaryTextColor: tok("--text", "#1a1a1a"),
+            tertiaryBorderColor: tok("--border", "#e0e0e0"),
+            fontSize: "14px",
+          },
     });
     lastTheme = theme;
   }

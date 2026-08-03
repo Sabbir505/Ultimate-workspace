@@ -18,6 +18,7 @@ import {
   listenChatOpenBrowser,
   listenChatOwner,
   listenChatStatus,
+  listenChatTaskProgress,
   listenChatToken,
 } from "../lib/ipc";
 import { useChatStore } from "../state/chat";
@@ -125,10 +126,15 @@ export function useChatEvents(): void {
       }),
     );
 
-    // Listen for mobile:session_chat_owner to set the owner-session mapping.
+    // Background chat tasks (download_file / run_shell) — live progress
+    // cards. Pushed from chat/tasks.rs; no mobile relay (desktop-only).
     unlistens.push(
-      useEffect(() => () => {}, []) as any as Promise<() => void>
+      listenChatTaskProgress((payload) => {
+        useChatStore.getState().onTaskProgress(payload);
+      }),
     );
+
+    // Listen for mobile:session_chat_owner to set the owner-session mapping.
     const unlistenOwner = listenChatOwner((payload) => {
       useChatStore.getState().setOwnerSessionId(payload.chatSessionId, payload.ownerSessionId);
     });

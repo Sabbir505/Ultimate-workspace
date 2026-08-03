@@ -59,9 +59,14 @@ pub async fn connect(app: &AppHandle, connector_id: &str) -> Result<McpSession, 
     // `Authorization: Bearer <token>` header to every request. We do NOT
     // build a reqwest::Client ourselves here: the app's reqwest is pinned to
     // 0.12, and the `StreamableHttpClient` impl is for rmcp's 0.13 client.
-    let config =
-        StreamableHttpClientTransportConfig::with_uri(connector.mcp_server_url)
-            .auth_header(access_token);
+    // `effective_mcp_server_url` resolves env-assembled URLs for
+    // static-bearer connectors (Merge) vs. the static URL of OAuth ones.
+    // Public connectors (Kiwi) have no token — no auth header is set then.
+    let mut config =
+        StreamableHttpClientTransportConfig::with_uri(connector.effective_mcp_server_url());
+    if !access_token.is_empty() {
+        config = config.auth_header(access_token);
+    }
     let transport = StreamableHttpClientTransport::from_config(config);
 
     // ClientInfo is `pub type ClientInfo = InitializeRequestParams`; the
@@ -139,5 +144,59 @@ impl McpSession {
             return Err(format!("mcp tools/call `{name}` returned an error"));
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Full live handshake against the public Kiwi MCP endpoint, mirroring
+    // exactly what `connect()` builds for a public connector (no auth header).
+    // Run explicitly with: cargo test -p conduit kiwi_public -- --ignored
+    #[test]
+    #[ignore = "hits the live network (mcp.kiwi.com)"]
+    fn kiwi_public_endpoint_initializes_and_lists_tools() {
+        let connector = connector_by_id("kiwi").expect("kiwi registered");
+        // Everything runs in ONE block_on: rmcp's background tasks are bound
+        // to the runtime that served them, so a fresh runtime per call would
+        // leave the session pointing at a dead reactor.
+        tauri::async_runtime::block_on(async {
+            let transport = StreamableHttpClientTransport::from_config(
+                StreamableHttpClientTransportConfig::with_uri(
+                    connector.effective_mcp_server_url(),
+                ),
+            );
+            let client_info = ClientInfo::new(
+                Default::default(),
+                Implementation::new("conduit-live-test", "0.0.0"),
+            );
+            let svc = client_info
+                .serve(transport)
+                .await
+                .map_err(|e| format!("mcp initialize failed: {e}"))
+                .expect("initialize against mcp.kiwi.com");
+            let result = svc
+                .list_tools(None)
+                .await
+                .expect("tools/list against mcp.kiwi.com");
+            let names: Vec<&str> = result.tools.iter().map(|t| t.name.as_ref()).collect();
+            assert!(names.contains(&"search-flight"), "tools: {names:?}");
+            let sf = result
+                .tools
+                .iter()
+                .find(|t| t.name.as_ref() == "search-flight")
+                .expect("search-flight present");
+            assert_eq!(
+                crate::chat::permission::classify_connector_tool(
+                    sf.name.as_ref(),
+                    sf.description.as_deref()
+                ),
+                crate::chat::permission::ConnectorToolKind::Read,
+                "live search-flight must classify as Read (no approval card for flight searches)"
+            );
+            println!("kiwi tools: {names:?}");
+            let _ = svc.cancel();
+        });
     }
 }

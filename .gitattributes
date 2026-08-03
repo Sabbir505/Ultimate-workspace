@@ -1,0 +1,18 @@
+# Normalize all text files to LF in the index and on checkout, so diffs are
+# byte-stable across editors/OSes and git never rewrites line endings behind
+# the scenes (core.autocrlf=true on Windows otherwise flips CRLF↔LF and makes
+# every diff consumer see churn).
+* text=auto eol=lf
+
+# Keep binary assets out of text normalization entirely.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.db binary
+*.sqlite binary

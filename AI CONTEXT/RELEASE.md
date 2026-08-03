@@ -89,16 +89,21 @@ renders in the update banner.
 > ```powershell
 > $env:NOTION_CLIENT_ID = "3a9d872b-..."        # your integration's client id
 > $env:NOTION_CLIENT_SECRET = "secret_..."      # your integration's secret
+> $env:GITHUB_CLIENT_ID = "Iv1.1234567890abcdef"  # GitHub OAuth App client id
+> $env:GITHUB_CLIENT_SECRET = "abcdef0123456789..."  # GitHub OAuth App secret
 > ```
 >
-> These are the *integration's* credentials (registered once at
-> https://www.notion.so/profile/integrations), NOT per-user. Each end user
-> still connects **their own** Notion account and gets their own access token
-> stored in their own OS keychain. The shared secret lets the app complete
-> the confidential-client token exchange on behalf of any authorizing user.
-> **The secret is extractable from the published `.exe`** — accepted trade-off
-> for the embedded-secret model; rotate it in the Notion integration dashboard
-> if it leaks. (See `src-tauri/src/connectors/config.rs` doc comment.)
+> The Notion + Google credentials are the *integration's* credentials; the
+> GitHub ones are a registered **GitHub OAuth App** (see the GitHub connector
+> entry in BUILD_LOG.md). Google's `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`
+> (Cloud Console "Desktop app" client) also follow this pattern. These are NOT
+> per-user: each end user still connects **their own** account and gets their
+> own access token stored in their own OS keychain. The shared secrets let the
+> app complete the confidential-client token exchange on behalf of any
+> authorizing user.
+> **The secrets are extractable from the published `.exe`** — accepted
+> trade-off for the embedded-secret model; rotate them in the vendor dashboards
+> if they leak. (See `src-tauri/src/connectors/config.rs` doc comments.)
 
 ```powershell
 npm run tauri build

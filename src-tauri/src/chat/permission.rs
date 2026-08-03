@@ -112,6 +112,59 @@ pub fn is_filesystem_tool(name: &str) -> bool {
     )
 }
 
+// ===========================================================================
+// System tools (background downloads + native shell) — chat/tasks.rs
+// ===========================================================================
+//
+// These are the "do it for me" capabilities: `download_file` writes a file
+// to an absolute local path (any drive — the user wants unrestricted access
+// to D:\ models etc.), and `run_shell` executes a native command with full
+// user privileges. Both run as background tasks, but the *permission* posture
+// is decided here, BEFORE the task starts:
+//
+//   * `download_file` follows the connector-write posture: approval under
+//     `read_only`/`manual`, auto-run under `auto_edit`/`full_auto`. There is
+//     NO granted-root scope check — the point of this tool is unrestricted
+//     filesystem access beyond workspace boundaries; the approval card is the
+//     gate. Stripped from the schema under `read_only` (see tools/specs.rs).
+//   * `run_shell` is native code execution with the user's privileges, so it
+//     is ALWAYS gated — a hard rule in every mode, mirroring `delete_file`.
+//     It is still present in the schema outside `read_only` so the model can
+//     propose it, but it never auto-runs.
+//   * The tracking tools (`download_progress`, `get_task_status`,
+//     `cancel_task`) are read-only/benign — they only inspect or abort tasks
+//     the model itself started in this conversation. Auto-run everywhere,
+//     including `read_only`.
+
+use super::tools::{
+    CANCEL_TASK, DOWNLOAD_FILE, DOWNLOAD_PROGRESS, GET_TASK_STATUS, RUN_SHELL,
+};
+
+/// Whether a tool belongs to the system-tool family (chat/tasks.rs).
+pub fn is_system_tool(name: &str) -> bool {
+    matches!(
+        name,
+        DOWNLOAD_FILE | DOWNLOAD_PROGRESS | RUN_SHELL | GET_TASK_STATUS | CANCEL_TASK
+    )
+}
+
+/// The permission decision for a system tool call. See the module comment
+/// above for the posture of each tool.
+pub fn check_system_permission(mode: PermissionMode, tool: &str) -> PermissionDecision {
+    match tool {
+        // Tracking/cancelling tools — benign, auto-run in every mode.
+        DOWNLOAD_PROGRESS | GET_TASK_STATUS | CANCEL_TASK => PermissionDecision::AutoRun,
+        // Native shell execution: hard rule — always gated, every mode.
+        RUN_SHELL => PermissionDecision::NeedsApproval,
+        // Downloads write to disk; follow the connector-write posture.
+        DOWNLOAD_FILE => match mode {
+            PermissionMode::ReadOnly | PermissionMode::Manual => PermissionDecision::NeedsApproval,
+            PermissionMode::AutoEdit | PermissionMode::FullAuto => PermissionDecision::AutoRun,
+        },
+        _ => PermissionDecision::AutoRun,
+    }
+}
+
 /// The central permission check. Called uniformly by every filesystem tool's
 /// handler before it touches disk. **Never** duplicate this logic per-tool.
 ///
@@ -198,12 +251,14 @@ pub fn check_permission(
 // dispatcher, which routes Write tools through this same approval flow.
 //
 // Hard rule (mirrors `delete_file` above): a connector Write/Create/Delete
-// action is ALWAYS `NeedsApproval`, in every mode — even `full_auto`. No mode
-// bypasses it. This is the connector equivalent of the delete carve-out: the
-// action mutates a third-party account the user connected, so it must always
-// be previewed and approved per-action. Connector Reads auto-run in every
-// mode (like filesystem reads), so a "search my Notion for X" runs without
-// friction regardless of permission mode.
+// action under `read_only`/`manual` is `NeedsApproval`. Unlike filesystem
+// tools there is no delete-only carve-out: the vendor classifies the tool and
+// we trust that classification, so `auto_edit` and `full_auto` auto-run
+// connector writes (the account is already connected, i.e. user-granted).
+// `read_only` strips Write tools from the schema (see `tools::specs`), and if
+// one still reaches the gate it is never auto-run. Connector Reads auto-run in
+// every mode (like filesystem reads), so a "search my Notion for X" runs
+// without friction regardless of permission mode.
 
 /// A connector tool's mutating intent, classified from its name/description
 /// when its schema is fetched from the vendor's MCP server.
@@ -212,50 +267,85 @@ pub enum ConnectorToolKind {
     /// Search / read / list / query — no mutation of the connected account.
     Read,
     /// Create / update / delete / insert / move / archive — mutates the
-    /// connected account. Always gated, regardless of permission mode.
+    /// connected account. Gated per the session's permission mode: approval
+    /// under `read_only`/`manual`, auto-run under `auto_edit`/`full_auto`.
     Write,
 }
 
 /// Classify a remote connector tool as Read or Write from its name + the
-/// description the vendor's MCP server returned. Conservative: when in doubt
-/// (no write keyword and no read keyword), treat as Write — the safe side is
-/// to over-gate, never to silently auto-run a mutating action on a connected
-/// third-party account.
+/// description the vendor's MCP server returned.
+///
+/// The tool NAME is authoritative: vendors name tools after their intent
+/// (`gmail_send_message`, `api_create_page`, `search-flight`), so a read or
+/// write verb in the name decides. The description is only consulted when the
+/// name carries no verb — long vendor descriptions routinely contain write
+/// words describing *how to present results* (e.g. Kiwi's search-flight
+/// instructions say "add the inbound equivalents for return flights"), which
+/// would misclassify a pure read as a Write.
+///
+/// Conservative fallback: when neither name nor description yields a keyword,
+/// treat as Write — the safe side is to over-gate, never to silently auto-run
+/// a mutating action on a connected third-party account.
 pub fn classify_connector_tool(name: &str, description: Option<&str>) -> ConnectorToolKind {
-    let hay = format!("{name} {}", description.unwrap_or(""));
-    let lower = hay.to_ascii_lowercase();
-    // Write keywords — any match ⇒ Write. Ordered roughly by specificity.
+    // Whole-word keyword matching, lowercased: "send" must not match
+    // "senders", "create" must not match "recreate" etc. Splitting on
+    // non-alphanumerics handles underscores (api_create_page → api, create,
+    // page) and full-sentence descriptions alike.
+    fn tokens(s: &str) -> Vec<String> {
+        s.to_ascii_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_string())
+            .collect()
+    }
+    // Write keywords — any whole-word match ⇒ Write. Ordered roughly by
+    // specificity (checked before read keywords).
     let write_kw = [
         "create", "insert", "add", "write", "update", "edit", "patch", "modify",
         "delete", "remove", "trash", "archive", "move", "rename", "publish",
         "send", "post", "comment", "assign", "share", "grant", "revoke",
     ];
-    if write_kw.iter().any(|kw| lower.contains(kw)) {
-        return ConnectorToolKind::Write;
-    }
     // Read keywords — a clear read verb with no write verb ⇒ Read.
     let read_kw = [
         "search", "find", "get", "read", "list", "query", "fetch", "retrieve",
         "show", "view", "inspect", "describe",
     ];
-    if read_kw.iter().any(|kw| lower.contains(kw)) {
+    let has_any = |ks: &[&str], toks: &[String]| ks.iter().any(|kw| toks.iter().any(|t| t == kw));
+
+    let name_tokens = tokens(name);
+    if has_any(&write_kw, &name_tokens) {
+        return ConnectorToolKind::Write;
+    }
+    if has_any(&read_kw, &name_tokens) {
+        return ConnectorToolKind::Read;
+    }
+    let desc_tokens = tokens(description.unwrap_or(""));
+    if has_any(&write_kw, &desc_tokens) {
+        return ConnectorToolKind::Write;
+    }
+    if has_any(&read_kw, &desc_tokens) {
         return ConnectorToolKind::Read;
     }
     // Unknown intent: gate it (treat as Write). Better to ask than to mutate.
     ConnectorToolKind::Write
 }
 
-/// The connector permission check. Reads auto-run in every mode; Writes are
-/// ALWAYS `NeedsApproval` (the carve-out). `mode` is accepted for symmetry
-/// with [`check_permission`] and for future per-mode read gating, but today
-/// only the kind matters.
+/// The connector permission check. Reads auto-run in every mode. Writes follow
+/// the session's permission mode — the same posture as filesystem writes:
+/// `read_only` never auto-runs (Write tools are also filtered from the schema),
+/// `manual` asks for per-action approval, `auto_edit`/`full_auto` auto-run.
 pub fn check_connector_permission(
-    _mode: PermissionMode,
+    mode: PermissionMode,
     kind: ConnectorToolKind,
 ) -> PermissionDecision {
     match kind {
         ConnectorToolKind::Read => PermissionDecision::AutoRun,
-        ConnectorToolKind::Write => PermissionDecision::NeedsApproval,
+        ConnectorToolKind::Write => match mode {
+            PermissionMode::ReadOnly | PermissionMode::Manual => {
+                PermissionDecision::NeedsApproval
+            }
+            PermissionMode::AutoEdit | PermissionMode::FullAuto => PermissionDecision::AutoRun,
+        },
     }
 }
 
@@ -560,6 +650,7 @@ mod tests {
             ("api_get_page", "Retrieve a page by id"),
             ("list_databases", "List all databases"),
             ("api_search", "Full-text query across content"),
+            ("search-flight", "# Search for flights"),
         ] {
             assert_eq!(
                 classify_connector_tool(name, Some(desc)),
@@ -567,6 +658,35 @@ mod tests {
                 "{name} should classify as Read"
             );
         }
+    }
+
+    #[test]
+    fn read_tool_name_wins_over_write_words_in_description() {
+        // Regression: Kiwi's search-flight description tells the model how to
+        // present results ("add the inbound equivalents for return flights"),
+        // which would misclassify the pure search as a Write if the description
+        // were consulted first. The name ("search") is authoritative.
+        assert_eq!(
+            classify_connector_tool(
+                "search-flight",
+                Some(
+                    "# Search for flights\n\nSearches Kiwi.com for available flights. \
+                     ... add the inbound equivalents for return flights, then summarise \
+                     the best price and give a recommendation."
+                ),
+            ),
+            ConnectorToolKind::Read,
+            "search-flight is read-only, idempotent — description noise must not gate it"
+        );
+        // But a write verb in the NAME still classifies as Write, even with a
+        // read-y description.
+        assert_eq!(
+            classify_connector_tool(
+                "send_message",
+                Some("List and display messages in the inbox"),
+            ),
+            ConnectorToolKind::Write
+        );
     }
 
     #[test]
@@ -596,19 +716,48 @@ mod tests {
     }
 
     #[test]
-    fn connector_write_is_gated_under_full_auto() {
-        // The acceptance test: a connector write/create/delete under full_auto
-        // STILL needs a per-action approval card.
-        for mode in [
-            PermissionMode::ReadOnly,
-            PermissionMode::Manual,
-            PermissionMode::AutoEdit,
-            PermissionMode::FullAuto,
-        ] {
+    fn connector_keywords_match_whole_words_not_substrings() {
+        // Regression: "send" must not match "senders" (a read-y Gmail context),
+        // and "create" must not match "recreate"/"creative".
+        assert_eq!(
+            classify_connector_tool(
+                "gmail_get_thread",
+                Some("Fetch a thread with senders, dates and plaintext bodies")
+            ),
+            ConnectorToolKind::Read
+        );
+        assert_eq!(
+            classify_connector_tool(
+                "api_get_page",
+                Some("Retrieve a page by id from the user's workspace")
+            ),
+            ConnectorToolKind::Read
+        );
+        assert_eq!(
+            classify_connector_tool(
+                "recreate_snippet",
+                Some("Show a creative snippet of content")
+            ),
+            ConnectorToolKind::Read
+        );
+    }
+
+    #[test]
+    fn connector_write_follows_permission_mode() {
+        // read_only / manual gate every connector write with a card; auto_edit
+        // and full_auto auto-run them (the account is already connected).
+        for mode in [PermissionMode::ReadOnly, PermissionMode::Manual] {
             assert_eq!(
                 check_connector_permission(mode, ConnectorToolKind::Write),
                 PermissionDecision::NeedsApproval,
                 "connector write must be gated under {mode:?}"
+            );
+        }
+        for mode in [PermissionMode::AutoEdit, PermissionMode::FullAuto] {
+            assert_eq!(
+                check_connector_permission(mode, ConnectorToolKind::Write),
+                PermissionDecision::AutoRun,
+                "connector write should auto-run under {mode:?}"
             );
         }
     }
@@ -660,5 +809,75 @@ mod tests {
                 "{tool} should auto-run under full_auto within roots"
             );
         }
+    }
+
+    // ---- system tools (downloads + native shell) ----
+
+    #[test]
+    fn run_shell_always_gated_in_every_mode() {
+        // Native code execution is a hard gate like delete_file — no mode
+        // bypasses the approval card.
+        for mode in [
+            PermissionMode::ReadOnly,
+            PermissionMode::Manual,
+            PermissionMode::AutoEdit,
+            PermissionMode::FullAuto,
+        ] {
+            assert_eq!(
+                check_system_permission(mode, RUN_SHELL),
+                PermissionDecision::NeedsApproval,
+                "run_shell must be gated under {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn download_file_follows_connector_write_posture() {
+        // Approval under read_only/manual; auto-run under auto_edit/full_auto
+        // (no granted-root scope — unrestricted filesystem access is the point).
+        for mode in [PermissionMode::ReadOnly, PermissionMode::Manual] {
+            assert_eq!(
+                check_system_permission(mode, DOWNLOAD_FILE),
+                PermissionDecision::NeedsApproval,
+                "download_file must be gated under {mode:?}"
+            );
+        }
+        for mode in [PermissionMode::AutoEdit, PermissionMode::FullAuto] {
+            assert_eq!(
+                check_system_permission(mode, DOWNLOAD_FILE),
+                PermissionDecision::AutoRun,
+                "download_file should auto-run under {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn task_tracking_tools_auto_run_in_every_mode() {
+        // download_progress / get_task_status / cancel_task are benign — they
+        // only inspect or abort tasks the model itself started.
+        for mode in [
+            PermissionMode::ReadOnly,
+            PermissionMode::Manual,
+            PermissionMode::AutoEdit,
+            PermissionMode::FullAuto,
+        ] {
+            for tool in [DOWNLOAD_PROGRESS, GET_TASK_STATUS, CANCEL_TASK] {
+                assert_eq!(
+                    check_system_permission(mode, tool),
+                    PermissionDecision::AutoRun,
+                    "{tool} should auto-run under {mode:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn system_tool_family_detection() {
+        assert!(is_system_tool(DOWNLOAD_FILE));
+        assert!(is_system_tool(RUN_SHELL));
+        assert!(is_system_tool(GET_TASK_STATUS));
+        assert!(!is_system_tool(WRITE_FILE));
+        assert!(!is_system_tool(READ_FILE));
+        assert!(!is_system_tool("web_search"));
     }
 }

@@ -267,8 +267,17 @@ export default function App() {
           <strong style={{ fontSize: 14 }}>Conduit</strong>
           <span className="spacer" />
           {sidebarMode !== "chats" && (
-            <button onClick={openBrowserPane} title="Open a browser preview pane (google.com)">
-              + Browser Pane
+            <button
+              className="ghost toolbar-icon-btn"
+              onClick={openBrowserPane}
+              title="Open a browser preview pane (google.com)"
+              aria-label="Open browser pane"
+            >
+              <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="2" y1="12" x2="22" y2="12" />
+                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+              </svg>
             </button>
           )}
           {sidebarMode !== "chats" && selectedProjectId && (
@@ -277,13 +286,20 @@ export default function App() {
               style={{ position: "relative" }}
             >
               <button
+                className="ghost toolbar-icon-btn"
                 onClick={() => {
                   void refreshWorkspaces();
                   setWorkspacesOpen((o) => !o);
                 }}
                 title="Workspaces: save/restore pane layouts"
+                aria-label="Workspaces"
               >
-                &#9724; Workspaces
+                <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <rect x="3" y="3" width="7" height="9" rx="1" />
+                  <rect x="14" y="3" width="7" height="5" rx="1" />
+                  <rect x="14" y="12" width="7" height="9" rx="1" />
+                  <rect x="3" y="16" width="7" height="5" rx="1" />
+                </svg>
               </button>
               {workspacesOpen && (
                 <div className="workspaces-dropdown">
@@ -341,25 +357,37 @@ export default function App() {
                 </button>
               )}
               <button
-                className={`broadcast-toggle${broadcast.enabled ? " active" : ""}`}
+                className={`broadcast-toggle ghost toolbar-icon-btn${broadcast.enabled ? " active" : ""}`}
                 onClick={() => setBroadcastEnabled(!broadcast.enabled)}
                 title="Toggle broadcast mode (Cmd/Ctrl+Shift+B)"
+                aria-label="Toggle broadcast"
               >
-                ⇶ Broadcast
+                <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M2 16.1A5 5 0 0 1 5.9 20M2 12.05A9 9 0 0 1 9.95 20M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" />
+                  <line x1="2" y1="20" x2="2.01" y2="20" />
+                </svg>
               </button>
             </>
           )}
           {sidebarMode === "chats" && (
             <>
-              <button onClick={openBrowserPane} title="Open a browser preview pane (google.com)">
-                + Browser Pane
+              <button
+                className="ghost toolbar-icon-btn"
+                onClick={openBrowserPane}
+                title="Open a browser preview pane (google.com)"
+                aria-label="Open browser pane"
+              >
+                <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="2" y1="12" x2="22" y2="12" />
+                  <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                </svg>
               </button>
             </>
           )}
         </div>
 
         <OnboardingBanner />
-        <UpdateBanner />
 
         {sidebarMode === "chats" ? (
           <div className="grid-wrap chat-grid-wrap">
@@ -382,6 +410,7 @@ export default function App() {
       {projectSettingsFor && <ProjectSettingsPanel />}
       <PeekPanel />
       <CommandPalette />
+      <UpdateBanner />
 
       {pendingReplace && (
         <Modal

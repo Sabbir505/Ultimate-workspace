@@ -2,38 +2,40 @@ import { createContext, useContext, useState, useEffect, type ReactNode } from '
 import { useColorScheme } from 'react-native';
 
 export const lightColors = {
-  background: '#FAF7F5',
-  surface: '#FFFFFF',
-  primary: '#C15F3C',
-  primaryLight: '#D47655',
-  text: '#3D322C',
-  textSecondary: '#7A6F67',
-  border: '#E8E3DF',
-  success: '#4CAF50',
-  warning: '#FF9800',
-  error: '#E53935',
-  green: '#4CAF50',
+  background: '#ffffff',
+  surface: '#ffffff',
+  surface2: '#f3f3f3',
+  primary: '#0078a8',
+  primaryLight: '#0078a8',
+  text: '#1a1a1a',
+  textSecondary: '#6a6a6a',
+  border: '#e0e0e0',
+  success: '#16a34a',
+  warning: '#FFC107',
+  error: '#d64545',
+  green: '#16a34a',
   yellow: '#FFC107',
-  blue: '#2196F3',
+  blue: '#0078a8',
   gray: '#9E9E9E',
   white: '#FFFFFF',
   black: '#000000',
 } as const;
 
 export const darkColors: typeof lightColors = {
-  background: '#1E1B1A',
-  surface: '#2A2726',
-  primary: '#C15F3C',
-  primaryLight: '#D47655',
-  text: '#E8E4E0',
-  textSecondary: '#A09B96',
-  border: '#3D3936',
-  success: '#4CAF50',
+  background: '#181818',
+  surface: '#1a1a1a',
+  surface2: '#1f1f1f',
+  primary: '#88C0D0',
+  primaryLight: '#88C0D0',
+  text: '#e4e4e4',
+  textSecondary: '#a0a0a0',
+  border: '#2a2a2a',
+  success: '#4ec9b0',
   warning: '#FFC107',
-  error: '#E53935',
-  green: '#4CAF50',
+  error: '#ff7b72',
+  green: '#4ec9b0',
   yellow: '#FFC107',
-  blue: '#2196F3',
+  blue: '#88C0D0',
   gray: '#9E9E9E',
   white: '#FFFFFF',
   black: '#000000',
@@ -44,7 +46,7 @@ export type ThemeColors = typeof lightColors;
 // ---- Reactive theme singleton ----
 // Components that import `theme` get colors that update when dark mode toggles.
 // StyleSheet.create is module-level frozen, so components must apply the 5
-// wallpaper colors (background, surface, text, textSecondary, border) as inline
+// wallpaper colors (background, surface, surface2, text, textSecondary, border) as inline
 // overrides: style={[styles.foo, { backgroundColor: theme.colors.surface }]}
 
 let _current: ThemeColors = lightColors;

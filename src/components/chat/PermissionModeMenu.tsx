@@ -1,12 +1,13 @@
-// Filesystem permission-mode selector for the chat composer. A pill trigger
+// Approval-mode selector for the chat composer. A pill trigger
 // ("Manual ▾") opens an upward glass menu listing the four postures
-// (read_only / manual / auto_edit / full_auto), styled to match
-// ModelEffortMenu's dropdown exactly — same glass surface, chevron, checkmark,
+// (read_only / manual / auto_edit / full_auto) that govern filesystem AND
+// connected-account tool calls, styled to match ModelEffortMenu's dropdown
+// exactly — same glass surface, chevron, checkmark,
 // and outside-click handling. Switching INTO full_auto does NOT apply here:
 // the store opens a one-time confirmation modal instead; selecting full_auto
 // in this menu calls onModeChange("full_auto") only as a request the store may
 // intercept.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PermissionMode } from "../../state/chat";
 
 export interface ModeOption {
@@ -20,22 +21,26 @@ export const PERMISSION_MODES: ModeOption[] = [
   {
     value: "read_only",
     label: "Read Only",
-    description: "Model can list/read/search files, but cannot write, edit, or delete.",
+    description:
+      "Model can read files and search accounts, but cannot write/edit/delete — incl. connected accounts (Gmail, Notion).",
   },
   {
     value: "manual",
     label: "Manual Approval",
-    description: "Every write/edit/delete/move/copy pauses for an approval card. (Default)",
+    description:
+      "Every mutating action pauses for an approval card — files and connected accounts (send email, label changes). (Default)",
   },
   {
     value: "auto_edit",
     label: "Auto-Edit",
-    description: "Reads & writes/edits in granted roots auto-run. Delete/move/copy still gated.",
+    description:
+      "Reads & writes/edits in granted roots auto-run, as do connected-account actions. Delete/move/copy still gated.",
   },
   {
     value: "full_auto",
     label: "Full Auto",
-    description: "Everything auto-runs except delete, which is always gated.",
+    description:
+      "Everything auto-runs — files and connected accounts — except delete, which is always gated.",
   },
 ];
 
@@ -58,8 +63,34 @@ interface Props {
 export function PermissionModeMenu({ mode, onModeChange, variant = "pill" }: Props) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [activeIndex, setActiveIndex] = useState(0);
+  // Override for the popup's horizontal position when the default right-aligned
+  // placement would push it off-screen (narrow chat column — collapsed sidebar
+  // + browser pane open). Computed against the viewport on open.
+  const [popupStyle, setPopupStyle] = useState<React.CSSProperties | undefined>(undefined);
+
+  // Clamp the popup horizontally inside the viewport. The popup is absolutely
+  // positioned `right: 0` to the trigger, so in a narrow column it can extend
+  // past the left edge; measure the rendered popup and shift it right (or
+  // left) when it would overflow.
+  useLayoutEffect(() => {
+    if (!open) {
+      setPopupStyle(undefined);
+      return;
+    }
+    const popup = popupRef.current;
+    const root = rootRef.current;
+    if (!popup || !root) return;
+    const pr = popup.getBoundingClientRect();
+    const rr = root.getBoundingClientRect();
+    const margin = 8;
+    let dx = 0;
+    if (pr.left < margin) dx = margin - pr.left;
+    else if (pr.right > window.innerWidth - margin) dx = window.innerWidth - margin - pr.right;
+    if (dx !== 0) setPopupStyle({ left: pr.left - rr.left + dx, right: "auto" });
+  }, [open]);
 
   // Close on outside pointer.
   useEffect(() => {
@@ -112,7 +143,7 @@ export function PermissionModeMenu({ mode, onModeChange, variant = "pill" }: Pro
         type="button"
         className={`permission-mode-trigger mode-${mode}${variantClass}`}
         onClick={() => setOpen((o) => !o)}
-        title="Filesystem permission mode"
+        title="Approval mode (files + connected accounts)"
         aria-haspopup="menu"
         aria-expanded={open}
       >
@@ -122,9 +153,15 @@ export function PermissionModeMenu({ mode, onModeChange, variant = "pill" }: Pro
       </button>
 
       {open && (
-        <div className="permission-mode-popup" role="menu" onKeyDown={onKeyDown}>
+        <div
+          ref={popupRef}
+          className="permission-mode-popup"
+          role="menu"
+          style={popupStyle}
+          onKeyDown={onKeyDown}
+        >
           <div className="permission-mode-hint">
-            Sets the default approval posture for filesystem tool calls this turn.
+            Approval posture for filesystem AND connected-account tool calls this turn.
           </div>
           <div className="permission-mode-divider" />
           {PERMISSION_MODES.map((opt, i) => (

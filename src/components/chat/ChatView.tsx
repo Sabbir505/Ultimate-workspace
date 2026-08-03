@@ -9,7 +9,9 @@ import { ChatComposer, type ChatAttachment } from "./ChatComposer";
 import { MessageBubble, TypingIndicator } from "./MessageBubble";
 import { ArtifactPreviewPane } from "./ArtifactPreviewPane";
 import { ApprovalCard, FullAutoConfirmModal } from "./ApprovalFlow";
+import { TaskProgressCard } from "./TaskProgressCard";
 import { listChatModels, scanLocalModels, startLocalModel, type ChatMessage, type GgufModel } from "../../lib/ipc";
+import { useContextMeter } from "../../hooks/useContextMeter";
 
 /** Format a backend error message for display. Strips raw JSON blobs,
  *  extracts the human-readable message, and keeps it to one line. */
@@ -104,6 +106,9 @@ export function ChatView() {
     activeChatSessionId ? s.artifacts[activeChatSessionId] : undefined,
   );
   const artifactsByMessage = useChatStore((s) => s.artifactsByMessage);
+  const sessionTasks = useChatStore((s) =>
+    activeChatSessionId ? Object.values(s.tasks[activeChatSessionId] ?? {}) : [],
+  );
 
   const activeSession = sessions.find((s) => s.id === activeChatSessionId) ?? null;
   const isLocal = activeSession?.provider === "local_gguf";
@@ -219,11 +224,11 @@ export function ChatView() {
     return stored;
   })();
 
-  // Context meter "used" figure: the input_tokens of the most recent assistant
-  // turn. That value is the full prompt size the provider counted (system +
-  // all history + current message + tool results), so it represents how much of
-  // the context window the conversation is actually consuming. Null until the
-  // first turn completes (the optimistic assistant bubble has no usage yet).
+  // Context meter "used" figure: prefer the live count from llama-server's
+  // /tokenize (driven by `useContextMeter`, polled while a local_gguf session
+  // is active), and fall back to the input_tokens of the most recent
+  // assistant turn for cloud sessions or before the first poll resolves.
+  // Both values represent the full prompt size the model saw.
   const lastInputTokens = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
@@ -234,6 +239,26 @@ export function ChatView() {
     return null;
   }, [messages]);
 
+  const isStreamingForMeter = streamingChatSessionId === activeChatSessionId;
+  // `compactionRevision` is bumped by onStatus whenever a `context_compacted`
+  // event lands for the active session — drives an immediate re-poll so the
+  // meter ticks down right after compaction instead of waiting up to 2s for
+  // the next interval.
+  const compactionRevision = useChatStore((s) => s.compactionRevision);
+  const liveUsage = useContextMeter({
+    chatSessionId: activeChatSessionId,
+    isLocal,
+    isStreaming: isStreamingForMeter,
+    messagesRevision: messages.length,
+    compactionRevision,
+  });
+  // Live count wins for local sessions; the persisted last-turn value is the
+  // fallback for cloud sessions and the brief window before the first poll
+  // resolves. Either way, the meter's percentage is a real number.
+  const usedTokens = isLocal
+    ? (liveUsage.usedTokens ?? lastInputTokens)
+    : lastInputTokens;
+
   const handleModelChange = useCallback(
     async (model: string) => {
       if (!activeChatSessionId) return;
@@ -243,14 +268,33 @@ export function ChatView() {
         // (start_local_model stops any existing one), then point the session
         // at the local provider so subsequent sends hit its endpoint.
         setLocalLoading(true);
+        let startErr: string | null = null;
         try {
           await startLocalModel(localMatch.id, localMatch.path, undefined, localCtx || undefined, localMatch.mmprojPath);
         } catch (err) {
-          console.warn("start local model failed", err);
+          // Keep the failure reason around so the user sees a meaningful
+          // error instead of a cryptic 400 on the NEXT send. Two important
+          // things to know:
+          //   1. We do NOT update the session model — the sidecar didn't
+          //      load, so the previous model (still in the registry) is
+          //      the only one a send could possibly hit. Stomping the
+          //      session to the failed model would orphan the session on
+          //      a dead endpoint and the user would see a 400.
+          //   2. We surface the error to the chat store's `error` field
+          //      so the same `chat-error` banner that handles provider
+          //      errors shows it. The error is also scrubbed via
+          //      `formatChatError` to strip the noisy llama.cpp startup
+          //      logs and keep just the salient reason (e.g. "unknown
+          //      model architecture: 'kimi-k3'").
+          startErr = err instanceof Error ? err.message : String(err);
+          console.warn("start local model failed", startErr);
+        } finally {
           setLocalLoading(false);
+        }
+        if (startErr) {
+          useChatStore.setState({ error: startErr });
           return;
         }
-        setLocalLoading(false);
         // start_local_model persists chat.local_gguf.model + chat.active_provider
         // in settings. We DON'T call loadConfig("local_gguf") here because that
         // would overwrite `config.provider` with "local_gguf" and break the
@@ -486,6 +530,13 @@ export function ChatView() {
             ) : (
               <TypingIndicator />
             ))}
+          {sessionTasks.length > 0 && (
+            <div className="chat-tasks">
+              {sessionTasks.map((t) => (
+                <TaskProgressCard key={t.taskId} task={t} />
+              ))}
+            </div>
+          )}
           {error && (
             <div className="chat-error">
               <span className="chat-error-icon">⚠</span>
@@ -560,8 +611,8 @@ export function ChatView() {
             : undefined
         }
         onPermissionModeChange={handlePermissionModeChange}
-        chatSessionId={activeChatSessionId ?? undefined}
-        usedTokens={lastInputTokens}
+        usedTokens={usedTokens}
+        liveMaxTokens={isLocal ? liveUsage.maxTokens : 0}
         thinking={thinking}
         onThinkingChange={setThinking}
         thinkingSupported={thinkingSupported}

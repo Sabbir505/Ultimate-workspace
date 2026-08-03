@@ -19,6 +19,12 @@ interface Props {
   model: string | undefined | null;
   isLocal: boolean;
   localCtx?: number;
+  /** Live context-window cap from the running llama-server. Takes precedence
+   *  over the slider-derived cap for local sessions so the meter matches
+   *  what the model actually has — the slider value only changes after a
+   *  model restart, so without this we'd be showing a stale cap whenever
+   *  the user moves the slider but hasn't yet restarted. */
+  liveMaxTokens?: number;
 }
 
 const PCT_WARN = 0.7;
@@ -28,9 +34,15 @@ const PCT_CRIT = 0.9;
 const R = 16;
 const CIRC = 2 * Math.PI * R;
 
-export function ContextMeter({ usedTokens, model, isLocal, localCtx }: Props) {
+export function ContextMeter({ usedTokens, model, isLocal, localCtx, liveMaxTokens }: Props) {
   const used = usedTokens && usedTokens > 0 ? usedTokens : 0;
-  const max = contextWindowFor(model, isLocal, localCtx);
+  // Prefer the live cap (what llama-server was actually started with) over
+  // the slider-derived cap. Falls back to the slider / 16K default for the
+  // brief window before the first poll resolves, and for cloud sessions
+  // where `liveMaxTokens` is 0.
+  const max = (isLocal && liveMaxTokens && liveMaxTokens > 0)
+    ? liveMaxTokens
+    : contextWindowFor(model, isLocal, localCtx);
   const pct = max > 0 ? Math.min(1, used / max) : 0;
   const level = pct >= PCT_CRIT ? "crit" : pct >= PCT_WARN ? "warn" : "ok";
   // Dash the circle so the filled portion grows from the top clockwise.

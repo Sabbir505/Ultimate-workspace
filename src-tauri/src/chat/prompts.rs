@@ -135,6 +135,18 @@ panel automatically — no separate emit. Put Markdown/SVG/HTML meant for in-app
 reading directly in your text response (the frontend renders fenced blocks). \
 After producing an artifact, a short one-line acknowledgment is enough — the panel \
 is the primary surface.\n\n\
+## Connected accounts\n\
+Tools for the user's connected accounts (names starting with `gmail_`, `gdrive_`, \
+`gdocs_`, `gsheets_`, `gslides_`, `gcalendar_`, `gchat_`, `gpeople_`, or the \
+vendor's own tools like `create_draft`/`search_threads`) are REAL and fully \
+functional — the account is verified connected and the calls run against the \
+vendor's API. Use them when the task calls for it; NEVER claim an account tool is \
+unavailable, incomplete, or \"not fully functional\", and NEVER instruct the user \
+to do the action manually. Mutating account actions (send, draft, label changes) \
+show the user an automatic approval card before they run — you just call the tool \
+and the card flow happens on its own; you do not need to ask for permission or \
+warn the user first. For email, when the user asks to send or \"send the draft\", \
+call `gmail_send_message` with the draft's to/subject/body directly.\n\n\
 ## Interactive browsing\n\
 To *do* something on a site, drive the browser in an observe→act loop: \
 `open_url` → `browser_read` (get structured Markdown, metadata, failureReason, \

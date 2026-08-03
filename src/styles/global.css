@@ -1,19 +1,27 @@
-/* Conduit theme system — warm "Claude Code" palette (cream light / warm
-   charcoal dark), terracotta accent. The window is opaque (transparent:false
-   in tauri.conf.json), so every surface here is a SOLID color rather than the
-   translucent glass of the old liquid-glass system. Surfaces still carry a
-   faint top-edge rim + soft shadow for depth, but there is no backdrop blur —
-   the theme reads as solid, high-contrast dark/light. */
+/* Conduit theme system â€” Cursor-style palette (deep neutral dark / warm
+   light), cyan accent. The window is opaque (transparent:false in
+   tauri.conf.json), so every surface here is a SOLID color. Surfaces still
+   carry a faint top-edge rim + soft shadow for depth.
+
+   Theme tokens are organized semantically (editor, sidebar, activity-bar,
+   status-bar, terminal, syntax) matching the modern editor taxonomy. The
+   three groups below are:
+     1. Brand-neutral root tokens (fonts, easing, radii)
+     2. :root[data-theme="dark"] â€” Cursor Dark palette + syntax tokens
+     3. :root[data-theme="light"] â€” Cursor Light palette + syntax tokens
+   Switching data-theme on <html> swaps the entire palette in one frame. */
 
 :root {
   --font-ui: "Space Grotesk", -apple-system, "Segoe UI", system-ui, sans-serif;
   --font-mono: "Space Mono", ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
 
-  /* Pane state colors (§7.3 / legend §12.4) */
-  --state-idle: #9aa4b2;
-  --state-working: #34d17b;
-  --state-waiting: #f2c14e;
-  --state-diff: #58a6ff;
+  /* Pane state colors (Â§7.3 / legend Â§12.4) â€” neutral, no blue/purple.
+     working = Cursor green, waiting = Cursor warm gold, idle/diff = neutral
+     grays (Cursor uses cool desaturated tones rather than saturated blue). */
+  --state-idle: #6a6a6a;
+  --state-working: #4ec9b0;
+  --state-waiting: #dcdcaa;
+  --state-diff: #a0a0a0;
 
   --radius: 12px;
   --radius-sm: 8px;
@@ -22,74 +30,256 @@
 
   /* Surface depth helpers. Compose surfaces with var(--glass) on the
      `background` and var(--glass-rim) on the box-shadow top edge. On solid
-     surfaces these are subtle — a hairline sheen, not a glass refraction. */
+     surfaces these are subtle â€” a hairline sheen, not a glass refraction. */
   --glass-rim: inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
   --glass-rim-soft: inset 0 1px 0 0 rgba(255, 255, 255, 0.04);
   --glass-shadow: 0 8px 28px -14px rgba(0, 0, 0, 0.4), 0 2px 8px -6px rgba(0, 0, 0, 0.3);
   --glass-shadow-lg: 0 24px 64px -20px rgba(0, 0, 0, 0.45), 0 8px 20px -12px rgba(0, 0, 0, 0.35);
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+
+  /* Theme switch transition â€” color/bg only, no layout-affecting props.
+     Applied globally so a data-theme swap animates smoothly rather than
+     snapping. Honor the OS "reduce motion" preference. */
+  --theme-transition: background-color 0.18s var(--ease),
+                      border-color 0.18s var(--ease),
+                      color 0.18s var(--ease),
+                      box-shadow 0.18s var(--ease);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --theme-transition: none;
+  }
 }
 
 :root[data-theme="dark"] {
-  /* Warm charcoal with a faint brown undertone — not pure black. */
-  --bg-tint: #262624;
-  --surface: #30302e;
-  --surface-2: #3a3a37;
-  --surface-solid: #1f1f1d;
-  /* Elevated surfaces (toolbars, headers, popovers) — one step lighter. */
-  --surface-glass: #34342f;
-  --surface-glass-2: #3e3e3a;
-  --border: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.16);
+  /* === Cursor Dark â€” Core UI Colors ============================== */
+  /* Editor Background:    #181818 / #1a1a1a   (main coding area)   */
+  /* Sidebar / Activity:   #141414             (darker panels)      */
+  /* Foreground / Text:    #d4d4d4 â€“ #e4e4e4   (primary text)       */
+  /* Muted / Secondary:    #858585 â€“ #a0a0a0   (comments, inactive) */
+  /* Borders / subtle:     #2a2a2a             (dividers)           */
+  /* Accent / Highlight:   #88C0D0             (cyan, selection)    */
+  /* Selection:            #404040 (opacity)   (selected text)      */
+  --bg-tint: #181818;
+  --surface: #1a1a1a;
+  --surface-2: #1f1f1f;
+  --surface-solid: #141414;
+  /* Elevated surfaces (toolbars, headers, popovers) â€” one step lighter. */
+  --surface-glass: #1e1e1e;
+  --surface-glass-2: #252525;
+  --border: #2a2a2a;
+  --border-strong: #3a3a3a;
   /* Light sheen reads on dark surfaces. */
   --glass-rim: inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
   --glass-rim-soft: inset 0 1px 0 0 rgba(255, 255, 255, 0.04);
-  /* Folded document-card corner — lifted above the charcoal body so the
-     dog-ear reads in dark (the body surface and surface-glass-2 are <10%
-     luminance apart, which made the fold vanish before these tokens). */
-  --doc-fold-light: #4a4a44;
-  --doc-fold-dark: #6b6b62;
-  --text: #f5f1ea;
-  --text-dim: #a8a299;
-  --accent: #c15f3c;
-  --accent-soft: rgba(193, 95, 60, 0.16);
-  --accent-glow: rgba(193, 95, 60, 0.35);
+  /* Folded document-card corner â€” lifted above the body so the dog-ear
+     reads in dark (the body surface and surface-glass-2 are <10% luminance
+     apart, which made the fold vanish before these tokens). */
+  --doc-fold-light: #383838;
+  --doc-fold-dark: #484848;
+  --text: #e4e4e4;
+  --text-dim: #a0a0a0;
+  --accent: #6e706f;
+  --accent-soft: rgba(110, 112, 111, 0.16);
+  --accent-glow: rgba(110, 112, 111, 0.35);
   --accent-contrast: #ffffff;
   --danger: #ff7b72;
   --shadow: rgba(0, 0, 0, 0.45);
-  --diff-add-bg: rgba(52, 209, 123, 0.12);
-  --diff-del-bg: rgba(255, 123, 114, 0.12);
-  --diff-hunk-bg: rgba(193, 95, 60, 0.14);
+  --diff-add-bg: rgba(52, 209, 123, 0.06);
+  --diff-del-bg: rgba(255, 123, 114, 0.06);
+  --diff-hunk-bg: rgba(136, 192, 208, 0.14);
+
+  /* === Semantic Editor Tokens (Cursor/VSCode taxonomy) ============== */
+  /* Mirrors the modern editor's "what is this surface/role" vocabulary
+     so webview-injected styles (Mermaid, syntax, etc.) can reference the
+     same names rather than guessing from generic surface tokens. */
+  --editor-bg: #1a1a1a;
+  --editor-fg: #e4e4e4;
+  --editor-line-highlight: #2a2a2a;
+  --editor-selection: rgba(64, 64, 64, 0.4);
+  --editor-cursor: #e4e4e4;
+  --editor-whitespace: #3a3a3a;
+  --editor-indent-guide: #2a2a2a;
+  --editor-bracket-match: #88C0D0;
+
+  --sidebar-bg: #141414;
+  --sidebar-fg: #d4d4d4;
+  --sidebar-border: #2a2a2a;
+  --sidebar-hover-bg: #1e1e1e;
+  --sidebar-active-bg: rgba(136, 192, 208, 0.12);
+
+  --activity-bar-bg: #141414;
+  --activity-bar-fg: #a0a0a0;
+  --activity-bar-active-fg: #e4e4e4;
+  --activity-bar-badge-bg: #88C0D0;
+  --activity-bar-badge-fg: #141414;
+
+  --status-bar-bg: #141414;
+  --status-bar-fg: #a0a0a0;
+  --status-bar-debug-bg: #88C0D0;
+
+  --tab-bg: #141414;
+  --tab-active-bg: #1a1a1a;
+  --tab-fg: #a0a0a0;
+  --tab-active-fg: #e4e4e4;
+  --tab-border: #2a2a2a;
+
+  --titlebar-bg: #141414;
+  --titlebar-fg: #d4d4d4;
+  --titlebar-inactive-fg: #858585;
+
+  --input-bg: #1f1f1f;
+  --input-fg: #e4e4e4;
+  --input-border: #2a2a2a;
+  --input-placeholder: #858585;
+  --input-focus-border: #88C0D0;
+
+  --button-bg: #2a2a2a;
+  --button-hover-bg: #3a3a3a;
+  --button-fg: #e4e4e4;
+  --button-primary-bg: #88C0D0;
+  --button-primary-fg: #141414;
+
+  --scrollbar-thumb: #3a3a3a;
+  --scrollbar-thumb-hover: #4a4a4a;
+  --scrollbar-track: transparent;
+
+  --tooltip-bg: #252525;
+  --tooltip-fg: #e4e4e4;
+  --tooltip-border: #3a3a3a;
+
+  /* === Syntax Highlighting Tokens (Cursor-aligned) ================= */
+  /* Cursor's actual editor palette is mostly warm/desaturated â€” no purple
+     keywords, no bright blue variables. We follow that. The teal/salmon/
+     gold trio carries semantic weight without shouting. */
+  /* Comments:        #6A9955  (muted green, italic)                  */
+  /* Strings:         #CE9178  (warm salmon/orange)                   */
+  /* Keywords:        #C586C0  (soft mauve)                           */
+  /* Functions:       #DCDCAA  (soft gold/yellow)                     */
+  /* Types / Classes: #4EC9B0  (teal)                                 */
+  /* Variables:       #9CDCFE  (light cool blue)                     */
+  /* Numbers:         #B5CEA8  (soft green)                           */
+  /* Operators:       #D4D4D4  (near-white)                           */
+  --syntax-comment: #6a9955;
+  --syntax-string: #ce9178;
+  --syntax-keyword: #c586c0;
+  --syntax-function: #dcdcaa;
+  --syntax-type: #4ec9b0;
+  --syntax-variable: #9cdcfe;
+  --syntax-number: #b5cea8;
+  --syntax-operator: #d4d4d4;
+  --syntax-tag: #569cd6;
+  --syntax-attr-name: #9cdcfe;
+  --syntax-attr-value: #ce9178;
+  --syntax-punctuation: #a0a0a0;
+  --syntax-regex: #d16969;
+  --syntax-builtin: #4ec9b0;
+  --syntax-deleted: #ff7b72;
+  --syntax-inserted: #34d17b;
+  --syntax-changed: #88C0D0;
 }
 
 :root[data-theme="light"] {
-  /* Warm off-white/cream — not pure white. */
-  --bg-tint: #faf7f2;
+  /* === Cursor Light â€” Core UI Colors ============================== */
+  --bg-tint: #ffffff;
   --surface: #ffffff;
-  --surface-2: #f3efe8;
-  --surface-solid: #f6f3ee;
-  --surface-glass: #fdfbf7;
-  --surface-glass-2: #f7f3ec;
-  --border: rgba(43, 38, 34, 0.1);
-  --border-strong: rgba(43, 38, 34, 0.2);
-  /* Dark sheen reads on light surfaces (white rim would be invisible). */
-  --glass-rim: inset 0 1px 0 0 rgba(43, 38, 34, 0.06);
-  --glass-rim-soft: inset 0 1px 0 0 rgba(43, 38, 34, 0.04);
-  /* Folded document-card corner — warm cream tones that read clearly on the
-     light card body. */
-  --doc-fold-light: #efe9df;
-  --doc-fold-dark: #d9d0c1;
-  --text: #2b2622;
-  --text-dim: #736b62;
-  --accent: #c15f3c;
-  --accent-soft: rgba(193, 95, 60, 0.12);
-  --accent-glow: rgba(193, 95, 60, 0.28);
+  --surface-2: #f3f3f3;
+  --surface-solid: #fafafa;
+  --surface-glass: #ffffff;
+  --surface-glass-2: #f3f3f3;
+  --border: #e0e0e0;
+  --border-strong: #c8c8c8;
+  --glass-rim: inset 0 1px 0 0 rgba(0, 0, 0, 0.06);
+  --glass-rim-soft: inset 0 1px 0 0 rgba(0, 0, 0, 0.04);
+  --doc-fold-light: #e8e8e8;
+  --doc-fold-dark: #d0d0d0;
+  --text: #1a1a1a;
+  --text-dim: #6a6a6a;
+  --accent: #6e706f;
+  --accent-soft: rgba(110, 112, 111, 0.12);
+  --accent-glow: rgba(110, 112, 111, 0.28);
   --accent-contrast: #ffffff;
   --danger: #d64545;
-  --shadow: rgba(60, 50, 40, 0.14);
-  --diff-add-bg: rgba(22, 163, 74, 0.12);
-  --diff-del-bg: rgba(214, 69, 69, 0.1);
-  --diff-hunk-bg: rgba(193, 95, 60, 0.12);
+  --shadow: rgba(0, 0, 0, 0.08);
+  --diff-add-bg: rgba(22, 163, 74, 0.05);
+  --diff-del-bg: rgba(214, 69, 69, 0.05);
+  --diff-hunk-bg: rgba(0, 120, 168, 0.12);
+
+  /* === Semantic Editor Tokens (Cursor/VSCode taxonomy) ============== */
+  --editor-bg: #ffffff;
+  --editor-fg: #1a1a1a;
+  --editor-line-highlight: #f3f3f3;
+  --editor-selection: rgba(0, 120, 168, 0.2);
+  --editor-cursor: #1a1a1a;
+  --editor-whitespace: #d0d0d0;
+  --editor-indent-guide: #e0e0e0;
+  --editor-bracket-match: #0078a8;
+
+  --sidebar-bg: #fafafa;
+  --sidebar-fg: #1a1a1a;
+  --sidebar-border: #e0e0e0;
+  --sidebar-hover-bg: #f0f0f0;
+  --sidebar-active-bg: rgba(0, 120, 168, 0.08);
+
+  --activity-bar-bg: #f0f0f0;
+  --activity-bar-fg: #6a6a6a;
+  --activity-bar-active-fg: #1a1a1a;
+  --activity-bar-badge-bg: #0078a8;
+  --activity-bar-badge-fg: #ffffff;
+
+  --status-bar-bg: #f0f0f0;
+  --status-bar-fg: #6a6a6a;
+  --status-bar-debug-bg: #0078a8;
+
+  --tab-bg: #f0f0f0;
+  --tab-active-bg: #ffffff;
+  --tab-fg: #6a6a6a;
+  --tab-active-fg: #1a1a1a;
+  --tab-border: #e0e0e0;
+
+  --titlebar-bg: #fafafa;
+  --titlebar-fg: #1a1a1a;
+  --titlebar-inactive-fg: #8a8a8a;
+
+  --input-bg: #ffffff;
+  --input-fg: #1a1a1a;
+  --input-border: #d0d0d0;
+  --input-placeholder: #8a8a8a;
+  --input-focus-border: #0078a8;
+
+  --button-bg: #f0f0f0;
+  --button-hover-bg: #e0e0e0;
+  --button-fg: #1a1a1a;
+  --button-primary-bg: #0078a8;
+  --button-primary-fg: #ffffff;
+
+  --scrollbar-thumb: #c8c8c8;
+  --scrollbar-thumb-hover: #a8a8a8;
+  --scrollbar-track: transparent;
+
+  --tooltip-bg: #ffffff;
+  --tooltip-fg: #1a1a1a;
+  --tooltip-border: #d0d0d0;
+
+  /* === Syntax Highlighting Tokens (Cursor-aligned) ================= */
+  --syntax-comment: #008000;
+  --syntax-string: #a31515;
+  --syntax-keyword: #af00db;
+  --syntax-function: #795e26;
+  --syntax-type: #267f99;
+  --syntax-variable: #001080;
+  --syntax-number: #098658;
+  --syntax-operator: #1a1a1a;
+  --syntax-tag: #800000;
+  --syntax-attr-name: #ff0000;
+  --syntax-attr-value: #0451a5;
+  --syntax-punctuation: #1a1a1a;
+  --syntax-regex: #811f3f;
+  --syntax-builtin: #267f99;
+  --syntax-deleted: #d64545;
+  --syntax-inserted: #16a34a;
+  --syntax-changed: #0078a8;
 }
 
 * {
@@ -107,6 +297,22 @@ body,
      paints the window backdrop via window-vibrancy; the rgba surfaces above
      it composite over this solid base instead of the desktop. */
   background: var(--surface-solid);
+  /* Theme switch: smoothly cross-fade surface + text colors when data-theme
+     toggles. Skipped when prefers-reduced-motion is on (handled in the
+     @media block above). */
+  transition: var(--theme-transition);
+}
+
+/* Global text selection highlight â€” uses the editor-selection token so
+   selected text reads consistently with the code editor's selection
+   background. */
+::selection {
+  background: var(--editor-selection);
+  color: inherit;
+}
+::-moz-selection {
+  background: var(--editor-selection);
+  color: inherit;
 }
 
 body {
@@ -115,7 +321,7 @@ body {
   color: var(--text);
   overflow: hidden;
   user-select: none;
-  /* Crisp anti-aliasing over the glass — without this, light-on-dark text on
+  /* Crisp anti-aliasing over the glass â€” without this, light-on-dark text on
      a translucent surface looks muddy. -webkit-font-smoothing is the only
      knob Chromium honors here. */
   -webkit-font-smoothing: antialiased;
@@ -338,7 +544,7 @@ pre,
 /* Ambient color wash behind the glass. The window blur is uniform; this soft
    radial tint gives the translucent surfaces something to refract so the UI
    reads as "liquid" rather than a flat sheet. Purely decorative, sits under
-   every surface (z-index: 0 on .app, surfaces are ≥1). */
+   every surface (z-index: 0 on .app, surfaces are â‰¥1). */
 .app::before {
   content: "";
   position: absolute;
@@ -371,7 +577,7 @@ pre,
   background: var(--surface-glass);
   backdrop-filter: blur(20px) saturate(140%);
   -webkit-backdrop-filter: blur(20px) saturate(140%);
-  /* Bottom sheen line — a brighter hairline under the toolbar reads as glass
+  /* Bottom sheen line â€” a brighter hairline under the toolbar reads as glass
      catching light along its lower edge. */
   box-shadow: var(--glass-rim), 0 1px 0 0 rgba(255, 255, 255, 0.06) inset;
   position: relative;
@@ -385,6 +591,35 @@ pre,
   flex: 1;
 }
 .toolbar .broadcast-toggle.active {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 92%, #fff 8%), var(--accent));
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  color: #fff;
+  box-shadow: var(--glass-rim), 0 4px 14px -6px var(--accent-glow);
+}
+/* Toolbar icon-only buttons (Browser / Workspaces / Broadcast): no border or
+   background, just a hover wash. Keep the icon as the affordance so the
+   toolbar stays quiet. */
+.toolbar .toolbar-icon-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  padding: 6px;
+  min-width: auto;
+  border-radius: var(--radius-xs);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.toolbar .toolbar-icon-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.toolbar .toolbar-icon-btn.active {
+  color: var(--accent);
+}
+/* When a toolbar-icon-btn also carries .broadcast-toggle.active, it should
+   keep the filled accent look (not the ghost icon-only style). */
+.toolbar .broadcast-toggle.toolbar-icon-btn.active {
   background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 92%, #fff 8%), var(--accent));
   border-color: color-mix(in srgb, var(--accent) 70%, transparent);
   color: #fff;
@@ -522,11 +757,18 @@ pre,
   min-height: 0;
   padding: 12px;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   gap: 10px;
 }
+.grid-wrap > .pane-grid {
+  flex: 1;
+  min-width: 0;
+}
+.grid-wrap > .broadcast-bar {
+  align-self: stretch;
+}
 /* Chat mode: the chat view owns its own background and inner padding, so the
-   wrapper sits flush under the toolbar — no framing band of a different tint. */
+   wrapper sits flush under the toolbar â€” no framing band of a different tint. */
 .chat-grid-wrap {
   padding: 0;
   gap: 0;
@@ -656,7 +898,7 @@ pre,
   flex-shrink: 0;
 }
 /* Header action buttons (peek, minimize, close). They sit right of the flex:1
-   title so they cluster at the right edge regardless of title length — the
+   title so they cluster at the right edge regardless of title length â€” the
    title absorbs width changes, so the close button's x position stays put as
    the session title or other header messages (activity chip, memory chip)
    appear/disappear or grow. flex-shrink:0 keeps the buttons from being
@@ -698,7 +940,7 @@ pre,
   flex: 1;
   min-height: 0;
   position: relative;
-  /* Solid terminal backdrop — the old translucent fill was for the glass blur. */
+  /* Solid terminal backdrop â€” the old translucent fill was for the glass blur. */
   background: var(--surface-solid);
 }
 .pane-body .xterm {
@@ -867,7 +1109,7 @@ pre,
   flex-direction: column;
   gap: 0; /* gap is handled by the splitter overlay */
 }
-/* Individual slot inside the stack — contains all terminals so the hidden/
+/* Individual slot inside the stack â€” contains all terminals so the hidden/
  * visible toggle pattern works identically to the single-terminal layout. */
 .split-slot {
   min-height: 0;
@@ -919,7 +1161,7 @@ pre,
   display: flex;
   align-items: center;
   gap: 4px;
-  flex: 0 0 auto; /* toolbar, not a flex grower — pane-body owns the space */
+  flex: 0 0 auto; /* toolbar, not a flex grower â€” pane-body owns the space */
   min-width: 0;
   padding: 5px 8px;
   background: linear-gradient(180deg, var(--surface-glass-2), var(--surface-2));
@@ -1057,26 +1299,30 @@ pre,
   z-index: 2;
 }
 
-/* ---------- Broadcast bar (§4.5) ---------- */
+/* ---------- Broadcast bar (Â§4.5) ---------- */
 .broadcast-bar {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 9px 12px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding: 12px;
+  width: 220px;
+  flex-shrink: 0;
   background: var(--surface-glass);
   backdrop-filter: blur(20px) saturate(140%);
   -webkit-backdrop-filter: blur(20px) saturate(140%);
   border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
   border-radius: var(--radius);
   box-shadow: var(--glass-rim), 0 0 24px -10px var(--accent-glow);
+  overflow-y: auto;
 }
 .broadcast-bar input.broadcast-input {
-  flex: 1;
   font-family: var(--font-mono);
 }
 .broadcast-bar .pane-checks {
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   font-size: 11px;
   color: var(--text-dim);
 }
@@ -1101,7 +1347,7 @@ pre,
   position: relative;
   z-index: 3;
 }
-/* "Show sidebar" button — rendered inline at the start of the toolbar while
+/* "Show sidebar" button â€” rendered inline at the start of the toolbar while
  * the sidebar is collapsed (App.tsx), so it never overlaps the title. */
 .sidebar-restore {
   flex-shrink: 0;
@@ -1167,18 +1413,18 @@ pre,
 }
 
 /* Artifact library (chat sidebar) */
-/* "Artifacts" entry — as prominent as the "New Chat" button (same full-width
+/* "Artifacts" entry â€” as prominent as the "New Chat" button (same full-width
    rounded button, padding, font size/weight) but in a DIFFERENT accent color
-   (a slate-violet secondary accent) so it reads as a sibling, not a clone. */
+   (a warm desaturated orange-terracotta) so it reads as a sibling, not a clone. */
 :root {
-  --accent-2: #6d6aa8;
-  --accent-2-soft: rgba(109, 106, 168, 0.16);
-  --accent-2-glow: rgba(109, 106, 168, 0.35);
+  --accent-2: #3a3d3e;
+  --accent-2-soft: rgba(58, 61, 62, 0.16);
+  --accent-2-glow: rgba(58, 61, 62, 0.35);
 }
 :root[data-theme="light"] {
-  --accent-2: #5a5790;
-  --accent-2-soft: rgba(90, 87, 144, 0.12);
-  --accent-2-glow: rgba(90, 87, 144, 0.28);
+  --accent-2: #6e706f;
+  --accent-2-soft: rgba(110, 112, 111, 0.12);
+  --accent-2-glow: rgba(110, 112, 111, 0.28);
 }
 .artifact-lib-title {
   display: flex;
@@ -1186,7 +1432,7 @@ pre,
   gap: 8px;
   width: 100%;
   /* Inset comes from the .chat-new-btn-row wrapper (same as the New Chat
-     button), so no horizontal margin here — keeps the width identical. */
+     button), so no horizontal margin here â€” keeps the width identical. */
   margin: 0;
   padding: 6px 12px;
   border: 1px solid color-mix(in srgb, var(--accent-2) 70%, transparent);
@@ -1266,9 +1512,9 @@ pre,
 /* ---------- Document-card grid (folded "dog-eared" page cards) ----------
    Every artifact renders as one uniform document card in a 3-column grid.
    The card has a cut/folded top-right corner (clip-path + a lighter fold
-   triangle), a top thumbnail area (~60% — faint text snippet or outline
+   triangle), a top thumbnail area (~60% â€” faint text snippet or outline
    icon), and a lower body with a bold title, a divider, and a muted
-   "Edited … ago" footer. Theme-aware: surfaces follow the app palette. */
+   "Edited â€¦ ago" footer. Theme-aware: surfaces follow the app palette. */
 .doc-card-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -1310,7 +1556,7 @@ pre,
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
-/* The folded corner — a lighter triangle that reads as the page turned down.
+/* The folded corner â€” a lighter triangle that reads as the page turned down.
    In the dark theme the fold needs enough luminance lift over the card body
    to stay visible (the card surface and surface-glass-2 are otherwise <10%
    apart); in light the natural contrast already reads. The --doc-fold-*
@@ -1325,7 +1571,7 @@ pre,
   background: linear-gradient(225deg, var(--doc-fold-light) 50%, var(--doc-fold-dark) 50%);
   box-shadow: -1px 1px 2px rgba(0, 0, 0, 0.25);
 }
-/* Delete button — top-left, hover-revealed. */
+/* Delete button â€” top-left, hover-revealed. */
 .doc-card-del {
   position: absolute;
   top: 6px;
@@ -1354,7 +1600,7 @@ pre,
   background: var(--danger);
 }
 
-/* Upper thumbnail area — ~60% of the card, dark gray backdrop. */
+/* Upper thumbnail area â€” ~60% of the card, dark gray backdrop. */
 .doc-card-thumb {
   position: relative;
   flex: 0 0 60%;
@@ -1397,7 +1643,7 @@ pre,
   height: 30px;
 }
 
-/* Lower body — title + divider + muted footer. */
+/* Lower body â€” title + divider + muted footer. */
 .doc-card-body {
   flex: 1;
   display: flex;
@@ -1690,7 +1936,7 @@ pre,
   margin: 4px 0;
 }
 
-/* ---------- Command palette (§12.3) ---------- */
+/* ---------- Command palette (Â§12.3) ---------- */
 .palette-overlay,
 .modal-overlay,
 .view-overlay {
@@ -1805,7 +2051,7 @@ pre,
   box-shadow: var(--glass-rim), var(--glass-shadow-lg);
 }
 /* Centered modals (settings, skills library, cost dashboard) need full
-   border-radius — the side-panel border-left would create a sharp edge on
+   border-radius â€” the side-panel border-left would create a sharp edge on
    the left while the right rounds. Override to a uniform border. */
 .view-overlay.modal-centered .view-panel {
   border: 1px solid var(--border-strong);
@@ -1890,8 +2136,8 @@ table.kv th {
 /* ---------- Settings: sectioned nav + fixed-height panels ----------
    The settings split has a fixed pixel height based on the tallest tab
    (Shortcuts: 15 keybinding rows + header + note + defaults line ~500px).
-   Every tab — Appearance (2 rows), Pricing (12-card grid), Harnesses,
-   Shortcuts — renders into this identical, locked box. The .settings-panel
+   Every tab â€” Appearance (2 rows), Pricing (12-card grid), Harnesses,
+   Shortcuts â€” renders into this identical, locked box. The .settings-panel
    scrolls internally when its content overflows (e.g. Pricing grid) so the
    modal never reflows on tab switch. */
 .settings-split {
@@ -1975,7 +2221,7 @@ table.kv th {
   color: var(--text-dim);
 }
 
-/* Settings form — clean two-column layout for Appearance and similar panels */
+/* Settings form â€” clean two-column layout for Appearance and similar panels */
 .settings-form {
   display: flex;
   flex-direction: column;
@@ -2015,7 +2261,7 @@ table.kv th {
   flex: 1;
 }
 
-/* ── Local Models panel ───────────────────────────────────────────────
+/* â”€â”€ Local Models panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
    Clean card-based list with status indicators, folder chips, and an
    active-server banner. Uses the app's theme variables throughout. */
 .local-models-banner {
@@ -2070,18 +2316,118 @@ table.kv th {
   color: var(--text);
 }
 
-/* Model card inside the local-models list */
-.local-model-card {
-  padding: 10px 12px;
-  background: var(--surface-glass);
+/* Model card inside the local-models list â€” reuses .model-card from ModelMarket */
+.model-card {
+  position: relative;
+}
+
+.model-card-delete {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  margin-bottom: 8px;
+  background: var(--surface-glass);
+  color: var(--text-dim);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+  z-index: 2;
+}
+
+.model-card-delete:hover {
+  color: var(--state-error);
+  background: var(--state-error-10);
+  border-color: var(--state-error);
+}
+
+.model-card-delete svg {
+  display: block;
+}
+
+.model-card.running {
+  border-left: 3px solid var(--state-working);
+}
+
+.model-card.running .model-card-status.done {
+  background: var(--state-working-10);
+  color: var(--state-working);
+}
+
+.model-card.running .model-card-title::before {
+  content: "â—";
+  margin-right: 6px;
+  color: var(--state-working);
+  font-size: 10px;
 }
 .local-model-card .model-card-head {
   display: flex;
   align-items: flex-start;
   gap: 8px;
+}
+.local-model-card .model-card-head .model-info {
+  flex: 1;
+  min-width: 0;
+}
+.local-model-card .model-card-head .model-card-actions {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 120px;
+}
+.local-model-card .model-card-head .model-card-actions .primary-action {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+  text-align: center;
+}
+.local-model-card .model-card-head .model-card-actions .primary-action:hover {
+  background: var(--accent);
+  color: var(--surface-solid);
+}
+.local-model-card .model-card-head .model-card-actions .primary-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.local-model-card .model-card-head .model-card-actions .model-card-actions-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.local-model-card .model-card-head .model-card-actions .model-card-actions-row .danger {
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.local-model-card .model-card-head .model-card-actions .model-card-actions-row .danger:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.local-model-card .model-card-head .model-card-actions .model-card-actions-row .model-memory-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 2px var(--surface-glass), 0 0 0 3px var(--border);
 }
 .local-model-card .model-status-dot {
   width: 8px;
@@ -2114,8 +2460,17 @@ table.kv th {
   margin-top: 0;
   opacity: 0.85;
 }
-/* Memory-class indicator dot shown under the "Use this model" button.
-   Green = fits, yellow = tight, red = too large. */
+.model-card-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.model-card-actions .model-card-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .model-memory-indicator {
   display: inline-block;
   width: 6px;
@@ -2169,7 +2524,7 @@ table.kv th {
   width: 60px;
   padding: 2px 4px;
 }
-/* Hide number input spinners (up/down arrows) — they clutter the compact
+/* Hide number input spinners (up/down arrows) â€” they clutter the compact
    advanced fields and the user can type values directly. */
 .local-model-card .model-advanced-fields input::-webkit-outer-spin-button,
 .local-model-card .model-advanced-fields input::-webkit-inner-spin-button {
@@ -2208,7 +2563,7 @@ table.kv th {
   min-height: 120px;
 }
 
-/* Two-column rate grid for the pricing panel — denser than form-rows so 12
+/* Two-column rate grid for the pricing panel â€” denser than form-rows so 12
    models fit without scrolling, with input/output grouped per model. */
 .rate-grid {
   display: grid;
@@ -2305,7 +2660,66 @@ table.kv th {
   -webkit-backdrop-filter: none;
 }
 
-/* ---------- Peek panel (§7.9) ---------- */
+/* ---------- Per-pane inline diff overlay ---------- */
+/* Scrim that covers the FOCUSED pane (not the whole window) and dims the
+   underlying terminal without hiding it. The pane's grid frame is the
+   containing block (position:relative via `.pane`), so `position:absolute;
+   inset:0` matches the pane's body, not the whole window. */
+.pane-diff-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  z-index: 10;
+  animation: overlay-in 0.16s var(--ease);
+}
+.pane-diff-panel {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-glass);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+  margin: 8px;
+  min-height: 0;
+  overflow: hidden;
+}
+.pane-diff-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.pane-diff-title {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.pane-diff-close {
+  flex: 0 0 auto;
+}
+.pane-diff-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 8px 12px;
+  user-select: text;
+}
+
+/* ---------- Peek panel (Â§7.9) ---------- */
 .peek-panel {
   width: min(560px, 90vw);
   background: var(--surface-glass);
@@ -2350,16 +2764,44 @@ table.kv th {
   white-space: pre-wrap;
   word-break: break-word;
   user-select: text;
+  display: flex;
+  align-items: flex-start;
 }
+/* Two-column gutter: old/new line numbers, then content. The gutter is
+   right-aligned monospace so digits line up; empty slots (added lines have
+   no old number, deleted have no new) collapse to blank so the +/- sign and
+   text still align with the context lines around them. */
+.diff-line-gutter {
+  flex: 0 0 auto;
+  min-width: 7ch;
+  margin-right: 10px;
+  text-align: right;
+  color: var(--text-dim);
+  opacity: 0.7;
+  user-select: none;
+  white-space: pre;
+}
+.diff-line-content { flex: 1 1 auto; min-width: 0; }
 .diff-line.add { background: var(--diff-add-bg); }
-.diff-line.del { background: var(--diff-del-bg); }
+.diff-line.add {
+  background: var(--diff-add-bg);
+  border-left: 3px solid #4ec98a;
+  padding-left: 7px;
+  margin-left: -10px;
+}
+.diff-line.del {
+  background: var(--diff-del-bg);
+  border-left: 3px solid #ff7b72;
+  padding-left: 7px;
+  margin-left: -10px;
+}
 .diff-line.hunk { background: var(--diff-hunk-bg); color: var(--accent); }
 .diff-line.meta { color: var(--text-dim); }
 
-/* ── Inline diff inside chat messages (Codex-style) ─────────────────
+/* â”€â”€ Inline diff inside chat messages (Codex-style) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
    Unified diff rendered directly in the message stream. File path as a
    small monospace header, then red/green +/- lines. Compact, no border
-   card — just the raw diff with color-coded backgrounds. */
+   card â€” just the raw diff with color-coded backgrounds. */
 .chat-diff-inline {
   margin: 4px 0 8px;
   font-family: var(--font-mono);
@@ -2422,7 +2864,7 @@ table.kv th {
   font-style: italic;
 }
 /* Cost dashboard: each section reserves a fixed height so the chart and table
-   areas stay stable when empty (no data yet) or while loading — switching
+   areas stay stable when empty (no data yet) or while loading â€” switching
    between populated and unpopulated states does not reflow the modal. */
 .cost-section {
   min-height: 220px;
@@ -2441,7 +2883,7 @@ table.kv th {
 .cost-chart-frame .chart {
   min-width: 100%;
 }
-/* Model chart — shorter frame since no labels under bars */
+/* Model chart â€” shorter frame since no labels under bars */
 .cost-chart-frame:has(.model-chart) {
   min-height: 140px;
   display: flex;
@@ -2479,7 +2921,7 @@ table.kv th {
   max-width: 180px;
 }
 
-/* ---------- Onboarding banner (§9) ---------- */
+/* ---------- Onboarding banner (Â§9) ---------- */
 .onboarding-banner {
   margin: 10px 12px 0;
   padding: 13px 15px;
@@ -2526,121 +2968,247 @@ table.kv th {
   box-shadow: var(--glass-rim-soft);
 }
 
-/* Update banner — mirrors the onboarding banner's glass look, accent-tinted. */
-.update-banner {
-  margin: 10px 12px 0;
-  padding: 13px 15px;
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
-  border-radius: var(--radius);
+/* Update banner â€” mirrors the onboarding banner's glass look, accent-tinted. */
+/* ---------- Update modal (centered overlay) ---------- */
+.update-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 70;
+  animation: overlay-in 0.2s var(--ease);
+}
+@keyframes overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.update-modal {
+  width: min(520px, 92vw);
+  max-height: 88vh;
   background: var(--surface-glass);
-  backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
-  box-shadow: var(--glass-rim), 0 0 24px -12px color-mix(in srgb, var(--accent) 45%, transparent);
+  backdrop-filter: blur(32px) saturate(150%);
+  -webkit-backdrop-filter: blur(32px) saturate(150%);
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  animation: modal-in 0.28s var(--ease);
+  overflow: hidden;
+}
+@keyframes modal-in {
+  from { opacity: 0; transform: scale(0.96) translateY(8px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+.update-modal.installed {
+  align-items: center;
+  text-align: center;
+  padding: 40px 32px;
+  gap: 12px;
+}
+.update-modal-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 32px 28px 20px;
+  text-align: center;
+}
+.update-modal-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--accent-soft, var(--surface-2));
+  color: var(--accent, var(--text));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.update-modal-icon.installed {
+  background: rgba(78, 201, 176, 0.12);
+  color: var(--state-working);
+}
+.update-modal-icon svg {
+  flex-shrink: 0;
+}
+.update-modal-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.3;
+}
+.update-modal-subtitle {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+.update-modal-version {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--accent-soft, var(--surface-2));
+  color: var(--accent, var(--text));
+  letter-spacing: 0.02em;
+}
+.update-modal-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.update-modal-notes-header {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  padding: 14px 28px 6px;
+}
+.update-modal-notes-body {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  padding: 0 28px 18px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.update-modal-notes-body h1,
+.update-modal-notes-body h2,
+.update-modal-notes-body h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 12px 0 6px;
+}
+.update-modal-notes-body ul,
+.update-modal-notes-body ol {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+.update-modal-notes-body li {
+  margin: 4px 0;
+}
+.update-modal-notes-body code {
+  background: var(--surface-2);
+  padding: 2px 7px;
+  border-radius: var(--radius-xs);
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+.update-modal-notes-body pre {
+  background: var(--surface-2);
+  padding: 10px 14px;
+  border-radius: var(--radius-xs);
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.update-modal-notes-body pre code {
+  background: transparent;
+  padding: 0;
+}
+.update-modal-progress {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  position: relative;
+  padding: 20px 28px;
 }
-.update-banner.installed {
-  border-color: color-mix(in srgb, var(--state-working) 45%, var(--border));
-  box-shadow: var(--glass-rim), 0 0 24px -12px color-mix(in srgb, var(--state-working) 45%, transparent);
-}
-.update-banner-close {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  padding: 0 6px;
-  background: transparent;
-  border: none;
-  color: var(--text-dim);
-  font-size: 16px;
-  line-height: 1;
-  cursor: pointer;
-}
-.update-banner-close:hover {
-  color: var(--text);
-}
-.update-banner-head {
+.update-modal-progress-top {
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: space-between;
+  gap: 12px;
 }
-.update-banner-title {
+.update-modal-progress-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+.update-modal-progress-value {
   font-size: 13px;
   font-weight: 600;
-}
-.update-banner-version {
-  font-size: 11px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: var(--radius-xs);
-  background: var(--accent-soft, var(--surface-2));
   color: var(--accent, var(--text));
+  font-variant-numeric: tabular-nums;
 }
-.update-banner-notes {
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--text-dim);
-  max-height: 180px;
-  overflow-y: auto;
-  padding-right: 4px;
-}
-.update-banner-notes h1,
-.update-banner-notes h2,
-.update-banner-notes h3 {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text);
-  margin: 8px 0 4px;
-}
-.update-banner-notes ul,
-.update-banner-notes ol {
-  margin: 4px 0;
-  padding-left: 18px;
-}
-.update-banner-notes li {
-  margin: 2px 0;
-}
-.update-banner-notes code {
-  background: var(--surface-2);
-  padding: 1px 6px;
-  border-radius: var(--radius-xs);
+.update-modal-progress-meta {
   font-size: 11px;
+  color: var(--text-dim);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
-.update-banner-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-.update-banner-progress {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.update-bar {
-  flex: 1;
-  height: 8px;
-  border-radius: var(--radius-xs);
+.update-modal-bar {
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
   background: var(--surface-2);
   overflow: hidden;
   box-shadow: var(--glass-rim-soft);
 }
-.update-bar-fill {
+.update-modal-bar-fill {
   height: 100%;
-  background: var(--accent, var(--state-working));
-  border-radius: var(--radius-xs);
-  transition: width 0.15s ease;
+  background: linear-gradient(90deg, var(--accent, var(--state-working)), color-mix(in srgb, var(--accent, var(--state-working)) 70%, var(--state-working)));
+  border-radius: 999px;
+  transition: width 0.3s var(--ease);
   min-width: 2px;
 }
-.update-bar-label {
-  font-size: 11px;
-  color: var(--text-dim);
-  min-width: 42px;
-  text-align: right;
+.update-modal-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 18px 28px 28px;
 }
-.update-banner-error {
-  font-size: 12px;
-  color: var(--state-waiting, var(--text-dim));
+.update-modal-actions button {
+  padding: 10px 20px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.update-modal-actions button:active {
+  transform: scale(0.98);
+}
+.update-modal-actions button.primary {
+  background: var(--button-primary-bg);
+  color: var(--button-primary-fg);
+  border: none;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+}
+.update-modal-actions button.primary:hover {
+  filter: brightness(1.08);
+}
+.update-modal-actions button.ghost {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+}
+.update-modal-actions button.ghost:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.update-modal-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 0 28px 24px;
+  font-size: 13px;
+  color: var(--danger, var(--state-waiting));
+  line-height: 1.5;
+}
+.update-modal-error svg {
+  flex-shrink: 0;
+  margin-top: 2px;
 }
 
 /* Model + effort selector (chat composer) */
@@ -2778,7 +3346,7 @@ table.kv th {
   accent-color: var(--accent);
   height: 4px;
 }
-/* Manual context-size entry — sits below the slider, full width, no spinner. */
+/* Manual context-size entry â€” sits below the slider, full width, no spinner. */
 .model-effort-ctx input[type="number"].model-effort-ctx-number {
   width: 100%;
   margin-top: 6px;
@@ -2917,19 +3485,21 @@ table.kv th {
   font-size: 12px;
 }
 
-/* Scrollbars */
+/* Scrollbars â€” use the dedicated --scrollbar-* tokens so the thumb can be
+   tuned per-theme (darker in light, lighter in dark) without affecting
+   other surfaces that share --border-strong. */
 ::-webkit-scrollbar {
   width: 9px;
   height: 9px;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
+  background: var(--scrollbar-thumb);
   border-radius: 99px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--border-strong) 80%, var(--text-dim));
+  background: var(--scrollbar-thumb-hover);
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-track {
@@ -2971,12 +3541,12 @@ table.kv th {
   min-height: 0;
   flex: 1;
   /* Fills the shared .library-panel container (fixed height, below) so every
-     tab — Skills, Loops, Prompt templates — occupies identical space and
+     tab â€” Skills, Loops, Prompt templates â€” occupies identical space and
      switching tabs never resizes the modal. */
   height: 100%;
 }
-/* The single fixed-height box that every library tab renders into. This — not
-   the per-tab panels — is what keeps the modal a constant size across tabs;
+/* The single fixed-height box that every library tab renders into. This â€” not
+   the per-tab panels â€” is what keeps the modal a constant size across tabs;
    each tab fills it and scrolls internally if its content overflows. */
 .library-panel {
   height: 500px;
@@ -3398,7 +3968,7 @@ table.kv th {
   line-height: 1.4;
 }
 
-/* Message bubbles — Claude style: user gets a compact rounded card on the
+/* Message bubbles â€” Claude style: user gets a compact rounded card on the
    right; assistant replies render as plain full-width text. */
 .chat-bubble {
   display: flex;
@@ -3420,7 +3990,7 @@ table.kv th {
   max-width: 100%;
 }
 
-/* Per-message action bar (copy / edit) — revealed on hover, Claude-style. */
+/* Per-message action bar (copy / edit) â€” revealed on hover, Claude-style. */
 .chat-msg-actions {
   display: flex;
   gap: 2px;
@@ -3446,7 +4016,7 @@ table.kv th {
   color: var(--text);
   background: var(--surface-2);
 }
-/* Destructive action (delete) — turns red on hover so it reads as a
+/* Destructive action (delete) â€” turns red on hover so it reads as a
  * "this removes content" gesture rather than a neutral toggle. */
 .chat-msg-action-danger:hover {
   color: #d44;
@@ -3492,7 +4062,7 @@ table.kv th {
   user-select: none;
   -webkit-user-select: none;
 }
-/* Code block contents are the one exception inside that set — let users
+/* Code block contents are the one exception inside that set â€” let users
    highlight code even though the header/copy button above isn't selectable. */
 .chat-bubble-inner .chat-code-block {
   user-select: text;
@@ -3597,10 +4167,10 @@ table.kv th {
   -webkit-box-orient: vertical;
 }
 
-/* ── Codex-style thinking / reasoning ───────────────────────────────
+/* â”€â”€ Codex-style thinking / reasoning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
    Quiet, secondary text that visually recedes behind the actual response.
    Collapsed by default; a small "Thinking" label toggles it. No colorful
-   card — just muted gray italic text with a subtle left border. */
+   card â€” just muted gray italic text with a subtle left border. */
 .chat-thinking {
   margin: 4px 0 8px;
 }
@@ -3654,7 +4224,7 @@ table.kv th {
   opacity: 0.75;
 }
 
-/* ── Codex-style activity / tool-call grouping ──────────────────────
+/* â”€â”€ Codex-style activity / tool-call grouping â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
    Compact, monochrome, terminal-native. A single synthesized summary line
    (minimal padding, no full border) expands into a stepped list where each
    step is a single monospace row with a subtle left-rail accent. Color is
@@ -3840,7 +4410,7 @@ table.kv th {
   height: 11px;
 }
 
-/* Compaction marker — a low-weight, tappable line in the timeline shown where
+/* Compaction marker â€” a low-weight, tappable line in the timeline shown where
    older context was summarized by the local-model compaction framework. Reuses
    the muted tokens of .chat-activity-done so it reads as ambient meta-info. */
 .chat-compacted-marker {
@@ -4166,9 +4736,9 @@ table.kv th {
 }
 
 /* Mermaid diagram block (rendered inline from a ```mermaid fence). No header
-   bar — the diagram renders full-bleed on a transparent canvas so it floats
+   bar â€” the diagram renders full-bleed on a transparent canvas so it floats
    on the message's glass surface. The SVG keeps its natural size (Mermaid
-   auto-sizes node boxes to fit their text), so node text is never clipped —
+   auto-sizes node boxes to fit their text), so node text is never clipped â€”
    wide diagrams scroll horizontally rather than shrinking. */
 .chat-mermaid-block {
   margin: 12px 0;
@@ -4234,7 +4804,7 @@ table.kv th {
   color: var(--text-dim);
 }
 
-/* Composer (bottom bar) — Claude-style rounded card */
+/* Composer (bottom bar) â€” Claude-style rounded card */
 .chat-composer {
   position: relative;
   flex-shrink: 0;
@@ -4288,6 +4858,12 @@ table.kv th {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.composer-slash-empty {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-style: italic;
+}
 .chat-composer-card {
   display: flex;
   flex-direction: column;
@@ -4313,6 +4889,8 @@ table.kv th {
   outline: none;
 }
 .chat-composer-textarea {
+  flex: 1;
+  min-width: 0;
   width: 100%;
   box-sizing: border-box;
   min-height: 24px;
@@ -4327,6 +4905,34 @@ table.kv th {
   color: var(--text);
   outline: none;
   overflow-y: auto;
+}
+/* Draft mention chips: the "@<id>" text the user picked from the "@" popup
+   renders as an italic pill followed by a single space (the row gap), e.g.
+   "@notion  <typed text>". Chips are composer-only — click to remove. */
+.composer-mention-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.composer-mention {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.5;
+  font-style: italic;
+  color: var(--accent);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 9px;
+  cursor: pointer;
+}
+.composer-mention:hover {
+  background: var(--surface);
+  border-color: var(--accent);
+}
+.composer-mention em {
+  font-style: italic;
 }
 .chat-composer-textarea::placeholder {
   color: var(--text-dim);
@@ -4356,7 +4962,7 @@ table.kv th {
 /* Context-window meter: a small circular ring positioned below the send
    button (right-aligned under it). An SVG ring fills clockwise; the fill
    percentage shows in the center, and the full "used / max" appears on hover
-   (title). Always rendered — 0% until the first turn's input_tokens are known.
+   (title). Always rendered â€” 0% until the first turn's input_tokens are known.
    Green normally, amber past 70%, red past 90% so the user sees when they're
    about to overflow the context window. */
 .context-meter-circle {
@@ -4510,7 +5116,12 @@ table.kv th {
   font-weight: 600;
 }
 .composer-attach-menu-item .connector-toggle:not(.on) {
-  visibility: hidden;
+  display: none;
+}
+.composer-context-meter-wrap {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 8px 0;
 }
 .composer-research-chip {
   display: flex;
@@ -4715,8 +5326,8 @@ table.kv th {
   display: block;
 }
 
-/* ── Codex-style pre-token typing indicator ───────────────────────────
-   A single quiet monospace line with a blinking cursor — no bouncing dots.
+/* â”€â”€ Codex-style pre-token typing indicator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+   A single quiet monospace line with a blinking cursor â€” no bouncing dots.
    Looks like a terminal prompt waiting for output. */
 .chat-typing {
   display: inline-flex;
@@ -4837,7 +5448,7 @@ table.kv th {
 /* CSS zoom: the inner wrapper is zoomed, which reflows the document so the
    scroll area grows and shrinks naturally. The header/toolbar are a SIBLING of
    .artifact-preview-content, never inside this subtree, so zoom touches only
-   the document body — like a PDF viewer. */
+   the document body â€” like a PDF viewer. */
 .artifact-preview-zoom {
   width: 100%;
   flex: 1;
@@ -5009,7 +5620,7 @@ table.kv th {
   width: 100%;
   /* Fill the unscaled zoom box so the scaler measures a stable box. The zoom
      wrapper clips with overflow:hidden, so the scaled visual is contained
-     inside the viewport — like a PDF viewer. */
+     inside the viewport â€” like a PDF viewer. */
   height: 100%;
   min-height: 480px;
   border: none;
@@ -5573,11 +6184,153 @@ table.kv th {
   font-size: 11px;
 }
 
-/* ---- Connectors (Settings → Connectors) ---- */
+/* ---- Connectors (Settings â†’ Connectors) ---- */
 .skill-list {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+.connector-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-glass);
+  box-shadow: var(--glass-rim-soft);
+}
+.connector-card-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.connector-card-icon {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+}
+.connector-card-icon svg {
+  display: block;
+}
+.connector-fallback-icon {
+  font-size: 20px;
+  line-height: 1;
+}
+.connector-card-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.connector-card-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.connector-card-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+.connector-card-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.connector-family-card .connector-family-head {
+  align-items: center;
+  cursor: pointer;
+}
+.connector-family-card .connector-family-head:focus-visible {
+  outline: 1px solid var(--accent, #C15F3C);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+.connector-family-count {
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.connector-family-side {
+  flex-shrink: 0;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.connector-family-side .primary {
+  white-space: nowrap;
+}
+.connector-member-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+.connector-member-chip {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.connector-member-chip.off {
+  opacity: 0.35;
+}
+.connector-member-chip .connector-fallback-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+.connector-more {
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.connector-family-note {
+  margin-top: 0;
+}
+.connector-modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.connector-sub-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-xs);
+}
+.connector-sub-row:hover {
+  background: var(--surface-2);
+}
+.connector-sub-icon {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+}
+.connector-sub-icon .connector-fallback-icon {
+  font-size: 16px;
+  line-height: 1;
+}
+.connector-sub-action {
+  flex-shrink: 0;
+  margin-left: auto;
 }
 .connector-icon {
   font-size: 16px;
@@ -5668,7 +6421,7 @@ table.kv th {
   background: var(--surface);
 }
 /* Inline variant: borderless, blends into the composer footer next to the `+`
-   attach button — no pill border, transparent background, subtle hover only.
+   attach button â€” no pill border, transparent background, subtle hover only.
    The colored mode dot still marks the active posture. */
 .permission-mode-trigger.inline {
   border: none;
@@ -5703,6 +6456,7 @@ table.kv th {
   bottom: calc(100% + 6px);
   right: 0;
   min-width: 280px;
+  max-width: calc(100vw - 16px);
   padding: 5px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -5788,7 +6542,9 @@ table.kv th {
   box-shadow: var(--glass-rim), 0 0 0 3px rgba(214, 69, 69, 0.22);
 }
 
-/* --- Per-action filesystem-tool approval card --- */
+/* --- Per-action approval card (filesystem + connected-account tools) ---
+   Codex-style: one compact row (badge + tool + target + Deny/Allow), no
+   side ribbon, no payload dump. */
 .composer-approval-wrap {
   flex-shrink: 0;
   padding: 0 max(14px, calc((100% - 780px) / 2)) 6px;
@@ -5796,60 +6552,140 @@ table.kv th {
 .approval-card {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 12px;
-  border: 1px solid var(--danger);
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface-glass);
-  box-shadow: var(--glass-rim), 0 6px 20px -12px rgba(214, 69, 69, 0.4);
+  box-shadow: var(--glass-rim), 0 8px 24px -14px rgba(0, 0, 0, 0.5);
+  outline: none;
 }
-.approval-card-icon {
-  color: var(--danger);
-  font-size: 16px;
+.approval-card:focus-visible {
+  box-shadow: var(--glass-rim), 0 0 0 2px color-mix(in srgb, var(--approval-accent, var(--accent)) 45%, transparent);
+}
+.approval-badge {
   flex-shrink: 0;
-}
-.approval-card-body {
-  flex: 1;
-  min-width: 0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--approval-accent, var(--text));
+  background: color-mix(in srgb, var(--approval-accent, var(--accent)) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--approval-accent, var(--accent)) 35%, transparent);
 }
 .approval-card-title {
-  font-size: 12.5px;
-  color: var(--text);
-}
-.approval-card-title code {
-  font-family: var(--font-mono, monospace);
-  font-size: 11.5px;
-  color: var(--text);
-  word-break: break-all;
-}
-.approval-card-hint {
-  font-size: 11px;
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
   color: var(--text-dim);
-  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .approval-card-actions {
   display: flex;
-  gap: 6px;
+  align-items: center;
+  gap: 8px;
   flex-shrink: 0;
 }
 .approval-btn {
-  padding: 5px 12px;
+  padding: 4px 12px;
   font-size: 12px;
+  font-weight: 600;
   border-radius: var(--radius-xs);
   border: 1px solid var(--border);
   cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, filter 120ms ease;
 }
 .approval-btn.deny {
   background: var(--surface-2);
   color: var(--text);
 }
-.approval-btn.approve {
-  background: var(--accent);
-  color: #fff;
-  border-color: var(--accent);
+.approval-btn.deny:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+  filter: none;
 }
-.approval-btn:hover {
-  filter: brightness(1.08);
+.approval-btn.approve {
+  background: var(--approval-accent, var(--accent));
+  color: var(--approval-accent-contrast, #fff);
+  border-color: var(--approval-accent, var(--accent));
+}
+.approval-btn.approve:hover {
+  filter: brightness(1.1);
+}
+/* Badge accent per action class (default falls back to the card accent). */
+.approval-card-delete { --approval-accent: var(--danger); --approval-accent-contrast: #fff; }
+.approval-card-send   { --approval-accent: #8b7cf6; --approval-accent-contrast: #fff; }
+.approval-card-write  { --approval-accent: #e3b341; --approval-accent-contrast: #1b1b1f; }
+.approval-card-edit   { --approval-accent: #5aa7f0; --approval-accent-contrast: #fff; }
+
+/* --- Background task progress cards (download_file / run_shell) ---
+   Same visual language as the approval card: one compact row with a kind
+   badge + a progress bar for downloads / status line for terminals. */
+.chat-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px max(14px, calc((100% - 780px) / 2)) 8px;
+}
+.task-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  box-shadow: var(--glass-rim), 0 8px 24px -14px rgba(0, 0, 0, 0.5);
+}
+.task-card-download { --task-accent: #5aa7f0; }
+.task-card-shell    { --task-accent: #e3b341; }
+.task-card-badge {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--task-accent, var(--text));
+  background: color-mix(in srgb, var(--task-accent, var(--accent)) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--task-accent, var(--accent)) 35%, transparent);
+}
+.task-card-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.task-card-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-card-bar {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.task-card-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--task-accent, var(--accent));
+  transition: width 200ms ease;
+}
+.task-card-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* --- Full-auto confirmation modal notes --- */
@@ -5900,6 +6736,57 @@ table.kv th {
   color: var(--text);
   padding: 4px 8px;
   font-size: 12px;
+  /* Force the dropdown options to use the app's dark palette so text is
+     readable on both dark and light themes.  The OS default often renders
+     light-grey text on a light-grey background in dark-mode Windows. */
+  color-scheme: dark;
+}
+:root[data-theme="light"] .model-market-sort select {
+  color-scheme: light;
+}
+/* Extra specificity for the <option> elements inside the select â€” some
+   browsers (Electron on Windows) need this to pick up the scheme. */
+.model-market-sort select option {
+  background: var(--surface);
+  color: var(--text);
+}
+/* Custom-styled dropdown that replaces the native <select> appearance.
+   The native <select> on Windows/Electron ignores most styling for its
+   open list, so we wrap it in a styled container and enlarge the touch
+   target. */
+.model-market-sort {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.model-market-sort select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 6px 28px 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  min-width: 140px;
+  /* Force the dropdown options to use the app's dark palette so text is
+     readable on both dark and light themes.  The OS default often renders
+     light-grey text on a light-grey background in dark-mode Windows. */
+  color-scheme: dark;
+}
+.model-market-sort::after {
+  content: "â–¼";
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 8px;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+:root[data-theme="light"] .model-market-sort select {
+  color-scheme: light;
 }
 .model-market-settings {
   display: flex;
@@ -6081,5 +6968,382 @@ table.kv th {
 .model-card-actions {
   display: flex;
   gap: 6px;
-  margin-top: 4px;
+  margin-top: auto;
+  justify-content: flex-end;
+  padding-top: 8px;
 }
+
+/* ---------- Dev-tab per-pane diff side panel (§7.10/§7.11) ----------
+   Right-edge slide-over bound to the focused terminal pane. It is a sibling
+   of .pane-grid inside .grid-wrap; grid-wrap becomes a row so the panel
+   takes a fixed width on the right and the pane grid fills the rest. The
+   panel hides itself (returns null) when no terminal is focused, at which
+   point grid-wrap collapses back to its normal single-column layout. */
+.dev-diff-panel {
+  width: 280px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface-glass);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--glass-rim-soft);
+  position: relative;
+}
+/* Resize handle on the left edge: drag to widen/narrow the panel. Same UX as
+   the browser pane's splitter — a thin 6px grab zone with a visible 2px line
+   on hover. */
+.dev-diff-panel-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 6px;
+  cursor: ew-resize;
+  z-index: 2;
+}
+.dev-diff-panel-resize::before {
+  content: "";
+  position: absolute;
+  top: 25%;
+  bottom: 25%;
+  left: 2px;
+  width: 2px;
+  background: transparent;
+  border-radius: 1px;
+  transition: background 120ms ease;
+}
+.dev-diff-panel-resize:hover::before,
+.dev-diff-panel-resize.dragging::before {
+  background: var(--accent);
+}
+/* Collapsed strip — mirrors the browser pane's minimize UX: a thin
+   vertical tab on the right edge that restores the full panel on click.
+   Keeps the same surface treatment so it reads as the same component. */
+.dev-diff-panel-collapsed {
+  width: 30px;
+  align-items: stretch;
+  justify-content: flex-start;
+}
+.dev-diff-panel-restore {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex: 1;
+  padding: 10px 0;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-family: var(--font-ui);
+}
+.dev-diff-panel-restore:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.dev-diff-panel-restore-glyph {
+  font-size: 14px;
+  line-height: 1;
+}
+.dev-diff-panel-restore-label {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.dev-diff-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.dev-diff-panel-title {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.dev-diff-panel-cwd {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Total added/deleted counter across all changed files, in the panel header. */
+.dev-diff-panel-total {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  white-space: nowrap;
+}
+.dev-diff-send-pr {
+  font-size: 11.5px;
+  padding: 4px 9px;
+  border-radius: var(--radius-xs);
+  white-space: nowrap;
+}
+.dev-diff-send-pr:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.dev-diff-panel-collapse {
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+  color: var(--text-dim);
+}
+.dev-diff-panel-collapse:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.dev-diff-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 0;
+}
+.dev-diff-empty {
+  padding: 16px 12px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.dev-diff-file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.dev-diff-file {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+}
+.dev-diff-file:hover {
+  background: var(--surface-2);
+}
+.dev-diff-file-icon {
+  width: 14px;
+  text-align: center;
+  font-family: var(--font-mono);
+  flex-shrink: 0;
+}
+.dev-diff-file-path {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: text;
+}
+.dev-diff-file-status {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+/* Per-file added/deleted counter, right-aligned on the file row. */
+.dev-diff-file-counter {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+/* Per-kind accent on the icon + left border, following git-status convention. */
+.dev-diff-kind-M { color: var(--state-waiting); }
+.dev-diff-kind-M .dev-diff-file-icon,
+.dev-diff-kind-M.dev-diff-file { border-left-color: var(--state-waiting); }
+.dev-diff-kind-A { color: var(--state-working); }
+.dev-diff-kind-A .dev-diff-file-icon,
+.dev-diff-kind-A.dev-diff-file { border-left-color: var(--state-working); }
+.dev-diff-kind-D { color: #f07178; }
+.dev-diff-kind-D .dev-diff-file-icon,
+.dev-diff-kind-D.dev-diff-file { border-left-color: #f07178; }
+.dev-diff-kind-U { color: var(--state-diff); }
+.dev-diff-kind-U .dev-diff-file-icon,
+.dev-diff-kind-U.dev-diff-file { border-left-color: var(--state-diff); }
+.dev-diff-kind-R,
+.dev-diff-kind-C { color: var(--accent, var(--state-working)); }
+.dev-diff-kind-R .dev-diff-file-icon,
+.dev-diff-kind-C .dev-diff-file-icon,
+.dev-diff-kind-R.dev-diff-file,
+.dev-diff-kind-C.dev-diff-file { border-left-color: var(--accent, var(--state-working)); }
+
+/* Inline diff detail view: replaces the file list when a row is clicked.
+   Compact because the side panel is narrow (~280px) — small font, tight
+   padding, two separate gutters (old/new) so each line number is colored
+   to match its side (red for old/deleted, green for new/added). */
+.dev-diff-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+/* Diff stat counter: +added (green) / −deleted (red) line counts,
+   right-aligned on the filename row in the side-panel diff view. */
+.dev-diff-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+.dev-diff-stat-add {
+  color: #4ec98a;
+}
+.dev-diff-stat-del {
+  color: #ff7b72;
+}
+.dev-diff-back {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.dev-diff-back:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.dev-diff-detail-path {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 0 4px;
+  flex: 0 0 auto;
+}
+.dev-diff-detail-path-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.dev-diff-detail .diff-file {
+  margin-bottom: 0;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  overflow: visible;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.dev-diff-detail .diff-line {
+  font-size: 11px;
+  padding: 0 6px;
+  gap: 4px;
+  line-height: 1.4;
+}
+/* Override the side-panel add/del styles: the shared --diff-add-bg and
+   --diff-del-bg are now very low alpha (5–6%) so the background is barely
+   visible. The colored left border is what makes the row type readable.
+   Deleted lines get a red border; added lines get a green border.
+   Text color inherits the theme default so it's white on dark theme and
+   dark on light theme — no explicit tint that would clash with the theme. */
+.dev-diff-detail .diff-line.add {
+  background: var(--diff-add-bg);
+  border-left: 3px solid #4ec98a;
+  padding-left: 3px;
+  margin-left: 0;
+}
+.dev-diff-detail .diff-line.del {
+  background: var(--diff-del-bg);
+  border-left: 3px solid #ff7b72;
+  padding-left: 3px;
+  margin-left: 0;
+}
+.dev-diff-detail .diff-line.add .diff-line-content::before,
+.dev-diff-detail .diff-line.del .diff-line-content::before {
+  font-weight: 700;
+  margin-right: 2px;
+}
+/* Two separate gutters, one per side, each colored to match what the line
+   represents on that side. The user explicitly asked for this: a red number
+   for the lines that were deleted and a green number for added lines.
+   - `old` gutter: when the line is a deletion, color it red (the number is
+     "going away"); on context lines, neutral.
+   - `new` gutter: when the line is an addition, color it green (the number
+     is "newly created"); on context lines, neutral.
+   On added lines the old number slot is empty (we don't show "??" — the
+   "—" character tells the user the slot is intentionally blank). */
+.dev-diff-detail .diff-line-gutter {
+  margin-right: 0;
+  min-width: 3ch;
+  text-align: right;
+  opacity: 1;
+  color: var(--text-dim);
+}
+.dev-diff-detail .diff-line-gutter-old {
+  border-right: 1px solid var(--border);
+  padding-right: 4px;
+  margin-right: 4px;
+}
+.dev-diff-detail .diff-line.add .diff-line-gutter-old,
+.dev-diff-detail .diff-line.add .diff-line-gutter-old:empty {
+  /* Empty old-side slot for added lines: dash placeholder so the columns
+     stay aligned. */
+  color: var(--text-dim);
+  opacity: 0.4;
+}
+.dev-diff-detail .diff-line.del .diff-line-gutter-old {
+  color: #f07178;
+  font-weight: 600;
+}
+.dev-diff-detail .diff-line.add .diff-line-gutter-new {
+  color: #7ec699;
+  font-weight: 600;
+}
+.dev-diff-detail .diff-line.del .diff-line-gutter-new,
+.dev-diff-detail .diff-line.del .diff-line-gutter-new:empty {
+  color: var(--text-dim);
+  opacity: 0.4;
+}
+.dev-diff-detail .diff-line-gutter:empty::before {
+  content: "·";
+  opacity: 0.35;
+}
+.dev-diff-detail .diff-line-content { white-space: pre-wrap; word-break: break-word; }
+

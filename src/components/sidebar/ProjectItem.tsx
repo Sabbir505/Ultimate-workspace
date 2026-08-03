@@ -176,7 +176,7 @@ export function ProjectItem({ project }: Props) {
           <button
             onClick={() => {
               setMenu(null);
-              openPeek({ mode: "diff", projectId: project.id, filePath: null });
+              openPeek({ mode: "diff", projectId: project.id, filePath: null, cwd: null });
             }}
             disabled={!project.isGitRepo}
           >

@@ -67,14 +67,69 @@ struct BuiltinSkill {
 }
 
 /// Root dirs per harness for a given kind ("skills" | "loops").
+///
+/// Claude Code's skill layout has shifted across versions. Conduit scans
+/// every convention we know about so the Skills Library shows what's actually
+/// on disk regardless of which one the user (or a marketplace) wrote into:
+///
+///   - `~/.claude/skills/<slug>/SKILL.md` — the original Claude Code convention.
+///   - `~/.claude/plugins/marketplaces/<marketplace>/skills/<slug>/SKILL.md` —
+///     the layout Claude Code 1.0+ uses for installed plugins. The user has
+///     an `anthropic-agent-skills` marketplace here with 16 skills; without
+///     this scan root the Skills Library shows nothing on this machine.
+///   - `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/<slug>/SKILL.md`
+///     — the cache dir Claude Code stages plugin content into; some
+///     workflows only land skills here without a `marketplaces/` mirror.
+///   - `~/.agents/skills/` — Kimi Code's user skill dir (kimi 0.27.0+).
+///   - `~/.kimi-code/skills/` — defensive: a kimi version that adopts a
+///     self-named dir.
 fn roots(kind: &str) -> Vec<(&'static str, PathBuf)> {
     let Some(home) = crate::util::home_dir() else { return vec![] };
     let mut v = vec![
         ("claude", home.join(".claude").join(kind)),
-        ("kimi", home.join(".agents").join(kind)),
+        ("agents", home.join(".agents").join(kind)),
+        ("kimi", home.join(".kimi-code").join(kind)),
     ];
-    // Defensive: kimi's own-named dir if a version starts using it.
-    v.push(("kimi", home.join(".kimi-code").join(kind)));
+    // Claude Code plugin marketplaces — `~/.claude/plugins/` has two
+    // skill-bearing siblings we walk:
+    //   marketplaces/<name>/skills/<slug>/SKILL.md
+    //   cache/<marketplace>/<plugin>/<version>/skills/<slug>/SKILL.md
+    // The earlier (buggy) attempt built plugins/<entry>/{marketplaces,cache}/<kind>
+    // for every entry under plugins/, which neither pattern matches. Walk
+    // the two top-level dirs explicitly.
+    let plugins_dir = home.join(".claude").join("plugins");
+    if let Ok(entries) = fs::read_dir(&plugins_dir) {
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if !child.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            match name.as_str() {
+                "marketplaces" => {
+                    // Each subdir under marketplaces/ is one marketplace.
+                    if let Ok(mps) = fs::read_dir(&child) {
+                        for mp in mps.flatten() {
+                            let mp_dir = mp.path();
+                            if !mp_dir.is_dir() {
+                                continue;
+                            }
+                            v.push(("claude", mp_dir.join(kind)));
+                        }
+                    }
+                }
+                "cache" => {
+                    // cache/<marketplace>/<plugin>/<version>/skills/<slug>/...
+                    // We push the `cache` root and let the scan walk into it
+                    // via `read_dir`; deeper enumeration is unnecessary
+                    // because the scan already recurses through directories
+                    // looking for SKILL.md / LOOP.md.
+                    v.push(("claude", child.join(kind)));
+                }
+                _ => {}
+            }
+        }
+    }
     v
 }
 

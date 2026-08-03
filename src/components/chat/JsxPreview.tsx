@@ -12,6 +12,7 @@
 // tried as a fallback. A "Preview / Code" toggle lets the user inspect source.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { useSyntaxTheme } from "../../hooks/useSyntaxTheme";
 // UMD builds inlined into the sandbox so it needs no network / same-origin.
 // Imported by relative node_modules path because the `react` / `react-dom`
 // package `exports` maps don't expose their `umd/` files as bare specifiers.
@@ -185,10 +186,13 @@ export function JsxPreview({
 
   const showCode = tab === "code" || (!srcDoc && !!error);
 
+  // useSyntaxTheme returns a new style object whenever data-theme changes,
+  // so the highlighted block re-derives and re-renders with the new tokens.
+  const syntaxTheme = useSyntaxTheme();
   const highlighted = useMemo(
     () => (
       <SyntaxHighlighter
-        style={{}}
+        style={syntaxTheme}
         language={isTsx ? "tsx" : "jsx"}
         PreTag="div"
         customStyle={{
@@ -205,7 +209,7 @@ export function JsxPreview({
         {code}
       </SyntaxHighlighter>
     ),
-    [code, isTsx],
+    [code, isTsx, syntaxTheme],
   );
 
   return (

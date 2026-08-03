@@ -11,6 +11,8 @@ interface ArtifactsState {
   remove: (id: string) => Promise<void>;
 }
 
+export type { ArtifactsState };
+
 export const useArtifactsStore = create<ArtifactsState>((set, get) => ({
   loaded: false,
   items: [],
@@ -22,6 +24,6 @@ export const useArtifactsStore = create<ArtifactsState>((set, get) => ({
 
   remove: async (id: string) => {
     await deleteArtifact(id);
-    set({ items: get().items.filter((a) => a.id !== id) });
+    set({ items: get().items.filter((a: ArtifactRecord) => a.id !== id) });
   },
 }));

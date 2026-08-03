@@ -9,6 +9,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { useSyntaxTheme } from "../../hooks/useSyntaxTheme";
 import {
   downloadArtifact,
   openArtifact,
@@ -104,25 +105,7 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
     if (kind === "text") {
       return <pre className="artifact-preview-text">{text}</pre>;
     }
-    return (
-      <SyntaxHighlighter
-        style={{}}
-        language={lang}
-        PreTag="div"
-        customStyle={{
-          margin: 0,
-          background: "transparent",
-          padding: "12px 16px",
-          fontSize: "12px",
-          fontFamily: "var(--font-mono)",
-          lineHeight: 1.5,
-          overflowX: "auto",
-        }}
-        codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
-      >
-        {text}
-      </SyntaxHighlighter>
-    );
+    return <ArtifactCodeBlock code={text} language={lang} />;
   }
 
   // Binary (docx/pptx/xlsx) or unsupported: file card.
@@ -142,6 +125,31 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
         Open file
       </button>
     </div>
+  );
+}
+
+/** Code-block renderer for artifact previews — uses the current theme's
+ *  syntax tokens (--syntax-*) so colors track data-theme. */
+function ArtifactCodeBlock({ code, language }: { code: string; language: string }) {
+  const theme = useSyntaxTheme();
+  return (
+    <SyntaxHighlighter
+      style={theme}
+      language={language}
+      PreTag="div"
+      customStyle={{
+        margin: 0,
+        background: "transparent",
+        padding: "12px 16px",
+        fontSize: "12px",
+        fontFamily: "var(--font-mono)",
+        lineHeight: 1.5,
+        overflowX: "auto",
+      }}
+      codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
+    >
+      {code}
+    </SyntaxHighlighter>
   );
 }
 

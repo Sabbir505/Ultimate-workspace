@@ -162,6 +162,23 @@ struct OpenAIWireBody {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
+    /// Qwen3 / DeepSeek-R1 (and other GGUF chat templates that look for this
+    /// key) toggle their built-in `<think>…</think>` block via
+    /// `chat_template_kwargs.enable_thinking`. Emitted only for explicit
+    /// user toggles (composer "brain" button), since llama-server templates
+    /// that don't recognize the key will 400. Anthropic gets its own shape
+    /// in `anthropic_request` and never sees this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<ChatTemplateKwargs>,
+}
+
+/// Wraps a single `chat_template_kwargs` entry. We need a struct (not a
+/// flat bool) because `chat_template_kwargs` is an object — `{ "enable_thinking": true }`,
+/// not the bare value. `Option<bool>` would serialize as `true`, which
+/// llama-server rejects.
+#[derive(Serialize)]
+struct ChatTemplateKwargs {
+    enable_thinking: bool,
 }
 
 /// Build the Anthropic `/v1/messages` streaming request. Both
@@ -230,12 +247,25 @@ fn openai_request(
         messages,
         stream: true,
         reasoning_effort: req.effort.clone(),
+        chat_template_kwargs: req.thinking.map(|t| ChatTemplateKwargs {
+            enable_thinking: t,
+        }),
     };
+    eprintln!(
+        "[openai_request] → POST {url} thinking={:?} model={:?}",
+        req.thinking, req.model,
+    );
+    let json_body = serde_json::to_string(&body).unwrap_or_default();
+    eprintln!(
+        "[openai_request] body_len={} has_template_kwargs={}",
+        json_body.len(),
+        json_body.contains("chat_template_kwargs"),
+    );
     client
         .post(&url)
         .header("Authorization", format!("Bearer {api_key}"))
         .header("content-type", "application/json")
-        .json(&body)
+        .body(json_body)
 }
 
 // ---- Anthropic ----

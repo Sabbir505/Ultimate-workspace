@@ -45,17 +45,27 @@ interface DetectedBlock {
 
 let feedIdSeq = 0;
 
-/** xterm theme per app theme: opaque warm backdrop, warm fg/cursor; ANSI
- *  colors pass through. Matches the Claude Code warm-charcoal/cream palette. */
+/** xterm theme per app theme: opaque backdrop, fg/cursor; ANSI colors pass
+ *  through. Reads from CSS custom properties (--editor-bg, --text, etc.)
+ *  so the terminal automatically tracks the app's data-theme swap. */
 function xtermTheme(appTheme: string): Record<string, string> {
+  // The hook layer re-resolves these on data-theme change, so we re-read at
+  // every call site (cheap — getComputedStyle is a hash lookup, not a parse).
+  if (typeof document === "undefined") {
+    return {};
+  }
+  const cs = getComputedStyle(document.documentElement);
+  const tok = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback;
   const light = appTheme === "light";
   return {
     // Solid terminal backdrop (was transparent for the old glass blur).
-    background: light ? "#f6f3ee" : "#1f1f1d",
-    foreground: light ? "#2b2622" : "#f5f1ea",
-    cursor: light ? "#2b2622" : "#f5f1ea",
-    cursorAccent: light ? "#f6f3ee" : "#1f1f1d",
-    selectionBackground: light ? "rgba(43, 38, 34, 0.2)" : "rgba(245, 241, 234, 0.2)",
+    background: tok("--editor-bg", light ? "#fafafa" : "#1a1a1a"),
+    foreground: tok("--editor-fg", light ? "#1a1a1a" : "#e4e4e4"),
+    cursor: tok("--editor-cursor", light ? "#1a1a1a" : "#e4e4e4"),
+    cursorAccent: tok("--editor-bg", light ? "#fafafa" : "#1a1a1a"),
+    selectionBackground: light
+      ? tok("--editor-selection", "rgba(0, 120, 168, 0.2)")
+      : tok("--editor-selection", "rgba(64, 64, 64, 0.4)"),
   };
 }
 

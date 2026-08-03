@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+**Local model context fix** — llama-server sidecars now start with a context window large enough to hold the app's own prompt overhead (system prompt + ~25 tool schemas ≈ 10k tokens). Medium models (≤ 8GB) get 32768 tokens instead of 8192, so a tool-enabled chat no longer 400s with `exceed_context_size_error` on the first message. Compaction now also reserves the tool-schema tokens out of the context budget, so long sessions compact before the prompt can overflow instead of failing.
+
+**GPU offload insight** — the app always requests full GPU offload (`--n-gpu-layers=999`); on cards where the model + KV cache don't fit, llama.cpp silently spills layers to CPU (weights stay on GPU, KV cache lands in system RAM). Correct, but generation is CPU-bound on long contexts.
+
+**GitHub connector fixes** — token exchange now sends `Accept: application/json` and falls back to parsing form-encoded responses; flow failures surface as proper errors instead of dying silently.
+
+**Release pipeline** — CI release builds now bake in Google + GitHub connector credentials (was Notion-only); new updater signing keypair.
+
 ## 0.3.2
 
 **Local model context compaction** — automatically summarizes older conversation history when a local GGUF model's context window approaches capacity. The most recent exchanges stay verbatim; aged-out turns are condensed via a non-streaming summarization call. Configurable threshold and pin count in Settings → Local Models → Compaction.

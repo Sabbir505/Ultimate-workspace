@@ -51,6 +51,32 @@ pub const BROWSER_CLICK: &str = "browser_click";
 pub const BROWSER_TYPE: &str = "browser_type";
 pub const BROWSER_SCROLL: &str = "browser_scroll";
 
+// ---- System tools (background downloads + native shell) ----
+//
+// These are the "do it for me" capabilities: `download_file` streams a URL
+// to an absolute local path (e.g. model weights from Hugging Face) and
+// `run_shell` executes a native shell command on the host. Both run as
+// background tasks so a multi-GB download or a long CLI run never blocks the
+// conversation turn; the model tracks them with `get_task_status` /
+// `download_progress` and aborts them with `cancel_task`. See chat/tasks.rs
+// for the task engine.
+
+/// Stream a file from a URL to an absolute local path as a background task.
+/// Returns a task id immediately; track with `download_progress`. Mutating
+/// (writes to disk) — gated by the permission mode like a filesystem write.
+pub const DOWNLOAD_FILE: &str = "download_file";
+/// Report a background download task's live progress. Read-only, auto-runs.
+pub const DOWNLOAD_PROGRESS: &str = "download_progress";
+/// Run a native shell command on the host (cmd.exe / sh), streaming output
+/// as a background task. Unsandboxed by design — ALWAYS requires approval.
+pub const RUN_SHELL: &str = "run_shell";
+/// Report any background task's status (downloads and shells). Read-only.
+pub const GET_TASK_STATUS: &str = "get_task_status";
+/// Cancel a background task (aborts the download, keeping its .part for
+/// resume, or kills the shell process). Applies only to tasks the model
+/// started in this session.
+pub const CANCEL_TASK: &str = "cancel_task";
+
 // ---- Research source ledger ----
 //
 // Tools the model calls during a research turn to record what it learns. They
@@ -355,6 +381,49 @@ const OPEN_URL_DESC: &str = "Open a web page in the app's built-in browser so \
     the user can see it, and return its readable text to you. Use when the user \
     asks to open/show/visit a site, or when it helps to display a page visually \
     alongside your answer.";
+
+const DOWNLOAD_FILE_DESC: &str = "Stream a file from an http(s) URL to an \
+    absolute local path on this machine (e.g. model weights such as \
+    .safetensors / .bin directly from Hugging Face repositories). This is a \
+    REAL, working tool: call it, and the file is downloaded in the background \
+    to the path you give (any drive or directory — no sandbox restriction), \
+    then you can report progress and the result to the user. Returns a task id \
+    immediately; poll `download_progress` with that id for live bytes/percent, \
+    and report when it completes. The download is resumable (a .part file is \
+    kept on cancel/failure), so a retry continues instead of restarting. \
+    Mutating — a write to disk, gated by the session's permission mode. Use \
+    this for ANY file a user wants saved locally from a URL.";
+
+const DOWNLOAD_PROGRESS_DESC: &str = "Report the live progress of a background \
+    download started by `download_file`. Pass the task id returned by \
+    `download_file`. Returns bytes downloaded, total bytes (when known), \
+    percentage, speed, and the final state. This is the tool for tracking \
+    multi-gigabyte transfers and handling retry/resume states. Read-only. If \
+    the user asked you to download a file, call this repeatedly (a few seconds \
+    apart) and report progress to them until the task completes.";
+
+const RUN_SHELL_DESC: &str = "Run a native shell command on the user's machine \
+    (cmd.exe on Windows, sh on Unix) and capture its output. This is a REAL, \
+    working tool — it executes unsandboxed with the user's privileges and can \
+    access any local working directory, so CLI tools like `huggingface-cli \
+    download`, git, pip, ffmpeg, etc. work exactly as they do in a terminal. \
+    Long-running commands run as a background task that streams output as it \
+    goes; poll `get_task_status` with the returned task id for the output, and \
+    `cancel_task` to abort. ALWAYS gated on an approval card before it runs. \
+    Use this when a task needs a native CLI tool that `download_file` (URL \
+    → file) or `run_code` (sandboxed snippet) cannot express. Prefer \
+    `download_file` for plain URL downloads, and `run_code` for small \
+    self-contained scripts.";
+
+const GET_TASK_STATUS_DESC: &str = "Report the status of any background task \
+    (`download_file` or `run_shell`) by its task id: state (running/completed/\
+    failed/cancelled), progress numbers, and the output or error message. \
+    Read-only. Poll this while a task is running to track it.";
+
+const CANCEL_TASK_DESC: &str = "Cancel a background task started in this \
+    conversation by its task id. For downloads this keeps the .part file so a \
+    later retry resumes instead of restarting; for shell commands it kills the \
+    process. Use when the user changes their mind or a task is stalled.";
 
 const ADD_SOURCE_NOTE_DESC: &str = "Record ONE concrete fact you extracted from a \
     research source, so it is preserved in the source ledger for this chat session \
@@ -713,6 +782,49 @@ mod tests {
         let names: Vec<&str> = specs.iter().map(|s| s["name"].as_str().unwrap()).collect();
         assert!(!names.contains(&WRITE_FILE));
         assert!(names.contains(&READ_FILE));
+    }
+
+    // ---- system tools (downloads + native shell) ----
+
+    #[test]
+    fn system_tools_listed_in_openai_specs() {
+        let names = openai_names(&ToolCaps::default(), PermissionMode::Manual);
+        assert!(names.contains(&DOWNLOAD_FILE.to_string()));
+        assert!(names.contains(&DOWNLOAD_PROGRESS.to_string()));
+        assert!(names.contains(&RUN_SHELL.to_string()));
+        assert!(names.contains(&GET_TASK_STATUS.to_string()));
+        assert!(names.contains(&CANCEL_TASK.to_string()));
+        // The download tool must expose url + dest_path args.
+        let specs = openai_tool_specs(&ToolCaps::default(), PermissionMode::Manual);
+        let spec = specs
+            .iter()
+            .find(|s| s["function"]["name"] == DOWNLOAD_FILE)
+            .expect("download_file must be in the spec")["function"]["parameters"]
+            .clone();
+        assert!(spec["properties"]["url"].is_object());
+        assert!(spec["properties"]["dest_path"].is_object());
+        assert!(spec["required"].as_array().unwrap().contains(&json!("url")));
+    }
+
+    #[test]
+    fn system_tools_listed_in_anthropic_specs() {
+        let specs = anthropic_tool_specs(&ToolCaps::default(), PermissionMode::Manual);
+        let names: Vec<&str> = specs.iter().map(|s| s["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&DOWNLOAD_FILE));
+        assert!(names.contains(&RUN_SHELL));
+        assert!(names.contains(&CANCEL_TASK));
+    }
+
+    #[test]
+    fn read_only_strips_mutating_system_tools_but_keeps_tracking() {
+        // read_only must drop download_file + run_shell from the schema
+        // (like write_file) while keeping the read-only tracking tools.
+        let names = openai_names(&ToolCaps::default(), PermissionMode::ReadOnly);
+        assert!(!names.contains(&DOWNLOAD_FILE.to_string()), "download_file must be absent under read_only");
+        assert!(!names.contains(&RUN_SHELL.to_string()), "run_shell must be absent under read_only");
+        assert!(names.contains(&DOWNLOAD_PROGRESS.to_string()));
+        assert!(names.contains(&GET_TASK_STATUS.to_string()));
+        assert!(names.contains(&CANCEL_TASK.to_string()));
     }
 
 }

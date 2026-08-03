@@ -230,6 +230,31 @@ fn clean_title(raw: &str) -> String {
     t.trim_end_matches(['.', ',', ';', ':']).trim().to_string()
 }
 
+/// Compact token-count formatter used in user-facing status lines (e.g.
+/// "Compacted 8.2k → 1.1k tokens"). Mirrors the frontend's `formatTokens`
+/// but is kept as a free function so the backend doesn't have to depend on
+/// the lib crate. 0 returns "0".
+fn format_compact_token_count(n: i64) -> String {
+    let n = n.max(0) as u64;
+    if n >= 1_000_000 {
+        let v = n as f64 / 1_000_000.0;
+        if v >= 10.0 {
+            format!("{}M", v.round() as u64)
+        } else {
+            format!("{:.1}M", v)
+        }
+    } else if n >= 1000 {
+        let v = n as f64 / 1000.0;
+        if v >= 100.0 {
+            format!("{}k", v.round() as u64)
+        } else {
+            format!("{:.1}k", v)
+        }
+    } else {
+        n.to_string()
+    }
+}
+
 /// One-shot (non-streaming) OpenAI-style completion returning the message text.
 async fn openai_oneshot(
     client: &reqwest::Client,
@@ -553,13 +578,28 @@ pub async fn send_chat_message(
     };
     let permission_mode = crate::chat::permission::PermissionMode::from_db(&permission_mode_str);
 
-    // Connectors attached to THIS conversation (per-session opt-in, persisted
-    // in chat_session_connectors — read at turn start, like permission_mode).
-    // They're connected inside the spawned tool loop (see ChatManager::send);
-    // here we just resolve the id list.
+    // Connectors available to this conversation. Per-session rows
+    // (chat_session_connectors, written by the old "@"-attach flow) are still
+    // honored, but ANY connector connected in Settings → Connectors is ALWAYS
+    // available — the model self-selects one when a task needs it, no
+    // per-conversation opt-in required. "Connected" = a credential row exists
+    // (OAuth connectors) OR a public endpoint that needs no credentials
+    // (Kiwi — `is_public()`, never has a row).
     let connector_ids: Vec<String> = {
         let conn = db.0.lock();
-        db::list_chat_session_connectors(&conn, &chat_session_id).unwrap_or_default()
+        let mut ids: Vec<String> =
+            db::list_chat_session_connectors(&conn, &chat_session_id).unwrap_or_default();
+        for row in db::list_connector_credential_rows(&conn).unwrap_or_default() {
+            if !ids.contains(&row.connector_id) {
+                ids.push(row.connector_id);
+            }
+        }
+        for c in crate::connectors::CONNECTORS {
+            if c.is_public() && !ids.iter().any(|i| i == c.id) {
+                ids.push(c.id.to_string());
+            }
+        }
+        ids
     };
 
     // 2. Persist the user message.
@@ -758,7 +798,30 @@ pub async fn send_chat_message(
     }
     // Per-session model wins; the Settings model is only a default for
     // sessions created without one.
-    let model = if model_str.trim().is_empty() {
+    //
+    // SPECIAL CASE: local_gguf. The session's stored `model` field carries
+    // the GGUF metadata *name* (e.g. "DeepSeek R1 0528 Qwen3 8B") because
+    // that's what the dropdown shows — but llama-server was started against
+    // `chat.local_gguf.model`, which is the file *path* (or the registry
+    // id-slug the caller passed to start_local_model). Sending the metadata
+    // name to llama-server makes it reject the request with HTTP 400, since
+    // the running model doesn't match that string. For local_gguf we
+    // therefore always prefer the sidecar's started-with model, which is the
+    // model llama-server actually has loaded. The session's display name is
+    // still used for the dropdown via the read path (list_chat_sessions),
+    // just not for the request body.
+    let model = if provider_str == "local_gguf" {
+        model_override
+            .filter(|m| !m.trim().is_empty())
+            .or_else(|| {
+                if model_str.trim().is_empty() {
+                    None
+                } else {
+                    Some(model_str)
+                }
+            })
+            .ok_or_else(|| "no model configured for this chat".to_string())?
+    } else if model_str.trim().is_empty() {
         model_override.ok_or_else(|| "no model configured for this chat".to_string())?
     } else {
         model_str
@@ -845,6 +908,61 @@ pub async fn send_chat_message(
                 let conn = db.0.lock();
                 crate::chat::compaction::load_compaction_config(&conn)
             };
+
+            // The send path adds the tool schema on top of system+history, so
+            // reserve those tokens out of the compaction budget — otherwise the
+            // window can "fit" by the count yet the real request 400s
+            // (exceed_context_size_error). Connector tools are attached
+            // per-turn inside the send task, so this estimate covers the
+            // built-in set only; the slack is margin.
+            let reserved_tokens: u32 = if tools_on {
+                let pcaps = crate::chat::prompts::provider_capabilities(provider_id.clone(), &model);
+                let caps = crate::chat::tools::ToolCaps {
+                    code_exec: code_exec_enabled.unwrap_or(false),
+                    fs_roots: Vec::new(),
+                    web_search: pcaps.native_web_search,
+                    requires_local_sandbox: pcaps.requires_local_sandbox,
+                    attached_connectors: std::sync::Arc::new(Vec::new()),
+                };
+                let specs = crate::chat::tools::openai_tool_specs(&caps, permission_mode);
+                let json = serde_json::to_string(&specs).unwrap_or_default();
+                let n = crate::chat::compaction::count_json_tokens(
+                    &chat_mgr.client,
+                    &status.base_url,
+                    &json,
+                )
+                .await
+                .unwrap_or(0);
+                eprintln!("[local-compaction] tool schema reserves {n} tokens");
+                n
+            } else {
+                0
+            };
+
+            // Tell the user we're condensing earlier turns. The summarization
+            // call against a small local model can take 5–30s and previously
+            // looked identical to a frozen UI — a tiny spinner with this
+            // message is enough to make the wait legible. We also capture the
+            // pre-compaction token count here so the post-compaction notice
+            // can show "Compacted 8.2k → 1.1k tokens" instead of a generic
+            // "earlier context compacted".
+            let pre_compact_tokens: u32 = crate::chat::compaction::count_tokens(
+                &chat_mgr.client,
+                &status.base_url,
+                &system,
+                &messages.iter().map(|e| e.message.clone()).collect::<Vec<_>>(),
+            )
+            .await
+            .unwrap_or(0);
+            let _ = app.emit(
+                "chat:status",
+                crate::types::ChatStatusPayload {
+                    chat_session_id: chat_session_id.clone(),
+                    reason: "context_compacting".to_string(),
+                    message: "Compacting earlier context…".to_string(),
+                },
+            );
+
             let outcome = crate::chat::compaction::maybe_compact(
                 &chat_mgr.client,
                 &status.base_url,
@@ -853,6 +971,7 @@ pub async fn send_chat_message(
                 &system,
                 &messages,
                 &cfg,
+                reserved_tokens,
             )
             .await;
             match outcome {
@@ -884,28 +1003,72 @@ pub async fn send_chat_message(
                         }
                         row.id
                     };
+
+                    // Count tokens against the REWRITTEN history so the
+                    // "from→to" deltas in the user-facing message are real.
+                    // If the post-count fails (sidecar hiccup), fall back to
+                    // a coarse estimate from the pre-count minus the summary
+                    // output tokens so the notice is never blank.
+                    let post_compact_tokens: u32 =
+                        crate::chat::compaction::count_tokens(
+                            &chat_mgr.client,
+                            &status.base_url,
+                            &system,
+                            &o.messages,
+                        )
+                        .await
+                        .unwrap_or_else(|_| {
+                            pre_compact_tokens.saturating_sub(
+                                o.summary_input_tokens as u32,
+                            )
+                        });
+
                     eprintln!(
                         "[local-compaction] compacted {} exchange(s) into summary row {} ({}→{} tokens); {} messages now active",
                         o.compacted_exchange_count,
                         summary_id,
-                        o.summary_input_tokens,
-                        o.summary_output_tokens,
+                        pre_compact_tokens,
+                        post_compact_tokens,
                         o.messages.len()
                     );
-                    compacted_system_notice = Some((
-                        "context_compacted".to_string(),
-                        "— earlier context compacted —".to_string(),
-                    ));
+                    let notice = format!(
+                        "Compacted {} → {} tokens",
+                        format_compact_token_count(pre_compact_tokens as i64),
+                        format_compact_token_count(post_compact_tokens as i64),
+                    );
+                    compacted_system_notice =
+                        Some(("context_compacted".to_string(), notice));
                     o.messages
                 }
                 // Below threshold, nothing aged out, or compaction failed and
                 // fell back — maybe_compact already returned the original
-                // history (as ChatMessages) in its passthrough outcome.
-                Ok(_noop) => _noop.messages,
+                // history (as ChatMessages) in its passthrough outcome. We
+                // also need to clear the "compacting…" spinner we emitted
+                // above, since the no-op case never gets a follow-up
+                // context_compacted event.
+                Ok(_noop) => {
+                    let _ = app.emit(
+                        "chat:status",
+                        crate::types::ChatStatusPayload {
+                            chat_session_id: chat_session_id.clone(),
+                            reason: "".to_string(),
+                            message: String::new(),
+                        },
+                    );
+                    _noop.messages
+                }
                 // Unreachable in practice (maybe_compact never returns Err),
                 // but rebuild from the caller's messages if it ever does.
                 Err(e) => {
                     eprintln!("[local-compaction] gave up, passing history through: {e}");
+                    let _ = app.emit(
+                        "chat:status",
+                        crate::types::ChatStatusPayload {
+                            chat_session_id: chat_session_id.clone(),
+                            reason: "".to_string(),
+                            message: String::new(),
+                        },
+                    );
                     messages.iter().map(|e| e.message.clone()).collect()
                 }
             }
@@ -1564,8 +1727,31 @@ pub fn scan_local_models(
         local_models::scan_folder(Path::new(&dir), "user")
     } else {
         let mut files = local_models::scan_default_locations();
-        let seen: std::collections::HashSet<String> =
+        let mut seen: std::collections::HashSet<String> =
             files.iter().map(|f| f.id.clone()).collect();
+        // Also scan the Model Market's download dir — both the user-picked
+        // override (`local_models.dir`) and its ~/Conduit/models default —
+        // otherwise market downloads never show up in the local list.
+        {
+            let conn = db.0.lock();
+            if let Ok(Some(dir)) = db::get_setting(&conn, "local_models.dir") {
+                if !dir.trim().is_empty() {
+                    for file in local_models::scan_folder(Path::new(&dir), "market") {
+                        if seen.insert(file.id.clone()) {
+                            files.push(file);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(home) = dirs::home_dir() {
+            let market_default = home.join("Conduit").join("models");
+            for file in local_models::scan_folder(&market_default, "market") {
+                if seen.insert(file.id.clone()) {
+                    files.push(file);
+                }
+            }
+        }
         // Load persisted user-added folders and scan each, deduping by file id.
         let stored = {
             let conn = db.0.lock();
@@ -1575,10 +1761,9 @@ pub fn scan_local_models(
             if let Ok(list) = serde_json::from_str::<Vec<String>>(&json) {
                 for f in list.into_iter().filter(|s| !s.trim().is_empty()) {
                     for file in local_models::scan_folder(Path::new(&f), "user") {
-                        if seen.contains(&file.id) {
-                            continue;
+                        if seen.insert(file.id.clone()) {
+                            files.push(file);
                         }
-                        files.push(file);
                     }
                 }
             }
@@ -1645,6 +1830,7 @@ pub async fn start_local_model(
         model_id: started.model_id,
         port: started.port,
         n_ctx: started.n_ctx,
+        n_gpu_layers: started.n_gpu_layers,
         base_url: started.base_url,
     })
 }
@@ -1666,8 +1852,120 @@ pub fn local_model_status(
         model_id: a.model_id,
         port: a.port,
         n_ctx: a.n_ctx,
+        n_gpu_layers: a.n_gpu_layers,
         base_url: a.base_url,
     }))
+}
+
+/// Live context-window usage for the active local-model session. Asks the
+/// running llama-server to tokenize the assembled (system + active history)
+/// conversation and returns the count alongside the sidecar's `-c` cap. The
+/// composer polls this so the circular context meter is always current — the
+/// stale `inputTokens` of the last persisted assistant turn is the previous
+/// fallback, which only updated on a chat:done and never reflected compaction.
+///
+/// Non-local sessions return a zero-cap payload (the meter falls back to its
+/// API flat-256K behaviour). No-sidecar / errored-tokenize returns
+/// `used_tokens: null` so the meter keeps showing whatever the last known
+/// value was instead of snapping to 0.
+#[tauri::command]
+pub async fn count_context_tokens(
+    chat_session_id: String,
+    chat_state: State<'_, crate::ChatState>,
+    local: State<'_, local_models::LocalModelState>,
+    db: State<'_, DbState>,
+) -> CmdResult<crate::types::ContextUsagePayload> {
+    let Some(status) = local.0.status() else {
+        return Ok(crate::types::ContextUsagePayload {
+            used_tokens: None,
+            max_tokens: 0,
+        });
+    };
+
+    let (provider_str, model_str) = {
+        let conn = db.0.lock();
+        let cs = db::get_chat_session(&conn, &chat_session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "chat session not found".to_string())?;
+        (cs.provider, cs.model)
+    };
+
+    // Only local sessions are tokenizable via llama-server; cloud sessions
+    // use the meter's 256K fallback. Return a zero-cap so the consumer can
+    // distinguish "no data" from "API session".
+    if provider_str != "local_gguf" {
+        return Ok(crate::types::ContextUsagePayload {
+            used_tokens: None,
+            max_tokens: 0,
+        });
+    }
+
+    // Build the system + active-history exactly the way send_chat_message
+    // does, so the count matches what the model would actually see. Only
+    // active (non-superseded) rows feed the local model — compaction has
+    // already soft-deleted summarized turns, so a stale `[compacted context]`
+    // is never re-tokenized.
+    let messages: Vec<ChatMessage> = {
+        let conn = db.0.lock();
+        let records = db::list_active_chat_messages(&conn, &chat_session_id)
+            .map_err(|e| e.to_string())?;
+        records
+            .into_iter()
+            .map(|r| ChatMessage {
+                role: r.role,
+                content: strip_think_blocks(&r.content),
+                images: Vec::new(),
+            })
+            .collect()
+    };
+
+    // Use the same system-prompt builder as the send path so the meter's
+    // percentage matches the model's view. We omit skill / connector injection
+    // (those depend on the current user message) — the meter is a rough
+    // indicator, not a token-perfect preview, and the small delta is well
+    // within the 5% slack the threshold check already has.
+    let system_str: String = {
+        let conn = db.0.lock();
+        let custom = db::get_setting(&conn, "assistant.systemPrompt")
+            .map_err(|e| e.to_string())?;
+        let provider_id = ChatProviderId::LocalGguf;
+        crate::chat::build_system_prompt(
+            provider_id,
+            &model_str,
+            custom.as_deref(),
+            &[],
+            false,
+            false,
+        )
+        .unwrap_or_default()
+    };
+    let system = if system_str.trim().is_empty() {
+        None
+    } else {
+        Some(system_str)
+    };
+
+    let tokens = crate::chat::compaction::count_tokens(
+        &chat_state.0.client,
+        &status.base_url,
+        &system,
+        &messages,
+    )
+    .await
+    .unwrap_or_else(|e| {
+        eprintln!("[context-meter] /tokenize failed: {e}");
+        0
+    });
+
+    // The Tauri command layer can't represent 0 as "errored" cleanly (the
+    // caller can't tell "empty transcript" from "tokenizer down"), so map 0
+    // to null when the session has no messages — otherwise we'd report 0
+    // used out of `n_ctx` and the ring would show 0% even with real history.
+    let has_messages = !messages.is_empty();
+    Ok(crate::types::ContextUsagePayload {
+        used_tokens: if tokens > 0 || has_messages { Some(tokens) } else { None },
+        max_tokens: status.n_ctx,
+    })
 }
 
 #[cfg(test)]

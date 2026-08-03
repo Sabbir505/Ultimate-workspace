@@ -4,9 +4,9 @@
 // not bury the short appearance/shortcut sections. Every panel reserves a
 // fixed min-height (see .settings-split / .empty-reserved) so switching
 // categories — or an empty harness list — does not reflow the modal.
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel } from "../../lib/ipc";
+import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel } from "../../lib/ipc";
 import { acceleratorFromEvent, DEFAULT_KEYBINDINGS, type KeybindingAction } from "../../lib/keybindings";
 import { runLoginFlow } from "../../lib/sessionLauncher";
 import { shortModelName } from "../../lib/modelLabel";
@@ -16,6 +16,8 @@ import { useUiStore } from "../../state/ui";
 import { GlassSelect } from "../common/GlassSelect";
 import { useChatStore } from "../../state/chat";
 import { ModelMarket } from "./ModelMarket";
+import { ConnectorIcon, FamilyIcon, FAMILY_NAMES } from "./ConnectorIcon";
+import { Modal } from "../common/Modal";
 
 const ACTION_LABELS: Record<KeybindingAction, string> = {
   openPalette: "Open command palette",
@@ -348,6 +350,8 @@ function LocalModelsPanel() {
   const [starting, setStarting] = useState<Record<string, boolean>>({});
   const [folders, setFolders] = useState<string[]>([]);
   const [advanced, setAdvanced] = useState<Record<string, { ngl?: number; ctx?: number }>>({});
+  // Panel tabs: "models" = on-disk GGUF list, "market" = Hugging Face browser.
+  const [tab, setTab] = useState<"models" | "market">("models");
 
   const newChat = useChatStore((s) => s.newChat);
   const setActiveView = useUiStore((s) => s.setActiveView);
@@ -359,6 +363,14 @@ function LocalModelsPanel() {
     setFolders(next);
     void setSetting(K_LOCAL_FOLDERS, JSON.stringify(next));
   };
+
+  // Heuristic RAM estimate for the "fits my RAM" badge — same heuristic the
+  // Model Market tab uses. navigator.deviceMemory is in GiB and only set on
+  // Chromium-family browsers; fall back to 16 GB when missing.
+  const totalRam = useMemo(() => {
+    const dm = (navigator as unknown as { deviceMemory?: number }).deviceMemory;
+    return (dm && dm > 0 ? dm : 16) * 1024 * 1024 * 1024;
+  }, []);
 
   // Rescan and replace the model list. The backend's bare scan_local_models
   // already merges default locations with every persisted user-added folder
@@ -482,46 +494,80 @@ function LocalModelsPanel() {
 
   const nothing =
     loaded && models.length === 0 && folders.length === 0 && !loading;
+  // `nothing` is intentionally unused now — the empty state is rendered
+  // inline in the grid below. Keeping the flag for future use.
+  void nothing;
+
+  // RAM fit classification (matches the heuristic in ModelMarket.tsx).
+  // < 50% → "fits", 50-80% → "tight", > 80% → "too_large".
+  const classifyRam = (sizeBytes: number): "fits" | "tight" | "too_large" => {
+    if (!totalRam) return "tight";
+    const r = sizeBytes / totalRam;
+    if (r < 0.5) return "fits";
+    if (r < 0.8) return "tight";
+    return "too_large";
+  };
 
   return (
     <>
       <div className="panel-head">
         <h3>Local Models</h3>
-        <div style={{ display: "flex", gap: 8 }}>
-          {active && (
-            <button className="ghost" style={{ padding: "2px 8px" }} onClick={handleStop}>
-              Stop server
-            </button>
-          )}
-          <button
-            className="ghost"
-            style={{ padding: "2px 8px" }}
-            onClick={() => void handleAddFolder()}
-          >
-            + Add folder
-          </button>
-          <button
-            className="ghost"
-            style={{ padding: "2px 8px" }}
-            onClick={() => {
-              setLoading(true);
-              setLoaded(false);
-            }}
-            disabled={loading}
-          >
-            {loading ? (
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                <span className="local-spinner" /> Scanning…
-              </span>
-            ) : (
-              "Rescan defaults"
+        {tab === "models" && (
+          <div style={{ display: "flex", gap: 8 }}>
+            {active && (
+              <button className="ghost" style={{ padding: "2px 8px" }} onClick={handleStop}>
+                Stop server
+              </button>
             )}
-          </button>
-        </div>
+            <button
+              className="ghost"
+              style={{ padding: "2px 8px" }}
+              onClick={() => void handleAddFolder()}
+            >
+              + Add folder
+            </button>
+            <button
+              className="ghost"
+              style={{ padding: "2px 8px" }}
+              onClick={() => {
+                setLoading(true);
+                setLoaded(false);
+              }}
+              disabled={loading}
+            >
+              {loading ? (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  <span className="local-spinner" /> Scanning…
+                </span>
+              ) : (
+                "Rescan defaults"
+              )}
+            </button>
+          </div>
+        )}
       </div>
+
+      <div className="tab-bar">
+        <button
+          className={`tab${tab === "models" ? " active" : ""}`}
+          onClick={() => setTab("models")}
+        >
+          My Models
+        </button>
+        <button
+          className={`tab${tab === "market" ? " active" : ""}`}
+          onClick={() => setTab("market")}
+        >
+          Model Market
+        </button>
+      </div>
+
+      {tab === "models" && (
+      <>
       <p className="estimate-note">
-        Llama-server must be installed separately (llama.cpp). Place .gguf files
-        in ~/.cache/lm-studio/models, ~/Downloads, or any folder you add here.
+        Llama-server must be installed separately (llama.cpp). Models are
+        scanned from ~/.lmstudio/models, ~/.cache/lm-studio/models, your
+        Downloads folder, Ollama, and any folder you add here.
       </p>
 
       {active && (
@@ -529,16 +575,6 @@ function LocalModelsPanel() {
           <span className="status-dot" />
           <span>
             Active: <strong>{active.modelId}</strong> on port {active.port}
-          </span>
-        </div>
-      )}
-
-      {nothing && (
-        <div className="empty-reserved">
-          <span className="empty-text">
-            No .gguf models found. Place them in the LM Studio cache
-            (~/.cache/lm-studio/models), your Downloads folder, or click "Add
-            folder" to scan a custom location.
           </span>
         </div>
       )}
@@ -564,77 +600,120 @@ function LocalModelsPanel() {
         </div>
       )}
 
-      {models.map((m) => {
-        const mc = MEMORY_LABELS[m.memoryClass] ?? MEMORY_LABELS.tight;
+      <div className="model-market-grid">
+        {models.length === 0 && !loading && !active && (
+          <div className="empty-reserved">
+            <span className="empty-text">
+              No .gguf models found. Place them in the LM Studio models folder
+              (~/.lmstudio/models), your Downloads folder, or click "Add folder"
+              to scan a custom location. Or grab one from the Model Market tab.
+            </span>
+          </div>
+        )}
+
+        {models.map((m) => {
+        const ram = classifyRam(m.sizeBytes);
         const err = errors[m.id];
         const overrides = advanced[m.id] ?? {};
         const isStarting = starting[m.id];
+        const isRunning = active?.modelId === m.id;
+        const displayName = shortModelName(m.name || m.filename);
         return (
-          <div key={m.id} className="local-model-card">
+          <div key={m.id} className={`model-card ram-${ram}${isRunning ? " running" : ""}`}>
+            <button
+              className="model-card-delete"
+              title="Delete this model file from disk"
+              aria-label="Delete model"
+              onClick={async () => {
+                if (!confirm(`Delete ${m.filename || m.id} from disk?`)) return;
+                try {
+                  await deleteDownloadedModel(m.path);
+                  await runScan();
+                } catch (e) {
+                  console.warn("delete failed", e);
+                }
+              }}
+            >
+              <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" />
+                <path d="M10 11v6" />
+                <path d="M14 11v6" />
+                <path d="M9 6V4a2 2 0 012-2h2a2 2 0 012 2v2" />
+              </svg>
+            </button>
             <div className="model-card-head">
-              <span className="model-status-dot" style={{ background: mc.color }} title={mc.text} />
-              <div className="model-info">
-                <div className="model-name">{shortModelName(m.name || m.filename)}</div>
-                <div className="model-meta">
-                  {humanSize(m.sizeBytes)}
-                  {m.paramCountLabel && ` · ${m.paramCountLabel}`}
-                  {m.quantization && ` · ${m.quantization}`}
-                  {m.architecture && ` · ${m.architecture}`}
-                  {" · "}{m.source}
-                </div>
-                {m.hasVision && (
-                  <div className="model-tag vision">◦ Vision capable</div>
-                )}
+              <div className="model-card-title" title={displayName}>
+                {displayName}
               </div>
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
-                <button
-                  className="ghost"
-                  style={{ padding: "4px 12px", whiteSpace: "nowrap", flexShrink: 0 }}
-                  onClick={() => void handleUseModel(m)}
-                  disabled={isStarting || loading}
-                >
-                  {isStarting ? (
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                      <span className="local-spinner" /> Loading…
-                    </span>
-                  ) : (
-                    "Use this model"
-                  )}
-                </button>
-                <button
-                  className="ghost"
-                  style={{ padding: "2px 10px", whiteSpace: "nowrap", flexShrink: 0, fontSize: 11 }}
-                  title="Delete this model file from disk"
-                  onClick={async () => {
-                    if (!confirm(`Delete ${m.filename || m.id} from disk?`)) return;
-                    try {
-                      await deleteDownloadedModel(m.path);
-                      await runScan();
-                    } catch (e) {
-                      console.warn("delete failed", e);
-                    }
-                  }}
-                >
-                  Delete
-                </button>
-                <span
-                  className="model-memory-indicator"
-                  title={mc.text}
-                  style={{ background: mc.color }}
-                />
+              <div className="model-card-badges">
+                {m.paramCountLabel && <span className="badge">{m.paramCountLabel}</span>}
+                {m.quantization && <span className="badge">{m.quantization}</span>}
+                {m.hasVision && <span className="badge vision">vision</span>}
+                <span className={`badge ram-badge ram-${ram}`}>
+                  {ram === "fits" ? "Fits RAM" : ram === "tight" ? "Tight" : "Too large"}
+                </span>
               </div>
             </div>
+            <div className="model-card-meta">
+              <span className="model-card-author" title={m.source}>
+                {m.architecture || m.source}
+              </span>
+              <span className="model-card-size">{humanSize(m.sizeBytes)}</span>
+            </div>
+
             {isStarting && (
-              <div className="model-loading-note">
-                <span className="local-spinner" />
-                Starting llama-server and loading the model onto your GPU. This can take 5–20s for larger models.
+              <div className="model-card-progress">
+                <div className="model-card-progress-bar">
+                  <div className="model-card-progress-fill" style={{ width: "0%" }} />
+                </div>
+                <div className="model-card-progress-info">
+                  <span>Starting llama-server and loading model…</span>
+                </div>
               </div>
             )}
+
+            {isRunning && (
+              <div className="model-card-status done">
+                Running on port {active.port} · Ready to use
+                {active.nGpuLayers > 0
+                  ? ` · ${active.nGpuLayers} layer${active.nGpuLayers === 1 ? "" : "s"} on GPU`
+                  : active.nGpuLayers === 0
+                    ? " · CPU only"
+                    : ""}
+              </div>
+            )}
+
             {err && (
-              <div className="model-error">
-                Couldn't load this model: {err}
+              <div className="model-card-status error">{err}</div>
+            )}
+
+            <div className="model-card-actions">
+              {isRunning ? (
+                <button
+                  className="primary danger"
+                  onClick={() => void handleStop()}
+                  disabled={loading}
+                >
+                  Stop server
+                </button>
+              ) : (
+                <button
+                  className="primary"
+                  onClick={() => void handleUseModel(m)}
+                  disabled={isStarting || loading || ram === "too_large"}
+                >
+                  {isStarting ? "Starting…" : "Use this model"}
+                </button>
+              )}
+            </div>
+
+            {ram !== "fits" && (
+              <div className="model-card-desc">
+                {ram === "tight" ? "⚠️ May run slowly with current RAM" : "❌ Requires more RAM than available"}
               </div>
             )}
+
             <details className="model-advanced">
               <summary>Advanced</summary>
               <div className="model-advanced-fields">
@@ -671,20 +750,13 @@ function LocalModelsPanel() {
           </div>
         );
       })}
+      </div>
       <details className="model-advanced local-compaction-advanced">
         <summary>Compaction (advanced)</summary>
         <LocalCompactionControls />
       </details>
-
-      <details className="model-market-section" open>
-        <summary>Model Market (Hugging Face)</summary>
-        <ModelMarket
-          onDownloadComplete={() => {
-            setLoading(true);
-            setLoaded(false);
-          }}
-        />
-      </details>
+      </>
+      )}
     </>
   );
 }
@@ -1149,6 +1221,7 @@ function ConnectorsPanel() {
   const [connecting, setConnecting] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<{ id: string; text: string } | null>(null);
+  const [modalFamily, setModalFamily] = useState<string | null>(null);
 
   const refresh = () => {
     void listConnectors().then((cs) => setConnectors(cs ?? []));
@@ -1204,67 +1277,129 @@ function ConnectorsPanel() {
     }
   };
 
+  // One OAuth flow (one consent screen) connects every member of the family.
+  const handleConnectFamily = (family: string) => {
+    setNote(null);
+    setConnecting(family);
+    void connectorConnectFamily(family).catch((e) => {
+      setConnecting(null);
+      setNote({ id: family, text: String(e) });
+    });
+  };
+
+  // Group connectors under their product family — one card per vendor. The
+  // Google Workspace set shares a single OAuth client/consent, so it collapses
+  // into one "Google" card (big logo, member chips, one Connect-all flow).
+  const families = useMemo(() => {
+    const out: { family: string; name: string; members: ConnectorWithStatus[] }[] = [];
+    const byFamily = new Map<string, ConnectorWithStatus[]>();
+    for (const c of connectors ?? []) {
+      const list = byFamily.get(c.family) ?? [];
+      list.push(c);
+      byFamily.set(c.family, list);
+    }
+    for (const [family, members] of byFamily) {
+      out.push({ family, name: FAMILY_NAMES[family] ?? members[0].displayName, members });
+    }
+    return out;
+  }, [connectors]);
+
+  const openFam = modalFamily ? (families.find((f) => f.family === modalFamily) ?? null) : null;
+
   return (
     <>
       <div className="panel-head">
         <h3>Connectors</h3>
       </div>
       <p className="estimate-note">
-        Connect a third-party account once, then attach it per conversation from
-        the chat composer. Attached connectors expose the vendor&apos;s tools
-        (search, read, create) for that conversation only. Write/create/delete
-        actions always require a per-action approval, regardless of permission mode.
+        Connect a third-party account once and its tools (search, read, create,
+        send) become available in every conversation automatically — the model
+        picks the right connector when a task needs it. Read actions always
+        auto-run; write/create/delete/send actions follow the conversation&apos;s
+        approval mode (card in Manual / Read Only, auto-run in Auto-Edit and
+        Full Auto).
       </p>
       <div className="skill-list">
-        {(connectors ?? []).map((c) => {
-          const st = c.status;
-          const statusLabel = !st.connected
-            ? "Not connected"
-            : st.expired
-              ? "Token expired"
-              : st.accountDisplay
-                ? `Connected as ${st.accountDisplay}`
-                : "Connected";
-          const isConnecting = connecting === c.id;
-          const isBusy = busy === c.id;
+        {families.map((f) => {
+          const connectedCount = f.members.filter(
+            (c) => c.status.connected && !c.status.expired
+          ).length;
+          const allConnected = connectedCount === f.members.length;
+          const familyLabel =
+            connectedCount === 0
+              ? "Not connected"
+              : allConnected
+                ? `All ${f.members.length} connected`
+                : `${connectedCount} of ${f.members.length} connected`;
+          const single = f.members.length === 1;
+          const isConnecting =
+            connecting === f.family || (single && connecting === f.members[0].id);
+          const connect = () =>
+            single ? handleConnect(f.members[0].id) : handleConnectFamily(f.family);
+          const openModal = () => setModalFamily(f.family);
           return (
-            <div className="skill-card" key={c.id}>
-              <div className="skill-card-head">
-                <strong>
-                  <span className="connector-icon" aria-hidden>{c.icon}</span>{" "}
-                  {c.displayName}
-                </strong>
-                <span className={`connector-status${st.expired ? " expired" : ""}${st.connected ? " ok" : ""}`}>
-                  {statusLabel}
-                </span>
-              </div>
-              {st.grantedScopes && (
-                <div className="connector-scopes">
-                  <span className="muted">Scopes:</span> {st.grantedScopes}
+            <div className="skill-card connector-card connector-family-card" key={f.family}>
+              <div
+                className="connector-card-main connector-family-head"
+                role="button"
+                tabIndex={0}
+                onClick={openModal}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    openModal();
+                  }
+                }}
+                title={single ? undefined : "Click to view every product"}
+              >
+                <div className="connector-card-icon connector-family-icon">
+                  <FamilyIcon family={f.family} size={40} />
                 </div>
-              )}
-              {note?.id === c.id && (
-                <div className="connector-note">{note.text}</div>
-              )}
-              <div className="skill-card-actions">
-                {st.connected ? (
-                  <button
-                    className="ghost"
-                    disabled={isBusy}
-                    onClick={() => void handleDisconnect(c.id)}
-                  >
-                    {isBusy ? "Disconnecting…" : "Disconnect"}
-                  </button>
-                ) : (
-                  <button
-                    className="primary"
-                    disabled={isConnecting}
-                    onClick={() => handleConnect(c.id)}
-                  >
-                    {isConnecting ? "Authorizing…" : "Connect"}
-                  </button>
-                )}
+                <div className="connector-card-info">
+                  <div className="connector-card-title-row">
+                    <strong className="connector-card-title">{f.name}</strong>
+                  </div>
+                  {f.members.length > 1 && (
+                    <div className="connector-member-chips">
+                      {f.members.slice(0, 4).map((c) => {
+                        const on = c.status.connected && !c.status.expired;
+                        return (
+                          <span
+                            className={`connector-member-chip${on ? "" : " off"}`}
+                            key={c.id}
+                            title={c.displayName}
+                          >
+                            {ConnectorIcon({ id: c.id, size: 16 }) ?? (
+                              <span className="connector-fallback-icon">{c.icon}</span>
+                            )}
+                          </span>
+                        );
+                      })}
+                      {f.members.length > 4 && (
+                        <span className="connector-more">+{f.members.length - 4} more</span>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className="connector-family-side">
+                  <span className="connector-family-count">{familyLabel}</span>
+                  {!allConnected && (
+                    <button
+                      className="primary"
+                      disabled={isConnecting}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        connect();
+                      }}
+                    >
+                      {isConnecting ? "Authorizing…" : single ? "Connect" : "Connect all"}
+                    </button>
+                  )}
+                </div>
               </div>
+              {note?.id === f.family && (
+                <div className="connector-note connector-family-note">{note.text}</div>
+              )}
             </div>
           );
         })}
@@ -1272,6 +1407,72 @@ function ConnectorsPanel() {
           <div className="empty-reserved">No connectors available.</div>
         )}
       </div>
+      {openFam && (
+        <Modal
+          title={openFam.name}
+          onClose={() => setModalFamily(null)}
+          actions={<button className="ghost" onClick={() => setModalFamily(null)}>Close</button>}
+        >
+          <p className="estimate-note">
+            {openFam.members.length > 1
+              ? "One OAuth consent covers every product below — use the card's Connect all, or manage each connection here."
+              : "Manage this connection."}
+          </p>
+          <div className="connector-modal-list">
+            {openFam.members.map((c) => {
+              const st = c.status;
+              const statusLabel = st.connected && st.expired ? "Token expired" : "Not connected";
+              const isConnecting = connecting === c.id;
+              const isBusy = busy === c.id;
+              const canConnect = openFam.members.length === 1;
+              return (
+                <div className="connector-sub-row" key={c.id}>
+                  <div className="connector-sub-icon">
+                    {ConnectorIcon({ id: c.id, size: 20 }) ?? (
+                      <span className="connector-fallback-icon">{c.icon}</span>
+                    )}
+                  </div>
+                  <div className="connector-card-info">
+                    <div className="connector-card-title-row">
+                      <strong className="connector-card-title">{c.displayName}</strong>
+                      {(!st.connected || st.expired) && (
+                        <span
+                          className={`connector-status${st.expired ? " expired" : ""}${st.connected ? " ok" : ""}`}
+                        >
+                          {statusLabel}
+                        </span>
+                      )}
+                    </div>
+                    {note?.id === c.id && <div className="connector-note">{note.text}</div>}
+                  </div>
+                  <div className="connector-sub-action">
+                    {st.connected ? (
+                      <button
+                        className="ghost"
+                        disabled={isBusy}
+                        onClick={() => void handleDisconnect(c.id)}
+                      >
+                        {isBusy ? "Disconnecting…" : "Disconnect"}
+                      </button>
+                    ) : canConnect ? (
+                      <button
+                        className="primary"
+                        disabled={isConnecting}
+                        onClick={() => handleConnect(c.id)}
+                      >
+                        {isConnecting ? "Authorizing…" : "Connect"}
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
+            {note?.id === modalFamily && (
+              <div className="connector-note">{note.text}</div>
+            )}
+          </div>
+        </Modal>
+      )}
     </>
   );
 }

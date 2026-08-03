@@ -77,16 +77,16 @@ fn fs_target_path(name: &str, args: &Value) -> String {
 fn fs_tool_summary(name: &str, args: &Value) -> String {
     let path = fs_target_path(name, args);
     let verb = match name {
-        tools::WRITE_FILE => "write",
-        tools::EDIT_FILE => "edit",
-        tools::DELETE_FILE => "delete",
-        tools::MOVE_FILE => "move",
-        tools::COPY_FILE => "copy",
+        tools::WRITE_FILE => "Write a file at",
+        tools::EDIT_FILE => "Edit a file at",
+        tools::DELETE_FILE => "Delete",
+        tools::MOVE_FILE => "Move",
+        tools::COPY_FILE => "Copy",
         _ => name,
     };
     if name == tools::MOVE_FILE || name == tools::COPY_FILE {
         let src = args.get("src").and_then(|v| v.as_str()).unwrap_or("");
-        format!("{verb} {src} → {path}")
+        format!("{verb} {src} to {path}")
     } else {
         format!("{verb} {path}")
     }
@@ -166,7 +166,8 @@ async fn run_gated_fs_tool(
 }
 
 /// Execute a connector-originated tool that the permission gate flagged for
-/// approval (any Write-kind connector action). Mirrors `run_gated_fs_tool`:
+/// approval (a Write-kind connector action under read_only/manual). Mirrors
+/// `run_gated_fs_tool`:
 /// register a pending approval, emit `chat:approval-request`, pause on the
 /// oneshot until the UI resolves, then call the vendor's MCP server. A denial
 /// (or a dropped sender on stream cancel) returns a "denied" tool result.
@@ -209,16 +210,40 @@ async fn run_gated_connector_tool(
         );
     }
 
-    // Approved — forward to the vendor's MCP server.
+    execute_connector_tool(attached, app, idx, name, args).await
+}
+
+/// Execute an approved connector tool call. Fallback tools (gmail REST while
+/// Google's MCP service layer is gated) run locally; everything else forwards
+/// to the vendor's MCP server.
+async fn execute_connector_tool(
+    attached: &[crate::connectors::AttachedConnector],
+    app: &AppHandle,
+    idx: usize,
+    name: &str,
+    args: &Value,
+) -> String {
+    if attached[idx].fallback.contains(name) {
+        let connector_id = attached[idx].connector_id.as_str();
+        let result = if connector_id == "gmail" {
+            crate::connectors::gmail_api::call_tool(app, name, args).await
+        } else {
+            crate::connectors::google_rest::call_tool(app, connector_id, name, args).await
+        };
+        return match result {
+            Ok(text) => text,
+            Err(e) => format!("Connector tool `{name}` failed: {e}"),
+        };
+    }
     match attached[idx].session.call_tool(name, args).await {
         Ok(text) => text,
         Err(e) => format!("Connector tool `{name}` failed: {e}"),
     }
 }
 
-/// Human-facing summary for a connector tool approval card — surfaces the
-/// connector name + tool name + a compact preview of the arguments so the
-/// user can see what's about to be created/changed before approving.
+/// Human-facing summary for a connector tool approval card — a plain-language
+/// description of the task ("Gmail: send an email to x — subject"), never the
+/// raw tool name, so the card reads like a sentence rather than an API call.
 fn connector_tool_summary(
     attached: &[crate::connectors::AttachedConnector],
     idx: usize,
@@ -226,34 +251,184 @@ fn connector_tool_summary(
     args: &Value,
 ) -> String {
     let connector = attached[idx].display_name.as_str();
-    let preview = compact_args_preview(args);
-    format!("{connector} · {name}{preview}")
+    let lower = name.to_ascii_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let has = |ks: &[&str]| ks.iter().any(|k| tokens.contains(k));
+    let tos = args
+        .get("to")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let subj = args.get("subject").and_then(|v| v.as_str()).unwrap_or("");
+    let task = if has(&["send"]) {
+        if !tos.is_empty() {
+            if !subj.is_empty() {
+                format!("send an email to {tos} — {subj}")
+            } else {
+                format!("send an email to {tos}")
+            }
+        } else {
+            "send an email".to_string()
+        }
+    } else if has(&["draft"]) {
+        if !tos.is_empty() {
+            format!("create a draft email to {tos}")
+        } else {
+            "create a draft email".to_string()
+        }
+    } else if has(&["label", "modify", "tag"]) {
+        "update labels on a thread".to_string()
+    } else if has(&["delete", "remove", "trash"]) {
+        "delete or remove content".to_string()
+    } else if has(&["create", "insert", "add", "write"]) {
+        "create content".to_string()
+    } else if has(&["update", "edit", "patch"]) {
+        "update content".to_string()
+    } else {
+        format!("run the {name} action")
+    };
+    format!("{connector}: {task}")
 }
 
-/// Compact, single-line preview of a tool call's arguments, capped so the
-/// approval card stays readable. Falls back to the raw JSON when truncated.
-fn compact_args_preview(args: &Value) -> String {
-    let s = if args.is_object() {
-        // Prefer a "title"/"name"/"path"/"url" hint if present, else the whole object.
-        if let Some(hint) = ["title", "name", "path", "url", "query", "parent"]
-            .iter()
-            .find_map(|k| args.get(k).and_then(|v| v.as_str()).map(|v| format!("{k}: {v}")))
-        {
-            hint
-        } else {
-            serde_json::to_string(args).unwrap_or_default()
+/// Human-facing summary for a system-tool approval card — a plain sentence of
+/// the task ("Download https://… to D:\…\model.safetensors" / "Run shell
+/// command: huggingface-cli download …").
+fn system_tool_summary(name: &str, args: &Value) -> String {
+    match name {
+        tools::DOWNLOAD_FILE => {
+            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let dest = args.get("dest_path").and_then(|v| v.as_str()).unwrap_or("");
+            if !url.is_empty() && !dest.is_empty() {
+                format!("Download {url} to {dest}")
+            } else if !url.is_empty() {
+                format!("Download {url}")
+            } else {
+                "Download a file from a URL".to_string()
+            }
         }
-    } else {
-        serde_json::to_string(args).unwrap_or_default()
-    };
-    const CAP: usize = 160;
-    if s.len() > CAP {
-        format!(" — {}…", &s[..s.char_indices().take(CAP).last().map(|(i, _)| i).unwrap_or(CAP)])
-    } else if s.is_empty() {
-        String::new()
-    } else {
-        format!(" — {s}")
+        tools::RUN_SHELL => {
+            let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            let cmd = cmd.trim();
+            let shown: String = cmd.chars().take(120).collect();
+            if shown.is_empty() {
+                "Run a shell command".to_string()
+            } else if shown.len() < cmd.len() {
+                format!("Run shell command: {shown}…")
+            } else {
+                format!("Run shell command: {shown}")
+            }
+        }
+        _ => name.to_string(),
     }
+}
+
+/// Execute a system tool (`download_file` / `run_shell` / status / cancel)
+/// against the background TaskManager. The permission gate has already
+/// decided (or the user approved); these calls either start a task, or read/
+/// cancel an existing one, and return text for the model.
+async fn execute_system_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -> String {
+    use tools::{CANCEL_TASK, DOWNLOAD_FILE, DOWNLOAD_PROGRESS, GET_TASK_STATUS, RUN_SHELL};
+    let tasks = app.state::<crate::TaskState>();
+    let task_id = args.get("task_id").and_then(|v| v.as_str()).unwrap_or("").trim();
+    match name {
+        DOWNLOAD_FILE => {
+            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let dest = args.get("dest_path").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if url.is_empty() {
+                return "Error: download_file requires a non-empty \"url\".".to_string();
+            }
+            if dest.is_empty() {
+                return "Error: download_file requires a non-empty \"dest_path\".".to_string();
+            }
+            let id = tasks.0.start_download(Some(app), sid, url, dest);
+            format!(
+                "Download started (task {id}) — downloading {url} to {dest} in the background. \
+                 Poll download_progress with task_id=\"{id}\" to track it, and report the final \
+                 result to the user when it completes."
+            )
+        }
+        DOWNLOAD_PROGRESS | GET_TASK_STATUS => {
+            if task_id.is_empty() {
+                return format!(
+                    "Error: {name} requires a non-empty \"task_id\" (returned by download_file / run_shell)."
+                )
+                .to_string();
+            }
+            tasks.0.status_json(task_id)
+        }
+        CANCEL_TASK => {
+            if task_id.is_empty() {
+                return "Error: cancel_task requires a non-empty \"task_id\".".to_string();
+            }
+            tasks.0.cancel(task_id)
+        }
+        RUN_SHELL => {
+            let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if command.is_empty() {
+                return "Error: run_shell requires a non-empty \"command\".".to_string();
+            }
+            let workdir = args.get("workdir").and_then(|v| v.as_str());
+            let id = tasks.0.start_shell(Some(app), sid, command, workdir);
+            format!(
+                "Shell task {id} started — running natively in the background. \
+                 Poll get_task_status with task_id=\"{id}\" for the output, and report \
+                 the result to the user when it finishes."
+            )
+        }
+        other => format!("Error: unknown system tool \"{other}\"."),
+    }
+}
+
+/// Execute a system tool that the permission gate flagged for approval.
+/// Mirrors `run_gated_fs_tool`: register a pending approval, emit
+/// `chat:approval-request`, pause on the oneshot until the UI resolves, then
+/// execute. A denial returns a "denied" tool result.
+async fn run_gated_system_tool(
+    mgr: &Arc<ChatManager>,
+    app: &AppHandle,
+    sid: &str,
+    name: &str,
+    args: &Value,
+) -> String {
+    let summary = system_tool_summary(name, args);
+    let (pending_id, rx) = mgr.register_pending_approval(sid, name, args.clone(), summary.clone());
+
+    let _ = app.emit(
+        "chat:approval-request",
+        ChatApprovalRequestPayload {
+            chat_session_id: sid.to_string(),
+            pending_id: pending_id.clone(),
+            tool: name.to_string(),
+            summary,
+            args: args.clone(),
+        },
+    );
+
+    let approved = rx.await.unwrap_or(false);
+    let _ = app.emit(
+        "chat:approval-resolved",
+        ChatApprovalResolvedPayload {
+            chat_session_id: sid.to_string(),
+            pending_id,
+            approved,
+        },
+    );
+
+    if !approved {
+        return format!(
+            "The user denied the {name} action. Do not retry it unless the user explicitly asks."
+        );
+    }
+
+    execute_system_tool(app, sid, name, args).await
 }
 
 /// Run a tool and, if it produced a file, notify the UI. Returns the text to
@@ -291,10 +466,10 @@ pub(crate) async fn run_tool(
     }
 
     // Connector-originated tools (OAuth-backed remote MCP tools, e.g. Notion).
-    // A matched tool name routes to the vendor's MCP server — Writes (create/
-    // update/delete) always gate through the approval flow (the carve-out, like
-    // `delete_file`); Reads auto-run. This reuses the SAME approval oneshot as
-    // filesystem tools — no parallel gating mechanism.
+    // A matched tool name routes to the vendor's MCP server. Writes are gated
+    // per the session's permission mode (approval under read_only/manual,
+    // auto-run under auto_edit/full_auto); Reads auto-run. This reuses the
+    // SAME approval oneshot as filesystem tools — no parallel gating mechanism.
     if let Some((idx, kind)) = crate::connectors::find_tool(&caps.attached_connectors, name) {
         let decision = permission::check_connector_permission(mode, kind);
         if matches!(decision, permission::PermissionDecision::NeedsApproval) {
@@ -309,11 +484,23 @@ pub(crate) async fn run_tool(
             )
             .await;
         }
-        // Read-kind: auto-run, forward to the MCP server.
-        return match caps.attached_connectors[idx].session.call_tool(name, args).await {
-            Ok(text) => text,
-            Err(e) => format!("Connector tool `{name}` failed: {e}"),
-        };
+        // AutoRun (Read kind, or Write under auto_edit/full_auto): execute
+        // immediately.
+        return execute_connector_tool(&caps.attached_connectors, app, idx, name, args).await;
+    }
+
+    // System tools (background downloads + native shell). `download_file` is
+    // gated like a connector write (approval under read_only/manual, auto-run
+    // under auto_edit/full_auto); `run_shell` is ALWAYS gated (native code
+    // execution); status/cancel tools auto-run. The gate decides BEFORE the
+    // task starts — the approval card is the only guard on what a download
+    // writes to disk, so it stays meaningful.
+    if permission::is_system_tool(name) {
+        let decision = permission::check_system_permission(mode, name);
+        if matches!(decision, permission::PermissionDecision::NeedsApproval) {
+            return run_gated_system_tool(mgr, app, sid, name, args).await;
+        }
+        return execute_system_tool(app, sid, name, args).await;
     }
 
     // Filesystem tools route through the central permission gate. Every FS

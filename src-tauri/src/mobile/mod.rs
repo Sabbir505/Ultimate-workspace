@@ -7,8 +7,11 @@
 //! chat requests through the exact same code path as desktop chats.
 
 pub mod commands;
+pub mod dispatch;
 pub mod protocol;
 pub mod relay;
+pub mod relay_owner;
+pub mod relay_ws;
 pub mod session_chat;
 
 #[cfg(test)]

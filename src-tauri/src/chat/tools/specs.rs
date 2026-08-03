@@ -47,6 +47,16 @@ pub fn openai_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -> V
         specs.push(openai_fn(MOVE_FILE, MOVE_FILE_DESC, src_dest_parameters()));
         specs.push(openai_fn(COPY_FILE, COPY_FILE_DESC, src_dest_parameters()));
     }
+    // System tools. The mutating ones (download_file, run_shell) are stripped
+    // under read_only exactly like filesystem writes; the read-only task
+    // tracking/cancelling tools are always present.
+    if mode != permission::PermissionMode::ReadOnly {
+        specs.push(openai_fn(DOWNLOAD_FILE, DOWNLOAD_FILE_DESC, download_file_parameters()));
+        specs.push(openai_fn(RUN_SHELL, RUN_SHELL_DESC, run_shell_parameters()));
+    }
+    specs.push(openai_fn(DOWNLOAD_PROGRESS, DOWNLOAD_PROGRESS_DESC, task_id_parameters()));
+    specs.push(openai_fn(GET_TASK_STATUS, GET_TASK_STATUS_DESC, task_id_parameters()));
+    specs.push(openai_fn(CANCEL_TASK, CANCEL_TASK_DESC, task_id_parameters()));
     if caps.code_exec {
         specs.push(openai_fn(RUN_CODE, RUN_CODE_DESC, run_code_parameters()));
     }
@@ -55,7 +65,7 @@ pub fn openai_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -> V
     // we don't store the full input schema per turn, we advertise a permissive
     // object schema and let the server validate. Write-kind tools get an
     // approval note in the description so the model knows each will be gated.
-    append_connector_tools_openai(&caps.attached_connectors, &mut specs);
+    append_connector_tools_openai(&caps.attached_connectors, mode, &mut specs);
     specs
 }
 
@@ -108,10 +118,17 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -
         specs.push(anthropic_fn(MOVE_FILE, MOVE_FILE_DESC, src_dest_parameters()));
         specs.push(anthropic_fn(COPY_FILE, COPY_FILE_DESC, src_dest_parameters()));
     }
+    if mode != permission::PermissionMode::ReadOnly {
+        specs.push(anthropic_fn(DOWNLOAD_FILE, DOWNLOAD_FILE_DESC, download_file_parameters()));
+        specs.push(anthropic_fn(RUN_SHELL, RUN_SHELL_DESC, run_shell_parameters()));
+    }
+    specs.push(anthropic_fn(DOWNLOAD_PROGRESS, DOWNLOAD_PROGRESS_DESC, task_id_parameters()));
+    specs.push(anthropic_fn(GET_TASK_STATUS, GET_TASK_STATUS_DESC, task_id_parameters()));
+    specs.push(anthropic_fn(CANCEL_TASK, CANCEL_TASK_DESC, task_id_parameters()));
     if caps.code_exec {
         specs.push(anthropic_fn(RUN_CODE, RUN_CODE_DESC, run_code_parameters()));
     }
-    append_connector_tools_anthropic(&caps.attached_connectors, &mut specs);
+    append_connector_tools_anthropic(&caps.attached_connectors, mode, &mut specs);
     specs
 }
 
@@ -365,6 +382,60 @@ fn run_code_parameters() -> Value {
     })
 }
 
+// ---- System tool parameter schemas ----
+
+fn download_file_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "The absolute http(s) URL of the file to download \
+                    (e.g. a Hugging Face resolve URL for a .safetensors / .bin \
+                    weight file).",
+            },
+            "dest_path": {
+                "type": "string",
+                "description": "Absolute destination path on this machine, e.g. \
+                    \"D:\\local models\\model.safetensors\". Parent directories \
+                    are created automatically. Any drive/directory is allowed.",
+            }
+        },
+        "required": ["url", "dest_path"],
+    })
+}
+
+fn run_shell_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": "The shell command to run natively (cmd.exe / sh).",
+            },
+            "workdir": {
+                "type": "string",
+                "description": "Optional working directory for the command. Defaults \
+                    to the user's home directory when omitted or invalid.",
+            }
+        },
+        "required": ["command"],
+    })
+}
+
+fn task_id_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "The task id returned by download_file / run_shell.",
+            }
+        },
+        "required": ["task_id"],
+    })
+}
+
 // ---- Filesystem tool parameter schemas ----
 
 fn path_parameters() -> Value {
@@ -572,10 +643,20 @@ fn permissive_params() -> Value {
 
 fn append_connector_tools_openai(
     attached: &[crate::connectors::AttachedConnector],
+    mode: permission::PermissionMode,
     specs: &mut Vec<Value>,
 ) {
     for att in attached {
         for name in att.tools.keys() {
+            // Under read_only, connector Write tools are stripped from the
+            // schema (mirrors the filesystem mutating tools) so the model
+            // cannot even propose them.
+            if mode == permission::PermissionMode::ReadOnly
+                && att.tools.get(name).map(|(k, _)| *k)
+                    == Some(permission::ConnectorToolKind::Write)
+            {
+                continue;
+            }
             let description = connector_tool_description(att, name);
             specs.push(openai_fn(name, &description, permissive_params()));
         }
@@ -584,10 +665,17 @@ fn append_connector_tools_openai(
 
 fn append_connector_tools_anthropic(
     attached: &[crate::connectors::AttachedConnector],
+    mode: permission::PermissionMode,
     specs: &mut Vec<Value>,
 ) {
     for att in attached {
         for name in att.tools.keys() {
+            if mode == permission::PermissionMode::ReadOnly
+                && att.tools.get(name).map(|(k, _)| *k)
+                    == Some(permission::ConnectorToolKind::Write)
+            {
+                continue;
+            }
             let description = connector_tool_description(att, name);
             specs.push(anthropic_fn(name, &description, permissive_params()));
         }

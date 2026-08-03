@@ -20,11 +20,10 @@ import {
   type Pane,
 } from "../../state/panes";
 import { useProjectsStore } from "../../state/projects";
-import { useUiStore } from "../../state/ui";
 import { harnessShortName } from "../../types";
 import { BrowserPane } from "./BrowserPane";
+import { DevDiffPanel } from "./DevDiffPanel";
 import { TerminalPane } from "./TerminalPane";
-
 const GAP_PX = 10;
 
 interface GridFractions {
@@ -127,6 +126,7 @@ export function PaneGrid() {
             <div>Open a session from the sidebar, or press ⌘/Ctrl+K to search.</div>
           </div>
         </div>
+        <DevDiffPanel />
         <DormantBrowsers panes={panes} />
       </>
     );
@@ -184,6 +184,7 @@ export function PaneGrid() {
           );
         })}
       </div>
+      <DevDiffPanel />
       <DormantBrowsers panes={panes} />
     </>
   );
@@ -472,6 +473,7 @@ function SplitLayout({
           />
         ))}
       </div>
+      <DevDiffPanel />
     </div>
   );
 }
@@ -527,7 +529,6 @@ const PaneFrame = memo(function PaneFrame({
   // Dev-only live memory reading for this pane (bytes). Selected per-pane so a
   // single header re-renders when its value changes, not the whole grid.
   const memBytes = usePanesStore((s) => s.paneMemory[pane.paneId] ?? 0);
-  const openPeek = useUiStore((s) => s.openPeek);
 
   const isTerminal = pane.data.kind === "terminal";
   const isBrowser = pane.data.kind === "browser";
@@ -573,16 +574,13 @@ const PaneFrame = memo(function PaneFrame({
           </span>
         )}
         {sessionId && (
-          <button
-            className="ghost pane-action"
-            title="Peek at project diff (read-only)"
-            onClick={(e) => {
-              e.stopPropagation();
-              openPeek({ mode: "diff", projectId: projectIdForSession(sessionId), filePath: null });
-            }}
-          >
-            ⧉
-          </button>
+          // Diff peek entry point: removed — the per-pane Dev-tab side
+          // panel (DevDiffPanel) now serves this purpose, and it shows the
+          // focused pane's actual working tree (project root OR worktree).
+          // This header button was redundant: it always opened the project
+          // root's diff regardless of the session's worktree, which is the
+          // exact thing the DevDiffPanel was added to fix.
+          null
         )}
         {isBrowser && (
           <button
@@ -634,9 +632,4 @@ function stateTitle(state: string): string {
     default:
       return "idle";
   }
-}
-
-function projectIdForSession(sessionId: string): string | null {
-  const session = useProjectsStore.getState().sessions.find((s) => s.id === sessionId);
-  return session?.projectId ?? null;
 }

@@ -1976,3 +1976,368 @@ emits it into the deb's `/usr/share/applications/` on build.
 - `AI CONTEXT/RELEASE.md` — added a "Platforms" section explaining
   Windows NSIS + Linux AppImage + deb, and the per-platform auto-update
   story.
+
+## 2026-08-01 — Dev tab: per-pane file diff side panel + Send PR
+
+### What was built
+
+A right-side panel on the Dev tab that lists the files changed by the
+**focused** terminal pane's session, with click-to-view-diff (reusing
+`PeekPanel.tsx`) and a "Send PR" button at the top. The panel is bound
+to whichever terminal pane is currently focused, not global — see "Send
+PR prompt text" below for the exact wording and the reasoning behind it.
+
+### Send PR prompt text (recorded per PRD §13)
+
+Exact text sent verbatim into the pane's pty when the user clicks Send PR
+(literally, single string, no leading/trailing whitespace):
+
+> `commit these changes with a clear message and open a pull request`
+
+Source: `src/components/panes/DevDiffPanel.tsx` → `SEND_PR_PROMPT`.
+
+Why this wording:
+1. **"commit these changes"** — avoids a multi-step harness-side
+   confirmation flow ("should I stage first?", "stage all or per-file?").
+   The agent that produced the diff knows which files matter; a single
+   imperative verb tells it to use its own judgment on staging.
+2. **"with a clear message"** — the harness writes a meaningful message
+   based on the diff context, not a generic "wip" or "update". We
+   deliberately don't dictate the message format; the agent that
+   authored the change is best positioned to summarize it.
+3. **"and open a pull request"** — tells the harness to use `gh pr
+   create` (or surface a URL if `gh` isn't authenticated). A flow
+   that only commits and stops would leave the user with a follow-up
+   step; "open" bundles the push and the PR.
+
+Mechanics (in case this needs tuning later):
+- Sent via `writePty(paneId, SEND_PR_PROMPT + "\r")`. The trailing `\r`
+  is the same convention `BroadcastBar.tsx` uses to actually submit
+  rather than leave the text in the input box.
+- The text lands in the pane's own output stream, so the user sees the
+  prompt they sent — not a silent background action.
+- The button is disabled (and the title explains why) when the focused
+  pane has no changes, so an accidental click is impossible.
+- Conduit does **not** stage, commit, push, or call the GitHub API
+  itself. The "Conduit-native PR pipeline" option from the original
+  discussion is explicitly out of scope and deferred.
+
+### Per-pane working-directory resolution (PRD §7.10)
+
+The panel's working directory is resolved in this order
+(`paneCwd()` in `DevDiffPanel.tsx`):
+
+1. `SessionRecord.worktreePath` (set when the session was created
+   inside a worktree). **This is the case most likely to expose a
+   subtle bug** — naive implementations would pass the project root
+   and end up showing the wrong diff.
+2. `Project.path` (the typical non-worktree case).
+3. Empty string when neither resolves (non-git project, no project
+   binding) → the panel renders an empty state instead of erroring.
+
+The resolved path is forwarded into the new `get_changed_files`
+command AND into the new `PeekState.cwd` field, so a click-to-diff
+opens the worktree's diff rather than the project root's. This was
+the specific bug class the task called out as worth testing against
+(PRD §13: "test specifically against a worktree-based session").
+
+### Code surface
+
+**Rust (`src-tauri/src/`):**
+- `git.rs`:
+  - New `ChangedFile` struct (status, kind, path, oldPath; `#[serde(rename_all = "camelCase")]`).
+  - New `get_changed_files(path)` that shells out to
+    `git status --porcelain --untracked-files=all -z` and parses the
+    NUL-separated entries (renames/copies surface a second NUL token
+    for the old path). The `-z` is load-bearing — it lets filenames
+    contain spaces, tabs, quotes, or any other byte that would break
+    a line-split parse.
+  - `porcelain_kind()` collapses XY codes to a single letter
+    (M / A / D / R / C / U) so the UI doesn't render "Modified" twice
+    for `M ` and ` M`.
+- `commands/git_cmds.rs`: new `get_changed_files` Tauri command that
+  wraps the function above (mirrors the existing `get_git_status` /
+  `get_git_diff` shape).
+- `lib.rs`: registered the new command in the Tauri `invoke_handler`.
+
+**TypeScript (`src/`):**
+- `types.ts`: new `ChangedFile` interface mirroring the Rust struct.
+- `lib/ipc.ts`: new `getChangedFiles(path)` wrapper.
+- `state/ui.ts`: added `cwd: string | null` to `PeekState` so a
+  per-pane peek can target a worktree path. Default value updated to
+  satisfy the new field; existing call sites (`ProjectItem`,
+  `PaneGrid` ⧉) pass `cwd: null` to preserve their previous
+  project-root behavior.
+- `components/peek/PeekPanel.tsx`: when `peek.cwd` is set, `getGitDiff`
+  is called against that path instead of `project.path`. The file/diff
+  mode-toggle button carries `cwd` through so the user doesn't get
+  bounced back to the project root when toggling.
+- `components/panes/DevDiffPanel.tsx` (new): the panel itself.
+  Subscribes to `panes`, `focusedPaneId`, `sessions`, `projects`,
+  `selectedProjectId`. Polls the focused pane's `cwd` every 4s
+  (faster than the existing §7.11 project-status poll, because
+  per-pane state changes more often than per-project state — and the
+  §7.11 project poll is keyed on the project root, so it can't cover
+  worktree-scoped panes).
+- `components/panes/PaneGrid.tsx`: `<DevDiffPanel />` mounted in all
+  three branches of `PaneGrid` (empty / split / grid). The panel
+  returns `null` when no terminal is focused, so it disappears
+  entirely when only browsers are open.
+- `styles/global.css`:
+  - `.grid-wrap` flipped to `flex-direction: row` so the panel
+    becomes a fixed-width right column.
+  - New `.dev-diff-panel` and `.dev-diff-file` rules (per-kind accent
+    on the icon + left border, monospace paths, hover state).
+
+### Tests (all green, see `cargo test --lib git::`)
+
+```
+test git::tests::get_changed_files_empty_on_non_repo ... ok
+test git::tests::get_changed_files_lists_modified_added_untracked ... ok
+test git::tests::porcelain_kind_collapses_xy_sides ... ok
+... (plus 5 pre-existing git::tests passed unchanged)
+```
+
+The two new behavior tests build a real temp git repo via the same
+shell-out path the command uses, then assert the parser surfaces
+Modified / Added / Untracked entries with the right paths. The
+porcelain-kind test pins the XY-collapse contract so a future refactor
+can't silently start rendering "Modified" twice.
+
+### Manual verification (per PRD §13)
+
+Two worktree-specific scenarios to check on a real machine before
+shipping:
+
+1. **Two panes, two worktrees, one project.** Open the same project
+   in two worktrees; spawn an agent in each. The panel must show
+   pane A's files when pane A is focused, pane B's when pane B is
+   focused — never a combined view, never a stale view from the
+   previously-focused pane.
+2. **Worktree vs project root.** With a pane in a worktree that has
+   uncommitted changes, click a file in the panel. The PeekPanel
+   must show THAT worktree's diff, not the project root's. (The
+   regression to look for: PeekPanel reverting to the project
+   root on the file/diff toggle — that's why `cwd` is preserved
+   across the toggle in `PeekPanel.tsx`.)
+
+### Known limitations / out of scope (deliberate)
+
+- The `+ "\r"` convention assumes the harness is in a state where
+  the Enter key submits (true for both Claude Code and Kimi Code
+  in their default REPL state). If a future harness uses a
+  paste-mode submit, this would need to change.
+- The 4s poll is independent of the §7.11 8s project poll. Could
+  be unified into a single store-driven interval later; for v1 the
+  per-pane responsiveness is worth the small extra IPC.
+- The panel is hidden when a non-terminal pane is focused (browser
+  panes have no working tree). The header bar of a browser pane
+  shows no diff controls — could be added later if requested.
+- Combined/multi-pane diff view: explicitly out of scope per the
+  task spec ("not global, single-pane-scoped only").
+
+### Follow-ups
+
+- Consider a "branch" header above the file list (currently shown
+  only as a tooltip on the cwd path) once the panel grows.
+- If the per-pane 4s poll becomes chatty, fold it into a single
+  `refreshGitStatus` pass that iterates over each pane's cwd rather
+  than the current project-keyed map.
+- Add a per-pane memory chip next to the cwd once we surface
+  worktree-relative memory in the pane header.
+
+---
+
+## 2026-08-02 — Notion connector: fixed OAuth callback port (Notion "no client_id configured" + redirect_uri mismatch)
+
+### Symptom
+
+Clicking **Settings → Connectors → Connect** on Notion failed with
+"connector `notion` has no client_id configured (set it before connecting)".
+
+### Root causes (two, both blocking)
+
+1. **Empty client_id in the running binary.** `NOTION_CLIENT_ID` /
+   `NOTION_CLIENT_SECRET` are baked in at compile time via `option_env!`
+   (`connectors/config.rs`); any build without those env vars falls back to
+   `""` and `oauth::start` rejects Connect with "no client_id configured".
+   The real values exist only as **GitHub Actions secrets**
+   (`${{ secrets.NOTION_CLIENT_ID }}` in the release workflow), so dev
+   builds never had them. Not a code bug; a build-environment gap.
+2. **redirect_uri mismatch (code bug).** The system-browser OAuth flow
+   (rewritten from the original auth-webview design — see below) bound a
+   loopback listener on a **random** high port and sent
+   `redirect_uri=http://127.0.0.1:<random>/oauth/callback` in the authorize
+   request. Notion does **strict exact-string matching** against registered
+   redirect URIs and does NOT honor RFC 8252 §7.3 loopback port matching —
+   the same incompatibility reported against Claude Code
+   (anthropics/claude-code#52896, #52961): dynamic/unregistered ports are
+   rejected with "Invalid redirect_uri for OAuth client". The previously
+   documented `https://conduit.local/oauth/callback` sentinel only works
+   with webview `on_navigation` interception (no HTTP request ever lands),
+   which the system-browser flow can't do.
+
+### What was changed
+
+- **Fixed callback port:** `CONNECTORS[notion].redirect_uri` is now
+  `http://localhost:45123/oauth/callback` (`NOTION_CALLBACK_PORT = 45123`,
+  below the Windows ephemeral range 49152+). `oauth::start` parses the port
+  from the connector's own `redirect_uri` (new `loopback_callback_port`
+  helper: `localhost`/`127.0.0.1`/`[::1]` + fixed port only) and binds
+  `127.0.0.1:<port>`. Bind failures / non-loopback URIs produce clear
+  `oauth:callback` errors instead of a silent 5-minute hang. The same
+  `redirect_uri` string flows into the authorize URL and the token-exchange
+  body (Notion requires it in both, verbatim).
+- **Registration step (user action):** register
+  `http://localhost:45123/oauth/callback` verbatim in the Notion developer
+  portal (public connection → OAuth redirect URIs), replacing the old
+  `https://conduit.local/oauth/callback` guidance.
+- **Credentials for dev builds (user action):** set
+  `$env:NOTION_CLIENT_ID` / `$env:NOTION_CLIENT_SECRET` in the shell before
+  `npm run tauri dev` (or persist as user env vars); the release workflow's
+  GitHub secrets remain unchanged.
+
+### Notes / context
+
+- The system-browser rewrite itself predates this fix and was **not
+  previously logged**: the 2026-07-26 connector entry documents the
+  original auth-webview design (native `WebviewWindowBuilder` +
+  `on_navigation` redirect interception, no loopback server). The rewrite
+  to system browser + one-shot loopback was made because Notion's OAuth
+  page breaks under WebView2 popup restrictions (noted in `oauth.rs`
+  header). The rewrite changed the redirect mechanics but left the sentinel
+  `redirect_uri` value in place — the exact mismatch fixed here.
+- AUDIT.md rows 3.3/8.2 ("OAuth fixed port 17963") now read: fixed port
+  **45123**, still loopback-only (`127.0.0.1`), still random-port-free.
+- Verification: `cargo test --lib` = 256 passed / 0 failed / 9 ignored
+  (new: `loopback_port_parsed_from_connector_redirect_uri`).
+
+### Follow-up fix (same day): MCP endpoint split — api.notion.com tokens are invalid for mcp.notion.com
+
+Live round-trip (first real end-to-end test — the 2026-07-26 entry noted the
+PRD §13 live test was still pending) found a second, deeper defect:
+
+- **Symptom:** Connect + attach succeeded, but every chat turn logged
+  `notion connect failed: mcp initialize failed: ... error: Auth required` —
+  the model saw no connector tools ("no connector available").
+- **Root cause:** the connector's OAuth endpoints were the **REST API** ones
+  (`https://api.notion.com/v1/oauth/authorize|token`), which mint `ntn_…`
+  tokens valid for the REST API only. The remote MCP server
+  (`https://mcp.notion.com/mcp`) is itself an **RFC 8707 resource server**
+  with its OWN authorization server (discovered live via
+  `.well-known/oauth-authorization-server`):
+  - `authorization_endpoint: https://mcp.notion.com/authorize`
+  - `token_endpoint: https://mcp.notion.com/token`
+  - `registration_endpoint: https://mcp.notion.com/register` (DCR; not
+    needed), `revocation_endpoint: /token`, `scopes: ["default"]`,
+    `client_id_metadata_document_supported: true`.
+  Probing with the REST token returned `401 invalid_token`.
+- **Confirmed live:** `mcp.notion.com/authorize` **accepts the same
+  api.notion.com public-connection `client_id`**, 302s into the standard
+  Notion login/consent (proxying through its own registered callback
+  `https://mcp.notion.com/callback`), and finally redirects to OUR
+  redirect_uri (`http://localhost:45123/oauth/callback`) with the code —
+  matching the existing loopback flow. The code is exchanged at
+  `mcp.notion.com/token`, which mints a token valid for the MCP resource.
+- **Change:** `config.rs` NOTION → `authorize_url`/`token_url`/`revoke_url`
+  now point at the MCP AS (`…/authorize`, `…/token`, `…/token`), and the
+  authorize URL gains the RFC 8707 `resource=https://mcp.notion.com/mcp`
+  param. `client_id`/`client_secret` (build-time env) still identify the
+  public connection; PKCE + fixed-port loopback flow unchanged.
+- **User action:** the previously-minted REST token is invalid for MCP —
+  Disconnect → Connect again to mint a fresh token from the MCP token
+  endpoint. Tests updated (`notion_is_registered` endpoints,
+  `resource=` param assert); `cargo test --lib` still green.
+- **Frontend (same day):** composer now supports an **`@`-mention command**
+  for connectors (mirroring `/skill`): typing `@` as the first character
+  opens the connected-connector picker with filtering + arrow-key nav;
+  Enter/Tab/click attaches the connector to the conversation (same
+  per-session opt-in as the "+" menu) and consumes the `@token` so nothing
+  stray reaches the model. Empty state hints to Settings → Connectors.
+## 2026-08-03 � GitHub + Canva connectors (new registry entries) and Kiwi/Merge cleanup
+
+### What was built
+
+Two new connectors, both official vendor-hosted remote MCP servers, plus the
+Merge retirement and two Kiwi bug fixes from the same period:
+
+- **GitHub** (id "github", family "github", port 45133):
+  https://api.githubcopilot.com/mcp/ � GitHub's hosted MCP server (repo /
+  issues / PRs / code tools). OAuth via a **GitHub OAuth App** supplied as
+  build-time env vars GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET (same
+  pattern as the Google client; GitHub has no DCR and publishes no AS
+  metadata � verified live, the RFC 9728 resource metadata at
+  .well-known/oauth-protected-resource/mcp/ names https://github.com/login/oauth
+  as the authorization server). Authorize
+  https://github.com/login/oauth/authorize, token
+  https://github.com/login/oauth/access_token, scopes
+  epo read:org read:user user:email (the scope set gates the tool surface).
+  OAuth App tokens never expire and no refresh token is issued � the stored
+  expires_at stays None, so the refresh path is never triggered. GitHub
+  OAuth Apps ignore the PKCE params our generic authorize URL always sends.
+  No revoke endpoint (Disconnect forgets locally, like Google).
+- **Canva** (id "canva", family "canva", port 45134):
+  https://mcp.canva.com/mcp � design create/edit/search/export tools.
+  Authorization-server metadata published (verified live): authorize
+  /authorize, token /token, register /register, revocation at /token,
+  auth methods client_secret_basic|post|none. Uses the generic RFC 7591
+  egistration_url machinery (Notion pattern) with a public PKCE client �
+  no credentials needed at build time. Scope set: profile:read +
+  design/folder/asset/comment/brandtemplate/brandkit reads+writes.
+  **Gate (verified live):** /register rejects every request body with
+  "Invalid JSON payload" until the redirect URI is approved via Canva's
+  waitlist form (the docs make allowlisting mandatory for custom clients;
+  DCR is deprecated there in favor of CIMD). Until approved, Connect fails at
+  registration with a clear error.
+- **Merge Agent Handler fully retired** (previous session): MERGE const and
+  its env vars, the whole quota system (connectors/quota.rs,
+  db/connector_usage.rs, connector_tool_calls table, month_start_ts,
+  Hinnant helpers, the dispatch gate), and the static-bearer path removed.
+  is_static_bearer() ? is_public() (empty uthorize_url = public, no
+  OAuth). configured() is no longer always-true: public connectors and
+  DCR-registered ones (Kiwi, Notion, Canva) are always configured; static
+  env-credentialed ones (Google, GitHub) only when client_id is non-empty.
+- **Kiwi attach bug fixed:** chat/commands.rs only included connector ids
+  with credential rows or per-session rows, so public Kiwi (no row) was never
+  attached. Public connectors are now always added to the session's
+  connector_ids.
+- **Kiwi permission bug fixed:** classify_connector_tool consulted the tool
+  *description* before the name; Kiwi's real search-flight description
+  contains the word "add", so every search-classified as Write and surfaced an
+  approval card even under full_auto. The name is now authoritative (read/write
+  verb in the name decides; description is only a fallback when the name has no
+  verb), and tokens are lowercased. Regression tests cover both.
+
+### Verification
+
+- cargo test -p conduit --lib: **295 passed / 0 failed / 10 ignored**
+  (new: github_is_registered_as_env_configured_oauth_connector,
+  canva_is_registered_as_dcr_oauth_connector; live Kiwi handshake test
+  still green with --ignored).
+- Frontend 	sc --noEmit: only the 3 pre-existing unrelated errors
+  (useChatEvents.ts / chat.ts).
+- Live probes: both MCP endpoints return 401 with RFC 9728
+  WWW-Authenticate; Canva AS metadata fetched; Canva /register gating
+  confirmed with a matrix of request bodies.
+
+### User actions
+
+1. **GitHub:** register a GitHub OAuth App (github.com/settings/developers):
+   callback URL http://localhost:45133/oauth/callback, request the default
+   scopes, then set GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET env vars in
+   the shell before building/running (persist as user env vars for dev).
+2. **Canva:** apply for the Canva MCP waitlist
+   (docs: canva.dev/docs/mcp � "Register your redirect URI" form) listing
+   redirect URI http://localhost:45134/oauth/callback. Once approved,
+   Connect works without any env vars.
+3. Restart the running app to pick up the new backend registry entries.
+### Follow-up (same day): Canva removed from the Settings UI
+
+Per user request, CANVA is no longer in the CONNECTORS array � it cannot
+appear in Settings ? Connectors until it's re-enabled (one line:
+CONNECTORS entry) after the waitlist approval lands. The const + endpoints
+remain in config.rs (documented DISABLED), the icon/family entries were
+dropped from ConnectorIcon.tsx, and the registry test now asserts Canva is
+absent from CONNECTORS while its const still carries correct endpoints.
+GitHub's icon became the canonical brand mark: octocat on a white tile
+(visible on both app themes, replacing the bare black silhouette).

@@ -64,6 +64,17 @@ async fn openai_stream_round(
     let status = resp.status();
     if !status.is_success() {
         let b = resp.text().await.unwrap_or_default();
+        // The 400 body from llama-server names the exact rejected field
+        // ("unknown field", "tool not supported", "content is empty", …) —
+        // surface it in the dev log, not just the UI banner.
+        eprintln!(
+            "[chat:stream] HTTP {status} from {url} body={}",
+            if b.len() > 2000 {
+                format!("{}…", &b[..2000])
+            } else {
+                b.clone()
+            }
+        );
         return Err(format!("HTTP {status}: {b}"));
     }
 

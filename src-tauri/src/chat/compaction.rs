@@ -148,7 +148,7 @@ impl CompactionOutcome {
 /// would produce; passing the assembled conversation (rather than summing
 /// per-message counts) most closely approximates what the model actually sees,
 /// including role/control tokens the chat template injects.
-fn assemble_for_tokenization(system: &Option<String>, messages: &[ChatMessage]) -> String {
+pub fn assemble_for_tokenization(system: &Option<String>, messages: &[ChatMessage]) -> String {
     let mut s = String::new();
     if let Some(sys) = system {
         if !sys.trim().is_empty() {
@@ -166,7 +166,7 @@ fn assemble_for_tokenization(system: &Option<String>, messages: &[ChatMessage]) 
 /// Count tokens for the assembled system+messages via `POST {base}/tokenize`.
 /// llama-server returns `{ "tokens": [...] }`; the count is the array length.
 /// Errors propagate to the caller, which treats them as a compaction fallback.
-async fn count_tokens(
+pub async fn count_tokens(
     client: &reqwest::Client,
     base_url: &str,
     system: &Option<String>,
@@ -178,6 +178,40 @@ async fn count_tokens(
         .post(&url)
         .header("content-type", "application/json")
         .json(&json!({ "content": content }))
+        .send()
+        .await
+        .map_err(|e| format!("/tokenize request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("/tokenize returned {}", resp.status()));
+    }
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("/tokenize body parse failed: {e}"))?;
+    let n = body
+        .get("tokens")
+        .and_then(|t| t.as_array())
+        .map(|a| a.len() as u32)
+        .ok_or_else(|| "/tokenize response missing \"tokens\" array".to_string())?;
+    Ok(n)
+}
+
+/// Count tokens for arbitrary raw text via `POST {base}/tokenize` — used for
+/// the tool-schema overhead, which the send path adds on top of the assembled
+/// system+history and which therefore must be reserved out of the compaction
+/// budget (otherwise the window "fits" by the count but the real request 400s
+/// with exceed_context_size_error). Errors propagate to the caller, which
+/// treats them as a compaction fallback.
+pub async fn count_json_tokens(
+    client: &reqwest::Client,
+    base_url: &str,
+    text: &str,
+) -> Result<u32, String> {
+    let url = format!("{base_url}/tokenize");
+    let resp = client
+        .post(&url)
+        .header("content-type", "application/json")
+        .json(&json!({ "content": text }))
         .send()
         .await
         .map_err(|e| format!("/tokenize request failed: {e}"))?;
@@ -306,8 +340,23 @@ async fn summarize(
     to_compact: &[&CompactionEntry],
     prior_summary: Option<&str>,
 ) -> Result<(String, i64, i64), String> {
+    // Truncate the user content defensively. llama-server will 400 on a
+    // summarization request whose user content alone overflows the model's
+    // context window — and the entire to_compact head (the oldest half of
+    // the conversation) gets dumped into ONE user message. For a 4K-ctx
+    // model with 30+ prior turns, that's 6–8K tokens, way over the cap. We
+    // cap at ¾ of the sidecar's n_ctx (read from the running model by the
+    // caller) so the request body is always a comfortable fit. The summary
+    // task is lossy by design — losing the tail of `to_compact` to keep the
+    // request valid is strictly better than a 400 that aborts compaction
+    // entirely (the fallback is context-shifting on the next send, which is
+    // the very thing compaction exists to avoid).
+    //
+    // The caller passes the n_ctx in via the existing `model` parameter slot
+    // doesn't carry it, so we thread a separate field. The call sites in
+    // maybe_compact already know n_ctx — pass it through.
     let url = format!("{base_url}/v1/chat/completions");
-    let body = json!({
+    let mut body = json!({
         "model": model,
         "stream": false,
         "max_tokens": 1024,
@@ -316,15 +365,25 @@ async fn summarize(
             { "role": "user", "content": summarization_user_content(to_compact, prior_summary) },
         ],
     });
+    let json_body = serde_json::to_string(&body).unwrap_or_default();
+    eprintln!(
+        "[local-compaction] summarize → POST {url} body_len={}",
+        json_body.len()
+    );
     let resp = client
         .post(&url)
         .header("content-type", "application/json")
-        .json(&body)
+        .body(json_body)
         .send()
         .await
         .map_err(|e| format!("summarize request failed: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!("summarize returned {}", resp.status()));
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        eprintln!(
+            "[local-compaction] summarize FAILED status={status} body={err_body}"
+        );
+        return Err(format!("summarize returned {status}: {err_body}"));
     }
     let v: Value = resp
         .json()
@@ -358,7 +417,8 @@ async fn summarize(
 /// from the DB and cleaned.
 ///
 /// Decides whether the assembled (system + history) exceeds the configured
-/// threshold of `n_ctx` (with response headroom); if so, splits, summarizes,
+/// threshold of the effective context (n_ctx minus the tokens reserved for
+/// the send-time tool schema + response headroom); if so, splits, summarizes,
 /// and returns the rewritten message list plus the DB writes to perform.
 /// On any failure — or if compaction still wouldn't fit — returns the original
 /// messages unchanged (`did_compact=false`) so the turn proceeds and
@@ -374,8 +434,21 @@ pub async fn maybe_compact(
     system: &Option<String>,
     messages: &[CompactionEntry],
     cfg: &CompactionConfig,
+    reserved_tokens: u32,
 ) -> Result<CompactionOutcome, String> {
     if n_ctx == 0 {
+        return Ok(CompactionOutcome::passthrough(messages.iter().map(|e| e.message.clone()).collect()));
+    }
+    // Effective window: what the request has left after the tool schema (and
+    // other send-time overhead) the caller reserved. If the overhead alone
+    // fills the window, compaction can't help — pass history through and let
+    // llama-server context-shift.
+    let effective_ctx = n_ctx.saturating_sub(reserved_tokens);
+    if effective_ctx == 0 {
+        eprintln!(
+            "[local-compaction] reserved overhead ({reserved_tokens} tokens) fills the \
+            {n_ctx}-token window; skipping compaction (context-shifting will degrade)"
+        );
         return Ok(CompactionOutcome::passthrough(messages.iter().map(|e| e.message.clone()).collect()));
     }
 
@@ -391,7 +464,7 @@ pub async fn maybe_compact(
         }
     };
 
-    let trigger = ((n_ctx as f64) * cfg.threshold) as u32;
+    let trigger = ((effective_ctx as f64) * cfg.threshold) as u32;
     if tokens.saturating_add(RESPONSE_HEADROOM) < trigger {
         return Ok(CompactionOutcome::passthrough(wire_messages));
     }
@@ -407,17 +480,52 @@ pub async fn maybe_compact(
     if let Ok(pinned_tokens) =
         count_tokens(client, base_url, system, &pinned.iter().map(|e| e.message.clone()).collect::<Vec<_>>()).await
     {
-        if pinned_tokens.saturating_add(RESPONSE_HEADROOM) >= n_ctx {
+        if pinned_tokens.saturating_add(RESPONSE_HEADROOM) >= effective_ctx {
             eprintln!(
                 "[local-compaction] pinned tail ({pinned_tokens} tokens) already fills \
-                the {n_ctx}-token window; skipping compaction (context-shifting will degrade)"
+                the {effective_ctx}-token window; skipping compaction (context-shifting will degrade)"
             );
             return Ok(CompactionOutcome::passthrough(wire_messages));
         }
     }
 
+    // Truncate `to_compact` so the summarization request is always a
+    // comfortable fit. The summarization call dumps the whole `to_compact`
+    // head into ONE user message, and llama-server 400s when that user
+    // content alone exceeds the model's context window. We cap the user
+    // content at ¾ of the sidecar's n_ctx (rough char/token ratio of 4 chars
+    // per token is plenty for a safety margin). Pin ordering already keeps
+    // the most recent tail verbatim, so truncating from the OLD end of
+    // to_compact is the right direction — we lose the oldest summarized
+    // detail, not the recent context.
+    let mut to_compact_truncated: Vec<&CompactionEntry> = Vec::new();
+    let mut chars: usize = 0;
+    {
+        let max_chars = ((n_ctx as usize) * 3 / 4).max(1024);
+        // Iterate from OLDEST → NEWEST, but we want to KEEP the NEWEST, so
+        // reverse-walk and add while we have headroom.
+        for e in to_compact.iter().rev() {
+            let added = e.message.content.len();
+            if chars + added > max_chars && !to_compact_truncated.is_empty() {
+                break;
+            }
+            to_compact_truncated.push(*e);
+            chars += added;
+        }
+        to_compact_truncated.reverse();
+    }
+    if to_compact_truncated.len() < to_compact.len() {
+        eprintln!(
+            "[local-compaction] to_compact truncated: {} → {} entries ({} chars; n_ctx={})",
+            to_compact.len(),
+            to_compact_truncated.len(),
+            chars,
+            n_ctx
+        );
+    }
+
     let prior_text = prior.as_ref().map(|(_, t)| t.as_str());
-    let (summary, in_tok, out_tok) = match summarize(client, base_url, model, &to_compact, prior_text).await {
+    let (summary, in_tok, out_tok) = match summarize(client, base_url, model, &to_compact_truncated, prior_text).await {
         Ok(s) => s,
         Err(e) => {
             eprintln!(

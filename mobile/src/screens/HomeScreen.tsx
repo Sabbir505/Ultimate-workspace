@@ -254,7 +254,7 @@ const styles = StyleSheet.create({
   },
   projectName: { fontSize: theme.fontSize.md, fontWeight: '700', flex: 1 },
   sessionCountBadge: {
-    backgroundColor: 'rgba(193, 95, 60, 0.12)', borderRadius: 10,
+    backgroundColor: 'rgba(0, 120, 168, 0.12)', borderRadius: 10,
     paddingHorizontal: 8, paddingVertical: 2,
   },
   sessionCountText: { fontSize: theme.fontSize.xs, fontWeight: '700', color: theme.colors.primary },
@@ -265,8 +265,8 @@ const styles = StyleSheet.create({
   harnessChip: {
     borderRadius: theme.borderRadius.md,
     paddingHorizontal: 12, paddingVertical: 6,
-    backgroundColor: 'rgba(193, 95, 60, 0.08)',
-    borderWidth: 1, borderColor: 'rgba(193, 95, 60, 0.2)',
+    backgroundColor: 'rgba(0, 120, 168, 0.08)',
+    borderWidth: 1, borderColor: 'rgba(0, 120, 168, 0.2)',
   },
   harnessChipText: { fontSize: theme.fontSize.sm, color: theme.colors.primary, fontWeight: '500' },
   createBtn: {

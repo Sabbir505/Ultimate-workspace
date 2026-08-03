@@ -1,0 +1,887 @@
+//! Background task manager for the chat's system tools.
+//!
+//! Powers the agentic "do it for me" tools that must NOT block the
+//! conversation turn:
+//!
+//!   * `download_file` â€” stream a file from a URL to an absolute local path
+//!     (e.g. `.safetensors` / `.bin` model weights straight from Hugging
+//!     Face). Chunked streaming writes straight to disk (no whole-file
+//!     memory buffering), with resume (`.part` file + `Range`), transient
+//!     retries, speed tracking and per-chunk progress events.
+//!   * `run_shell` â€” native shell execution on the host (unsandboxed by
+//!     design â€” this is the "run CLI tools like huggingface-cli download"
+//!     escape hatch). Runs as a background task with streaming output so a
+//!     long-running command doesn't lock the chat.
+//!
+//! Every task gets a `task_id`; the model tracks it with
+//! `get_task_status` / `download_progress` and aborts it with
+//! `cancel_task`. Progress is ALSO pushed to the UI as `chat:task-progress`
+//! events so the chat tab can render live progress cards without polling.
+//!
+//! Security posture: downloads accept any http(s) URL and any absolute
+//! destination path â€” unrestricted filesystem access is the point (writing
+//! to D:\models etc. without a virtual workspace boundary). The permission
+//! gate in `permission::check_system_permission` decides whether the call
+//! auto-runs or surfaces an approval card before the task is even created.
+//! `run_shell` is native code execution, so it is ALWAYS gated on an
+//! approval card, in every permission mode.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::oneshot;
+use tokio::time::sleep;
+
+use crate::types::ChatTaskProgressPayload;
+
+/// How long a terminal task (completed/failed/cancelled) stays in the
+/// registry before being swept, so `get_task_status` answers stay truthful
+/// for a while but the map doesn't grow forever.
+const TERMINAL_TASK_TTL: Duration = Duration::from_secs(60 * 60);
+/// Max bytes of a shell task's captured output kept for the model.
+const SHELL_OUTPUT_CAP: usize = 200_000;
+/// Throttle for progress events (downloads) â€” ~7/s max.
+const PROGRESS_EMIT_MIN: Duration = Duration::from_millis(150);
+/// Throttle for shell output events.
+const SHELL_EMIT_MIN: Duration = Duration::from_millis(250);
+/// Transient download failures are retried this many times.
+const DOWNLOAD_RETRIES: u32 = 2;
+
+/// Machine-readable task state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskState {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// A point-in-time snapshot of a background task. Sent to the model via
+/// `get_task_status` / `download_progress` and to the UI via
+/// `chat:task-progress`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskSnapshot {
+    pub task_id: String,
+    /// "download" | "shell"
+    pub kind: String,
+    pub state: TaskState,
+    /// Human-facing detail: error for failed, destination for completed
+    /// downloads, latest output tail for shells.
+    pub message: String,
+    pub downloaded: u64,
+    pub total: Option<u64>,
+    pub speed_bps: u64,
+    pub dest_path: Option<String>,
+}
+
+impl TaskSnapshot {
+    /// Percentage of the total downloaded (0.0â€“100.0), or `None` when the
+    /// total size is unknown (e.g. streaming without Content-Length).
+    #[allow(dead_code)] // used by the frontend via serialized fields; kept for tests
+    pub fn percent(&self) -> Option<f64> {
+        self.total.map(|t| {
+            if t == 0 {
+                0.0
+            } else {
+                (self.downloaded as f64 / t as f64 * 100.0).min(100.0)
+            }
+        })
+    }
+}
+
+struct TaskEntry {
+    snapshot: Arc<Mutex<TaskSnapshot>>,
+    /// Sender that aborts the running task (download loop / shell process).
+    cancel: Mutex<Option<oneshot::Sender<()>>>,
+    /// Creation time, for the terminal-task sweep.
+    created: Instant,
+}
+
+impl TaskEntry {
+    /// Whether the task is still in flight. Terminal tasks are swept away
+    /// after `TERMINAL_TASK_TTL`.
+    fn is_running(&self) -> bool {
+        matches!(self.snapshot.lock().unwrap().state, TaskState::Running)
+    }
+}
+
+/// Registry of background tasks, shared across chat sessions. Registered as
+/// Tauri state (`TaskState` in lib.rs); the chat dispatcher resolves it via
+/// `app.state`.
+pub struct TaskManager {
+    tasks: Mutex<HashMap<String, Arc<TaskEntry>>>,
+    next_id: Mutex<u64>,
+}
+
+impl Default for TaskManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TaskManager {
+    pub fn new() -> Self {
+        Self {
+            tasks: Mutex::new(HashMap::new()),
+            next_id: Mutex::new(1),
+        }
+    }
+
+    /// Allocate a unique task id and register a running task entry.
+    fn register(&self, kind: &str) -> (String, Arc<TaskEntry>) {
+        let id = {
+            let mut n = self.next_id.lock().unwrap();
+            let id = format!("task-{}", *n);
+            *n += 1;
+            id
+        };
+        let snapshot = Arc::new(Mutex::new(TaskSnapshot {
+            task_id: id.clone(),
+            kind: kind.to_string(),
+            state: TaskState::Running,
+            message: String::new(),
+            downloaded: 0,
+            total: None,
+            speed_bps: 0,
+            dest_path: None,
+        }));
+        let entry = Arc::new(TaskEntry {
+            snapshot,
+            cancel: Mutex::new(None),
+            created: Instant::now(),
+        });
+        {
+            let mut tasks = self.tasks.lock().unwrap();
+            // Sweep stale terminal tasks so the map can't grow unbounded.
+            let now = Instant::now();
+            tasks.retain(|_, e| e.is_running() || now.duration_since(e.created) < TERMINAL_TASK_TTL);
+            tasks.insert(id.clone(), Arc::clone(&entry));
+        }
+        (id, entry)
+    }
+
+    /// Update the snapshot under a short lock and emit a `chat:task-progress`
+    /// event to the UI. Callers must NOT hold the snapshot lock across this
+    /// call (it re-locks). `None` app (tests / headless) skips the emit.
+    fn emit<R: tauri::Runtime>(app: Option<&AppHandle<R>>, sid: &str, entry: &TaskEntry) {
+        let snap = entry.snapshot.lock().unwrap().clone();
+        if let Some(app) = app {
+            let _ = app.emit(
+                "chat:task-progress",
+                ChatTaskProgressPayload {
+                    chat_session_id: sid.to_string(),
+                    task_id: snap.task_id,
+                    kind: snap.kind.clone(),
+                    state: snap.state,
+                    message: snap.message.clone(),
+                    downloaded: snap.downloaded,
+                    total: snap.total,
+                    speed_bps: snap.speed_bps,
+                    dest_path: snap.dest_path.clone(),
+                },
+            );
+        }
+    }
+
+    /// Mark the task terminal and emit the final event.
+    fn finish<R: tauri::Runtime>(
+        app: Option<&AppHandle<R>>,
+        sid: &str,
+        entry: &TaskEntry,
+        state: TaskState,
+        message: String,
+    ) {
+        {
+            let mut snap = entry.snapshot.lock().unwrap();
+            snap.state = state;
+            snap.message = message;
+            snap.speed_bps = 0;
+        }
+        Self::emit(app, sid, entry);
+    }
+
+    /// Current snapshot JSON for the model, or an error text if unknown.
+    pub fn status_json(&self, task_id: &str) -> String {
+        let tasks = self.tasks.lock().unwrap();
+        match tasks.get(task_id) {
+            Some(e) => serde_json::to_string(&*e.snapshot.lock().unwrap())
+                .unwrap_or_else(|_| "{\"error\":\"serialize failed\"}".to_string()),
+            None => format!(
+                "No task \"{task_id}\". Tasks are only kept for an hour after they finish."
+            ),
+        }
+    }
+
+    /// Abort a running task (download: keeps the .part for resume; shell:
+    /// kills the process). Returns a message for the model.
+    pub fn cancel(&self, task_id: &str) -> String {
+        let tasks = self.tasks.lock().unwrap();
+        match tasks.get(task_id) {
+            Some(entry) => {
+                if let Some(tx) = entry.cancel.lock().unwrap().take() {
+                    let _ = tx.send(());
+                    format!("Cancelling task {task_id}â€¦")
+                } else {
+                    let state = entry.snapshot.lock().unwrap().state;
+                    match state {
+                        TaskState::Running => {
+                            format!("Task {task_id} is already being cancelled.")
+                        }
+                        _ => format!(
+                            "Task {task_id} already finished ({}).",
+                            serde_json::to_string(&state).unwrap_or_default()
+                        ),
+                    }
+                }
+            }
+            None => format!("No task \"{task_id}\"."),
+        }
+    }
+
+    /// Start a background download. Returns the task id. `app` may be `None`
+    /// in tests/headless runs (progress events are skipped).
+    pub fn start_download<R: tauri::Runtime>(
+        &self,
+        app: Option<&AppHandle<R>>,
+        sid: &str,
+        url: &str,
+        dest: &str,
+    ) -> String {
+        let (id, entry) = self.register("download");
+        let (tx, rx) = oneshot::channel();
+        *entry.cancel.lock().unwrap() = Some(tx);
+        let app = app.cloned();
+        let sid = sid.to_string();
+        let url = url.to_string();
+        let dest = dest.to_string();
+        let entry_for_task = Arc::clone(&entry);
+        tauri::async_runtime::spawn(async move {
+            let result = download_task(app.as_ref(), &sid, &entry_for_task, rx, &url, &dest).await;
+            if let Err(msg) = result {
+                let state = entry_for_task.snapshot.lock().unwrap().state;
+                if state == TaskState::Running {
+                    TaskManager::finish(app.as_ref(), &sid, &entry_for_task, TaskState::Failed, msg);
+                }
+            }
+        });
+        id
+    }
+
+    /// Start a native shell command in the background. Returns the task id.
+    /// `app` may be `None` in tests/headless runs (progress events skipped).
+    pub fn start_shell<R: tauri::Runtime>(
+        &self,
+        app: Option<&AppHandle<R>>,
+        sid: &str,
+        command: &str,
+        workdir: Option<&str>,
+    ) -> String {
+        let (id, entry) = self.register("shell");
+        let (tx, rx) = oneshot::channel();
+        *entry.cancel.lock().unwrap() = Some(tx);
+        let app = app.cloned();
+        let sid = sid.to_string();
+        let command = command.to_string();
+        let workdir = workdir.map(|s| s.to_string());
+        let entry_for_task = Arc::clone(&entry);
+        tauri::async_runtime::spawn(async move {
+            shell_task(app.as_ref(), &sid, &entry_for_task, rx, &command, workdir).await;
+        });
+        id
+    }
+}
+
+/// Stream a download to `dest` with resume + retry. Writes chunks straight
+/// to a `.part` file (no whole-file buffering) and renames on completion;
+/// the `.part` is kept on cancel/failure so the next attempt resumes.
+async fn download_task<R: tauri::Runtime>(
+    app: Option<&AppHandle<R>>,
+    sid: &str,
+    entry: &TaskEntry,
+    mut cancel_rx: oneshot::Receiver<()>,
+    url: &str,
+    dest: &str,
+) -> Result<(), String> {
+    let dest_path = PathBuf::from(dest);
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(format!("download_file requires an http(s) URL, got \"{url}\""));
+    }
+    if !dest_path.is_absolute() {
+        return Err(format!(
+            "download_file requires an absolute destination path, got \"{dest}\""
+        ));
+    }
+    let parent = dest_path.parent().unwrap_or(Path::new("."));
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|e| format!("could not create destination directory {parent:?}: {e}"))?;
+    let partial_path = dest_path.with_extension(
+        dest_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!("{e}.part"))
+            .unwrap_or_else(|| "part".to_string()),
+    );
+    let client = reqwest::Client::builder()
+        .user_agent("Conduit/0.3.2 (desktop; +https://conduit.app)")
+        .timeout(Duration::from_secs(60))
+        .build()
+        .unwrap_or_default();
+
+    // If the destination already exists, consider it done.
+    if tokio::fs::metadata(&dest_path).await.is_ok() {
+        {
+            let mut snap = entry.snapshot.lock().unwrap();
+            snap.downloaded = 0;
+            snap.total = None;
+            snap.dest_path = Some(dest.to_string());
+        }
+        TaskManager::finish(
+            app,
+            sid,
+            entry,
+            TaskState::Completed,
+            format!("Already present at {dest} â€” nothing to download."),
+        );
+        return Ok(());
+    }
+
+    // Resume: start from the .part file's current size.
+    let mut resume_from = tokio::fs::metadata(&partial_path)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let mut last_error = String::new();
+
+    for attempt in 0..=DOWNLOAD_RETRIES {
+        if attempt > 0 {
+            sleep(Duration::from_millis(400 * (1 << attempt))).await;
+            // Cancelled while backing off? Bail.
+            if cancel_rx.try_recv().is_ok() {
+                let _ = cancel_rx; // consume the channel
+                {
+                    let mut snap = entry.snapshot.lock().unwrap();
+                    snap.state = TaskState::Cancelled;
+                    snap.speed_bps = 0;
+                    snap.message = format!(
+                        "Cancelled at {} â€” the .part file was kept for resume.",
+                        human_bytes(resume_from)
+                    );
+                }
+                TaskManager::emit(app, sid, entry);
+                return Ok(());
+            }
+        }
+        let mut req = client.get(url);
+        if resume_from > 0 {
+            req = req.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
+        }
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                last_error = format!("request failed: {e}");
+                continue;
+            }
+        };
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(format!(
+                "HTTP {status} â€” this file is likely gated; open it on huggingface.co to accept \
+                 the license, or set a Hugging Face access token in Settings â†’ Local Models."
+            ));
+        }
+        if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            last_error = format!("HTTP {status}");
+            continue;
+        }
+        if !status.is_success() {
+            return Err(format!("HTTP {status}"));
+        }
+
+        let resuming = status == reqwest::StatusCode::PARTIAL_CONTENT && resume_from > 0;
+        let start = if resuming { resume_from } else { 0 };
+        let mut file = if resuming {
+            let mut opts = tokio::fs::OpenOptions::new();
+            opts.append(true).open(&partial_path).await
+        } else {
+            tokio::fs::File::create(&partial_path).await
+        }
+        .map_err(|e| format!("could not open .part file: {e}"))?;
+
+        // Cumulative total (resumed downloads add the existing prefix).
+        let total = if resuming {
+            resp.content_length().map(|c| c + start)
+        } else {
+            resp.content_length()
+        };
+        {
+            let mut snap = entry.snapshot.lock().unwrap();
+            snap.downloaded = start;
+            snap.total = total;
+            snap.dest_path = Some(dest.to_string());
+            snap.message = if resuming {
+                format!("Resuming from {} bytesâ€¦", human_bytes(start))
+            } else {
+                "Downloadingâ€¦".to_string()
+            };
+        }
+        TaskManager::emit(app, sid, entry);
+
+        let mut stream = resp.bytes_stream();
+        let mut downloaded: u64 = start;
+        let mut speed: u64;
+        let mut last_emit = Instant::now() - PROGRESS_EMIT_MIN;
+        let mut last_downloaded = start;
+        let mut stream_failed: Option<String> = None;
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut cancel_rx => {
+                    // User cancelled: keep the .part for a future resume,
+                    // mark the task cancelled, and stop.
+                    drop(file);
+                    {
+                        let mut snap = entry.snapshot.lock().unwrap();
+                        snap.state = TaskState::Cancelled;
+                        snap.speed_bps = 0;
+                        snap.message = format!(
+                            "Cancelled at {} â€” the .part file was kept for resume.",
+                            human_bytes(downloaded)
+                        );
+                    }
+                    TaskManager::emit(app, sid, entry);
+                    return Ok(());
+                }
+                next = stream.next() => {
+                    match next {
+                        Some(Ok(chunk)) => {
+                            if chunk.is_empty() { continue; }
+                            if let Err(e) = file.write_all(&chunk).await {
+                                return Err(format!("write error: {e}"));
+                            }
+                            downloaded = downloaded.saturating_add(chunk.len() as u64);
+                            if last_emit.elapsed() >= PROGRESS_EMIT_MIN {
+                                let dt = last_emit.elapsed().as_secs_f64().max(0.001);
+                                speed = ((downloaded - last_downloaded) as f64 / dt) as u64;
+                                last_downloaded = downloaded;
+                                last_emit = Instant::now();
+                                {
+                                    let mut snap = entry.snapshot.lock().unwrap();
+                                    snap.downloaded = downloaded;
+                                    snap.speed_bps = speed;
+                                    snap.total = total;
+                                }
+                                TaskManager::emit(app, sid, entry);
+                            }
+                        }
+                        Some(Err(e)) => {
+                            stream_failed = Some(format!("stream error: {e}"));
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+
+        // A mid-stream failure keeps the .part and retries from where it
+        // stopped (Range resume); a clean EOF finishes the download.
+        if let Some(msg) = stream_failed {
+            last_error = msg;
+            resume_from = downloaded;
+            continue;
+        }
+
+        file.flush().await.map_err(|e| format!("flush: {e}"))?;
+        drop(file);
+        tokio::fs::rename(&partial_path, &dest_path)
+            .await
+            .map_err(|e| format!("rename to final path failed: {e}"))?;
+        {
+            let mut snap = entry.snapshot.lock().unwrap();
+            snap.downloaded = total.unwrap_or(downloaded);
+            snap.total = total;
+            snap.speed_bps = 0;
+            snap.dest_path = Some(dest.to_string());
+        }
+        TaskManager::finish(
+            app,
+            sid,
+            entry,
+            TaskState::Completed,
+            format!("Downloaded to {dest} ({})", human_bytes(total.unwrap_or(downloaded))),
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "download failed after {} attempts: {last_error}",
+        DOWNLOAD_RETRIES + 1
+    ))
+}
+
+/// Run a native shell command, streaming output lines as progress events.
+/// No sandbox, no wall-clock timeout (long CLI runs like
+/// `huggingface-cli download` are the point) â€” cancel_task kills it.
+async fn shell_task<R: tauri::Runtime>(
+    app: Option<&AppHandle<R>>,
+    sid: &str,
+    entry: &TaskEntry,
+    mut cancel_rx: oneshot::Receiver<()>,
+    command: &str,
+    workdir: Option<String>,
+) {
+    let mut cmd = if cfg!(windows) {
+        let mut c = Command::new("cmd.exe");
+        c.arg("/C").arg(command);
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            c.creation_flags(CREATE_NO_WINDOW);
+        }
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(command);
+        c
+    };
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(wd) = workdir {
+        if Path::new(&wd).is_dir() {
+            cmd.current_dir(&wd);
+        }
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            TaskManager::finish(
+                app,
+                sid,
+                entry,
+                TaskState::Failed,
+                format!("could not start shell: {e}"),
+            );
+            return;
+        }
+    };
+
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+    let mut stdout_lines = BufReader::new(stdout).lines();
+    let mut stderr_lines = BufReader::new(stderr).lines();
+    let mut output: Vec<String> = Vec::new();
+    let mut last_emit = Instant::now() - SHELL_EMIT_MIN;
+
+    let mut consume_line =
+        |line: String,
+         last_emit: &mut Instant,
+         app: Option<&AppHandle<R>>,
+         sid: &str,
+         entry: &TaskEntry| {
+            if output.len() >= 40 {
+                output.remove(0);
+            }
+            output.push(line);
+            if last_emit.elapsed() >= SHELL_EMIT_MIN {
+                {
+                    let mut snap = entry.snapshot.lock().unwrap();
+                    snap.message = output.join("\n").chars().take(SHELL_OUTPUT_CAP).collect();
+                }
+                TaskManager::emit(app, sid, entry);
+                *last_emit = Instant::now();
+            }
+        };
+
+    let mut stdout_open = true;
+    let mut stderr_open = true;
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut cancel_rx => {
+                let _ = child.kill().await;
+                {
+                    let mut snap = entry.snapshot.lock().unwrap();
+                    snap.state = TaskState::Cancelled;
+                    snap.speed_bps = 0;
+                    snap.message = "Cancelled â€” process killed.".to_string();
+                }
+                TaskManager::emit(app, sid, entry);
+                return;
+            }
+            next = stdout_lines.next_line(), if stdout_open => {
+                match next {
+                    Ok(Some(line)) => consume_line(line, &mut last_emit, app, sid, entry),
+                    _ => stdout_open = false,
+                }
+            }
+            next = stderr_lines.next_line(), if stderr_open => {
+                match next {
+                    Ok(Some(line)) => consume_line(line, &mut last_emit, app, sid, entry),
+                    _ => stderr_open = false,
+                }
+            }
+            status = child.wait() => {
+                let code = status.map(|s| s.code()).unwrap_or(None);
+                let msg = {
+                    let mut snap = entry.snapshot.lock().unwrap();
+                    snap.message = output.join("\n").chars().take(SHELL_OUTPUT_CAP).collect();
+                    match code {
+                        Some(0) => format!("Command finished (exit 0).\n\n{}", snap.message),
+                        Some(c) => format!("Command finished with exit code {c}.\n\n{}", snap.message),
+                        None => format!("Command was terminated.\n\n{}", snap.message),
+                    }
+                };
+                TaskManager::finish(app, sid, entry, TaskState::Completed, msg);
+                return;
+            }
+        }
+    }
+}
+
+/// Compact human byte formatting ("1.2 GB") for task messages.
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = bytes as f64;
+    let mut unit = 0;
+    while v >= 1024.0 && unit < UNITS.len() - 1 {
+        v /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{v:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn human_bytes_formats() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(2048), "2.0 KB");
+        assert_eq!(human_bytes(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(human_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
+    }
+
+    #[test]
+    fn percent_calculation() {
+        let mut s = TaskSnapshot {
+            task_id: "t".into(),
+            kind: "download".into(),
+            state: TaskState::Running,
+            message: String::new(),
+            downloaded: 50,
+            total: Some(200),
+            speed_bps: 1000,
+            dest_path: None,
+        };
+        assert_eq!(s.percent(), Some(25.0));
+        s.total = Some(0);
+        assert_eq!(s.percent(), Some(0.0));
+        s.total = None;
+        assert_eq!(s.percent(), None);
+    }
+
+    #[test]
+    fn register_allocates_unique_ids() {
+        let tm = TaskManager::new();
+        let (id1, e1) = tm.register("download");
+        let (id2, _) = tm.register("shell");
+        assert_ne!(id1, id2);
+        assert_eq!(e1.snapshot.lock().unwrap().kind, "download");
+        assert_eq!(e1.snapshot.lock().unwrap().state, TaskState::Running);
+    }
+
+    #[test]
+    fn status_unknown_task_reports_missing() {
+        let tm = TaskManager::new();
+        assert!(tm.status_json("task-999").contains("No task"));
+    }
+
+    // ---- integration: local HTTP server + mock app ----
+
+    /// Tiny HTTP server serving `body` with optional Range support, on a
+    /// loopback port. Returns the base URL. `chunk_delay` throttles the
+    /// stream (64KiB chunks) so tests can keep a download in flight.
+    async fn serve(body: &'static [u8], support_range: bool, chunk_delay: Duration) -> String {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                let body = body.to_vec();
+                let support_range = support_range;
+                let chunk_delay = chunk_delay;
+                tauri::async_runtime::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0u8; 4096];
+                    let _ = sock.read(&mut buf).await;
+                    let req = String::from_utf8_lossy(&buf);
+                    let range = req
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("range:"))
+                        .and_then(|l| l.split('=').nth(1))
+                        .and_then(|v| v.trim().strip_suffix('-'))
+                        .and_then(|v| v.parse::<usize>().ok());
+                    let start = if support_range { range.unwrap_or(0) } else { 0 };
+                    let chunk = &body[start.min(body.len())..];
+                    let status = if start > 0 && support_range {
+                        "206 Partial Content"
+                    } else {
+                        "200 OK"
+                    };
+                    let extra = if start > 0 && support_range {
+                        format!("Content-Range: bytes {}-{}/{}\r\n", start, body.len() - 1, body.len())
+                    } else {
+                        String::new()
+                    };
+                    let head = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{extra}\r\n",
+                        chunk.len()
+                    );
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let mut sent = 0usize;
+                    while sent < chunk.len() {
+                        let end = (sent + 64 * 1024).min(chunk.len());
+                        let _ = sock.write_all(&chunk[sent..end]).await;
+                        sent = end;
+                        if !chunk_delay.is_zero() {
+                            tokio::time::sleep(chunk_delay).await;
+                        }
+                    }
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}/file.bin")
+    }
+
+    #[test]
+    fn download_streams_to_disk_with_progress() {
+        let body: &'static [u8] = &[0u8; 1024 * 1024 * 2];
+        let url = tauri::async_runtime::block_on(serve(body, true, Duration::ZERO));
+        
+        let tm = TaskManager::new();
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.safetensors");
+        let id = tm.start_download(None::<&tauri::AppHandle>, "sid1", &url, dest.to_str().unwrap());
+        // Poll until terminal (2 MB over loopback is near-instant).
+        let mut final_state = String::new();
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let snap = tm.status_json(&id);
+            if snap.contains("completed") || snap.contains("failed") {
+                final_state = snap;
+                break;
+            }
+        }
+        assert!(
+            final_state.contains("completed"),
+            "expected completion, got: {final_state}"
+        );
+        let meta = std::fs::metadata(&dest).expect("dest file must exist");
+        assert_eq!(meta.len(), 1024 * 1024 * 2);
+        assert!(!dest.with_extension("safetensors.part").exists(), ".part must be renamed away");
+    }
+
+    #[test]
+    fn download_resumes_from_existing_part() {
+        let body: &'static [u8] = &[7u8; 1024 * 1024];
+        let url = tauri::async_runtime::block_on(serve(body, true, Duration::ZERO));
+        
+        let tm = TaskManager::new();
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("big.bin");
+        // Pre-seed the .part with the first 512KB.
+        let part = dest.with_extension("bin.part");
+        std::fs::write(&part, &[7u8; 512 * 1024]).unwrap();
+        let id = tm.start_download(None::<&tauri::AppHandle>, "sid1", &url, dest.to_str().unwrap());
+        let mut final_state = String::new();
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let snap = tm.status_json(&id);
+            if snap.contains("completed") || snap.contains("failed") {
+                final_state = snap;
+                break;
+            }
+        }
+        assert!(
+            final_state.contains("completed"),
+            "resume should complete, got: {final_state}"
+        );
+        let meta = std::fs::metadata(&dest).expect("dest file must exist");
+        assert_eq!(meta.len(), 1024 * 1024, "resumed file must be full size");
+    }
+
+    #[test]
+    fn cancel_keeps_part_file_for_resume() {
+        // 64KiB chunks at 5ms each â‰ˆ 5s of streaming â€” guaranteed still
+        // in flight when the test cancels.
+        let body: &'static [u8] = &[0u8; 1024 * 1024 * 64];
+        let url = tauri::async_runtime::block_on(serve(body, true, Duration::from_millis(5)));
+        
+        let tm = TaskManager::new();
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("slow.bin");
+        let id = tm.start_download(None::<&tauri::AppHandle>, "sid1", &url, dest.to_str().unwrap());
+        // Give it a moment to start, then cancel.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let cancel_msg = tm.cancel(&id);
+        assert!(cancel_msg.contains("Cancelling"), "got: {cancel_msg}");
+        let mut final_state = String::new();
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let snap = tm.status_json(&id);
+            if snap.contains("cancelled") || snap.contains("failed") {
+                final_state = snap;
+                break;
+            }
+        }
+        assert!(
+            final_state.contains("cancelled"),
+            "expected cancelled, got: {final_state}"
+        );
+        // The .part survives for resume; the final file never lands.
+        assert!(!dest.exists(), "dest must NOT exist after cancel");
+    }
+
+    #[test]
+    fn shell_captures_output_and_exit_code() {
+        
+        let tm = TaskManager::new();
+        let cmd = if cfg!(windows) { "echo conduit-shell-test" } else { "echo conduit-shell-test" };
+        let id = tm.start_shell(None::<&tauri::AppHandle>, "sid1", cmd, None);
+        let mut final_state = String::new();
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let snap = tm.status_json(&id);
+            if snap.contains("completed") || snap.contains("failed") || snap.contains("cancelled") {
+                final_state = snap;
+                break;
+            }
+        }
+        assert!(final_state.contains("completed"), "got: {final_state}");
+        assert!(final_state.contains("conduit-shell-test"), "output must be captured: {final_state}");
+        assert!(final_state.contains("exit 0"), "exit code must be reported: {final_state}");
+    }
+}
+

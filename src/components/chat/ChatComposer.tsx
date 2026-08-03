@@ -10,7 +10,7 @@ import { ModelEffortMenu } from "./ModelEffortMenu";
 import { ContextMeter } from "./ContextMeter";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import type { PermissionMode } from "../../state/chat";
-import { listChatSkills, listConnectors, listSessionConnectors, setSessionConnectors, type ConnectorWithStatus } from "../../lib/ipc";
+import { listChatSkills } from "../../lib/ipc";
 
 const MAX_TEXT_BYTES = 512 * 1024;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
@@ -57,16 +57,6 @@ function ResearchIcon() {
     <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <circle cx="11" cy="11" r="7" />
       <line x1="21" y1="21" x2="16.65" y2="16.65" />
-    </svg>
-  );
-}
-
-/** Plug icon for the "Attach a connector" menu item. */
-function ConnectorsIcon() {
-  return (
-    <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M9 2v6a4 4 0 0 0 4 4h0a4 4 0 0 0 4-4V2" />
-      <path d="M15 22v-6a4 4 0 0 0-4-4h0a4 4 0 0 0-4 4v6" />
     </svg>
   );
 }
@@ -220,12 +210,13 @@ interface Props {
   /** When true, the active provider supports extended thinking and the
    *  "brain" button is shown. */
   thinkingSupported?: boolean;
-  /** Active chat session id — used to load + persist the per-conversation
-   *  connector opt-in (attached connectors are scoped to this session only). */
-  chatSessionId?: string;
   /** Input tokens of the last assistant turn (the full prompt size the
    *  provider counted). Drives the context meter; null/0 hides it. */
   usedTokens?: number | null;
+  /** Live context-window cap from the running llama-server (`-c`). When >0
+   *  and the session is local, the meter uses this instead of the slider
+   *  value, so it always matches what the model actually has. */
+  liveMaxTokens?: number;
 }
 
 export function ChatComposer({
@@ -246,8 +237,8 @@ export function ChatComposer({
   onLocalCtxChange,
   permissionMode,
   onPermissionModeChange,
-  chatSessionId,
   usedTokens,
+  liveMaxTokens,
   thinking,
   onThinkingChange,
   thinkingSupported,
@@ -255,13 +246,6 @@ export function ChatComposer({
   const [content, setContent] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
-  // Connected connectors available to attach (loaded once per session change;
-  // only connected ones are eligible for per-conversation opt-in).
-  const [connectors, setConnectors] = useState<ConnectorWithStatus[]>([]);
-  // Connector ids attached to THIS conversation (per-session opt-in).
-  const [attachedConnectors, setAttachedConnectors] = useState<string[]>([]);
-  const [connectorsMenuOpen, setConnectorsMenuOpen] = useState(false);
-  const connectorsMenuRef = useRef<HTMLDivElement>(null);
   // Whether the next send should force research mode (set via the "+"
   // menu's "Research" option). Stays on only for the next send, then resets.
   const [forceResearch, setForceResearch] = useState(false);
@@ -337,46 +321,6 @@ export function ChatComposer({
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
   }, [attachMenuOpen]);
-
-  // Load connected connectors + this session's attached set when the session
-  // changes. Attached connectors are per-conversation (persisted in
-  // chat_session_connectors); only connected ones are eligible to attach.
-  useEffect(() => {
-    void listConnectors().then((cs) => {
-      setConnectors((cs ?? []).filter((c) => c.status.connected));
-    });
-    if (!chatSessionId) {
-      setAttachedConnectors([]);
-      return;
-    }
-    void listSessionConnectors(chatSessionId).then((ids) => {
-      setAttachedConnectors(ids ?? []);
-    });
-  }, [chatSessionId]);
-
-  // Close the connectors submenu on outside click.
-  useEffect(() => {
-    if (!connectorsMenuOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (connectorsMenuRef.current && !connectorsMenuRef.current.contains(e.target as Node)) {
-        setConnectorsMenuOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [connectorsMenuOpen]);
-
-  const toggleConnector = useCallback(
-    (id: string) => {
-      if (!chatSessionId) return;
-      setAttachedConnectors((prev) => {
-        const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id];
-        void setSessionConnectors(chatSessionId, next);
-        return next;
-      });
-    },
-    [chatSessionId],
-  );
 
   // Prefill from an external draft (per-message Edit action). Focuses and
   // moves the caret to the end so the user can immediately tweak and resend.
@@ -608,48 +552,27 @@ export function ChatComposer({
                     {forceResearch ? "Research mode on — tap again to turn off" : "Research a topic"}
                   </span>
                 </button>
-                <button
-                  type="button"
-                  className="composer-attach-menu-item"
-                  role="menuitem"
-                  disabled={connectors.length === 0}
-                  title={connectors.length === 0 ? "Connect an account in Settings → Connectors first" : "Attach a connected account to this conversation"}
-                  onClick={() => {
-                    setAttachMenuOpen(false);
-                    setConnectorsMenuOpen((o) => !o);
-                  }}
-                >
-                  <ConnectorsIcon />
-                  <span>
-                    {attachedConnectors.length > 0
-                      ? `Connectors (${attachedConnectors.length} attached)`
-                      : "Attach a connector"}
-                  </span>
-                </button>
+                {thinkingSupported && onThinkingChange && (
+                  <button
+                    type="button"
+                    className="composer-attach-menu-item"
+                    role="menuitem"
+                    aria-pressed={thinking === true}
+                    onClick={() => {
+                      const next: boolean | null =
+                        thinking === null ? true : thinking === true ? false : null;
+                      onThinkingChange(next);
+                      setAttachMenuOpen(false);
+                      textareaRef.current?.focus();
+                    }}
+                  >
+                    <ThinkingIcon on={thinking === true} />
+                    <span>{thinking === true ? "Thinking on" : "Thinking off"}</span>
+                  </button>
+                )}
               </div>
             )}
           </div>
-          {connectorsMenuOpen && (
-            <div className="composer-attach-menu composer-connectors-menu" ref={connectorsMenuRef} role="menu">
-              {connectors.map((c) => {
-                const on = attachedConnectors.includes(c.id);
-                return (
-                  <button
-                    key={c.id}
-                    type="button"
-                    className="composer-attach-menu-item"
-                    role="menuitemcheckbox"
-                    aria-checked={on}
-                    onClick={() => toggleConnector(c.id)}
-                  >
-                    <span className="connector-icon" aria-hidden>{c.icon}</span>
-                    <span>{c.displayName}</span>
-                    <span className={`connector-toggle${on ? " on" : ""}`}>{on ? "✓" : ""}</span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
           {forceResearch && (
             <button
               type="button"
@@ -665,12 +588,6 @@ export function ChatComposer({
               mode={permissionMode!}
               onModeChange={onPermissionModeChange!}
               variant="inline"
-            />
-          )}
-          {thinkingSupported && onThinkingChange && (
-            <ThinkingToggle
-              value={thinking ?? null}
-              onChange={onThinkingChange}
             />
           )}
           {attachError && <span className="composer-attach-error">{attachError}</span>}
@@ -713,15 +630,17 @@ export function ChatComposer({
                 ↑
               </button>
             )}
-            {/* Context meter sits directly below the send button */}
-            <ContextMeter
-              usedTokens={usedTokens ?? null}
-              model={model}
-              isLocal={provider === "local_gguf"}
-              localCtx={localCtx}
-            />
           </div>
         </div>
+      </div>
+      <div className="composer-context-meter-wrap">
+        <ContextMeter
+          usedTokens={usedTokens ?? null}
+          model={model}
+          isLocal={provider === "local_gguf"}
+          localCtx={localCtx}
+          liveMaxTokens={liveMaxTokens}
+        />
       </div>
     </div>
   );

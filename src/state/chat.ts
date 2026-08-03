@@ -34,6 +34,7 @@ import {
   type ChatConfigPayload,
   type ChatMessageRecord,
   type ChatSession,
+  type ChatTaskProgressPayload,
 } from "../lib/ipc";
 import { useArtifactsStore } from "./artifacts";
 
@@ -94,6 +95,21 @@ export interface PendingApproval {
   tool: string;
   summary: string;
   args: unknown;
+}
+
+/** Live progress of a background chat task (download_file / run_shell),
+ *  keyed by task id within a chat session. Updated by `chat:task-progress`
+ *  events; the card UI renders the latest snapshot. */
+export interface ChatTaskProgress {
+  taskId: string;
+  /** "download" | "shell" */
+  kind: string;
+  state: "running" | "completed" | "failed" | "cancelled";
+  message: string;
+  downloaded: number;
+  total: number | null;
+  speedBps: number;
+  destPath: string | null;
 }
 
 /** Sessions in which the user has already confirmed the full_auto modal this
@@ -169,6 +185,9 @@ export interface ChatState {
   /** Pending per-action filesystem-tool approvals, keyed by chat session. A
    *  session has at most one card at a time (the tool loop pauses on it). */
   pendingApprovals: Record<string, PendingApproval>;
+  /** Background chat tasks (download_file / run_shell) with live progress,
+   *  keyed by chat session id → task id → latest snapshot. */
+  tasks: Record<string, Record<string, ChatTaskProgress>>;
   /** True while the full_auto confirmation modal is open for a session. */
   fullAutoConfirmingFor: string | null;
   /** Per-turn owner session id (mobile app's session identifier) keyed by
@@ -258,6 +277,8 @@ export interface ChatState {
   onArtifact: (payload: ChatArtifactPayload) => void;
   onApprovalRequest: (payload: ChatApprovalRequestPayload) => void;
   onApprovalResolved: (payload: ChatApprovalResolvedPayload) => void;
+  /** Track a background chat task's progress (downloads / shell runs). */
+  onTaskProgress: (payload: ChatTaskProgressPayload) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -294,6 +315,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   previewArtifact: null,
   pendingApprovals: {},
   fullAutoConfirmingFor: null,
+  tasks: {},
 
   loadSessions: async () => {
     const sessions = await listChatSessions();
@@ -316,6 +338,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Ignore selects for sessions deleted this run (stale sidebar row, in-
     // flight click). The tombstone is the source of truth until restart.
     if (deletedSessions.has(chatSessionId)) return;
+    // Capture the outgoing session's emptiness BEFORE the switch: the
+    // `messages` buffer is replaced by the target session's messages below,
+    // so the post-switch check would always see a non-empty buffer.
+    const outgoingId = get().activeChatSessionId;
+    const outgoingEmpty = get().messages.length === 0;
     // Opening a chat clears its unread mark (persisted only if it was set).
     const wasUnread = get().sessions.find((s) => s.id === chatSessionId)?.unread ?? false;
     // Reset the per-session thinking override to the provider default
@@ -365,6 +392,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const sessions = await listChatSessions();
       if (sessions) set({ sessions: withoutDeleted(sessions) });
     });
+    // Switching away from a brand-new chat that never received a message
+    // (e.g. the auto-started default chat) should not leave an empty session
+    // row behind in the sidebar. deleteChat() tombstones it, so the relist
+    // above can't resurrect it.
+    if (outgoingId && outgoingId !== chatSessionId && outgoingEmpty) {
+      void get().deleteChat(outgoingId);
+    }
   },
 
   newChat: async (provider, model) => {
@@ -903,6 +937,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const next = { ...s.pendingApprovals };
       delete next[chatSessionId];
       return { pendingApprovals: next };
+    });
+  },
+
+  onTaskProgress: ({ chatSessionId, taskId, kind, state, message, downloaded, total, speedBps, destPath }) => {
+    set((s) => {
+      const sessionTasks = { ...(s.tasks[chatSessionId] ?? {}) };
+      sessionTasks[taskId] = { taskId, kind, state, message, downloaded, total, speedBps, destPath };
+      return { tasks: { ...s.tasks, [chatSessionId]: sessionTasks } };
     });
   },
 }));

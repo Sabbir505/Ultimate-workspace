@@ -367,6 +367,26 @@ pub struct ChatApprovalResolvedPayload {
     pub approved: bool,
 }
 
+/// Emitted while a background chat task (download_file / run_shell) makes
+/// progress. The UI renders a live progress card; the model polls the same
+/// state via `get_task_status` / `download_progress`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatTaskProgressPayload {
+    pub chat_session_id: String,
+    pub task_id: String,
+    /// "download" | "shell"
+    pub kind: String,
+    /// running | completed | failed | cancelled
+    pub state: crate::chat::tasks::TaskState,
+    /// Human-facing detail (error, destination, output tail).
+    pub message: String,
+    pub downloaded: u64,
+    pub total: Option<u64>,
+    pub speed_bps: u64,
+    pub dest_path: Option<String>,
+}
+
 /// In-app preview of a generated artifact file (see `read_artifact_preview`).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -442,6 +462,10 @@ pub struct StartedModel {
     pub port: u16,
     #[serde(default)]
     pub n_ctx: u32,
+    /// Effective `--n-gpu-layers` after the stepwise fallback ladder.
+    /// 0 = CPU-only, >0 = partial or full GPU offload. UI surfaces this.
+    #[serde(default)]
+    pub n_gpu_layers: i32,
     pub base_url: String,
 }
 
@@ -452,7 +476,26 @@ pub struct ActiveLocalModel {
     pub port: u16,
     #[serde(default)]
     pub n_ctx: u32,
+    /// Effective `--n-gpu-layers` of the running sidecar.
+    #[serde(default)]
+    pub n_gpu_layers: i32,
     pub base_url: String,
+}
+
+/// Live context-window usage for a local-model session. Returned by
+/// `count_context_tokens` so the composer can drive its circular meter off
+/// the same tokenizer the model actually uses (llama-server's `/tokenize`),
+/// not the stale `inputTokens` of the last persisted assistant turn.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsagePayload {
+    /// Tokens the running sidecar counted for the assembled (system + active
+    /// history) conversation. Null when no sidecar is running, the chat
+    /// session can't be found, or the tokenizer errored.
+    pub used_tokens: Option<u32>,
+    /// The model context window the sidecar was started with (`-c`). The
+    /// meter divides `used_tokens` by this to render the ring.
+    pub max_tokens: u32,
 }
 
 /// Saved workspace (pane layout snapshot). See db/workspaces.rs.

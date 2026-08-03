@@ -51,9 +51,7 @@
       }
     },
     "resources": [
-      "resources/python/**/*",
-      "binaries/llama-server-x86_64-unknown-linux-gnu/lib*.so*",
-      "binaries/llama-server-x86_64-unknown-linux-gnu/lib*.so"
+      "resources/python/**/*"
     ],
     "externalBin": [
       "binaries/conduit-browser-mcp"

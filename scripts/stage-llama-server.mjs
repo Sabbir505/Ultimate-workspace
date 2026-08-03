@@ -110,6 +110,14 @@ if (!asset) {
   process.exit(1);
 }
 
+// The llama-server sidecar is only bundled on Linux targets (see the
+// externalBin entry in tauri.conf.json). Windows/macOS builds have nothing to
+// stage — skip so CI/dev builds stay fast and don't download 100+ MB zips.
+if (isWin || isMac) {
+  console.log(`ℹ llama-server sidecar is only bundled for Linux targets — skipping staging on ${target}`);
+  process.exit(0);
+}
+
 console.log(`→ target: ${target}`);
 console.log(`→ gpu:    ${hasNvidia ? "NVIDIA (vulkan build)" : "none (cpu build)"}`);
 console.log(`→ asset:  ${asset}`);

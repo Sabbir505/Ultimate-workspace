@@ -56,6 +56,12 @@ jobs:
       - name: Install npm deps
         run: npm ci
 
+      # tauri build only compiles the main binary — the conduit-browser-mcp
+      # sidecar must be built explicitly so stage-browser-mcp.mjs (run inside
+      # beforeBuildCommand) finds it in target/release/.
+      - name: Build browser-mcp sidecar
+        run: cargo build --release --bin conduit-browser-mcp
+
       # Note: the sidecar is staged by beforeBuildCommand during `npm run tauri
       # build` (after cargo build --release has produced the binary), so no
       # separate staging step is needed here.
@@ -117,6 +123,12 @@ jobs:
 
       - name: Install npm deps
         run: npm ci
+
+      # tauri build only compiles the main binary — the conduit-browser-mcp
+      # sidecar must be built explicitly so stage-browser-mcp.mjs (run inside
+      # beforeBuildCommand) finds it in target/release/.
+      - name: Build browser-mcp sidecar
+        run: cargo build --release --bin conduit-browser-mcp
 
       # Note: the sidecar is staged by beforeBuildCommand during `npm run tauri
       # build` (after cargo build --release has produced the binary), so no

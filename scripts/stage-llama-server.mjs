@@ -154,10 +154,15 @@ mkdirSync(finalDir, { recursive: true });
 
 const isZip = asset.endsWith(".zip");
 if (isZip) {
-  const r = spawnSync("unzip", ["-o", "-q", tarball, "-d", cacheDir], { stdio: "inherit" });
+  // Windows-only asset. Prefer `tar` (the Windows 10+ built-in libarchive
+  // handles zip); fall back to `unzip` (Git-for-Windows / Unix) if absent.
+  let r = spawnSync("tar", ["xf", tarball, "-C", cacheDir], { stdio: "inherit" });
   if (r.status !== 0) {
-    console.error(`✗ unzip failed`);
-    process.exit(1);
+    r = spawnSync("unzip", ["-o", "-q", tarball, "-d", cacheDir], { stdio: "inherit" });
+    if (r.status !== 0) {
+      console.error(`✗ extract failed (tar and unzip both failed)`);
+      process.exit(1);
+    }
   }
 } else {
   const r = spawnSync("tar", ["xzf", tarball, "-C", cacheDir], { stdio: "inherit" });

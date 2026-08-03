@@ -57,15 +57,15 @@ jobs:
         run: npm ci
 
       # tauri build only compiles the main binary — the conduit-browser-mcp
-      # sidecar must be built explicitly so stage-browser-mcp.mjs (run inside
-      # beforeBuildCommand) finds it in target/release/.
+      # sidecar must be built explicitly. tauri-build validates the externalBin
+      # path at compile time, so touch a placeholder first, then stage the real
+      # binary once cargo has produced it.
       - name: Build browser-mcp sidecar
         working-directory: src-tauri
-        run: cargo build --release --bin conduit-browser-mcp
-
-      # Note: the sidecar is staged by beforeBuildCommand during `npm run tauri
-      # build` (after cargo build --release has produced the binary), so no
-      # separate staging step is needed here.
+        run: |
+          New-Item -ItemType File -Force "binaries/conduit-browser-mcp-x86_64-pc-windows-msvc.exe" | Out-Null
+          cargo build --release --bin conduit-browser-mcp
+          node ../scripts/stage-browser-mcp.mjs
 
       - name: Build (do NOT set signing env vars — the release job signs)
         env:
@@ -126,15 +126,17 @@ jobs:
         run: npm ci
 
       # tauri build only compiles the main binary — the conduit-browser-mcp
-      # sidecar must be built explicitly so stage-browser-mcp.mjs (run inside
-      # beforeBuildCommand) finds it in target/release/.
-      - name: Build browser-mcp sidecar
+      # sidecar must be built explicitly. tauri-build validates the externalBin
+      # path at compile time, so touch a placeholder first, then stage the real
+      # binary once cargo has produced it. llama-server is staged for real
+      # before compiling (it only needs downloads, not cargo artifacts).
+      - name: Build browser-mcp sidecar + stage llama-server
         working-directory: src-tauri
-        run: cargo build --release --bin conduit-browser-mcp
-
-      # Note: the sidecar is staged by beforeBuildCommand during `npm run tauri
-      # build` (after cargo build --release has produced the binary), so no
-      # separate staging step is needed here.
+        run: |
+          node ../scripts/stage-llama-server.mjs
+          touch binaries/conduit-browser-mcp-x86_64-unknown-linux-gnu
+          cargo build --release --bin conduit-browser-mcp
+          node ../scripts/stage-browser-mcp.mjs
 
       - name: Build
         env:

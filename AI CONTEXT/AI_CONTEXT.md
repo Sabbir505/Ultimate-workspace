@@ -1,8 +1,8 @@
 # Conduit — AI Context Document
 
-**Last verified:** 2026-07-26  
+**Last verified:** 2026-08-03  
 **Branch:** `master`  
-**Working tree:** The auto-updater (Tauri plugin-updater + GitHub Releases + `UpdateBanner`), the bundled Python runtime (`chat/python_runtime.rs` staged by `scripts/fetch-bundled-python.mjs`), and message attachments (`components/chat/MessageAttachments.tsx`) are all in place. Doc set has been consolidated under `AI CONTEXT/`. On 2026-07-26 the chat backend was split into focused submodules (see BUILD_LOG): `chat/mod.rs` 2306→622 lines (extracted `prompts`/`proto`/`dispatch`/`streaming`) and `chat/tools.rs` 2394→`tools/mod.rs` 1108 (extracted `tools/{search,generate,fs}`); pure-mechanical, no behavior change.
+**Working tree:** The auto-updater (Tauri plugin-updater + GitHub Releases + `UpdateBanner`), the bundled Python runtime (`chat/python_runtime.rs` staged by `scripts/fetch-bundled-python.mjs`), message attachments (`components/chat/MessageAttachments.tsx`), local model support (GGUF via llama.cpp sidecar), OAuth connectors, workspace save/restore, and the mobile relay are all in place. Doc set has been consolidated under `AI CONTEXT/`. On 2026-07-26 the chat backend was split into focused submodules (see BUILD_LOG): `chat/mod.rs` 2306→622 lines (extracted `prompts`/`proto`/`dispatch`/`streaming`) and `chat/tools.rs` 2394→`tools/mod.rs` 1108 (extracted `tools/{search,generate,fs}`); pure-mechanical, no behavior change.
 
 This document is the single source of truth for AI assistants working on this codebase. It is grounded in the actual source, not in PRD/BUILD_LOG summaries. When in doubt, trust this doc over the PRD.
 
@@ -29,34 +29,51 @@ A local-first, multi-pane desktop shell for AI coding agents. It does **not** im
 
 - **Managed states:** `DbState` (SQLite behind `Mutex`), `PtyState` (`PtyManager`), `BrowserState` (`BrowserManager`), `ChatState` (`ChatManager`)
 - **Plugins:** dialog, notification, fs, opener, updater
-- **Boot sequence:** open `<app_data_dir>/conduit.db` → sweep expired artifacts (30-day retention) → register Python runtime resource dir → apply window vibrancy → register 78 commands
+- **Boot sequence:** open `<app_data_dir>/conduit.db` → sweep expired artifacts (30-day retention) → register Python runtime resource dir → apply window vibrancy → register 118 commands
 - **Exit cleanup** (`ExitRequested` / `Exit`): `kill_all()` PTYs, `close_all()` browsers, `cancel_all()` chat streams
 
-### 2.2 Command Surface (80 registered in `lib.rs`)
+### 2.2 Command Surface (118 registered in `lib.rs`)
 
 ```
 Projects/sessions:   list_projects, add_project, remove_project, rename_project,
                      init_git_repo, list_sessions, create_session, update_session_title,
                      delete_session, touch_session
 PTY/harnesses:       spawn_agent_session, spawn_shell, write_pty, resize_pty, kill_pty,
-                     list_harnesses, run_harness_login
+                     list_harnesses, run_harness_login, pane_memory
 Browser:             browser_create, browser_navigate, browser_push_state, browser_action_result,
                      browser_go_back, browser_go_forward, browser_reload, browser_set_bounds,
-                     browser_set_visible, browser_close, browser_close_pane
-Git:                 get_git_status, create_worktree, get_git_diff
+                     browser_set_visible, browser_close, browser_close_pane,
+                     browser_open_pane_result, browser_resolve_pane_result,
+                     register_browser_pane_project, unregister_browser_pane_project
+Git:                 get_git_status, create_worktree, get_git_diff,
+                     get_changed_files, get_git_file_diff
 Settings/skills/etc: get_setting, set_setting, list_skills, create_skill, update_skill,
                      delete_skill, list_quick_actions, create_quick_action, update_quick_action,
                      delete_quick_action, set_secret, delete_secret, list_secret_keys,
                      get_cost_events, get_cost_rollups, export_session_markdown, read_file_text
 Installed skills:    list_installed_skills, list_installed_loops, read_installed_skill,
-                     save_installed_skill, create_installed_skill, delete_installed_skill
+                     save_installed_skill, create_installed_skill, delete_installed_skill,
+                     list_chat_skills
 Chat:                list_chat_sessions, create_chat_session, delete_chat_session,
                      update_chat_session_title, generate_chat_title, set_chat_session_starred,
                      set_chat_session_unread, update_chat_session_model, get_chat_messages,
                      touch_chat_session, send_chat_message, cancel_chat_message,
                      set_chat_api_key, delete_chat_api_key, get_chat_config, list_chat_models,
                      read_artifact_preview, download_artifact, download_artifacts_zip,
-                     list_artifacts, list_chat_artifacts, delete_artifact
+                     list_artifacts, list_chat_artifacts, delete_artifact,
+                     delete_chat_message, update_chat_session_provider,
+                     update_chat_session_watch_mode, update_chat_session_permission_mode,
+                     resolve_tool_action, count_context_tokens
+Local model:         scan_local_models, start_local_model, stop_local_model,
+                     local_model_status
+Connectors:          list_connectors, connector_connect, connector_connect_family,
+                     connector_disconnect, list_session_connectors, set_session_connectors
+Workspaces:          list_workspaces, save_workspace, delete_workspace
+Mobile relay:        start_mobile_relay, stop_mobile_relay, get_mobile_relay_status
+Local model market:  fetch_model_catalog, start_model_download, cancel_model_download,
+                     download_mmproj, delete_downloaded_model, get_market_settings,
+                     set_models_directory, pick_models_directory,
+                     set_hugging_face_token, clear_hugging_face_token
 Updater:             check_for_update, download_and_install_update
 ```
 
@@ -76,6 +93,16 @@ Updater:             check_for_update, download_and_install_update
 | `chat:error` | `{ chatSessionId, message, code }` | `chat/mod.rs` |
 | `chat:artifact` | `{ chatSessionId, path, filename }` | `chat/mod.rs` |
 | `chat:open-browser` | `{ chatSessionId, url }` | `chat/mod.rs` (from `open_url` tool) |
+| `chat:status` | `{ chatSessionId, status, reason? }` | `chat/streaming.rs` |
+| `chat:task-progress` | `{ chatSessionId, taskId, kind, status, detail? }` | `chat/streaming.rs` |
+| `chat:approval-request` | `{ chatSessionId, pendingId, tool, summary, args }` | `chat/permission.rs` |
+| `chat:approval-resolved` | `{ chatSessionId, pendingId, approved }` | `chat/permission.rs` |
+| `browser:resolve-pane-request` | `{ reqId, projectId }` | `browser_mcp.rs` (MCP roundtrip) |
+| `browser:open-browser-request` | `{ reqId, projectId, url? }` | `browser_mcp.rs` (MCP roundtrip) |
+| `oauth:callback` | `{ connectorId, code, state }` | `connectors/mod.rs` |
+| `mobile:session_chat_event` | `{ sessionId, event }` | `mobile/mod.rs` |
+| `mobile:session_chat_owner` | `{ sessionId, ownerPaneId }` | `mobile/mod.rs` |
+| `local-model:download:progress` | `{ modelId, downloaded, total, status }` | `local_model_market.rs` |
 | `updater:progress` | `{ downloaded, total }` (`total` may be null) | `commands/updater_cmds.rs` (download stream) |
 | `updater:installed` | `{}` | `commands/updater_cmds.rs` (post-install, app restarts) |
 
@@ -100,9 +127,9 @@ Updater:             check_for_update, download_and_install_update
 ### 2.6 Chat Subsystem (`chat/`)
 
 - **Core prompt:** lives in `chat/prompts.rs` — `core_prompt_base()`, `core_prompt_strict()` (appended for local models), `core_prompt_for(provider, model)`, `is_research_request()`, `build_system_prompt()`. `mod.rs` re-exports `build_system_prompt` + `is_research_request`. Tool names must match the `tools/mod.rs` registry.
-- **Providers:** `Anthropic`, `OpenAI`, `AnthropicCompatible`, `OpenAICompatible`, `OpenRouter` (`chat/providers.rs`)
+- **Providers:** `Anthropic`, `OpenAI`, `AnthropicCompatible`, `OpenAICompatible`, `OpenRouter`, `LocalGguf` (`chat/providers.rs`)
 - **Tool loop (`chat/streaming.rs`):** OpenAI-style (`run_openai_tool_loop`) and Anthropic-style (`run_anthropic_tool_loop`), capped at `MAX_TOOL_ITERS = 45` (non-research) / `RESEARCH_MAX_TOOL_ITERS = 96` (research turns). Each call streams one round (`openai_stream_round`/`anthropic_stream_round`), then runs tool calls and feeds results back until a final answer or the cap. Hermes XML `<tool_calls>` fallback parser (in `chat/proto.rs`) recovers tool calls emitted as plain text by aggregators that don't translate the `tools` field. Wire-protocol helpers (`parse_tool_args`, `parse_hermes_tool_calls`, `strip_hermes_tool_calls`, `tool_block`, `openai_message_json`/`anthropic_message_json`, `next_synthetic_tool_id`) live in `chat/proto.rs`; tool dispatch (`run_tool`, `run_gated_fs_tool`, `run_browser_tool`, `run_ledger_tool`, `emit_token`, `artifacts_dir`) in `chat/dispatch.rs`.
-- **Tools (19):** `web_search`, `generate_file`, `generate_document`, `generate_diagram`, `fetch_url`, `run_code`, `open_url`, `browser_read` (modes: `full`/`summary_only`/`section`, structured Markdown + metadata + failure reasons), `browser_click`, `browser_type`, `browser_scroll`, plus the filesystem set `list_directory`, `read_file`, `search_files` (read-only), `write_file`, `edit_file`, `delete_file`, `move_file`, `copy_file` (mutating).
+- **Tools (29):** `web_search`, `generate_file`, `generate_document`, `generate_diagram`, `fetch_url`, `run_code`, `open_url`, `get_skill`, `browser_read` (modes: `full`/`summary_only`/`section`, structured Markdown + metadata + failure reasons), `browser_click`, `browser_type`, `browser_scroll`, `download_file`, `download_progress`, `run_shell`, `get_task_status`, `cancel_task`, `add_source_note`, `get_source_ledger`, `reset_source_ledger`, plus the filesystem set `list_directory`, `read_file`, `search_files`, `search_content` (read-only), `write_file`, `edit_file`, `delete_file`, `move_file`, `copy_file` (mutating).
 - **Tool caps:** `ToolCaps { code_exec, fs_roots }` — `code_exec` is gated per-chat; `fs_roots` is the per-session granted-root set for the auto-run permission modes. Everything else is on when tools enabled.
 - **Permission gate (`permission.rs`):** the single `check_permission(mode, tool, path, fs_roots) -> AutoRun|NeedsApproval` function every filesystem tool routes through. `PermissionMode` ∈ `read_only`/`manual`/`auto_edit`/`full_auto` (per-session, on `chat_sessions.permission_mode`, default `manual`). Hard rules enforced here, not in UI copy: reads auto-run in every mode; `delete_file` is **always** gated (every mode); `read_only` strips mutating tools from the tool schema entirely (schema-level exclusion — the model literally cannot call `write_file`); `auto_edit`/`full_auto` auto-run writes/edits within granted roots; `auto_edit` also gates move/copy while `full_auto` auto-runs them. `run_tool` calls this before executing; `NeedsApproval` registers a pending approval + emits `chat:approval-request` and **pauses the turn** on a oneshot until the UI calls `resolve_tool_action(pendingId, approved)`.
 - **Code exec:** `codeexec.rs` — python/js/bash in fresh temp dir, 20s timeout, NOT a hard sandbox
@@ -122,7 +149,7 @@ Updater:             check_for_update, download_and_install_update
 
 ### 2.8 DB Schema (`db/mod.rs`)
 
-10 tables:
+14 tables:
 
 | Table | Key columns |
 |---|---|
@@ -133,11 +160,15 @@ Updater:             check_for_update, download_and_install_update
 | `project_secrets` | `project_id` + `key` composite PK, `value_encrypted` BLOB |
 | `app_settings` | `key` PK, `value` |
 | `quick_actions` | `id` PK, `project_id` FK, `label`, `command`, `keybinding`, `run_on_worktree` |
-| `chat_sessions` | `id` PK, `title`, `provider`, `model`, `created_at`, `last_active_at`, `starred`, `unread`, `permission_mode` (DEFAULT 'manual') |
+| `chat_sessions` | `id` PK, `title`, `provider`, `model`, `created_at`, `last_active_at`, `starred`, `unread`, `permission_mode` (DEFAULT 'manual'), `watch_mode` (NULLABLE) |
 | `chat_messages` | `id` AUTOINCREMENT, `chat_session_id` FK (CASCADE), `role`, `content`, `input_tokens`, `output_tokens`, `cost_usd`, `created_at` |
 | `artifacts` | `id` PK, `chat_session_id`, `chat_message_id`, `filename`, `path`, `kind`, `created_at`, `expires_at` |
+| `chat_source_notes` | `id` PK, `chat_session_id` FK, `url`, `title`, `note`, `created_at` |
+| `connector_credentials` | `connector_id` PK, `access_token_encrypted`, `refresh_token_encrypted`, `expires_at`, `scopes`, `created_at`, `updated_at` |
+| `chat_session_connectors` | `chat_session_id` + `connector_id` composite PK, `enabled` |
+| `workspaces` | `id` PK, `name`, `layout_json`, `created_at`, `updated_at` |
 
-**Migrations:** `migrate_chat_session_flags` (adds `starred`/`unread`), `migrate_chat_session_permission_mode` (adds `permission_mode`, backfills NULL→`manual`), `migrate_artifacts_message_id`, `migrate_unc_paths` (Win only, strips `\\?\` prefix).
+**Migrations:** `migrate_chat_session_flags` (adds `starred`/`unread`), `migrate_chat_session_permission_mode` (adds `permission_mode`, backfills NULL→`manual`), `migrate_chat_session_watch_mode` (adds `watch_mode`), `migrate_artifacts_message_id`, `migrate_unc_paths` (Win only, strips `\\?\` prefix).
 
 ### 2.9 Secrets (`secrets.rs`)
 
@@ -189,6 +220,8 @@ Updater:             check_for_update, download_and_install_update
 | `settings.ts` | `theme`, `dnd`, `keybindings`, `browserUrls` | `load`, `setTheme`, `setDnd`, `setKeybinding`, `lastBrowserUrl`, `rememberBrowserUrl` |
 | `ui.ts` | `activeView`, `paletteOpen`, `peek`, `pendingReplace` | `setActiveView`, `togglePalette`, `openPeek`, `setPendingReplace` |
 | `updater.ts` | `update`, `downloaded`, `total`, `error`, `checking`, `installing` | `check` (every 4h), `startInstall`, `dismiss`, `reset`; `wireUpdaterEvents()` |
+| `connector.ts` | `connectors[]`, `sessionConnectors` | `loadConnectors`, `connect`, `disconnect`, `setSessionConnectors` |
+| `localModel.ts` | `models[]`, `activeModelId`, `status`, `catalog` | `scanModels`, `startModel`, `stopModel`, `fetchCatalog` |
 
 **Spotlight logic** (pure functions in `state/spotlight.ts`): `activeTerminalId` (override wins, else recency), `cycleTerminalId`, `activeTerminalPair` (top+bottom), `cycleTerminalPair`.
 
@@ -227,10 +260,15 @@ Updater:             check_for_update, download_and_install_update
 ### 3.6 IPC (`lib/ipc.ts`)
 
 - `safeInvoke` / `safeListen` — no-op outside Tauri (jsdom tests, plain `vite dev`)
-- All commands grouped by subsystem (projects, PTY, browser, git, settings, chat, artifacts, installed skills)
+- All commands grouped by subsystem (projects, PTY, browser, git, settings, chat, artifacts, installed skills, local model, connectors, workspaces, mobile relay, local model market)
 - Updater IPC: `UpdateInfo` / `UpdateProgressPayload` interfaces, `checkForUpdate()`, `downloadAndInstallUpdate()`, `listenUpdaterProgress()`, `listenUpdaterInstalled()`
-- `ChatProvider` union: `"anthropic" | "openai" | "openrouter" | "anthropic_compatible" | "openai_compatible"`
-- `ChatSession` interface includes `starred?: boolean`, `unread?: boolean`
+- `ChatProvider` union: `"anthropic" | "openai" | "openrouter" | "anthropic_compatible" | "openai_compatible" | "local_gguf"`
+- `ChatSession` interface includes `starred?: boolean`, `unread?: boolean`, `permissionMode?: string`, `watchMode?: boolean | null`
+- Local model IPC: `scanLocalModels()`, `startLocalModel()`, `stopLocalModel()`, `localModelStatus()`, `countContextTokens()`
+- Connector IPC: `listConnectors()`, `connectorConnect()`, `connectorConnectFamily()`, `connectorDisconnect()`, `listSessionConnectors()`, `setSessionConnectors()`
+- Workspace IPC: `listWorkspaces()`, `saveWorkspace()`, `deleteWorkspace()`
+- Mobile relay IPC: `startMobileRelay()`, `stopMobileRelay()`, `getMobileRelayStatus()`
+- Local model market IPC: `fetchModelCatalog()`, `startModelDownload()`, `cancelModelDownload()`, `downloadMmproj()`, `deleteDownloadedModel()`, `getMarketSettings()`, `setModelsDirectory()`, `pickModelsDirectory()`, `setHuggingFaceToken()`, `clearHuggingFaceToken()`
 
 ### 3.7 Key Libraries
 
@@ -256,17 +294,25 @@ Updater:             check_for_update, download_and_install_update
 
 ## 4. Documentation Gaps (Verified Against Source)
 
-These are confirmed discrepancies between the docs and the current implementation. Fix them when editing docs.
+All previously identified gaps have been resolved as of 2026-08-03:
 
-| Gap | Where | Current truth |
+| Gap | Where | Status |
 |---|---|---|
-| `openrouter` missing from `ChatProviderId` | `CONTRACT.md` line 11 | `ChatProviderId` in Rust has 5 variants including `OpenRouter`; frontend `ipc.ts` has `"openrouter"` |
-| `starred`/`unread` missing from `ChatSession` | `CONTRACT.md` line 115 | Both fields exist in DB schema, Rust `types.rs`, and frontend `ipc.ts` |
-| `browser:url_detected` event missing | `CONTRACT.md` Events section | Emitted by `pty/mod.rs` (local URL scan); frontend `usePtyEvents.ts` listens and opens browser pane |
-| `list_chat_artifacts` command missing | `CONTRACT.md` Chat section | Registered in `lib.rs` line 167; used by frontend chat store |
-| `generate_chat_title` command missing | `CONTRACT.md` Chat section | Registered in `lib.rs` line 151 |
-| `set_chat_session_starred`/`unread` missing | `CONTRACT.md` Chat section | Registered in `lib.rs` lines 152-153 |
-| PRD §14 says "only two harnesses required for v1" | `PRD.md` line 541 | Three harnesses are implemented: claude_code, kimi_code, opencode |
+| `openrouter` missing from `ChatProviderId` | `CONTRACT.md` line 11 | **Fixed** — now includes all 6 providers |
+| `starred`/`unread` missing from `ChatSession` | `CONTRACT.md` line 115 | **Fixed** — both fields documented |
+| `browser:url_detected` event missing | `CONTRACT.md` Events section | **Fixed** — event added |
+| `list_chat_artifacts` command missing | `CONTRACT.md` Chat section | **Fixed** — command added |
+| `generate_chat_title` command missing | `CONTRACT.md` Chat section | **Fixed** — command added |
+| `set_chat_session_starred`/`unread` missing | `CONTRACT.md` Chat section | **Fixed** — commands added |
+| PRD §14 says "only two harnesses required for v1" | `PRD.md` line 541 | **Fixed** — three harnesses are implemented |
+| Command count listed as 78/80 | `AI_CONTEXT.md` §2.2 | **Fixed** — actual count is 118 |
+| Provider count listed as 5 | `AI_CONTEXT.md` §2.6 | **Fixed** — actual count is 6 (including LocalGguf) |
+| Tool count listed as 19 | `AI_CONTEXT.md` §2.6 | **Fixed** — actual count is 29 |
+| DB table count listed as 10 | `AI_CONTEXT.md` §2.8 | **Fixed** — actual count is 14 |
+| Missing events in events table | `AI_CONTEXT.md` §2.3 | **Fixed** — 10 additional events documented |
+| Missing IPC sections | `AI_CONTEXT.md` §3.6 | **Fixed** — local model, connectors, workspaces, mobile relay, local model market added |
+| Missing state stores | `AI_CONTEXT.md` §3.2 | **Fixed** — `connector.ts`, `localModel.ts` added |
+| Linux secrets documentation | `README.md` | **Fixed** — XOR-obfuscated SQLite fallback documented |
 
 ---
 
@@ -297,18 +343,18 @@ From BUILD_LOG.md and source inspection:
 | Bundled Python | `src-tauri/src/chat/python_runtime.rs`, `scripts/fetch-bundled-python.mjs` |
 | Browser webviews | `src-tauri/src/browser.rs`, `src-tauri/src/commands/browser_cmds.rs` |
 | DB schema | `src-tauri/src/db/mod.rs` |
-| DB queries | `src-tauri/src/db/{projects,chat,cost,artifacts,settings,skills,secrets}.rs` |
+| DB queries | `src-tauri/src/db/{projects,chat,cost,artifacts,settings,skills,secrets,connectors,workspaces}.rs` |
 | Git helpers | `src-tauri/src/git.rs`, `src-tauri/src/commands/git_cmds.rs` |
 | Secrets | `src-tauri/src/secrets.rs` |
 | Frontend entry | `src/main.tsx`, `src/App.tsx` |
-| State stores | `src/state/{projects,panes,chat,artifacts,skills,settings,ui,updater,spotlight}.ts` |
+| State stores | `src/state/{projects,panes,chat,artifacts,skills,settings,ui,updater,spotlight,connector,localModel}.ts` |
 | Pane components | `src/components/panes/{PaneGrid,TerminalPane,BrowserPane,BroadcastBar}.tsx` |
 | Chat components | `src/components/chat/{ChatView,ChatComposer,MessageAttachments,MessageBubble,MermaidDiagram,InlineDiagram,JsxPreview,ArtifactPreviewPane,ArtifactsMenu,ArtifactExportMenu,ModelEffortMenu,ChatSessionRow}.tsx` |
 | Sidebar | `src/components/sidebar/{Sidebar,ProjectItem,SessionRow,ArtifactLibrary}.tsx` |
 | Overlays | `src/components/{command-palette/CommandPalette,peek/PeekPanel,onboarding/OnboardingBanner,onboarding/UpdateBanner,cost-dashboard/CostDashboard,settings/SettingsView,skills-library/SkillsLibrary,common/Modal,common/GlassSelect}.tsx` |
 | IPC | `src/lib/ipc.ts` |
 | Utilities | `src/lib/{id,sessionTitle,skillExpansion,diff,fuzzy,keybindings,browserHistory,browserOcclusion,defaultSkills,sessionLauncher,exportSession}.ts` |
-| Hooks | `src/hooks/{usePtyEvents,useChatEvents,useGitStatusPolling,useTheme,useKeybindings}.ts` |
+| Hooks | `src/hooks/{usePtyEvents,useChatEvents,useGitStatusPolling,useTheme,useKeybindings,useBrowserMcpEvents}.ts` |
 | Tests | `src/test/*.{ts,tsx}` |
 | Built-in skills | `skills/{docx-skill,pptx-skill,pdf-skill,diagram-html-svg-skill,conduit-chat-system-prompt}.md` |
 | Config | `src-tauri/tauri.conf.json`, `vite.config.ts`, `tsconfig.json`, `index.html` |

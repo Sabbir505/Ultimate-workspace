@@ -11,6 +11,8 @@ Status: 🟢 fixed+tested · 🟡 mitigated/doc-only · 🔴 unfixed · ⚪ N/A
 - 🟢 **128 vitest frontend tests passed** (0 failed)
 - 🟢 `cargo build` clean (only pre-existing warnings)
 
+> **Implementation note:** As of 2026-08-04 the test counts are **295+** Rust + vitest combined (see `BUILD_LOG.md` for the most recent run). The 207/128 split above is the snapshot from 2026-07-27.
+
 ---
 
 ## Completed fixes (14 items)

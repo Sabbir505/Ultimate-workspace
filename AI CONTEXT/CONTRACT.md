@@ -77,12 +77,13 @@ Installed skills / loops (harness skill directories — Claude Code `~/.claude/s
 - `save_installed_skill(slug: string, kind: string, content: string) -> ()` — overwrites an existing skill/loop file (mirrors to every copy that exists)
 - `create_installed_skill(name: string, kind: string, content: string) -> InstalledSkill` — creates a new skill/loop in both harness roots
 - `delete_installed_skill(slug: string, kind: string) -> ()`
+- `list_chat_skills() -> ChatSkillInfo[]` — skills available for the Chat tab (appended to system prompt)
 
 `InstalledSkill = { slug, name, description, source ("claude"|"kimi"|"both"), claudePath?, kimiPath?, kind ("skill"|"loop") }`.
 
 ## Browser (native child webviews, one per tab)
 
-The browser pane uses Tauri child webviews on Windows/macOS; Linux falls back to iframes.
+The browser pane uses Tauri child webviews on Windows/macOS; Linux uses standalone `WebviewWindow`s (one per tab) because wry/gtk has no multi-webview support. No iframe fallback remains on any platform.
 Webview label scheme: `browser-{paneId}-tab-{tabId}` (extends the prior `browser-{paneId}` scheme).
 Use tabId=`"default"` for the single-tab path so there is ONE code path.
 
@@ -121,8 +122,16 @@ Event:
 - `chat:open-browser` — payload `{ chatSessionId: string, url: string }` (the `open_url` tool asks the UI to show a page in the built-in browser pane)
 - `chat:approval-request` — payload `{ chatSessionId, pendingId, tool, summary, args }` (a filesystem tool call needs per-action approval; the turn pauses until the UI calls `resolve_tool_action`)
 - `chat:approval-resolved` — payload `{ chatSessionId, pendingId, approved }` (the user resolved the card; the backend has resumed the paused tool loop)
+- `chat:status` — payload `{ chatSessionId: string, status: string, reason?: string }` (stream status change, e.g. `context_compacted`)
+- `chat:task-progress` — payload `{ chatSessionId: string, taskId: string, kind: string, status: string, detail?: string }` (background task progress)
 - `updater:progress` — payload `{ downloaded: number, total: number | null }` (cumulative bytes downloaded during `download_and_install_update`; `total` is the Content-Length if known)
 - `updater:installed` — payload `()` (the verified update package is on disk; the app restarts automatically)
+- `browser:resolve-pane-request` — payload `{ reqId: string, projectId: string }` (MCP server asks frontend to resolve which browser pane to use)
+- `browser:open-browser-request` — payload `{ reqId: string, projectId: string, url?: string }` (MCP server asks frontend to open a browser pane)
+- `oauth:callback` — payload `{ connectorId: string, code: string, state: string }` (OAuth redirect captured by the backend)
+- `mobile:session_chat_event` — payload `{ sessionId: string, event: object }` (mobile relay forwards a chat event)
+- `mobile:session_chat_owner` — payload `{ sessionId: string, ownerPaneId: string }` (mobile relay assigns chat ownership)
+- `local-model:download:progress` — payload `{ modelId: string, downloaded: number, total: number, status: string }` (model download progress)
 
 ## Auto-updater (Tauri plugin-updater + GitHub Releases)
 
@@ -138,7 +147,7 @@ The endpoint URL, pubkey, and Windows install mode live in `tauri.conf.json` (`p
 ## Chat (direct LLM HTTP API, separate from CLI agent panes)
 
 Types:
-- `ChatSession { id: string, title: string | null, provider: string, model: string, createdAt: number, lastActiveAt: number, starred: boolean, unread: boolean, permissionMode: string }` — `permissionMode` is the per-session filesystem-tool posture (`read_only` | `manual` | `auto_edit` | `full_auto`); new sessions default to `manual`.
+- `ChatSession { id: string, title: string | null, provider: string, model: string, createdAt: number, lastActiveAt: number, starred: boolean, unread: boolean, permissionMode: string, watchMode?: boolean | null }` — `permissionMode` is the per-session filesystem-tool posture (`read_only` | `manual` | `auto_edit` | `full_auto`); new sessions default to `manual`. `watchMode` overrides the global `watchMode` setting for this session only.
 - `ChatMessageRecord { id: number, chatSessionId: string, role: string, content: string, inputTokens: number | null, outputTokens: number | null, costUsd: number | null, createdAt: number }`
 - `ChatConfigPayload { provider: string | null, baseUrl: string | null, model: string | null, hasKey: boolean }`
 - `ChatModel { id: string, object: string, created: number, ownedBy: string }`
@@ -150,14 +159,17 @@ Commands:
 - `create_chat_session(provider: string, model: string) -> ChatSession`
 - `delete_chat_session(chatSessionId: string) -> ()`
 - `update_chat_session_model(chatSessionId: string, model: string) -> ()`
+- `update_chat_session_provider(chatSessionId: string, provider: string) -> ()` — switches the provider for an existing chat session.
+- `update_chat_session_watch_mode(chatSessionId: string, watchMode: boolean | null) -> ()` — sets the per-session watch-mode override (null = inherit global setting).
 - `update_chat_session_permission_mode(chatSessionId: string, mode: string) -> ()` — sets the per-session filesystem-tool posture (`read_only` | `manual` | `auto_edit` | `full_auto`); rejects unknown modes. The frontend gates the switch INTO `full_auto` behind a one-time confirmation modal before calling this.
+- `delete_chat_message(chatSessionId: string, messageId: number) -> ()` — deletes a single message from a chat session.
 - `update_chat_session_title(chatSessionId: string, title: string) -> ()`
 - `generate_chat_title(chatSessionId: string) -> string | null` — auto-generates a 3–6 word title from the conversation history via the LLM; returns `null` if generation fails (no API key configured, empty transcript, or API error).
 - `set_chat_session_starred(chatSessionId: string, starred: boolean) -> ()`
 - `set_chat_session_unread(chatSessionId: string, unread: boolean) -> ()`
 - `get_chat_messages(chatSessionId: string) -> ChatMessageRecord[]` (chronological by id)
 - `touch_chat_session(chatSessionId: string) -> ()` (sets lastActiveAt = now)
-- `send_chat_message(chatSessionId: string, content: string, effort?: string, toolsEnabled?: boolean, codeExecEnabled?: boolean, attachments?: ChatAttachmentInput[]) -> ()` — persists user message, looks up provider/model/api_key + the session's `permissionMode`, assembles message history, kicks off SSE streaming. `ChatAttachmentInput = { name, kind: "image"|"text"|"doc", text?, data? (base64), mediaType?, format? }`: images are sent to the model as vision content parts (data URL for OpenAI, base64 image block for Anthropic) on the live turn only; `doc` (docx/pptx/xlsx) bytes are text-extracted server-side and inlined into the message; `text` files are inlined as fenced blocks. Emits `chat:token`, then `chat:done` or `chat:error`. All diagrams go through the `generate_diagram` (vector SVG) tool. Chat tools: `web_search`, `generate_file`, `generate_document`, `generate_diagram`, `fetch_url`, `open_url`, `run_code`, the agentic browser control set (`browser_read`/`browser_click`/`browser_type`/`browser_scroll`), and the filesystem set (`list_directory`/`read_file`/`search_files`/`write_file`/`edit_file`/`delete_file`/`move_file`/`copy_file`). Filesystem mutating tools route through the central `check_permission` gate: under `read_only` the mutating tools are absent from the tool schema entirely; under `manual`/`auto_edit`/`full_auto` an action that needs approval emits `chat:approval-request` and pauses the turn until the UI resolves it via `resolve_tool_action`. `delete_file` is ALWAYS gated, in every mode.
+- `send_chat_message(chatSessionId: string, content: string, effort?: string, toolsEnabled?: boolean, codeExecEnabled?: boolean, attachments?: ChatAttachmentInput[]) -> ()` — persists user message, looks up provider/model/api_key + the session's `permissionMode`, assembles message history, kicks off SSE streaming. `ChatAttachmentInput = { name, kind: "image"|"text"|"doc", text?, data? (base64), mediaType?, format? }`: images are sent to the model as vision content parts (data URL for OpenAI, base64 image block for Anthropic) on the live turn only; `doc` (docx/pptx/xlsx) bytes are text-extracted server-side and inlined into the message; `text` files are inlined as fenced blocks. Emits `chat:token`, then `chat:done` or `chat:error`. All diagrams go through the `generate_diagram` (vector SVG) tool. Chat tools (29): `web_search`, `generate_file`, `generate_document`, `generate_diagram`, `fetch_url`, `open_url`, `run_code`, `get_skill`, the agentic browser control set (`browser_read`/`browser_click`/`browser_type`/`browser_scroll`), `download_file`, `download_progress`, `run_shell`, `get_task_status`, `cancel_task`, `add_source_note`, `get_source_ledger`, `reset_source_ledger`, and the filesystem set (`list_directory`/`read_file`/`search_files`/`search_content`/`write_file`/`edit_file`/`delete_file`/`move_file`/`copy_file`). Filesystem mutating tools route through the central `check_permission` gate: under `read_only` the mutating tools are absent from the tool schema entirely; under `manual`/`auto_edit`/`full_auto` an action that needs approval emits `chat:approval-request` and pauses the turn until the UI resolves it via `resolve_tool_action`. `delete_file` is ALWAYS gated, in every mode.
 - `cancel_chat_message(chatSessionId: string) -> ()` — aborts the active stream for that session (also drops its pending approvals).
 - `resolve_tool_action(pendingId: string, approved: boolean) -> ()` — resolves a pending per-action filesystem-tool approval card. `true` lets the paused tool loop run the action and feed its result back to the model; `false` injects a "user denied" tool result. Unknown/already-resolved `pendingId` is a no-op.
 - `list_artifacts() -> ArtifactRecord[]` — all persisted generated artifacts (files/diagrams), most recent first. `ArtifactRecord = { id, chatSessionId?, chatMessageId?, filename, path, kind, createdAt, expiresAt }`. `chatMessageId` links an artifact to the specific assistant message that produced it (used to restore inline diagrams/file chips on a reopened chat). Artifacts are retained 30 days; expired rows+files are swept on app startup.
@@ -170,6 +182,46 @@ Commands:
 - `read_artifact_preview(path: string) -> ArtifactPreview` — returns in-app preview content for a generated artifact file. `kind` is one of: `text`, `markdown`, `csv`, `json`, `html`, `code`, `image`, `pdf`, `office`, `diagram`, `binary`. `diagram` is used for HTML files containing the `<!-- conduit:diagram -->` sentinel (generated by the `generate_diagram` tool); `office` is used for docx/pptx/xlsx extracted to HTML.
 - `download_artifact(src: string, dest: string) -> ()` — copy an artifact to a user-chosen path.
 - `download_artifacts_zip(paths: string[], dest: string) -> ()` — zip multiple artifacts to a user-chosen `.zip` path.
+
+## Local Model (bundled llama.cpp sidecar)
+
+Commands:
+- `scan_local_models() -> LocalModelInfo[]` — scans the models directory for GGUF files.
+- `start_local_model(modelId: string, ctxSize?: number) -> LocalModelStatus` — spawns the llama.cpp sidecar.
+- `stop_local_model() -> ()` — stops the running sidecar.
+- `local_model_status() -> LocalModelStatus` — returns the current sidecar state.
+- `count_context_tokens(chatSessionId: string) -> { usedTokens: number, maxTokens: number }` — queries the sidecar's /tokenize endpoint for the live context count.
+
+## Connectors (OAuth + remote MCP)
+
+Commands:
+- `list_connectors() -> ConnectorInfo[]` — all configured connectors.
+- `connector_connect(connectorId: string) -> ()` — initiates OAuth flow for a connector.
+- `connector_connect_family(family: string) -> ()` — initiates OAuth for a connector family.
+- `connector_disconnect(connectorId: string) -> ()` — revokes and removes stored credentials.
+- `list_session_connectors(chatSessionId: string) -> SessionConnector[]` — connectors enabled for a chat session.
+- `set_session_connectors(chatSessionId: string, connectorIds: string[]) -> ()` — sets which connectors are enabled for a chat session.
+
+## Workspaces (pane layout save/restore)
+
+Commands:
+- `list_workspaces() -> Workspace[]` — all saved workspace layouts.
+- `save_workspace(name: string, layoutJson: string) -> Workspace` — saves the current pane layout.
+- `delete_workspace(workspaceId: string) -> ()` — deletes a saved workspace.
+
+## Local Model Market (Hugging Face model downloads)
+
+Commands:
+- `fetch_model_catalog() -> ModelCatalogEntry[]` — fetches the curated model catalog.
+- `start_model_download(modelId: string) -> ()` — starts downloading a model from Hugging Face.
+- `cancel_model_download(modelId: string) -> ()` — cancels an in-progress download.
+- `download_mmproj(modelId: string) -> ()` — downloads the mmproj (vision) companion file.
+- `delete_downloaded_model(modelId: string) -> ()` — removes a downloaded model from disk.
+- `get_market_settings() -> MarketSettings` — returns the current market settings.
+- `set_models_directory(path: string) -> ()` — sets the directory where models are stored.
+- `pick_models_directory() -> string | null` — opens a folder picker for the models directory.
+- `set_hugging_face_token(token: string) -> ()` — stores the Hugging Face API token.
+- `clear_hugging_face_token() -> ()` — removes the stored Hugging Face API token.
 
 Providers: `anthropic`, `openai`, `openrouter`, `anthropic_compatible`, `openai_compatible`, `local_gguf`.
 

@@ -24,21 +24,11 @@ This doc is the exact recipe. Follow it top-to-bottom each time you release.
 
 ## Platforms
 
-Conduit ships for **Windows (NSIS)** and **Linux (AppImage + deb)**. The
-GitHub Actions workflow (`.github/workflows/build.yml`) builds both on tag
-push (`v*`) and publishes a single release with artifacts for every platform,
-plus a shared cross-platform `latest.json` (one `platforms` entry per OS).
+Conduit ships for **Windows (NSIS)** and **Linux (AppImage + deb)**. The GitHub Actions workflow (`.github/workflows/build.yml`) builds **Windows-only** (the Linux pipeline is paused until the product stabilizes — see the workflow's header). A future release will resume Linux builds from CI; for now, manual builds (`npm run tauri build` on Linux) produce the AppImage and deb artifacts.
 
-- **Windows** installs download the signed `.exe` updater package; the updater
-  runs it in `passive` mode (a progress UI, no manual steps).
-- **Linux AppImage** updates: the Tauri updater plugin surfaces "a new version
-  is available" and links to the release; AppImage auto-replace is best-effort
-  (the `.AppImage` is a portable single-file binary — to update, download the
-  new one and replace the old file). The `latest.json` `linux-x86_64` entry
-  carries the download URL for this.
-- **Linux deb** packages are for apt-based distros; `sudo dpkg -i` installs,
-  but the updater plugin does not auto-replace debs — treat deb as the
-  install-once path; use the AppImage for auto-updates.
+- **Windows** installs download the signed `.exe` updater package; the updater runs it in `passive` mode (a progress UI, no manual steps).
+- **Linux AppImage** updates: the Tauri updater plugin surfaces "a new version is available" and links to the release; AppImage auto-replace is best-effort (the `.AppImage` is a portable single-file binary — to update, download the new one and replace the old file). The `latest.json` `linux-x86_64` entry carries the download URL for this.
+- **Linux deb** packages are for apt-based distros; `sudo dpkg -i` installs, but the updater plugin does not auto-replace debs — treat deb as the install-once path; use the AppImage for auto-updates.
 
 ## Prerequisites
 
@@ -81,16 +71,21 @@ renders in the update banner.
 
 > **Connector credentials required at build time.** `option_env!` in
 > `src-tauri/src/connectors/config.rs` bakes the Notion `client_id` /
-> `client_secret` into the binary when cargo compiles. If these are unset,
-> the published build ships with empty credentials and every user's
-> **Settings → Connectors → Connect** fails with "no client_id configured".
-> Set them in the same shell before the build command (PowerShell):
+> `client_secret`, GitHub `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`, and
+> Google `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` into the binary when cargo
+> compiles. Canva uses Dynamic Client Registration (DCR, public client) and
+> needs no build-time secret. If these are unset, the published build ships
+> with empty credentials and every user's **Settings → Connectors → Connect**
+> fails with "no client_id configured". Set them in the same shell before the
+> build command (PowerShell):
 >
 > ```powershell
 > $env:NOTION_CLIENT_ID = "3a9d872b-..."        # your integration's client id
 > $env:NOTION_CLIENT_SECRET = "secret_..."      # your integration's secret
 > $env:GITHUB_CLIENT_ID = "Iv1.1234567890abcdef"  # GitHub OAuth App client id
 > $env:GITHUB_CLIENT_SECRET = "abcdef0123456789..."  # GitHub OAuth App secret
+> $env:GOOGLE_CLIENT_ID = "..."  # Google Cloud Console "Desktop app" client id
+> $env:GOOGLE_CLIENT_SECRET = "..."  # Google Cloud Console "Desktop app" secret
 > ```
 >
 > The Notion + Google credentials are the *integration's* credentials; the

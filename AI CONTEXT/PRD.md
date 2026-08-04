@@ -29,7 +29,8 @@ It is **not** a code editor and **not** a fork of VS Code. It does not implement
 - Not implementing our own agent loop, tool-calling, or diff-application engine — we rely entirely on the CLI harness (Claude Code / Kimi Code) for that.
 - No cloud sync, no multi-device account system, no hosted backend in v1. Fully local-first, single-machine.
 - No third-party code-execution plugin marketplace in v1 (explicitly deferred — see §12).
-- No mobile app.
+
+> **Implementation note (v0.3.0+):** A **mobile companion app** ships alongside the desktop build (React Native / Expo). It is a client-only UI over a localhost WebSocket relay; the phone never holds API keys, and all model calls originate from the desktop. The original PRD stated "no mobile app" because the v1 build was desktop-only; the companion was added in v0.3.0 without moving the data model off-device. See §14.4 and `CONTRACT.md` → Mobile Relay for the protocol.
 
 ---
 
@@ -41,7 +42,7 @@ The app must support at minimum:
 2. **Kimi Code CLI** (Moonshot AI) — supports session resume via `kimi -r <session-id>` / `--session`, `kimi -c` / `--continue` for the most recent session. Single-binary distribution.
 3. **OpenCode** — added as a third adapter; resume support follows the same trait.
 
-> **Implementation note (Chat tab):** The app also includes a Chat tab (not described in this PRD) that offers direct LLM conversations via the Anthropic/OpenAI HTTP APIs — a separate feature from the CLI agent panes covered here. The Chat tab supports streaming responses, tool calling (web_search, generate_document, generate_file, generate_diagram, fetch_url, open_url, run_code), Mermaid diagram rendering, HTML/CSS diagram generation with PNG export, artifact preview/download, and skill loading. See `CONTRACT.md` Chat section for the full IPC contract.
+> **Implementation note (Chat tab):** The app also includes a Chat tab (not described in this PRD) that offers direct LLM conversations via HTTP APIs — a separate feature from the CLI agent panes covered here. The Chat tab supports: streaming responses, tool calling (29 tools: web_search, generate_document, generate_file, generate_diagram, fetch_url, open_url, run_code, download_file, download_progress, run_shell, get_task_status, cancel_task, the agentic browser control set `browser_read`/`browser_click`/`browser_type`/`browser_scroll`/`wait_for`, the filesystem set `list_directory`/`read_file`/`search_files`/`search_content`/`write_file`/`edit_file`/`delete_file`/`move_file`/`copy_file`, the source ledger `add_source_note`/`get_source_ledger`/`reset_source_ledger`, and `get_skill`), Mermaid diagram rendering, HTML/CSS diagram generation with PNG export, artifact preview/download/export, research mode (`/research`) with Plan/Execute/Synthesize prompting and a persistent source ledger, context compaction for local GGUF models, per-session permission modes (read_only / manual / auto_edit / full_auto), and a Connectors framework (OAuth + remote MCP for Notion, GitHub, Google, Gmail, Kiwi). See `CONTRACT.md` Chat section for the full IPC contract.
 
 Both harnesses run as normal CLI processes; the app does **not** need to reimplement their protocols. The app spawns them in a pseudo-terminal (pty) with the working directory set to the target project folder, and lets their native TUI render inside the pane. This means:
 - Conduit does not need to parse or understand the agent's internal message format for v1's baseline experience — the pty output is rendered as terminal output (via xterm.js or equivalent), exactly as if the user ran the CLI directly.
@@ -93,7 +94,9 @@ Both harnesses run as normal CLI processes; the app does **not** need to reimple
 2. Browser pane has a URL bar (defaults to `http://localhost:3000` or last-used URL per project), refresh, and back/forward.
 3. Browser pane is a plain embedded webview — it does not need special agent integration in v1, it's for the user to visually check dev server output next to the agent that's driving it.
 
-> **Implementation note:** The browser pane uses native Tauri child webviews (`Window::add_child`) on Windows/macOS rather than a secondary `WebviewWindow`. This provides a top-level browsing context with no `X-Frame-Options` restrictions and full navigation history. Linux falls back to iframes. The webview is positioned over the pane's body div by syncing bounds from the frontend (ResizeObserver) to the backend, with occlusion logic that hides the webview when overlays/modals are open.
+> **Implementation note:** The browser pane uses native Tauri child webviews (`Window::add_child`) on Windows/macOS rather than a secondary `WebviewWindow`. This provides a top-level browsing context with no `X-Frame-Options` restrictions and full navigation history. Linux uses standalone `WebviewWindow`s (one per tab) because wry/gtk has no multi-webview support. No iframe fallback remains on any platform. The webview is positioned over the pane's body div by syncing bounds from the frontend (ResizeObserver) to the backend, with occlusion logic that hides the webview when overlays/modals are open.
+
+> **Implementation note (v0.3.0+):** Agent-driven browser control is available via the bundled `conduit-browser-mcp` sidecar (a standalone MCP binary that bridges JSON-RPC over stdio to the desktop's WebSocket relay) and the in-app chat tools `browser_read`/`browser_click`/`browser_type`/`browser_scroll`/`wait_for`. Visual feedback overlays (cursor tween, click ripple, typing caret, element highlight) show the user what the agent is doing. Page extraction uses Mozilla's Readability.js with consent-banner dismissal, lazy-load/infinite-scroll handling, and structured output (full/summary_only/section modes). See `task-browser-agent-visual-feedback.md`, `task-browser-extraction-quality.md`, and `task-conduit-browser-mcp.md` for full specs.
 
 ---
 
@@ -352,6 +355,47 @@ All shortcuts must be remappable in Settings — store overrides in `app_setting
 - Injected into a pane's process environment only when explicitly referenced by a quick action or when the user opts to inject "this project's secrets" into a freshly spawned pane.
 - Never logged, never included in session exports (§7.14), never sent to any network endpoint by Conduit itself.
 
+> **Implementation note (Linux):** The `keyring` crate is built with `linux-native` + `sync-secret-service` features, which talks to the Secret Service API (`gnome-keyring`, `kwalletd5`, `KeePassXC`). The XOR-obfuscated SQLite fallback documented in `AUDIT.md` (row 3.2/2.2) remains a last-resort fallback when no Secret Service is available.
+
+---
+
+## 7.17 Connectors (OAuth SaaS Integrations) — added in v0.3.0+
+
+A Connectors framework bridges third-party SaaS accounts into the Chat tab as per-conversation MCP tool sources:
+
+- **OAuth 2.0 flows** for third-party MCP servers. Supported connectors: **Notion**, **GitHub**, **Gmail**, **Google Drive/Calendar/Sheets/Docs/Slides/Chat/People**, and **Kiwi**.
+- **Per-conversation opt-in** — connectors are attached to a specific chat session (`set_session_connectors`), never global. A connector's tools only appear in the tool schema for sessions that have explicitly enabled it.
+- **Credentials stored in the OS keychain** (Windows Credential Manager / macOS Keychain / Linux Secret Service) — per-user access tokens are never in the database in cleartext.
+- **Confidential-client credentials** (Notion/GitHub/Google `client_id`/`client_secret`) are baked into the binary at build time via `option_env!` (`src-tauri/src/connectors/config.rs`). These are shared across all installs so the app can complete the token exchange on behalf of any authorizing user; each end user still authorizes their own account. Canva uses Dynamic Client Registration (DCR, public client) and needs no build-time secret. See `RELEASE.md` for the build-time credential requirement and `AUDIT.md` row 3.6 for the acknowledged extractable-secret trade-off.
+- **Per-tool permission gating** — connector tools route through the same `check_permission` gate as the filesystem tools and respect the session's permission mode.
+
+---
+
+## 7.18 Local Model Market & Context Compaction — added in v0.3.0+
+
+- **Local models** (Settings → Local Models): scan the machine for `.gguf` files and serve them through a managed llama.cpp sidecar. Local models appear as a first-class chat provider (`local_gguf`) — free, offline, private. GPU offload is requested by default (`--n-gpu-layers=999`); on cards where the model + KV cache don't fit, llama.cpp spills layers to CPU.
+- **Local Model Market**: browse a curated Hugging Face catalog and download models directly. Downloads are cancellable and report progress (`local-model:download:progress`); mmproj (vision) companion files are supported.
+- **Context compaction**: automatically summarizes older conversation history when a local GGUF model's context window approaches capacity. The most recent exchanges stay verbatim; aged-out turns are condensed via a non-streaming summarization call. Compaction reserves tool-schema tokens out of the context budget and triggers before the prompt can overflow. Configurable threshold and pin count in Settings → Local Models → Compaction.
+- **Context window meter**: a circular SVG ring below the send button shows how much context the last turn used (green < 70%, amber 70–90%, red > 90%).
+
+---
+
+## 7.19 Research Mode — added in v0.3.0+
+
+- Triggered with `/research` (or keyword triggers) in the Chat tab when tools are enabled.
+- **Plan / Execute / Synthesize** prompting scaffolding: the agent plans the research approach, gathers sources into a persistent **source ledger** (`add_source_note` / `get_source_ledger` / `reset_source_ledger` tools backed by SQLite), then synthesizes a cited answer.
+- The source ledger dedups by `(session, url, fact)` and caps at 50 entries.
+- Artifact generation appends a **Sources** section to the output.
+- See `task-research-orchestration.md` for the full spec.
+
+---
+
+## 7.20 Mobile Companion App — added in v0.3.0+
+
+- A **React Native / Expo** companion app connects to the desktop over a localhost WebSocket relay.
+- The phone never holds API keys — every model call originates from the desktop process. The phone mirrors terminal sessions as styled-text snapshots (SGR-styled output from a vt100 parser), triggers chat turns, spawns local model sidecars, and resolves tool approvals (`SessionApprovalRequest` / `ResolveSessionApproval`).
+- The relay auto-starts on app launch and auto-stops on exit. See `CONTRACT.md` → Mobile Relay for the full protocol (JSON over WebSocket, tagged-union message types).
+
 ---
 
 ## 8. Non-Functional Requirements
@@ -538,6 +582,15 @@ Do not batch multiple unrelated features into one untested, undocumented pass. S
 ## 14. Explicitly Deferred to v2
 
 - Open marketplace for third-party plugins/skills (search, install, permission-scoped sandboxing for code-executing plugins). Skills library (§7.15) in v1 is local-only, no discovery/sharing mechanism.
-- Additional harness adapters beyond Claude Code and Kimi Code (e.g. Codex, OpenCode) — the adapter interface (§6.4) is designed to make this straightforward later, but only two are required for v1.
+- Additional harness adapters beyond Claude Code, Kimi Code, and OpenCode (e.g. Codex) — the adapter interface (§6.4) is designed to make this straightforward later, but only three are implemented for v1.
 - Real-time collaborative/remote sessions.
-- Mobile companion app.
+- Tahoe-era native `NSGlassEffectView` (true dynamic glass with per-corner radius) — waiting on a stable `tauri-plugin-liquid-glass` for Tauri v2; current build uses `window-vibrancy` (frosted look) as a stopgap.
+
+### 14.4 Added in v0.3.0+ (out of original scope)
+
+- **Mobile companion app** — React Native / Expo client over a localhost WebSocket relay. (Was listed as a non-goal in the original §2; added in v0.3.0.)
+- **Connectors framework** — OAuth + remote MCP for Notion, GitHub, Google, Gmail, Kiwi. (Not in the original PRD; added in v0.3.0.)
+- **Local Model Market** — Hugging Face model browsing and download. (Not in the original PRD; added in v0.3.0.)
+- **Context compaction for local models** — auto-summarize aged-out turns to fit context window. (Not in the original PRD; added in v0.3.2.)
+- **Research mode** — Plan/Execute/Synthesize orchestration with source ledger. (Not in the original PRD; added in v0.3.0.)
+- **Agent-driven browser control** — `conduit-browser-mcp` sidecar + in-app browser tools with visual feedback overlays. (Not in the original PRD; added in v0.3.0.)

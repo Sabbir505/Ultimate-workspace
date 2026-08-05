@@ -351,16 +351,16 @@ fn tool_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "generate_document",
-            "description": "Create a REAL, professionally formatted docx/pptx/xlsx/pdf file in the artifacts dir. Use this instead of hand-building office files with python. Args: format ('docx'|'pptx'|'xlsx'|'pdf'), filename, title, content.",
+            "description": "Create a REAL, professionally formatted docx/pptx/xlsx/pdf file in the artifacts dir. Use this instead of hand-building office files with python. Args: format ('docx'|'pptx'|'xlsx'|'pdf'), filename, code (a complete runnable Python program that saves the built document to os.environ['CONDUIT_OUTPUT']).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "format": { "type": "string", "enum": ["docx", "pptx", "xlsx", "pdf"] },
                     "filename": { "type": "string" },
-                    "title": { "type": "string" },
-                    "content": { "type": "string" }
+                    "code": { "type": "string", "description": "Complete runnable Python program (python-docx/python-pptx/openpyxl/reportlab, or conduit_docgen) that builds the document and saves it to os.environ['CONDUIT_OUTPUT']. Not natural-language instructions." },
+                    "instructions": { "type": "string" }
                 },
-                "required": ["format", "filename", "title", "content"]
+                "required": ["format", "filename", "code"]
             }
         }),
         json!({

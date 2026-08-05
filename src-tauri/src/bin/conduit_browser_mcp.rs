@@ -183,6 +183,19 @@ async fn handle_line(
     }
 }
 
+/// Map an MCP tool name to the WS op the app dispatches. Browser tools keep
+/// their bare op names; conduit-tools live under a `conduit_tools:<name>`
+/// prefix so the app-side dispatcher can route them to
+/// chat::tools::execute_tool (which receives the name back).
+fn tool_op(tool: &str) -> Result<String, &'static str> {
+    match tool {
+        "navigate" | "read_page" | "click" | "type_text" | "scroll" | "wait_for" => Ok(tool.to_string()),
+        "generate_document" | "generate_diagram" | "generate_file"
+        | "get_skill" | "list_skills" => Ok(format!("conduit_tools:{tool}")),
+        _ => Err("unknown tool"),
+    }
+}
+
 /// Dispatch a `tools/call` to the app over the WebSocket. Returns the tool's
 /// text result or a structured (code, message) error.
 async fn handle_tool_call(
@@ -194,15 +207,7 @@ async fn handle_tool_call(
     let tool = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
-    let op = match tool {
-        "navigate" => "navigate",
-        "read_page" => "read_page",
-        "click" => "click",
-        "type_text" => "type_text",
-        "scroll" => "scroll",
-        "wait_for" => "wait_for",
-        other => return Err(("unknown_op", format!("unknown tool: {other}"))),
-    };
+    let op = tool_op(tool).map_err(|_| ("unknown_op", format!("unknown tool: {tool}")))?;
 
     // Ensure we have a connection (lazy connect / reconnect on drop).
     if ws.as_ref().map(|c| c.closed).unwrap_or(true) {
@@ -344,5 +349,88 @@ fn tool_schemas() -> Vec<Value> {
                 "required": ["condition"]
             }
         }),
+        json!({
+            "name": "generate_document",
+            "description": "Create a REAL, professionally formatted docx/pptx/xlsx/pdf file in the artifacts dir. Use this instead of hand-building office files with python. Args: format ('docx'|'pptx'|'xlsx'|'pdf'), filename, title, content.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "format": { "type": "string", "enum": ["docx", "pptx", "xlsx", "pdf"] },
+                    "filename": { "type": "string" },
+                    "title": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["format", "filename", "title", "content"]
+            }
+        }),
+        json!({
+            "name": "generate_diagram",
+            "description": "Create a diagram (SVG/PNG) in the artifacts dir from a structured spec (mindmap/flow/sequence/architecture).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["mindmap", "flow", "sequence", "architecture"] },
+                    "filename": { "type": "string" },
+                    "title": { "type": "string" },
+                    "items": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["kind", "filename", "title", "items"]
+            }
+        }),
+        json!({
+            "name": "generate_file",
+            "description": "Write a plain text/code file into the artifacts dir. Args: format (extension without dot), filename, title, content.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "format": { "type": "string" },
+                    "filename": { "type": "string" },
+                    "title": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["format", "filename", "title", "content"]
+            }
+        }),
+        json!({
+            "name": "get_skill",
+            "description": "Load a skill's detailed instructions (e.g. 'docx', 'pdf', 'pptx', 'diagram') before producing that artifact.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" }
+                },
+                "required": ["slug"]
+            }
+        }),
+        json!({
+            "name": "list_skills",
+            "description": "List every available skill slug.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_schemas_include_conduit_tools() {
+        let schemas = tool_schemas();
+        let names: Vec<&str> = schemas
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        for tool in ["navigate", "read_page", "generate_document", "generate_diagram",
+                     "generate_file", "get_skill", "list_skills"] {
+            assert!(names.contains(&tool), "missing tool schema: {tool}");
+        }
+    }
+
+    #[test]
+    fn conduit_tool_routing_uses_tools_namespace() {
+        assert_eq!(tool_op("generate_document").unwrap(), "conduit_tools:generate_document");
+        assert_eq!(tool_op("navigate").unwrap(), "navigate"); // browser tools unchanged
+        assert!(tool_op("bogus").is_err()); // unknown tools error, not misroute
+    }
 }

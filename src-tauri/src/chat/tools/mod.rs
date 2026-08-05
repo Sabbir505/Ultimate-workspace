@@ -45,6 +45,7 @@ pub const FETCH_URL: &str = "fetch_url";
 pub const RUN_CODE: &str = "run_code";
 pub const OPEN_URL: &str = "open_url";
 pub const GET_SKILL: &str = "get_skill";
+pub const LIST_SKILLS: &str = "list_skills";
 pub const BROWSER_READ: &str = "browser_read";
 
 pub const BROWSER_CLICK: &str = "browser_click";
@@ -306,6 +307,8 @@ const GET_SKILL_DESC: &str = "Load a skill's detailed instructions into your \
     Only call it when a skill genuinely applies — do not call it for general \
     questions.";
 
+const LIST_SKILLS_DESC: &str = "List every available skill slug.";
+
 const LIST_DIRECTORY_DESC: &str = "List the immediate children of a directory \
     (files and subdirectories, one per line). Pass an absolute path. Read-only.";
 
@@ -513,6 +516,24 @@ pub async fn execute_tool(
                         "No skill named \"{slug}\". The available skills are listed in the system prompt under \"## Available skills\"."
                     )),
                 }
+            }
+        }
+        LIST_SKILLS => {
+            // Read-only (no FS/DB mutation) so it stays available under every
+            // permission mode, mirroring get_skill. Same source as the chat
+            // `/` menu and the harness system prompt: on-disk skills first,
+            // built-ins (docx/pptx/pdf/diagram) when not shadowed.
+            let skills = crate::installed_skills::list_all_skills();
+            if skills.is_empty() {
+                ToolOutcome::text("No skills available.")
+            } else {
+                ToolOutcome::text(
+                    skills
+                        .iter()
+                        .map(|s| format!("{} — {}", s.slug, s.name))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
             }
         }
         RUN_CODE => {
@@ -748,6 +769,33 @@ mod tests {
             &json!({}),
         ));
         assert!(out.text.contains("unknown tool"));
+    }
+
+    #[test]
+    fn list_skills_returns_docx_slug() {
+        let client = reqwest::Client::new();
+        let dir = std::env::temp_dir();
+        let out = tauri::async_runtime::block_on(execute_tool(
+            &client,
+            &dir,
+            &ToolCaps::default(),
+            LIST_SKILLS,
+            &json!({}),
+        ));
+        // The built-in docx skill always exists (even when shadowed by an
+        // on-disk override the slug is preserved), so the listing must
+        // mention it.
+        assert!(
+            out.text.contains("docx"),
+            "list_skills output must include the docx slug, got: {}",
+            out.text
+        );
+        assert!(out.artifact.is_none());
+        // The read-only tool must be surfaced in both provider specs.
+        let o = openai_names(&ToolCaps::default(), PermissionMode::Manual);
+        assert!(o.contains(&LIST_SKILLS.to_string()));
+        let a = anthropic_tool_specs(&ToolCaps::default(), PermissionMode::Manual);
+        assert!(a.iter().any(|s| s["name"] == LIST_SKILLS));
     }
 
     // ---- Filesystem tool + permission-mode tests ----

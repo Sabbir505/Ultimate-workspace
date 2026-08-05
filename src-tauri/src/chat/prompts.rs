@@ -96,7 +96,7 @@ pub fn provider_capabilities(id: ChatProviderId, model: &str) -> ProviderCaps {
 /// skills. Tool names and the artifact mechanism below must stay in sync with
 /// the live tool registry in `tools.rs` (`WEB_SEARCH`, `GENERATE_DOCUMENT`,
 /// `GENERATE_FILE`, `FETCH_URL`, `OPEN_URL`, `RUN_CODE`).
-fn core_prompt_base() -> &'static str {
+pub(crate) fn core_prompt_base() -> String {
     "You are in Conduit's Chat tab — a general assistant. The Dev tab runs coding \
 agents against real repos; you do not have that access.\n\n\
 ## Tools\n\
@@ -194,6 +194,7 @@ nothing and you genuinely cannot locate it.\n\n\
 ## Session isolation\n\
 No memory of other Conduit sessions (other chats, Dev tab) unless explicitly \
 pasted or referenced here. Do not assume continuity you lack context for."
+        .to_string()
 }
 
 /// STRICT addendum — appended only when `ModelClass == Local`. Restates the
@@ -230,7 +231,7 @@ pub fn core_prompt_for(provider: ChatProviderId, model: &str) -> String {
     let caps = provider_capabilities(provider, model);
     let base = core_prompt_base();
     match caps.model_class {
-        ModelClass::Frontier => base.to_string(),
+        ModelClass::Frontier => base,
         ModelClass::Local => format!("{}{}", base, core_prompt_strict()),
     }
 }
@@ -354,7 +355,7 @@ fn core_prompt_research(model: &str) -> String {
 /// can decide whether to call `get_skill(slug)` for a given request. The full
 /// body is NOT inlined here — the model pulls it on demand via `get_skill`.
 /// Empty catalog → `None` (segment omitted entirely).
-fn available_skills_segment() -> Option<String> {
+pub(crate) fn available_skills_segment() -> Option<String> {
     let skills = crate::installed_skills::list_all_skills();
     if skills.is_empty() {
         return None;

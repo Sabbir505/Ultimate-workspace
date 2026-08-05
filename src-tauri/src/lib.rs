@@ -14,6 +14,7 @@ mod connectors;
 mod db;
 mod git;
 mod harness_adapters;
+mod harness_bundle;
 mod installed_skills;
 mod mobile;
 mod pty;

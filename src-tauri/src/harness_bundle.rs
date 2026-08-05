@@ -74,12 +74,19 @@ pub fn build_tools_mcp_json(mcp_binary_path: &str, project_id: &str, ws_port: u1
     })
 }
 
-/// OpenCode config: mcp (both servers) + permission section + instructions.
+/// OpenCode config: mcp (both servers) + permission section.
+///
+/// `instructions` is intentionally NOT included as a config key: the installed
+/// OpenCode (`opencode --help`) exposes no such key — agents/instructions are
+/// managed via the `opencode agent` subcommand and AGENTS.md auto-discovery
+/// conventions the user controls. The system-prompt content is therefore
+/// delivered to Claude Code / Kimi (which have explicit flags) but NOT to
+/// OpenCode via config; OpenCode still gets the conduit-tools MCP server and
+/// the permission section, so document/diagram generation works there too.
 pub fn build_opencode_tools_config(
     mcp_binary_path: &str,
     project_id: &str,
     ws_port: u16,
-    instructions_path: &str,
 ) -> Value {
     let server = |name: &str| {
         json!({
@@ -96,7 +103,6 @@ pub fn build_opencode_tools_config(
             "conduit-browser": server("conduit-browser"),
             "conduit-tools": server("conduit-tools")
         },
-        "instructions": [instructions_path],
         "permission": {
             "allow": ["mcp__conduit-tools"],
             "edit": ["*"]
@@ -169,13 +175,41 @@ pub fn write_bundle(
             serde_json::to_string_pretty(&mcp).unwrap_or_default());
         let _ = std::fs::write(&paths.kimi_mcp,
             serde_json::to_string_pretty(&mcp).unwrap_or_default());
-        let oc = build_opencode_tools_config(&bin_str, project_id, ws_port,
-            &paths.claude_instructions.to_string_lossy().replace('\\', "/"));
+        let oc = build_opencode_tools_config(&bin_str, project_id, ws_port);
         let _ = std::fs::write(&paths.opencode_config,
             serde_json::to_string_pretty(&oc).unwrap_or_default());
     }
 
     Some(paths)
+}
+
+/// Extra CLI args for a kimi per-turn spawn. `--agent-file` is only valid on a
+/// fresh session (kimi forbids it with `--session`); `--mcp-config-file` and
+/// `--add-dir` always apply when the bundle exists.
+pub fn kimi_bundle_args(bundle: &HarnessBundlePaths, artifacts_dir: &str, resume: bool) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    if bundle.kimi_mcp.exists() {
+        args.push("--mcp-config-file".into());
+        args.push(bundle.kimi_mcp.to_string_lossy().replace('\\', "/"));
+    }
+    if !resume && bundle.kimi_agent.exists() {
+        args.push("--agent-file".into());
+        args.push(bundle.kimi_agent.to_string_lossy().replace('\\', "/"));
+    }
+    if !artifacts_dir.is_empty() {
+        args.push("--add-dir".into());
+        args.push(artifacts_dir.to_string());
+    }
+    args
+}
+
+/// Extra CLI args for an OpenCode per-turn spawn. None today — the bundle's
+/// opencode.json is consumed via the `OPENCODE_CONFIG` env var (set on the
+/// Command by the caller), so the per-spawn arg list needs no additional
+/// flags. Provided for symmetry with claude/kimi and as the future home for
+/// any per-spawn opencode flags.
+pub fn opencode_bundle_args(_bundle: &HarnessBundlePaths, _artifacts_dir: &str) -> Vec<String> {
+    Vec::new()
 }
 
 /// Extra CLI args for a Claude Code spawn carrying the bundle. The MCP args
@@ -242,13 +276,46 @@ mod tests {
     }
 
     #[test]
-    fn opencode_config_has_mcp_permission_instructions() {
-        let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "C:/bundle/opencode-instructions.md");
+    fn opencode_config_has_mcp_permission() {
+        let v = build_opencode_tools_config("C:/app/exe", "p1", 7681);
         assert!(v["mcp"]["conduit-browser"]["type"] == "local");
         assert!(v["mcp"]["conduit-tools"]["type"] == "local");
-        assert!(v["instructions"][0] == "C:/bundle/opencode-instructions.md");
         assert!(v["permission"]["allow"].as_array().unwrap().iter().any(|x| x == "mcp__conduit-tools"));
         assert!(v["permission"]["edit"].as_array().unwrap().iter().any(|x| x == "*"));
+    }
+
+    #[test]
+    fn kimi_bundle_args_respects_resume() {
+        // Both args are gated on .exists() (sidecar present), so point them
+        // at real temp files — same approach as the claude_bundle_args_shape test.
+        let dir = std::env::temp_dir().join(format!("conduit-kimi-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let kimi_agent = dir.join("agent.md");
+        let kimi_mcp = dir.join("mcp.json");
+        std::fs::write(&kimi_agent, "---\nname: conduit\n---\n").unwrap();
+        std::fs::write(&kimi_mcp, "{}").unwrap();
+        let agent_str = kimi_agent.to_string_lossy().replace('\\', "/");
+        let mcp_str = kimi_mcp.to_string_lossy().replace('\\', "/");
+        let paths = HarnessBundlePaths {
+            claude_instructions: PathBuf::from("C:/b/i.md"),
+            claude_settings: PathBuf::from("C:/b/s.json"),
+            claude_mcp: PathBuf::from("C:/b/m.json"),
+            kimi_agent,
+            kimi_mcp,
+            kimi_skills_dir: PathBuf::from("C:/b/skills"),
+            opencode_config: PathBuf::from("C:/b/oc.json"),
+        };
+        // Fresh session: --agent-file + --mcp-config-file + --add-dir.
+        let args = kimi_bundle_args(&paths, "C:/work/out", false);
+        let s: Vec<&str> = args.iter().map(|x| x.as_str()).collect();
+        assert!(s.windows(2).any(|w| w == ["--agent-file", agent_str.as_str()]));
+        assert!(s.windows(2).any(|w| w == ["--mcp-config-file", mcp_str.as_str()]));
+        assert!(s.windows(2).any(|w| w == ["--add-dir", "C:/work/out"]));
+        // Resume: --agent-file must NOT be passed (kimi forbids it with --session).
+        let args = kimi_bundle_args(&paths, "C:/work/out", true);
+        let s: Vec<&str> = args.iter().map(|x| x.as_str()).collect();
+        assert!(!s.iter().any(|a| *a == "--agent-file"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

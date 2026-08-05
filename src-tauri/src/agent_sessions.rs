@@ -974,13 +974,15 @@ fn spawn_per_turn(
     kind: PerTurn,
 ) -> Result<(), String> {
     let resume = entry.cli_session_id.lock().ok().and_then(|g| g.clone());
-    // Register the conduit-browser MCP server per harness: kimi takes a
-    // --mcp-config-file flag (same {"mcpServers": …} shape as claude),
-    // opencode reads an opencode.json via the OPENCODE_CONFIG env var.
-    // Registration failure silently skips browser tools for this turn.
-    let mcp_cfg = match kind {
-        PerTurn::Kimi => resolve_mcp_config(app, project_id),
-        PerTurn::OpenCode => resolve_opencode_config(app, project_id),
+    // Conduit-owned bundle: instructions, permissions, and MCP registration.
+    // Failure degrades to the legacy browser-only configs below (or none).
+    let bundle = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd));
+    // Legacy fallback: browser-only MCP when the bundle (or its mcp part)
+    // didn't write — keeps pty-style browser tools working in degraded mode.
+    let opencode_legacy_cfg = if bundle.is_none() {
+        resolve_opencode_config(app, project_id)
+    } else {
+        None
     };
     let spec = match kind {
         PerTurn::Kimi => {
@@ -1003,9 +1005,13 @@ fn spawn_per_turn(
                 args.push("--session".into());
                 args.push(id.clone());
             }
-            if let Some(cfg) = &mcp_cfg {
-                args.push("--mcp-config-file".into());
-                args.push(cfg.to_string_lossy().replace('\\', "/"));
+            // Bundle args cover --mcp-config-file, --agent-file (fresh only),
+            // and --add-dir. kimi_bundle_args skips --agent-file when resuming
+            // (kimi forbids it with --session). When bundle is None, nothing is
+            // added — matching today's degraded behavior (no browser tools).
+            if let Some(b) = &bundle {
+                args.extend(crate::harness_bundle::kimi_bundle_args(
+                    b, &artifacts_dir_for_bundle(app, cwd), resume.is_some()));
             }
             resolve_for_spawn(&CommandSpec {
                 program: "kimi".into(),
@@ -1050,7 +1056,11 @@ fn spawn_per_turn(
     // OpenCode only: point the CLI at the Conduit-owned opencode.json that
     // registers conduit-browser (it has no --mcp-config CLI flag).
     if matches!(kind, PerTurn::OpenCode) {
-        if let Some(cfg) = &mcp_cfg {
+        // Bundle's opencode.json already has both MCP servers + permissions;
+        // the legacy path only applies when the bundle failed to write.
+        if let Some(cfg) = bundle.as_ref().map(|b| b.opencode_config.clone())
+            .filter(|p| p.exists())
+            .or(opencode_legacy_cfg.clone()) {
             cmd.env("OPENCODE_CONFIG", cfg);
         }
     }

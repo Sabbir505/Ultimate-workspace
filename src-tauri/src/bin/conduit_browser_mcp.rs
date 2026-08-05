@@ -365,16 +365,14 @@ fn tool_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "generate_diagram",
-            "description": "Create a diagram (SVG/PNG) in the artifacts dir from a structured spec (mindmap/flow/sequence/architecture).",
+            "description": "Create a hand-styled HTML/CSS diagram file in the artifacts dir from a full HTML document. Use get_skill('diagram') for guidance.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "kind": { "type": "string", "enum": ["mindmap", "flow", "sequence", "architecture"] },
                     "filename": { "type": "string" },
-                    "title": { "type": "string" },
-                    "items": { "type": "array", "items": { "type": "string" } }
+                    "html": { "type": "string" }
                 },
-                "required": ["kind", "filename", "title", "items"]
+                "required": ["filename", "html"]
             }
         }),
         json!({

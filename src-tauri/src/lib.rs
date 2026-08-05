@@ -16,6 +16,7 @@ mod git;
 mod harness_adapters;
 mod harness_bundle;
 mod installed_skills;
+mod mcp_tools_bridge;
 mod mobile;
 mod pty;
 mod secrets;

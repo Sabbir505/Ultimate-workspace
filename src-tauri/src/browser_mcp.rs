@@ -259,6 +259,14 @@ async fn dispatch(
         "type_text" => op_type_text(req, browser, app).await,
         "scroll" => op_scroll(req, browser, app).await,
         "wait_for" => op_wait_for(req, browser, app).await,
+        op if crate::mcp_tools_bridge::tool_from_op(op).is_some() => {
+            let tool = crate::mcp_tools_bridge::tool_from_op(op).unwrap();
+            let args = req.args.clone();
+            match crate::mcp_tools_bridge::execute_conduit_tool(app, &tool, &args).await {
+                Ok(v) => Ok(v),
+                Err(e) => Err(e),
+            }
+        }
         other => Err(McpError::unknown_op(other)),
     }
 }

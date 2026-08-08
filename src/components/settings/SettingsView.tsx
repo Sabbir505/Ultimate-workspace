@@ -18,6 +18,16 @@ import { useArtifactsStore } from "../../state/artifacts";
 import { ModelMarket } from "./ModelMarket";
 import { ConnectorIcon, FamilyIcon, FAMILY_NAMES } from "./ConnectorIcon";
 import { Modal } from "../common/Modal";
+import {
+  Database,
+  KeyRound,
+  Palette,
+  Plug,
+  Bot,
+  Cpu,
+  Coins,
+  TerminalSquare,
+} from "lucide-react";
 
 type Category =
   | "appearance"
@@ -44,15 +54,64 @@ function isCategory(v: string | null): v is Category {
   return v !== null && (CATEGORY_KEYS as string[]).includes(v);
 }
 
-const CATEGORIES: Array<{ key: Category; label: string; sub: string }> = [
-  { key: "appearance", label: "Appearance", sub: "Theme, notifications" },
-  { key: "assistant", label: "Assistant", sub: "System prompt & skills" },
-  { key: "pricing", label: "Pricing", sub: "Per-model $/Mtok rates" },
-  { key: "harnesses", label: "Harnesses", sub: "CLI install & login" },
-  { key: "localmodels", label: "Local Models", sub: "GGUF via llama-server" },
-  { key: "apikeys", label: "API Keys", sub: "Chat provider keys" },
-  { key: "connectors", label: "Connectors", sub: "Notion & more (OAuth)" },
-  { key: "data", label: "Data", sub: "Storage & delete" },
+/** Small icon beside each settings nav item. */
+function SettingsNavIcon({ category }: { category: Category }) {
+  const size = 13;
+  const props = { size, strokeWidth: 1.8, "aria-hidden": true as const };
+  switch (category) {
+    case "appearance": return <Palette {...props} />;
+    case "assistant": return <Bot {...props} />;
+    case "apikeys": return <KeyRound {...props} />;
+    case "localmodels": return <Cpu {...props} />;
+    case "pricing": return <Coins {...props} />;
+    case "harnesses": return <TerminalSquare {...props} />;
+    case "connectors": return <Plug {...props} />;
+    case "data": return <Database {...props} />;
+    default: return null;
+  }
+}
+
+interface CategoryDef {
+  key: Category;
+  label: string;
+  sub: string;
+}
+
+/** Grouped nav sections: section header + its categories, in display order. */
+const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
+  {
+    title: "General",
+    items: [
+      { key: "appearance", label: "Appearance", sub: "Theme, notifications" },
+      { key: "assistant", label: "Assistant", sub: "System prompt & skills" },
+    ],
+  },
+  {
+    title: "Models & Providers",
+    items: [
+      { key: "apikeys", label: "API Keys", sub: "Chat provider keys" },
+      { key: "localmodels", label: "Local Models", sub: "GGUF via llama-server" },
+      { key: "pricing", label: "Pricing", sub: "Per-model $/Mtok rates" },
+    ],
+  },
+  {
+    title: "Agents",
+    items: [
+      { key: "harnesses", label: "Harnesses", sub: "CLI install & login" },
+    ],
+  },
+  {
+    title: "Integrations",
+    items: [
+      { key: "connectors", label: "Connectors", sub: "Notion & more (OAuth)" },
+    ],
+  },
+  {
+    title: "Storage",
+    items: [
+      { key: "data", label: "Data", sub: "Location & delete" },
+    ],
+  },
 ];
 
 const MODELS: Array<[string, string, string, string]> = [
@@ -102,9 +161,14 @@ export function SettingsView() {
 
   return (
     <div className="view-overlay modal-centered" onPointerDown={(e) => e.target === e.currentTarget && setActiveView("chat")}>
-      <div className="view-panel">
+      <div className="view-panel settings-modal">
         <div className="view-header">
-          <h2>Settings</h2>
+          <div>
+            <h2>Settings</h2>
+            <span className="settings-header-sub">
+              {NAV_SECTIONS.flatMap((s) => s.items).find((c) => c.key === category)?.sub}
+            </span>
+          </div>
           <button className="ghost" onClick={() => setActiveView("chat")}>
             ✕
           </button>
@@ -112,15 +176,23 @@ export function SettingsView() {
         <div className="view-body">
           <div className="settings-split">
             <nav className="settings-nav">
-              {CATEGORIES.map((c) => (
-                <button
-                  key={c.key}
-                  className={`nav-item${category === c.key ? " active" : ""}`}
-                  onClick={() => pickCategory(c.key)}
-                >
-                  {c.label}
-                  <span className="nav-sub">{c.sub}</span>
-                </button>
+              {NAV_SECTIONS.map((section) => (
+                <div key={section.title} className="settings-nav-section">
+                  <div className="settings-nav-section-title">{section.title}</div>
+                  {section.items.map((c) => (
+                    <button
+                      key={c.key}
+                      className={`nav-item${category === c.key ? " active" : ""}`}
+                      onClick={() => pickCategory(c.key)}
+                    >
+                      <span className="nav-item-label">
+                        <SettingsNavIcon category={c.key} />
+                        {c.label}
+                      </span>
+                      <span className="nav-sub">{c.sub}</span>
+                    </button>
+                  ))}
+                </div>
               ))}
             </nav>
 

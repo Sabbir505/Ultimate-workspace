@@ -2489,20 +2489,34 @@ table.kv th {
    modal never reflows on tab switch. */
 .settings-split {
   display: flex;
-  gap: 18px;
-  height: 500px;
-  min-height: 500px;
-  max-height: 500px;
+  gap: 22px;
+  height: 560px;
+  min-height: 560px;
+  max-height: 560px;
   flex-shrink: 0;
 }
 .settings-nav {
-  width: 168px;
+  width: 196px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 14px;
   border-right: 1px solid var(--border);
-  padding-right: 14px;
+  padding-right: 16px;
+  overflow-y: auto;
+}
+.settings-nav-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-nav-section-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--text-dim);
+  opacity: 0.75;
+  padding: 0 6px 4px;
 }
 .settings-nav .nav-item {
   text-align: left;
@@ -2510,7 +2524,7 @@ table.kv th {
   border: 1px solid transparent;
   border-radius: var(--radius-xs);
   color: var(--text-dim);
-  padding: 8px 11px;
+  padding: 7px 10px;
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
@@ -2527,12 +2541,25 @@ table.kv th {
   border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   box-shadow: var(--glass-rim-soft);
 }
+.settings-nav .nav-item .nav-item-label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.settings-nav .nav-item .nav-item-label svg {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.settings-nav .nav-item.active .nav-item-label svg {
+  color: var(--accent);
+}
 .settings-nav .nav-item .nav-sub {
   display: block;
   font-size: 11px;
   color: var(--text-dim);
   font-weight: 400;
-  margin-top: 1px;
+  margin-top: 2px;
+  padding-left: 20px;
 }
 .settings-panel {
   flex: 1;
@@ -2566,6 +2593,20 @@ table.kv th {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-dim);
+}
+/* Settings header: title + the active category's one-line description. */
+.settings-modal .view-header > div {
+  flex: 1;
+  min-width: 0;
+}
+.settings-header-sub {
+  display: block;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 1px;
+}
+.settings-modal .view-panel {
+  width: min(1080px, 95vw);
 }
 
 /* Settings form â€” clean two-column layout for Appearance and similar panels */

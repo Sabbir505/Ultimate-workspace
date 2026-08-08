@@ -85,17 +85,79 @@ export interface CostEvent {
   timestamp: number;
   inputTokens: number | null;
   outputTokens: number | null;
-  estimatedCostUsd: number | null;
+  provider: string | null;
+  modelKey: string | null;
+  source: string;
+  cacheCreationInputTokens: number | null;
+  cacheReadInputTokens: number | null;
+  reasoningOutputTokens: number | null;
+  reportedCostUsd: number | null;
+  pricingEstimatedUsd: number | null;
 }
 
 export interface CostRollups {
-  perProject: Array<{
-    projectId: string;
-    totalCostUsd: number;
-    totalInputTokens: number;
-    totalOutputTokens: number;
-  }>;
-  daily: Array<{ day: string; costUsd: number }>; // day = 'YYYY-MM-DD'
+  totals: CostTotals;
+  perProvider: ProviderCostRollup[];
+  daily: DailyCost[];
+  byKind: CostByKind;
+  perModel: ModelCostRollup[];
+  costQuality: CostQuality;
+  perProject: ProjectCostRollup[];
+  rangeStart: string;
+  rangeEnd: string;
+  rangeDays: 7 | 30 | 90;
+}
+
+export interface CostTotals {
+  rawTokenCostUsd: number;
+  providerReportedUsd: number;
+  estimatedUsd: number;
+  unpricedUsd: number;
+}
+export interface ProviderCostRollup {
+  provider: string;
+  costUsd: number;
+  tokens: number;
+  sharePct: number;
+}
+export interface DailyCost {
+  day: string;
+  costUsd: number;
+  tokensByProvider: Record<string, number>;
+}
+export interface CostByKind {
+  processedTokens: number;
+  cachedInputTokens: number;
+  uncachedInputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  sessions: number;
+  responses: number;
+}
+export interface ModelCostRollup {
+  modelKey: string;
+  displayName: string;
+  costUsd: number;
+  sharePct: number;
+  tokens: number;
+  provider: string | null;
+}
+export interface CostQuality {
+  providerReportedPct: number;
+  modelPricedPct: number;
+  unpricedPct: number;
+  cacheSavingsUsd: number;
+}
+export interface ProjectCostRollup {
+  projectId: string;
+  totalCostUsd: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+}
+
+export interface CostUpdatedPayload {
+  sessionId: string;
+  version: 1 | 2;
 }
 
 // Event payloads (backend -> frontend)

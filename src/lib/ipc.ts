@@ -188,6 +188,8 @@ export const getChangedFiles = (path: string) =>
 // --- Settings / skills / quick actions / secrets / cost ---
 export const getSetting = (key: string) => safeInvoke<string | null>("get_setting", { key });
 export const setSetting = (key: string, value: string) => safeInvoke<void>("set_setting", { key, value });
+/** Absolute path of the chat DB (read-only; fixed at the app data dir). */
+export const getChatDbPath = () => safeInvoke<string | null>("get_chat_db_path", {});
 export const listSkills = (projectId?: string) =>
   safeInvoke<Skill[] | null>("list_skills", projectId ? { projectId } : {});
 export const createSkill = (name: string, slashCommand: string, content: string, scope: string) =>
@@ -215,7 +217,8 @@ export const listSecretKeys = (projectId: string) =>
   safeInvoke<string[] | null>("list_secret_keys", { projectId });
 export const getCostEvents = (sessionId?: string) =>
   safeInvoke<CostEvent[] | null>("get_cost_events", sessionId ? { sessionId } : {});
-export const getCostRollups = () => safeInvoke<CostRollups | null>("get_cost_rollups");
+export const getCostRollups = (rangeDays?: 7 | 30 | 90) =>
+  safeInvoke<CostRollups | null>("get_cost_rollups", rangeDays ? { rangeDays } : {});
 export const exportSessionMarkdown = (paneId: string) =>
   safeInvoke<string | null>("export_session_markdown", { paneId });
 export const readFileText = (path: string) => safeInvoke<string | null>("read_file_text", { path });
@@ -260,13 +263,14 @@ export interface ChatSession {
   starred?: boolean;
   /** Marked-unread chats show an unread dot in the sidebar. */
   unread?: boolean;
-  /** Per-session filesystem permission posture
-   *  (`read_only` | `manual` | `auto_edit` | `full_auto`). New sessions
-   *  start at `manual`. See chat::permission::PermissionMode. */
-  permissionMode?: string;
   /** Per-session watch-mode pacing override. null = inherit global setting;
    *  "on" | "off" = per-session override. */
   watchMode?: string | null;
+  /** Per-session agent selection from the composer's agent-then-model
+   *  selector. null/undefined = no agent picked yet (model chip locked, Send
+   *  disabled). Values: "builtin" | "local" | "harness:<id>" (e.g.
+   *  "harness:claude_code"). */
+  agent?: string | null;
 }
 
 export interface ChatMessageRecord {
@@ -335,26 +339,6 @@ export interface ChatOpenBrowserPayload {
   url: string;
 }
 
-/** A pending per-action filesystem-tool approval surfaced as a card.
- *  Emitted when the central `check_permission` gate returns NeedsApproval.
- *  The user's choice is sent back via `resolveToolAction`. */
-export interface ChatApprovalRequestPayload {
-  chatSessionId: string;
-  pendingId: string;
-  tool: string;
-  summary: string;
-  args: unknown;
-}
-
-/** Emitted when the user has resolved a pending approval card (so the UI can
- *  dismiss the card). `approved` ran the tool; a denied card returned a
- *  "user denied" tool result instead. */
-export interface ChatApprovalResolvedPayload {
-  chatSessionId: string;
-  pendingId: string;
-  approved: boolean;
-}
-
 /** Live progress for a background chat task (download_file / run_shell),
  *  pushed as `chat:task-progress` while the task runs and on completion. */
 export interface ChatTaskProgressPayload {
@@ -395,6 +379,11 @@ export const listChatArtifacts = (chatSessionId: string) =>
 export const deleteArtifact = (id: string) =>
   safeInvoke<void>("delete_artifact", { id });
 
+/** Delete every artifact: rows + on-disk files, plus a sweep of leftover
+ *  files inside the resolved artifacts dir. Returns the files removed. */
+export const deleteAllArtifacts = () =>
+  safeInvoke<number>("delete_all_artifacts", {});
+
 /** Delete a single chat message (user or assistant) by id. No-op on the
  *  backend for unknown ids; the optimistic just-sent message (negative id)
  *  simply doesn't match anything server-side. The UI removes the bubble
@@ -421,6 +410,8 @@ export interface ArtifactPreview {
     | "binary";
   text: string | null;
   dataUri: string | null;
+  /** Signal to frontend that dataUri contains raw bytes (not base64-encoded HTML). */
+  originalBytes?: boolean;
   size: number;
   truncated: boolean;
 }
@@ -436,6 +427,10 @@ export const createChatSession = (provider: string, model: string) =>
   safeInvoke<ChatSession | null>("create_chat_session", { provider, model });
 export const deleteChatSession = (chatSessionId: string) =>
   safeInvoke<void>("delete_chat_session", { chatSessionId });
+/** Delete every chat session + its messages (bulk form of deleteChatSession,
+ *  same per-session cleanup). Returns the number of sessions deleted. */
+export const deleteAllChatSessions = () =>
+  safeInvoke<number>("delete_all_chat_sessions", {});
 export const updateChatSessionTitle = (chatSessionId: string, title: string) =>
   safeInvoke<void>("update_chat_session_title", { chatSessionId, title });
 /** Ask the session's model for a short auto-generated title. Returns the new
@@ -469,6 +464,9 @@ export const sendChatMessage = (
   // Extended-thinking toggle from the composer "brain" button. undefined
   // means "leave at provider default"; true/false forces on/off.
   thinking?: boolean,
+  // Custom working folder chosen via the composer's folder picker — granted
+  // as an extra fs_root for this turn's mutating tools.
+  extraFsRoot?: string,
 ) =>
   safeInvoke<void>("send_chat_message", {
     chatSessionId,
@@ -479,23 +477,115 @@ export const sendChatMessage = (
     attachments: attachments ?? null,
     forceResearch: forceResearch ?? false,
     thinking: thinking ?? null,
+    extraFsRoot: extraFsRoot ?? null,
   });
 export const updateChatSessionModel = (chatSessionId: string, model: string) =>
   safeInvoke<void>("update_chat_session_model", { chatSessionId, model });
+
+// Headless CLI chat (Phase 2 — agent_sessions.rs). Backs chat sessions whose
+// agent is a CLI harness ("harness:claude_code", …); same chat:* events as
+// the built-in path, so useChatEvents works unchanged.
+export const sendAgentChatMessage = (
+  chatSessionId: string,
+  content: string,
+  harnessId: string,
+  model?: string,
+  cwd?: string,
+  projectId?: string,
+) =>
+  safeInvoke<void>("send_agent_chat_message", {
+    chatSessionId,
+    content,
+    harnessId,
+    model: model ?? null,
+    cwd: cwd ?? null,
+    projectId: projectId ?? null,
+  });
+export const cancelAgentChatMessage = (chatSessionId: string) =>
+  safeInvoke<void>("cancel_agent_chat_message", { chatSessionId });
+
+/** Models/endpoint discovered in a CLI harness's own config files
+ *  (harness_config.rs): settings.json / config.toml / opencode.json. */
+export interface HarnessModelInfo {
+  id: string;
+  label: string;
+  source: "config" | "builtin";
+}
+export interface HarnessModelConfig {
+  defaultModel: string | null;
+  endpoint: string | null;
+  models: HarnessModelInfo[];
+}
+export const listHarnessModels = (harnessId: string) =>
+  safeInvoke<HarnessModelConfig | null>("list_harness_models", { harnessId });
+
+// ---------------------------------------------------------------------------
+// Automations (scheduled headless agent runs — automations.rs). Each run is a
+// one-shot turn at full-auto permission, logged into the automation's own
+// chat session so transcripts show up in normal chat history.
+export interface Automation {
+  id: string;
+  name: string;
+  prompt: string;
+  /** "claude_code" | "opencode" (kimi can't auto-approve in prompt mode). */
+  harness: string;
+  model: string;
+  cwd: string;
+  /** 5-field cron, local time. */
+  schedule: string;
+  enabled: boolean;
+  lastRunAt: number | null;
+  /** "ok" | "skipped" | error text. */
+  lastStatus: string | null;
+  /** Chat session used as the run log (bound on first run). */
+  chatSessionId: string | null;
+  createdAt: number;
+}
+export interface AutomationInput {
+  name: string;
+  prompt: string;
+  harness: string;
+  model?: string;
+  cwd?: string;
+  schedule: string;
+  enabled?: boolean;
+}
+export const listAutomations = () => safeInvoke<Automation[]>("list_automations");
+export const createAutomation = (input: AutomationInput) =>
+  safeInvoke<Automation>("create_automation", { input });
+export const updateAutomation = (automationId: string, input: AutomationInput) =>
+  safeInvoke<void>("update_automation", { automationId, input });
+export const deleteAutomation = (automationId: string) =>
+  safeInvoke<void>("delete_automation", { automationId });
+export const setAutomationEnabled = (automationId: string, enabled: boolean) =>
+  safeInvoke<void>("set_automation_enabled", { automationId, enabled });
+export const runAutomationNow = (automationId: string) =>
+  safeInvoke<void>("run_automation_now", { automationId });
+
+/** One past (or in-flight) run of an automation — backed by the
+ *  automation_runs SQLite table. Used by the Automations view's
+ *  "Past runs" list inside the detail pane. */
+export interface AutomationRun {
+  id: string;
+  automationId: string;
+  startedAt: number;
+  finishedAt: number | null;
+  /** "running" | "ok" | "skipped" | error text. */
+  status: string;
+  summary: string;
+  chatSessionId: string | null;
+  /** "scheduled" (cron tick) | "manual" (run-now button). */
+  source: string;
+}
+export const listAutomationRuns = (automationId: string, limit = 100) =>
+  safeInvoke<AutomationRun[]>("list_automation_runs", { automationId, limit });
+export const countAutomationRuns = (automationId: string) =>
+  safeInvoke<number>("count_automation_runs", { automationId });
 
 /** Switch a chat session's provider (e.g. to/from "local_gguf" when picking a
  *  local model from the selector in a cloud session, or vice versa). */
 export const updateChatSessionProvider = (chatSessionId: string, provider: string) =>
   safeInvoke<void>("update_chat_session_provider", { chatSessionId, provider });
-/** Update a chat session's filesystem permission posture
- *  (`read_only` | `manual` | `auto_edit` | `full_auto`). Per-session; new
- *  sessions start at `manual`. The frontend gates the switch to `full_auto`
- *  behind a one-time confirmation modal before calling this. */
-export const updateChatSessionPermissionMode = (
-  chatSessionId: string,
-  mode: "read_only" | "manual" | "auto_edit" | "full_auto",
-) =>
-  safeInvoke<void>("update_chat_session_permission_mode", { chatSessionId, mode });
 /** Update a chat session's watch-mode pacing override. null clears the
  *  override so the session inherits the global setting; "on" | "off" set
  *  a per-session override. */
@@ -504,12 +594,18 @@ export const updateChatSessionWatchMode = (
   mode: "on" | "off" | null,
 ) =>
   safeInvoke<void>("update_chat_session_watch_mode", { chatSessionId, mode });
+/** Update a chat session's agent selection from the composer's agent-then-model
+ *  selector. `"builtin"` | `"local"` | `"harness:<id>"` | null (clears the
+ *  selection — back to the locked fresh-chat state). Persisted per session;
+ *  selecting a harness does not reroute messages until the headless CLI chat
+ *  protocol lands. */
+export const updateChatSessionAgent = (
+  chatSessionId: string,
+  agent: string | null,
+) =>
+  safeInvoke<void>("update_chat_session_agent", { chatSessionId, agent });
 export const cancelChatMessage = (chatSessionId: string) =>
   safeInvoke<void>("cancel_chat_message", { chatSessionId });
-/** Resolve a pending per-action tool approval card. `approved` lets the paused
- *  tool loop run the action; `false` injects a "user denied" tool result. */
-export const resolveToolAction = (pendingId: string, approved: boolean) =>
-  safeInvoke<void>("resolve_tool_action", { pendingId, approved });
 export const setChatApiKey = (
   provider: string,
   key: string,
@@ -621,16 +717,12 @@ export const listenChatArtifact = (handler: (payload: ChatArtifactPayload) => vo
   safeListen<ChatArtifactPayload>("chat:artifact", handler);
 export const listenChatOpenBrowser = (handler: (payload: ChatOpenBrowserPayload) => void) =>
   safeListen<ChatOpenBrowserPayload>("chat:open-browser", handler);
-export const listenChatApprovalRequest = (handler: (payload: ChatApprovalRequestPayload) => void) =>
-  safeListen<ChatApprovalRequestPayload>("chat:approval-request", handler);
-export const listenChatApprovalResolved = (handler: (payload: ChatApprovalResolvedPayload) => void) =>
-  safeListen<ChatApprovalResolvedPayload>("chat:approval-resolved", handler);
 
 export const listenChatTaskProgress = (handler: (payload: ChatTaskProgressPayload) => void) =>
   safeListen<ChatTaskProgressPayload>("chat:task-progress", handler);
 
 /** Re-broadcast a chat event to the mobile relay. Used from useChatEvents.ts to
- *  forward chat:token, chat:status, chat:done, chat:error, chat:approval-request,
+ *  forward chat:token, chat:status, chat:done, chat:error,
  *  and chat:artifact events to the per-session mobile connection. */
 export const emitMobileSessionChatEvent = (
   sessionId: string,
@@ -655,6 +747,11 @@ export const listenChatOwner = (handler: (payload: ChatOwnerPayload) => void) =>
 /** Read a generated artifact for in-app preview. */
 export const readArtifactPreview = (path: string) =>
   safeInvoke<ArtifactPreview | null>("read_artifact_preview", { path });
+
+/** True when LibreOffice is installed — the pptx→pdf preview path needs it.
+ *  When false, pptx previews fall back to the built-in HTML converter. */
+export const isLibreofficeAvailable = () =>
+  safeInvoke<boolean>("is_libreoffice_available");
 
 /** Open a generated artifact file with the OS default application. */
 export async function openArtifact(path: string): Promise<void> {

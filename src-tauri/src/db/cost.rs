@@ -106,9 +106,9 @@ mod tests {
         let s1 = super::super::create_session(&conn, &p1.id, "claude_code").unwrap();
         let s2 = super::super::create_session(&conn, &p2.id, "kimi_code").unwrap();
 
-        insert_cost_event(&conn, &s1.id, &UsageInfo { input_tokens: Some(100), output_tokens: Some(50), cost_usd: Some(0.10) }).unwrap();
-        insert_cost_event(&conn, &s1.id, &UsageInfo { input_tokens: Some(200), output_tokens: None, cost_usd: Some(0.20) }).unwrap();
-        insert_cost_event(&conn, &s2.id, &UsageInfo { input_tokens: None, output_tokens: Some(5), cost_usd: None }).unwrap();
+        insert_cost_event(&conn, &s1.id, &UsageInfo { input_tokens: Some(100), output_tokens: Some(50), cost_usd: Some(0.10), ..Default::default() }).unwrap();
+        insert_cost_event(&conn, &s1.id, &UsageInfo { input_tokens: Some(200), output_tokens: None, cost_usd: Some(0.20), ..Default::default() }).unwrap();
+        insert_cost_event(&conn, &s2.id, &UsageInfo { input_tokens: None, output_tokens: Some(5), cost_usd: None, ..Default::default() }).unwrap();
 
         assert_eq!(get_cost_events(&conn, Some(&s1.id)).unwrap().len(), 2);
         assert_eq!(get_cost_events(&conn, None).unwrap().len(), 3);

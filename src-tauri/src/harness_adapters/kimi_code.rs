@@ -113,7 +113,10 @@ pub fn find_newest_session_id(cwd: &Path, since: SystemTime) -> Option<String> {
         if v.get("workDir").and_then(|w| w.as_str()) != Some(want.as_str()) {
             continue;
         }
-        let session_id = v.get("sessionId").and_then(|s| s.as_str())?;
+        // One malformed index line must not abort the probe — skip it.
+        let Some(session_id) = v.get("sessionId").and_then(|s| s.as_str()) else {
+            continue;
+        };
         // Guard against attributing a pre-existing session to this pane.
         if let Some(dir) = v.get("sessionDir").and_then(|d| d.as_str()) {
             if let Ok(meta) = fs::metadata(dir) {
@@ -138,7 +141,10 @@ pub fn find_newest_session_id(cwd: &Path, since: SystemTime) -> Option<String> {
 pub fn parse_session_usage(harness_session_id: &str) -> Option<SessionUsage> {
     let sessions_root = crate::util::home_dir()?.join(".kimi-code").join("sessions");
     let mut input: i64 = 0;
+    let mut cache_read: i64 = 0;
+    let mut cache_creation: i64 = 0;
     let mut output: i64 = 0;
+    let mut reasoning: i64 = 0;
     let mut found = false;
     let mut model: Option<String> = None;
     for wd in fs::read_dir(sessions_root).ok()?.flatten() {
@@ -164,8 +170,11 @@ pub fn parse_session_usage(harness_session_id: &str) -> Option<SessionUsage> {
                 }
                 let Some(u) = v.get("usage") else { continue };
                 let num = |k: &str| u.get(k).and_then(|n| n.as_i64()).unwrap_or(0);
-                input += num("inputOther") + num("inputCacheRead") + num("inputCacheCreation");
+                input += num("inputOther");
+                cache_read += num("inputCacheRead");
+                cache_creation += num("inputCacheCreation");
                 output += num("output");
+                reasoning += num("reasoning_tokens").max(num("thinking_tokens"));
                 found = true;
             }
         }
@@ -174,6 +183,9 @@ pub fn parse_session_usage(harness_session_id: &str) -> Option<SessionUsage> {
         usage: UsageInfo {
             input_tokens: Some(input),
             output_tokens: Some(output),
+            cache_creation_input_tokens: Some(cache_creation),
+            cache_read_input_tokens: Some(cache_read),
+            reasoning_output_tokens: Some(reasoning),
             cost_usd: None,
         },
         model,

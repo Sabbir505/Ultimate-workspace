@@ -216,7 +216,7 @@ mod tests {
             &UsageInfo {
                 input_tokens: Some(1),
                 output_tokens: None,
-                cost_usd: Some(0.01),
+                cost_usd: Some(0.01), ..Default::default()
             },
         )
         .unwrap();

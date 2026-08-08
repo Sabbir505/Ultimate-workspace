@@ -14,6 +14,7 @@ use std::sync::Arc;
 pub mod claude_code;
 pub mod kimi_code;
 pub mod opencode;
+pub mod pricing;
 
 /// A command ready to be turned into a `portable_pty::CommandBuilder`.
 ///
@@ -39,10 +40,16 @@ impl CommandSpec {
 /// Best-effort token/cost usage scraped from harness output.
 /// Cost is only ever what the harness itself printed — we never invent a
 /// pricing table (CONTRACT/PRD §7.12).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct UsageInfo {
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    /// Charged at full input rate (Anthropic's policy).
+    pub cache_creation_input_tokens: Option<i64>,
+    /// Charged at `cache_read_per_mtok` (Anthropic 0.1× input, OpenAI 0.5×).
+    pub cache_read_input_tokens: Option<i64>,
+    /// Counted in output cost (Anthropic surfaces this on thinking models).
+    pub reasoning_output_tokens: Option<i64>,
     pub cost_usd: Option<f64>,
 }
 
@@ -216,6 +223,155 @@ pub fn resolve_for_spawn(spec: &CommandSpec) -> CommandSpec {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Safe prompt transport for one-shot turns (M12).
+//
+// On Windows every spawn goes through `cmd.exe /C` (npm installs the harness
+// CLIs as `.cmd` shims, which CreateProcess cannot run directly). cmd.exe
+// re-parses the whole command line: `%VAR%` substrings expand even inside
+// quotes (mangling prompts that discuss env vars), args without whitespace
+// pass UNQUOTED so `a&b` executes `b` as a command, and embedded quotes
+// toggle quoting and expose metachars the same way. The shims make it worse
+// — their unquoted `%*` re-parses whatever survives. There is NO correct
+// escaping for arbitrary text through this chain.
+//
+// The fix: keep the untrusted prompt OFF every command line.
+//   * claude one-shot: `claude -p` reads the prompt from stdin when no
+//     prompt arg is given (documented "useful for pipes") — caller pipes it.
+//   * kimi / opencode: the prompt travels in the CONDUIT_TURN_PROMPT env var
+//     (the process env block is never cmd-parsed) and a tiny wrapper batch
+//     expands it with DELAYED expansion (`!VAR!`), which runs after the
+//     percent/metachar phases so the value stays inert — all the way through
+//     the shim's own `%*`. Verified empirically on Windows 11 against:
+//     `a&b %PATH% say "hi" <tag> | pipe ^caret 100% & calc`, `x"&calc&"y`,
+//     and multi-line (LF + CRLF) payloads — all arrive literally, nothing
+//     executes. Caveat: embedded `"` chars are consumed by the C runtime's
+//     argv parsing at the final node.exe hop (cosmetic, not unsafe).
+//
+// Flags (model, session ids) are OUR bounded strings and still ride the
+// command line as before; only the prompt is untrusted.
+// ---------------------------------------------------------------------------
+
+/// Env var carrying the untrusted turn prompt to the wrapper batch.
+pub const TURN_PROMPT_ENV: &str = "CONDUIT_TURN_PROMPT";
+
+/// Harnesses with a one-shot (non-persistent) turn path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnHarness {
+    Kimi,
+    OpenCode,
+}
+
+impl TurnHarness {
+    fn program(&self) -> &'static str {
+        match self {
+            TurnHarness::Kimi => "kimi",
+            TurnHarness::OpenCode => "opencode",
+        }
+    }
+
+    #[cfg(windows)]
+    fn wrapper_name(&self) -> &'static str {
+        match self {
+            TurnHarness::Kimi => "kimi-turn.cmd",
+            TurnHarness::OpenCode => "opencode-turn.cmd",
+        }
+    }
+
+    /// The constant body of the delayed-expansion wrapper batch. The prompt
+    /// placeholder is `!CONDUIT_TURN_PROMPT!`; `%*` forwards our trusted
+    /// flags (Rust-quoted, so quoting survives the parse chain).
+    #[cfg(windows)]
+    fn wrapper_body(&self) -> &'static str {
+        match self {
+            TurnHarness::Kimi => {
+                "@echo off\r\nsetlocal EnableDelayedExpansion\r\nkimi -p \"!CONDUIT_TURN_PROMPT!\" %*\r\n"
+            }
+            TurnHarness::OpenCode => {
+                "@echo off\r\nsetlocal EnableDelayedExpansion\r\nopencode run --format json --auto %* -- \"!CONDUIT_TURN_PROMPT!\"\r\n"
+            }
+        }
+    }
+
+    /// Full argv with the prompt inline — used on POSIX (exec carries argv
+    /// verbatim, no shell re-parse) and as the Windows fallback when the
+    /// wrapper can't be written.
+    fn argv_args(&self, prompt: &str, flags: Vec<String>) -> Vec<String> {
+        match self {
+            TurnHarness::Kimi => {
+                let mut a = vec!["-p".to_string(), prompt.to_string()];
+                a.extend(flags);
+                a
+            }
+            TurnHarness::OpenCode => {
+                let mut a = vec![
+                    "run".to_string(),
+                    "--format".to_string(),
+                    "json".to_string(),
+                    "--auto".to_string(),
+                ];
+                a.extend(flags);
+                a.push("--".to_string());
+                a.push(prompt.to_string());
+                a
+            }
+        }
+    }
+}
+
+/// Write the two turn-wrapper batches to a temp dir (idempotent — rewrites
+/// only when content differs). Returns the dir, or None if temp is
+/// unwritable (callers then fall back to the legacy argv spec).
+#[cfg(windows)]
+fn ensure_turn_wrappers() -> Option<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join("conduit-turn-wrappers");
+    std::fs::create_dir_all(&dir).ok()?;
+    for kind in [TurnHarness::Kimi, TurnHarness::OpenCode] {
+        let path = dir.join(kind.wrapper_name());
+        let body = kind.wrapper_body();
+        let current = std::fs::read_to_string(&path).unwrap_or_default();
+        if current != body && std::fs::write(&path, body).is_err() {
+            return None;
+        }
+    }
+    Some(dir)
+}
+
+/// Build the spawn spec for a one-shot turn carrying an untrusted prompt.
+/// Returns the spec plus, on Windows, the `(TURN_PROMPT_ENV, prompt)` pair
+/// the caller MUST set on the `Command` — the prompt never appears in
+/// `spec.args` in that case (see the M12 note above). Off-Windows the prompt
+/// is inline in argv and the pair is None.
+pub fn turn_spec(
+    kind: TurnHarness,
+    prompt: &str,
+    flags: Vec<String>,
+) -> (CommandSpec, Option<(String, String)>) {
+    #[cfg(windows)]
+    {
+        if let Some(wrapper) = ensure_turn_wrappers().map(|d| d.join(kind.wrapper_name())) {
+            let mut args = vec!["/C".to_string(), wrapper.to_string_lossy().into_owned()];
+            args.extend(flags);
+            return (
+                CommandSpec {
+                    program: "cmd.exe".to_string(),
+                    args,
+                },
+                Some((TURN_PROMPT_ENV.to_string(), prompt.to_string())),
+            );
+        }
+        // Wrapper write failed — fall through to the legacy argv spec so the
+        // turn still runs (M12 exposure documented in BUG_LIST.md).
+    }
+    (
+        resolve_for_spawn(&CommandSpec {
+            program: kind.program().to_string(),
+            args: kind.argv_args(prompt, flags),
+        }),
+        None,
+    )
+}
+
 /// Runs `<binary> --version` with a short timeout; a clean exit means the
 /// harness is installed. Used for the onboarding/Settings status (PRD §9).
 /// Spawning `--version` (rather than `where`/`which`) also confirms the binary
@@ -278,11 +434,7 @@ static RE_COST: Lazy<Regex> = Lazy::new(|| {
 /// "Tokens: 1,234 in / 567 out", "Input tokens: 100", "Total cost: $0.12".
 /// Returns None when nothing matched — callers must tolerate that.
 pub fn parse_usage_common(output: &str) -> Option<UsageInfo> {
-    let mut info = UsageInfo {
-        input_tokens: None,
-        output_tokens: None,
-        cost_usd: None,
-    };
+    let mut info = UsageInfo::default();
     if let Some(c) = RE_TOKENS_IN_OUT.captures(output) {
         info.input_tokens = parse_num(&c[1]);
         info.output_tokens = parse_num(&c[2]);
@@ -381,6 +533,79 @@ mod tests {
         let spec = resolve_for_spawn(&CommandSpec::new("cmd.exe", &["/C", "npm run dev"]));
         assert_eq!(spec.program, "cmd.exe");
         assert_eq!(spec.args, vec!["/C", "npm run dev"]);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn turn_spec_keeps_prompt_off_the_command_line() {
+        // M12: the untrusted prompt must travel via env, never argv.
+        let hostile = "a&b %PATH% say \"hi\" <tag> | pipe ^caret 100% & calc";
+        for kind in [TurnHarness::Kimi, TurnHarness::OpenCode] {
+            let (spec, env) = turn_spec(kind, hostile, vec!["-m".into(), "some-model".into()]);
+            assert_eq!(spec.program, "cmd.exe");
+            // No command-line token may contain the prompt text.
+            assert!(
+                spec.args.iter().all(|a| !a.contains(hostile)),
+                "prompt leaked into argv: {:?}",
+                spec.args
+            );
+            // Flags still ride the command line (trusted, Rust-quoted).
+            assert!(spec.args.iter().any(|a| a == "some-model"));
+            let (key, val) = env.expect("windows turns must use the env transport");
+            assert_eq!(key, TURN_PROMPT_ENV);
+            assert_eq!(val, hostile);
+            // The wrapper itself must use delayed expansion on the env var.
+            let wrapper_path = std::path::Path::new(&spec.args[1]);
+            let body = std::fs::read_to_string(wrapper_path)
+                .unwrap_or_else(|e| panic!("wrapper {} unreadable: {e}", wrapper_path.display()));
+            assert!(body.contains("EnableDelayedExpansion"), "{body}");
+            assert!(body.contains("!CONDUIT_TURN_PROMPT!"), "{body}");
+            assert!(!body.contains("%CONDUIT_TURN_PROMPT%"), "{body}");
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn wrapper_batch_transports_hostile_prompt_literally() {
+        // End-to-end canary for the cmd.exe parse chain: a probe shim records
+        // its %* exactly as received; the payload must arrive byte-identical
+        // and NOTHING may execute. Mirrors the manual verification from the
+        // M12 fix (would catch a cmd behavior change on another Windows
+        // version).
+        let dir = std::env::temp_dir().join(format!("conduit-m12-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("out.txt");
+        let shim = dir.join("probe.cmd");
+        let wrapper = dir.join("wrapper.cmd");
+        std::fs::write(
+            &shim,
+            "@echo off\r\necho star=[%*] > \"%~dp0out.txt\"\r\necho survived >> \"%~dp0out.txt\"\r\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &wrapper,
+            format!(
+                "@echo off\r\nsetlocal EnableDelayedExpansion\r\n\"{}\" -p \"!P!\"\r\n",
+                shim.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let payload = "a&b %PATH% say \"hi\" <tag> | pipe ^caret 100% & calc\r\nsecond line";
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/C", &wrapper.to_string_lossy()])
+            .env("P", payload)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let got = std::fs::read_to_string(&out).unwrap();
+        // The probe's echo shows %* verbatim; the payload must be there in
+        // full (quotes retained around it) followed by the survivor line.
+        assert!(got.contains(payload), "payload mangled:\n{got}");
+        assert!(got.contains("survived"), "command split executed:\n{got}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

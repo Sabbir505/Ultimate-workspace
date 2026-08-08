@@ -59,7 +59,15 @@ fn is_local_dev_url(url: &str) -> bool {
         || host == "::1"
         || host.ends_with(".localhost")
         || host.ends_with(".local")
-        || host.starts_with("127.")
+        // 127/8 is loopback — but only on a strict IPv4 parse: a bare
+        // `starts_with("127.")` also matches valid PUBLIC DNS names like
+        // `127.evil.com`, which would auto-open an arbitrary remote site.
+        // Rust's parser rejects hex/octal/integer shorthand, so those
+        // obfuscated forms fail closed here too.
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .map(|ip| ip.octets()[0] == 127)
+            .unwrap_or(false)
 }
 
 /// Rolling stripped transcript cap per pane (CONTRACT.md: ~1MB). Used for
@@ -254,6 +262,18 @@ impl Pane {
                     output_tokens: usage
                         .output_tokens
                         .zip(p.output_tokens)
+                        .map(|(a, b)| (a - b).max(0)),
+                    cache_creation_input_tokens: usage
+                        .cache_creation_input_tokens
+                        .zip(p.cache_creation_input_tokens)
+                        .map(|(a, b)| (a - b).max(0)),
+                    cache_read_input_tokens: usage
+                        .cache_read_input_tokens
+                        .zip(p.cache_read_input_tokens)
+                        .map(|(a, b)| (a - b).max(0)),
+                    reasoning_output_tokens: usage
+                        .reasoning_output_tokens
+                        .zip(p.reasoning_output_tokens)
                         .map(|(a, b)| (a - b).max(0)),
                     cost_usd: usage.cost_usd.zip(p.cost_usd).map(|(a, b)| (a - b).max(0.0)),
                 },
@@ -542,12 +562,20 @@ impl PtyManager {
                                     }
                                     // Only emit each unique URL once per pane
                                     // to avoid re-opening a browser pane the
-                                    // user just closed.
+                                    // user just closed. Prune periodically
+                                    // (keep most-recent 800 of 1000) instead of
+                                    // a hard clear that would re-open the most
+                                    // recently detected local URL.
                                     if seen_urls.insert(url.clone()) {
-                                        // Prune the set periodically to avoid
-                                        // unbounded growth across long-lived panes.
                                         if seen_urls.len() > 1000 {
+                                            // Drop the oldest 200 entries rather
+                                            // than clearing — a full clear lets
+                                            // a just-detected URL re-fire on the
+                                            // next matching line.
+                                            let keep: Vec<String> =
+                                                seen_urls.iter().skip(200).cloned().collect();
                                             seen_urls.clear();
+                                            seen_urls.extend(keep);
                                         }
                                         let _ = app.emit(
                                             "browser:url_detected",
@@ -578,6 +606,7 @@ impl PtyManager {
         {
             let pane = Arc::clone(&pane);
             let app = self.app.clone();
+            let session_to_pane = Arc::clone(&self.session_to_pane);
             thread::spawn(move || {
                 // Poll try_wait rather than a blocking wait: a blocking wait
                 // would hold the child lock and prevent kill_pty from getting
@@ -590,6 +619,11 @@ impl PtyManager {
                     }
                 };
                 pane.exited.store(true, Ordering::Relaxed);
+                // Drop any session→pane mapping pointing at this pane so the
+                // mobile relay stops reporting the dead session as live (and
+                // SendToSession stops writing into the void). kill_pane is
+                // covered too: the kill makes try_wait return, landing here.
+                session_to_pane.lock().retain(|_, v| *v != pane.id);
                 // Dropping the sender closes the writer thread's channel.
                 pane.writer_tx.lock().take();
                 let _ = app.emit(
@@ -697,7 +731,16 @@ impl PtyManager {
     /// Resolve a session_id to the current pane_id (if the session has a
     /// live pty). Used by the mobile relay to route `SendToSession`.
     pub fn pane_id_for_session(&self, session_id: &str) -> Option<String> {
-        self.session_to_pane.lock().get(session_id).cloned()
+        let pane_id = self.session_to_pane.lock().get(session_id).cloned()?;
+        // Stale-entry guard: the waiter thread removes mappings on exit, but
+        // never trust the map alone — a pane that exited before the cleanup
+        // existed (or a mapping written by an older build) must not be
+        // reported as live.
+        let panes = self.panes.lock();
+        match panes.get(&pane_id) {
+            Some(p) if !p.exited.load(Ordering::Relaxed) => Some(pane_id),
+            _ => None,
+        }
     }
 
     /// Get the pty transcript for a session (if it has a live pane).
@@ -799,6 +842,8 @@ mod tests {
     fn local_dev_urls_are_detected() {
         assert!(is_local_dev_url("http://localhost:5173/"));
         assert!(is_local_dev_url("http://127.0.0.1:3000"));
+        // Any 127/8 address is loopback, not just 127.0.0.1.
+        assert!(is_local_dev_url("http://127.9.9.9:8080"));
         assert!(is_local_dev_url("https://0.0.0.0:8080/app"));
         assert!(is_local_dev_url("http://[::1]:5173/"));
         assert!(is_local_dev_url("http://myapp.local/"));
@@ -812,5 +857,14 @@ mod tests {
         assert!(!is_local_dev_url("http://192.168.1.5:3000"));
         assert!(!is_local_dev_url("https://docs.rs/tokio"));
         assert!(!is_local_dev_url("http://user@evil.com/localhost"));
+        // M19 regression: bare `starts_with("127.")` matched these VALID
+        // PUBLIC DNS names and auto-opened them.
+        assert!(!is_local_dev_url("http://127.evil.com"));
+        assert!(!is_local_dev_url("http://127.0.0.1.evil.com"));
+        assert!(!is_local_dev_url("http://1270.evil.com/path"));
+        // Obfuscated loopback spellings fail closed (Rust's parser rejects
+        // hex/octal/integer shorthand) — conservative beats clever here.
+        assert!(!is_local_dev_url("http://0x7f.0.0.1"));
+        assert!(!is_local_dev_url("http://2130706433"));
     }
 }

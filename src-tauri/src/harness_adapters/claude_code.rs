@@ -148,7 +148,10 @@ pub fn find_newest_session_id(cwd: &Path, since: SystemTime) -> Option<String> {
         // `modified` is used rather than `created` because creation time is
         // not reliably available across filesystems; a brand-new session file
         // is written immediately, so mtime >= spawn time is a safe filter.
-        let mtime = entry.metadata().ok()?.modified().ok()?;
+        // One unreadable entry must not abort the probe — skip it.
+        let Some(mtime) = entry.metadata().ok().and_then(|m| m.modified().ok()) else {
+            continue;
+        };
         if mtime < since {
             continue;
         }
@@ -173,7 +176,10 @@ pub fn parse_session_usage(cwd: &Path, harness_session_id: &str) -> Option<Sessi
     let file = claude_projects_dir(Path::new(&clean))?.join(format!("{harness_session_id}.jsonl"));
     let content = fs::read_to_string(file).ok()?;
     let mut input: i64 = 0;
+    let mut cache_creation: i64 = 0;
+    let mut cache_read: i64 = 0;
     let mut output: i64 = 0;
+    let mut reasoning: i64 = 0;
     let mut found = false;
     let mut model: Option<String> = None;
     for line in content.lines() {
@@ -188,14 +194,21 @@ pub fn parse_session_usage(cwd: &Path, harness_session_id: &str) -> Option<Sessi
             continue;
         };
         let num = |k: &str| u.get(k).and_then(|n| n.as_i64()).unwrap_or(0);
-        input += num("input_tokens") + num("cache_creation_input_tokens") + num("cache_read_input_tokens");
+        input += num("input_tokens");
+        cache_creation += num("cache_creation_input_tokens");
+        cache_read += num("cache_read_input_tokens");
         output += num("output_tokens");
+        // Anthropic surfaces reasoning_tokens on thinking-capable models.
+        reasoning += num("reasoning_tokens").max(num("thinking_tokens"));
         found = true;
     }
     found.then_some(SessionUsage {
         usage: UsageInfo {
             input_tokens: Some(input),
             output_tokens: Some(output),
+            cache_creation_input_tokens: Some(cache_creation),
+            cache_read_input_tokens: Some(cache_read),
+            reasoning_output_tokens: Some(reasoning),
             cost_usd: None,
         },
         model,

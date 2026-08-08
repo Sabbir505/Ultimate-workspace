@@ -81,6 +81,19 @@ fn read_json(path: std::path::PathBuf) -> Option<Value> {
     serde_json::from_str(&text).ok()
 }
 
+/// Display label for a remapped Claude alias. `name` is the human name
+/// (`ANTHROPIC_DEFAULT_<ALIAS>_MODEL_NAME`), `mapped` the upstream model id.
+/// The parenthetical is only useful when they differ — relays often set both
+/// to the same string, which would render as "deepseek v4 flash (deepseek
+/// v4 flash)".
+fn remap_label(name: &str, mapped: &str) -> String {
+    if name.eq_ignore_ascii_case(mapped) {
+        name.to_string()
+    } else {
+        format!("{name} ({mapped})")
+    }
+}
+
 // ---------------------------------------------------------------- Claude Code
 
 /// Claude's aliases are the values `--model` accepts; relay setups remap them
@@ -106,7 +119,7 @@ fn claude_config() -> HarnessModelConfig {
         match (&mapped, &name) {
             (Some(m), Some(n)) => cfg.models.push(HarnessModelInfo {
                 id: alias.to_string(),
-                label: format!("{n} ({m})"),
+                label: remap_label(n, m),
                 source: "config",
             }),
             (Some(m), None) => cfg.models.push(HarnessModelInfo {
@@ -290,5 +303,26 @@ fn capitalize(s: &str) -> String {
     match c.next() {
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remap_label_dedupes_identical_name_and_id() {
+        // The relay bug: NAME and MODEL both "deepseek v4 flash" → label must
+        // not render "deepseek v4 flash (deepseek v4 flash)".
+        assert_eq!(remap_label("deepseek v4 flash", "deepseek v4 flash"), "deepseek v4 flash");
+        // Case differences are still the same model name.
+        assert_eq!(remap_label("DeepSeek V4 Flash", "deepseek v4 flash"), "DeepSeek V4 Flash");
+    }
+
+    #[test]
+    fn remap_label_keeps_parenthetical_when_names_differ() {
+        // Different name + id keeps the disambiguating parenthetical.
+        assert_eq!(remap_label("Sonnet", "kimi-k2.6"), "Sonnet (kimi-k2.6)");
+        assert_eq!(remap_label("Opus", "glm-5.2"), "Opus (glm-5.2)");
     }
 }

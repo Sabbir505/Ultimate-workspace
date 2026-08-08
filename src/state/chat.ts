@@ -11,6 +11,7 @@ import {
   persistPartialChatMessage,
   createChatSession,
   deleteChatApiKey,
+  deleteAllChatSessions,
   deleteChatMessage,
   deleteChatSession,
   generateChatTitle,
@@ -210,6 +211,10 @@ export interface ChatState {
   selectSession: (chatSessionId: string) => Promise<void>;
   newChat: (provider: string, model: string) => Promise<ChatSession | null>;
   deleteChat: (chatSessionId: string) => Promise<void>;
+  /** Delete EVERY chat session + message (Settings → Data). Uses the backend
+   *  bulk command, then wipes all in-memory chat state so the sidebar and
+   *  chat view reflect the deletion immediately. */
+  deleteAllChats: () => Promise<number>;
   /** Delete the active chat session if it has no turns (no persisted
    *  messages). Used when leaving the Chat tab so an untouched new chat
    *  doesn't linger as an empty session — returning to Chat starts fresh
@@ -545,6 +550,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
         pendingArtifacts: nextPendingArtifacts,
       };
     });
+  },
+
+  deleteAllChats: async () => {
+    const count = await deleteAllChatSessions();
+    // Tombstone every id that existed so background session-list refreshes
+    // can't resurrect any of them (same guard as single deleteChat).
+    for (const s of get().sessions) markDeleted(s.id);
+    set((s) => ({
+      sessions: [],
+      activeChatSessionId: null,
+      messages: [],
+      streaming: {},
+      streamingChatSessionId: null,
+      chatStatus: {},
+      artifacts: {},
+      artifactsByMessage: {},
+      pendingArtifacts: {},
+      tasks: {},
+      messageQueue: {},
+      cwdOverrides: {},
+      sessionProjects: {},
+      ownerSessionByChatId: {},
+    }));
+    return count;
   },
 
   deleteActiveIfEmpty: async () => {

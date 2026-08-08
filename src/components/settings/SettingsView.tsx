@@ -6,7 +6,7 @@
 // categories — or an empty harness list — does not reflow the modal.
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel, getDataPaths, setChatDbDir, deleteAllChatSessions, deleteAllArtifacts, type DataPaths } from "../../lib/ipc";
+import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel, getDataPaths, setChatDbDir, type DataPaths } from "../../lib/ipc";
 import { runLoginFlow } from "../../lib/sessionLauncher";
 import { shortModelName } from "../../lib/modelLabel";
 import { useProjectsStore } from "../../state/projects";
@@ -14,6 +14,7 @@ import { useSettingsStore, type ThemeSetting } from "../../state/settings";
 import { useUiStore } from "../../state/ui";
 import { GlassSelect } from "../common/GlassSelect";
 import { useChatStore } from "../../state/chat";
+import { useArtifactsStore } from "../../state/artifacts";
 import { ModelMarket } from "./ModelMarket";
 import { ConnectorIcon, FamilyIcon, FAMILY_NAMES } from "./ConnectorIcon";
 import { Modal } from "../common/Modal";
@@ -1472,6 +1473,10 @@ function DataPanel() {
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<"chats" | "artifacts" | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  // Store-backed deletes so the sidebar/chat view update immediately —
+  // the raw IPC commands alone leave stale in-memory state on screen.
+  const deleteAllChats = useChatStore((s) => s.deleteAllChats);
+  const clearAllArtifacts = useArtifactsStore((s) => s.clearAll);
 
   const refresh = () => {
     void getDataPaths().then((p) => p && setPaths(p));
@@ -1531,10 +1536,10 @@ function DataPanel() {
     setBusy(true);
     try {
       if (confirm === "chats") {
-        const n = await deleteAllChatSessions();
+        const n = await deleteAllChats();
         setNote(`Deleted ${n} chat session(s)`);
       } else {
-        const n = await deleteAllArtifacts();
+        const n = await clearAllArtifacts();
         setNote(`Deleted ${n} artifact(s)`);
       }
       refresh();

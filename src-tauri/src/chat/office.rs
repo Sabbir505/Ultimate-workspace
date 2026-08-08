@@ -846,7 +846,14 @@ fn pptx_bytes_to_text(bytes: &[u8]) -> Option<String> {
         .map(|n| n.to_string())
         .collect();
     let mut ordered = names;
-    ordered.sort();
+    // Sort by slide number, not lexicographically: "slide10" must not come
+    // before "slide2".
+    ordered.sort_by_key(|n| {
+        n.trim_start_matches("ppt/slides/slide")
+            .trim_end_matches(".xml")
+            .parse::<u32>()
+            .unwrap_or(u32::MAX)
+    });
     let mut out = String::new();
     for (i, name) in ordered.iter().enumerate() {
         let mut xml = String::new();
@@ -902,9 +909,235 @@ fn strip_html_to_text(html: &str) -> String {
         .join("\n")
 }
 
+// ---------------------------------------------------------------------------
+// PPTX → PDF conversion via LibreOffice headless.
+//
+// The canvas renders PPTX by converting the deck to a PDF with a headless
+// LibreOffice subprocess, then routing the bytes through the same native
+// `<embed>` preview path as real PDFs. This preserves the original file's
+// fidelity (fonts, images, animations flattened) far better than the
+// hand-rolled pptx→HTML converter above, which stays as the fallback when
+// LibreOffice isn't installed.
+// ---------------------------------------------------------------------------
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+/// Hard cap on one conversion. Typical decks convert in 3–15 s; 90 s covers
+/// pathological decks without hanging the preview forever.
+const SOFFICE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Relative path (under the app's resource directory) where the bundled
+/// LibreOffice tree is shipped by `scripts/fetch-bundled-libreoffice.mjs`
+/// (soffice at `<resource_dir>/libreoffice/program/soffice.exe` on Windows).
+const BUNDLED_LO_SUBDIR: &str = "libreoffice";
+
+static LO_RESOURCE_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// Record the app's resource directory at startup (called once from lib.rs
+/// setup, same pattern as python_runtime). The bundled soffice is resolved
+/// lazily from it. Safe to call multiple times — only the first wins.
+pub fn set_resource_dir(resource_dir: Option<PathBuf>) {
+    let _ = LO_RESOURCE_DIR.set(resource_dir.map(|d| d.join(BUNDLED_LO_SUBDIR)));
+}
+
+/// The bundled soffice shipped inside the installer, when present on disk.
+/// Checked FIRST so the app never depends on a system LibreOffice install.
+fn bundled_soffice() -> Option<PathBuf> {
+    let dir = LO_RESOURCE_DIR.get_or_init(|| None).as_ref()?;
+    let exe = if cfg!(windows) {
+        dir.join("program").join("soffice.exe")
+    } else {
+        dir.join("program").join("soffice")
+    };
+    exe.is_file().then_some(exe)
+}
+
+/// Locate the LibreOffice `soffice` binary: bundled copy first, then PATH,
+/// then the standard install locations per OS. Returns `None` when no
+/// LibreOffice is reachable at all.
+fn find_soffice() -> Option<PathBuf> {
+    if let Some(bundled) = bundled_soffice() {
+        return Some(bundled);
+    }
+    // PATH lookup via a probe spawn (exit status 0/1 both mean "found";
+    // only a spawn error means "missing").
+    let probe = |name: &str| -> bool {
+        let mut cmd = Command::new(name);
+        cmd.arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd.status().is_ok()
+    };
+    for name in ["soffice", "libreoffice"] {
+        if probe(name) {
+            return Some(PathBuf::from(name));
+        }
+    }
+    // Common absolute install paths (probed directly).
+    #[cfg(windows)]
+    let candidates: &[&str] = &[
+        r"C:\Program Files\LibreOffice\program\soffice.exe",
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+    ];
+    #[cfg(target_os = "macos")]
+    let candidates: &[&str] = &["/Applications/LibreOffice.app/Contents/MacOS/soffice"];
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let candidates: &[&str] = &["/usr/bin/soffice", "/usr/local/bin/soffice", "/snap/bin/libreoffice"];
+    candidates
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.is_file())
+}
+
+/// True when a LibreOffice `soffice` binary is reachable. Exposed to the
+/// frontend so it can warn that PPTX previews need LibreOffice installed.
+pub fn libreoffice_available() -> bool {
+    find_soffice().is_some()
+}
+
+/// Fresh, unique temp dir for one soffice invocation. Keyed by pid AND a
+/// process-local sequence number: concurrent conversions in the same process
+/// used to share `conduit-soffice-<pid>`, and each invocation's cleanup
+/// (`remove_dir_all`) deleted the other's in-flight work — the second deck's
+/// preview then came back empty or with the first deck's partial output.
+fn soffice_run_dir() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("conduit-soffice-{}-{seq}", std::process::id()))
+}
+
+/// Convert a `.pptx` file to PDF bytes via `soffice --headless --convert-to
+/// pdf`. Returns `None` when LibreOffice is missing, the conversion fails, or
+/// it exceeds `SOFFICE_TIMEOUT` (the process is killed). Results are cached in
+/// the temp dir keyed by (path, len, mtime) so re-opening the same deck's
+/// preview doesn't re-run LibreOffice.
+///
+/// This is blocking (subprocess wait loop) — call it inside
+/// `tokio::task::spawn_blocking` from async command handlers so the IPC
+/// thread pool isn't stalled for the conversion's multi-second runtime.
+pub fn pptx_to_pdf(pptx_path: &Path) -> Option<Vec<u8>> {
+    let soffice = find_soffice()?;
+
+    let meta = std::fs::metadata(pptx_path).ok()?;
+    // Cache key: absolute path + length + mtime. DefaultHasher is fine here —
+    // collisions only cost a stale-but-valid PDF of another deck, and the key
+    // includes path so cross-file collisions are astronomically unlikely.
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    pptx_path.to_string_lossy().hash(&mut hasher);
+    meta.len().hash(&mut hasher);
+    if let Ok(mtime) = meta.modified() {
+        if let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH) {
+            dur.as_nanos().hash(&mut hasher);
+        }
+    }
+    let cache_dir = std::env::temp_dir().join("conduit-pptx-pdf");
+    let cached = cache_dir.join(format!("{:016x}.pdf", hasher.finish()));
+    if let Ok(bytes) = std::fs::read(&cached) {
+        if !bytes.is_empty() {
+            return Some(bytes);
+        }
+    }
+
+    // Fresh conversion into a per-run dir. LibreOffice refuses concurrent
+    // runs sharing one user profile, so hand each invocation its own
+    // UserInstallation — that also keeps first-run dialogs out of headless
+    // mode. The dir is unique per invocation (see soffice_run_dir); the
+    // pre-clean only guards against a stale dir left by a crashed process
+    // that happened to recycle this pid + sequence.
+    let run_dir = soffice_run_dir();
+    let _ = std::fs::remove_dir_all(&run_dir);
+    std::fs::create_dir_all(&run_dir).ok()?;
+    let profile_uri = format!("file:///{}", run_dir.join("profile").to_string_lossy().replace('\\', "/"));
+
+    let mut cmd = Command::new(&soffice);
+    cmd.arg("--headless")
+        .arg("--norestore")
+        .arg("-env:UserInstallation")
+        .arg(&profile_uri)
+        .arg("--convert-to")
+        .arg("pdf")
+        .arg("--outdir")
+        .arg(&run_dir)
+        .arg(pptx_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // Suppress the console-window flash a GUI app gets when shelling out to a
+    // console binary on Windows. Same pattern as chat/codeexec.rs.
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().ok()?;
+
+    // Poll with a deadline: std::process has no wait-with-timeout, and a hung
+    // soffice must not wedge the preview path forever.
+    let deadline = Instant::now() + SOFFICE_TIMEOUT;
+    let ok = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(_) => break false,
+        }
+    };
+    if !ok {
+        let _ = std::fs::remove_dir_all(&run_dir);
+        return None;
+    }
+
+    // soffice names the output after the input stem.
+    let stem = pptx_path.file_stem()?.to_string_lossy();
+    let produced = run_dir.join(format!("{stem}.pdf"));
+    let bytes = std::fs::read(&produced).ok();
+    let _ = std::fs::remove_dir_all(&run_dir);
+    let bytes = bytes.filter(|b| !b.is_empty())?;
+
+    // Best-effort cache write; a failed cache is not a failed conversion.
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let _ = std::fs::write(&cached, &bytes);
+    Some(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soffice_run_dir_is_unique_per_invocation() {
+        // Concurrency fix: two conversions in the same process must not share
+        // a run dir — the old pid-only key let one invocation's cleanup
+        // delete the other's in-flight conversion.
+        let a = soffice_run_dir();
+        let b = soffice_run_dir();
+        assert_ne!(a, b, "concurrent conversions must get distinct run dirs");
+        let pid = std::process::id().to_string();
+        assert!(
+            a.to_string_lossy().contains(&format!("conduit-soffice-{pid}-")),
+            "run dir keeps the pid prefix for diagnosability: {}",
+            a.display()
+        );
+    }
 
     #[test]
     fn elements_handles_nesting_and_self_close() {
@@ -971,6 +1204,24 @@ mod tests {
         assert!(ptext.contains("Alpha") && ptext.contains("Beta"), "{ptext}");
 
         assert!(doc_to_text("bogus", b"not a real file").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pptx_text_orders_slides_numerically() {
+        // Regression: slide names sorted lexicographically put slide10 before
+        // slide2. With 12 slides, slide 2's text must precede slide 10's.
+        let dir = std::env::temp_dir().join(format!("conduit-pptx-order-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let content = (1..=12)
+            .map(|i| format!("Slide{i}\nMarker{i}"))
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+        let pptx = crate::chat::artifacts::generate(&dir, "pptx", "t.pptx", None, &content).unwrap();
+        let text = doc_to_text("pptx", &std::fs::read(&pptx.path).unwrap()).unwrap();
+        let two = text.find("Marker2").unwrap();
+        let ten = text.find("Marker10").unwrap();
+        assert!(two < ten, "slide2 must precede slide10, got:\n{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

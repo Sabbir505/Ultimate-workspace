@@ -287,6 +287,10 @@ impl ChatManager {
                                     None
                                 }
                             }),
+                            usage.as_ref().and_then(|u| if u.cache_creation_input_tokens > 0 { Some(u.cache_creation_input_tokens) } else { None }),
+                            usage.as_ref().and_then(|u| if u.cache_read_input_tokens > 0 { Some(u.cache_read_input_tokens) } else { None }),
+                            usage.as_ref().and_then(|u| if u.reasoning_tokens > 0 { Some(u.reasoning_tokens) } else { None }),
+                            None, None, None,
                         );
                         // Attribute this turn's artifacts to the assistant
                         // message so they reappear on its bubble when the chat
@@ -343,15 +347,28 @@ impl ChatManager {
 
             // The stream finished (either done or aborted). Drop the abort
             // handle from the registry so a future `send` for this session
-            // starts clean. Without this, a cancelled-mid-stream-then-resent
-            // race could leave a stale handle in the map and confuse the next
-            // cancel() call (it'd try to abort an already-completed task).
-            mgr.streams.lock().remove(&sid);
+            // starts clean — but only if the entry still belongs to THIS
+            // stream. A superseding send() may already have replaced it;
+            // removing unconditionally would clobber the newer stream's
+            // handle and leave it uncancellable.
+            mgr.remove_stream_if_current(&sid, tokio::task::id());
         });
 
         self.streams
             .lock()
             .insert(chat_session_id.clone(), handle.abort_handle());
+    }
+
+    /// Remove the abort-handle registry entry for a finished stream — but only
+    /// if the entry still maps to that stream's own handle (identified by its
+    /// task id). A superseding `send` for the same session replaces the entry;
+    /// without this check the old stream's cleanup would clobber the newer
+    /// stream's handle and leave it uncancellable.
+    fn remove_stream_if_current(&self, chat_session_id: &str, task_id: tokio::task::Id) {
+        let mut streams = self.streams.lock();
+        if streams.get(chat_session_id).is_some_and(|h| h.id() == task_id) {
+            streams.remove(chat_session_id);
+        }
     }
 
     /// Cancel an active stream for the given session (no-op if none active).
@@ -408,14 +425,26 @@ pub(crate) async fn run_chat_stream(
 
     let mut stream = response.bytes_stream();
     let mut buf = String::new(); // SSE buffer passed to provider parser
+    // Carry-over for partial lines: TCP chunks split SSE `data:` lines
+    // arbitrarily, and feeding half a line into parse_sse_chunk is fatal
+    // (its serde_json::from_str fails and kills the whole turn). Only
+    // complete, newline-terminated lines may be parsed — same pattern the
+    // tool-loop rounds use in streaming.rs.
+    let mut pending = String::new();
     let mut full_text = String::new();
     let mut in_think = false;
 
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result.map_err(|e| format!("stream read error: {e}"))?;
-        let text = String::from_utf8_lossy(&chunk);
+        pending.push_str(&String::from_utf8_lossy(&chunk));
 
-        for line in text.lines() {
+        let mut complete_lines: Vec<String> = Vec::new();
+        while let Some(nl) = pending.find('\n') {
+            complete_lines.push(pending.drain(..=nl).collect());
+        }
+
+        for line in complete_lines {
+            let line = line.trim_end();
             match provider.parse_sse_chunk(line, &mut buf)? {
                 (Some(token), false) => {
                     // Reasoning tokens are sentinel-prefixed by the parser;
@@ -450,6 +479,39 @@ pub(crate) async fn run_chat_stream(
                 }
                 _ => {}
             }
+        }
+    }
+
+    // EOF flush: a final line with no trailing newline (some local servers
+    // close this way) is still complete and must be parsed — pre-buffering
+    // behavior did so via str::lines. Parse failures here are tolerated, not
+    // fatal: the stream has already ended, and erroring now would throw away
+    // a turn whose tokens were all delivered.
+    let trailing = pending.trim_end().to_string();
+    if !trailing.is_empty() {
+        if let Ok((Some(token), _)) = provider.parse_sse_chunk(&trailing, &mut buf) {
+            let mut out = String::new();
+            if let Some(reasoning) = token.strip_prefix(REASONING_PREFIX) {
+                if !in_think {
+                    out.push_str("<think>");
+                    in_think = true;
+                }
+                out.push_str(reasoning);
+            } else {
+                if in_think {
+                    out.push_str("</think>");
+                    in_think = false;
+                }
+                out.push_str(&token);
+            }
+            full_text.push_str(&out);
+            let _ = app.emit(
+                "chat:token",
+                ChatTokenPayload {
+                    chat_session_id: chat_session_id.to_string(),
+                    token: out,
+                },
+            );
         }
     }
 
@@ -656,6 +718,37 @@ mod tests {
         assert!(stripped.contains("Let me search"));
         assert!(!stripped.contains("tool_calls"));
         assert!(!stripped.contains("invoke"));
+    }
+
+    #[tokio::test]
+    async fn finished_stream_cleanup_does_not_clobber_superseding_stream() {
+        let mgr = ChatManager::new();
+        let sid = "s1".to_string();
+
+        // Two parked tasks stand in for stream A and the stream B that
+        // supersedes it for the same session.
+        let task_a = tokio::spawn(std::future::pending::<()>());
+        let task_b = tokio::spawn(std::future::pending::<()>());
+
+        // A registers its abort handle, then B replaces it.
+        mgr.streams
+            .lock()
+            .insert(sid.clone(), task_a.abort_handle());
+        mgr.streams
+            .lock()
+            .insert(sid.clone(), task_b.abort_handle());
+
+        // A's late cleanup must NOT remove B's handle (that would leave B
+        // uncancellable)…
+        mgr.remove_stream_if_current(&sid, task_a.abort_handle().id());
+        assert!(mgr.streams.lock().contains_key(&sid));
+
+        // …while B's own cleanup removes the entry as before.
+        mgr.remove_stream_if_current(&sid, task_b.abort_handle().id());
+        assert!(!mgr.streams.lock().contains_key(&sid));
+
+        task_a.abort();
+        task_b.abort();
     }
 
     #[test]

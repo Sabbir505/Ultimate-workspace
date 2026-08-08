@@ -107,7 +107,7 @@ pub async fn connector_connect(
     // stores the tokens, and emits `oauth:callback` (success or error). Run it
     // detached so this command returns immediately.
     tauri::async_runtime::spawn(async move {
-        let _ = flows_arc.start(&app_clone, &cid).await;
+        let _ = flows_arc.start(&app_clone, &cid, id).await;
     });
     Ok(id)
 }
@@ -128,7 +128,7 @@ pub async fn connector_connect_family(
     let app_clone = app.clone();
     let fam = family.clone();
     tauri::async_runtime::spawn(async move {
-        let _ = flows_arc.start_family(&app_clone, &fam).await;
+        let _ = flows_arc.start_family(&app_clone, &fam, id).await;
     });
     Ok(id)
 }
@@ -157,8 +157,19 @@ pub async fn connector_disconnect(
 
     {
         let conn = db.0.lock();
-        let _ = secrets::delete_connector_tokens(&conn, &connector_id);
-        let _ = db::delete_connector_credential_row(&conn, &connector_id);
+        // If the keychain delete succeeds but DB delete fails (or vice
+        // versa), return an error so the UI can surface the inconsistency
+        // instead of silently showing a disconnected connector that still
+        // has a credential row (or a connected one with no keychain entry).
+        let keychain_err = secrets::delete_connector_tokens(&conn, &connector_id);
+        let db_err = db::delete_connector_credential_row(&conn, &connector_id);
+        if let Err(e) = &keychain_err {
+            // Keychain failure is non-fatal (may not exist), but log it.
+            eprintln!("warning: keychain delete for {connector_id} failed: {e}");
+        }
+        if let Err(e) = &db_err {
+            return Err(format!("DB credential delete failed: {e}"));
+        }
     }
     Ok(DisconnectOutcome {
         revoked,

@@ -66,11 +66,14 @@ pub struct ChatRequest {
     pub thinking: Option<bool>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ChatUsage {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cost_usd: f64,
+    pub cache_creation_input_tokens: i64,
+    pub cache_read_input_tokens: i64,
+    pub reasoning_tokens: i64,
 }
 
 /// Private-use char prefixed to reasoning/thinking tokens so the stream
@@ -117,16 +120,12 @@ pub trait ChatProvider: Send + Sync {
 // default it) — everything else is identical, so they delegate here.
 
 #[derive(Serialize)]
-struct AnthropicWireMessage {
-    role: String,
-    content: String,
-}
-
-#[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 struct AnthropicWireBody {
     model: String,
-    messages: Vec<AnthropicWireMessage>,
+    /// Built via `proto::anthropic_message_json` so messages carrying images
+    /// become content-block arrays (vision); plain messages stay strings.
+    messages: Vec<serde_json::Value>,
     max_tokens: i64,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -150,15 +149,11 @@ struct AnthropicThinking {
 }
 
 #[derive(Serialize)]
-struct OpenAIWireMessage {
-    role: String,
-    content: String,
-}
-
-#[derive(Serialize)]
 struct OpenAIWireBody {
     model: String,
-    messages: Vec<OpenAIWireMessage>,
+    /// Built via `proto::openai_message_json` so messages carrying images
+    /// become multimodal content arrays (vision); plain messages stay strings.
+    messages: Vec<serde_json::Value>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
@@ -202,10 +197,7 @@ fn anthropic_request(
         messages: req
             .messages
             .iter()
-            .map(|m| AnthropicWireMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
-            })
+            .map(crate::chat::proto::anthropic_message_json)
             .collect(),
         max_tokens,
         stream: true,
@@ -229,19 +221,17 @@ fn openai_request(
     base: &str,
 ) -> reqwest::RequestBuilder {
     let url = format!("{base}/v1/chat/completions");
-    let mut messages: Vec<OpenAIWireMessage> = Vec::new();
+    let mut messages: Vec<serde_json::Value> = Vec::new();
     if let Some(sys) = &req.system {
         if !sys.is_empty() {
-            messages.push(OpenAIWireMessage {
-                role: "system".to_string(),
-                content: sys.clone(),
-            });
+            messages.push(serde_json::json!({ "role": "system", "content": sys }));
         }
     }
-    messages.extend(req.messages.iter().map(|m| OpenAIWireMessage {
-        role: m.role.clone(),
-        content: m.content.clone(),
-    }));
+    messages.extend(
+        req.messages
+            .iter()
+            .map(crate::chat::proto::openai_message_json),
+    );
     let body = OpenAIWireBody {
         model: req.model.clone(),
         messages,
@@ -251,10 +241,7 @@ fn openai_request(
             enable_thinking: t,
         }),
     };
-    eprintln!(
-        "[openai_request] → POST {url} thinking={:?} model={:?}",
-        req.thinking, req.model,
-    );
+    eprintln!("[openai_request] → POST {url} thinking={:?} model={:?}", req.thinking, req.model);
     let json_body = serde_json::to_string(&body).unwrap_or_default();
     eprintln!(
         "[openai_request] body_len={} has_template_kwargs={}",
@@ -323,6 +310,10 @@ impl ChatProvider for AnthropicProvider {
             #[derive(Deserialize)]
             struct Delta {
                 text: Option<String>,
+                // `thinking_delta` events carry their payload under
+                // `delta.thinking` — previously dropped on the floor here,
+                // so the non-tool Anthropic path never showed thinking.
+                thinking: Option<String>,
             }
 
             let payload: SsePayload =
@@ -333,6 +324,14 @@ impl ChatProvider for AnthropicProvider {
                     if let Some(ref delta) = payload.delta {
                         if let Some(ref text) = delta.text {
                             return Ok((Some(text.clone()), false));
+                        }
+                        if let Some(ref thinking) = delta.thinking {
+                            if !thinking.is_empty() {
+                                return Ok((
+                                    Some(format!("{REASONING_PREFIX}{thinking}")),
+                                    false,
+                                ));
+                            }
                         }
                     }
                 }
@@ -362,6 +361,8 @@ impl ChatProvider for AnthropicProvider {
                 struct UsageData {
                     input_tokens: Option<i64>,
                     output_tokens: Option<i64>,
+                    cache_creation_input_tokens: Option<i64>,
+                    cache_read_input_tokens: Option<i64>,
                 }
                 if let Ok(ev) = serde_json::from_str::<UsageEvent>(data) {
                     if let Some(u) = ev.usage {
@@ -372,6 +373,9 @@ impl ChatProvider for AnthropicProvider {
                             input_tokens: input,
                             output_tokens: output,
                             cost_usd: cost,
+                            cache_creation_input_tokens: u.cache_creation_input_tokens.unwrap_or(0),
+                            cache_read_input_tokens: u.cache_read_input_tokens.unwrap_or(0),
+                            reasoning_tokens: 0, // Anthropic doesn't surface reasoning_tokens on message_delta yet
                         });
                     }
                 }
@@ -526,6 +530,7 @@ impl ChatProvider for OpenAIProvider {
                             input_tokens: input,
                             output_tokens: output,
                             cost_usd: cost,
+                            ..Default::default()
                         });
                     }
                 }

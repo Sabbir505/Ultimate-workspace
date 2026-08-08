@@ -83,6 +83,46 @@ pub fn delete_artifact(id: String, db: State<DbState>) -> CmdResult<()> {
     Ok(())
 }
 
+/// Delete every artifact: each DB row + its on-disk file (best-effort), then
+/// sweep any leftover files inside the resolved artifacts dir that have no
+/// row. Never touches anything outside the resolved artifacts dir. Returns
+/// the number of files removed.
+#[tauri::command]
+pub fn delete_all_artifacts(app: AppHandle, db: State<DbState>) -> CmdResult<usize> {
+    let paths = {
+        let conn = db.0.lock();
+        let artifacts = db::list_artifacts(&conn).map_err(|e| e.to_string())?;
+        let mut paths = Vec::with_capacity(artifacts.len());
+        for a in &artifacts {
+            if let Some(p) = db::delete_artifact(&conn, &a.id).map_err(|e| e.to_string())? {
+                paths.push(p);
+            }
+        }
+        paths
+    };
+    let mut removed = 0usize;
+    for p in &paths {
+        if std::fs::remove_file(p).is_ok() {
+            removed += 1;
+        }
+    }
+    // Sweep leftover files (no DB row) — strictly inside the resolved
+    // artifacts dir (the walk never escapes it).
+    let dir = crate::chat::dispatch::artifacts_dir(&app);
+    if let Ok(canon_dir) = dir.canonicalize() {
+        for entry in walkdir::WalkDir::new(&canon_dir)
+            .min_depth(1)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.file_type().is_file() && std::fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
+}
+
 /// Sweep artifacts past their 30-day expiry, removing both rows and files.
 /// Called on startup; returns the number of artifacts removed.
 pub fn sweep_expired_artifacts(db: &Arc<parking_lot::Mutex<rusqlite::Connection>>) -> usize {
@@ -111,9 +151,54 @@ pub fn create_chat_session(
 pub fn delete_chat_session(
     chat_session_id: String,
     db: State<DbState>,
+    agent_state: State<crate::agent_sessions::AgentSessionState>,
 ) -> CmdResult<()> {
+    // Kill any harness process still backing this chat and drop its state,
+    // including the persisted CLI session ids used for cross-turn resume.
+    agent_state.0.remove_session(&chat_session_id);
     let conn = db.0.lock();
+    for harness in ["claude_code", "kimi_code", "opencode"] {
+        let _ = db::delete_setting(
+            &conn,
+            &format!("agent.cli_session_id.{harness}.{chat_session_id}"),
+        );
+    }
     db::delete_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())
+}
+
+/// Delete every chat session and all of its messages — the bulk form of
+/// `delete_chat_session`, applying the exact same per-session cleanup (kill
+/// any backing harness process, drop the persisted CLI session ids, then the
+/// row). Returns the number of sessions deleted.
+#[tauri::command]
+pub fn delete_all_chat_sessions(
+    db: State<DbState>,
+    agent_state: State<crate::agent_sessions::AgentSessionState>,
+) -> CmdResult<usize> {
+    let ids = {
+        let conn = db.0.lock();
+        db::list_chat_sessions(&conn)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|s| s.id)
+            .collect::<Vec<_>>()
+    };
+    let count = ids.len();
+    for id in &ids {
+        // Same cleanup as delete_chat_session: kill any harness process still
+        // backing this chat and drop its state, including the persisted CLI
+        // session ids used for cross-turn resume.
+        agent_state.0.remove_session(id);
+        let conn = db.0.lock();
+        for harness in ["claude_code", "kimi_code", "opencode"] {
+            let _ = db::delete_setting(
+                &conn,
+                &format!("agent.cli_session_id.{harness}.{id}"),
+            );
+        }
+        db::delete_chat_session(&conn, id).map_err(|e| e.to_string())?;
+    }
+    Ok(count)
 }
 
 /// Delete a single chat message (user or assistant). The optimistic
@@ -158,27 +243,6 @@ pub fn update_chat_session_provider(
     db::update_chat_session_provider(&conn, &chat_session_id, &provider).map_err(|e| e.to_string())
 }
 
-/// Update a chat session's filesystem permission posture
-/// (`read_only` | `manual` | `auto_edit` | `full_auto`). Per-session: persists
-/// so reopening a chat restores its last mode; new sessions start at `manual`.
-/// The frontend gates the switch to `full_auto` behind a one-time confirmation
-/// modal — this command itself is a plain setter, applied only after the user
-/// confirms (or for the other three modes, immediately).
-#[tauri::command]
-pub fn update_chat_session_permission_mode(
-    chat_session_id: String,
-    mode: String,
-    db: State<DbState>,
-) -> CmdResult<()> {
-    // Validate against the known modes so a bogus value can't be persisted.
-    let mode = match mode.as_str() {
-        "read_only" | "manual" | "auto_edit" | "full_auto" => mode,
-        other => return Err(format!("unknown permission_mode: {other}")),
-    };
-    let conn = db.0.lock();
-    db::update_chat_session_permission_mode(&conn, &chat_session_id, &mode).map_err(|e| e.to_string())
-}
-
 /// Update a chat session's watch-mode pacing override. Per-session; new sessions
 /// start with no override (NULL = inherit global setting). Valid values:
 /// `"on"` | `"off"` | null (clears the override, falls back to global).
@@ -196,6 +260,35 @@ pub fn update_chat_session_watch_mode(
     }
     let conn = db.0.lock();
     db::update_chat_session_watch_mode(&conn, &chat_session_id, mode.as_deref()).map_err(|e| e.to_string())
+}
+
+/// Update a chat session's agent selection from the composer's
+/// agent-then-model selector. Per-session; new sessions start with no
+/// selection (NULL = locked model chip). Valid values: `"builtin"` |
+/// `"local"` | `"harness:<id>"` where `<id>` is a registered harness adapter
+/// (e.g. `"harness:claude_code"`) | null (clears the selection). Selecting a
+/// harness agent does NOT reroute messages yet — the headless CLI chat
+/// protocol lands separately; this only records the user's pick.
+#[tauri::command]
+pub fn update_chat_session_agent(
+    chat_session_id: String,
+    agent: Option<String>,
+    db: State<DbState>,
+) -> CmdResult<()> {
+    if let Some(ref a) = agent {
+        let valid = a == "builtin"
+            || a == "local"
+            || a
+                .strip_prefix("harness:")
+                .is_some_and(|id| crate::harness_adapters::get_adapter(id).is_some());
+        if !valid {
+            return Err(format!(
+                "unknown agent: {a} (expected 'builtin', 'local', or 'harness:<id>')"
+            ));
+        }
+    }
+    let conn = db.0.lock();
+    db::update_chat_session_agent(&conn, &chat_session_id, agent.as_deref()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -549,6 +642,10 @@ pub async fn send_chat_message(
     // the model at its default; Some(true)/Some(false) explicitly enable or
     // disable thinking for this turn.
     thinking: Option<bool>,
+    // Custom working folder chosen in the composer ("+" → folder icon) for
+    // this chat session. Granted as an extra fs_root for the turn so mutating
+    // tools may write inside it even though it isn't a registered project.
+    extra_fs_root: Option<String>,
     chat_state: State<'_, crate::ChatState>,
     db: State<'_, DbState>,
     app: AppHandle,
@@ -566,17 +663,14 @@ pub async fn send_chat_message(
         && (force_research.unwrap_or(false) || crate::chat::is_research_request(&content));
     let content = format!("{content}{extra_text}");
     let chat_mgr = &chat_state.0;
-    // 1. Look up the session — provider/model + the per-session permission
-    //    posture for filesystem tools (read at turn start so it governs this
-    //    turn's tool schema/approval logic).
-    let (provider_str, model_str, permission_mode_str) = {
+    // 1. Look up the session — provider/model for this turn.
+    let (provider_str, model_str) = {
         let conn = db.0.lock();
         let cs = db::get_chat_session(&conn, &chat_session_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "chat session not found".to_string())?;
-        (cs.provider, cs.model, cs.permission_mode)
+        (cs.provider, cs.model)
     };
-    let permission_mode = crate::chat::permission::PermissionMode::from_db(&permission_mode_str);
 
     // Connectors available to this conversation. Per-session rows
     // (chat_session_connectors, written by the old "@"-attach flow) are still
@@ -605,7 +699,7 @@ pub async fn send_chat_message(
     // 2. Persist the user message.
     {
         let conn = db.0.lock();
-        db::add_chat_message(&conn, &chat_session_id, "user", &content, None, None, None)
+        db::add_chat_message(&conn, &chat_session_id, "user", &content, None, None, None, None, None, None, None, None, None)
             .map_err(|e| e.to_string())?;
         db::touch_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())?;
     }
@@ -833,7 +927,7 @@ pub async fn send_chat_message(
     // custom prompt + skills (global, provider-independent settings), plus
     // built-in tool guidance.
     let tools_on = tools_enabled.unwrap_or(false);
-    let system = {
+    let mut system: Option<String> = {
         let conn = db.0.lock();
         let custom = db::get_setting(&conn, "assistant.systemPrompt")
             .map_err(|e| e.to_string())?;
@@ -924,7 +1018,7 @@ pub async fn send_chat_message(
                     requires_local_sandbox: pcaps.requires_local_sandbox,
                     attached_connectors: std::sync::Arc::new(Vec::new()),
                 };
-                let specs = crate::chat::tools::openai_tool_specs(&caps, permission_mode);
+                let specs = crate::chat::tools::openai_tool_specs(&caps, crate::chat::permission::PermissionMode::FullAuto);
                 let json = serde_json::to_string(&specs).unwrap_or_default();
                 let n = crate::chat::compaction::count_json_tokens(
                     &chat_mgr.client,
@@ -995,6 +1089,7 @@ pub async fn send_chat_message(
                             Some(o.summary_input_tokens),
                             Some(o.summary_output_tokens),
                             None,
+                            None, None, None, None, None, None,
                         )
                         .map_err(|e| e.to_string())?;
                         if !o.superseded_ids.is_empty() {
@@ -1094,19 +1189,45 @@ pub async fn send_chat_message(
     }
 
     let shared_db = Arc::clone(&db.0);
-    // Granted filesystem roots: until the granted-roots UI ships, an empty
-    // set is the safe default — every mutating tool call routed through
-    // `dispatch::run_tool` is then rejected by `permission::path_within_scope`
-    // unless the path lies under a granted root. The selector only changes
-    // approval *defaults* within granted roots; combined with the scope
-    // check, it can never expand reachability.
-    //
-    // The pre-grant-roots flow still works: mutating actions under
-    // `manual` / `auto_edit` / `full_auto` modes pause for a per-action
-    // approval card. The card is the user's explicit "yes, write here" for
-    // THIS one action; the path-scope gate is the backstop that prevents
-    // a path outside any granted root from being auto-run after approval.
-    let fs_roots: Vec<String> = Vec::new();
+    // Granted filesystem roots: every registered project path plus the
+    // artifacts dir (Documents/Conduit). Mutating tool calls routed through
+    // `dispatch::run_tool` are rejected by `permission::path_within_scope`
+    // unless the path lies under one of these roots — so the agent can write
+    // inside the user's projects and its own artifacts folder, while random
+    // system paths stay hard-blocked regardless of the permission selector.
+    let mut fs_roots: Vec<String> = {
+        let conn = shared_db.lock();
+        crate::db::list_projects(&conn)
+            .map(|ps| ps.into_iter().map(|p| p.path).collect())
+            .unwrap_or_default()
+    };
+    fs_roots.push(
+        crate::chat::dispatch::artifacts_dir(&app)
+            .to_string_lossy()
+            .to_string(),
+    );
+    // The chat's working folder — a custom folder from the composer picker,
+    // or the selected project's path (the frontend sends both through this
+    // param). Granted as an additional root for this turn (deduped against
+    // the project roots) AND named in the system prompt: without that line
+    // the model had no idea which directory the chat was scoped to and
+    // answered that it wasn't working in any directory.
+    if let Some(root) = extra_fs_root {
+        let root = root.trim().to_string();
+        if !root.is_empty() {
+            if !fs_roots.iter().any(|r| r == &root) {
+                fs_roots.push(root.clone());
+            }
+            let section = format!(
+                "\n\n## Working directory\nThis chat is scoped to `{root}`. Treat it as \
+                 the current working directory: resolve relative paths against it, and \
+                 default `list_directory`/`search_files`/`search_content`/`write_file`/\
+                 `edit_file` calls to paths inside it unless the user explicitly points \
+                 elsewhere."
+            );
+            system = Some(system.unwrap_or_default() + &section);
+        }
+    }
     chat_state.0.send(
         chat_session_id,
         provider_id,
@@ -1116,7 +1237,7 @@ pub async fn send_chat_message(
         effort,
         tools_on,
         code_exec_enabled.unwrap_or(false),
-        permission_mode,
+        crate::chat::permission::PermissionMode::FullAuto,
         fs_roots,
         connector_ids,
         system,
@@ -1237,10 +1358,16 @@ fn base64_encode(data: &[u8]) -> String {
 
 /// Read a generated artifact for in-app preview. Text-like files return their
 /// decoded (and length-capped) text; images and PDFs return a `data:` URI;
-/// Office documents (docx/pptx/xlsx) are extracted to HTML (kind = `office`);
-/// anything else returns metadata only (rendered as a file card).
+/// Office documents are rendered as: docx → raw bytes for client-side mammoth
+/// rendering (kind = `office`, original_bytes = true); pptx → converted to PDF
+/// via headless LibreOffice when available (kind = `pdf`), else the hand-rolled
+/// HTML converter (kind = `office`); xlsx → HTML (kind = `office`). Anything
+/// else returns metadata only (rendered as a file card).
+///
+/// `async` because pptx→pdf shells out to LibreOffice for several seconds —
+/// that work runs on `spawn_blocking` so the IPC handler isn't stalled.
 #[tauri::command]
-pub fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
+pub async fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
     use std::path::Path;
 
     let p = Path::new(&path);
@@ -1305,6 +1432,7 @@ pub fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
             kind: final_kind.to_string(),
             text: Some(text),
             data_uri: None,
+            original_bytes: None,
             size,
             truncated,
         });
@@ -1330,13 +1458,45 @@ pub fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
             kind: if is_pdf { "pdf" } else { "image" }.to_string(),
             text: None,
             data_uri: Some(data_uri),
+            original_bytes: None,
             size,
             truncated: false,
         });
     }
 
+    // PPTX: convert the original deck to PDF with headless LibreOffice so the
+    // preview is the *original* file (fonts/images/layout intact), rendered by
+    // the native PDF viewer. On any conversion failure (LibreOffice missing,
+    // timeout, corrupt file) fall through to the office→HTML preview below.
+    if ext == "pptx" && size <= MAX_MEDIA {
+        let path_for_convert = path.clone();
+        let pdf_bytes = tokio::task::spawn_blocking(move || {
+            crate::chat::office::pptx_to_pdf(Path::new(&path_for_convert))
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(pdf_bytes) = pdf_bytes {
+            let data_uri = format!("data:application/pdf;base64,{}", base64_encode(&pdf_bytes));
+            return Ok(ArtifactPreview {
+                path,
+                filename,
+                ext,
+                kind: "pdf".to_string(),
+                text: None,
+                data_uri: Some(data_uri),
+                original_bytes: Some(true),
+                size,
+                truncated: false,
+            });
+        }
+    }
+
     // Office documents: render to faithful, self-contained HTML (colours,
     // fonts, tables, slide layouts) shown in a sandboxed iframe (kind = office).
+    // For docx/pptx, also return the raw bytes as data_uri for client-side
+    // rendering (mammoth.js for docx; pptx raw bytes back the fallback when
+    // LibreOffice conversion failed).
     if matches!(ext.as_str(), "docx" | "pptx" | "xlsx") && size <= MAX_MEDIA {
         if let Ok(bytes) = std::fs::read(p) {
             let html = match ext.as_str() {
@@ -1345,6 +1505,14 @@ pub fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
                 "xlsx" => crate::chat::office::xlsx_to_html(&bytes),
                 _ => None,
             };
+            // Encode raw file bytes for client-side rendering.
+            let mime = match ext.as_str() {
+                "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                _ => "application/octet-stream",
+            };
+            let data_uri = format!("data:{mime};base64,{}", base64_encode(&bytes));
             if let Some(html) = html {
                 return Ok(ArtifactPreview {
                     path,
@@ -1352,7 +1520,8 @@ pub fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
                     ext,
                     kind: "office".to_string(),
                     text: Some(html),
-                    data_uri: None,
+                    data_uri: Some(data_uri),
+                    original_bytes: Some(true),
                     size,
                     truncated: false,
                 });
@@ -1368,9 +1537,18 @@ pub fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
         kind: "binary".to_string(),
         text: None,
         data_uri: None,
+        original_bytes: None,
         size,
         truncated: false,
     })
+}
+
+/// True when a LibreOffice `soffice` binary is reachable, which is what the
+/// pptx→pdf preview path needs. The frontend uses this to show a one-line
+/// install hint above pptx previews that fell back to the HTML converter.
+#[tauri::command]
+pub fn is_libreoffice_available() -> bool {
+    crate::chat::office::libreoffice_available()
 }
 
 // ---- Artifact download ----
@@ -1945,22 +2123,31 @@ pub async fn count_context_tokens(
         Some(system_str)
     };
 
-    let tokens = crate::chat::compaction::count_tokens(
+    let tokens = match crate::chat::compaction::count_tokens(
         &chat_state.0.client,
         &status.base_url,
         &system,
         &messages,
     )
     .await
-    .unwrap_or_else(|e| {
-        eprintln!("[context-meter] /tokenize failed: {e}");
-        0
-    });
+    {
+        Ok(t) => t,
+        Err(e) => {
+            // A failed tokenize is "no data", NOT zero: reporting Some(0)
+            // snapped the context ring to 0% exactly when the number was
+            // untrustworthy (tokenizer down / model unloaded). Contract:
+            // report null and let the UI keep the last known value.
+            eprintln!("[context-meter] /tokenize failed: {e}");
+            return Ok(crate::types::ContextUsagePayload {
+                used_tokens: None,
+                max_tokens: status.n_ctx,
+            });
+        }
+    };
 
-    // The Tauri command layer can't represent 0 as "errored" cleanly (the
-    // caller can't tell "empty transcript" from "tokenizer down"), so map 0
-    // to null when the session has no messages — otherwise we'd report 0
-    // used out of `n_ctx` and the ring would show 0% even with real history.
+    // 0 with no messages is a genuinely empty transcript → null; 0 WITH
+    // messages on a SUCCESSFUL tokenize is real data (empty system + no
+    // active rows) and stays Some(0).
     let has_messages = !messages.is_empty();
     Ok(crate::types::ContextUsagePayload {
         used_tokens: if tokens > 0 || has_messages { Some(tokens) } else { None },

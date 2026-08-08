@@ -139,10 +139,18 @@ pub fn parse_gguf(path: &Path) -> GgufMeta {
             }
             // array = 9 -> skip (type + count + items)
             9 => {
-                let mut arr_header = [0u8; 4 + 4]; // type + count
+                // Per the GGUF spec an array value is u32 element-type + u64
+                // element-count. Reading count as u32 leaves the high half in
+                // the stream and desyncs EVERY KV pair after the first array
+                // (tokenizer arrays are ubiquitous), so metadata positioned
+                // after an array parsed as garbage.
+                let mut arr_header = [0u8; 4 + 8]; // type (u32) + count (u64)
                 if file.read_exact(&mut arr_header).is_ok() {
                     let _arr_type = u32::from_le_bytes([arr_header[0], arr_header[1], arr_header[2], arr_header[3]]);
-                    let arr_count = u32::from_le_bytes([arr_header[4], arr_header[5], arr_header[6], arr_header[7]]) as u64;
+                    let arr_count = u64::from_le_bytes([
+                        arr_header[4], arr_header[5], arr_header[6], arr_header[7],
+                        arr_header[8], arr_header[9], arr_header[10], arr_header[11],
+                    ]);
                     // Skip the array payload. Since we only care about string KV values,
                     // and arrays are metadata blobs (tokenizer, etc.), skip them.
                     skip_gguf_value(&mut file, _arr_type, arr_count);
@@ -242,10 +250,14 @@ fn has_gguf_magic(path: &Path) -> bool {
 /// candidate (the metadata parser still rejects non-GGUF content).
 pub fn scan_folder(dir: &Path, source: &str) -> Vec<GgufFile> {
     let mut files = Vec::new();
-    let walker = match walkdir::WalkDir::new(dir).max_depth(6).into_iter().collect::<Result<Vec<_>, _>>() {
-        Ok(entries) => entries,
-        Err(_) => return files,
-    };
+    // filter_map(ok) — NOT collect::<Result<..>>: a single unreadable entry
+    // (permission-denied subdir, dangling junction — common in Downloads and
+    // drive roots) must skip, not abort the whole scan with zero models found.
+    let walker: Vec<_> = walkdir::WalkDir::new(dir)
+        .max_depth(6)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .collect();
 
     let extensionless_ok = source == "ollama";
 
@@ -652,6 +664,10 @@ impl LocalModelRegistry {
         if let Some(mut h) = handle {
             let _ = h.child.kill().await;
             let _ = h.child.wait().await;
+            eprintln!(
+                "[local-models] ejected model_id={} port={}; VRAM released",
+                model_id, h.port
+            );
         }
     }
 
@@ -1237,6 +1253,65 @@ mod scanner_tests {
         v.extend_from_slice(&0u64.to_le_bytes()); // tensor count
         v.extend_from_slice(&0u64.to_le_bytes()); // metadata kv count
         v
+    }
+
+    fn push_gguf_string(v: &mut Vec<u8>, s: &str) {
+        v.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        v.extend_from_slice(s.as_bytes());
+    }
+
+    /// GGUF carrying an array KV followed by scalar + string KVs — the
+    /// desync scenario from the array-count fix. Per the GGUF spec an array
+    /// value header is u32 element-type + u64 element-count; reading count
+    /// as u32 left the high half in the stream, so the payload skip started
+    /// 4 bytes early and EVERY KV after the first array parsed as garbage
+    /// (tokenizer arrays are ubiquitous, so in practice all extracted
+    /// metadata came back empty for real models).
+    fn gguf_bytes_with_array_kv() -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"GGUF"); // magic
+        v.extend_from_slice(&3u32.to_le_bytes()); // version
+        v.extend_from_slice(&0u64.to_le_bytes()); // tensor count
+        v.extend_from_slice(&4u64.to_le_bytes()); // metadata kv count
+
+        // KV 1: array of strings (tokenizer-style).
+        push_gguf_string(&mut v, "tokenizer.ggml.tokens");
+        v.extend_from_slice(&9u32.to_le_bytes()); // value type: array
+        v.extend_from_slice(&8u32.to_le_bytes()); // element type: string
+        v.extend_from_slice(&2u64.to_le_bytes()); // element count (u64 per spec)
+        push_gguf_string(&mut v, "<bos>");
+        push_gguf_string(&mut v, "<eos>");
+
+        // KV 2: scalar (uint32) — exercises the scalar-skip arm after an array.
+        push_gguf_string(&mut v, "general.context_length");
+        v.extend_from_slice(&6u32.to_le_bytes()); // value type: uint32
+        v.extend_from_slice(&4096u32.to_le_bytes());
+
+        // KV 3: the metadata we actually extract.
+        push_gguf_string(&mut v, "general.name");
+        v.extend_from_slice(&8u32.to_le_bytes()); // value type: string
+        push_gguf_string(&mut v, "desync-test-model");
+
+        // KV 4: second string — alignment must hold past the first
+        // post-array KV, not just into it.
+        push_gguf_string(&mut v, "general.architecture");
+        v.extend_from_slice(&8u32.to_le_bytes());
+        push_gguf_string(&mut v, "llama");
+
+        v
+    }
+
+    #[test]
+    fn parse_gguf_array_kv_does_not_desync_following_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("model.gguf");
+        fs::File::create(&p)
+            .unwrap()
+            .write_all(&gguf_bytes_with_array_kv())
+            .unwrap();
+        let meta = parse_gguf(&p);
+        assert_eq!(meta.name.as_deref(), Some("desync-test-model"));
+        assert_eq!(meta.architecture.as_deref(), Some("llama"));
     }
 
     #[test]

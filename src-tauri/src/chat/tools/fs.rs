@@ -131,7 +131,11 @@ pub(super) fn fs_write_file(args: &Value) -> ToolOutcome {
         }
     }
     match std::fs::write(p, content) {
-        Ok(_) => ToolOutcome::text(format!("Wrote {} bytes to {path}.", content.len())),
+        Ok(_) => ToolOutcome::text(format!(
+            "Wrote {} bytes ({} chars) to {path}.",
+            content.len(),
+            content.chars().count()
+        )),
         Err(e) => ToolOutcome::text(format!("write_file failed: {e}")),
     }
 }
@@ -145,7 +149,10 @@ pub(super) fn fs_write_file(args: &Value) -> ToolOutcome {
 ///   * `all_occurrences: true`  — replace every match (bulk refactor), OR
 ///   * `expected_matches: N`    — confirm the count is N before replacing.
 ///
-/// Single-match and zero-match paths are unchanged from the prior behavior.
+/// `expected_matches` is a contract for ANY actual count: `Some(n)` that
+/// disagrees with reality rejects the edit untouched — including the
+/// single-match case, which previously sailed through and edited once when
+/// the model had asserted `expected_matches: 2`.
 pub(super) fn fs_edit_file(args: &Value) -> ToolOutcome {
     let path = arg_str(args, "path");
     if path.is_empty() {
@@ -212,6 +219,20 @@ pub(super) fn fs_edit_file(args: &Value) -> ToolOutcome {
             }
         }
         // We either have a single match, or the model explicitly opted in.
+        // The gate above only enforces expected_matches on the >1 path, so
+        // re-check here: `expected_matches: 2` with exactly one actual
+        // occurrence used to sail through and silently edit once. A wrong
+        // count means the model's picture of the file is stale — reject
+        // without touching anything, whatever the count is.
+        if let Some(n) = expected_matches {
+            if n != occurrences.len() {
+                return ToolOutcome::text(format!(
+                    "edit_file: expected_matches={n} but \"find\" matched {} in {path}. \
+                     No edit was made — re-read the file, refine \"find\", or pass the real count.",
+                    occurrences.len(),
+                ));
+            }
+        }
         if all_occurrences || occurrences.len() > 1 {
             // Single read-modify-write pass: replace every occurrence
             // left-to-right. `replacen` with count = all replaces
@@ -335,6 +356,41 @@ mod tests {
         // list_directory lists the parent (contains hello.txt).
         let out = fs_list_directory(&json!({ "path": dir.join("sub").display().to_string() }));
         assert!(out.text.contains("hello.txt"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_file_expected_matches_enforced_on_single_match() {
+        // Regression: expected_matches used to be honored only when the find
+        // occurred MORE than once — `expected_matches: 2` with a single
+        // actual occurrence silently edited once, contradicting the schema
+        // contract. Now any count mismatch rejects the edit untouched.
+        let dir = std::env::temp_dir().join(format!("conduit_fs_test_{}_exp", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("one.txt");
+        std::fs::write(&path, "alpha needle omega").unwrap();
+
+        // Model expects 2 matches; there is exactly 1 → reject, file unchanged.
+        let out = fs_edit_file(&json!({
+            "path": path.display().to_string(),
+            "find": "needle",
+            "replace": "pin",
+            "expected_matches": 2
+        }));
+        assert!(out.text.contains("expected_matches"), "{}", out.text);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha needle omega");
+
+        // The correct count proceeds normally.
+        let out = fs_edit_file(&json!({
+            "path": path.display().to_string(),
+            "find": "needle",
+            "replace": "pin",
+            "expected_matches": 1
+        }));
+        assert!(out.text.contains("Edited"), "{}", out.text);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha pin omega");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -4,6 +4,8 @@
 //! Both produce plain text the model consumes. A real browser User-Agent is
 //! sent on every request so CDNs/WAFs (Cloudflare) do not 403 us.
 
+use std::net::IpAddr;
+
 use serde_json::Value;
 
 /// A real browser User-Agent. Many CDNs/WAFs (Cloudflare in particular) 403
@@ -12,6 +14,78 @@ use serde_json::Value;
 const BROWSER_UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) \
      Chrome/131.0.0.0 Safari/537.36";
+
+/// Hard cap on how many response bytes `fetch_url` will buffer into RAM before
+/// giving up. Truncation to 12 KB for the model happens AFTER this point, but
+/// capping the raw body size stops a hostile server streaming gigabytes from
+/// OOM-killing the Tauri backend. 1 MiB is well above any reasonable article.
+const FETCH_URL_MAX_BODY_BYTES: usize = 1_048_576;
+
+/// True when `ip` is in a range that a malicious model should never be able to
+/// reach from `fetch_url` / `download_file`: loopback, link-local
+/// (cloud-metadata / link-local), private RFC1918, CGNAT, ULA, multicast,
+/// unspecified, broadcast, and reserved.
+pub fn is_blocked_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_private()
+                // CGNAT 100.64.0.0/10 (carrier-grade NAT) — the doc comment
+                // above claims this is blocked; without it, ISP-internal
+                // services are reachable. `is_shared()` is still an unstable
+                // library feature (rust#27709), so match the /10 manually.
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40)
+                || v4.is_documentation()
+        }
+        IpAddr::V6(v6) => {
+            // IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d)
+            // addresses smuggle a V4 address past every V6 check below —
+            // `[::ffff:127.0.0.1]` is NOT `is_loopback()`. Unwrap the
+            // embedded V4 and apply the V4 rules to it. (`to_ipv4` covers
+            // both mapped and compatible forms; ::1 is neither and falls
+            // through to the V6 checks.)
+            if let Some(v4) = v6.to_ipv4() {
+                return is_blocked_ip(&IpAddr::V4(v4));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // Unique-local (fc00::/7) — RFC4193
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // Link-local (fe80::/10)
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                // Documentation (2001:db8::/32) — parity with the V4 arm
+                || (v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8)
+        }
+    }
+}
+
+/// True when `host` resolves to an IP in a blocked range (or fails to
+/// resolve). Fails closed — unresolvable hostnames are rejected. DNS-rebinding
+/// is mitigated by re-checking `resp.remote_addr()` after the TCP connect.
+pub fn host_blocked(host: &str) -> bool {
+    let h = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = h.parse::<IpAddr>() {
+        return is_blocked_ip(&ip);
+    }
+    let addrs: Vec<IpAddr> = match std::net::ToSocketAddrs::to_socket_addrs(h) {
+        Ok(it) => it
+            .filter_map(|s| match s.ip() {
+                IpAddr::V4(v4) => Some(IpAddr::V4(v4)),
+                IpAddr::V6(v6) => Some(IpAddr::V6(v6)),
+            })
+            .collect(),
+        Err(_) => return true,
+    };
+    if addrs.is_empty() {
+        return true;
+    }
+    addrs.iter().any(is_blocked_ip)
+}
 
 /// Fetch a URL and return its readable text (HTML stripped, truncated).
 ///
@@ -26,6 +100,16 @@ pub(super) async fn fetch_url(client: &reqwest::Client, url: &str) -> Result<Str
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("url must start with http:// or https://".to_string());
     }
+    // Parse out the host and reject blocked address ranges (SSRF guard).
+    let parsed = url::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
+    if let Some(host) = parsed.host_str() {
+        if host_blocked(host) {
+            return Err(format!(
+                "fetch_url refused: `{host}` resolves to a loopback, link-local, \
+                 private, or otherwise blocked address range (SSRF guard)."
+            ));
+        }
+    }
     let resp = client
         .get(url)
         .header("User-Agent", BROWSER_UA)
@@ -37,12 +121,40 @@ pub(super) async fn fetch_url(client: &reqwest::Client, url: &str) -> Result<Str
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("request failed: {e}"))?;
+    // DNS-rebinding guard: re-verify the resolved peer IP after the TCP
+    // connection has been opened.
+    if let Some(peer) = resp.remote_addr() {
+        if is_blocked_ip(&peer.ip()) {
+            return Err(format!(
+                "fetch_url refused: peer {} is in a blocked address range \
+                 (DNS-rebinding guard).",
+                peer.ip()
+            ));
+        }
+    }
     let status = resp.status();
     if !status.is_success() {
         return Err(format!("HTTP {status}"));
     }
-    let body = resp.text().await.map_err(|e| e.to_string())?;
+    // Read the body with a hard byte cap so a hostile server can't OOM the
+    // process by streaming gigabytes of HTML.
+    let mut body_buf: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    use futures_util::StreamExt;
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = chunk_res.map_err(|e| format!("read body: {e}"))?;
+        if body_buf.len() + chunk.len() > FETCH_URL_MAX_BODY_BYTES {
+            return Err(format!(
+                "fetch_url refused: response body exceeds {FETCH_URL_MAX_BODY_BYTES} byte cap (sandbox limit)."
+            ));
+        }
+        body_buf.extend_from_slice(&chunk);
+    }
+    let body = match String::from_utf8(body_buf) {
+        Ok(s) => s,
+        Err(_) => return Err("fetch_url response is not valid UTF-8".to_string()),
+    };
     let title = extract_title(&body);
     let text = html_to_text(&body);
     const MAX: usize = 12_000;
@@ -689,6 +801,49 @@ mod tests {
         .unwrap();
         println!("===LEN {}===", out.len());
         println!("{}", &out[..out.len().min(1500)]);
+    }
+
+    #[test]
+    fn ssrf_guard_blocks_ipv4_smuggled_as_ipv6() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        // IPv4-mapped loopback/private must be blocked (was the bypass).
+        let mapped_loop: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        assert!(is_blocked_ip(&mapped_loop));
+        let mapped_priv: IpAddr = "::ffff:10.0.0.5".parse().unwrap();
+        assert!(is_blocked_ip(&mapped_priv));
+        let mapped_cgnat: IpAddr = "::ffff:100.64.0.1".parse().unwrap();
+        assert!(is_blocked_ip(&mapped_cgnat));
+        // IPv4-compatible (deprecated) form too.
+        let compat_loop: IpAddr = "::127.0.0.1".parse().unwrap();
+        assert!(is_blocked_ip(&compat_loop));
+        // …but a mapped PUBLIC v4 is still allowed (guard must not over-block).
+        let mapped_public: IpAddr = "::ffff:8.8.8.8".parse().unwrap();
+        assert!(!is_blocked_ip(&mapped_public));
+        assert!(!is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+        assert!(!is_blocked_ip(&IpAddr::V6(
+            "2606:4700:4700::1111".parse::<Ipv6Addr>().unwrap()
+        )));
+    }
+
+    #[test]
+    fn ssrf_guard_blocks_cgnat_and_v6_documentation() {
+        use std::net::IpAddr;
+        // CGNAT 100.64.0.0/10 (carrier-grade NAT) — claimed by the doc
+        // comment but previously unblocked.
+        let cgnat: IpAddr = "100.64.0.1".parse().unwrap();
+        assert!(is_blocked_ip(&cgnat));
+        let not_cgnat: IpAddr = "100.63.255.255".parse().unwrap();
+        assert!(!is_blocked_ip(&not_cgnat));
+        // V6 documentation range, parity with the V4 arm.
+        let v6doc: IpAddr = "2001:db8::1".parse().unwrap();
+        assert!(is_blocked_ip(&v6doc));
+    }
+
+    #[test]
+    fn ssrf_guard_bracketed_mapped_host_literal() {
+        // host_blocked strips the URL bracket form before parsing.
+        assert!(host_blocked("[::ffff:127.0.0.1]"));
+        assert!(host_blocked("::ffff:127.0.0.1"));
     }
 
 }

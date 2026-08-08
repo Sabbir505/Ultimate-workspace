@@ -361,7 +361,16 @@ pub fn path_within_granted_roots(path: &str, granted_roots: &[String]) -> bool {
     granted_roots
         .iter()
         .map(|r| canonicalize(r))
-        .any(|root| needle == root || needle.starts_with(&root))
+        .any(|root| {
+            if needle == root {
+                return true;
+            }
+            // Segment boundary required: with granted root `c:/projects/alpha`,
+            // a raw `starts_with` would also pass the sibling `c:/projects/alpha2/…`
+            // (or `alpha-evil/…`), silently widening the granted scope.
+            let root_with_sep = if root.ends_with('/') { root } else { format!("{root}/") };
+            needle.starts_with(&root_with_sep)
+        })
 }
 
 /// Hard scope check: a mutating tool call is only allowed when its target
@@ -466,6 +475,19 @@ mod tests {
     }
 
     // ---- the delete-always-gated hard rule ----
+
+    #[test]
+    fn granted_root_requires_segment_boundary() {
+        // Sibling directories that share a name prefix with a granted root
+        // must NOT be treated as inside it.
+        assert!(!path_within_granted_roots("C:/projects/alpha2/secret.txt", &roots()));
+        assert!(!path_within_granted_roots("C:/projects/alpha-evil/x", &roots()));
+        assert!(!path_within_granted_roots("C:/projects/beta2/y", &roots()));
+        // …while exact-root and nested paths still pass.
+        assert!(path_within_granted_roots("C:/projects/alpha", &roots()));
+        assert!(path_within_granted_roots("C:/projects/alpha/sub/file.txt", &roots()));
+        assert!(path_within_granted_roots("C:/projects/beta/src/main.rs", &roots()));
+    }
 
     #[test]
     fn delete_is_gated_under_full_auto() {

@@ -115,7 +115,13 @@ pub fn fetch_page(
                     input_tokens: row.get(4)?,
                     output_tokens: row.get(5)?,
                     cost_usd: row.get(6)?,
-                    superseded_by: None, // Not used for session-chat history.
+                    superseded_by: None,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                    reasoning_output_tokens: None,
+                    provider: None,
+                    model_key: None,
+                    pricing_estimated_usd: None,
                 })
             },
         )
@@ -180,7 +186,7 @@ impl SessionChatManager {
             } => handle_send_chat_message(&app, &db, &chat_mgr, session_id, text, attachments),
 
             MobileMessage::CancelSessionStream { session_id } => {
-                handle_cancel_session_stream(&chat_mgr, session_id)
+                handle_cancel_session_stream(&chat_mgr, &db, session_id)
             }
 
             MobileMessage::ResolveSessionApproval {
@@ -222,21 +228,50 @@ fn handle_send_chat_message(
     text: String,
     _attachments: Vec<ChatAttachment>,
 ) -> Result<Vec<DesktopMessage>, String> {
-    // 1. Look up (or create) a chat_session row keyed by owner_session_id.
-    //    The mobile companion app doesn't yet surface a per-session provider/
-    //    model picker; fall back to a default so the turn has a working
-    //    endpoint. The session's `provider`/`model` are persisted on the
-    //    chat_sessions row and read back by `send_chat_message` at turn
-    //    start, so users can change them via the desktop later and the
-    //    next mobile turn picks up the new config.
-    let chat_session_id = {
+    // 1. Look up (or create) a chat_session row keyed by owner_session_id,
+    //    then read back its provider/model. The phone has no provider picker;
+    //    the row is the source of truth (switch on the desktop and the next
+    //    mobile turn picks it up). Previously this hardcoded Anthropic +
+    //    the literal key "no-key" — every turn 401'd even with a real key
+    //    configured, and non-Anthropic sessions were ignored entirely.
+    let (chat_session_id, provider_str, model) = {
         let conn = db.lock();
-        resolve_chat_session(
+        let id = resolve_chat_session(
             &conn,
             &owner_session_id,
             "anthropic",
             "claude-sonnet-4-5-20250929",
-        )?
+        )?;
+        let row = db::get_chat_session(&conn, &id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "chat session missing right after resolve".to_string())?;
+        (id, row.provider, row.model)
+    };
+
+    // 2. Resolve provider + credentials exactly like the desktop
+    //    send_chat_message command. local_gguf is keyless; everything else
+    //    reads the real key from the keychain.
+    let provider_id = match provider_str.as_str() {
+        "anthropic" => crate::chat::providers::ChatProviderId::Anthropic,
+        "openai" => crate::chat::providers::ChatProviderId::OpenAI,
+        "anthropic_compatible" => crate::chat::providers::ChatProviderId::AnthropicCompatible,
+        "openai_compatible" => crate::chat::providers::ChatProviderId::OpenAICompatible,
+        "openrouter" => crate::chat::providers::ChatProviderId::OpenRouter,
+        "local_gguf" => crate::chat::providers::ChatProviderId::LocalGguf,
+        other => return Err(format!("unknown provider: {other}")),
+    };
+    let api_key = if provider_str == "local_gguf" {
+        "no-key".to_string()
+    } else {
+        let conn = db.lock();
+        crate::secrets::get_chat_api_key(&conn, &provider_str)
+            .ok_or_else(|| format!("no API key configured for provider: {provider_str}"))?
+    };
+    let base_url = {
+        let conn = db.lock();
+        db::get_setting(&conn, &format!("chat.{provider_str}.base_url"))
+            .ok()
+            .flatten()
     };
 
     // 2. Persist the user message. Attachments are not yet processed for the
@@ -247,13 +282,35 @@ fn handle_send_chat_message(
     //    shape the desktop sends.
     {
         let conn = db.lock();
-        db::add_chat_message(&conn, &chat_session_id, "user", &text, None, None, None)
+        db::add_chat_message(&conn, &chat_session_id, "user", &text, None, None, None, None, None, None, None, None, None)
             .map_err(|e| format!("failed to persist user message: {e}"))?;
         db::touch_chat_session(&conn, &chat_session_id)
             .map_err(|e| format!("failed to touch chat session: {e}"))?;
     }
 
-    // 3. Hand off to the chat pipeline. `ChatManager::send` cancels any
+    // 3. Load the conversation history from the DB so the model sees the
+    //    whole session (previously an empty Vec was passed — the model
+    //    received a blank conversation every turn). Mirrors the desktop
+    //    history selection: compacted-active rows for local models.
+    let messages: Vec<crate::chat::providers::ChatMessage> = {
+        let conn = db.lock();
+        let records = if matches!(provider_id, crate::chat::providers::ChatProviderId::LocalGguf) {
+            db::list_active_chat_messages(&conn, &chat_session_id)
+        } else {
+            db::list_chat_messages(&conn, &chat_session_id)
+        }
+        .map_err(|e| format!("failed to load chat history: {e}"))?;
+        records
+            .into_iter()
+            .map(|r| crate::chat::providers::ChatMessage {
+                role: r.role,
+                content: r.content,
+                images: Vec::new(),
+            })
+            .collect()
+    };
+
+    // 4. Hand off to the chat pipeline. `ChatManager::send` cancels any
     //    in-flight stream for this `chat_session_id`, then spawns a tokio
     //    task that emits the same `chat:token` / `chat:status` /
     //    `chat:done` / `chat:error` / `chat:approval_request` /
@@ -264,25 +321,25 @@ fn handle_send_chat_message(
     //    receives them.
     chat_mgr.send(
         chat_session_id.clone(),
-        crate::chat::providers::ChatProviderId::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
-        "no-key".to_string(),
-        None,
+        provider_id,
+        model,
+        api_key,
+        base_url,
         None,
         true,
         true,
-        crate::chat::permission::PermissionMode::Manual,
+        crate::chat::permission::PermissionMode::FullAuto,
         Vec::new(),
         Vec::new(),
         None,
-        Vec::new(),
+        messages,
         Arc::clone(db),
         app.clone(),
         false,
         None,
     );
 
-    // 4. Tell the React side which chat_session_id maps to this owner_session_id,
+    // 5. Tell the React side which chat_session_id maps to this owner_session_id,
     //    so the re-broadcast in useChatEvents.ts can route streaming events back
     //    to the right phone via the owner map. Without this, getOwnerSessionId()
     //    always returns undefined and the re-broadcast is a no-op.
@@ -299,12 +356,26 @@ fn handle_send_chat_message(
 
 fn handle_cancel_session_stream(
     chat_mgr: &Arc<chat::ChatManager>,
+    db: &Arc<Mutex<Connection>>,
     owner_session_id: String,
 ) -> Result<Vec<DesktopMessage>, String> {
-    // TODO: Resolve the internal chat_session_id from owner_session_id via DB lookup.
-    // For now, we use owner_session_id directly. Task 4 will add the DB parameter
-    // and proper owner_session_id → chat_session_id resolution.
-    chat_mgr.cancel(&owner_session_id);
+    // Streams are keyed by the INTERNAL chat_session_id (the id passed to
+    // ChatManager::send), so resolve it from the phone's owner_session_id
+    // first — cancelling by owner_session_id was a silent no-op that left
+    // the stream running (and billing) while the phone was told it stopped.
+    let chat_session_id = {
+        let conn = db.lock();
+        ensure_chat_session_owner_column(&conn)?;
+        conn.query_row(
+            "SELECT id FROM chat_sessions WHERE owner_session_id = ?1",
+            rusqlite::params![owner_session_id],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+    };
+    if let Some(id) = chat_session_id {
+        chat_mgr.cancel(&id);
+    }
     Ok(vec![DesktopMessage::SessionChatDone {
         session_id: owner_session_id,
         usage: None,

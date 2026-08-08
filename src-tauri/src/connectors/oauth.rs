@@ -18,7 +18,7 @@
 //! quirks (confidential vs. public client, scope strings, revocation
 //! endpoint availability) are noted per-connector in BUILD_LOG.md.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -238,13 +238,13 @@ impl OAuthFlows {
     /// callback.
     /// Returns the flow id (so the caller can correlate the `oauth:callback`
     /// event). Completion (or error/denial) is emitted via `oauth:callback`.
-    pub async fn start(&self, app: &AppHandle, connector_id: &str) -> Result<u64, String> {
+    pub async fn start(&self, app: &AppHandle, connector_id: &str, flow_id: u64) -> Result<u64, String> {
         let connector = match connector_by_id(connector_id) {
             Some(c) => c,
             None => {
                 let e = format!("unknown connector `{connector_id}`");
                 let _ = app.emit("oauth:callback", OAuthCallbackEvent {
-                    flow_id: self.next.fetch_add(1, Ordering::Relaxed),
+                    flow_id,
                     connector_id: connector_id.to_string(),
                     status: "error".to_string(),
                     error: Some(e.clone()),
@@ -258,7 +258,7 @@ impl OAuthFlows {
         if connector.is_public() {
             let e = crate::connectors::config::no_oauth_flow_reason(connector);
             let _ = app.emit("oauth:callback", OAuthCallbackEvent {
-                flow_id: self.next.fetch_add(1, Ordering::Relaxed),
+                flow_id,
                 connector_id: connector.id.to_string(),
                 status: "error".to_string(),
                 error: Some(e.clone()),
@@ -275,7 +275,7 @@ impl OAuthFlows {
             Err(e) => {
                 eprintln!("[conduit:oauth] {connector_id} client resolution failed: {e}");
                 let _ = app.emit("oauth:callback", OAuthCallbackEvent {
-                    flow_id: self.next.fetch_add(1, Ordering::Relaxed),
+                    flow_id,
                     connector_id: connector.id.to_string(),
                     status: "error".to_string(),
                     error: Some(e.clone()),
@@ -287,6 +287,7 @@ impl OAuthFlows {
 
         self.run_flow(
             app,
+            flow_id,
             connector.id,
             &connector,
             &client,
@@ -302,14 +303,15 @@ impl OAuthFlows {
     /// member's scopes), then the resulting token is stored under EACH
     /// member's credential row — one "Connect" click connects the entire
     /// family. The `oauth:callback` event carries the family id (e.g.
-    /// "google") as `connector_id`.
-    pub async fn start_family(&self, app: &AppHandle, family: &str) -> Result<u64, String> {
+    /// "google") as `connector_id`. `flow_id` is allocated ONCE by the caller
+    /// ([`Self::next_id`]), same contract as [`Self::start`].
+    pub async fn start_family(&self, app: &AppHandle, family: &str, flow_id: u64) -> Result<u64, String> {
         let members = match family_members(family) {
             Some(m) => m,
             None => {
                 let e = format!("unknown connector family `{family}`");
                 let _ = app.emit("oauth:callback", OAuthCallbackEvent {
-                    flow_id: self.next.fetch_add(1, Ordering::Relaxed),
+                    flow_id,
                     connector_id: family.to_string(),
                     status: "error".to_string(),
                     error: Some(e.clone()),
@@ -326,7 +328,7 @@ impl OAuthFlows {
             Err(e) => {
                 eprintln!("[conduit:oauth] {family} client resolution failed: {e}");
                 let _ = app.emit("oauth:callback", OAuthCallbackEvent {
-                    flow_id: self.next.fetch_add(1, Ordering::Relaxed),
+                    flow_id,
                     connector_id: family.to_string(),
                     status: "error".to_string(),
                     error: Some(e.clone()),
@@ -347,6 +349,7 @@ impl OAuthFlows {
             .expect("family registered with redirect uri");
         self.run_flow(
             app,
+            flow_id,
             family,
             head,
             &client,
@@ -362,11 +365,15 @@ impl OAuthFlows {
     /// guard, PKCE + state, loopback callback server, browser, callback wait,
     /// token exchange, and storage (per `store`). `key` is what the
     /// `oauth:callback` event and pending-guard error messages report (a
-    /// connector id, or the family id for family flows).
+    /// connector id, or the family id for family flows). `flow_id` is the id
+    /// the caller allocated via [`Self::next_id`] — this function never
+    /// allocates one itself, so the command's returned id always matches the
+    /// id in the emitted `oauth:callback` events.
     #[allow(clippy::too_many_arguments)]
     async fn run_flow(
         &self,
         app: &AppHandle,
+        flow_id: u64,
         key: &str,
         connector: &Connector,
         client: &OAuthClient,
@@ -385,7 +392,7 @@ impl OAuthFlows {
                      in the browser or wait for it to time out (5 minutes), then try again"
                 );
                 let _ = app.emit("oauth:callback", OAuthCallbackEvent {
-                    flow_id: self.next.fetch_add(1, Ordering::Relaxed),
+                    flow_id,
                     connector_id: key.to_string(),
                     status: "error".to_string(),
                     error: Some(e.clone()),
@@ -407,7 +414,6 @@ impl OAuthFlows {
 
         let code_verifier = random_pkce_verifier();
         let code_challenge = pkce_challenge(&code_verifier);
-        let flow_id = self.next.fetch_add(1, Ordering::Relaxed);
         let state = format!("flow-{flow_id}-{:016x}", rand::random::<u64>());
         eprintln!(
             "[conduit:oauth] flow {flow_id} start key={key} client_id={} method={}",
@@ -548,6 +554,12 @@ impl OAuthFlows {
             }
             Err(_elapsed) => {
                 eprintln!("[conduit:oauth] flow {flow_id} timed out waiting for callback (5 min)");
+                // The spawn_blocking acceptor can't be cancelled and still
+                // owns the listener — without a nudge it blocks in accept()
+                // until app exit, holding the port so every later Connect
+                // fails with AddrInUse (M15). Poke it so it wakes, fails
+                // state validation, and drops the listener.
+                unblock_acceptor(port);
                 let msg = "Authorization timed out — no callback received within 5 minutes. Please try Connect again.".to_string();
                 let _ = app.emit("oauth:callback", OAuthCallbackEvent {
                     flow_id,
@@ -624,11 +636,15 @@ impl OAuthFlows {
         }
     }
 
-    /// The next flow id — exposed so the command layer can return an id
-    /// immediately even before `start` allocates one (the latter emits the
-    /// `oauth:callback` event with the real id once it runs).
+    /// Allocate the next flow id. The command layer calls this BEFORE
+    /// spawning `start`/`start_family` so it can return an id immediately;
+    /// the SAME id is then threaded through the flow and lands in every
+    /// `oauth:callback` event. It must allocate atomically (fetch_add): a
+    /// plain load would hand the SAME id to two concurrent Connect commands
+    /// while their flows later fetched different ones — the events would no
+    /// longer correlate with the id the UI holds (M27).
     pub fn next_id(&self) -> u64 {
-        self.next.load(Ordering::Relaxed)
+        self.next.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Cancel a pending flow. No-op for the system-browser approach (the user
@@ -645,6 +661,19 @@ impl OAuthFlows {
 /// extract the OAuth `code` (or `error`) from the query string. Validates that
 /// the returned `state` parameter matches the one sent in the authorize URL
 /// (CSRF protection per RFC 6749 §10.12).
+/// Nudge a leaked loopback acceptor so it finishes (M15): connect and send
+/// one throwaway request line. The acceptor's accept()+read_line return, the
+/// request fails state validation (it carries no OAuth `state`), it writes
+/// its 400 and returns — dropping the listener and freeing the port. Without
+/// this a timed-out flow leaks the bound port until app restart because
+/// `spawn_blocking` cannot be cancelled.
+fn unblock_acceptor(port: u16) {
+    if let Ok(mut s) = std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)) {
+        let _ = s.write_all(b"GET /conduit-timeout HTTP/1.0\r\n\r\n");
+        let _ = s.flush();
+    }
+}
+
 fn accept_one_callback(listener: &TcpListener, expected_state: &str) -> Result<String, String> {
     let (mut stream, _addr) = listener
         .accept()
@@ -911,11 +940,9 @@ async fn exchange_token(
     let resp = req.send().await.map_err(|e| format!("token exchange failed: {e}"))?;
     let status = resp.status();
     let body = resp.text().await.map_err(|e| format!("token response read failed: {e}"))?;
-    eprintln!(
-        "[conduit:oauth] token exchange {} {status}: {}",
-        connector.id,
-        if body.len() > 200 { format!("{}…", &body[..200]) } else { body.clone() }
-    );
+    // Never log the response body: on success it contains live access/refresh
+    // tokens. Log only the connector id and status code.
+    eprintln!("[conduit:oauth] token exchange {} {status}", connector.id);
     if !status.is_success() {
         return Err(format!("token exchange HTTP {status}: {body}"));
     }
@@ -1019,6 +1046,24 @@ fn store_exchanged(
     Ok(())
 }
 
+/// Single-flight guards for token refresh (M16): concurrent refreshes of the
+/// same connector would each present the SAME old refresh token — vendors
+/// that rotate refresh tokens (Google, GitHub) invalidate it on first use,
+/// so the loser gets `invalid_grant` (spurious disconnect) or, racing the
+/// other way, persists an already-invalidated token over the fresh one.
+/// BTreeMap only because `BTreeMap::new` is const.
+static REFRESH_LOCKS: Mutex<
+    BTreeMap<&'static str, std::sync::Arc<tokio::sync::Mutex<()>>>,
+> = Mutex::new(BTreeMap::new());
+
+fn refresh_lock_for(connector_id: &'static str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    REFRESH_LOCKS
+        .lock()
+        .entry(connector_id)
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
 /// Refresh an expired access token using the stored refresh token. Returns the
 /// new access token. Best-effort: vendors that don't issue refresh tokens
 /// (Notion, per docs) will return Err here and the caller should prompt the
@@ -1027,6 +1072,12 @@ pub async fn refresh_access_token(
     app: &AppHandle,
     connector: &Connector,
 ) -> Result<String, String> {
+    // Hold the per-connector single-flight for the whole read → HTTP → store
+    // cycle (M16). The refresh token is read AFTER acquiring the lock so a
+    // queued caller picks up the token the previous holder just stored — not
+    // the invalidated predecessor it raced with.
+    let refresh_lock = refresh_lock_for(connector.id);
+    let _refresh_guard = refresh_lock.lock().await;
     let db = app.state::<crate::DbState>();
     let refresh_token = {
         let conn = db.0.lock();
@@ -1181,6 +1232,71 @@ mod tests {
         // A garbage body is a clear error, not a silently swallowed parse.
         assert!(parse_form_body("").is_err());
         assert!(parse_form_body("&&&").is_err());
+    }
+
+    #[test]
+    fn unblock_acceptor_ends_the_accept_loop_and_frees_the_port() {
+        // M15: a timed-out flow leaves accept_one_callback blocked in a
+        // spawn_blocking that owns the listener. The poke must wake it, fail
+        // state validation, and let the listener drop — so the port can be
+        // bound again immediately.
+        std::thread::scope(|scope| {
+            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            // The closure OWNS the listener (mirrors production, where the
+            // spawn_blocking owns it): when the acceptor returns, the
+            // listener drops inside the thread and the port is freed.
+            let acceptor = scope.spawn(move || accept_one_callback(&listener, "expected-state"));
+            // Give the acceptor a beat to block in accept().
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            unblock_acceptor(port);
+
+            let result = acceptor
+                .join()
+                .expect("acceptor must finish after the poke — without M15 it hangs forever");
+            assert!(result.is_err(), "throwaway request must fail state validation");
+            // The port is bindable again right away.
+            TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
+                .expect("port must be freed once the acceptor returns");
+        });
+    }
+
+    #[test]
+    fn refresh_lock_is_shared_per_connector() {
+        // M16: the single-flight map must hand the SAME lock to concurrent
+        // refreshes of one connector and distinct locks to distinct
+        // connectors.
+        let a1 = refresh_lock_for("m16_test_a");
+        let a2 = refresh_lock_for("m16_test_a");
+        let b = refresh_lock_for("m16_test_b");
+        assert!(std::sync::Arc::ptr_eq(&a1, &a2), "same connector → same lock");
+        assert!(!std::sync::Arc::ptr_eq(&a1, &b), "distinct connectors → distinct locks");
+    }
+
+    #[test]
+    fn next_id_allocates_unique_ids_under_concurrency() {
+        // M27: next_id used to be a plain load(), so two concurrent Connect
+        // commands could return the SAME id while their flows later allocated
+        // different ones in run_flow — the `oauth:callback` events then no
+        // longer correlated with the id the UI was holding. It must allocate
+        // atomically: every call returns a distinct id.
+        let flows = std::sync::Arc::new(OAuthFlows::default());
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let f = flows.clone();
+            handles.push(std::thread::spawn(move || {
+                (0..100).map(|_| f.next_id()).collect::<Vec<u64>>()
+            }));
+        }
+        let mut ids: Vec<u64> = handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect();
+        let total = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), total, "next_id must never hand out a duplicate id");
     }
 
     #[test]

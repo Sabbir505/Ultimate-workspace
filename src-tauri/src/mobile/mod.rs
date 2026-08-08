@@ -15,4 +15,6 @@ pub mod relay_ws;
 pub mod session_chat;
 
 #[cfg(test)]
+mod relay_tests;
+#[cfg(test)]
 mod session_chat_tests;

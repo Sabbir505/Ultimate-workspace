@@ -274,6 +274,18 @@ pub struct ChatMessageRecord {
     /// still lists them behind the compaction marker.
     #[serde(default)]
     pub superseded_by: Option<i64>,
+    #[serde(default)]
+    pub cache_creation_input_tokens: Option<i64>,
+    #[serde(default)]
+    pub cache_read_input_tokens: Option<i64>,
+    #[serde(default)]
+    pub reasoning_output_tokens: Option<i64>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model_key: Option<String>,
+    #[serde(default)]
+    pub pricing_estimated_usd: Option<f64>,
 }
 
 /// One recorded fact/claim a research turn extracted from a single source page.

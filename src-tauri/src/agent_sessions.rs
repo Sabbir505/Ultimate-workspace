@@ -31,7 +31,7 @@
 //! without a Tauri AppHandle — it backs scheduled automations, both from the
 //! in-app scheduler and from the standalone `conduit-automation` binary.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -54,37 +54,17 @@ pub struct AgentSessionManager {
     sessions: Mutex<HashMap<String, AgentChild>>,
 }
 
-/// When the CLI (running with `--permission-mode acceptEdits`) encounters
-/// a dangerous operation (bash, delete), it pauses and waits for an stdin
-/// approval. This state bridges that wait into the frontend's approval-card
-/// system: the reader thread fills it in and spin-waits on `resolved`, while
-/// a Tauri command (`resolve_agent_approval`) sets `approved` + `resolved`
-/// from the frontend. The reader then writes the decision to stdin.
-struct ApprovalRelay {
-    tool_name: String,
-    /// JSON input args for the tool — surfaced in the approval card.
-    tool_input: serde_json::Value,
-    resolved: Arc<AtomicBool>,
-    approved: Arc<AtomicBool>,
-}
-
 struct AgentChild {
     harness: String,
     /// Model the session was last spawned with — a model change respawns
     /// (claude) or just applies to the next per-turn process.
     model: String,
-    /// The chat session's permission mode (read_only | manual | auto_edit |
-    /// full_auto), mapped onto each CLI's own permission flags at spawn.
-    perm: String,
     /// claude_code: the persistent process (always Some).
     /// kimi/opencode: Some only while a turn's process is running.
     child: Option<Child>,
     /// claude_code: the model the persistent process was spawned with —
     /// a change kills and respawns it.
     spawned_model: Option<String>,
-    /// claude_code: the permission mode the persistent process was spawned
-    /// with — `--permission-mode` is spawn-time only, so a change respawns.
-    spawned_perm: Option<String>,
     /// The CLI's own session id, captured from turn output and passed back
     /// to continue the conversation (kimi `--session`, opencode `-s`,
     /// claude `--resume` on respawn). Shared with the reader thread, which
@@ -98,14 +78,9 @@ struct AgentChild {
     /// a cancelled turn still sees `true` (skips persisting the partial
     /// reply) even after the user has already sent the next message.
     cancelled: Arc<AtomicBool>,
-    /// Shared stdin for writing approval responses from the reader thread
-    /// (or from the resolve_agent_approval Tauri command). Only meaningful
-    /// for the persistent-process path; per-turn CLIs have Stdio::null().
+    /// Shared stdin for writing user input (e.g. a tool result) from the reader thread
+    /// on stdin.
     stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
-    /// Pending approval relay — filled by the reader thread when the CLI
-    /// waits for permission on a dangerous operation. The frontend resolves
-    /// it via `resolve_agent_approval`.
-    pending_approval: Arc<Mutex<Option<ApprovalRelay>>>,
 }
 
 impl AgentSessionManager {
@@ -125,7 +100,6 @@ impl AgentSessionManager {
         content: &str,
         harness: &str,
         model: &str,
-        perm: &str,
         cwd: Option<&str>,
         project_id: Option<&str>,
     ) -> Result<(), String> {
@@ -145,15 +119,12 @@ impl AgentSessionManager {
                 AgentChild {
                     harness: harness.to_string(),
                     model: model.to_string(),
-                    perm: perm.to_string(),
                     child: None,
                     spawned_model: None,
-                    spawned_perm: None,
                     cli_session_id: Arc::new(Mutex::new(stored)),
                     turn_in_flight: Arc::new(AtomicBool::new(false)),
                     cancelled: Arc::new(AtomicBool::new(false)),
                     stdin: Arc::new(Mutex::new(None)),
-                    pending_approval: Arc::new(Mutex::new(None)),
                 }
             });
         // Harness switch on an existing chat: kill the old CLI's process and
@@ -164,7 +135,6 @@ impl AgentSessionManager {
             }
             entry.harness = harness.to_string();
             entry.spawned_model = None;
-            entry.spawned_perm = None;
             if let Ok(mut g) = entry.cli_session_id.lock() {
                 *g = None;
             }
@@ -176,14 +146,13 @@ impl AgentSessionManager {
             return Err("a turn is already running for this chat".to_string());
         }
         entry.model = model.to_string();
-        entry.perm = perm.to_string();
 
         // Mirror the built-in chat: the user message is persisted up front so
         // history survives a crash mid-turn. Done AFTER the turn-in-flight
         // check so a rejected turn can't orphan a user message.
         {
             let conn = db.0.lock();
-            crate::db::add_chat_message(&conn, chat_session_id, "user", content, None, None, None)
+            crate::db::add_chat_message(&conn, chat_session_id, "user", content, None, None, None, None, None, None, None, None, None)
                 .map_err(|e| e.to_string())?;
         }
 
@@ -236,26 +205,6 @@ impl AgentSessionManager {
         Ok(())
     }
 
-    /// Resolve a pending harness approval. Called from the frontend when the
-    /// user clicks Approve/Deny on the approval card. Sets the resolved +
-    /// approved flags so the reader thread wakes up and writes the decision
-    /// to the CLI's stdin.
-    pub fn resolve_approval(&self, chat_session_id: &str, approved: bool) -> Result<(), String> {
-        let sessions = self.sessions.lock().map_err(|e| e.to_string())?;
-        let entry = sessions
-            .get(chat_session_id)
-            .ok_or_else(|| "no agent session for this chat".to_string())?;
-        let mut pa = entry
-            .pending_approval
-            .lock()
-            .map_err(|e| e.to_string())?;
-        if let Some(ref relay) = *pa {
-            relay.approved.store(approved, Ordering::SeqCst);
-            relay.resolved.store(true, Ordering::SeqCst);
-        }
-        Ok(())
-    }
-
     /// Drop all state for a deleted chat: kill any running process tree and
     /// forget the in-memory CLI session id (the persisted app_settings keys
     /// are removed by the delete_chat_session command).
@@ -277,6 +226,46 @@ impl AgentSessionManager {
                 if let Some(mut child) = c.child.take() {
                     kill_child_tree(&mut child);
                 }
+            }
+        }
+    }
+}
+
+/// Registry of one-shot (automation) children so the app-exit handler can
+/// kill them (M13): `run_one_shot` spawns a full `--dangerously-skip-permissions`
+/// CLI tree that is NOT in the session registry — without this it keeps
+/// running after the app quits. Keyed by pid; entries are removed when the
+/// child is reaped, and the kill path skips children that already exited, so
+/// a recycled pid can never be hit. BTreeMap only because `BTreeMap::new` is
+/// const (HashMap's RandomState isn't).
+static ONE_SHOT_CHILDREN: Mutex<BTreeMap<u32, Arc<Mutex<Child>>>> =
+    Mutex::new(BTreeMap::new());
+
+fn register_one_shot_child(child: &Arc<Mutex<Child>>) -> Option<u32> {
+    let pid = child.lock().ok()?.id();
+    ONE_SHOT_CHILDREN.lock().ok()?.insert(pid, Arc::clone(child));
+    Some(pid)
+}
+
+fn unregister_one_shot_child(pid: u32) {
+    if let Ok(mut map) = ONE_SHOT_CHILDREN.lock() {
+        map.remove(&pid);
+    }
+}
+
+/// Kill every registered one-shot child (app shutdown). Idempotent; children
+/// that already exited are skipped — their pid may have been recycled, and
+/// `try_wait` is the only safe way to know the handle is still ours.
+pub fn kill_one_shot_children() {
+    let drained: Vec<Arc<Mutex<Child>>> = match ONE_SHOT_CHILDREN.lock() {
+        Ok(mut map) => std::mem::take(&mut *map).into_values().collect(),
+        Err(_) => return,
+    };
+    for child in drained {
+        if let Ok(mut guard) = child.lock() {
+            let already_exited = matches!(guard.try_wait(), Ok(Some(_)) | Err(_));
+            if !already_exited {
+                kill_child_tree(&mut guard);
             }
         }
     }
@@ -351,10 +340,7 @@ fn send_claude_turn(
     cwd: Option<&str>,
     project_id: Option<&str>,
 ) -> Result<(), String> {
-    if entry.child.is_none()
-        || entry.spawned_model.as_deref() != Some(entry.model.as_str())
-        || entry.spawned_perm.as_deref() != Some(entry.perm.as_str())
-    {
+    if entry.child.is_none() || entry.spawned_model.as_deref() != Some(entry.model.as_str()) {
         if let Some(mut old) = entry.child.take() {
             kill_child_tree(&mut old);
         }
@@ -367,17 +353,14 @@ fn send_claude_turn(
             db,
             sid,
             &entry.model,
-            &entry.perm,
             cwd,
             project_id,
             &entry.turn_in_flight,
             &entry.cli_session_id,
             &cancelled,
             &entry.stdin,
-            &entry.pending_approval,
         )?);
         entry.spawned_model = Some(entry.model.clone());
-        entry.spawned_perm = Some(entry.perm.clone());
     }
 
     let line = json!({
@@ -388,16 +371,27 @@ fn send_claude_turn(
         },
     })
     .to_string();
-    {
+    // Set turn_in_flight BEFORE the stdin write (mirrors spawn_per_turn): the
+    // reader thread can see this turn's `result`/EOF and clear the flag in
+    // the gap between write and store — the trailing store would then re-set
+    // a flag the reader already cleared, wedging every future send with
+    // "turn already running". The flag can only legitimately transition
+    // true→false from a result arriving, which requires the write first.
+    entry.turn_in_flight.store(true, Ordering::SeqCst);
+    let write_result = {
         let mut guard = entry.stdin.lock().map_err(|e| e.to_string())?;
         let stdin = guard.as_mut().ok_or("agent process stdin is closed")?;
         stdin
             .write_all(line.as_bytes())
             .and_then(|_| stdin.write_all(b"\n"))
             .and_then(|_| stdin.flush())
-            .map_err(|e| format!("failed to write to CLI stdin: {e}"))?;
+    };
+    if let Err(e) = write_result {
+        // The turn never reached the CLI — undo the flag we just set so the
+        // next send isn't blocked by a phantom in-flight turn.
+        entry.turn_in_flight.store(false, Ordering::SeqCst);
+        return Err(format!("failed to write to CLI stdin: {e}"));
     }
-    entry.turn_in_flight.store(true, Ordering::SeqCst);
     Ok(())
 }
 
@@ -416,22 +410,6 @@ fn claude_model_alias(model: &str) -> String {
         "haiku".to_string()
     } else {
         model.to_string()
-    }
-}
-
-/// Map the chat session's permission mode onto `claude --permission-mode`.
-/// read_only runs as plan mode (no mutations).
-/// manual / auto_edit both use acceptEdits: file reads+writes auto-approve,
-/// dangerous ops (bash, delete) pause for approval via an stdin relay
-/// (see the `permission_ask` event handler in the reader loop).
-/// full_auto bypasses all permission checks.
-fn claude_permission_mode(perm: &str) -> &'static str {
-    match perm {
-        "read_only" => "plan",
-        "manual" => "acceptEdits",
-        "auto_edit" => "acceptEdits",
-        "full_auto" => "bypassPermissions",
-        _ => "acceptEdits",
     }
 }
 
@@ -580,7 +558,7 @@ fn artifacts_dir_for_bundle(app: &AppHandle, cwd: Option<&str>) -> String {
     crate::chat::dispatch::artifacts_dir(app).to_string_lossy().into_owned()
 }
 
-/// Resolve (writing if needed) the per-project harness bundle. Returns None
+/// Resolve (write if needed) the per-project harness bundle. Returns None
 /// when no project is selected or the write fails — bundle failure must
 /// never fail the turn (same contract as the old resolve_mcp_config).
 fn resolve_harness_bundle(
@@ -591,7 +569,7 @@ fn resolve_harness_bundle(
 ) -> Option<crate::harness_bundle::HarnessBundlePaths> {
     let data_dir = app.path().app_data_dir().ok()?;
     crate::harness_bundle::write_bundle(
-        &data_dir, project_id?, cwd, Some(artifacts_dir.as_str()), crate::browser::BROWSER_MCP_PORT)
+        &data_dir, project_id?, cwd, Some(artifacts_dir.as_str()), None, crate::browser::BROWSER_MCP_PORT)
 }
 
 fn spawn_claude(
@@ -599,14 +577,12 @@ fn spawn_claude(
     db: &DbState,
     sid: &str,
     model: &str,
-    perm: &str,
     cwd: Option<&str>,
     project_id: Option<&str>,
     in_flight: &Arc<AtomicBool>,
     session_cell: &Arc<Mutex<Option<String>>>,
     cancelled: &Arc<AtomicBool>,
     shared_stdin: &Arc<Mutex<Option<std::process::ChildStdin>>>,
-    pending_approval: &Arc<Mutex<Option<ApprovalRelay>>>,
 ) -> Result<Child, String> {
     let alias = claude_model_alias(model);
     let mut args: Vec<String> = vec![
@@ -617,12 +593,11 @@ fn spawn_claude(
         "stream-json".into(),
         "--verbose".into(),
         "--include-partial-messages".into(),
-        "--permission-mode".into(),
-        claude_permission_mode(perm).into(),
+        "--dangerously-skip-permissions".into(),
         "--model".into(),
         alias,
     ];
-    // Respawning (after a cancel, model/perm change, or app restart) would
+    // Respawning (after a cancel, model change, or app restart) would
     // start a blank conversation — resume the captured CLI session instead.
     let resume = session_cell.lock().ok().and_then(|g| g.clone());
     if let Some(id) = &resume {
@@ -660,8 +635,8 @@ fn spawn_claude(
         .stdout
         .take()
         .ok_or("failed to capture claude stdout")?;
-    // Take stdin and share it so the reader thread can write approval
-    // responses when the CLI pauses on dangerous operations.
+    // Take stdin and share it so the reader thread can write user input
+    // (e.g. a tool result) on stdin.
     {
         let mut guard = shared_stdin.lock().map_err(|e| e.to_string())?;
         *guard = child.stdin.take();
@@ -673,7 +648,6 @@ fn spawn_claude(
     let session_cell2 = Arc::clone(session_cell);
     let cancelled2 = Arc::clone(cancelled);
     let stdin2 = Arc::clone(shared_stdin);
-    let approval2 = Arc::clone(pending_approval);
     std::thread::spawn(move || {
         read_claude_stream(
             Some(&app2),
@@ -684,72 +658,10 @@ fn spawn_claude(
             &session_cell2,
             &cancelled2,
             stdin2,
-            approval2,
             watch,
         );
     });
     Ok(child)
-}
-
-/// Fire the approval relay for a dangerous tool the CLI is about to execute.
-/// Sets the pending-approval state, emits `chat:approval-request` to the
-/// frontend, and spin-waits until the user resolves the card (or the turn is
-/// cancelled). On resolution writes the decision to the CLI's stdin so the
-/// tool either executes or is denied with a text fallback.
-fn relay_dangerous_tool(
-    app: &AppHandle,
-    sid: &str,
-    tool_name: &str,
-    tool_input: Value,
-    shared_stdin: &Arc<Mutex<Option<std::process::ChildStdin>>>,
-    pending_approval: &Arc<Mutex<Option<ApprovalRelay>>>,
-    cancelled: &AtomicBool,
-) {
-    let resolved = Arc::new(AtomicBool::new(false));
-    let approved = Arc::new(AtomicBool::new(false));
-    {
-        let mut pa = pending_approval.lock().unwrap();
-        *pa = Some(ApprovalRelay {
-            tool_name: tool_name.to_string(),
-            tool_input: tool_input.clone(),
-            resolved: Arc::clone(&resolved),
-            approved: Arc::clone(&approved),
-        });
-    }
-
-    let _ = app.emit(
-        "chat:approval-request",
-        crate::types::ChatApprovalRequestPayload {
-            chat_session_id: sid.to_string(),
-            pending_id: format!("harness-{sid}-{tool_name}"),
-            tool: tool_name.to_string(),
-            summary: format!("Harness wants to run: {tool_name}"),
-            args: tool_input.clone(),
-        },
-    );
-
-    // Spin-wait for resolve_agent_approval (or cancel).
-    while !resolved.load(Ordering::SeqCst) && !cancelled.load(Ordering::SeqCst) {
-        std::thread::sleep(Duration::from_millis(100));
-    }
-
-    let allow = approved.load(Ordering::SeqCst);
-    {
-        let mut pa = pending_approval.lock().unwrap();
-        *pa = None;
-    }
-
-    if let Ok(mut guard) = shared_stdin.lock() {
-        if let Some(stdin) = guard.as_mut() {
-            let resp = if allow {
-                json!({"type":"tool_approval","approve":true})
-            } else {
-                json!({"type":"tool_approval","approve":false})
-            };
-            let _ = write!(stdin, "{resp}\n");
-            let _ = stdin.flush();
-        }
-    }
 }
 
 /// Reader loop for the persistent claude process: one JSON event per line.
@@ -762,7 +674,6 @@ fn read_claude_stream(
     session_cell: &Arc<Mutex<Option<String>>>,
     cancelled: &AtomicBool,
     shared_stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
-    pending_approval: Arc<Mutex<Option<ApprovalRelay>>>,
     mut watch: Option<DirWatch>,
 ) {
     let mut full = String::new();
@@ -816,36 +727,17 @@ fn read_claude_stream(
                             emit_token(app, sid, text);
                         }
                     }
-                    // A tool_use content_block_start with a dangerous tool
-                    // (bash, run_shell, delete_files) means the CLI is about
-                    // to wait for stdin approval. Fire the relay NOW — before
-                    // the CLI pauses — so the frontend can show the approval
-                    // card. The `assistant` handler also checks, but that
-                    // event arrives AFTER the tool is approved/denied; this
-                    // stream_event path catches it before the wait.
+                    // Tool-use content_block_start: extract tool markers for
+                    // the frontend's tool-call cards. No permission relay —
+                    // the CLI is spawned with --dangerously-skip-permissions,
+                    // so no stdin approval is needed.
                     Some("content_block_start") => {
                         let block = delta
                             .and_then(|d| d.get("content_block"))
                             .or_else(|| v.pointer("/event/content_block"));
                         if let Some(block) = block {
                             if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                                let name = block
-                                    .get("name")
-                                    .and_then(|n| n.as_str())
-                                    .unwrap_or("");
-                                if name == "bash" || name == "run_shell" || name == "delete_files" {
-                                    if let Some(app) = app {
-                                        relay_dangerous_tool(
-                                            app,
-                                            sid,
-                                            name,
-                                            block.get("input").cloned().unwrap_or(json!({})),
-                                            &shared_stdin,
-                                            &pending_approval,
-                                            cancelled,
-                                        );
-                                    }
-                                }
+                                // No relay needed — full-auto mode.
                             }
                         }
                     }
@@ -864,26 +756,8 @@ fn read_claude_stream(
                     in_think = false;
                 }
                 if let Some(blocks) = v.pointer("/message/content").and_then(|c| c.as_array()) {
-                    // Safety-net relay for dangerous tools.
-                    for block in blocks.iter().filter(|b| {
-                        b.get("type").and_then(|t| t.as_str()) == Some("tool_use")
-                    }) {
-                        let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                        if (name == "bash" || name == "run_shell" || name == "delete_files")
-                            && app.is_some()
-                        {
-                            relay_dangerous_tool(
-                                app.unwrap(),
-                                sid,
-                                name,
-                                block.get("input").cloned().unwrap_or(json!({})),
-                                &shared_stdin,
-                                &pending_approval,
-                                cancelled,
-                            );
-                        }
-                    }
-
+                    // No safety-net relay — CLI is in full-auto mode (no stdin
+                    // approval). Just extract tool markers for the UI.
                     for marker in blocks
                         .iter()
                         .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
@@ -976,6 +850,8 @@ fn spawn_per_turn(
     let resume = entry.cli_session_id.lock().ok().and_then(|g| g.clone());
     // Conduit-owned bundle: instructions, permissions, and MCP registration.
     // Failure degrades to the legacy browser-only configs below (or none).
+    // The bundle hardcodes bypassPermissions in settings.json so claude
+    // runs with full-auto approval.
     let bundle = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd));
     // Legacy fallback: browser-only MCP when the bundle (or its mcp part)
     // didn't write — keeps pty-style browser tools working in degraded mode.
@@ -984,67 +860,62 @@ fn spawn_per_turn(
     } else {
         None
     };
+    let mut prompt_env: Option<(String, String)> = None;
     let spec = match kind {
         PerTurn::Kimi => {
-            let mut args: Vec<String> = vec![
-                "-p".into(),
-                content.into(),
+            // The untrusted prompt never rides the command line — it goes via
+            // CONDUIT_TURN_PROMPT + a delayed-expansion wrapper batch on
+            // Windows (M12, see harness_adapters::turn_spec). Only OUR
+            // bounded strings (model, session id, bundle paths) are argv.
+            // Kimi prompt mode is non-interactive; --yolo/--auto are
+            // interactive-mode flags that kimi rejects with -p.
+            // Tool calls are auto-approved by default in prompt mode.
+            let mut flags: Vec<String> = vec![
                 "--output-format".into(),
                 "stream-json".into(),
             ];
-            // Permission mode is NOT mapped: kimi refuses `--yolo`/`--auto`
-            // in combination with `-p` ("Cannot combine --prompt with
-            // --yolo"), so prompt mode always runs under the CLI's own
-            // non-interactive policy regardless of the selector.
             if !entry.model.is_empty() {
-                args.push("-m".into());
-                args.push(entry.model.clone());
+                flags.push("-m".into());
+                flags.push(entry.model.clone());
             }
             if let Some(id) = &resume {
                 // Verified against `kimi --help` (v0.31): `-S, --session <id>`.
-                args.push("--session".into());
-                args.push(id.clone());
+                flags.push("--session".into());
+                flags.push(id.clone());
             }
             // Bundle args cover --mcp-config-file, --agent-file (fresh only),
             // and --add-dir. kimi_bundle_args skips --agent-file when resuming
             // (kimi forbids it with --session). When bundle is None, nothing is
             // added — matching today's degraded behavior (no browser tools).
             if let Some(b) = &bundle {
-                args.extend(crate::harness_bundle::kimi_bundle_args(
+                flags.extend(crate::harness_bundle::kimi_bundle_args(
                     b, &artifacts_dir_for_bundle(app, cwd), resume.is_some()));
             }
-            resolve_for_spawn(&CommandSpec {
-                program: "kimi".into(),
-                args,
-            })
+            let (spec, env) =
+                crate::harness_adapters::turn_spec(crate::harness_adapters::TurnHarness::Kimi, content, flags);
+            prompt_env = env;
+            spec
         }
         PerTurn::OpenCode => {
-            // -- terminator defends against flag smuggling when content
-            // starts with a dash.
-            let mut args: Vec<String> = vec!["run".into(), "--".into(), content.into(), "--format".into(), "json".into()];
+            // Every flag must come BEFORE the `--` terminator: yargs (which
+            // `opencode run` uses) treats post-`--` tokens as positional
+            // message parts — turn_spec's argv/wrapper assembly keeps that
+            // invariant. Only the prompt is positional, and on Windows it
+            // arrives via the wrapper's delayed-expansion env read (M12).
+            let mut flags: Vec<String> = vec![];
             if !entry.model.is_empty() {
-                args.push("-m".into());
-                args.push(entry.model.clone());
+                flags.push("-m".into());
+                flags.push(entry.model.clone());
             }
-            // Permission mapping: full_auto → `--auto` (auto-approve anything
-            // not explicitly denied); read_only → the read-only plan agent.
-            // manual/auto_edit keep the CLI's default headless policy.
-            match entry.perm.as_str() {
-                "full_auto" => args.push("--auto".into()),
-                "read_only" => {
-                    args.push("--agent".into());
-                    args.push("plan".into());
-                }
-                _ => {}
-            }
+            // OpenCode: --auto is baked into the wrapper/argv prefix.
             if let Some(id) = &resume {
-                args.push("-s".into());
-                args.push(id.clone());
+                flags.push("-s".into());
+                flags.push(id.clone());
             }
-            resolve_for_spawn(&CommandSpec {
-                program: "opencode".into(),
-                args,
-            })
+            let (spec, env) =
+                crate::harness_adapters::turn_spec(crate::harness_adapters::TurnHarness::OpenCode, content, flags);
+            prompt_env = env;
+            spec
         }
     };
 
@@ -1053,6 +924,11 @@ fn spawn_per_turn(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    // The prompt travels in the process env block (never cmd-parsed) when the
+    // Windows wrapper transport is active — see turn_spec.
+    if let Some((k, v)) = &prompt_env {
+        cmd.env(k, v);
+    }
     // OpenCode only: point the CLI at the Conduit-owned opencode.json that
     // registers conduit-browser (it has no --mcp-config CLI flag).
     if matches!(kind, PerTurn::OpenCode) {
@@ -1293,12 +1169,11 @@ pub fn run_one_shot(
     prompt: &str,
     harness: &str,
     model: &str,
-    perm: &str,
     cwd: Option<&str>,
 ) -> Result<(), String> {
     {
         let conn = db.lock();
-        crate::db::add_chat_message(&conn, chat_session_id, "user", prompt, None, None, None)
+        crate::db::add_chat_message(&conn, chat_session_id, "user", prompt, None, None, None, None, None, None, None, None, None)
             .map_err(|e| e.to_string())?;
     }
 
@@ -1315,12 +1190,19 @@ pub fn run_one_shot(
         }
     };
 
-    let spec = one_shot_spec(harness, &effective, model, perm)?;
+    let (spec, prompt_env) = one_shot_spec(harness, &effective, model)?;
+    // claude one-shot takes the prompt via stdin (see one_shot_spec — M12);
+    // the other harnesses either carry it in the env pair (Windows wrapper)
+    // or inline in argv (POSIX).
+    let prompt_via_stdin = harness == "claude_code";
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args)
-        .stdin(Stdio::null())
+        .stdin(if prompt_via_stdin { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    if let Some((k, v)) = &prompt_env {
+        cmd.env(k, v);
+    }
     // Same artifact detection as the chat-session paths: diff the spawn dir
     // after the turn and surface created/modified files.
     let mut watch = None;
@@ -1332,10 +1214,39 @@ pub fn run_one_shot(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to spawn {} CLI: {e}", spec.program))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or("failed to capture CLI stdout")?;
+    if prompt_via_stdin {
+        // Write the prompt and close the pipe — EOF tells the CLI the prompt
+        // is complete. A write failure must kill the child, otherwise the
+        // CLI waits on stdin forever and the automation turn hangs.
+        let write_result = match child.stdin.take() {
+            Some(mut stdin) => {
+                use std::io::Write as _;
+                stdin
+                    .write_all(effective.as_bytes())
+                    .and_then(|_| stdin.flush())
+                    .map_err(|e| format!("failed to write prompt to CLI stdin: {e}"))
+                // stdin drops here, closing the pipe.
+            }
+            None => Err("failed to open CLI stdin".to_string()),
+        };
+        if let Err(e) = write_result {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
+    }
+    // Register the child so the app-exit handler can kill this tree (M13):
+    // an automation child is a full skip-permissions CLI tree that would
+    // otherwise keep running after the app quits.
+    let child = Arc::new(Mutex::new(child));
+    let one_shot_pid = register_one_shot_child(&child);
+    let stdout = {
+        let mut guard = child.lock().map_err(|e| e.to_string())?;
+        guard
+            .stdout
+            .take()
+            .ok_or("failed to capture CLI stdout")?
+    };
 
     let db2 = DbState(Arc::clone(db));
     let sid2 = chat_session_id.to_string();
@@ -1352,16 +1263,39 @@ pub fn run_one_shot(
         if is_claude {
             let cell = Arc::new(Mutex::new(None));
             let dummy_stdin = Arc::new(Mutex::new(None));
-            let dummy_approval = Arc::new(Mutex::new(None));
-            read_claude_stream(app2.as_ref(), &db2, &sid2, stdout, &in_flight2, &cell, &never_cancelled, dummy_stdin, dummy_approval, watch);
+            read_claude_stream(app2.as_ref(), &db2, &sid2, stdout, &in_flight2, &cell, &never_cancelled, dummy_stdin, watch);
         } else {
             let cell = Arc::new(Mutex::new(None));
             read_per_turn_stream(app2.as_ref(), &db2, &sid2, stdout, &in_flight2, &cell, is_kimi, &never_cancelled, watch);
         }
     });
 
-    let wait = child.wait();
+    // Poll-wait WITHOUT holding the child lock across the wait: the app-exit
+    // handler must be able to lock + kill this child while we block (M13) —
+    // holding it would deadlock the exit path against the running turn.
+    let wait = loop {
+        {
+            let mut guard = match child.lock() {
+                Ok(g) => g,
+                Err(e) => {
+                    break Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        e.to_string(),
+                    ))
+                }
+            };
+            match guard.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) => {}
+                Err(e) => break Err(e),
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
     let _ = reader.join();
+    if let Some(pid) = one_shot_pid {
+        unregister_one_shot_child(pid);
+    }
     match wait {
         Ok(status) if status.success() => Ok(()),
         Ok(status) => Err(format!("{} exited with {status}", spec.program)),
@@ -1369,58 +1303,74 @@ pub fn run_one_shot(
     }
 }
 
-/// Build the spawn spec for a one-shot turn on any harness.
-fn one_shot_spec(harness: &str, prompt: &str, model: &str, perm: &str) -> Result<CommandSpec, String> {
-    let spec = match harness {
+/// Build the spawn spec for a one-shot turn on any harness. Always full-auto
+/// (--dangerously-skip-permissions for claude, --auto for opencode — no
+/// permission selector is surfaced or consulted in the UI, so all CLI turns
+/// run unrestricted). Kimi prompt mode is already non-interactive and
+/// auto-approves tool calls by default; --yolo/--auto are interactive-mode
+/// flags that kimi rejects with -p.
+///
+/// The prompt is UNTRUSTED user text and never rides a cmd.exe command line
+/// (M12): claude reads it from stdin (`claude -p` with no prompt arg — the
+/// caller pipes it, see `prompt_via_stdin` in run_one_shot); kimi/opencode
+/// get it via CONDUIT_TURN_PROMPT + delayed-expansion wrapper (the returned
+/// env pair, Windows only — POSIX keeps the prompt in argv, which exec
+/// carries verbatim).
+fn one_shot_spec(harness: &str, prompt: &str, model: &str) -> Result<(CommandSpec, Option<(String, String)>), String> {
+    match harness {
         "claude_code" => {
             let mut args: Vec<String> = vec![
                 "-p".into(),
-                prompt.into(),
                 "--output-format".into(),
                 "stream-json".into(),
                 "--verbose".into(),
                 "--include-partial-messages".into(),
-                "--permission-mode".into(),
-                claude_permission_mode(perm).into(),
+                "--dangerously-skip-permissions".into(),
             ];
             if !model.is_empty() {
                 args.push("--model".into());
                 args.push(claude_model_alias(model));
             }
-            CommandSpec { program: "claude".into(), args }
+            Ok((
+                resolve_for_spawn(&CommandSpec {
+                    program: "claude".into(),
+                    args,
+                }),
+                None,
+            ))
         }
         "kimi_code" => {
-            let mut args: Vec<String> = vec![
-                "-p".into(),
-                prompt.into(),
+            let mut flags: Vec<String> = vec![
                 "--output-format".into(),
                 "stream-json".into(),
             ];
             if !model.is_empty() {
-                args.push("-m".into());
-                args.push(model.into());
+                flags.push("-m".into());
+                flags.push(model.into());
             }
-            CommandSpec { program: "kimi".into(), args }
+            Ok(crate::harness_adapters::turn_spec(
+                crate::harness_adapters::TurnHarness::Kimi,
+                prompt,
+                flags,
+            ))
         }
         "opencode" => {
-            let mut args: Vec<String> = vec!["run".into(), "--".into(), prompt.into(), "--format".into(), "json".into()];
+            // Flags BEFORE `--` (yargs swallows post-terminator tokens into
+            // the prompt — see spawn_per_turn's OpenCode arm); turn_spec's
+            // assembly preserves that invariant.
+            let mut flags: Vec<String> = vec![];
             if !model.is_empty() {
-                args.push("-m".into());
-                args.push(model.into());
+                flags.push("-m".into());
+                flags.push(model.into());
             }
-            match perm {
-                "full_auto" => args.push("--auto".into()),
-                "read_only" => {
-                    args.push("--agent".into());
-                    args.push("plan".into());
-                }
-                _ => {}
-            }
-            CommandSpec { program: "opencode".into(), args }
+            Ok(crate::harness_adapters::turn_spec(
+                crate::harness_adapters::TurnHarness::OpenCode,
+                prompt,
+                flags,
+            ))
         }
-        other => return Err(format!("harness '{other}' has no headless chat backend yet")),
-    };
-    Ok(resolve_for_spawn(&spec))
+        other => Err(format!("harness '{other}' has no headless chat backend yet")),
+    }
 }
 
 // ---------------------------------------------------------------- tool markers
@@ -1552,7 +1502,8 @@ fn finish_turn(
     // Persist the assistant message FIRST so we can attribute artifacts to it.
     let message_id: Option<i64> = if !full.is_empty() {
         let conn = db.0.lock();
-        crate::db::add_chat_message(&conn, sid, "assistant", full, input, output, cost)
+        let harness_id = ""; // harness id captured in closure; empty placeholder
+        crate::db::add_chat_message(&conn, sid, "assistant", full, input, output, cost, None, None, None, Some(harness_id), None, None)
             .ok()
             .map(|m| m.id)
     } else {
@@ -1643,6 +1594,33 @@ fn no_console_window(cmd: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M13: a registered one-shot child (a cmd-wrapped tree, like automation
+    /// spawns) must die with the app, and the kill must be idempotent —
+    /// already-exited children are skipped so a recycled pid is never hit.
+    #[test]
+    #[cfg(windows)]
+    fn kill_one_shot_children_kills_registered_trees() {
+        // Sleeper tree mirroring the harness spawn shape: cmd.exe → ping.
+        let mut cmd = Command::new("cmd.exe");
+        cmd.args(["/C", "ping 127.0.0.1 -n 60 >nul"]);
+        no_console_window(&mut cmd);
+        let child = cmd.spawn().unwrap();
+        let child = Arc::new(Mutex::new(child));
+        let pid = register_one_shot_child(&child).expect("must register");
+        std::thread::sleep(Duration::from_millis(300)); // let the tree start
+
+        kill_one_shot_children();
+
+        let status = child.lock().unwrap().try_wait().unwrap();
+        assert!(status.is_some(), "registered one-shot child survived the kill");
+        assert!(
+            ONE_SHOT_CHILDREN.lock().unwrap().get(&pid).is_none(),
+            "registry must be drained after the kill"
+        );
+        // Idempotent re-run: no registered children, no pid-recycle hazard.
+        kill_one_shot_children();
+    }
 
     /// OpenCode "text" events carry the full snapshot of a part's text, not a
     /// delta: only the new suffix must reach `full`/the token stream, and a

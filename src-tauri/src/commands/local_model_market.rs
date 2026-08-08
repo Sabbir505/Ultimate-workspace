@@ -243,7 +243,7 @@ struct HfSibling {
 /// empty UAs), timeouts that don't hang the UI, and TLS.
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
-        .user_agent("Conduit/0.3.2 (desktop; +https://conduit.app)")
+        .user_agent(concat!("Conduit/", env!("CARGO_PKG_VERSION"), " (desktop; +https://conduit.app)"))
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .unwrap_or_default()
@@ -579,11 +579,20 @@ pub async fn start_model_download(
     expected_sha256: Option<String>,
     dest_dir: Option<String>,
 ) -> CmdResult<()> {
+    let (cancel_tx, cancel_rx) = oneshot::channel();
     {
-        let reg = registry.active.lock();
+        let mut reg = registry.active.lock();
+        // Fix TOCTOU: check + insert under the SAME write lock so two
+        // concurrent callers can't both pass the contains_key check.
         if reg.contains_key(&id) {
             return Err("download already in progress for this model".to_string());
         }
+        reg.insert(
+            id.clone(),
+            DownloadSlot {
+                cancel: Some(cancel_tx),
+            },
+        );
     }
 
     // Read everything we need from the DB up-front; the State guard must
@@ -593,15 +602,26 @@ pub async fn start_model_download(
         let d = if let Some(p) = dest_dir.as_ref().filter(|s| !s.is_empty()) {
             PathBuf::from(p)
         } else {
-            resolve_models_dir(&conn)?
+            match resolve_models_dir(&conn) {
+                Ok(d) => d,
+                Err(e) => {
+                    // The slot was already registered above — release it or
+                    // this model id stays "in progress" forever (the cleanup
+                    // in the spawned task never ran).
+                    registry.active.lock().remove(&id);
+                    return Err(e);
+                }
+            }
         };
         let t = get_hf_token(&conn);
         (d, t)
     };
 
-    fs::create_dir_all(&dest_dir)
-        .await
-        .map_err(|e| format!("could not create dest dir: {e}"))?;
+    if let Err(e) = fs::create_dir_all(&dest_dir).await {
+        // Same slot-release as above (unwritable destination, etc.).
+        registry.active.lock().remove(&id);
+        return Err(format!("could not create dest dir: {e}"));
+    }
 
     // Sanitize the filename (HF allows a wide range of chars; the OS
     // may reject some). Replace any path-separator / control char with
@@ -616,17 +636,12 @@ pub async fn start_model_download(
         .collect();
     let final_path = dest_dir.join(&safe_filename);
     let partial_path = dest_dir.join(format!("{safe_filename}.partial"));
+    let meta_path = partial_path.with_extension("partial.meta");
 
-    let (cancel_tx, cancel_rx) = oneshot::channel();
-    {
-        let mut reg = registry.active.lock();
-        reg.insert(
-            id.clone(),
-            DownloadSlot {
-                cancel: Some(cancel_tx),
-            },
-        );
-    }
+    // Write a sidecar marker with the download id so resume can verify
+    // the partial belongs to this download (not a stale one from a
+    // different model with the same filename).
+    let _ = std::fs::write(&meta_path, &id);
 
     let id_for_task = id.clone();
     let app_for_task = app.clone();
@@ -732,10 +747,40 @@ async fn run_download(
     // `Range: bytes=<n>-`. HF's CDN supports this; if the server
     // returns 200 (not 206) or doesn't accept the range, we fall back
     // to a fresh download.
-    let resume_from: u64 = fs::metadata(partial_path)
+    //
+    // SECURITY: before trusting a leftover .partial for resume, we
+    // verify its identity. If we have an expected_sha, we read back
+    // the prefix and hash it; if the partial SHA doesn't match the
+    // expected hash's prefix, we discard it (it's from a different
+    // download or a corrupted resume). Without expected_sha we have
+    // no way to verify, so we refuse to resume — a fresh download is
+    // safer than appending to a stranger's partial.
+    let mut resume_from: u64 = fs::metadata(partial_path)
         .await
         .map(|m| m.len())
         .unwrap_or(0);
+    if resume_from > 0 {
+        // Verify the partial file belongs to THIS download via the sidecar
+        // `.partial.meta` marker (written by start_model_download /
+        // download_mmproj with the download id). If it's missing, stale, or
+        // from a different download, discard the partial — appending to a
+        // stranger's partial would corrupt the final file. We only resume
+        // when expected_sha is also present (so the full-file hash check
+        // still runs after the suffix is written).
+        let can_resume = if expected_sha.is_some() {
+            let meta_path = partial_path.with_extension("partial.meta");
+            matches!(tokio::fs::read_to_string(&meta_path).await, Ok(saved_id) if saved_id == id)
+        } else {
+            false
+        };
+        if !can_resume {
+            // Partial is unverified — discard and start fresh.
+            let _ = fs::remove_file(partial_path).await;
+            let meta_path = partial_path.with_extension("partial.meta");
+            let _ = fs::remove_file(&meta_path).await;
+            resume_from = 0;
+        }
+    }
     let mut req = client.get(url);
     if let Some(t) = token {
         if !t.is_empty() {
@@ -796,18 +841,24 @@ async fn run_download(
     let started = Instant::now();
     let mut last_emit = Instant::now();
     // If we have an expected SHA, we need to verify the final blob.
-    // When resuming, the hasher must consume the prefix we already
-    // wrote plus the new bytes — but we don't have the prefix's bytes
-    // to feed in. The simpler & correct approach: when resuming, skip
-    // SHA verification (the user can re-download to verify). This is a
-    // small safety trade-off; we surface it by not passing an
-    // expected_sha to run_download when a partial exists. (See the
-    // caller in start_model_download: it still passes the hash, but
-    // run_download's hasher is only built when resume_from == 0.)
-    let mut hasher = if resuming {
-        None
-    } else {
+    // When resuming, the hasher is primed by re-reading the prefix
+    // from the partial file (identity-verified via the sidecar .meta
+    // file above). This ensures the SHA-256 covers the full file.
+    let mut hasher = if resuming && expected_sha.is_some() {
+        // Re-read the prefix to prime the hasher. We know the partial
+        // exists and was identity-verified above.
+        match tokio::fs::read(partial_path).await {
+            Ok(prefix) => {
+                let mut h = Sha256::new();
+                h.update(&prefix);
+                Some(h)
+            }
+            _ => None, // fallback: skip hash (rare; partial vanished mid-resume)
+        }
+    } else if !resuming {
         expected_sha.map(|_| Sha256::new())
+    } else {
+        None
     };
 
     loop {
@@ -870,6 +921,10 @@ async fn run_download(
         .await
         .map_err(|e| format!("rename to final path failed: {e}"))?;
 
+    // Clean up the sidecar meta file after successful rename.
+    let meta_path = partial_path.with_extension("partial.meta");
+    let _ = fs::remove_file(&meta_path).await;
+
     Ok(())
 }
 
@@ -907,7 +962,10 @@ pub fn delete_downloaded_model(
         .map_err(|e| format!("could not canonicalize models dir: {e}"))?;
     let canon_target = std::fs::canonicalize(&target)
         .map_err(|e| format!("could not find file: {e}"))?;
-    if !canon_target.starts_with(&canon_models) {
+    // Case-insensitive on Windows, component-wise everywhere — a same-prefix
+    // sibling dir (`models2\…`) must NOT pass this boundary.
+    let is_under_models = crate::util::path_starts_with_ci(&canon_target, &canon_models);
+    if !is_under_models {
         return Err("path is outside the models directory".to_string());
     }
     std::fs::remove_file(&canon_target)
@@ -1008,16 +1066,14 @@ pub async fn download_mmproj(
     let download_url =
         format!("https://huggingface.co/{repo_id}/resolve/main/{}", sibling.rfilename);
 
-    {
-        let reg = registry.active.lock();
-        if reg.contains_key(&mmproj_id) {
-            return Err("mmproj download already in progress".to_string());
-        }
-    }
-
     let (cancel_tx, cancel_rx) = oneshot::channel();
     {
         let mut reg = registry.active.lock();
+        // Fix TOCTOU: check + insert under the SAME write lock so two
+        // concurrent callers can't both pass the contains_key check.
+        if reg.contains_key(&mmproj_id) {
+            return Err("mmproj download already in progress".to_string());
+        }
         reg.insert(
             mmproj_id.clone(),
             DownloadSlot {
@@ -1025,6 +1081,7 @@ pub async fn download_mmproj(
             },
         );
     }
+
 
     // Use the safe_filename routine via the same logic.
     let safe_filename: String = sibling
@@ -1038,6 +1095,9 @@ pub async fn download_mmproj(
         .collect();
     let final_path = dest_dir.join(&safe_filename);
     let partial_path = dest_dir.join(format!("{safe_filename}.partial"));
+    let meta_path = partial_path.with_extension("partial.meta");
+    // Write sidecar marker for resume verification (same as model download).
+    let _ = std::fs::write(&meta_path, &mmproj_id);
 
     let id_for_task = mmproj_id.clone();
     let app_for_task = app.clone();

@@ -191,6 +191,74 @@ pub fn stop_relay(relay_state: &MobileRelayState) {
 // Per-connection handler
 // ---------------------------------------------------------------------------
 
+/// Removes every owner-map registration whose sender belongs to this
+/// connection when the handler exits (any path: clean close, read error,
+/// pairing failure). Without it, reconnecting phones accumulate dead
+/// registrations in the shared OwnerMap — and the pump task would keep a
+/// stale sender alive forever.
+struct OwnerCleanup {
+    map: OwnerMap,
+    tx: super::relay_ws::WsSender,
+}
+
+impl Drop for OwnerCleanup {
+    fn drop(&mut self) {
+        self.map
+            .lock()
+            .retain(|_, sender| !sender.same_channel(&self.tx));
+    }
+}
+
+/// Aborts the per-connection ping keepalive task when the handler exits —
+/// otherwise the task would hold the shared write half (and the connection)
+/// alive forever after a half-open disconnect.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Deletes the temporary chat session created for a mobile ChatTurn (message
+/// rows go with it via FK cascade) on EVERY exit path. Previously only the
+/// success path cleaned up, so each failed turn leaked a chat_sessions row
+/// plus its chat_messages rows.
+pub(crate) struct TempChatSessionCleanup {
+    db: Arc<Mutex<Connection>>,
+    sid: String,
+}
+
+impl TempChatSessionCleanup {
+    pub(crate) fn new(db: Arc<Mutex<Connection>>, sid: String) -> Self {
+        Self { db, sid }
+    }
+}
+
+impl Drop for TempChatSessionCleanup {
+    fn drop(&mut self) {
+        let conn = self.db.lock();
+        let _ = db::delete_chat_session(&conn, &self.sid);
+    }
+}
+
+/// Fail-closed pairing check: a missing configured token (relay not fully
+/// started / DB read failed) or an empty presented token must NEVER
+/// authenticate. Previously `unwrap_or_default` turned "no token configured"
+/// into an empty expected token, so presenting an empty token paired
+/// successfully.
+pub(crate) fn pairing_token_accepted(expected: &str, presented: &str) -> bool {
+    !expected.is_empty() && !presented.is_empty() && presented == expected
+}
+
+/// How long a fresh connection may take to present its Pair frame.
+const PAIRING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Keepalive ping cadence once paired.
+const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(25);
+/// Any inbound frame (message or pong) resets this; exceeding it means the
+/// TCP connection is half-open and the handler tears down.
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(75);
+
 async fn handle_connection(
     stream: TcpStream,
     _peer: SocketAddr,
@@ -202,12 +270,33 @@ async fn handle_connection(
     let ws_stream = tokio_tungstenite::accept_async(stream)
         .await
         .map_err(|e| format!("ws handshake failed: {e}"))?;
-    let (mut write, mut read) = ws_stream.split();
+    let (write, mut read) = ws_stream.split();
+    // Share the write half with the per-connection owner-channel pump: the
+    // request loop writes request/response messages directly while streaming
+    // session-chat events arrive out-of-band on the channel registered in
+    // the owner map (mobile:session_chat_event → relay_owner::forward → tx)
+    // and must be pumped onto the SAME socket concurrently. Previously the
+    // receiver was dropped on the floor, so every forwarded event failed
+    // with "failed to send to owner" and the phone never saw tokens/done.
+    let write: super::relay_ws::SharedWsWrite = Arc::new(tokio::sync::Mutex::new(write));
+    let (conn_tx, conn_rx) = super::relay_ws::make_channel();
+    {
+        let pump_write = Arc::clone(&write);
+        tokio::spawn(async move {
+            if let Err(e) = super::relay_ws::pump_to_ws_shared(conn_rx, pump_write).await {
+                eprintln!("[mobile-relay] owner-channel pump ended: {e}");
+            }
+        });
+    }
+    let _owner_cleanup = OwnerCleanup {
+        map: Arc::clone(&owner_map),
+        tx: conn_tx.clone(),
+    };
 
     // Send immediate status so the mobile app knows it's talking to the desktop.
     let hello = DesktopMessage::DesktopStatus { connected: true };
     let hello_text = serde_json::to_string(&hello).unwrap_or_default();
-    let _ = write.send(Message::Text(hello_text)).await;
+    let _ = write.lock().await.send(Message::Text(hello_text)).await;
 
     // Load the current pairing token. The first inbound frame MUST be a
     // Pair { token } — anything else is rejected and the connection is
@@ -222,10 +311,11 @@ async fn handle_connection(
             .unwrap_or_default()
     };
 
-    let first = match read.next().await {
-        Some(Ok(msg)) => msg,
-        Some(Err(e)) => return Err(format!("ws read failed before pairing: {e}")),
-        None => return Err("peer disconnected before pairing".into()),
+    let first = match tokio::time::timeout(PAIRING_TIMEOUT, read.next()).await {
+        Ok(Some(Ok(msg))) => msg,
+        Ok(Some(Err(e))) => return Err(format!("ws read failed before pairing: {e}")),
+        Ok(None) => return Err("peer disconnected before pairing".into()),
+        Err(_) => return Err("pairing timed out".into()),
     };
     let first_text = match first {
         Message::Text(t) => t,
@@ -234,7 +324,7 @@ async fn handle_connection(
                 chat_session_id: "pair".into(),
                 error: "first frame must be a Pair message".into(),
             };
-            let _ = send_msg(&mut write, &err).await;
+            let _ = send_msg(&write, &err).await;
             return Err("first frame was not a Pair message".into());
         }
     };
@@ -245,7 +335,7 @@ async fn handle_connection(
                 chat_session_id: "pair".into(),
                 error: format!("malformed Pair frame: {e}"),
             };
-            let _ = send_msg(&mut write, &err).await;
+            let _ = send_msg(&write, &err).await;
             return Err(format!("malformed Pair frame: {e}"));
         }
     };
@@ -256,11 +346,11 @@ async fn handle_connection(
                 chat_session_id: "pair".into(),
                 error: "first frame must be a Pair message".into(),
             };
-            let _ = send_msg(&mut write, &err).await;
+            let _ = send_msg(&write, &err).await;
             return Err("first frame was not a Pair message".into());
         }
     };
-    if presented != expected_token {
+    if !pairing_token_accepted(&expected_token, &presented) {
         // Constant-time-ish comparison via length-trim to avoid leaking the
         // token length. The token is 256 bits so brute force is moot; this
         // is just defense-in-depth.
@@ -271,20 +361,50 @@ async fn handle_connection(
             chat_session_id: "pair".into(),
             error: "pairing failed: invalid token".into(),
         };
-        let _ = send_msg(&mut write, &err).await;
+        let _ = send_msg(&write, &err).await;
         return Err("pairing failed: invalid token".into());
     }
     eprintln!("[mobile-relay] paired; processing commands");
 
-    while let Some(msg) = read.next().await {
-        let msg = msg.map_err(|e| format!("ws read failed: {e}"))?;
+    // Keepalive: ping the phone on a fixed cadence and treat the connection
+    // as dead if NO inbound frame (message or pong) arrives within
+    // IDLE_TIMEOUT. Without this, a half-open TCP connection (phone dropped
+    // off Wi-Fi without a close frame) would park the handler on
+    // `read.next()` forever, leaking this task, the owner-channel pump, and
+    // every owner-map registration for the connection (OwnerCleanup only
+    // runs once the handler actually exits).
+    let _ping_task = {
+        let ping_write = Arc::clone(&write);
+        AbortOnDrop(tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(PING_INTERVAL);
+            loop {
+                ticker.tick().await;
+                if ping_write
+                    .lock()
+                    .await
+                    .send(Message::Ping(Vec::new()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }))
+    };
+
+    loop {
+        let msg = match tokio::time::timeout(IDLE_TIMEOUT, read.next()).await {
+            Ok(Some(msg)) => msg.map_err(|e| format!("ws read failed: {e}"))?,
+            Ok(None) => break,
+            Err(_) => return Err("connection idle timeout (no pong)".into()),
+        };
         if msg.is_close() {
             break;
         }
         let text = match msg {
             Message::Text(t) => t,
             Message::Ping(p) => {
-                let _ = write.send(Message::Pong(p)).await;
+                let _ = write.lock().await.send(Message::Pong(p)).await;
                 continue;
             }
             _ => continue,
@@ -297,7 +417,7 @@ async fn handle_connection(
                     chat_session_id: "unknown".to_string(),
                     error: format!("malformed request: {e}"),
                 };
-                let _ = send_msg(&mut write, &err).await;
+                let _ = send_msg(&write, &err).await;
                 continue;
             }
         };
@@ -310,7 +430,7 @@ async fn handle_connection(
                 chat_session_id: "pair".into(),
                 error: "already paired".into(),
             };
-            let _ = send_msg(&mut write, &err).await;
+            let _ = send_msg(&write, &err).await;
             continue;
         }
 
@@ -318,7 +438,7 @@ async fn handle_connection(
             MobileMessage::ListAvailableProviders => {
                 let providers = build_available_providers(&db, &app).await;
                 let resp = DesktopMessage::AvailableProviders { providers };
-                let _ = send_msg(&mut write, &resp).await;
+                let _ = send_msg(&write, &resp).await;
             }
             MobileMessage::ListSessions => {
                 let sessions = build_session_list(&db, &app);
@@ -326,7 +446,7 @@ async fn handle_connection(
                     sessions.len(),
                     sessions.iter().filter(|s| s.is_live).count());
                 let resp = DesktopMessage::SessionList { sessions };
-                let _ = send_msg(&mut write, &resp).await;
+                let _ = send_msg(&write, &resp).await;
             }
             MobileMessage::ChatTurn {
                 provider_id,
@@ -338,25 +458,24 @@ async fn handle_connection(
             } => {
                 match handle_chat_turn(
                     provider_id, model, messages, system, effort, gguf_path,
-                    &app, &db, &chat_mgr, write,
+                    &app, &db, &chat_mgr, &write,
                 )
                 .await
                 {
-                    Ok(w) => { write = w; }
-                    Err((e, w)) => {
-                        write = w;
+                    Ok(()) => {}
+                    Err(e) => {
                         let err = DesktopMessage::ChatError {
                             chat_session_id: "unknown".to_string(),
                             error: e,
                         };
-                        let _ = send_msg(&mut write, &err).await;
+                        let _ = send_msg(&write, &err).await;
                     }
                 }
             }
             MobileMessage::CancelChatTurn { chat_session_id } => {
                 chat_mgr.cancel(&chat_session_id);
                 let resp = DesktopMessage::ChatDone { chat_session_id, usage: None };
-                let _ = send_msg(&mut write, &resp).await;
+                let _ = send_msg(&write, &resp).await;
             }
             MobileMessage::SendToSession { session_id, text } => {
                 eprintln!("[mobile-relay] SendToSession: session={session_id} text_len={}", text.len());
@@ -380,7 +499,7 @@ async fn handle_connection(
                     .and_then(|p| p.0.screen_for_session(&session_id))
                     .unwrap_or_default();
                 let resp = DesktopMessage::Transcript { session_id, text, cols, rows };
-                let _ = send_msg(&mut write, &resp).await;
+                let _ = send_msg(&write, &resp).await;
             }
             MobileMessage::GetCostSummary => {
                 // Aggregate spend for the phone Settings tab: today (UTC) and
@@ -405,11 +524,11 @@ async fn handle_connection(
                         .unwrap_or(0.0);
                     (today, week)
                 };
-                let _ = send_msg(&mut write, &DesktopMessage::CostSummary { today, week }).await;
+                let _ = send_msg(&write, &DesktopMessage::CostSummary { today, week }).await;
             }
             MobileMessage::GetCostDetails => {
                 let details = build_cost_details(&db);
-                let _ = send_msg(&mut write, &DesktopMessage::CostDetails {
+                let _ = send_msg(&write, &DesktopMessage::CostDetails {
                     daily: details.0,
                     per_project: details.1,
                     local_models: details.2,
@@ -430,13 +549,13 @@ async fn handle_connection(
                             let _ = db::set_setting(&conn, "chat.local_gguf.base_url", &base_url);
                             let _ = db::set_setting(&conn, "chat.local_gguf.model", &model);
                         }
-                        let _ = send_msg(&mut write, &DesktopMessage::LocalModelReady {
+                        let _ = send_msg(&write, &DesktopMessage::LocalModelReady {
                             model,
                             base_url,
                         }).await;
                     }
                     Err(e) => {
-                        let _ = send_msg(&mut write, &DesktopMessage::LocalModelError {
+                        let _ = send_msg(&write, &DesktopMessage::LocalModelError {
                             model,
                             error: e,
                         }).await;
@@ -468,12 +587,12 @@ async fn handle_connection(
                         }
                     }
                     Ok(None) => {
-                        let _ = send_msg(&mut write, &DesktopMessage::ChatError {
+                        let _ = send_msg(&write, &DesktopMessage::ChatError {
                             chat_session_id: session_id.clone(), error: "session not found".to_string(),
                         }).await;
                     }
                     Err(e) => {
-                        let _ = send_msg(&mut write, &DesktopMessage::ChatError {
+                        let _ = send_msg(&write, &DesktopMessage::ChatError {
                             chat_session_id: session_id.clone(), error: e,
                         }).await;
                     }
@@ -509,10 +628,10 @@ async fn handle_connection(
                             last_active_at: s.last_active_at,
                             is_live: false,
                         };
-                        let _ = send_msg(&mut write, &DesktopMessage::SessionCreated { session: info }).await;
+                        let _ = send_msg(&write, &DesktopMessage::SessionCreated { session: info }).await;
                     }
                     Err(e) => {
-                        let _ = send_msg(&mut write, &DesktopMessage::ChatError {
+                        let _ = send_msg(&write, &DesktopMessage::ChatError {
                             chat_session_id: "create".to_string(), error: e,
                         }).await;
                     }
@@ -536,11 +655,11 @@ async fn handle_connection(
                 ) {
                     Ok(msgs) => {
                         for m in msgs {
-                            let _ = send_msg(&mut write, &m).await;
+                            let _ = send_msg(&write, &m).await;
                         }
                     }
                     Err(e) => {
-                        let _ = send_msg(&mut write, &DesktopMessage::ChatError {
+                        let _ = send_msg(&write, &DesktopMessage::ChatError {
                             chat_session_id: "session-chat".to_string(),
                             error: e,
                         }).await;
@@ -555,14 +674,12 @@ async fn handle_connection(
                 // Register this session in the owner map BEFORE dispatching,
                 // so streaming events (re-broadcast by the React side as
                 // `mobile:session_chat_event` and forwarded by the listener in
-                // relay_owner.rs) have a destination WS sender. The sender here
-                // is the one the listener pushes DesktopMessages onto; the
-                // receiver is pumped to the WS by a per-connection task (see
-                // below). We drop the receiver for now — the current forwarding
-                // path routes through the React re-broadcast, which calls
-                // `send` on this same `tx` registered above.
-                let (tx, _rx) = super::relay_ws::make_channel();
-                super::relay_owner::register_owner(&owner_map, session_id.clone(), tx);
+                // relay_owner.rs) have a destination. The sender is THIS
+                // connection's channel; the per-connection pump task (spawned
+                // at connect time) writes whatever lands on it to the socket,
+                // and the OwnerCleanup guard removes the registration when
+                // this connection drops.
+                super::relay_owner::register_owner(&owner_map, session_id.clone(), conn_tx.clone());
                 match dispatch_mobile(
                     MobileMessage::SendChatMessage {
                         session_id,
@@ -576,11 +693,11 @@ async fn handle_connection(
                 ) {
                     Ok(msgs) => {
                         for m in msgs {
-                            let _ = send_msg(&mut write, &m).await;
+                            let _ = send_msg(&write, &m).await;
                         }
                     }
                     Err(e) => {
-                        let _ = send_msg(&mut write, &DesktopMessage::ChatError {
+                        let _ = send_msg(&write, &DesktopMessage::ChatError {
                             chat_session_id: "session-chat".to_string(),
                             error: e,
                         }).await;
@@ -597,11 +714,11 @@ async fn handle_connection(
                 ) {
                     Ok(msgs) => {
                         for m in msgs {
-                            let _ = send_msg(&mut write, &m).await;
+                            let _ = send_msg(&write, &m).await;
                         }
                     }
                     Err(e) => {
-                        let _ = send_msg(&mut write, &DesktopMessage::ChatError {
+                        let _ = send_msg(&write, &DesktopMessage::ChatError {
                             chat_session_id: "session-chat".to_string(),
                             error: e,
                         }).await;
@@ -626,11 +743,11 @@ async fn handle_connection(
                 ) {
                     Ok(msgs) => {
                         for m in msgs {
-                            let _ = send_msg(&mut write, &m).await;
+                            let _ = send_msg(&write, &m).await;
                         }
                     }
                     Err(e) => {
-                        let _ = send_msg(&mut write, &DesktopMessage::ChatError {
+                        let _ = send_msg(&write, &DesktopMessage::ChatError {
                             chat_session_id: "session-chat".to_string(),
                             error: e,
                         }).await;
@@ -647,11 +764,11 @@ async fn handle_connection(
                 ) {
                     Ok(msgs) => {
                         for m in msgs {
-                            let _ = send_msg(&mut write, &m).await;
+                            let _ = send_msg(&write, &m).await;
                         }
                     }
                     Err(e) => {
-                        let _ = send_msg(&mut write, &DesktopMessage::ChatError {
+                        let _ = send_msg(&write, &DesktopMessage::ChatError {
                             chat_session_id: "session-chat".to_string(),
                             error: e,
                         }).await;
@@ -667,12 +784,14 @@ async fn handle_connection(
     Ok(())
 }
 
-async fn send_msg<W>(write: &mut W, msg: &DesktopMessage) -> Result<(), String>
-where
-    W: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
-{
+async fn send_msg(
+    write: &super::relay_ws::SharedWsWrite,
+    msg: &DesktopMessage,
+) -> Result<(), String> {
     let text = serde_json::to_string(msg).map_err(|e| e.to_string())?;
     write
+        .lock()
+        .await
         .send(Message::Text(text))
         .await
         .map_err(|e| e.to_string())
@@ -685,7 +804,7 @@ where
 /// Build a temporary chat session and run the SSE stream, writing tokens
 /// directly to the WebSocket. Returns the write half so the connection can
 /// continue handling further messages.
-async fn handle_chat_turn<W>(
+async fn handle_chat_turn(
     provider_id_str: String,
     model: String,
     messages: Vec<crate::chat::providers::ChatMessage>,
@@ -695,11 +814,8 @@ async fn handle_chat_turn<W>(
     app: &AppHandle,
     db: &Arc<Mutex<Connection>>,
     chat_mgr: &Arc<ChatManager>,
-    mut write: W,
-) -> Result<W, (String, W)>
-where
-    W: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
-{
+    write: &super::relay_ws::SharedWsWrite,
+) -> Result<(), String> {
     // Resolve provider id.
     let provider_id = match provider_id_str.as_str() {
         "anthropic" => ChatProviderId::Anthropic,
@@ -708,7 +824,7 @@ where
         "openai_compatible" => ChatProviderId::OpenAICompatible,
         "openrouter" => ChatProviderId::OpenRouter,
         "local_gguf" => ChatProviderId::LocalGguf,
-        other => return Err((format!("unknown provider: {other}"), write)),
+        other => return Err(format!("unknown provider: {other}")),
     };
 
     // On-demand local-model warm-up (option b): if the phone selected a GGUF
@@ -720,7 +836,7 @@ where
                 chat_session_id: "warmup".to_string(),
                 token: "[STATUS] Starting local model…".to_string(),
             };
-            let _ = send_msg(&mut write, &status_msg).await;
+            let _ = send_msg(&write, &status_msg).await;
 
             match warm_up_local_model(app, path, &model).await {
                 Ok(_base_url) => {
@@ -735,8 +851,8 @@ where
                         chat_session_id: "warmup".to_string(),
                         error: format!("Failed to start local model: {e}"),
                     };
-                    let _ = send_msg(&mut write, &err).await;
-                    return Err((format!("warm-up failed: {e}"), write));
+                    let _ = send_msg(&write, &err).await;
+                    return Err(format!("warm-up failed: {e}"));
                 }
             }
         }
@@ -750,10 +866,7 @@ where
         match secrets::get_chat_api_key(&conn, &provider_id_str) {
             Some(k) => k,
             None => {
-                return Err((
-                    format!("no API key configured for provider: {provider_id_str}"),
-                    write,
-                ));
+                return Err(format!("no API key configured for provider: {provider_id_str}"));
             }
         }
     };
@@ -763,7 +876,7 @@ where
         let conn = db.lock();
         match db::get_setting(&conn, &format!("chat.{provider_id_str}.base_url")) {
             Ok(v) => v,
-            Err(e) => return Err((e.to_string(), write)),
+            Err(e) => return Err(e.to_string()),
         }
     };
 
@@ -772,15 +885,18 @@ where
         let conn = db.lock();
         match db::create_chat_session(&conn, &provider_id_str, &model) {
             Ok(cs) => cs.id,
-            Err(e) => return Err((e.to_string(), write)),
+            Err(e) => return Err(e.to_string()),
         }
     };
+    // Drop guard removes the temp session + its message rows on every exit
+    // path below (request/build/stream errors included), not just success.
+    let _session_cleanup = TempChatSessionCleanup::new(Arc::clone(db), chat_session_id.clone());
 
     // Persist the latest user message.
     if let Some(last) = messages.last() {
         if last.role == "user" {
             let conn = db.lock();
-            let _ = db::add_chat_message(&conn, &chat_session_id, "user", &last.content, None, None, None);
+            let _ = db::add_chat_message(&conn, &chat_session_id, "user", &last.content, None, None, None, None, None, None, None, None, None);
             let _ = db::touch_chat_session(&conn, &chat_session_id);
         }
     }
@@ -805,38 +921,48 @@ where
     // Build and send the HTTP request.
     let request = match provider.build_request(&client, &chat_req, &api_key, base_url.as_deref()) {
         Ok(r) => r,
-        Err(e) => return Err((format!("failed to build request: {e}"), write)),
+        Err(e) => return Err(format!("failed to build request: {e}")),
     };
 
     let response = match request.send().await {
         Ok(r) => r,
-        Err(e) => return Err((format!("request failed: {e}"), write)),
+        Err(e) => return Err(format!("request failed: {e}")),
     };
 
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err((format!("HTTP {status}: {body}"), write));
+        return Err(format!("HTTP {status}: {body}"));
     }
 
     // Stream SSE chunks and forward tokens over the WebSocket.
     use futures_util::StreamExt;
     let mut stream = response.bytes_stream();
     let mut buf = String::new();
+    // Partial-line carry-over (same fix as chat::run_chat_stream): TCP chunks
+    // split SSE `data:` lines arbitrarily, and parse_sse_chunk is fatal on a
+    // half line. Only complete newline-terminated lines may be parsed.
+    let mut pending = String::new();
     let mut full_text = String::new();
     let mut in_think = false;
 
-    while let Some(chunk_result) = stream.next().await {
+    'chunks: while let Some(chunk_result) = stream.next().await {
         let chunk = match chunk_result {
             Ok(c) => c,
             Err(e) => {
-                let _ = send_done(&mut write, &sid, None).await;
-                return Err((format!("stream read error: {e}"), write));
+                let _ = send_done(&write, &sid, None).await;
+                return Err(format!("stream read error: {e}"));
             }
         };
-        let text = String::from_utf8_lossy(&chunk);
+        pending.push_str(&String::from_utf8_lossy(&chunk));
 
-        for line in text.lines() {
+        let mut complete_lines: Vec<String> = Vec::new();
+        while let Some(nl) = pending.find('\n') {
+            complete_lines.push(pending.drain(..=nl).collect());
+        }
+
+        for line in complete_lines {
+            let line = line.trim_end();
             match provider.parse_sse_chunk(line, &mut buf) {
                 Ok((Some(token), false)) => {
                     let mut out = String::new();
@@ -858,20 +984,20 @@ where
                         chat_session_id: sid.clone(),
                         token: out,
                     };
-                    if send_msg(&mut write, &token_msg).await.is_err() {
+                    if send_msg(&write, &token_msg).await.is_err() {
                         // Client disconnected — stop streaming but still clean up.
                         let _ = stream.next().await;
-                        break;
+                        break 'chunks;
                     }
                 }
                 Ok((_, true)) => {
                     // Stream done — usage will be parsed from buffer below.
-                    break;
+                    break 'chunks;
                 }
                 Ok((None, false)) => {}
                 Err(e) => {
-                    let _ = send_done(&mut write, &sid, None).await;
-                    return Err((format!("SSE parse error: {e}"), write));
+                    let _ = send_done(&write, &sid, None).await;
+                    return Err(format!("SSE parse error: {e}"));
                 }
             }
         }
@@ -883,7 +1009,7 @@ where
             chat_session_id: sid.clone(),
             token: "</think>".to_string(),
         };
-        let _ = send_msg(&mut write, &token_msg).await;
+        let _ = send_msg(&write, &token_msg).await;
     }
 
     let usage = provider.parse_usage(&buf);
@@ -905,6 +1031,7 @@ where
             usage.as_ref().and_then(|u| {
                 if u.input_tokens > 0 || u.output_tokens > 0 { Some(u.cost_usd) } else { None }
             }),
+            None, None, None, None, None, None,
         );
         let _ = db::touch_chat_session(&conn, &sid);
     }
@@ -918,21 +1045,17 @@ where
             cost_usd: u.cost_usd,
         }),
     };
-    let _ = send_msg(&mut write, &done_msg).await;
+    let _ = send_msg(&write, &done_msg).await;
 
-    // Clean up temporary session.
-    {
-        let conn = db.lock();
-        let _ = db::delete_chat_session(&conn, &sid);
-    }
-
-    Ok(write)
+    // Temp session cleanup happens via the guard on scope exit.
+    Ok(())
 }
 
-async fn send_done<W>(write: &mut W, sid: &str, usage: Option<MobileChatUsage>) -> Result<(), String>
-where
-    W: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
-{
+async fn send_done(
+    write: &super::relay_ws::SharedWsWrite,
+    sid: &str,
+    usage: Option<MobileChatUsage>,
+) -> Result<(), String> {
     let msg = DesktopMessage::ChatDone {
         chat_session_id: sid.to_string(),
         usage,

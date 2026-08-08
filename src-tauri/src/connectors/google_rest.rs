@@ -307,6 +307,30 @@ async fn post_json(
     serde_json::from_str(&body).map_err(|e| format!("{product} {op} response not JSON: {e}"))
 }
 
+async fn put_json(
+    http: &reqwest::Client,
+    url: &str,
+    token: &str,
+    payload: &serde_json::Value,
+    product: &str,
+    op: &str,
+) -> Result<serde_json::Value, String> {
+    let resp = http
+        .put(url)
+        .bearer_auth(token)
+        .json(payload)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("{product} {op} failed: {e}"))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("{product} {op} HTTP {status}: {body}"));
+    }
+    serde_json::from_str(&body).map_err(|e| format!("{product} {op} response not JSON: {e}"))
+}
+
 async fn delete_req(
     http: &reqwest::Client,
     url: &str,
@@ -497,6 +521,29 @@ fn doc_to_text(body: &serde_json::Value) -> String {
     out
 }
 
+/// Build the batchUpdate requests for replace-whole-document: delete all
+/// existing content EXCEPT the body's mandatory final newline, then insert
+/// the new text at index 1. A Docs document always ends with a structural
+/// "\n" at [end-1, end), and a deleteContentRange that includes it is
+/// rejected by batchUpdate with a generic 400 — so the delete stops one
+/// short (M18). `end > 2` guards so the delete range [1, end-1) is
+/// non-empty (a doc holding only the newline has end == 2 → nothing to
+/// delete, just insert).
+fn build_replace_doc_requests(end: u64, text: &str) -> Vec<serde_json::Value> {
+    let mut requests = Vec::new();
+    if end > 2 {
+        requests.push(serde_json::json!({
+            "deleteContentRange": {
+                "range": { "startIndex": 1, "endIndex": end - 1 }
+            }
+        }));
+    }
+    requests.push(serde_json::json!({
+        "insertText": { "location": { "index": 1 }, "text": text }
+    }));
+    requests
+}
+
 async fn docs_call(
     http: &reqwest::Client,
     token: &str,
@@ -504,8 +551,7 @@ async fn docs_call(
     args: &serde_json::Value,
 ) -> Result<String, String> {
     const BASE: &str = "https://docs.googleapis.com/v1/documents";
-    match name {
-        "gdocs_read_doc" => {
+    match name {        "gdocs_read_doc" => {
             let doc_id = str_arg(args, "document_id")
                 .ok_or_else(|| "gdocs_read_doc: missing `document_id` argument".to_string())?;
             let json = get_json(
@@ -548,17 +594,7 @@ async fn docs_call(
                 .and_then(|i| i.get("endIndex"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1);
-            let mut requests = Vec::new();
-            if end > 1 {
-                requests.push(serde_json::json!({
-                    "deleteContentRange": {
-                        "range": { "startIndex": 1, "endIndex": end }
-                    }
-                }));
-            }
-            requests.push(serde_json::json!({
-                "insertText": { "location": { "index": 1 }, "text": text }
-            }));
+            let requests = build_replace_doc_requests(end, text);
             let json = post_json(
                 http,
                 &format!("{BASE}/{}:batchUpdate", urlencoding::encode(doc_id)),
@@ -652,7 +688,8 @@ async fn sheets_call(
                 urlencoding::encode(id),
                 urlencoding::encode(range)
             );
-            let json = post_json(
+            // Sheets values.update is PUT — POST fails every call (405/404).
+            let json = put_json(
                 http,
                 &url,
                 token,
@@ -1186,6 +1223,69 @@ mod tests {
             ]
         });
         assert_eq!(doc_to_text(&body), "Hello world\nSecond line\n");
+    }
+
+    #[test]
+    fn replace_doc_requests_never_delete_the_final_newline() {
+        // M18 regression: deleting [1, end) includes the doc's mandatory
+        // trailing newline, and batchUpdate rejects the whole request.
+        let reqs = build_replace_doc_requests(10, "fresh");
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(
+            reqs[0].pointer("/deleteContentRange/range/endIndex").and_then(|v| v.as_u64()),
+            Some(9),
+            "delete must stop one short of the structural newline"
+        );
+        assert_eq!(
+            reqs[1].pointer("/insertText/location/index").and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        // A doc holding only the newline (end == 2) or nothing (end == 1):
+        // no delete request at all — just the insert.
+        for end in [1, 2] {
+            let reqs = build_replace_doc_requests(end, "fresh");
+            assert_eq!(reqs.len(), 1, "end={end} must skip the delete");
+            assert!(reqs[0].get("insertText").is_some());
+        }
+    }
+
+    #[test]
+    fn put_json_sends_put_not_post() {
+        // M17 regression: Sheets values.update requires PUT; POST fails 405.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let seen = tauri::async_runtime::block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+            tauri::async_runtime::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let req = String::from_utf8_lossy(&buf).to_string();
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                    .await;
+                let _ = tx.send(req);
+            });
+            let http = reqwest::Client::new();
+            put_json(
+                &http,
+                &format!("http://127.0.0.1:{port}/values/A1"),
+                "tok",
+                &serde_json::json!({ "values": [[1]] }),
+                "sheets",
+                "update_values",
+            )
+            .await
+            .unwrap();
+            rx.await.unwrap()
+        });
+        let request_line = seen.lines().next().unwrap_or("");
+        assert!(request_line.starts_with("PUT "), "expected PUT, got: {request_line}");
+        assert!(
+            seen.to_ascii_lowercase().contains("authorization: bearer tok"),
+            "bearer token must ride along:\n{seen}"
+        );
     }
 
     #[test]

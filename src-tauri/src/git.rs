@@ -238,6 +238,8 @@ pub struct ChangedFile {
 /// path to (added, deleted). With `-z` the numbers stay TAB-separated and
 /// only the path is NUL-terminated (`<added>\t<deleted>\t<path>\0`), so we
 /// split on NUL first, then tabs. Binary entries print `-` and count as 0.
+/// Rename records are different: the path slot is empty (`<a>\t<d>\t\0`) and
+/// TWO NUL-terminated path tokens follow (old path, then new path).
 fn numstat_map(path: &Path) -> std::collections::HashMap<String, (u32, u32)> {
     let mut map = std::collections::HashMap::new();
     let out = match git_command(path, &["diff", "--numstat", "-z", "HEAD"]) {
@@ -245,13 +247,25 @@ fn numstat_map(path: &Path) -> std::collections::HashMap<String, (u32, u32)> {
         _ => return map,
     };
     let text = String::from_utf8_lossy(&out.stdout);
-    for token in text.split('\0') {
+    let mut tokens = text.split('\0');
+    while let Some(token) = tokens.next() {
+        if token.is_empty() {
+            continue;
+        }
         let mut parts = token.split('\t');
         let added = parts.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
         let deleted = parts.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
         let p = parts.collect::<Vec<_>>().join("\t");
         if !p.is_empty() {
             map.insert(p, (added, deleted));
+        } else {
+            // Rename record: consume the old-path token, key counts on the new.
+            tokens.next();
+            if let Some(new_path) = tokens.next() {
+                if !new_path.is_empty() {
+                    map.insert(new_path.to_string(), (added, deleted));
+                }
+            }
         }
     }
     map
@@ -298,6 +312,14 @@ pub fn get_changed_files(path: &Path) -> Vec<ChangedFile> {
     if !path.is_dir() || !is_git_repo(path) {
         return Vec::new();
     }
+    // Hard caps for pathological trees (a huge unignored directory like
+    // node_modules or build output inside the repo). Without them,
+    // `--untracked-files=all` enumerates every file and the per-untracked-file
+    // `git diff --no-index` below spawns ONE SUBPROCESS PER FILE — tens of
+    // thousands of git processes froze the whole app when such a project was
+    // selected. The diff panel can't usefully show more than this anyway.
+    const MAX_CHANGED_FILES: usize = 1000;
+    const MAX_UNTRACKED_LINE_COUNTS: usize = 50;
     // `-z` gives NUL-separated, C-quoted paths and avoids any ambiguity with
     // spaces/tabs/quotes in filenames. `--untracked-files=all` so newly-created
     // files in subdirs show up. We keep default rename detection so renames
@@ -314,6 +336,9 @@ pub fn get_changed_files(path: &Path) -> Vec<ChangedFile> {
     let mut files: Vec<ChangedFile> = Vec::new();
     let mut tokens = out.split('\0');
     while let Some(entry) = tokens.next() {
+        if files.len() >= MAX_CHANGED_FILES {
+            break;
+        }
         // Each entry starts with the 2-char XY status followed by a space, then
         // the path. With -z there is no trailing newline; an empty token means
         // we've consumed the final NUL.
@@ -347,14 +372,19 @@ pub fn get_changed_files(path: &Path) -> Vec<ChangedFile> {
     }
     // Per-file line counts: one `--numstat` call covers all tracked changes
     // (staged + unstaged), keyed by path. Untracked files aren't in that
-    // output, so count each with a cheap `--no-index` against /dev/null
-    // (rare — typically a handful at most).
+    // output, so count each with a cheap `--no-index` against /dev/null —
+    // but ONLY for a handful (see MAX_UNTRACKED_LINE_COUNTS): beyond that we
+    // leave the counts at 0 rather than spawn a subprocess per file.
     let tracked_counts = numstat_map(path);
+    let mut untracked_counted = 0usize;
     for file in files.iter_mut() {
         if file.kind == "U" {
-            if let Some((a, d)) = no_index_numstat(&path.join(&file.path)) {
-                file.added = a;
-                file.deleted = d;
+            if untracked_counted < MAX_UNTRACKED_LINE_COUNTS {
+                if let Some((a, d)) = no_index_numstat(&path.join(&file.path)) {
+                    file.added = a;
+                    file.deleted = d;
+                }
+                untracked_counted += 1;
             }
         } else if let Some((a, d)) = tracked_counts.get(&file.path) {
             file.added = *a;
@@ -510,6 +540,39 @@ mod tests {
         let fresh = files.iter().find(|f| f.path == "fresh.txt").expect("fresh entry");
         assert_eq!(fresh.added, 2);
         assert_eq!(fresh.deleted, 0);
+    }
+
+    /// Regression test: with `--numstat -z`, a rename record has an empty path
+    /// slot followed by TWO NUL-terminated tokens (old path, new path). The
+    /// parser used to consume only one, so a renamed+modified file showed 0/0
+    /// line counts (and the old path got a bogus 0/0 entry).
+    #[test]
+    fn get_changed_files_numstat_rename_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+        run_git(path, &["init"]).expect("init");
+        run_git(path, &["config", "user.email", "t@e"]).expect("email");
+        run_git(path, &["config", "user.name", "t"]).expect("name");
+        // Enough lines that a small edit still clears the rename-similarity bar.
+        std::fs::write(path.join("old.txt"), "a\nb\nc\nd\ne\nf\ng\nh\n").expect("seed");
+        run_git(path, &["add", "."]).expect("add");
+        run_git(path, &["commit", "-m", "init"]).expect("commit");
+        // Rename + small modification: drop "b", add "x".
+        run_git(path, &["mv", "old.txt", "renamed.txt"]).expect("mv");
+        std::fs::write(path.join("renamed.txt"), "a\nc\nd\ne\nf\ng\nh\nx\n").expect("modify");
+
+        let files = get_changed_files(path);
+        let renamed = files
+            .iter()
+            .find(|f| f.path == "renamed.txt")
+            .expect("renamed entry");
+        assert_eq!(renamed.added, 1, "rename record should keep its counts");
+        assert_eq!(renamed.deleted, 1, "rename record should keep its counts");
+        // The old path must not leak in as a bogus 0/0 numstat entry.
+        assert!(
+            !files.iter().any(|f| f.path == "old.txt"),
+            "old rename path should not appear as a changed file, got {files:?}"
+        );
     }
 
     /// porcelain_kind should map the two-letter codes to the single-letter

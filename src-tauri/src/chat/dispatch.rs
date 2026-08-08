@@ -40,9 +40,40 @@ pub(crate) fn emit_token(app: &AppHandle, sid: &str, token: &str, full: &mut Str
     );
 }
 
-/// Directory where generated artifacts are written (`<Documents>/Conduit`,
-/// falling back to home, then temp). Created on demand by the artifact writer.
+/// Setting key for the user-configured artifacts directory (Settings →
+/// Storage & Data). Empty/unset = default `<Documents>/Conduit`.
+pub(crate) const ARTIFACTS_DIR_SETTING_KEY: &str = "storage.artifactsDir";
+
+/// Resolve the user-configured artifacts directory from the DB setting.
+/// Returns None when unset/blank (or the read fails).
+pub(crate) fn configured_artifacts_dir(conn: &rusqlite::Connection) -> Option<std::path::PathBuf> {
+    match db::get_setting(conn, ARTIFACTS_DIR_SETTING_KEY) {
+        Ok(Some(dir)) => {
+            let dir = dir.trim();
+            if dir.is_empty() {
+                None
+            } else {
+                Some(std::path::PathBuf::from(dir))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Directory where generated artifacts are written: the configured
+/// `storage.artifactsDir` when set, else `<Documents>/Conduit` (falling back
+/// to home, then temp). Created if missing.
 pub(crate) fn artifacts_dir(app: &AppHandle) -> std::path::PathBuf {
+    if let Some(db) = app.try_state::<crate::DbState>() {
+        let configured = {
+            let conn = db.0.lock();
+            configured_artifacts_dir(&conn)
+        };
+        if let Some(dir) = configured {
+            let _ = std::fs::create_dir_all(&dir);
+            return dir;
+        }
+    }
     let base = app
         .path()
         .document_dir()
@@ -59,6 +90,13 @@ fn fs_target_path(name: &str, args: &Value) -> String {
     if name == tools::MOVE_FILE || name == tools::COPY_FILE {
         // For move/copy, the destination is the write-side — check that.
         args.get("dest")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    } else if name == tools::DOWNLOAD_FILE {
+        // download_file writes to `dest_path`, not `path`.
+        args.get("dest_path")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim()
@@ -497,6 +535,26 @@ pub(crate) async fn run_tool(
     // writes to disk, so it stays meaningful.
     if permission::is_system_tool(name) {
         let decision = permission::check_system_permission(mode, name);
+        // download_file's dest_path can be any absolute path the model chooses;
+        // a real download writes to disk the same way write_file does, so
+        // enforce the same `fs_roots` containment as the mutating FS tools.
+        // Without this gate, a prompt-injected model in AutoEdit/FullAuto
+        // could write to startup folders, overwriting trusted binaries on PATH,
+        // etc. The check is skipped when fs_roots is empty (already blocks
+        // mutating FS tools) so behavior for users who never grant roots is
+        // unchanged.
+        if name == tools::DOWNLOAD_FILE
+            && !permission::path_within_scope(
+                &fs_target_path(name, args),
+                &caps.fs_roots,
+            )
+        {
+            return format!(
+                "Error: {name} is gated — destination path is outside the granted roots. \
+                 Add the directory under Settings → Filesystem permissions \
+                 and retry, or pick a destination inside an already-granted root."
+            );
+        }
         if matches!(decision, permission::PermissionDecision::NeedsApproval) {
             return run_gated_system_tool(mgr, app, sid, name, args).await;
         }
@@ -527,6 +585,20 @@ pub(crate) async fn run_tool(
                  Add the directory under Settings → Filesystem permissions \
                  and retry, or pick a path inside an already-granted root."
             );
+        }
+        // move_file ALSO has to source from within a granted root: a move is
+        // copy+delete of the source, so checking only the destination let a
+        // FullAuto turn delete an arbitrary file anywhere on disk by moving
+        // it into a project. (copy_file stays dest-only — reads are unscoped.)
+        if name == tools::MOVE_FILE {
+            let src = args.get("src").and_then(|v| v.as_str()).unwrap_or("");
+            if !permission::path_within_scope(src, &caps.fs_roots) {
+                return format!(
+                    "Error: {name} is gated — source path is outside the granted roots. \
+                     Moving deletes the file at its source, so both ends of a move \
+                     must lie inside a granted root."
+                );
+            }
         }
     }
 

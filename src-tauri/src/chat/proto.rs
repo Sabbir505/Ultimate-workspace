@@ -245,6 +245,31 @@ pub(crate) fn tool_block(name: &str, args: &Value) -> String {
         json!({ "kind": "web", "title": format!("{verb} a web page"), "detail": s("url") })
     } else if name == tools::GET_SKILL {
         json!({ "kind": "tool", "title": "Loading skill", "detail": format!("/{}", s("slug")) })
+    } else if name == tools::WRITE_FILE || name == tools::EDIT_FILE {
+        // File edits get a rich payload so the UI can render an inline diff
+        // review card (filename, +/− stats, hunks, Accept/Reject) instead of
+        // a generic "Running tool …" step. The model's args carry the old/new
+        // content directly (find/replace for edit_file, full content for
+        // write_file), so hunks are computed client-side — no disk read-back.
+        let edit = if name == tools::WRITE_FILE {
+            json!({ "mode": "write", "content": sanitize(s("content")) })
+        } else if let Some(append) = args.get("append").and_then(|v| v.as_str()) {
+            json!({ "mode": "append", "append": sanitize(append.to_string()) })
+        } else {
+            json!({
+                "mode": "replace",
+                "find": sanitize(s("find")),
+                "replace": sanitize(s("replace")),
+            })
+        };
+        let verb = if name == tools::WRITE_FILE { "Writing" } else { "Editing" };
+        json!({
+            "kind": "edit",
+            "title": format!("{verb} file \"{}\"", s("path")),
+            "detail": s("path"),
+            "path": s("path"),
+            "edit": edit,
+        })
     } else if name == tools::RUN_CODE {
         let lang = args
             .get("language")

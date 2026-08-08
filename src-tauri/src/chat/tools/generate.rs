@@ -137,14 +137,15 @@ pub(super) fn generate_diagram(artifacts_dir: &Path, args: &Value) -> ToolOutcom
         return ToolOutcome::text("Error: generate_diagram requires non-empty \"html\".");
     }
 
-    // Prepend the sentinel marker (after the doctype, if present, so the file
-    // stays a valid HTML document). Falls back to prefixing the whole thing.
+    // Prepend the sentinel marker as the very first bytes of the file: the
+    // preview classifier (`read_artifact_preview`) detects diagrams via
+    // `starts_with(DIAGRAM_MARKER)`. A leading HTML comment does not affect
+    // doctype-based standards-mode parsing in modern browsers.
     let body = prepend_diagram_marker(html);
-    let full = format!("{DIAGRAM_MARKER}\n{body}");
 
     // Reuse the artifacts writer with the `html` format so we get the same
     // filename-sanitization, extension-handling, and dir-creation behavior.
-    let file = match artifacts::generate(artifacts_dir, "html", filename, None, &full) {
+    let file = match artifacts::generate(artifacts_dir, "html", filename, None, &body) {
         Ok(f) => f,
         Err(e) => return ToolOutcome::text(format!("generate_diagram failed: {e}")),
     };
@@ -178,18 +179,12 @@ pub(super) fn generate_diagram(artifacts_dir: &Path, args: &Value) -> ToolOutcom
     }
 }
 
-/// Place the diagram sentinel marker right after the doctype declaration so
-/// the document remains valid HTML while still carrying the marker at the top.
+/// Place the diagram sentinel marker at the very start of the file. The
+/// preview classifier checks the file's first bytes (`starts_with`), so the
+/// marker must precede even the doctype; a leading comment before the doctype
+/// still parses in standards mode in modern browsers.
 fn prepend_diagram_marker(html: &str) -> String {
-    let trimmed = html.trim_start();
-    if let Some(rest) = trimmed
-        .strip_prefix("<!doctype html>")
-        .or_else(|| trimmed.strip_prefix("<!DOCTYPE html>"))
-    {
-        format!("<!doctype html>\n{DIAGRAM_MARKER}\n{rest}")
-    } else {
-        format!("{DIAGRAM_MARKER}\n{trimmed}")
-    }
+    format!("{DIAGRAM_MARKER}\n{}", html.trim_start())
 }
 
 /// Lightweight, dependency-free structural check on diagram HTML. This is NOT
@@ -333,11 +328,26 @@ mod tests {
     }
 
     #[test]
-    fn prepend_marker_after_doctype() {
+    fn prepend_marker_places_marker_first() {
+        // The marker must be the file's first bytes (the preview classifier
+        // uses `starts_with`), even when the HTML starts with a doctype.
         let with_doctype = "<!doctype html><html><body>x</body></html>";
-        assert!(prepend_diagram_marker(with_doctype).contains("<!doctype html>\n<!-- conduit:diagram -->"));
+        assert!(prepend_diagram_marker(with_doctype).starts_with("<!-- conduit:diagram -->"));
         let no_doctype = "<html><body>x</body></html>";
         assert!(prepend_diagram_marker(no_doctype).starts_with("<!-- conduit:diagram -->"));
+    }
+
+    #[test]
+    fn generate_diagram_writes_marker_exactly_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let args = serde_json::json!({
+            "filename": "d.html",
+            "html": "<!doctype html><html><body><div>hi</div></body></html>",
+        });
+        let outcome = generate_diagram(tmp.path(), &args);
+        let path = outcome.artifact.expect("artifact ref").path;
+        let written = std::fs::read_to_string(path).unwrap();
+        assert_eq!(written.matches(DIAGRAM_MARKER).count(), 1, "marker written more than once:\n{written}");
     }
 
 }

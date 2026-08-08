@@ -27,6 +27,35 @@ pub fn home_dir() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+/// Containment check: is `path` equal to or nested under `prefix`?
+///
+/// Component-wise (via `Path::starts_with`) and case-insensitive on Windows.
+/// NEVER implement this as a lowercase string `starts_with`: a raw string
+/// prefix match lets a same-prefix SIBLING pass — with allowlisted root
+/// `D:\proj\app`, the path `D:\proj\app-old\secret` string-matches but is not
+/// under the root. This is the SECURITY boundary for `read_file_text`, the
+/// git commands, and model deletion, so the segment boundary is load-bearing.
+///
+/// Both sides should already be filesystem-canonicalized by the caller (this
+/// helper is lexicographic; it does not resolve symlinks or `..`).
+pub fn path_starts_with_ci(path: &std::path::Path, prefix: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    {
+        if path.starts_with(prefix) {
+            return true;
+        }
+        // Case-insensitive fallback, still component-wise: lowercase both
+        // sides, then compare whole path components (not a string prefix).
+        let lowered_path = path.to_string_lossy().to_lowercase();
+        let lowered_prefix = prefix.to_string_lossy().to_lowercase();
+        std::path::Path::new(&lowered_path).starts_with(std::path::Path::new(&lowered_prefix))
+    }
+    #[cfg(not(windows))]
+    {
+        path.starts_with(prefix)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,5 +80,30 @@ mod tests {
     #[cfg(not(windows))]
     fn passthrough_on_posix() {
         assert_eq!(strip_unc_prefix("/home/u/proj"), "/home/u/proj");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn ci_containment_requires_segment_boundary() {
+        use std::path::Path;
+        // Case-insensitive match of nested paths.
+        assert!(crate::util::path_starts_with_ci(
+            Path::new(r"D:\proj\app\src\main.rs"),
+            Path::new(r"d:\PROJ\app"),
+        ));
+        // The root itself matches.
+        assert!(crate::util::path_starts_with_ci(
+            Path::new(r"D:\proj\app"),
+            Path::new(r"d:\proj\app"),
+        ));
+        // Same-prefix SIBLINGS must NOT match (the load-bearing case).
+        assert!(!crate::util::path_starts_with_ci(
+            Path::new(r"D:\proj\app-old\x"),
+            Path::new(r"D:\proj\app"),
+        ));
+        assert!(!crate::util::path_starts_with_ci(
+            Path::new(r"D:\proj\apple\x"),
+            Path::new(r"D:\proj\app"),
+        ));
     }
 }

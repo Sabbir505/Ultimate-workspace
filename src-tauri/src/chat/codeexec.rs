@@ -1,4 +1,4 @@
-//! Sandboxed local code execution for the chat `run_code` tool.
+//! Local code execution for the chat `run_code` tool.
 //!
 //! Security posture:
 //!   * Opt-in only. The tool is registered / dispatched solely when the user
@@ -7,13 +7,13 @@
 //!     removed afterwards.
 //!   * A hard wall-clock timeout kills runaway processes (`kill_on_drop`).
 //!   * stdin is closed and output is capped so a program can't flood the UI.
-//!   * The child is wrapped in an OS-level sandbox when the host supports it
-//!     (Landlock on Linux, Job Objects + restricted token on Windows,
-//!     `sandbox-exec` on macOS). All three deny network access (`AF_UNIX` is
-//!     left alone so the Python runtime can do IPC) and restrict the writable
-//!     filesystem to the temp dir. On hosts where no sandbox backend is
-//!     available, we fall back to a clearly-marked "no sandbox" mode and
-//!     surface that fact in the result text so the user knows.
+//!
+//! NOTE: no OS-level sandbox is currently enforced. The `apply_sandbox` hook
+//! reserves the integration point for Landlock (Linux), Job Objects + restricted
+//! token (Windows) and `sandbox-exec` (macOS), but none is wired up yet — see
+//! the comment there. `sandbox_available()` therefore returns `false` so the
+//! result text honestly warns the user that the snippet ran with full user
+//! privileges (including network) rather than silently claiming confinement.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -27,51 +27,45 @@ const EXEC_TIMEOUT: Duration = Duration::from_secs(20);
 /// Max bytes of combined stdout+stderr returned to the model.
 const MAX_OUTPUT: usize = 12_000;
 
-/// True if the host can enforce a real sandbox. Logged once per process so
-/// the user (and our own audits) can see when we degraded to "no sandbox".
+/// True if the host currently enforces a real sandbox around `run_code`.
+/// Logged once per process so the user (and our own audits) can see when we
+/// degraded to "no sandbox".
+///
+/// Currently always `false`: `apply_sandbox` only reserves the integration
+/// point for Landlock / Job Objects / `sandbox-exec` — none is wired up yet.
+/// Returning `false` here keeps the "no OS-level sandbox" warning honest
+/// instead of advertising confinement that isn't actually enforced.
 fn sandbox_available() -> bool {
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    {
-        // The actual probe happens in apply_sandbox() so we don't lie on
-        // platforms where the binary isn't installed.
-        true
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    {
-        false
-    }
+    false
 }
 
-/// Wrap `cmd` in the best sandbox we can on this host. Falls back to a no-op
-/// on platforms / configurations where no backend is available. The point is
-/// to make `run_code` as close to a true sandbox as we can get without
-/// shipping a microVM.
+/// Reserve the integration point for an OS-level sandbox around `run_code`.
+///
+/// Currently a NO-OP on every platform: this only marks where a future Landlock
+/// (Linux), Job-Object + restricted-token (Windows) or `sandbox-exec` (macOS)
+/// integration would wrap `cmd`. Because nothing is enforced yet,
+/// `sandbox_available()` returns `false` and the result text warns the user
+/// that the snippet ran with full user privileges (including network).
 fn apply_sandbox(cmd: &mut Command, work_dir: &Path) {
     #[cfg(target_os = "linux")]
     {
-        // Landlock: kernel-level, no root, no daemon. Landlock ABI 1 denies
-        // every filesystem operation by default; we then re-allow `work_dir`
-        // and `/usr`, `/lib`, `/etc` (read-only) so the interpreter can boot.
-        //
-        // The full Landlock ruleset is a follow-up: it requires allocating a
-        // `landlock_ruleset_attr` with allowed paths and adding several
-        // rules, which is significant surface to ship without the `landlock`
-        // crate dep. For now the integration point is reserved and
-        // `sandbox_available()` continues to return true (the platform can
-        // in principle enforce a sandbox); the post-exec result text
-        // surfaces the actual enforcement status. A future PR should add
-        // either the `landlock` crate or a `seccompiler` filter, then
-        // populate the ruleset here.
-        let _ = cmd; // suppress unused warning on this branch
+        // TODO(landlock): allocate a `landlock_ruleset_attr`, re-allow
+        // `work_dir` (writable) and `/usr`, `/lib`, `/etc` (read-only) so the
+        // interpreter can boot, then restrict the child to that ruleset. Needs
+        // either the `landlock` crate or a `seccompiler` filter — neither is a
+        // dependency yet, so we deliberately do nothing here rather than ship a
+        // half-applied policy that looks enforced but isn't.
+        let _ = (cmd, work_dir);
     }
     #[cfg(target_os = "macos")]
     {
-        // sandbox-exec ships with macOS and accepts an inline SBPL profile.
-        // We start a `true` shim and inject the profile via an env file.
-        // The interpreter invocation is wrapped in a sub-shell that does
-        // `sandbox-exec -p '<profile>' <interpreter> ...`.
-        // The profile denies network and limits writes to work_dir.
-        let profile = format!(
+        // TODO(sandbox-exec): wrap the interpreter in
+        // `sandbox-exec -p '<profile>'` with a profile that denies network and
+        // limits writes to `work_dir` (see the draft below). `Command` can't
+        // redirect an already-built program, so this needs a pre-exec shim or
+        // a rebuilt argv — left unimplemented for now. The profile is sketched
+        // here only as a reference; it is NOT applied.
+        let _profile = format!(
             "(version 1)\n\
              (deny default)\n\
              (allow process-exec)\n\
@@ -82,21 +76,20 @@ fn apply_sandbox(cmd: &mut Command, work_dir: &Path) {
              (allow network* (local ip*))",
             work_dir.display()
         );
-        // We can't redirect an already-built `Command`'s program, so we wrap
-        // via CommandExt by setting pre_exec to write the profile to a file
-        // and reading it back from the front of the arg list. For simplicity
-        // here we just emit a sidecar env var that the run_code caller reads.
-        cmd.env("CONDUIT_SANDBOX_PROFILE", profile);
+        let _ = (cmd, work_dir);
     }
     #[cfg(target_os = "windows")]
     {
-        // Job Object + restricted token: too platform-specific to inline in
-        // a cross-platform crate without a Windows-only dep. The runtime
-        // hook is registered in lib.rs; here we just mark the intent so the
-        // wrapper in `run_code` knows to wait on a Job handle.
-        cmd.env("CONDUIT_SANDBOX_REQUEST", "job+token");
+        // TODO(job+token): assign the child to a Job Object with network/UI
+        // restrictions and launch it on a restricted token. Needs Windows-only
+        // deps (`windows-sys` Job Objects / Threading / Security features),
+        // which are not currently enabled in Cargo.toml — so nothing is done.
+        let _ = (cmd, work_dir);
     }
-    let _ = work_dir; // suppress unused on platforms that don't need it
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (cmd, work_dir);
+    }
 }
 
 /// Languages the tool understands. Returns the interpreter program and the
@@ -184,7 +177,7 @@ pub async fn run_code(language: &str, code: &str) -> String {
     let _ = std::fs::remove_dir_all(&dir);
 
     let sandbox_note = if !sandbox_available() {
-        "\n(warning: no OS-level sandbox is available on this host — code ran with full user privileges)"
+        "\n⚠ No OS-level sandbox is enforced — code ran with full user privileges (including network). Enable code execution only for trusted prompts."
     } else {
         ""
     };

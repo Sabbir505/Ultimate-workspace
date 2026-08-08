@@ -389,6 +389,28 @@ fn pushstate_injection_js(pane_id: &str, tab_id: &str) -> String {
     )
 }
 
+/// RAII guard for the `in_flight` create marker: removes the label on drop so
+/// EVERY exit path of `create` (success and every `?` error return) releases
+/// it. Without this, an early error return leaked the marker and every later
+/// create for that pane was silently skipped — the pane sat on
+/// "Opening browser…" forever.
+struct InFlightGuard<'a> {
+    in_flight: &'a Mutex<std::collections::HashSet<String>>,
+    label: String,
+}
+
+impl<'a> InFlightGuard<'a> {
+    fn new(in_flight: &'a Mutex<std::collections::HashSet<String>>, label: String) -> Self {
+        Self { in_flight, label }
+    }
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.in_flight.lock().remove(&self.label);
+    }
+}
+
 pub struct BrowserManager {
     app: AppHandle,
     webviews: Mutex<HashMap<String, BrowserPane>>,
@@ -468,22 +490,31 @@ impl BrowserManager {
             }
             inf.insert(label.clone());
         }
+        // Releases the in-flight marker on every exit path below — success and
+        // all `?` error returns — so a failed create can't wedge the pane on
+        // "Opening browser…" with later creates silently skipped.
+        let _in_flight_guard = InFlightGuard::new(&self.in_flight, label.clone());
 
         ensure_supported().map_err(|e| {
             eprintln!("[conduit:browser] ensure_supported FAILED: {e}");
-            self.in_flight.lock().remove(&label);
             e
         })?;
 
-        // Replacing an existing tab: close the old webview first.
+        // Replacing an existing tab: close the old webview first. `close` is a
+        // WebView2 controller call, and this method runs on an async worker
+        // thread — controller calls from a non-UI thread cause access
+        // violations / hangs, so dispatch it to the main thread. (We inline
+        // the removal instead of calling `self.close`, which would also strip
+        // the in-flight marker the guard above now owns.)
         {
-            let map = self.webviews.lock();
-            if map.contains_key(&label) {
-                drop(map);
-                self.close(pane_id, tab_id).map_err(|e| {
-                    eprintln!("[conduit:browser] close(existing) FAILED: {e}");
-                    e
-                })?;
+            let old = self.webviews.lock().remove(&label);
+            if let Some(pane) = old {
+                eprintln!("[conduit:browser] create replacing existing label={label} — closing old webview on main thread");
+                self.run_main_thread_call(move || pane.close().map_err(|e| e.to_string()))
+                    .map_err(|e| {
+                        eprintln!("[conduit:browser] close(existing) FAILED: {e}");
+                        e
+                    })?;
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
@@ -509,8 +540,19 @@ impl BrowserManager {
         self.webviews.lock().insert(label.clone(), pane);
         self.pane_visible.lock().insert(pane_id.to_string(), true);
         self.pane_active_tab.lock().insert(pane_id.to_string(), tab_id.to_string());
-        self.navigate(pane_id, tab_id, url)?;
-        self.in_flight.lock().remove(&label);
+
+        // The navigate controller call must run on the main thread too (this
+        // method runs on an async worker) — same WebView2 constraint as
+        // add_child above.
+        let (nav_pane, parsed) = self.prepare_navigate(pane_id, tab_id, url)?;
+        self.run_main_thread_call(move || {
+            nav_pane.webview.navigate(parsed).map_err(|e| e.to_string())
+        })?;
+        self.spawn_post_nav_inject(pane_id, tab_id);
+
+        // Hand keyboard focus back to the main webview: the freshly-attached
+        // WebView2 child grabs it, stealing keystrokes from the chat composer.
+        self.refocus_main_webview();
         Ok(())
     }
 
@@ -600,10 +642,30 @@ impl BrowserManager {
             let pos = LogicalPosition::new(rect.x, rect.y);
             let size = LogicalSize::new(rect.width, rect.height);
             let label_owned = label.clone();
-            self.app.run_on_main_thread(move || {
-                let res = window_ref
-                    .add_child(builder, pos, size)
-                    .map_err(|e| format!("failed to create browser webview: {e}"));
+            let _ = self.app.run_on_main_thread(move || {
+                // wry/webview2-com can PANIC inside add_child (WebView2
+                // controller init failure, duplicate-label race). Letting that
+                // unwind through the tao main event loop kills the whole
+                // process, so catch it and convert to the normal Err path —
+                // the frontend then engages its iframe fallback.
+                let res = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    window_ref
+                        .add_child(builder, pos, size)
+                        .map_err(|e| format!("failed to create browser webview: {e}"))
+                })) {
+                    Ok(res) => res,
+                    Err(payload) => {
+                        let detail = if let Some(s) = payload.downcast_ref::<&str>() {
+                            (*s).to_string()
+                        } else if let Some(s) = payload.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "unknown panic".to_string()
+                        };
+                        eprintln!("[conduit:browser] add_child PANICKED on main thread: {detail}");
+                        Err(format!("browser webview creation panicked: {detail}"))
+                    }
+                };
                 match &res {
                     Ok(_) => eprintln!("[conduit:browser] add_child OK on main thread for label={label_owned}"),
                     Err(msg) => eprintln!("[conduit:browser] add_child FAILED on main thread: {msg}"),
@@ -639,7 +701,7 @@ impl BrowserManager {
             let label_for_win = label.clone();
             let pos = LogicalPosition::new(abs_x, abs_y);
             let size = LogicalSize::new(rect.width.max(1.0), rect.height.max(1.0));
-            self.app.run_on_main_thread(move || {
+            let _ = self.app.run_on_main_thread(move || {
                 // Re-resolve the main window position on the main thread so
                 // the value is current (the previous read may have raced with
                 // a recent window-move event).
@@ -700,7 +762,57 @@ impl BrowserManager {
         }
     }
 
+    /// Run a webview controller call on the main thread and block the calling
+    /// worker until it completes — the same dispatch pattern `add_child` uses.
+    /// WebView2 controller calls from a non-UI thread cause access violations
+    /// / hangs, so async-worker code paths must funnel controller calls
+    /// through here. MUST NOT be called from the main thread itself (the
+    /// queued closure would never run while we block on `recv` — deadlock).
+    fn run_main_thread_call<F>(&self, f: F) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<(), String> + Send + 'static,
+    {
+        let (tx, rx) = mpsc::sync_channel::<Result<(), String>>(1);
+        let _ = self.app.run_on_main_thread(move || {
+            let _ = tx.send(f());
+        });
+        match rx.recv() {
+            Ok(res) => res,
+            Err(_) => Err("main thread dropped browser webview call".to_string()),
+        }
+    }
+
+    /// Hand keyboard focus back to the main webview after a browser-pane
+    /// transition (create / navigate / show): appearing WebView2 children grab
+    /// focus, which steals keystrokes from the chat composer. Queued (not
+    /// blocking) so it's safe from both the main thread and async workers.
+    fn refocus_main_webview(&self) {
+        let app = self.app.clone();
+        let _ = self.app.run_on_main_thread(move || {
+            if let Some(w) = app.get_webview("main") {
+                let _ = w.set_focus();
+            }
+        });
+    }
+
     pub fn navigate(&self, pane_id: &str, tab_id: &str, url: &str) -> Result<(), String> {
+        let (pane, parsed) = self.prepare_navigate(pane_id, tab_id, url)?;
+        pane.webview.navigate(parsed)
+            .map_err(|e| e.to_string())?;
+        self.spawn_post_nav_inject(pane_id, tab_id);
+        self.refocus_main_webview();
+        Ok(())
+    }
+
+    /// Shared first half of `navigate`: validate the URL, mark the pane active
+    /// and resolve the pane handle. Split out so `create` (an async worker)
+    /// can dispatch the controller `navigate` call itself on the main thread.
+    fn prepare_navigate(
+        &self,
+        pane_id: &str,
+        tab_id: &str,
+        url: &str,
+    ) -> Result<(BrowserPane, tauri::Url), String> {
         ensure_supported()?;
         let parsed: tauri::Url = url
             .parse()
@@ -709,12 +821,16 @@ impl BrowserManager {
         self.pane_active_tab.lock().insert(pane_id.to_string(), tab_id.to_string());
         let label = browser_label(pane_id, tab_id);
         let pane = self.get(&label)?;
-        pane.webview.navigate(parsed)
-            .map_err(|e| e.to_string())?;
-        // Inject the pushState monkey-patch after a delay so the new page's
-        // DOM has loaded. The eval fires on whatever document is current.
+        Ok((pane, parsed))
+    }
+
+    /// Shared second half of `navigate`: inject the pushState monkey-patch
+    /// after a delay so the new page's DOM has loaded. The eval fires on
+    /// whatever document is current.
+    fn spawn_post_nav_inject(&self, pane_id: &str, tab_id: &str) {
         let pid = pane_id.to_string();
         let tid = tab_id.to_string();
+        let label = browser_label(pane_id, tab_id);
         let app = self.app.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(1));
@@ -727,7 +843,6 @@ impl BrowserManager {
                 let _ = w.eval(BRIDGE_OVERLAY_JS);
             }
         });
-        Ok(())
     }
 
     /// Back/forward/reload drive the webview's REAL history via JS eval —
@@ -791,7 +906,13 @@ impl BrowserManager {
             .cloned()
             .ok_or_else(|| format!("no browser webview with label {label}"))?;
         let res = if visible { pane.show() } else { pane.hide() };
-        res.map_err(|e| e.to_string())
+        let out = res.map_err(|e| e.to_string());
+        if visible && out.is_ok() {
+            // Showing the pane lets the WebView2 child grab keyboard focus —
+            // hand it back to the main webview so the composer keeps typing.
+            self.refocus_main_webview();
+        }
+        out
     }
 
     /// Idempotent close — closing an unknown tab is a no-op (the frontend

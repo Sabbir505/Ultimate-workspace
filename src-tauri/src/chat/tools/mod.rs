@@ -15,6 +15,9 @@ use super::codeexec;
 
 mod search;
 use search::{fetch_url, web_search};
+/// Re-exported so `download_task` (chat/tasks.rs) can reuse the SSRF guard
+/// (host_blocked / is_blocked_ip) instead of duplicating it.
+pub(crate) use search::{host_blocked, is_blocked_ip};
 
 mod generate;
 use generate::{generate_document, generate_diagram, generate_file};

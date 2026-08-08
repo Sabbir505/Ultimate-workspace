@@ -6,26 +6,49 @@
 //! so a user's hand-maintained `.mcp.json` is never clobbered) and surfaced to
 //! Claude Code via its `--mcp-config <path>` flag.
 //!
-//! Kimi Code / OpenCode: `.mcp.json` is Claude Code's convention. We write the
-//! file regardless (best-effort) — if a harness ignores `--mcp-config`, the
-//! file is inert and that session simply has no browser tools (acceptable v1;
-//! logged in BUILD_LOG.md).
+//! Kimi Code takes the same `.mcp.json` via its `--mcp-config-file` flag.
+//! OpenCode has no such flag — it reads MCP servers from an opencode.json
+//! "mcp" section, so `write_opencode_config` writes that shape into the same
+//! Conduit-owned dir and spawns point at it via the `OPENCODE_CONFIG` env var.
 
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
 /// Build the `.mcp.json` content for a project: registers `conduit-browser`
-/// with the binary path + the project id + WS port as env vars. The binary
-/// reads `CONDUIT_PROJECT_ID` and `CONDUIT_WS_PORT` on startup.
-pub fn mcp_config_json(mcp_binary_path: &str, project_id: &str, ws_port: u16) -> Value {
+/// with the binary path + the project id + WS port + WS auth token as env
+/// vars. The binary reads `CONDUIT_PROJECT_ID`, `CONDUIT_WS_PORT` and
+/// `CONDUIT_MCP_AUTH_TOKEN` on startup. The token rides this per-server env
+/// block so only the MCP child process inherits it (never process-wide).
+pub fn mcp_config_json(mcp_binary_path: &str, project_id: &str, ws_port: u16, auth_token: &str) -> Value {
     json!({
         "mcpServers": {
             "conduit-browser": {
                 "command": mcp_binary_path,
                 "env": {
                     "CONDUIT_PROJECT_ID": project_id,
-                    "CONDUIT_WS_PORT": ws_port.to_string()
+                    "CONDUIT_WS_PORT": ws_port.to_string(),
+                    "CONDUIT_MCP_AUTH_TOKEN": auth_token
+                }
+            }
+        }
+    })
+}
+
+/// Build the OpenCode-format config for a project: OpenCode has no CLI flag
+/// for MCP servers — it reads them from an `opencode.json` "mcp" section.
+/// We write a Conduit-owned file and point the spawn at it via the
+/// `OPENCODE_CONFIG` env var (never touching the project's own opencode.json).
+pub fn opencode_config_json(mcp_binary_path: &str, project_id: &str, ws_port: u16, auth_token: &str) -> Value {
+    json!({
+        "mcp": {
+            "conduit-browser": {
+                "type": "local",
+                "command": [mcp_binary_path],
+                "environment": {
+                    "CONDUIT_PROJECT_ID": project_id,
+                    "CONDUIT_WS_PORT": ws_port.to_string(),
+                    "CONDUIT_MCP_AUTH_TOKEN": auth_token
                 }
             }
         }
@@ -116,7 +139,7 @@ pub fn write_mcp_config(
 ) -> Option<PathBuf> {
     let bin = mcp_binary_path()?;
     let bin_str = bin.to_string_lossy().replace('\\', "/");
-    let cfg = mcp_config_json(&bin_str, project_id, ws_port);
+    let cfg = mcp_config_json(&bin_str, project_id, ws_port, crate::browser_mcp::mcp_auth_token());
     let mcp_dir = data_dir.join("mcp");
     if let Err(e) = std::fs::create_dir_all(&mcp_dir) {
         eprintln!("[conduit:mcp] failed to create mcp dir: {e}");
@@ -136,17 +159,58 @@ pub fn write_mcp_config(
     Some(path)
 }
 
+/// Write the OpenCode-format config (`<data_dir>/mcp/<project_id>.opencode.json`)
+/// so an opencode spawn pointed at it via `OPENCODE_CONFIG` picks up the
+/// conduit-browser MCP server. Same non-fatal semantics as write_mcp_config.
+pub fn write_opencode_config(
+    data_dir: &std::path::Path,
+    project_id: &str,
+    ws_port: u16,
+) -> Option<PathBuf> {
+    let bin = mcp_binary_path()?;
+    let bin_str = bin.to_string_lossy().replace('\\', "/");
+    let cfg = opencode_config_json(&bin_str, project_id, ws_port, crate::browser_mcp::mcp_auth_token());
+    let mcp_dir = data_dir.join("mcp");
+    if let Err(e) = std::fs::create_dir_all(&mcp_dir) {
+        eprintln!("[conduit:mcp] failed to create mcp dir: {e}");
+        return None;
+    }
+    let safe = project_id.chars().map(|c| {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }
+    }).collect::<String>();
+    let path = mcp_dir.join(format!("{safe}.opencode.json"));
+    let pretty = serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".into());
+    if let Err(e) = std::fs::write(&path, pretty) {
+        eprintln!("[conduit:mcp] failed to write opencode config at {}: {e}", path.display());
+        return None;
+    }
+    Some(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn mcp_config_json_shapes_server_and_env() {
-        let v = mcp_config_json("C:/app/conduit-browser-mcp.exe", "proj-123", 7681);
+        let v = mcp_config_json("C:/app/conduit-browser-mcp.exe", "proj-123", 7681, "tok-abc");
         let server = &v["mcpServers"]["conduit-browser"];
         assert_eq!(server["command"], "C:/app/conduit-browser-mcp.exe");
         assert_eq!(server["env"]["CONDUIT_PROJECT_ID"], "proj-123");
         assert_eq!(server["env"]["CONDUIT_WS_PORT"], "7681");
+        // WS auth token rides the per-server env block, not the process env.
+        assert_eq!(server["env"]["CONDUIT_MCP_AUTH_TOKEN"], "tok-abc");
+    }
+
+    #[test]
+    fn opencode_config_json_shapes_local_server() {
+        let v = opencode_config_json("C:/app/conduit-browser-mcp.exe", "proj-123", 7681, "tok-abc");
+        let server = &v["mcp"]["conduit-browser"];
+        assert_eq!(server["type"], "local");
+        assert_eq!(server["command"][0], "C:/app/conduit-browser-mcp.exe");
+        assert_eq!(server["environment"]["CONDUIT_PROJECT_ID"], "proj-123");
+        assert_eq!(server["environment"]["CONDUIT_WS_PORT"], "7681");
+        assert_eq!(server["environment"]["CONDUIT_MCP_AUTH_TOKEN"], "tok-abc");
     }
 
     #[test]
@@ -156,7 +220,7 @@ mod tests {
         // mcp_binary_path() returns None in CI without the binary built, so we
         // can't assert the full path here; instead verify the config-shape
         // helper is what gets written by checking the JSON builder directly.
-        let cfg = mcp_config_json("/x/conduit-browser-mcp", "p1", 7681);
+        let cfg = mcp_config_json("/x/conduit-browser-mcp", "p1", 7681, "tok");
         assert!(cfg["mcpServers"]["conduit-browser"]["env"]["CONDUIT_PROJECT_ID"].is_string());
         let _ = std::fs::remove_dir_all(&dir);
     }

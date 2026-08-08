@@ -10,10 +10,26 @@ use serde_json::{json, Value};
 use crate::browser_mcp::McpError;
 use crate::chat::tools::{self, ToolCaps};
 
-/// Strip the `conduit_tools:` prefix from a WS op; None for non-tool ops.
+/// The only chat tools the MCP relay may invoke. The WS server must not rely
+/// on the relay binary's own `tool_op` whitelist for authorization: any local
+/// process holding the auth token could otherwise reach mutating tools
+/// (write_file/delete_file/run_shell/…) with no permission-mode gate, since
+/// this path intentionally runs the same ungated dispatcher the built-in chat
+/// uses (where the caller enforces the gate BEFORE reaching execute_tool).
+const ALLOWED_RELAY_TOOLS: [&str; 5] = [
+    tools::GENERATE_DOCUMENT,
+    tools::GENERATE_DIAGRAM,
+    tools::GENERATE_FILE,
+    tools::GET_SKILL,
+    tools::LIST_SKILLS,
+];
+
+/// Strip the `conduit_tools:` prefix from a WS op; None for non-tool ops and
+/// for any tool outside the relay whitelist (those fall through to
+/// `unknown_op` in the dispatcher).
 pub fn tool_from_op(op: &str) -> Option<String> {
     let rest = op.strip_prefix("conduit_tools:")?;
-    if rest.is_empty() { None } else { Some(rest.to_string()) }
+    if ALLOWED_RELAY_TOOLS.contains(&rest) { Some(rest.to_string()) } else { None }
 }
 
 pub fn outcome_text(o: &tools::ToolOutcome) -> &str {
@@ -53,6 +69,11 @@ mod tests {
         assert_eq!(tool_from_op("conduit_tools:generate_document"), Some("generate_document".to_string()));
         assert_eq!(tool_from_op("navigate"), None);
         assert_eq!(tool_from_op("conduit_tools:"), None);
+        // Mutating/dangerous chat tools must be rejected server-side even
+        // though they exist in chat::tools (no permission gate on this path).
+        assert_eq!(tool_from_op("conduit_tools:delete_file"), None);
+        assert_eq!(tool_from_op("conduit_tools:write_file"), None);
+        assert_eq!(tool_from_op("conduit_tools:run_shell"), None);
     }
 
     #[test]

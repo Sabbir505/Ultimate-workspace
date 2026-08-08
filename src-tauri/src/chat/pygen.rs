@@ -208,7 +208,9 @@ fn newest_new_file(
         {
             continue;
         }
-        let mtime = e.metadata().and_then(|m| m.modified()).ok()?;
+        let Ok(mtime) = e.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
         if best.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
             best = Some((mtime, p));
         }
@@ -259,6 +261,36 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = tauri::async_runtime::block_on(generate(dir.path(), "docx", "x", "  "));
         assert!(out.is_err());
+    }
+
+    // Regression: one file whose metadata cannot be read (here a dangling
+    // symlink) must be skipped, not abort the whole fallback scan with `?`.
+    #[cfg(unix)]
+    #[test]
+    fn fallback_scan_skips_unreadable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good.docx");
+        std::fs::write(&good, b"x").unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("nonexistent-target"),
+            dir.path().join("dangling.docx"),
+        )
+        .unwrap();
+        let found = newest_new_file(dir.path(), &HashSet::new(), "docx");
+        assert_eq!(found.map(|(p, _)| p), Some(good));
+    }
+
+    #[test]
+    fn fallback_scan_picks_new_matching_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old.docx");
+        std::fs::write(&old, b"x").unwrap();
+        let before: HashSet<PathBuf> = [old].into_iter().collect();
+        std::fs::write(dir.path().join("notes.txt"), b"x").unwrap();
+        let new = dir.path().join("new.docx");
+        std::fs::write(&new, b"x").unwrap();
+        let found = newest_new_file(dir.path(), &before, "docx");
+        assert_eq!(found.map(|(p, _)| p), Some(new));
     }
 
     #[test]

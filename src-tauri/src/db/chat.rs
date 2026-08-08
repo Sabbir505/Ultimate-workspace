@@ -230,6 +230,12 @@ fn map_chat_message(row: &rusqlite::Row) -> rusqlite::Result<ChatMessageRecord> 
         cost_usd: row.get("cost_usd")?,
         created_at: row.get("created_at")?,
         superseded_by: row.get("superseded_by")?,
+        cache_creation_input_tokens: row.get("cache_creation_input_tokens")?,
+        cache_read_input_tokens: row.get("cache_read_input_tokens")?,
+        reasoning_output_tokens: row.get("reasoning_output_tokens")?,
+        provider: row.get("provider")?,
+        model_key: row.get("model_key")?,
+        pricing_estimated_usd: row.get("pricing_estimated_usd")?,
     })
 }
 
@@ -241,12 +247,27 @@ pub fn add_chat_message(
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
     cost_usd: Option<f64>,
+    cache_creation_input_tokens: Option<i64>,
+    cache_read_input_tokens: Option<i64>,
+    reasoning_output_tokens: Option<i64>,
+    provider: Option<&str>,
+    model_key: Option<&str>,
+    pricing_estimated_usd: Option<f64>,
 ) -> DbResult<ChatMessageRecord> {
     let now = now_ts();
     conn.execute(
-        "INSERT INTO chat_messages (chat_session_id, role, content, input_tokens, output_tokens, cost_usd, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![chat_session_id, role, content, input_tokens, output_tokens, cost_usd, now],
+        "INSERT INTO chat_messages (
+            chat_session_id, role, content,
+            input_tokens, output_tokens, cost_usd, created_at,
+            cache_creation_input_tokens, cache_read_input_tokens, reasoning_output_tokens,
+            provider, model_key, pricing_estimated_usd
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        params![
+            chat_session_id, role, content,
+            input_tokens, output_tokens, cost_usd, now,
+            cache_creation_input_tokens, cache_read_input_tokens, reasoning_output_tokens,
+            provider, model_key, pricing_estimated_usd,
+        ],
     )?;
     let id = conn.last_insert_rowid();
     Ok(ChatMessageRecord {
@@ -259,6 +280,12 @@ pub fn add_chat_message(
         cost_usd,
         created_at: now,
         superseded_by: None,
+        cache_creation_input_tokens,
+        cache_read_input_tokens,
+        reasoning_output_tokens,
+        provider: provider.map(String::from),
+        model_key: model_key.map(String::from),
+        pricing_estimated_usd,
     })
 }
 
@@ -355,9 +382,9 @@ mod tests {
         assert_eq!(cs2.title.as_deref(), Some("my chat"));
         assert!(cs2.last_active_at >= cs.last_active_at);
 
-        let m1 = add_chat_message(&conn, &cs.id, "user", "hello", None, None, None).unwrap();
+        let m1 = add_chat_message(&conn, &cs.id, "user", "hello", None, None, None, None, None, None, None, None, None).unwrap();
         assert_eq!(m1.role, "user");
-        let m2 = add_chat_message(&conn, &cs.id, "assistant", "hi there", Some(100), Some(50), Some(0.0015)).unwrap();
+        let m2 = add_chat_message(&conn, &cs.id, "assistant", "hi there", Some(100), Some(50), Some(0.0015), None, None, None, None, None, None).unwrap();
         assert_eq!(m2.input_tokens, Some(100));
         assert_eq!(m2.output_tokens, Some(50));
         assert!((m2.cost_usd.unwrap() - 0.0015).abs() < 1e-9);
@@ -440,9 +467,9 @@ mod tests {
     fn delete_chat_message_removes_row_and_detaches_artifacts() {
         let conn = super::super::mem();
         let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5").unwrap();
-        let m1 = add_chat_message(&conn, &cs.id, "user", "hi", None, None, None).unwrap();
+        let m1 = add_chat_message(&conn, &cs.id, "user", "hi", None, None, None, None, None, None, None, None, None).unwrap();
         let m2 =
-            add_chat_message(&conn, &cs.id, "assistant", "hello", None, None, None).unwrap();
+            add_chat_message(&conn, &cs.id, "assistant", "hello", None, None, None, None, None, None, None, None, None).unwrap();
 
         // Attach an artifact to the assistant message we'll delete.
         let art = super::super::insert_artifact(

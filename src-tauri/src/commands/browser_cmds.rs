@@ -39,6 +39,10 @@ pub fn browser_navigate(
 /// history.replaceState fires. Emits browser:navigated so the frontend's
 /// address bar + history stack stay in sync with same-document navigations
 /// (e.g. Bing's Images/Videos/Maps tabs, SPAs).
+///
+/// SECURITY: `javascript:` URLs are rejected to prevent XSS if the user
+/// navigates back to a pushed state that executes script in the webview's
+/// origin.
 #[tauri::command]
 pub fn browser_push_state(
     pane_id: String,
@@ -46,6 +50,9 @@ pub fn browser_push_state(
     url: String,
     app: tauri::AppHandle,
 ) -> CmdResult<()> {
+    if url.trim().to_lowercase().starts_with("javascript:") {
+        return Err("javascript: URLs are not allowed in pushState".to_string());
+    }
     let _ = app.emit(
         "browser:navigated",
         BrowserNavigatedEvent {

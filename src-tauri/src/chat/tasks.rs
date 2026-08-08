@@ -53,6 +53,10 @@ const PROGRESS_EMIT_MIN: Duration = Duration::from_millis(150);
 const SHELL_EMIT_MIN: Duration = Duration::from_millis(250);
 /// Transient download failures are retried this many times.
 const DOWNLOAD_RETRIES: u32 = 2;
+/// A transfer with no bytes for this long is declared stalled and retried
+/// (resumed via Range). This replaces the old blanket request timeout, which
+/// capped TOTAL transfer time and made every large model download fail.
+const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Machine-readable task state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +304,16 @@ impl TaskManager {
     }
 }
 
+/// Escape hatch for the SSRF guard in `download_task`: when
+/// `CONDUIT_ALLOW_PRIVATE_DOWNLOADS` is set in the APP's environment, the
+/// download task may reach loopback/private hosts. Two legitimate uses: LAN
+/// model mirrors (a real deployment pattern for local models) and the unit
+/// tests' loopback fixture server. Read from the app's OWN env at request
+/// time — untrusted child processes (agent harnesses, shells) cannot set it.
+fn private_downloads_allowed() -> bool {
+    std::env::var_os("CONDUIT_ALLOW_PRIVATE_DOWNLOADS").is_some()
+}
+
 /// Stream a download to `dest` with resume + retry. Writes chunks straight
 /// to a `.part` file (no whole-file buffering) and renames on completion;
 /// the `.part` is kept on cancel/failure so the next attempt resumes.
@@ -320,6 +334,23 @@ async fn download_task<R: tauri::Runtime>(
             "download_file requires an absolute destination path, got \"{dest}\""
         ));
     }
+    // SSRF guard: refuse hosts that resolve to loopback / link-local / private
+    // / multicast / reserved ranges. Mirrors `fetch_url`'s guard so the model
+    // can't use download_file to read cloud metadata or probe internal hosts.
+    // Bypassed only by the explicit app-env opt-out (LAN mirrors, tests).
+    if !private_downloads_allowed() {
+        if let Ok(parsed) = url::Url::parse(url) {
+            if let Some(host) = parsed.host_str() {
+                if crate::chat::tools::host_blocked(host) {
+                    return Err(format!(
+                        "download_file refused: `{host}` resolves to a loopback, \
+                         link-local, private, or otherwise blocked address range \
+                         (SSRF guard)."
+                    ));
+                }
+            }
+        }
+    }
     let parent = dest_path.parent().unwrap_or(Path::new("."));
     tokio::fs::create_dir_all(parent)
         .await
@@ -332,8 +363,12 @@ async fn download_task<R: tauri::Runtime>(
             .unwrap_or_else(|| "part".to_string()),
     );
     let client = reqwest::Client::builder()
-        .user_agent("Conduit/0.3.2 (desktop; +https://conduit.app)")
-        .timeout(Duration::from_secs(60))
+        .user_agent(concat!("Conduit/", env!("CARGO_PKG_VERSION"), " (desktop; +https://conduit.app)"))
+        // NO blanket .timeout() here: reqwest's request timeout covers the
+        // whole body stream, so any download slower than size/timeout can
+        // never finish (multi-GB model weights). Bound connection setup only,
+        // and detect stalls per-chunk in the read loop below.
+        .connect_timeout(Duration::from_secs(20))
         .build()
         .unwrap_or_default();
 
@@ -392,6 +427,19 @@ async fn download_task<R: tauri::Runtime>(
                 continue;
             }
         };
+        // DNS-rebinding guard: re-verify the resolved peer IP after the
+        // TCP connection has been opened.
+        if !private_downloads_allowed() {
+            if let Some(peer) = resp.remote_addr() {
+                if crate::chat::tools::is_blocked_ip(&peer.ip()) {
+                    return Err(format!(
+                        "download_file refused: peer {} is in a blocked address range \
+                         (DNS-rebinding guard).",
+                        peer.ip()
+                    ));
+                }
+            }
+        }
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(format!(
@@ -462,9 +510,19 @@ async fn download_task<R: tauri::Runtime>(
                     TaskManager::emit(app, sid, entry);
                     return Ok(());
                 }
-                next = stream.next() => {
+                next = tokio::time::timeout(DOWNLOAD_STALL_TIMEOUT, stream.next()) => {
                     match next {
-                        Some(Ok(chunk)) => {
+                        Err(_elapsed) => {
+                            // No bytes for DOWNLOAD_STALL_TIMEOUT — the peer
+                            // is hung. Treat like a stream error: keep the
+                            // .part and resume on the next attempt.
+                            stream_failed = Some(format!(
+                                "stalled (no data for {}s)",
+                                DOWNLOAD_STALL_TIMEOUT.as_secs()
+                            ));
+                            break;
+                        }
+                        Ok(Some(Ok(chunk))) => {
                             if chunk.is_empty() { continue; }
                             if let Err(e) = file.write_all(&chunk).await {
                                 return Err(format!("write error: {e}"));
@@ -484,11 +542,11 @@ async fn download_task<R: tauri::Runtime>(
                                 TaskManager::emit(app, sid, entry);
                             }
                         }
-                        Some(Err(e)) => {
+                        Ok(Some(Err(e))) => {
                             stream_failed = Some(format!("stream error: {e}"));
                             break;
                         }
-                        None => break,
+                        Ok(None) => break,
                     }
                 }
             }
@@ -540,9 +598,13 @@ async fn shell_task<R: tauri::Runtime>(
     command: &str,
     workdir: Option<String>,
 ) {
+    // Strip any NUL bytes — they terminate C strings early and could otherwise
+    // smuggle extra bytes past the shell interface (defense-in-depth; the model
+    // should not emit NULs, but we never trust tool input blindly).
+    let command = command.replace('\0', "");
     let mut cmd = if cfg!(windows) {
         let mut c = Command::new("cmd.exe");
-        c.arg("/C").arg(command);
+        c.arg("/C").arg(&command);
         #[cfg(windows)]
         {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -551,7 +613,7 @@ async fn shell_task<R: tauri::Runtime>(
         c
     } else {
         let mut c = Command::new("sh");
-        c.arg("-c").arg(command);
+        c.arg("-c").arg(&command);
         c
     };
     cmd.stdout(std::process::Stdio::piped())
@@ -777,6 +839,9 @@ mod tests {
 
     #[test]
     fn download_streams_to_disk_with_progress() {
+        // The fixture serves on 127.0.0.1, which the SSRF guard refuses —
+        // opt out for tests (process-global, idempotent).
+        std::env::set_var("CONDUIT_ALLOW_PRIVATE_DOWNLOADS", "1");
         let body: &'static [u8] = &[0u8; 1024 * 1024 * 2];
         let url = tauri::async_runtime::block_on(serve(body, true, Duration::ZERO));
         
@@ -805,6 +870,7 @@ mod tests {
 
     #[test]
     fn download_resumes_from_existing_part() {
+        std::env::set_var("CONDUIT_ALLOW_PRIVATE_DOWNLOADS", "1");
         let body: &'static [u8] = &[7u8; 1024 * 1024];
         let url = tauri::async_runtime::block_on(serve(body, true, Duration::ZERO));
         
@@ -834,6 +900,7 @@ mod tests {
 
     #[test]
     fn cancel_keeps_part_file_for_resume() {
+        std::env::set_var("CONDUIT_ALLOW_PRIVATE_DOWNLOADS", "1");
         // 64KiB chunks at 5ms each â‰ˆ 5s of streaming â€” guaranteed still
         // in flight when the test cancels.
         let body: &'static [u8] = &[0u8; 1024 * 1024 * 64];

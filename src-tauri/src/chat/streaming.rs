@@ -42,6 +42,14 @@ const RESEARCH_MAX_TOOL_ITERS: usize = 96;
 /// the provider's SSE format has diverged or data is irrecoverably corrupt.
 const MAX_PARSE_FAILURES: u32 = 50;
 
+/// Upper bound on tool-call / content-block indexes accepted from the wire.
+/// The index is network-controlled (OpenAI/Anthropic-compatible base URLs are
+/// user-configurable, hence untrusted): without a cap, a hostile or buggy
+/// endpoint can send `"index": 4294967295` and make the grow-loops below
+/// allocate billions of entries — instant memory exhaustion mid-turn. Real
+/// rounds use a handful of blocks; 64 is generous.
+const MAX_STREAM_BLOCK_INDEX: usize = 64;
+
 async fn openai_stream_round(
     client: &reqwest::Client,
     url: &str,
@@ -83,6 +91,10 @@ async fn openai_stream_round(
 
     let mut content = String::new();
     let mut suppress = false;
+    // Byte offset in `content` where the suspected `<tool_call` markup began
+    // — the held-back tail starts here if suppression turns out to be a
+    // false positive.
+    let mut suppressed_from = 0usize;
     let mut in_think = false;
     // Sanitize: drop ANY untrusted content that could break out of the chat
     // bubble once persisted. The model is the source of `content` and is not
@@ -158,8 +170,18 @@ async fn openai_stream_round(
                     }
                     let clean = sanitize(c);
                     content.push_str(&clean);
-                    if !suppress && content.contains("<tool_call") {
-                        suppress = true;
+                    if !suppress {
+                        if let Some(pos) = content.find("<tool_call") {
+                            suppress = true;
+                            suppressed_from = pos;
+                            // Emit any prose that preceded the markup inside
+                            // this chunk — only the markup itself is suspect.
+                            let chunk_start = content.len() - clean.len();
+                            if pos > chunk_start {
+                                let prefix = content[chunk_start..pos].to_string();
+                                emit_token(app, sid, &prefix, full);
+                            }
+                        }
                     }
                     if !suppress {
                         emit_token(app, sid, &clean, full);
@@ -183,6 +205,11 @@ async fn openai_stream_round(
             if let Some(tcs) = delta.get("tool_calls").and_then(|x| x.as_array()) {
                 for tc in tcs {
                     let idx = tc.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                    // Network-controlled index — clamp before growing the vec
+                    // (see MAX_STREAM_BLOCK_INDEX).
+                    if idx > MAX_STREAM_BLOCK_INDEX {
+                        continue;
+                    }
                     while calls.len() <= idx {
                         calls.push((String::new(), String::new(), String::new()));
                     }
@@ -206,6 +233,24 @@ async fn openai_stream_round(
 
     if in_think {
         emit_token(app, sid, "</think>", full);
+    }
+
+    // Suppression latched on a suspected `<tool_call` opener. Flush the
+    // held-back tail so the UI and the persisted message don't lose it:
+    // when a parseable Hermes block materialized, strip the markup and keep
+    // any prose that followed it; otherwise (the model wrote literal
+    // "<tool_call" in prose, or the stream ended mid-block) flush the tail
+    // verbatim.
+    if suppress {
+        let tail = match parse_hermes_tool_calls(&content) {
+            Some(calls) if !calls.is_empty() => {
+                strip_hermes_tool_calls(&content[suppressed_from..])
+            }
+            _ => content[suppressed_from..].to_string(),
+        };
+        if !tail.is_empty() {
+            emit_token(app, sid, &tail, full);
+        }
     }
 
     let tool_calls: Vec<Value> = calls
@@ -266,12 +311,16 @@ async fn anthropic_stream_round(
     }
 
     // Accumulated content blocks in stream order. kind: 0=text, 1=tool, 2=thinking.
+    // `sig` carries the thinking block's signature — Anthropic requires the
+    // full thinking block (text + signature) to be echoed back during tool
+    // use when extended thinking is enabled.
     struct Blk {
         kind: u8,
         text: String,
         id: String,
         name: String,
         json: String,
+        sig: String,
     }
     let mut blocks: Vec<Blk> = Vec::new();
     let mut in_think = false;
@@ -317,6 +366,12 @@ async fn anthropic_stream_round(
                 }
                 "content_block_start" => {
                     let idx = p.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                    // Network-controlled index — clamp before growing the vec
+                    // (see MAX_STREAM_BLOCK_INDEX). Deltas for skipped blocks
+                    // are dropped harmlessly via blocks.get_mut below.
+                    if idx > MAX_STREAM_BLOCK_INDEX {
+                        continue;
+                    }
                     let cb = p.get("content_block");
                     let kind = match cb.and_then(|c| c.get("type")).and_then(|t| t.as_str()) {
                         Some("tool_use") => 1,
@@ -340,6 +395,7 @@ async fn anthropic_stream_round(
                             id: String::new(),
                             name: String::new(),
                             json: String::new(),
+                            sig: String::new(),
                         });
                     }
                     blocks[idx].kind = kind;
@@ -383,7 +439,22 @@ async fn anthropic_stream_round(
                                     emit_token(app, sid, "<think>", full);
                                     in_think = true;
                                 }
+                                // Accumulate as well as stream: with extended
+                                // thinking + tool use, Anthropic requires the
+                                // full thinking block echoed back next round.
+                                if let Some(b) = blocks.get_mut(idx) {
+                                    b.text.push_str(t);
+                                }
                                 emit_token(app, sid, t, full);
+                            }
+                        }
+                        "signature_delta" => {
+                            if let Some(s) =
+                                delta.and_then(|d| d.get("signature")).and_then(|x| x.as_str())
+                            {
+                                if let Some(b) = blocks.get_mut(idx) {
+                                    b.sig.push_str(s);
+                                }
                             }
                         }
                         _ => {}
@@ -412,6 +483,11 @@ async fn anthropic_stream_round(
                 let input_val = serde_json::from_str::<Value>(&b.json).unwrap_or_else(|_| json!({}));
                 Some(json!({ "type": "tool_use", "id": b.id, "name": b.name, "input": input_val }))
             }
+            // Thinking blocks must be echoed back verbatim (text + signature)
+            // during tool use or the API 400s on the next round.
+            2 if !b.text.is_empty() => Some(
+                json!({ "type": "thinking", "thinking": b.text, "signature": b.sig }),
+            ),
             2 => None,
             _ if !b.text.is_empty() => Some(json!({ "type": "text", "text": b.text })),
             _ => None,
@@ -503,23 +579,27 @@ pub(crate) async fn run_openai_tool_loop(
         // then emits its trained Hermes-format tool call as plain text in
         // `content`. Recover those calls and synthesize the same structured
         // shape the loop below already handles, so the tools actually run.
+        let mut hermes_recovered = false;
         let tool_calls: Vec<Value> = if tool_calls.is_empty() {
             let content = message.get("content").and_then(|c| c.as_str()).unwrap_or("");
             match parse_hermes_tool_calls(content) {
-                Some(parsed) if !parsed.is_empty() => parsed
-                    .into_iter()
-                    .map(|(name, args)| {
-                        let id = next_synthetic_tool_id();
-                        json!({
-                            "id": id,
-                            "type": "function",
-                            "function": {
-                                "name": name,
-                                "arguments": args.to_string(),
-                            },
+                Some(parsed) if !parsed.is_empty() => {
+                    hermes_recovered = true;
+                    parsed
+                        .into_iter()
+                        .map(|(name, args)| {
+                            let id = next_synthetic_tool_id();
+                            json!({
+                                "id": id,
+                                "type": "function",
+                                "function": {
+                                    "name": name,
+                                    "arguments": args.to_string(),
+                                },
+                            })
                         })
-                    })
-                    .collect(),
+                        .collect()
+                }
                 _ => Vec::new(),
             }
         } else {
@@ -533,6 +613,17 @@ pub(crate) async fn run_openai_tool_loop(
             // JSON here so the re-sent history doesn't confuse the model into
             // repeating the same call.
             let mut echoed = message.clone();
+            // When the calls were recovered from Hermes text, the streamed
+            // message's `tool_calls` is the empty array produced by
+            // `openai_stream_round`. Insert the synthesized calls so the
+            // re-sent history pairs each `role: "tool"` message below with a
+            // matching assistant `tool_calls` entry — strict OpenAI-compatible
+            // validators reject tool messages with unmatched ids (400).
+            if hermes_recovered {
+                if let Some(obj) = echoed.as_object_mut() {
+                    obj.insert("tool_calls".to_string(), Value::Array(tool_calls.clone()));
+                }
+            }
             // When the calls were recovered from Hermes text, the message's
             // `content` still holds the raw `<tool_calls>` markup. Strip it so
             // the markup is neither re-sent nor shown to the user downstream.
@@ -645,6 +736,17 @@ pub(crate) async fn run_anthropic_tool_loop(
                 body["system"] = json!(sys);
             }
         }
+        // Extended thinking on the tool path too — previously only the
+        // non-tool request builder (providers.rs) sent this, so the
+        // composer's brain toggle was a no-op with tools on (the default).
+        // Anthropic requires budget_tokens < max_tokens.
+        if req.thinking == Some(true) {
+            let max_tokens = req.max_tokens.unwrap_or(4096);
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": (max_tokens - 1024).max(1024),
+            });
+        }
 
         let (content, in_tok, out_tok, have) =
             anthropic_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?;
@@ -708,6 +810,7 @@ fn build_usage(openai: bool, input: i64, output: i64, have: bool) -> Option<Chat
         input_tokens: input,
         output_tokens: output,
         cost_usd: cost,
+        ..Default::default()
     })
 }
 

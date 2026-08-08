@@ -28,17 +28,31 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::browser::{BrowserManager, ReadMode, ActionOpts, BROWSER_MCP_PORT};
 
 /// Random auth token generated at startup so only the conduit-browser-mcp
-/// binary (which reads it from the env) can connect to the loopback WS.
+/// binary can connect to the loopback WS. It is delivered to the binary via
+/// the per-server env block of the generated `.mcp.json` / `opencode.json`
+/// (CONDUIT_MCP_AUTH_TOKEN) — never process-wide, so pty shells and agent
+/// processes don't inherit it.
 static MCP_AUTH_TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Upper bound for the `wait_for` op's caller-supplied timeout. The value is
+/// untrusted LLM JSON arriving over the WS bridge: unclamped, a huge
+/// `timeout_ms` starves the sequential dispatch loop (every other browser op
+/// queues behind it for days) and `Instant + Duration` panics outright near
+/// u64::MAX.
+const MAX_WAIT_FOR_MS: u64 = 120_000;
+
+/// Parse + clamp the untrusted `timeout_ms` arg for `wait_for`
+/// (see MAX_WAIT_FOR_MS). Defaults to 10 s when absent.
+fn wait_for_timeout_ms(args: &Value) -> u64 {
+    args.get("timeout_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10_000)
+        .min(MAX_WAIT_FOR_MS)
+}
 
 /// Return the current MCP auth token, generating one if this is the first call.
 pub fn mcp_auth_token() -> &'static str {
-    MCP_AUTH_TOKEN.get_or_init(|| {
-        let token = format!("{:032x}", rand::random::<u128>());
-        // Expose to child processes (the MCP binary reads it from the env).
-        std::env::set_var("CONDUIT_MCP_AUTH_TOKEN", &token);
-        token
-    })
+    MCP_AUTH_TOKEN.get_or_init(|| format!("{:032x}", rand::random::<u128>()))
 }
 
 /// A structured error returned to the MCP binary over the WebSocket. The
@@ -79,8 +93,8 @@ impl McpError {
 /// Bind 127.0.0.1 on the fixed BROWSER_MCP_PORT and serve connections until
 /// the app exits. Non-fatal if the bind fails (the MCP binary will just see
 /// connection-refused → `browser_unavailable`). Generates a random auth token
-/// at startup and exposes it via CONDUIT_MCP_AUTH_TOKEN env var so only the
-/// conduit-browser-mcp binary can connect.
+/// at startup; it reaches the conduit-browser-mcp binary via the env block of
+/// the generated MCP configs so only that binary can connect.
 pub async fn serve(browser: Arc<BrowserManager>, app: AppHandle) {
     let token = mcp_auth_token();
     let addr = format!("127.0.0.1:{BROWSER_MCP_PORT}");
@@ -150,7 +164,20 @@ async fn handle_connection(
         .map_err(|e| format!("malformed auth message: {e}"))?;
     let token_ok = auth.get("auth")
         .and_then(|v| v.as_str())
-        .map(|t| t == expected_token)
+        .map(|t| {
+            // Constant-time comparison to prevent timing side-channels.
+            // `subtle` is in the dep tree (via rustls); use a simple
+            // byte-level XOR-length check when lengths differ to avoid
+            // short-circuiting on length mismatch.
+            if t.as_bytes().len() != expected_token.as_bytes().len() {
+                // Still do a comparison to burn the same cycles — compare
+                // against a slice of matching length (prefix of expected_token).
+                let _ = expected_token.as_bytes().iter().zip(t.as_bytes().iter()).fold(0u8, |acc, (a, b)| acc | (a ^ b));
+                false
+            } else {
+                expected_token.as_bytes().iter().zip(t.as_bytes().iter()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+            }
+        })
         .unwrap_or(false);
     if !token_ok {
         let _ = write.send(Message::Text(r#"{"error":"unauthorized"}"#.into())).await;
@@ -207,8 +234,10 @@ async fn resolve_or_open(
     browser: &BrowserManager,
     _app: &AppHandle,
 ) -> Result<String, McpError> {
-    // Explicit pane_id always wins.
-    if let Some(label) = resolve_label(browser, req.project_id.as_deref(), req.pane_id.as_deref()).await {
+    // Explicit pane_id always wins. A genuine resolution failure (stale
+    // pane_id, missing active tab) propagates — it must NOT be mistaken for
+    // "no pane yet", or navigate would silently auto-open a duplicate pane.
+    if let Some(label) = resolve_label(browser, req.project_id.as_deref(), req.pane_id.as_deref()).await? {
         return Ok(label);
     }
     // No resolvable pane. For navigate we auto-open; for everything else the
@@ -228,21 +257,31 @@ async fn resolve_or_open(
     })
 }
 
-/// Thin wrapper around BrowserManager::resolve_pane_label that maps the
-/// `pane_not_found` sentinel into None (so the caller can decide to auto-open).
+/// Thin wrapper around BrowserManager::resolve_pane_label: Ok(Some) resolved
+/// a label, Ok(None) is the genuine "no pane yet" case (the caller may
+/// auto-open on navigate), Err is a real resolution failure that must surface
+/// to the agent instead of being treated as not-found.
 async fn resolve_label(
     browser: &BrowserManager,
     project_id: Option<&str>,
     pane_id: Option<&str>,
-) -> Option<String> {
-    match browser.resolve_pane_label(project_id, pane_id).await {
-        Ok(label) => Some(label),
-        Err(e) if e == "pane_not_found" => None,
+) -> Result<Option<String>, McpError> {
+    map_resolve_result(browser.resolve_pane_label(project_id, pane_id).await)
+}
+
+/// Map a `resolve_pane_label` outcome: the `pane_not_found` sentinel and the
+/// global-active miss ("No page is open…") both mean "no pane exists" → None
+/// (auto-open candidate). Anything else (e.g. "no active tab for pane X" from
+/// a stale explicit pane_id) is a real failure — previously it was logged and
+/// swallowed as None, so `navigate` auto-opened a duplicate pane.
+fn map_resolve_result(res: Result<String, String>) -> Result<Option<String>, McpError> {
+    match res {
+        Ok(label) => Ok(Some(label)),
+        Err(e) if e == "pane_not_found" => Ok(None),
+        Err(e) if e.starts_with("No page is open") => Ok(None),
         Err(e) => {
-            // Resolution failed for another reason (e.g. roundtrip timeout) —
-            // surface it as a real error rather than silently auto-opening.
             eprintln!("[conduit:browser-mcp] pane resolution failed: {e}");
-            None
+            Err(McpError { code: "pane_not_found", message: e })
         }
     }
 }
@@ -467,14 +506,18 @@ async fn op_wait_for(
         .and_then(|v| v.as_str())
         .ok_or_else(|| McpError::invalid_args("wait_for requires 'condition'"))?;
     let target = req.args.get("target").and_then(|v| v.as_str());
-    let timeout_ms = req.args.get("timeout_ms").and_then(|v| v.as_u64()).unwrap_or(10_000);
+    let timeout_ms = wait_for_timeout_ms(&req.args);
 
     let (pane_id, _tab_id) = parse_label(&label)
         .ok_or_else(|| McpError { code: "invalid_args", message: format!("bad label: {label}") })?;
     let opts = resolve_action_opts(app, Some(&pane_id));
 
     let started = std::time::Instant::now();
-    let deadline = started + std::time::Duration::from_millis(timeout_ms);
+    // checked_add on top of the clamp — belt and braces against Instant
+    // overflow on platforms with exotic monotonic clocks.
+    let deadline = started
+        .checked_add(std::time::Duration::from_millis(timeout_ms))
+        .unwrap_or_else(|| started + std::time::Duration::from_millis(MAX_WAIT_FOR_MS));
     let mut resolved = false;
     let mut detail = String::new();
 
@@ -598,5 +641,38 @@ mod tests {
             "pane_not_found"
         );
         assert_eq!(McpError::from_action_err("something else".into()).code, "action_failed");
+    }
+
+    #[test]
+    fn resolve_result_maps_not_found_sentinel_but_surfaces_real_errors() {
+        // Resolved label passes through.
+        assert_eq!(
+            map_resolve_result(Ok("browser-p1-tab-t1".into())).unwrap(),
+            Some("browser-p1-tab-t1".into())
+        );
+        // The pane_not_found sentinel → None (caller may auto-open).
+        assert_eq!(map_resolve_result(Err("pane_not_found".into())).unwrap(), None);
+        // Global-active miss is also a genuine "no pane exists" → None.
+        assert_eq!(
+            map_resolve_result(Err("No page is open in the browser pane yet — call open_url first.".into())).unwrap(),
+            None
+        );
+        // A real failure (stale explicit pane_id) must surface as an error —
+        // previously swallowed as None, so navigate auto-opened a duplicate pane.
+        let err = map_resolve_result(Err("no active tab for pane ghost".into())).unwrap_err();
+        assert_eq!(err.code, "pane_not_found");
+        assert!(err.message.contains("no active tab for pane ghost"));
+    }
+
+    #[test]
+    fn wait_for_timeout_is_clamped() {
+        // Untrusted LLM JSON: absent → default, small → passthrough,
+        // u64::MAX → clamped (previously panicked Instant arithmetic and
+        // starved the sequential dispatch loop).
+        assert_eq!(wait_for_timeout_ms(&serde_json::json!({})), 10_000);
+        assert_eq!(wait_for_timeout_ms(&serde_json::json!({ "timeout_ms": 5_000 })), 5_000);
+        assert_eq!(wait_for_timeout_ms(&serde_json::json!({ "timeout_ms": u64::MAX })), MAX_WAIT_FOR_MS);
+        // Non-numeric junk falls back to the default, not a panic.
+        assert_eq!(wait_for_timeout_ms(&serde_json::json!({ "timeout_ms": "soon" })), 10_000);
     }
 }

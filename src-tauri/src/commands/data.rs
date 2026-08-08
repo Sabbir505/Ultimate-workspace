@@ -2,9 +2,9 @@
 //! commands (CONTRACT.md last section).
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::db;
 use crate::secrets;
@@ -28,6 +28,18 @@ pub fn get_setting(key: String, db: State<DbState>) -> CmdResult<Option<String>>
 pub fn set_setting(key: String, value: String, db: State<DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     db::set_setting(&conn, &key, &value).map_err(|e| e.to_string())
+}
+
+/// Absolute path of the chat database (`<app data dir>/conduit.db`). Shown
+/// read-only in Settings → Storage & Data — the location is fixed at the
+/// app data dir.
+#[tauri::command]
+pub fn get_chat_db_path(app: AppHandle) -> CmdResult<String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("no app data dir: {e}"))?;
+    Ok(dir.join("conduit.db").to_string_lossy().to_string())
 }
 
 // ---- skills ----
@@ -188,10 +200,21 @@ pub fn export_session_markdown(pane_id: String, pty: State<PtyState>) -> CmdResu
 
 /// Read-only file peek (PRD §7.9): hard cap ~512KB, refuses binary-ish
 /// content (NUL byte) rather than spewing garbage into the webview.
+///
+/// SECURITY: the path must resolve to a location inside a registered project
+/// root (or the app data dir). This prevents a compromised renderer from
+/// reading arbitrary files like ~/.ssh/id_rsa or other apps' credentials.
 #[tauri::command]
-pub fn read_file_text(path: String) -> CmdResult<String> {
+pub fn read_file_text(path: String, app: AppHandle, db: State<DbState>) -> CmdResult<String> {
     let p = Path::new(&path);
-    let meta = fs::metadata(p).map_err(|e| format!("cannot stat file: {e}"))?;
+    // Resolve to canonical form to dodge symlinks that escape the project root.
+    let canon = p
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve path: {e}"))?;
+    if !is_path_allowed(&canon, &app, &db) {
+        return Err("path is outside allowed project roots".to_string());
+    }
+    let meta = fs::metadata(&canon).map_err(|e| format!("cannot stat file: {e}"))?;
     if !meta.is_file() {
         return Err("not a regular file".to_string());
     }
@@ -202,11 +225,74 @@ pub fn read_file_text(path: String) -> CmdResult<String> {
             READ_FILE_CAP
         ));
     }
-    let bytes = fs::read(p).map_err(|e| format!("cannot read file: {e}"))?;
+    let bytes = fs::read(&canon).map_err(|e| format!("cannot read file: {e}"))?;
     if bytes.contains(&0) {
         return Err("refusing to read binary file".to_string());
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Check that `path` is under at least one registered project root, or
+/// under the Tauri app data directory (for Conduit-internal files like
+/// artifact exports). Case-insensitive on Windows.
+fn is_path_allowed(path: &Path, app: &AppHandle, db: &DbState) -> bool {
+    // Allow anything under the app data dir (Conduit's own artifacts/config).
+    if let Ok(data_dir) = app.path().app_data_dir() {
+        if let Ok(data_canon) = data_dir.canonicalize() {
+            if crate::util::path_starts_with_ci(path, &data_canon) {
+                return true;
+            }
+        }
+    }
+    // Allow anything under a registered project root.
+    let conn = db.0.lock();
+    if let Ok(projs) = db::list_projects(&conn) {
+        for proj in &projs {
+            let proj_path = Path::new(&proj.path);
+            if let Ok(proj_canon) = proj_path.canonicalize() {
+                if crate::util::path_starts_with_ci(path, &proj_canon) {
+                    return true;
+                }
+            }
+        }
+    }
+    // Allow anything under a session worktree. Worktrees are SIBLINGS of the
+    // project root (`<parent>/<name>-<branch>`), so they legitimately sit
+    // outside every project prefix — allowlist the exact recorded paths
+    // instead of loosening the prefix check (which would also pass any
+    // same-prefix sibling like `<name>-evil`).
+    if let Ok(sessions) = db::list_sessions(&conn, None) {
+        for sess in &sessions {
+            if let Some(wt) = &sess.worktree_path {
+                if let Ok(wt_canon) = Path::new(wt).canonicalize() {
+                    if crate::util::path_starts_with_ci(path, &wt_canon) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    // Allow anything under the configured artifacts dir (Settings →
+    // Storage & Data, `storage.artifactsDir`) when set.
+    if let Some(configured) = crate::chat::dispatch::configured_artifacts_dir(&conn) {
+        let _ = fs::create_dir_all(&configured);
+        if let Ok(conf_canon) = configured.canonicalize() {
+            if crate::util::path_starts_with_ci(path, &conf_canon) {
+                return true;
+            }
+        }
+    }
+    drop(conn);
+    // Allow anything under the user's Documents/Conduit dir (artifact exports).
+    if let Some(docs_dir) = dirs::document_dir() {
+        let conduit_docs = docs_dir.join("Conduit");
+        if let Ok(docs_canon) = conduit_docs.canonicalize() {
+            if crate::util::path_starts_with_ci(path, &docs_canon) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ---- workspaces (pane layout save/restore) ----

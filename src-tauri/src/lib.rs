@@ -8,13 +8,16 @@
 mod browser;
 mod browser_mcp;
 mod browser_mcp_register;
+pub mod agent_sessions;
+pub mod automations;
 mod chat;
 mod commands;
 mod connectors;
-mod db;
+pub mod db;
 mod git;
 mod harness_adapters;
 mod harness_bundle;
+mod harness_config;
 mod installed_skills;
 mod mcp_tools_bridge;
 mod mobile;
@@ -80,16 +83,34 @@ pub fn run() {
             // Register the bundled, relocatable Python (shipped in
             // bundle.resources → resource_dir/python) so document generation
             // works on machines that have no system Python. Missing bundle
-            // (e.g. `cargo run` from source) degrades silently to system
-            // Python — see chat::python_runtime.
+            // degrades silently to system Python — see chat::python_runtime.
             let resource_dir = app.path().resource_dir().ok();
-            chat::python_runtime::set_resource_dir(resource_dir);
+            // Dev builds (`tauri dev` / `cargo run`) don't copy
+            // bundle.resources into the target dir, so resource_dir/<bundle>
+            // is absent even when the bundle is staged. Fall back to the
+            // staged tree in the repo (scripts/fetch-bundled-*.mjs) so dev
+            // uses the same interpreters and converters as the installed app.
+            #[cfg(debug_assertions)]
+            let resource_dir = resource_dir
+                .filter(|d| d.join("python").is_dir() || d.join("libreoffice").is_dir())
+                .or_else(|| {
+                    let dev = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+                    (dev.join("python").is_dir() || dev.join("libreoffice").is_dir())
+                        .then_some(dev)
+                });
+            chat::python_runtime::set_resource_dir(resource_dir.clone());
+            // Same registration for the bundled LibreOffice that backs the
+            // pptx→pdf preview path (resource_dir/libreoffice/program/soffice).
+            chat::office::set_resource_dir(resource_dir);
             app.manage(DbState(Arc::clone(&shared_db)));
             app.manage(PtyState(PtyManager::new(app.handle().clone(), Arc::clone(&shared_db))));
             app.manage(BrowserState(Arc::new(browser::BrowserManager::new(
                 app.handle().clone(),
             ))));
             app.manage(ChatState(Arc::new(chat::ChatManager::new())));
+            app.manage(agent_sessions::AgentSessionState(Arc::new(
+                agent_sessions::AgentSessionManager::new(),
+            )));
             app.manage(TaskState(Arc::new(chat::tasks::TaskManager::new())));
             app.manage(MobileRelayState(Arc::new(mobile::relay::MobileRelayState::new())));
             app.manage(OAuthFlowsState(Arc::new(
@@ -131,6 +152,10 @@ pub fn run() {
                     browser_mcp::serve(browser_mgr, app_handle).await;
                 });
             }
+
+            // Automations scheduler: 30s tick, fires due cron schedules as
+            // headless one-shot agent turns (see automations.rs).
+            automations::start(app.handle().clone(), Arc::clone(&shared_db));
 
             // Native vibrancy (PRD §7.1): acrylic blur on Windows, frosted
             // vibrancy on macOS, nothing on Linux (flat theme is the correct
@@ -197,9 +222,19 @@ pub fn run() {
             commands::git_cmds::create_worktree,
             commands::git_cmds::get_git_diff,
             commands::git_cmds::get_git_file_diff,
+            // automations (scheduled headless agent runs)
+            commands::automation_cmds::list_automations,
+            commands::automation_cmds::create_automation,
+            commands::automation_cmds::update_automation,
+            commands::automation_cmds::delete_automation,
+            commands::automation_cmds::set_automation_enabled,
+            commands::automation_cmds::run_automation_now,
+            commands::automation_cmds::list_automation_runs,
+            commands::automation_cmds::count_automation_runs,
             // settings / skills / quick actions / secrets / cost / misc
             commands::data::get_setting,
             commands::data::set_setting,
+            commands::data::get_chat_db_path,
             commands::data::list_skills,
             commands::data::create_skill,
             commands::data::update_skill,
@@ -231,6 +266,7 @@ pub fn run() {
             commands::chat_cmds::list_chat_sessions,
             commands::chat_cmds::create_chat_session,
             commands::chat_cmds::delete_chat_session,
+            commands::chat_cmds::delete_all_chat_sessions,
             commands::chat_cmds::delete_chat_message,
             commands::chat_cmds::update_chat_session_title,
             commands::chat_cmds::generate_chat_title,
@@ -238,23 +274,28 @@ pub fn run() {
             commands::chat_cmds::set_chat_session_unread,
             commands::chat_cmds::update_chat_session_model,
             commands::chat_cmds::update_chat_session_provider,
-            commands::chat_cmds::update_chat_session_permission_mode,
             commands::chat_cmds::update_chat_session_watch_mode,
+            commands::chat_cmds::update_chat_session_agent,
             commands::chat_cmds::get_chat_messages,
             commands::chat_cmds::touch_chat_session,
             commands::chat_cmds::send_chat_message,
             commands::chat_cmds::cancel_chat_message,
+            commands::agent_cmds::send_agent_chat_message,
+            commands::agent_cmds::cancel_agent_chat_message,
+            commands::agent_cmds::list_harness_models,
             commands::chat_cmds::resolve_tool_action,
             commands::chat_cmds::set_chat_api_key,
             commands::chat_cmds::delete_chat_api_key,
             commands::chat_cmds::get_chat_config,
             commands::chat_cmds::list_chat_models,
             commands::chat_cmds::read_artifact_preview,
+            commands::chat_cmds::is_libreoffice_available,
             commands::chat_cmds::download_artifact,
             commands::chat_cmds::download_artifacts_zip,
             commands::chat_cmds::list_artifacts,
             commands::chat_cmds::list_chat_artifacts,
             commands::chat_cmds::delete_artifact,
+            commands::chat_cmds::delete_all_artifacts,
             // local models (GGUF scan / llama-server sidecar)
             commands::chat_cmds::scan_local_models,
             commands::chat_cmds::start_local_model,
@@ -312,6 +353,14 @@ pub fn run() {
             if let Some(state) = handle.try_state::<ChatState>() {
                 state.0.cancel_all();
             }
+            // Kill headless CLI chat processes (claude stream-json sessions).
+            if let Some(state) = handle.try_state::<agent_sessions::AgentSessionState>() {
+                state.0.kill_all();
+            }
+            // Kill one-shot automation CLI trees too — they aren't in the
+            // session registry (M13); children that already exited are
+            // skipped so a recycled pid is never hit.
+            agent_sessions::kill_one_shot_children();
             // Stop any running local-model sidecars (llama-server processes).
             if let Some(state) = handle.try_state::<chat::local_models::LocalModelState>() {
                 tauri::async_runtime::block_on(state.0.stop_all());

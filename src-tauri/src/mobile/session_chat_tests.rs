@@ -52,6 +52,7 @@ fn history_pagination_query() {
             None,
             None,
             None,
+            None, None, None, None, None, None,
         )
         .unwrap();
     }

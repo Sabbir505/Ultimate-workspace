@@ -22,20 +22,63 @@ pub fn build_instructions_md(project_path: &str, artifacts_dir: &str) -> String 
          `conduit-tools` MCP tools (`generate_document`, `generate_diagram`, \
          `generate_file`) — do not hand-build docx/pptx/pdf yourself. Use \
          `get_skill` to load the detailed guidance for a skill before \
-         producing it. The skills catalog is:"
+         producing it."
     ));
     if let Some(catalog) = crate::chat::prompts::available_skills_segment() {
         parts.push(catalog);
     }
-    parts.push(crate::chat::prompts::core_prompt_base());
+    parts.push(format!(
+        "## In-app browser pane\n\
+         You have full control of the visible in-app browser pane via the `conduit-browser` \
+         MCP server. This is NOT an external browser — it is a real webview embedded in the \
+         Conduit window, and every action you take is visible on screen in real time (cursor \
+         movement, typing, click ripples, highlights). You are NOT limited to a terminal.\n\n\
+         ### Browser MCP tools (prefix: `mcp__conduit-browser__`)\n\
+         - `navigate(url, pane_id?)` — Navigate the pane to a URL. Auto-opens a pane if none \
+         exists for the project. Use this (not `open_url` or `fetch_url`) when the user asks \
+         to open a website, browse, or interact with a web page.\n\
+         - `read_page(mode?, pane_id?)` — Read the current page. Modes: `interactive` \
+         (default — returns accessibility tree with roles, labels, form state, element refs \
+         for clicking/typing), `content` (readability-stripped article text), `full` (raw \
+         HTML/text), `summary` (~1500 chars + headings for triage), `section` (extract under \
+         a CSS selector or heading). Always call this after navigation before acting.\n\
+         - `click(selector_or_description, pane_id?)` — Click an element by CSS selector or \
+         by visible text/aria-label/placeholder description.\n\
+         - `type_text(selector_or_description, text, pane_id?)` — Type text into an input. \
+         Dispatches per-keystroke events so React/Vue controlled inputs work.\n\
+         - `scroll(direction, pane_id?)` — Scroll up or down by one viewport step.\n\
+         - `wait_for(condition, target?, pane_id?)` — Wait for `navigation` (URL change), \
+         `selector` (element exists), or `network_idle` (page settled).\n\n\
+         ### Workflow for browser tasks\n\
+         1. `navigate(url)` to load the page.\n\
+         2. `read_page(mode: \"interactive\")` to get the element tree with refs.\n\
+         3. `click` or `type_text` using a selector or description from the read.\n\
+         4. `wait_for(\"navigation\")` if the action triggers a page change.\n\
+         5. `read_page` again to see the new state. Refs expire after navigation.\n\n\
+         ### When to use which tool\n\
+         - **Browse / search / research / social media / E2E test** → `navigate` + \
+         `read_page` + `click`/`type_text`/`scroll` + `wait_for`. The pane is visible, so \
+         the user watches every action live.\n\
+         - **Just fetch a page's text silently** → `fetch_url(url)`. No visual feedback, \
+         faster for pure content extraction. Use only when the user doesn't need to see the \
+         page.\n\
+         - **Open a URL in the built-in browser pane** → `navigate(url)` (MCP) or `open_url(url)` (built-in tool). Both open in the in-app pane where you can interact with the page. Always prefer these over fetch_url when the user should see the page.
+
+\
+         You are a GUI-capable agent, not a headless CLI. When the user asks you to browse, \
+         search, test a web app, or interact with a website, use the browser MCP tools — \
+         never say you can't because you're in a terminal."
+    ));
     parts.join("\n\n")
 }
 
-/// Claude Code `--settings` content: conduit-safe auto, danger gated.
+/// Claude Code `--settings` content: always bypass permissions (the CLI is
+/// spawned with `--dangerously-skip-permissions`, the settings file must
+/// agree or one silently overrides the other).
 pub fn build_claude_settings_json(project_path: &str, artifacts_dir: &str) -> Value {
     json!({
         "permissions": {
-            "defaultMode": "acceptEdits",
+            "defaultMode": "bypassPermissions",
             "allow": [
                 "mcp__conduit-tools__*",
                 "Bash(git:*)"
@@ -55,14 +98,17 @@ pub fn build_kimi_agent_md(project_path: &str, artifacts_dir: &str) -> String {
 }
 
 /// `.mcp.json` registering BOTH conduit-browser and conduit-tools (same
-/// binary, same env — the binary routes by tool name).
-pub fn build_tools_mcp_json(mcp_binary_path: &str, project_id: &str, ws_port: u16) -> Value {
+/// binary, same env — the binary routes by tool name). `auth_token` is the
+/// WS auth token (`browser_mcp::mcp_auth_token()`); it travels in the
+/// per-server env block so only the MCP child process sees it.
+pub fn build_tools_mcp_json(mcp_binary_path: &str, project_id: &str, ws_port: u16, auth_token: &str) -> Value {
     let server = || {
         json!({
             "command": mcp_binary_path,
             "env": {
                 "CONDUIT_PROJECT_ID": project_id,
-                "CONDUIT_WS_PORT": ws_port.to_string()
+                "CONDUIT_WS_PORT": ws_port.to_string(),
+                "CONDUIT_MCP_AUTH_TOKEN": auth_token
             }
         })
     };
@@ -87,6 +133,7 @@ pub fn build_opencode_tools_config(
     mcp_binary_path: &str,
     project_id: &str,
     ws_port: u16,
+    auth_token: &str,
 ) -> Value {
     let server = |name: &str| {
         json!({
@@ -94,7 +141,8 @@ pub fn build_opencode_tools_config(
             "command": [mcp_binary_path],
             "environment": {
                 "CONDUIT_PROJECT_ID": project_id,
-                "CONDUIT_WS_PORT": ws_port.to_string()
+                "CONDUIT_WS_PORT": ws_port.to_string(),
+                "CONDUIT_MCP_AUTH_TOKEN": auth_token
             }
         })
     };
@@ -136,6 +184,7 @@ pub fn write_bundle(
     project_id: &str,
     project_path: Option<&str>,
     artifacts_dir: Option<&str>,
+    _permission: Option<&str>,
     ws_port: u16,
 ) -> Option<HarnessBundlePaths> {
     let base = data_dir.join("harness").join(safe_id(project_id));
@@ -170,12 +219,13 @@ pub fn write_bundle(
     // MCP registration needs the sidecar binary; skip silently if absent.
     if let Some(bin) = crate::browser_mcp_register::mcp_binary_path() {
         let bin_str = bin.to_string_lossy().replace('\\', "/");
-        let mcp = build_tools_mcp_json(&bin_str, project_id, ws_port);
+        let token = crate::browser_mcp::mcp_auth_token();
+        let mcp = build_tools_mcp_json(&bin_str, project_id, ws_port, token);
         let _ = std::fs::write(&paths.claude_mcp,
             serde_json::to_string_pretty(&mcp).unwrap_or_default());
         let _ = std::fs::write(&paths.kimi_mcp,
             serde_json::to_string_pretty(&mcp).unwrap_or_default());
-        let oc = build_opencode_tools_config(&bin_str, project_id, ws_port);
+        let oc = build_opencode_tools_config(&bin_str, project_id, ws_port, token);
         let _ = std::fs::write(&paths.opencode_config,
             serde_json::to_string_pretty(&oc).unwrap_or_default());
     }
@@ -251,7 +301,7 @@ mod tests {
     #[test]
     fn claude_settings_shape() {
         let v = build_claude_settings_json("C:/work/proj", "C:/work/out");
-        assert_eq!(v["permissions"]["defaultMode"], "acceptEdits");
+        assert_eq!(v["permissions"]["defaultMode"], "bypassPermissions");
         let allow = v["permissions"]["allow"].as_array().unwrap();
         assert!(allow.iter().any(|x| x == "mcp__conduit-tools__*"));
         assert!(allow.iter().any(|x| x == "Bash(git:*)"));
@@ -269,17 +319,22 @@ mod tests {
 
     #[test]
     fn tools_mcp_json_registers_both_servers() {
-        let v = build_tools_mcp_json("C:/app/conduit-browser-mcp.exe", "p1", 7681);
+        let v = build_tools_mcp_json("C:/app/conduit-browser-mcp.exe", "p1", 7681, "tok-abc");
         assert!(v["mcpServers"]["conduit-browser"]["command"].is_string());
         assert!(v["mcpServers"]["conduit-tools"]["command"].is_string());
         assert_eq!(v["mcpServers"]["conduit-tools"]["env"]["CONDUIT_WS_PORT"], "7681");
+        // The WS auth token rides the per-server env block (not process env),
+        // on BOTH servers — they share the binary and the WS auth gate.
+        assert_eq!(v["mcpServers"]["conduit-browser"]["env"]["CONDUIT_MCP_AUTH_TOKEN"], "tok-abc");
+        assert_eq!(v["mcpServers"]["conduit-tools"]["env"]["CONDUIT_MCP_AUTH_TOKEN"], "tok-abc");
     }
 
     #[test]
     fn opencode_config_has_mcp_permission() {
-        let v = build_opencode_tools_config("C:/app/exe", "p1", 7681);
+        let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok-abc");
         assert!(v["mcp"]["conduit-browser"]["type"] == "local");
         assert!(v["mcp"]["conduit-tools"]["type"] == "local");
+        assert_eq!(v["mcp"]["conduit-browser"]["environment"]["CONDUIT_MCP_AUTH_TOKEN"], "tok-abc");
         assert!(v["permission"]["allow"].as_array().unwrap().iter().any(|x| x == "mcp__conduit-tools"));
         assert!(v["permission"]["edit"].as_array().unwrap().iter().any(|x| x == "*"));
     }
@@ -324,13 +379,19 @@ mod tests {
         // instructions/settings/agent write unconditionally (independent of the
         // sidecar binary); the mcp.json / opencode.json parts need
         // mcp_binary_path() and are skipped in CI. Assert the unconditional ones.
-        let b = write_bundle(&dir, "p1", Some("C:/work/proj"), Some("C:/work/out"), 7681);
+        let b = write_bundle(&dir, "p1", Some("C:/work/proj"), Some("C:/work/out"), None, 7681);
         let b = b.expect("base dir should create");
         assert!(b.claude_instructions.exists(), "claude instructions written");
         assert!(b.claude_settings.exists(), "claude settings written");
         assert!(b.kimi_agent.exists(), "kimi agent written");
         let md = std::fs::read_to_string(&b.claude_instructions).unwrap();
         assert!(md.contains("You are running inside Conduit"));
+        // The settings.json always has bypassPermissions under the new regime
+        // (the CLI spawn uses --dangerously-skip-permissions, the settings file must agree).
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(&b.claude_settings).unwrap()
+        ).unwrap();
+        assert_eq!(settings["permissions"]["defaultMode"], "bypassPermissions");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -2,6 +2,8 @@
 //! implement CONTRACT.md exactly. All argument names are camelCase on the JS
 //! side (Tauri maps snake_case Rust params <-> camelCase JS automatically).
 
+pub mod agent_cmds;
+pub mod automation_cmds;
 pub mod browser_cmds;
 pub mod chat_cmds;
 pub mod connectors_cmds;

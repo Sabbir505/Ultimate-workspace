@@ -3,7 +3,7 @@
 //! Speaks Model Context Protocol JSON-RPC over stdio to a harness (Claude
 //! Code / Kimi Code) and forwards every `tools/call` to the running Conduit
 //! app over a loopback WebSocket (ws://127.0.0.1:{CONDUIT_WS_PORT}). The app
-//! executes against the real visible Dev-tab browser pane — the harness sees
+//! executes against the real visible in-app browser pane — the harness sees
 //! a normal browser MCP server, but it's driving the exact pane on screen.
 //!
 //! This binary deliberately does NOT link Tauri: it's a thin stdio→WS relay.
@@ -60,7 +60,12 @@ async fn run() {
         if line.trim().is_empty() {
             continue;
         }
-        let response = handle_line(&line, &url, &project_id, &mut ws).await;
+        let Some(response) = handle_line(&line, &url, &project_id, &mut ws).await else {
+            // JSON-RPC notification — the spec forbids any response. The old
+            // code wrote a bare `null` line here, which strict MCP clients
+            // flag as a protocol violation.
+            continue;
+        };
         let mut text = serde_json::to_string(&response).unwrap_or_else(|_| fallback_err().to_string());
         text.push('\n');
         if stdout.write_all(text.as_bytes()).is_err() {
@@ -135,23 +140,40 @@ async fn round_trip(
     Err("ws stream ended without response".into())
 }
 
-/// Handle one stdin JSON-RPC line, returning the JSON-RPC response object.
+/// Handle one stdin JSON-RPC line, returning the JSON-RPC response object —
+/// or `None` for notifications, which MUST NOT receive a response per the
+/// JSON-RPC spec. (Previously `notifications/initialized` got a bare `null`
+/// line and unknown notifications got an error with `"id": null` — both are
+/// protocol violations that strict MCP clients reject.)
 async fn handle_line(
     line: &str,
     url: &str,
     project_id: &Option<String>,
     ws: &mut Option<WsConn>,
-) -> Value {
+) -> Option<Value> {
     let msg: Value = match serde_json::from_str(line) {
         Ok(v) => v,
-        Err(e) => return error_response(None, "invalid_args", &format!("malformed JSON-RPC: {e}")),
+        // Unparseable input might be a mangled notification, but JSON-RPC
+        // mandates a Parse-error reply with id:null here, and MCP clients
+        // never send malformed frames — keep answering this one.
+        Err(e) => return Some(error_response(None, "invalid_args", &format!("malformed JSON-RPC: {e}"))),
     };
 
-    // Notifications (no `id`) — acknowledge with nothing (no response per spec).
+    // Notifications carry no `id` member (or an explicit null) → silence.
+    // This single gate covers `notifications/initialized` AND any unknown
+    // notification method, which previously got an id:null error response.
     let id = msg.get("id").cloned();
+    let is_notification = match msg.get("id") {
+        None => true,
+        Some(Value::Null) => true,
+        _ => false,
+    };
+    if is_notification {
+        return None;
+    }
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
-    match method {
+    Some(match method {
         "initialize" => json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -161,7 +183,13 @@ async fn handle_line(
                 "capabilities": { "tools": {} }
             }
         }),
-        "notifications/initialized" | "initialized" => json!(null),
+        // A notifications/* method tagged with an id is a confused client;
+        // answer with a valid envelope rather than the old bare `null` line.
+        "notifications/initialized" | "initialized" => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": null
+        }),
         "tools/list" => json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -180,7 +208,7 @@ async fn handle_line(
             }
         }
         other => error_response(id, "unknown_op", &format!("unknown method: {other}")),
-    }
+    })
 }
 
 /// Map an MCP tool name to the WS op the app dispatches. Browser tools keep
@@ -277,11 +305,11 @@ fn tool_schemas() -> Vec<Value> {
     vec![
         json!({
             "name": "navigate",
-            "description": "Navigate the Dev-tab browser pane to a URL. Auto-opens a pane if none exists for the project.",
+            "description": "Navigate the in-app browser pane to a URL. This is NOT an external browser — the page loads in the Conduit window's visible pane. Auto-opens a pane if none exists. Use this (not fetch_url) when the user asks to browse, open a website, search, or interact with a web page. After navigating, call read_page to see what's on the page.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "url": { "type": "string", "description": "Absolute URL to navigate to." },
+                    "url": { "type": "string", "description": "Absolute URL to navigate to (e.g. https://google.com)." },
                     "pane_id": { "type": "string", "description": "Optional explicit browser pane id (omit to target the most-recently-used pane for the project)." }
                 },
                 "required": ["url"]
@@ -289,7 +317,7 @@ fn tool_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "read_page",
-            "description": "Read the active page. 'interactive' (default) returns the accessibility tree (roles, labels, form state, rects) so you can locate and interact with elements without pixel coordinates; 'content' returns readability-stripped page content.",
+            "description": "Read the current page in the browser pane. ALWAYS call this after navigating, before clicking or typing. Modes: 'interactive' (default — accessibility tree with element roles, labels, form state, and numbered refs you use in click/type_text); 'content' (readability-stripped article text); 'full' (raw page text); 'summary' (~1500 chars + headings for quick triage); 'section' (extract content under a CSS selector or heading). Refs from a read are valid only until the next navigation — re-read after any page change.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -301,11 +329,11 @@ fn tool_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "click",
-            "description": "Click an element resolved from a CSS selector or a role/text description.",
+            "description": "Click an element on the browser page. Pass a CSS selector or a natural-language description (visible text, aria-label, placeholder, or role). The agent cursor visibly moves to the element and a click ripple appears — the user sees it happen. After clicking, if the page changes, call read_page again to get fresh refs.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "selector_or_description": { "type": "string", "description": "CSS selector or a description (visible text / aria-label / placeholder) of the element to click." },
+                    "selector_or_description": { "type": "string", "description": "CSS selector (e.g. '#submit-btn', 'button.login') or a description (e.g. 'the Sign In button', 'search box')." },
                     "pane_id": { "type": "string" }
                 },
                 "required": ["selector_or_description"]
@@ -313,12 +341,12 @@ fn tool_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "type_text",
-            "description": "Type text into an input resolved from a CSS selector or role/text description. Dispatches per-keystroke events so controlled inputs (React/Vue) register the change.",
+            "description": "Type text into an input field on the browser page. Pass a CSS selector or description to find the input, then the text to type. Text is typed character-by-character (visible to the user) with real keydown/keyup/input events per keystroke, so React/Vue controlled inputs work correctly. After typing, call read_page to verify the input state if needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "selector_or_description": { "type": "string" },
-                    "text": { "type": "string" },
+                    "selector_or_description": { "type": "string", "description": "CSS selector or description of the input field (e.g. '#search', 'the email input')." },
+                    "text": { "type": "string", "description": "Text to type into the field." },
                     "pane_id": { "type": "string" }
                 },
                 "required": ["selector_or_description", "text"]
@@ -326,7 +354,7 @@ fn tool_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "scroll",
-            "description": "Scroll the page up or down by a viewport step.",
+            "description": "Scroll the browser page up or down by one viewport step. Use to reveal more content (e.g. lazy-loaded lists, below-the-fold sections). After scrolling, call read_page to get fresh refs — new elements may have appeared.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -337,7 +365,7 @@ fn tool_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "wait_for",
-            "description": "Wait for a condition: 'navigation' (URL change), 'selector' (element exists), or 'network_idle' (readyState complete + quiet period).",
+            "description": "Wait for a condition on the browser page before continuing. 'navigation' — wait for the URL to change (pass the previous URL as target). 'selector' — wait for an element matching the CSS selector to appear. 'network_idle' — wait for the page to settle (readyState complete + network quiet). Essential after clicks that trigger navigation or async content loads.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -430,5 +458,60 @@ mod tests {
         assert_eq!(tool_op("generate_document").unwrap(), "conduit_tools:generate_document");
         assert_eq!(tool_op("navigate").unwrap(), "navigate"); // browser tools unchanged
         assert!(tool_op("bogus").is_err()); // unknown tools error, not misroute
+    }
+
+    #[test]
+    fn notifications_get_no_response() {
+        // JSON-RPC: notifications (no id, or null id) must be answered with
+        // silence. The old code emitted a bare `null` line for
+        // notifications/initialized and id:null errors for unknown
+        // notifications — both protocol violations.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let url = "ws://127.0.0.1:1/".to_string();
+            let pid = None;
+            let mut ws = None;
+
+            // Initialized notification (the MCP handshake's tail).
+            assert!(handle_line(
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                &url, &pid, &mut ws,
+            ).await.is_none());
+            // Explicit null id is still a notification.
+            assert!(handle_line(
+                r#"{"jsonrpc":"2.0","id":null,"method":"notifications/initialized"}"#,
+                &url, &pid, &mut ws,
+            ).await.is_none());
+            // Unknown NOTIFICATION: also silent (previously an id:null error).
+            assert!(handle_line(
+                r#"{"jsonrpc":"2.0","method":"notifications/cancelled"}"#,
+                &url, &pid, &mut ws,
+            ).await.is_none());
+
+            // Requests WITH an id are still answered.
+            let resp = handle_line(
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+                &url, &pid, &mut ws,
+            ).await.expect("initialize request must be answered");
+            assert_eq!(resp["id"], 1);
+            assert!(resp.get("result").is_some());
+
+            // Unknown REQUEST: error response with the caller's id.
+            let resp = handle_line(
+                r#"{"jsonrpc":"2.0","id":7,"method":"bogus/method"}"#,
+                &url, &pid, &mut ws,
+            ).await.expect("unknown request must get an error response");
+            assert_eq!(resp["id"], 7);
+            assert!(resp.get("error").is_some());
+
+            // Malformed JSON: parse error is answered with id:null (spec).
+            let resp = handle_line("{not json", &url, &pid, &mut ws)
+                .await
+                .expect("parse errors must be answered");
+            assert!(resp.get("error").is_some());
+        });
     }
 }

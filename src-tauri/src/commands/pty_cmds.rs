@@ -42,18 +42,35 @@ pub fn spawn_agent_session(
         None => adapter.spawn_new_command(),
     };
 
-    // Register the conduit-browser-mcp server for Claude Code sessions so the
-    // agent can drive the in-app browser pane. Writes a Conduit-owned
-    // .mcp.json (never the project cwd) and surfaces it via --mcp-config.
-    // Kimi/OpenCode: best-effort (the flag is Claude Code's convention); a
-    // harness that ignores it simply has no browser tools (Task #6).
-    if session.harness == "claude_code" {
-        if let Some(cfg_path) = resolve_mcp_config(&app, &project.id) {
-            append_mcp_config_flag(&mut spec, &cfg_path);
+    // Register the conduit-browser-mcp server for agent sessions so the
+    // harness can drive the in-app browser pane. Writes a Conduit-owned
+    // config (never the project cwd) and surfaces it per harness: claude
+    // `--mcp-config`, kimi `--mcp-config-file`, opencode via the
+    // OPENCODE_CONFIG env var (no CLI flag) (Task #6).
+    let mut extra_env: Vec<(String, String)> = vec![];
+    match session.harness.as_str() {
+        "claude_code" => {
+            if let Some(cfg_path) = resolve_mcp_config(&app, &project.id) {
+                append_config_flag(&mut spec, "--mcp-config", &cfg_path);
+            }
         }
+        "kimi_code" => {
+            if let Some(cfg_path) = resolve_mcp_config(&app, &project.id) {
+                append_config_flag(&mut spec, "--mcp-config-file", &cfg_path);
+            }
+        }
+        "opencode" => {
+            if let Some(cfg_path) = resolve_opencode_config(&app, &project.id) {
+                extra_env.push((
+                    "OPENCODE_CONFIG".to_string(),
+                    cfg_path.to_string_lossy().replace('\\', "/"),
+                ));
+            }
+        }
+        _ => {}
     }
 
-    pty.0.spawn(&pane_id, Some(session_id.clone()), Some(adapter), Path::new(&cwd), &spec, vec![])?;
+    pty.0.spawn(&pane_id, Some(session_id.clone()), Some(adapter), Path::new(&cwd), &spec, extra_env)?;
     // Resume case: the harness id is already known — bind it now so the
     // on-disk usage sync starts immediately (no probe window needed).
     if let Some(hid) = &session.harness_session_id {
@@ -72,14 +89,23 @@ fn resolve_mcp_config(app: &AppHandle, project_id: &str) -> Option<PathBuf> {
     browser_mcp_register::write_mcp_config(&data_dir, project_id, BROWSER_MCP_PORT)
 }
 
-/// Append `--mcp-config <path>` to a Claude Code CommandSpec. Idempotent: if a
-/// `--mcp-config` is already present (shouldn't happen, but defensive), skip.
-fn append_mcp_config_flag(spec: &mut CommandSpec, cfg_path: &Path) {
-    if spec.args.iter().any(|a| a == "--mcp-config") {
+/// Same as resolve_mcp_config, but OpenCode-format: opencode reads MCP servers
+/// from an opencode.json "mcp" section, pointed at via the OPENCODE_CONFIG env
+/// var on the spawn (it has no --mcp-config CLI flag).
+fn resolve_opencode_config(app: &AppHandle, project_id: &str) -> Option<PathBuf> {
+    let data_dir = app.path().app_data_dir().ok()?;
+    browser_mcp_register::write_opencode_config(&data_dir, project_id, BROWSER_MCP_PORT)
+}
+
+/// Append `<flag> <path>` to a CommandSpec (e.g. `--mcp-config` for claude,
+/// `--mcp-config-file` for kimi). Idempotent: if the flag is already present
+/// (shouldn't happen, but defensive), skip.
+fn append_config_flag(spec: &mut CommandSpec, flag: &str, cfg_path: &Path) {
+    if spec.args.iter().any(|a| a == flag) {
         return;
     }
     let path_str = cfg_path.to_string_lossy().replace('\\', "/");
-    spec.args.push("--mcp-config".to_string());
+    spec.args.push(flag.to_string());
     spec.args.push(path_str);
 }
 
@@ -121,17 +147,24 @@ pub fn spawn_shell(
 /// features. Callers are responsible for not letting untrusted model
 /// output flow into this argument; the frontend wires it from user-curated
 /// quick actions and explicit input only.
+///
+/// Hardening: a `command` containing NUL bytes is always a bug (shells
+/// terminate strings on NUL). The frontend also rejects NULs in user
+/// input, but defending again here guarantees a corrupted DB row (e.g. a
+/// quick-action with embedded NUL) cannot smuggle extra bytes past
+/// the shell interface.
 fn shell_spec(command: &str) -> CommandSpec {
+    let cleaned = command.replace('\0', "");
     #[cfg(windows)]
     {
-        CommandSpec::new("cmd.exe", &["/C", command])
+        CommandSpec::new("cmd.exe", &["/C", &cleaned])
     }
     #[cfg(not(windows))]
     {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
         CommandSpec {
             program: shell,
-            args: vec!["-lc".to_string(), command.to_string()],
+            args: vec!["-lc".to_string(), cleaned.to_string()],
         }
     }
 }

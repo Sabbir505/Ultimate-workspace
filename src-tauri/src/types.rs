@@ -93,7 +93,14 @@ pub struct CostEvent {
     pub timestamp: i64,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
-    pub estimated_cost_usd: Option<f64>,
+    pub provider: Option<String>,
+    pub model_key: Option<String>,
+    pub source: String,
+    pub cache_creation_input_tokens: Option<i64>,
+    pub cache_read_input_tokens: Option<i64>,
+    pub reasoning_output_tokens: Option<i64>,
+    pub reported_cost_usd: Option<f64>,
+    pub pricing_estimated_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -170,6 +177,11 @@ pub struct SessionHarnessIdEvent {
 #[serde(rename_all = "camelCase")]
 pub struct CostUpdatedEvent {
     pub session_id: String,
+    /// Schema version of the payload. 1 = legacy `{ sessionId }`; 2 = current
+    /// (adds `totals`, `byKind`, `costQuality` blocks on the rollup endpoint).
+    /// Old mobile clients ignore the version field; the value lets the mobile
+    /// UI detect the new shape and degrade gracefully.
+    pub version: u32,
 }
 
 // ---- Chat types (CONTRACT.md "Chat" section) ----
@@ -189,21 +201,18 @@ pub struct ChatSession {
     /// Marked-unread chats show an unread dot in the sidebar.
     #[serde(default)]
     pub unread: bool,
-    /// Per-session permission posture for filesystem tool calls
-    /// (`read_only` | `manual` | `auto_edit` | `full_auto`). New sessions
-    /// default to `manual`. See `chat::permission::PermissionMode`.
-    #[serde(default = "default_permission_mode")]
-    pub permission_mode: String,
     /// Per-session watch-mode pacing override. None = inherit global setting;
     /// otherwise `"on"` | `"off"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch_mode: Option<String>,
-}
-
-/// The serde default for `ChatSession::permission_mode` — `manual`, the safe
-/// posture every new chat starts in.
-fn default_permission_mode() -> String {
-    "manual".to_string()
+    /// Per-session agent selection from the composer's agent-then-model
+    /// selector. `None` = no agent picked yet (fresh chats — the model chip
+    /// stays locked and Send is disabled until one is chosen). Values:
+    /// `"builtin"` (direct cloud API chat), `"local"` (bundled GGUF via
+    /// llama-server), or `"harness:<id>"` (a CLI agent, e.g.
+    /// `"harness:claude_code"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 /// A file attached to a chat message from the composer. Images are forwarded
@@ -398,8 +407,11 @@ pub struct ArtifactPreview {
     pub kind: String,
     /// Present for text-like kinds (text/markdown/csv/json/html/code/office/diagram).
     pub text: Option<String>,
-    /// `data:` URI present for image/pdf kinds.
+    /// `data:` URI present for image/pdf/docx/pptx kinds (raw file bytes).
     pub data_uri: Option<String>,
+    /// Signal to frontend that data_uri contains raw bytes (not base64-encoded HTML).
+    /// When true for docx, use mammoth.js client-side conversion.
+    pub original_bytes: Option<bool>,
     pub size: u64,
     pub truncated: bool,
 }

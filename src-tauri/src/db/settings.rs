@@ -24,6 +24,11 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> DbResult<()> {
     Ok(())
 }
 
+pub fn delete_setting(conn: &Connection, key: &str) -> DbResult<()> {
+    conn.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;

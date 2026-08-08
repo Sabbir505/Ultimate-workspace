@@ -36,34 +36,35 @@ pub fn add_source_note(
     unavailable: Option<&str>,
 ) -> DbResult<SourceNote> {
     let now = now_ts();
+    let changes_before = conn.changes();
     conn.execute(
         "INSERT OR IGNORE INTO chat_source_notes
            (chat_session_id, url, title, fact, excerpt, unavailable, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![chat_session_id, url, title, fact, excerpt, unavailable, now],
     )?;
-    let id = conn.last_insert_rowid();
-    // If last_insert_rowid() is 0, the row was ignored (duplicate);
-    // fetch the existing row so the caller always gets a valid record.
-    if id == 0 {
-        return conn
-            .query_row(
-                "SELECT * FROM chat_source_notes WHERE chat_session_id = ?1 AND url = ?2 AND fact = ?3 ORDER BY id ASC LIMIT 1",
-                params![chat_session_id, url, fact],
-                map_source_note,
-            )
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()));
+    let was_inserted = conn.changes() > 0 && conn.changes() > changes_before;
+    if was_inserted {
+        let id = conn.last_insert_rowid();
+        Ok(SourceNote {
+            id,
+            chat_session_id: chat_session_id.to_string(),
+            url: url.to_string(),
+            title: title.to_string(),
+            fact: fact.to_string(),
+            excerpt: excerpt.to_string(),
+            unavailable: unavailable.map(str::to_string),
+            created_at: now,
+        })
+    } else {
+        // INSERT OR IGNORE did nothing (duplicate) — fetch the existing row
+        // so the caller always gets a valid record with the correct id.
+        conn.query_row(
+            "SELECT * FROM chat_source_notes WHERE chat_session_id = ?1 AND url = ?2 AND fact = ?3 ORDER BY id ASC LIMIT 1",
+            params![chat_session_id, url, fact],
+            map_source_note,
+        ).map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))
     }
-    Ok(SourceNote {
-        id,
-        chat_session_id: chat_session_id.to_string(),
-        url: url.to_string(),
-        title: title.to_string(),
-        fact: fact.to_string(),
-        excerpt: excerpt.to_string(),
-        unavailable: unavailable.map(str::to_string),
-        created_at: now,
-    })
 }
 
 /// All source notes for a chat session, in insertion (chronological) order so
@@ -71,10 +72,13 @@ pub fn add_source_note(
 /// most recent 50 to keep the context window manageable.
 pub fn list_source_notes(conn: &Connection, chat_session_id: &str) -> DbResult<Vec<SourceNote>> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM chat_source_notes WHERE chat_session_id = ?1 ORDER BY id ASC LIMIT 50",
+        "SELECT * FROM chat_source_notes WHERE chat_session_id = ?1 ORDER BY id DESC LIMIT 50",
     )?;
     let rows = stmt.query_map(params![chat_session_id], map_source_note)?;
-    rows.collect()
+    // DESC picks the most recent 50; reverse back to chronological order.
+    let mut notes: Vec<SourceNote> = rows.collect::<Result<_, _>>()?;
+    notes.reverse();
+    Ok(notes)
 }
 
 /// Drop every source note for a chat session — called at the start of each new
@@ -145,6 +149,22 @@ mod tests {
         clear_source_notes(&conn, &a.id).unwrap();
         assert!(list_source_notes(&conn, &a.id).unwrap().is_empty());
         assert_eq!(list_source_notes(&conn, &b.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn list_caps_at_most_recent_50_in_chronological_order() {
+        let conn = mem();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-5").unwrap();
+        for i in 0..55 {
+            let url = format!("https://example.com/{i}");
+            add_source_note(&conn, &cs.id, &url, "T", "f", "e", None).unwrap();
+        }
+        let notes = list_source_notes(&conn, &cs.id).unwrap();
+        assert_eq!(notes.len(), 50);
+        // Most recent 50 (notes 5..=54 by insertion), oldest of them first.
+        assert_eq!(notes[0].url, "https://example.com/5");
+        assert_eq!(notes[49].url, "https://example.com/54");
+        assert!(notes.windows(2).all(|w| w[0].id < w[1].id));
     }
 
     #[test]

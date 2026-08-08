@@ -218,6 +218,7 @@ mod tests {
                 output_tokens: None,
                 cost_usd: Some(0.01), ..Default::default()
             },
+            "claude_code", "pty", Some(0.01),
         )
         .unwrap();
         super::super::create_quick_action(&conn, &p.id, "dev", "npm run dev", None, false).unwrap();

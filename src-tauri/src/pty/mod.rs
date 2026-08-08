@@ -289,12 +289,15 @@ impl Pane {
         if delta.cost_usd.is_none() {
             delta.cost_usd = self.price_for(db, &delta, model);
         }
+        let pricing_estimated_usd = delta.cost_usd;
+        let adapter_id = self.adapter.as_ref().map(|a| a.id()).unwrap_or("unknown");
         let conn = db.lock();
-        if db::insert_cost_event(&conn, session_id, &delta).is_ok() {
+        if db::insert_cost_event(&conn, session_id, &delta, adapter_id, "pty", pricing_estimated_usd).is_ok() {
             let _ = app.emit(
                 "cost:updated",
                 CostUpdatedEvent {
                     session_id: session_id.clone(),
+                    version: 2,
                 },
             );
         }

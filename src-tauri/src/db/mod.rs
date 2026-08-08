@@ -8,6 +8,7 @@
 //! (search, filtering, cost rollups) per PRD §6.1.
 
 mod artifacts;
+mod automations;
 mod chat;
 mod connector_credentials;
 mod cost;
@@ -69,12 +70,17 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    // 5-second busy timeout so concurrent readers (cost dashboard, settings)
+    // don't immediately fail when a write transaction is active.
+    conn.pragma_update(None, "busy_timeout", 5000)?;
     init_schema(conn)?;
     migrate_chat_session_flags(conn)?;
-    migrate_chat_session_permission_mode(conn)?;
     migrate_chat_session_watch_mode(conn)?;
+    migrate_chat_session_agent(conn)?;
     migrate_artifacts_message_id(conn)?;
     migrate_chat_messages_superseded(conn)?;
+    migrate_cost_v2(conn)?;
+    migrate_chat_messages_v2(conn)?;
     migrate_unc_paths(conn)
 }
 
@@ -94,27 +100,6 @@ fn migrate_chat_session_flags(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
-/// Add the `permission_mode` column to `chat_sessions` on databases created
-/// before the permission-mode selector existed. `ALTER TABLE … ADD COLUMN`
-/// errors if the column is already present, so a duplicate-column error is a
-/// no-op. Existing rows default to `'manual'` (the safe posture every new
-/// chat starts in); the column is nullable so the migration also tolerates a
-/// half-applied state.
-fn migrate_chat_session_permission_mode(conn: &Connection) -> DbResult<()> {
-    let sql = "ALTER TABLE chat_sessions ADD COLUMN permission_mode TEXT";
-    if let Err(e) = conn.execute(sql, []) {
-        if !e.to_string().contains("duplicate column name") {
-            return Err(e);
-        }
-    }
-    // Backfill any NULL/empty rows to the explicit default.
-    conn.execute(
-        "UPDATE chat_sessions SET permission_mode = 'manual' WHERE permission_mode IS NULL OR permission_mode = ''",
-        [],
-    )?;
-    Ok(())
-}
-
 /// Add the `watch_mode` column to `chat_sessions` on databases created before
 /// the watch-mode pacing feature existed. `ALTER TABLE … ADD COLUMN` errors if
 /// the column is already present, so a duplicate-column error is a no-op. NULL
@@ -125,6 +110,38 @@ fn migrate_chat_session_watch_mode(conn: &Connection) -> DbResult<()> {
         if !e.to_string().contains("duplicate column name") {
             return Err(e);
         }
+    }
+    Ok(())
+}
+
+/// Add the `agent` column to `chat_sessions` on databases created before the
+/// composer's agent-then-model selector existed. `ALTER TABLE … ADD COLUMN`
+/// errors if the column is already present, so a duplicate-column error is a
+/// no-op. NULL means "no agent picked yet" (the model chip stays locked).
+///
+/// The provider-derived backfill (`local_gguf` → `"local"`, else `"builtin"`)
+/// runs ONLY when the ALTER actually added the column — i.e. for rows that
+/// predate the feature, so they keep working instead of suddenly locking
+/// their Send button. It must NOT run on every startup: chats created after
+/// the migration are inserted with NULL on purpose, and re-backfilling would
+/// clobber that intentional "unselected" state (M14).
+fn migrate_chat_session_agent(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE chat_sessions ADD COLUMN agent TEXT";
+    let column_added = match conn.execute(sql, []) {
+        Ok(_) => true,
+        Err(e) => {
+            if e.to_string().contains("duplicate column name") {
+                false
+            } else {
+                return Err(e);
+            }
+        }
+    };
+    if column_added {
+        conn.execute(
+            "UPDATE chat_sessions SET agent = CASE WHEN provider = 'local_gguf' THEN 'local' ELSE 'builtin' END WHERE agent IS NULL",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -153,6 +170,105 @@ fn migrate_chat_messages_superseded(conn: &Connection) -> DbResult<()> {
     if let Err(e) = conn.execute(sql, []) {
         if !e.to_string().contains("duplicate column name") {
             return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Cost events v2: cache/reasoning/source/model_key/reported/pricing columns,
+/// backfill where possible, and drop the old `estimated_cost_usd`. Each
+/// `ALTER TABLE … ADD COLUMN` is a no-op when the column already exists
+/// (handles re-runs). The `DROP COLUMN` is gated on the column existing so
+/// older SQLite builds (< 3.35) skip it without erroring out.
+pub fn migrate_cost_v2(conn: &Connection) -> DbResult<()> {
+    for (col, def) in [
+        ("provider", "TEXT"),
+        ("model_key", "TEXT"),
+        ("cache_creation_input_tokens", "INTEGER"),
+        ("cache_read_input_tokens", "INTEGER"),
+        ("reasoning_output_tokens", "INTEGER"),
+        ("reported_cost_usd", "REAL"),
+        ("pricing_estimated_usd", "REAL"),
+    ] {
+        let sql = format!("ALTER TABLE cost_events ADD COLUMN {col} {def}");
+        if let Err(e) = conn.execute(&sql, []) {
+            if !e.to_string().contains("duplicate column name") {
+                return Err(e);
+            }
+        }
+    }
+    let sql_source = "ALTER TABLE cost_events ADD COLUMN source TEXT NOT NULL DEFAULT 'pty'";
+    if let Err(e) = conn.execute(sql_source, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+
+    // Backfill: rows whose session was ever on-disk-synced get source='on_disk';
+    // remaining rows keep the 'pty' default. Guarded by the sessions table
+    // having a last_synced_at column (older DBs / pre-migration test schemas
+    // may not have it yet).
+    let has_last_synced: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'last_synced_at')",
+            [], |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if has_last_synced {
+        conn.execute(
+            "UPDATE cost_events
+                SET source = 'on_disk'
+              WHERE source = 'pty'
+                AND session_id IN (SELECT id FROM sessions WHERE last_synced_at IS NOT NULL)",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE cost_events
+                SET model_key = CASE s.harness
+                    WHEN 'claude_code' THEN 'claude-sonnet-4-5'
+                    WHEN 'kimi_code'   THEN 'kimi-k3'
+                    ELSE model_key
+                END
+               FROM sessions s
+              WHERE cost_events.session_id = s.id
+                AND cost_events.model_key IS NULL
+                AND s.harness IN ('claude_code', 'kimi_code')",
+            [],
+        )?;
+    }
+
+    // DROP COLUMN: gated on the column existing. Older SQLite (< 3.35) may
+    // not support DROP COLUMN; fail soft by skipping in that case.
+    let has_old_col: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('cost_events') WHERE name = 'estimated_cost_usd')",
+            [], |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if has_old_col {
+        if let Err(e) = conn.execute("ALTER TABLE cost_events DROP COLUMN estimated_cost_usd", []) {
+            eprintln!("[conduit] cost_v2: DROP COLUMN failed ({e}); column will be unused");
+        }
+    }
+    Ok(())
+}
+
+/// Chat messages v2: cache/reasoning/provider/model_key/pricing_estimated_usd.
+/// Same duplicate-column-tolerant pattern as `migrate_cost_v2`.
+pub fn migrate_chat_messages_v2(conn: &Connection) -> DbResult<()> {
+    for (col, def) in [
+        ("cache_creation_input_tokens", "INTEGER"),
+        ("cache_read_input_tokens", "INTEGER"),
+        ("reasoning_output_tokens", "INTEGER"),
+        ("provider", "TEXT"),
+        ("model_key", "TEXT"),
+        ("pricing_estimated_usd", "REAL"),
+    ] {
+        let sql = format!("ALTER TABLE chat_messages ADD COLUMN {col} {def}");
+        if let Err(e) = conn.execute(&sql, []) {
+            if !e.to_string().contains("duplicate column name") {
+                return Err(e);
+            }
         }
     }
     Ok(())
@@ -189,7 +305,14 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           timestamp INTEGER NOT NULL,
           input_tokens INTEGER,
           output_tokens INTEGER,
-          estimated_cost_usd REAL
+          provider TEXT,
+          model_key TEXT,
+          source TEXT NOT NULL DEFAULT 'pty',
+          cache_creation_input_tokens INTEGER,
+          cache_read_input_tokens INTEGER,
+          reasoning_output_tokens INTEGER,
+          reported_cost_usd REAL,
+          pricing_estimated_usd REAL
         );
 
         CREATE TABLE IF NOT EXISTS skills (
@@ -235,8 +358,8 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           last_active_at INTEGER NOT NULL,
           starred INTEGER NOT NULL DEFAULT 0,
           unread INTEGER NOT NULL DEFAULT 0,
-          permission_mode TEXT NOT NULL DEFAULT 'manual',
-          watch_mode TEXT
+          watch_mode TEXT,
+          agent TEXT
         );
 
         CREATE TABLE IF NOT EXISTS chat_messages (
@@ -248,7 +371,13 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           output_tokens INTEGER,
           cost_usd REAL,
           created_at INTEGER NOT NULL,
-          superseded_by INTEGER
+          superseded_by INTEGER,
+          cache_creation_input_tokens INTEGER,
+          cache_read_input_tokens INTEGER,
+          reasoning_output_tokens INTEGER,
+          provider TEXT,
+          model_key TEXT,
+          pricing_estimated_usd REAL
         );
 
         CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(chat_session_id, id);
@@ -264,6 +393,38 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           created_at INTEGER NOT NULL,
           expires_at INTEGER NOT NULL
         );
+
+        -- Scheduled headless agent runs (see db/automations.rs +
+        -- crate::automations). chat_session_id is the run log, bound lazily.
+        CREATE TABLE IF NOT EXISTS automations (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          harness TEXT NOT NULL,
+          model TEXT NOT NULL DEFAULT '',
+          cwd TEXT NOT NULL DEFAULT '',
+          schedule TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          last_run_at INTEGER,
+          last_status TEXT,
+          chat_session_id TEXT,
+          created_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS automation_runs (
+          id TEXT PRIMARY KEY,
+          automation_id TEXT NOT NULL REFERENCES automations(id) ON DELETE CASCADE,
+          started_at INTEGER NOT NULL,
+          finished_at INTEGER,
+          status TEXT NOT NULL DEFAULT 'running',
+          summary TEXT NOT NULL DEFAULT '',
+          chat_session_id TEXT,
+          source TEXT NOT NULL DEFAULT 'scheduled'
+        );
+        CREATE INDEX IF NOT EXISTS idx_automation_runs_auto
+          ON automation_runs(automation_id, started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_automation_runs_running
+          ON automation_runs(status) WHERE finished_at IS NULL;
 
         CREATE INDEX IF NOT EXISTS idx_artifacts_created ON artifacts(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_artifacts_expires ON artifacts(expires_at);
@@ -334,7 +495,7 @@ pub use projects::{
 };
 
 // settings
-pub use settings::{get_setting, set_setting};
+pub use settings::{delete_setting, get_setting, set_setting};
 
 // skills
 pub use skills::{
@@ -362,7 +523,7 @@ pub use chat::{
     get_chat_session, list_active_chat_messages, list_chat_messages, list_chat_sessions,
     list_chat_session_connectors, mark_superseded, set_chat_session_connectors,
     set_chat_session_starred, set_chat_session_unread, touch_chat_session,
-    update_chat_session_model, update_chat_session_permission_mode,
+    update_chat_session_agent, update_chat_session_model,
     update_chat_session_provider, update_chat_session_title, update_chat_session_watch_mode,
 };
 
@@ -386,6 +547,13 @@ pub use workspaces::{
     create_workspace, delete_workspace, get_workspace, list_workspaces, update_workspace,
 };
 
+// automations (scheduled headless agent runs)
+pub use automations::{
+    count_runs_for, create_automation, delete_automation, finish_run, get_automation,
+    list_automations, list_runs_for, record_run, record_status, set_automation_enabled,
+    start_run, update_automation, Automation, AutomationInput, AutomationRun,
+};
+
 // ---- test helpers ----
 
 /// Creates an in-memory `Connection`, configures foreign_keys, and runs
@@ -406,5 +574,47 @@ mod tests {
     fn schema_creates_idempotently() {
         let conn = mem();
         init_schema(&conn).unwrap(); // second run must not error
+    }
+
+    #[test]
+    fn agent_migration_backfills_only_when_column_is_new() {
+        // M14 regression: the provider backfill used to run on EVERY startup,
+        // clobbering intentionally-NULL (unselected) chats back to 'builtin'.
+        let conn = Connection::open_in_memory().unwrap();
+        // Minimal pre-migration schema: provider exists, agent does not.
+        conn.execute_batch(
+            "CREATE TABLE chat_sessions (id INTEGER PRIMARY KEY, provider TEXT);
+             INSERT INTO chat_sessions (id, provider) VALUES (1, 'anthropic'), (2, 'local_gguf');",
+        )
+        .unwrap();
+
+        // First run: the ALTER adds the column → pre-existing rows backfill.
+        migrate_chat_session_agent(&conn).unwrap();
+        let a1: String = conn
+            .query_row("SELECT agent FROM chat_sessions WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        let a2: String = conn
+            .query_row("SELECT agent FROM chat_sessions WHERE id = 2", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(a1, "builtin");
+        assert_eq!(a2, "local");
+
+        // A chat created after the migration starts intentionally NULL…
+        conn.execute(
+            "INSERT INTO chat_sessions (id, provider, agent) VALUES (3, 'anthropic', NULL)",
+            [],
+        )
+        .unwrap();
+        // …and the every-startup re-run must leave that NULL (and the
+        // backfilled values) alone.
+        migrate_chat_session_agent(&conn).unwrap();
+        let a3: Option<String> = conn
+            .query_row("SELECT agent FROM chat_sessions WHERE id = 3", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(a3, None, "re-run clobbered an intentional NULL agent");
+        let a1: String = conn
+            .query_row("SELECT agent FROM chat_sessions WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(a1, "builtin");
     }
 }

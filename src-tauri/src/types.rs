@@ -112,18 +112,82 @@ pub struct ProjectCostRollup {
     pub total_output_tokens: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DailyCost {
     pub day: String, // 'YYYY-MM-DD' (SQLite date(timestamp,'unixepoch'))
     pub cost_usd: f64,
+    pub tokens_by_provider: std::collections::BTreeMap<String, i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CostRollups {
-    pub per_project: Vec<ProjectCostRollup>,
+    pub totals: CostTotals,
+    pub per_provider: Vec<ProviderCostRollup>,
     pub daily: Vec<DailyCost>,
+    pub by_kind: CostByKind,
+    pub per_model: Vec<ModelCostRollup>,
+    pub cost_quality: CostQuality,
+    pub per_project: Vec<ProjectCostRollup>,
+    pub range_start: String,
+    pub range_end: String,
+    pub range_days: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CostTotals {
+    pub raw_token_cost_usd: f64,
+    pub provider_reported_usd: f64,
+    pub estimated_usd: f64,
+    pub unpriced_usd: f64,
+    /// Internal accumulator used by get_cost_rollups_v2; not part of the
+    /// public IPC contract (the real cache-savings figure is on CostQuality).
+    #[serde(skip)]
+    pub cache_savings_usd_via_helper: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCostRollup {
+    pub provider: String,
+    pub cost_usd: f64,
+    pub tokens: i64,
+    pub share_pct: f64,
+}
+
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CostByKind {
+    pub processed_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub uncached_input_tokens: i64,
+    pub output_tokens: i64,
+    pub reasoning_tokens: i64,
+    pub sessions: i64,
+    pub responses: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCostRollup {
+    pub model_key: String,
+    pub display_name: String,
+    pub cost_usd: f64,
+    pub share_pct: f64,
+    pub tokens: i64,
+    pub provider: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CostQuality {
+    pub provider_reported_pct: f64,
+    pub model_priced_pct: f64,
+    pub unpriced_pct: f64,
+    pub cache_savings_usd: f64,
 }
 
 // ---- Event payloads (backend -> frontend, CONTRACT.md "Events") ----

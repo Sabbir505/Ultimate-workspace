@@ -113,11 +113,23 @@ pub fn get_cost_rollups(conn: &Connection) -> DbResult<CostRollups> {
             Ok(DailyCost {
                 day: r.get(0)?,
                 cost_usd: r.get(1)?,
+                tokens_by_provider: std::collections::BTreeMap::new(),
             })
         })?;
         rows.collect::<DbResult<Vec<_>>>()?
     };
-    Ok(CostRollups { per_project, daily })
+    Ok(CostRollups {
+        totals: crate::types::CostTotals::default(),
+        per_provider: Vec::new(),
+        per_project,
+        daily,
+        by_kind: crate::types::CostByKind::default(),
+        per_model: Vec::new(),
+        cost_quality: crate::types::CostQuality::default(),
+        range_start: String::new(),
+        range_end: String::new(),
+        range_days: 30,
+    })
 }
 
 #[cfg(test)]

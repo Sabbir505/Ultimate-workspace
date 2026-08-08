@@ -12,6 +12,7 @@ mod automations;
 mod chat;
 mod connector_credentials;
 mod cost;
+mod cost_v2;
 mod projects;
 mod secrets;
 mod settings;
@@ -516,6 +517,7 @@ pub use secrets::{
 pub use cost::{
     get_cost_events, get_cost_rollups, insert_cost_event,
 };
+pub use cost_v2::{get_cost_rollups_v2, read_rate_overrides};
 
 // chat
 pub use chat::{

@@ -1127,8 +1127,16 @@ fn build_cost_details(
 
     // Daily + per-project rollups come from the same query the desktop uses.
     let rollups = crate::db::get_cost_rollups(&conn).unwrap_or_else(|_| crate::types::CostRollups {
-        per_project: Vec::new(),
+        totals: crate::types::CostTotals::default(),
+        per_provider: Vec::new(),
         daily: Vec::new(),
+        by_kind: crate::types::CostByKind::default(),
+        per_model: Vec::new(),
+        cost_quality: crate::types::CostQuality::default(),
+        per_project: Vec::new(),
+        range_start: String::new(),
+        range_end: String::new(),
+        range_days: 30,
     });
 
     let daily = rollups

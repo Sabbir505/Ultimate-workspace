@@ -173,9 +173,13 @@ pub fn get_cost_events(session_id: Option<String>, db: State<DbState>) -> CmdRes
 }
 
 #[tauri::command]
-pub fn get_cost_rollups(db: State<DbState>) -> CmdResult<CostRollups> {
+pub fn get_cost_rollups(range_days: Option<u32>, db: State<DbState>) -> CmdResult<CostRollups> {
+    let days = match range_days.unwrap_or(30) {
+        7 | 30 | 90 => range_days.unwrap_or(30),
+        _ => 30,
+    };
     let conn = db.0.lock();
-    db::get_cost_rollups(&conn).map_err(|e| e.to_string())
+    db::get_cost_rollups_v2(&conn, days).map_err(|e| e.to_string())
 }
 
 // ---- export & file peek ----

@@ -40,8 +40,12 @@ export function CostDashboard() {
             </div>
           ) : rollups ? (
             <>
-              <CostHero rollups={rollups} />
-              <DailyChart rollups={rollups} />
+              {/* T3 Code layout: hero + per-tool breakdown LEFT, daily chart
+                  RIGHT, side by side; stats row spans below. */}
+              <div className="cost-top-grid">
+                <CostHero rollups={rollups} />
+                <DailyChart rollups={rollups} />
+              </div>
               <StatsRow byKind={rollups.byKind} cacheSavingsUsd={rollups.costQuality.cacheSavingsUsd} />
               <ModelBreakdownTable rows={rollups.perModel} />
               <CostQualityPanel q={rollups.costQuality} cacheSavingsUsd={rollups.costQuality.cacheSavingsUsd} />

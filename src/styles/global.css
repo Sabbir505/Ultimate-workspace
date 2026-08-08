@@ -3441,9 +3441,11 @@ table.kv th {
   box-shadow: var(--glass-rim-soft);
 }
 
+/* T3 Code reference: the left column stacks the big "Raw Token Cost" number
+   ABOVE the per-tool breakdown rows (number on top, rows below). */
 .cost-hero {
-  display: grid;
-  grid-template-columns: minmax(200px, 0.9fr) 1.1fr;
+  display: flex;
+  flex-direction: column;
   gap: 16px;
   padding: 16px;
   border: 1px solid var(--border);
@@ -3455,6 +3457,8 @@ table.kv th {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
 }
 .cost-hero-label {
   font-size: 11px;
@@ -3477,9 +3481,7 @@ table.kv th {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 6px;
-  border-left: 1px solid var(--border);
-  padding-left: 16px;
+  gap: 8px;
 }
 .cost-hero-row {
   display: grid;
@@ -3547,6 +3549,28 @@ table.kv th {
 .daily-chart .bar:hover {
   opacity: 1;
   filter: brightness(1.15);
+}
+
+/* T3 Code layout: hero + per-tool breakdown on the LEFT, daily cost chart on
+   the RIGHT, side by side. */
+.cost-top-grid {
+  display: grid;
+  grid-template-columns: 0.95fr 1.05fr;
+  gap: 16px;
+  align-items: stretch;
+}
+.cost-top-grid .cost-hero {
+  height: 100%;
+  box-sizing: border-box;
+}
+.cost-top-grid .cost-chart {
+  height: 100%;
+  box-sizing: border-box;
+}
+@media (max-width: 1100px) {
+  .cost-top-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .stats-row {
@@ -3667,15 +3691,6 @@ table.kv th {
 }
 
 @media (max-width: 900px) {
-  .cost-hero {
-    grid-template-columns: 1fr;
-  }
-  .cost-hero-breakdown {
-    border-left: none;
-    padding-left: 0;
-    border-top: 1px solid var(--border);
-    padding-top: 12px;
-  }
   .stats-row {
     grid-template-columns: repeat(2, 1fr);
   }

@@ -10,15 +10,32 @@ IDs are UUID strings. Timestamps are Unix epoch **seconds** (i64).
 type HarnessId = 'claude_code' | 'kimi_code' | 'opencode';
 type ChatProviderId = 'anthropic' | 'openai' | 'openrouter' | 'anthropic_compatible' | 'openai_compatible' | 'local_gguf';
 type PaneState = 'idle' | 'working' | 'waiting' | 'diff_ready';
+type ChatAgent = 'builtin' | 'local' | `harness:${HarnessId}`;
 
 interface Project { id: string; path: string; name: string; isGitRepo: boolean; createdAt: number; lastOpenedAt: number | null }
 interface SessionRecord { id: string; projectId: string; harness: HarnessId; harnessSessionId: string | null; title: string | null; worktreePath: string | null; createdAt: number; lastActiveAt: number; status: string }
 interface HarnessStatus { id: HarnessId; displayName: string; installed: boolean }
 interface GitStatusInfo { isRepo: boolean; branch: string | null; dirty: boolean; ahead: number; behind: number }
+interface ChangedFile { path: string; status: 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked' }
 interface Skill { id: string; name: string; slashCommand: string; content: string; scope: string; createdAt: number } // scope = 'global' or a project id
 interface QuickAction { id: string; projectId: string; label: string; command: string; keybinding: string | null; runOnWorktree: boolean }
-interface CostEvent { id: number; sessionId: string; timestamp: number; inputTokens: number | null; outputTokens: number | null; estimatedCostUsd: number | null }
-interface CostRollups { perProject: Array<{ projectId: string; totalCostUsd: number; totalInputTokens: number; totalOutputTokens: number }>; daily: Array<{ day: string; costUsd: number }> } // day = 'YYYY-MM-DD'
+interface CostEvent { id: number; sessionId: string; timestamp: number; inputTokens: number | null; outputTokens: number | null; provider: string | null; modelKey: string | null; source: string; cacheCreationInputTokens: number | null; cacheReadInputTokens: number | null; reasoningOutputTokens: number | null; reportedCostUsd: number | null; pricingEstimatedUsd: number | null }
+interface CostRollups {
+  totals: { rawTokenCostUsd: number; providerReportedUsd: number; estimatedUsd: number; unpricedUsd: number };
+  perProvider: Array<{ provider: string; costUsd: number; tokens: number; sharePct: number }>;
+  daily: Array<{ day: string; costUsd: number; tokensByProvider: Record<string, number> }>;
+  byKind: { processedTokens: number; cachedInputTokens: number; uncachedInputTokens: number; outputTokens: number; reasoningTokens: number; sessions: number; responses: number };
+  perModel: Array<{ modelKey: string; displayName: string; costUsd: number; sharePct: number; tokens: number; provider: string | null }>;
+  costQuality: { providerReportedPct: number; modelPricedPct: number; unpricedPct: number; cacheSavingsUsd: number };
+  perProject: Array<{ projectId: string; totalCostUsd: number; totalInputTokens: number; totalOutputTokens: number }>;
+  rangeStart: string; rangeEnd: string; rangeDays: 7 | 30 | 90;
+} // day = 'YYYY-MM-DD'
+interface Automation { id: string; name: string; prompt: string; harness: 'claude_code' | 'opencode'; model: string; cwd: string; schedule: string; enabled: boolean; lastRunAt: number | null; lastStatus: string | null; chatSessionId: string | null; createdAt: number }
+interface AutomationInput { name: string; prompt: string; harness: 'claude_code' | 'opencode'; model?: string; cwd?: string; schedule: string; enabled?: boolean }
+interface AutomationRun { id: string; automationId: string; startedAt: number; finishedAt: number | null; status: string; summary: string; chatSessionId: string | null; source: 'scheduled' | 'manual' }
+interface HarnessModelInfo { id: string; label: string; source: 'config' | 'cli' | 'builtin' }
+interface HarnessModelConfig { defaultModel: string | null; endpoint: string | null; models: HarnessModelInfo[] }
+interface WorkspaceRecord { id: string; projectId: string; name: string; data: string; createdAt: number; updatedAt: number }
 ```
 
 ## Commands
@@ -45,15 +62,33 @@ PTY (paneId is a frontend-generated UUID per pane slot):
 Harnesses:
 - `list_harnesses() -> HarnessStatus[]`
 - `run_harness_login(paneId: string, harnessId: HarnessId, cwd: string) -> ()` (spawns login flow in that pane's pty)
+- `list_harness_models(harnessId: HarnessId) -> HarnessModelConfig` — models/endpoint discovered in the CLI's own config files (`~/.claude/settings.json`, `~/.kimi-code/config.toml`, `~/.config/opencode/opencode.json`); per-model `source` = `"config"` | `"cli"` | `"builtin"`. Best-effort — empty/failed reads yield an empty list and the frontend falls back to the static catalog (`src/lib/harnessModels.ts`).
+
+Headless CLI chat (chat sessions whose `agent` is `"harness:<id>"`; same `chat:token`/`chat:done`/`chat:error`/`chat:artifact` events as the built-in chat):
+- `send_agent_chat_message(chatSessionId, content, harnessId, model?, cwd?, projectId?) -> ()` — spawns (or writes to) the headless CLI; claude uses a persistent process, kimi/opencode spawn per turn. The harness always runs at full-auto permission (`--dangerously-skip-permissions` for claude, `--auto` for opencode, kimi prompt mode auto-approves). The capture-and-resume CLI session id persists under `agent.cli_session_id.<harness>.<sid>` in `app_settings`.
+- `cancel_agent_chat_message(chatSessionId) -> ()` — kills the in-flight CLI process; the next send respawns. Captured CLI session id is kept so context survives the cancel.
 
 Git:
 - `get_git_status(path: string) -> GitStatusInfo`
 - `create_worktree(projectId: string, branchName: string) -> string` (returns worktree path; uses `git worktree add <path> -b <branch>`; path = sibling dir `<project>-<branch>` sanitized)
 - `get_git_diff(path: string) -> string` (unified diff of working tree, capped ~200KB)
+- `get_changed_files(path: string) -> ChangedFile[]` — per-pane file list for the Dev-tab Files panel (arg is the pane's actual cwd, worktree-aware)
+- `get_git_file_diff(path: string, filePath: string) -> string` — per-file unified diff for the Files panel
+
+Automations (scheduled headless agent runs; kimi excluded — `--yolo`/`--auto` are interactive-only):
+- `list_automations() -> Automation[]`
+- `create_automation(input: AutomationInput) -> Automation`
+- `update_automation(automationId: string, input: AutomationInput) -> ()`
+- `delete_automation(automationId: string) -> ()`
+- `set_automation_enabled(automationId: string, enabled: boolean) -> ()`
+- `run_automation_now(automationId: string) -> ()` — fire one run immediately on the same launch path the scheduler uses
+- `list_automation_runs(automationId: string, limit?: number) -> AutomationRun[]` — newest-first, default cap 100
+- `count_automation_runs(automationId: string) -> number` — sidebar list badge
 
 Settings / skills / quick actions / secrets / cost:
 - `get_setting(key: string) -> string | null`
 - `set_setting(key: string, value: string) -> ()`
+- `get_chat_db_path() -> string` — absolute path of `<app_data_dir>/conduit.db`
 - `list_skills(projectId?: string) -> Skill[]` (global skills plus, if projectId given, that project's skills)
 - `create_skill(name: string, slashCommand: string, content: string, scope: string) -> Skill`
 - `update_skill(id: string, name: string, slashCommand: string, content: string) -> ()`
@@ -66,7 +101,7 @@ Settings / skills / quick actions / secrets / cost:
 - `delete_secret(projectId: string, key: string) -> ()`
 - `list_secret_keys(projectId: string) -> string[]`
 - `get_cost_events(sessionId?: string) -> CostEvent[]`
-- `get_cost_rollups() -> CostRollups`
+- `get_cost_rollups(rangeDays?: 7 | 30 | 90) -> CostRollups` (default 30; new shape from COST_MODEL_REDESIGN.md §8)
 - `export_session_markdown(paneId: string) -> string` (formatted markdown from that pane's stripped transcript buffer)
 - `read_file_text(path: string) -> string` (capped ~512KB; for the read-only peek viewer)
 
@@ -112,7 +147,7 @@ Event:
 - `pty:exit` — payload `{ paneId: string, code: number | null }`
 - `pty:state` — payload `{ paneId: string, state: PaneState }` (backend heuristic: output activity → `working`; ~1.5s of silence after output → `waiting`; fresh spawn with no output → `idle`; harness diff-approval prompt pattern → `diff_ready`, best-effort)
 - `session:harness-id` — payload `{ sessionId: string, harnessSessionId: string }` (when adapter detects the harness's own session id in output)
-- `cost:updated` — payload `{ sessionId: string }` (after a parsed usage event is written; frontend refetches)
+- `cost:updated` — payload `{ sessionId: string, version: 1 | 2 }` (after a parsed usage event is written; frontend refetches; version 2 = current shape)
 - `browser:url_detected` — payload `{ paneId: string, url: string }` (when a local dev-server URL is detected in terminal output; frontend opens it in the built-in browser pane)
 
 - `chat:token` — payload `{ chatSessionId: string, token: string }` (streaming token from LLM)
@@ -158,10 +193,12 @@ Commands:
 - `list_chat_sessions() -> ChatSession[]` (most recent first by lastActiveAt)
 - `create_chat_session(provider: string, model: string) -> ChatSession`
 - `delete_chat_session(chatSessionId: string) -> ()`
+- `delete_all_chat_sessions() -> number` — bulk delete every chat session + its messages; returns the count deleted
 - `update_chat_session_model(chatSessionId: string, model: string) -> ()`
 - `update_chat_session_provider(chatSessionId: string, provider: string) -> ()` — switches the provider for an existing chat session.
 - `update_chat_session_watch_mode(chatSessionId: string, watchMode: boolean | null) -> ()` — sets the per-session watch-mode override (null = inherit global setting).
 - `update_chat_session_permission_mode(chatSessionId: string, mode: string) -> ()` — sets the per-session filesystem-tool posture (`read_only` | `manual` | `auto_edit` | `full_auto`); rejects unknown modes. The frontend gates the switch INTO `full_auto` behind a one-time confirmation modal before calling this.
+- `update_chat_session_agent(chatSessionId: string, agent: string | null) -> ()` — sets the per-session agent selection from the composer's `AgentMenu` (`"builtin"` | `"local"` | `"harness:<id>"` | null = no agent picked yet). Selecting a harness routes subsequent `send_chat_message` calls to the headless CLI chat path (`send_agent_chat_message`).
 - `delete_chat_message(chatSessionId: string, messageId: number) -> ()` — deletes a single message from a chat session.
 - `update_chat_session_title(chatSessionId: string, title: string) -> ()`
 - `generate_chat_title(chatSessionId: string) -> string | null` — auto-generates a 3–6 word title from the conversation history via the LLM; returns `null` if generation fails (no API key configured, empty transcript, or API error).
@@ -175,6 +212,7 @@ Commands:
 - `list_artifacts() -> ArtifactRecord[]` — all persisted generated artifacts (files/diagrams), most recent first. `ArtifactRecord = { id, chatSessionId?, chatMessageId?, filename, path, kind, createdAt, expiresAt }`. `chatMessageId` links an artifact to the specific assistant message that produced it (used to restore inline diagrams/file chips on a reopened chat). Artifacts are retained 30 days; expired rows+files are swept on app startup.
 - `list_chat_artifacts(chatSessionId: string) -> ArtifactRecord[]` — artifacts for a specific chat session
 - `delete_artifact(id: string) -> ()` — removes an artifact's DB row and its on-disk file.
+- `delete_all_artifacts() -> number` — bulk: removes every artifact row + on-disk file and sweeps the artifacts dir for leftovers. Returns the number of files removed.
 - `set_chat_api_key(provider: string, key: string, baseUrl?: string, model?: string) -> ()` — stores key in OS keychain, stores baseUrl/model in app_settings. The key value is NEVER returned via any IPC command.
 - `delete_chat_api_key(provider: string) -> ()`
 - `get_chat_config(provider?: string) -> ChatConfigPayload` — NON-secret config only. The API key is never returned.
@@ -244,8 +282,9 @@ for the full protocol (JSON over WebSocket, tagged-union message types).
 ## Rules both sides must honor
 
 - Pane processes are killed on explicit close, LRU replacement (when all 6 slots are full — the evicted pane's pty is terminated), or app quit — never on blur (PRD §6.5).
-- On app quit the backend terminates all child pty processes cleanly.
+- On app quit the backend terminates all child pty processes cleanly (PtyState + agent_sessions::AgentSessionState + LocalModelState + mobile relay).
 - CLI agent session title auto-generation (first ~40 chars of first user prompt) happens in the **frontend** (it observes what the user types); it calls `update_session_title` once when a session's title is null and the first prompt is submitted. Chat sessions instead use `generate_chat_title` (backend, LLM-based, 3–6 words).
 - Skill slash-command expansion happens in the **frontend** before `write_pty`.
 - Broadcast mode is pure frontend: it calls `write_pty` for each selected pane.
-- SQLite lives at `<app_data_dir>/conduit.db`. Schema = PRD §6.3 plus a `quick_actions` table (id TEXT PK, project_id TEXT NOT NULL REFERENCES projects(id), label TEXT NOT NULL, command TEXT NOT NULL, keybinding TEXT, run_on_worktree BOOLEAN NOT NULL DEFAULT 0).
+- **Headless CLI chat** routes through `send_agent_chat_message` when the chat session's `agent` starts with `"harness:"`; built-in chat uses `send_chat_message`. The `permission_mode` column is only honored by the built-in chat — CLI chat always runs at full-auto permission. UI for selecting a permission mode was removed in favor of the `AgentMenu` selector.
+- SQLite lives at `<app_data_dir>/conduit.db`. Schema = PRD §6.3 plus `quick_actions`, `chat_sessions` (with `starred`/`unread`/`watch_mode`/`agent`/`permission_mode` columns), `chat_messages` (with `superseded_by`), `artifacts`, `chat_source_notes`, `connector_credentials`, `chat_session_connectors`, `workspaces`, `automations`, and `automation_runs`. Migrations add columns idempotently (`ALTER TABLE … ADD COLUMN` + duplicate-column tolerance).

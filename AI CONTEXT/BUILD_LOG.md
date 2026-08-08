@@ -4,6 +4,140 @@ Running log per PRD §13.3: what was built, what was tested and how, assumptions
 
 ---
 
+## 2026-08-08 — Cost model v2 (T3-Code parity)
+
+Cost model redesign to match the T3 Code usage dashboard (design spec:
+`AI CONTEXT/COST_MODEL_REDESIGN.md`; implementation plan:
+`docs/superpowers/plans/2026-08-08-cost-model-redesign.md`).
+
+**What was built:**
+- **Schema migration** (`migrate_cost_v2` + `migrate_chat_messages_v2` in
+  `db/mod.rs`): `cost_events` gains `provider`, `model_key`, `source`,
+  `cache_creation_input_tokens`, `cache_read_input_tokens`,
+  `reasoning_output_tokens`, `reported_cost_usd`, `pricing_estimated_usd`;
+  the old `estimated_cost_usd` is dropped. `chat_messages` gains the same
+  shape minus `source`/`reported_cost_usd`. Backfills `source='on_disk'`
+  for on-disk-synced sessions and `model_key` for known harnesses.
+- **Read-time pricing** (`harness_adapters::pricing`): `price_usage` is
+  the single source of truth for cost math, layered on Settings overrides
+  and per-model cache rates. `pricing_estimated_usd` is write-only audit;
+  changing a rate reprices history retroactively.
+- **Adapter cache/reasoning tracking**: `UsageInfo` v2 splits
+  cache_creation / cache_read / reasoning; Claude + Kimi
+  `parse_session_usage` record them separately. The pty scraper stays
+  conservative (NULL cache/reasoning).
+- **New rollup endpoint** (`get_cost_rollups(rangeDays?: 7|30|90)`):
+  unions `cost_events` + `chat_messages`; returns totals, perProvider,
+  daily (with tokensByProvider), byKind, perModel, costQuality
+  (provider-reported / model-priced / unpriced %s + cache savings),
+  perProject, rangeStart/End/Days. `CostUpdatedEvent` carries `version: 2`.
+- **T3 Code-style dashboard**: `CostDashboard.tsx` rewritten with
+  `RangeToggle`, `CostHero`, `DailyChart` (Cost/Tokens toggle),
+  `StatsRow` (6 cards incl. cache savings), `ModelBreakdownTable`,
+  `CostQualityPanel`, and a `useCostRollups` hook. Local-model usage panel
+  folded into the per-model table.
+- **Mobile relay** uses the same read-time pricing (`read_rate_overrides`
+  + `get_cost_rollups_v2(14)`); `CostSummary` message gains `version: 2`.
+
+**What was tested and how:**
+- `cargo test --lib` → **354 passed, 0 failed, 10 ignored** (new: pricing
+  module 7 tests, cost_v2 rollup 2 tests, migration test, kimi cache
+  split test, updated claude cache split test).
+- `npx vitest run` → **176 passed** (new: costRollups shape, useCostRollups
+  hook, CostDashboard render + range toggle).
+- `npx tsc --noEmit` clean; `npm run build` clean.
+
+**Assumptions / deviations:**
+1. Rows with NULL `model_key` price at the harness default
+   (`harness_default_model_key(provider)` for cost_events,
+   `canonical_model_key(chat_sessions.model)` for chat rows) per spec §7.2.
+2. `CostTotals` carries a `#[serde(skip)]` internal cache-savings
+   accumulator; the public cache-savings figure lives on `CostQuality`.
+3. OpenAI-compatible chat rows currently zero the cache/reasoning fields
+   (the wire format we parse doesn't expose them yet) — spec-flagged follow-up.
+
+---
+
+## 2026-08-07 — Doc audit + permission-mode removal + agent/automation features landed
+
+This entry covers the doc-audit pass that pulled the docs in line with the
+headless-CLI-chat + automations + harness-bundle + harness-config work that
+landed since 2026-08-03. The implementation has been merged across the past
+two weeks (separate work sessions); the only code-shaped change in this entry
+itself is the `PermissionModeMenu` / `ApprovalFlow` removal in favor of the
+`AgentMenu` + `DiffCard` pattern (per the chat-frontend refactor below).
+
+**Doc set** (`AI CONTEXT/AI_CONTEXT.md`, `CONTRACT.md`):
+- Bumped `last verified` to 2026-08-07; added headless CLI chat to the boot
+  overview, working-tree summary, and feature list.
+- §2.1 entry point now lists all 11 managed states (added
+  `agent_sessions::AgentSessionState`, `TaskState`, `MobileRelayState`,
+  `OAuthFlowsState`, `LocalModelState`, `DownloadRegistry`) and the
+  134-command total; exit cleanup adds `agent_sessions::kill_all` and
+  `LocalModelState::stop_all`.
+- §2.2 command surface expanded: 8 automation commands, `get_chat_db_path`,
+  `update_chat_session_agent`, `send_agent_chat_message`,
+  `cancel_agent_chat_message`, `list_harness_models`,
+  `delete_all_chat_sessions`, `delete_all_artifacts`; 5 new groups
+  (Automations, Chat additions, new Harnes/Agent entry).
+- §2.5 rewritten to cover the per-project bundle, harness config discovery,
+  and headless CLI chat.
+- §2.6 covers automations + compaction + `superseded_by`; tool count 29 → 32
+  (added `list_skills`; `search_content` is its own tool; `browser_read`
+  gained the `interactive` mode).
+- §2.8 lists 15 tables (`automations`, `automation_runs` new), adds the
+  `agent` column migration and `migrate_chat_messages_superseded`.
+- §2.12 adds the headless-CLI-chat safety note (full-auto by design).
+- §3.2 state table adds `automations.ts`; `chat.ts` row updated to mention
+  the new `sendMessage` routing + `setSessionAgent`; the new `ui` tool-panel
+  fields (tab/collapsed/width) are listed.
+- §3.3 / §3.4 / §3.5 list the new components (`ToolPanel`, `AgentMenu`,
+  `DiffCard`, `ContextMeter`, `TaskProgressCard`, `ConnectorGrid`,
+  `ModelMarket`, `ModelDownloadIndicator`, `DocumentsLibrary`,
+  `AutomationRunTable`, `AutomationsView`, `UpdateBannerMarkdown`); the
+  removed `PermissionModeMenu` + `ApprovalFlow` are noted with the date.
+- §3.6 IPC section documents the new automation / agent / harness-models
+  IPC + types; `ChatSession` now includes `agent`.
+- §3.7 / §3.8 add the new lib utilities (`harnessModels`, `sanitize`,
+  `syntaxTheme`, `syntaxHighlighter`, `modelLabel`, `contextWindow`,
+  `sound`) and the new test files; deleted tests
+  (`permissionModeMenu`, `permissionModeStore`) are noted via the removed
+  components.
+- §4 gaps table refreshed (new fix entries for the headless-CLI chat,
+  automations, and new components).
+- §6 file map updated to include the new backend modules
+  (`harness_bundle.rs`, `harness_config.rs`, `agent_sessions.rs`,
+  `automations.rs`, `mcp_tools_bridge.rs`, `commands/automation_cmds.rs`,
+  `db/automations.rs`, `bin/conduit_automation.rs`) and the new frontend
+  files.
+- `CONTRACT.md`: new types (`Automation`, `AutomationInput`,
+  `AutomationRun`, `HarnessModelInfo`, `HarnessModelConfig`,
+  `WorkspaceRecord`, `ChangedFile`); `ChatSession` adds `agent`; new
+  Automations / Harness / Headless CLI chat / Git additions / Chat
+  additions command blocks; `chat:status` and `chat:task-progress` event
+  details filled in; the "Rules both sides must honor" section notes the
+  headless-CLI routing rule and the removed permission-mode UI.
+
+**Implementation, chat-frontend refactor (the only code change in this entry):**
+- `src/components/chat/{PermissionModeMenu,ApprovalFlow}.tsx` deleted;
+  the corresponding `src/test/{permissionModeMenu.test.tsx,permissionModeStore.test.ts}`
+  removed.
+- `src/components/chat/AgentMenu.tsx` is the new composer leftmost chip:
+  installed harnesses + the two non-CLI modes (`"builtin"` / `"local"`).
+- `src/components/chat/DiffCard.tsx` replaces `ApprovalCard` for CLI-chat
+  file edits: filename + +/− stats + 5-line preview + inline expand
+  (Cursor-style) + "Open in Peek". No Accept/Reject — the CLI is full-auto.
+- `chat.ts` routes `sendMessage` to `sendAgentChatMessage` when the
+  session's `agent` is `"harness:<id>"`; `setSessionAgent` writes via
+  `update_chat_session_agent`.
+
+**Verification (post-edit):**
+- The doc edits are a no-op for `cargo` / `tsc` / `vitest`; the run was not
+  re-executed for this entry. See the prior work sessions (below) for the
+  per-feature verification.
+
+---
+
 ## 2026-07-26 — Local Models: minimal-click GGUF setup
 
 ### What was built
@@ -2254,7 +2388,7 @@ PRD §13 live test was still pending) found a second, deeper defect:
   Enter/Tab/click attaches the connector to the conversation (same
   per-session opt-in as the "+" menu) and consumes the `@token` so nothing
   stray reaches the model. Empty state hints to Settings → Connectors.
-## 2026-08-03 � GitHub + Canva connectors (new registry entries) and Kiwi/Merge cleanup
+## 2026-08-03 � GitHub + Canva connectors (new registry entries) and Kiwi/Merge cleanup
 
 ### What was built
 
@@ -2262,26 +2396,26 @@ Two new connectors, both official vendor-hosted remote MCP servers, plus the
 Merge retirement and two Kiwi bug fixes from the same period:
 
 - **GitHub** (id "github", family "github", port 45133):
-  https://api.githubcopilot.com/mcp/ � GitHub's hosted MCP server (repo /
+  https://api.githubcopilot.com/mcp/ � GitHub's hosted MCP server (repo /
   issues / PRs / code tools). OAuth via a **GitHub OAuth App** supplied as
   build-time env vars GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET (same
   pattern as the Google client; GitHub has no DCR and publishes no AS
-  metadata � verified live, the RFC 9728 resource metadata at
+  metadata � verified live, the RFC 9728 resource metadata at
   .well-known/oauth-protected-resource/mcp/ names https://github.com/login/oauth
   as the authorization server). Authorize
   https://github.com/login/oauth/authorize, token
   https://github.com/login/oauth/access_token, scopes
   epo read:org read:user user:email (the scope set gates the tool surface).
-  OAuth App tokens never expire and no refresh token is issued � the stored
+  OAuth App tokens never expire and no refresh token is issued � the stored
   expires_at stays None, so the refresh path is never triggered. GitHub
   OAuth Apps ignore the PKCE params our generic authorize URL always sends.
   No revoke endpoint (Disconnect forgets locally, like Google).
 - **Canva** (id "canva", family "canva", port 45134):
-  https://mcp.canva.com/mcp � design create/edit/search/export tools.
+  https://mcp.canva.com/mcp � design create/edit/search/export tools.
   Authorization-server metadata published (verified live): authorize
   /authorize, token /token, register /register, revocation at /token,
   auth methods client_secret_basic|post|none. Uses the generic RFC 7591
-  egistration_url machinery (Notion pattern) with a public PKCE client �
+  egistration_url machinery (Notion pattern) with a public PKCE client �
   no credentials needed at build time. Scope set: profile:read +
   design/folder/asset/comment/brandtemplate/brandkit reads+writes.
   **Gate (verified live):** /register rejects every request body with
@@ -2327,13 +2461,13 @@ Merge retirement and two Kiwi bug fixes from the same period:
    scopes, then set GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET env vars in
    the shell before building/running (persist as user env vars for dev).
 2. **Canva:** apply for the Canva MCP waitlist
-   (docs: canva.dev/docs/mcp � "Register your redirect URI" form) listing
+   (docs: canva.dev/docs/mcp � "Register your redirect URI" form) listing
    redirect URI http://localhost:45134/oauth/callback. Once approved,
    Connect works without any env vars.
 3. Restart the running app to pick up the new backend registry entries.
 ### Follow-up (same day): Canva removed from the Settings UI
 
-Per user request, CANVA is no longer in the CONNECTORS array � it cannot
+Per user request, CANVA is no longer in the CONNECTORS array � it cannot
 appear in Settings ? Connectors until it's re-enabled (one line:
 CONNECTORS entry) after the waitlist approval lands. The const + endpoints
 remain in config.rs (documented DISABLED), the icon/family entries were

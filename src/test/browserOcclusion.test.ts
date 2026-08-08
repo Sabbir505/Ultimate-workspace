@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { browserOccluded } from "../lib/browserOcclusion";
 
 const clear = {
-  activeView: "grid" as const,
+  activeView: "chat" as const,
   paletteOpen: false,
   peekOpen: false,
   modalOpen: false,
@@ -11,18 +11,14 @@ const clear = {
 };
 
 describe("browserOccluded", () => {
-  it("is not occluded on the plain grid with the pane visible", () => {
+  it("is not occluded in the main chat layout with the pane visible", () => {
     expect(browserOccluded(clear)).toBe(false);
   });
 
-  it("is occluded by every non-grid overlay view", () => {
+  it("is occluded by every overlay view", () => {
     for (const activeView of ["settings", "skills", "cost"] as const) {
       expect(browserOccluded({ ...clear, activeView })).toBe(true);
     }
-  });
-
-  it("is not occluded in chat mode (chat hosts browser panes in its split)", () => {
-    expect(browserOccluded({ ...clear, activeView: "chat" })).toBe(false);
   });
 
   it("is occluded by the command palette, peek panel, and modals", () => {

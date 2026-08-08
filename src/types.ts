@@ -124,6 +124,7 @@ export interface DailyCost {
   day: string;
   costUsd: number;
   tokensByProvider: Record<string, number>;
+  costByProvider: Record<string, number>;
 }
 export interface CostByKind {
   processedTokens: number;

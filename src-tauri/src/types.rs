@@ -118,6 +118,8 @@ pub struct DailyCost {
     pub day: String, // 'YYYY-MM-DD' (SQLite date(timestamp,'unixepoch'))
     pub cost_usd: f64,
     pub tokens_by_provider: std::collections::BTreeMap<String, i64>,
+    /// Per-provider cost for the stacked area chart (cost mode).
+    pub cost_by_provider: std::collections::BTreeMap<String, f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

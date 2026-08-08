@@ -110,6 +110,44 @@ describe("broadcast selection", () => {
   });
 });
 
+describe("focus navigation skips minimized panes (M21)", () => {
+  it("focusPaneByIndex indexes only visible panes", () => {
+    const store = usePanesStore.getState();
+    const t1 = store.addPane(terminalDesc("s1"));
+    const b1 = store.addPane(browserDesc());
+    const t2 = store.addPane(terminalDesc("s2"));
+    usePanesStore.getState().toggleBrowserCollapsed(b1); // minimize
+
+    // Without the fix, index 1 was the INVISIBLE minimized browser.
+    usePanesStore.getState().focusPaneByIndex(1);
+    expect(usePanesStore.getState().focusedPaneId).toBe(t2);
+
+    usePanesStore.getState().focusPaneByIndex(0);
+    expect(usePanesStore.getState().focusedPaneId).toBe(t1);
+  });
+
+  it("cycleFocus skips minimized panes and survives a minimized focus", () => {
+    const store = usePanesStore.getState();
+    const t1 = store.addPane(terminalDesc("s1"));
+    const b1 = store.addPane(browserDesc());
+    const t2 = store.addPane(terminalDesc("s2"));
+
+    usePanesStore.getState().focusPane(t1);
+    usePanesStore.getState().cycleFocus();
+    expect(usePanesStore.getState().focusedPaneId).toBe(b1); // visible → included
+
+    usePanesStore.getState().toggleBrowserCollapsed(b1); // minimize b1
+    usePanesStore.getState().focusPane(t1);
+    usePanesStore.getState().cycleFocus();
+    expect(usePanesStore.getState().focusedPaneId).toBe(t2); // skipped over b1
+
+    // Focused pane itself just minimized: idx is -1 → first visible.
+    usePanesStore.getState().focusPane(b1);
+    usePanesStore.getState().cycleFocus();
+    expect(usePanesStore.getState().focusedPaneId).toBe(t1);
+  });
+});
+
 describe("LRU pane replacement", () => {
   it("selectLruPane picks the least-recently-used pane", () => {
     const panes = [makePane("a", 5), makePane("b", 2), makePane("c", 9)];

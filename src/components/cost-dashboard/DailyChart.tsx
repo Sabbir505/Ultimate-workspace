@@ -1,49 +1,192 @@
-import { useState } from "react";
-import type { CostRollups } from "../../types";
+import { useMemo, useRef, useState } from "react";
+import type { CostRollups, DailyCost } from "../../types";
 
 type Mode = "cost" | "tokens";
 
+// Fixed categorical hue order (validated palette, dataviz skill) — assigned
+// by provider identity, never by rank, so filtering never repaints survivors.
+const SERIES_ORDER = [
+  "claude_code",
+  "kimi_code",
+  "opencode",
+  "chat:anthropic",
+  "chat:openai",
+  "chat:openrouter",
+  "chat:local_gguf",
+  "other", // everything else folds in here (never a 9th generated hue)
+];
+
+function seriesLabel(p: string): string {
+  switch (p) {
+    case "claude_code": return "Claude Code";
+    case "kimi_code": return "Kimi";
+    case "opencode": return "OpenCode";
+    case "chat:anthropic": return "Chat: Anthropic";
+    case "chat:openai": return "Chat: OpenAI";
+    case "chat:openrouter": return "Chat: OpenRouter";
+    case "chat:local_gguf": return "Local GGUF";
+    default: return p === "other" ? "Other" : p;
+  }
+}
+
+function dayValue(d: DailyCost, mode: Mode, p: string): number {
+  const m = mode === "cost" ? d.costByProvider : d.tokensByProvider;
+  return m[p] ?? 0;
+}
+
 export function DailyChart({ rollups }: { rollups: CostRollups }) {
   const [mode, setMode] = useState<Mode>("cost");
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const [scrollLeft, setScrollLeft] = useState(0);
+  const frameRef = useRef<HTMLDivElement>(null);
+
   const data = rollups.daily;
+
+  const { series, stacked } = useMemo(() => {
+    if (data.length === 0) return { series: [] as string[], stacked: [] as number[][] };
+    // Collect the providers actually present, in the fixed hue order.
+    const present = new Set<string>();
+    for (const d of data) {
+      const m = mode === "cost" ? d.costByProvider : d.tokensByProvider;
+      for (const p of Object.keys(m)) present.add(p);
+    }
+    const ordered = SERIES_ORDER.filter(p => present.has(p));
+    const others = [...present].filter(p => !SERIES_ORDER.includes(p)).sort();
+    const series = [...ordered, ...(others.length ? ["other" as string] : [])];
+    // Per-day cumulative top per series (stacked bottom→top in series order).
+    const stacked = data.map(d => {
+      const tops: number[] = [];
+      let acc = 0;
+      for (const p of series) {
+        const v = p === "other"
+          ? others.reduce((s, o) => s + dayValue(d, mode, o), 0)
+          : dayValue(d, mode, p);
+        acc += v;
+        tops.push(acc);
+      }
+      return tops;
+    });
+    return { series, stacked };
+  }, [data, mode]);
+
+  const height = 170;
+  const barW = 28;
+  const gap = 6;
+  const step = barW + gap;
+  const totalW = Math.max(data.length * step, 100);
+  const maxTotal = Math.max(...stacked.map(t => t[t.length - 1] ?? 0), 1);
+  const y = (v: number) => height - (v / maxTotal) * height;
+
+  const fmt = mode === "cost" ? fmtUsd : fmtTokens;
+
   if (data.length === 0) {
-    return <div className="empty-reserved">No usage in this range.</div>;
+    return <div className="cost-chart empty-reserved">No usage in this range.</div>;
   }
-  const maxCost = Math.max(...data.map(d => d.costUsd), 0.01);
-  const maxTokens = Math.max(...data.map(d => sumTokens(d.tokensByProvider)), 1);
-  const barWidth = 26; const gap = 10; const height = 120;
-  const labelH = 26;
-  const totalW = data.length * (barWidth + gap);
+
+  // Stacked area path for one series: top edge from its cumulative tops,
+  // bottom edge = previous series' tops (or baseline).
+  const areaPath = (sIdx: number, dIdxStart: number, dIdxEnd: number) => {
+    const top = stacked.map((tops, i) => [i, tops[sIdx]] as const);
+    const bot = sIdx === 0 ? top.map(([i]) => [i, 0] as const) : stacked.map((tops, i) => [i, tops[sIdx - 1]] as const);
+    const x = (i: number) => i * step + barW / 2;
+    let d = `M ${x(dIdxStart)} ${y(bot[dIdxStart][1])}`;
+    for (const [i, v] of top) d += ` L ${x(i)} ${y(v)}`;
+    for (let i = bot.length - 1; i >= 0; i--) d += ` L ${x(bot[i][0])} ${y(bot[i][1])}`;
+    d += " Z";
+    return d;
+  };
+
+  const hovered = hoverIdx !== null ? data[hoverIdx] : null;
+
   return (
     <div className="cost-chart">
       <div className="chart-toggle">
         <button className={`ghost ${mode === "cost" ? "active" : ""}`} onClick={() => setMode("cost")}>Cost</button>
         <button className={`ghost ${mode === "tokens" ? "active" : ""}`} onClick={() => setMode("tokens")}>Tokens</button>
       </div>
-      <div className="chart-frame">
-        <svg className="chart daily-chart" width={Math.max(totalW, 100)} height={height + labelH} role="img"
-             aria-label={`Daily ${mode} chart`}>
-          {data.map((d, i) => {
-            const value = mode === "cost" ? d.costUsd : sumTokens(d.tokensByProvider);
-            const max = mode === "cost" ? maxCost : maxTokens;
-            const h = Math.max(3, (value / max) * height);
-            const x = i * (barWidth + gap);
-            return (
-              <g key={d.day}>
-                <rect className="bar" x={x} y={height - h} width={barWidth} height={h} rx={3} />
-                <text className="bar-value" x={x + barWidth / 2} y={h > 18 ? height - h + 12 : height - h - 6} textAnchor="middle">
-                  {mode === "cost" ? fmtUsd(value) : fmtTokens(value)}
-                </text>
-                <text className="bar-label" x={x + barWidth / 2} y={height + 15} textAnchor="middle">{d.day.slice(5)}</text>
-              </g>
-            );
-          })}
+
+      <div className="chart-frame" ref={frameRef} onScroll={(e) => setScrollLeft(e.currentTarget.scrollLeft)}>
+        <svg className="chart daily-chart" width={totalW} height={height + 24} role="img"
+             aria-label={`Daily ${mode} by provider, stacked area chart`}>
+          {/* Recessive gridlines */}
+          {[0.25, 0.5, 0.75, 1].map(f => (
+            <line key={f} className="gridline" x1={0} x2={totalW} y1={y(maxTotal * f)} y2={y(maxTotal * f)} />
+          ))}
+          {/* Stacked areas, bottom series first */}
+          {series.map((p, sIdx) => (
+            <path key={p} className="area"
+                  style={{ ["--series" as string]: `var(--series-${sIdx + 1}, var(--series-other))` }}
+                  d={areaPath(sIdx, 0, data.length - 1)} />
+          ))}
+          {/* Crosshair on the hovered day */}
+          {hoverIdx !== null && (
+            <line className="crosshair" x1={hoverIdx * step + barW / 2} x2={hoverIdx * step + barW / 2} y1={0} y2={height} />
+          )}
+          {/* Day labels + hover hit targets (full column height) */}
+          {data.map((d, i) => (
+            <g key={d.day}>
+              <rect className="hit-target" x={i * step} y={0} width={step} height={height}
+                    onMouseEnter={() => setHoverIdx(i)}
+                    onMouseLeave={() => setHoverIdx(null)} />
+              <text className="bar-label" x={i * step + barW / 2} y={height + 16} textAnchor="middle">
+                {d.day.slice(5)}
+              </text>
+            </g>
+          ))}
         </svg>
       </div>
+
+      {/* Hover tooltip: absolute in the card, follows the crosshair */}
+      {hovered && (
+        <div className="chart-tooltip" style={{
+          left: `min(${hoverIdx! * step + barW / 2 - scrollLeft}px, calc(100% - 150px))`,
+        }}>
+          <div className="chart-tooltip-day">{hovered.day}</div>
+          {series.map((p, sIdx) => {
+            const v = p === "other"
+              ? Object.keys(mode === "cost" ? hovered.costByProvider : hovered.tokensByProvider)
+                  .filter(o => !SERIES_ORDER.includes(o))
+                  .reduce((s, o) => s + dayValue(hovered, mode, o), 0)
+              : dayValue(hovered, mode, p);
+            if (v <= 0) return null;
+            return (
+              <div key={p} className="chart-tooltip-row">
+                <span className="chart-tooltip-swatch" style={{ background: `var(--series-${sIdx + 1}, var(--series-other))` }} />
+                <span className="chart-tooltip-name">{seriesLabel(p)}</span>
+                <span className="chart-tooltip-value">{fmt(v)}</span>
+              </div>
+            );
+          })}
+          <div className="chart-tooltip-total">
+            <span>Total</span>
+            <span className="chart-tooltip-value">{fmt(mode === "cost" ? hovered.costUsd : sumTokens(hovered.tokensByProvider))}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Legend — required for ≥2 series; text in text tokens, swatch carries identity */}
+      {series.length >= 2 && (
+        <div className="chart-legend">
+          {series.map((p, sIdx) => (
+            <div key={p} className="chart-legend-item">
+              <span className="chart-legend-swatch" style={{ background: `var(--series-${sIdx + 1}, var(--series-other))` }} />
+              <span className="chart-legend-label">{seriesLabel(p)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
       <table className="visually-hidden">
-        <caption>Daily {mode}</caption>
-        <thead><tr><th>Day</th><th>Value</th></tr></thead>
-        <tbody>{data.map(d => <tr key={d.day}><td>{d.day}</td><td>{mode === "cost" ? d.costUsd : sumTokens(d.tokensByProvider)}</td></tr>)}</tbody>
+        <caption>Daily {mode} by provider</caption>
+        <thead><tr><th>Day</th><th>Provider</th><th>Value</th></tr></thead>
+        <tbody>
+          {data.map(d => {
+            const m = mode === "cost" ? d.costByProvider : d.tokensByProvider;
+            return Object.entries(m).map(([p, v]) => (
+              <tr key={`${d.day}-${p}`}><td>{d.day}</td><td>{p}</td><td>{v}</td></tr>
+            ));
+          })}
+        </tbody>
       </table>
     </div>
   );

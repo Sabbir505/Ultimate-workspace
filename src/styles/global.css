@@ -3537,18 +3537,139 @@ table.kv th {
 .cost-chart .chart-frame {
   overflow-x: auto;
   padding-bottom: 4px;
+  position: relative;
+}
+/* Stacked area chart (dataviz skill): validated categorical palette, fixed
+   hue order by provider identity. Light values default; dark under the app's
+   data-theme + OS dark (same ramps stepped for the dark surface). */
+.cost-chart {
+  --series-1: #2a78d6;   /* claude_code */
+  --series-2: #eb6834;   /* kimi_code */
+  --series-3: #1baf7a;   /* opencode */
+  --series-4: #eda100;   /* chat:anthropic */
+  --series-5: #e87ba4;   /* chat:openai */
+  --series-6: #008300;   /* chat:openrouter */
+  --series-7: #4a3aa7;   /* chat:local_gguf */
+  --series-other: #8b8b8b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .cost-chart {
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+    --series-7: #9085e9;
+    --series-other: #6e706f;
+  }
+}
+:root[data-theme="dark"] .cost-chart {
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-other: #6e706f;
 }
 .daily-chart {
   display: block;
   min-width: 100%;
 }
-.daily-chart .bar {
-  fill: #c15f3c;
-  opacity: 0.9;
+.daily-chart .gridline {
+  stroke: var(--border);
+  stroke-width: 1;
+  stroke-dasharray: 2 4;
 }
-.daily-chart .bar:hover {
-  opacity: 1;
-  filter: brightness(1.15);
+.daily-chart .area {
+  fill: var(--series, var(--series-other));
+  fill-opacity: 0.82;
+  stroke: var(--series, var(--series-other));
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  transition: fill-opacity 0.15s ease;
+}
+.daily-chart .area:hover {
+  fill-opacity: 0.95;
+}
+.daily-chart .crosshair {
+  stroke: var(--text-dim);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  pointer-events: none;
+}
+.daily-chart .hit-target {
+  fill: transparent;
+  cursor: crosshair;
+}
+.chart-tooltip {
+  position: absolute;
+  top: 8px;
+  z-index: 5;
+  min-width: 150px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-solid);
+  box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.5);
+  font-size: 11px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.chart-tooltip-day {
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+.chart-tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 0;
+}
+.chart-tooltip-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.chart-tooltip-name {
+  color: var(--text-dim);
+  flex: 1;
+}
+.chart-tooltip-value {
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+.chart-tooltip-total {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding-top: 10px;
+}
+.chart-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.chart-legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex-shrink: 0;
 }
 
 /* T3 Code layout: hero + per-tool breakdown on the LEFT, daily cost chart on

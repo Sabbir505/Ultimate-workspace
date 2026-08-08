@@ -157,7 +157,9 @@ pub fn get_cost_rollups_v2(conn: &Connection, range_days: u32) -> DbResult<CostR
                 }
                 let d = daily_map.entry(day.clone()).or_insert_with(|| DailyCost { day: day.clone(), ..Default::default() });
                 d.cost_usd += c;
-                *d.tokens_by_provider.entry(provider.clone().unwrap_or_else(|| "unknown".to_string())).or_insert(0) += tokens_i;
+                let prov_label = provider.clone().unwrap_or_else(|| "unknown".to_string());
+                *d.tokens_by_provider.entry(prov_label.clone()).or_insert(0) += tokens_i;
+                *d.cost_by_provider.entry(prov_label).or_insert(0.0) += c;
                 totals.cache_savings_usd_via_helper += cache_savings(&usage, key, &overrides);
             } else {
                 totals.unpriced_usd += reported.unwrap_or(0.0);
@@ -252,7 +254,8 @@ pub fn get_cost_rollups_v2(conn: &Connection, range_days: u32) -> DbResult<CostR
             let day = date_str(ts);
             let d = daily_map.entry(day.clone()).or_insert_with(|| DailyCost { day: day.clone(), ..Default::default() });
             d.cost_usd += c;
-            *d.tokens_by_provider.entry(grouped).or_insert(0) += tokens_i;
+            *d.tokens_by_provider.entry(grouped.clone()).or_insert(0) += tokens_i;
+            *d.cost_by_provider.entry(grouped).or_insert(0.0) += c;
             totals.cache_savings_usd_via_helper += cache_savings(&usage, key, &overrides);
             by_kind.uncached_input_tokens += i.unwrap_or(0);
             by_kind.cached_input_tokens += cc.unwrap_or(0) + cr.unwrap_or(0);

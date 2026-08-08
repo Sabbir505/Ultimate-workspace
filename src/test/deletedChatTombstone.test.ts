@@ -21,9 +21,7 @@ vi.mock("../lib/ipc", () => ({
   setChatSessionUnread: vi.fn(),
   updateChatSessionModel: vi.fn(),
   updateChatSessionTitle: vi.fn(),
-  updateChatSessionPermissionMode: vi.fn(),
   updateChatSessionWatchMode: vi.fn(),
-  resolveToolAction: vi.fn(),
   cancelChatMessage: vi.fn(),
 }));
 
@@ -46,8 +44,6 @@ beforeEach(() => {
     activeChatSessionId: null,
     streaming: {},
     streamingChatSessionId: null,
-    pendingApprovals: {},
-    fullAutoConfirmingFor: null,
   });
 });
 

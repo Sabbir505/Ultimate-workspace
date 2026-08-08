@@ -8,7 +8,7 @@ vi.mock("../lib/ipc", () => ({
   getCostRollups: vi.fn().mockResolvedValue({
     totals: { rawTokenCostUsd: 100, providerReportedUsd: 5, estimatedUsd: 95, unpricedUsd: 0 },
     perProvider: [{ provider: "claude_code", costUsd: 80, tokens: 1_000_000, sharePct: 80 }],
-    daily: [{ day: "2026-08-01", costUsd: 10, tokensByProvider: { claude_code: 100_000 } }],
+    daily: [{ day: "2026-08-01", costUsd: 10, tokensByProvider: { claude_code: 100_000 }, costByProvider: { claude_code: 8 } }],
     byKind: { processedTokens: 1_100_000, cachedInputTokens: 1_000_000, uncachedInputTokens: 100_000, outputTokens: 50_000, reasoningTokens: 5_000, sessions: 12, responses: 120 },
     perModel: [{ modelKey: "claude-sonnet-4-5", displayName: "claude-sonnet-4-5", costUsd: 80, sharePct: 80, tokens: 1_000_000, provider: "claude_code" }],
     costQuality: { providerReportedPct: 5, modelPricedPct: 95, unpricedPct: 0, cacheSavingsUsd: 12.3 },

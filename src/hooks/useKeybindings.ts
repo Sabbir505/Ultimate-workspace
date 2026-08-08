@@ -77,6 +77,10 @@ export function useKeybindings(): void {
         if (inEditable && action !== "openPalette") continue;
         const accel = keybindings[action];
         if (accel && matchesAccelerator(accel, e)) {
+          // Once one action matches, stop checking — otherwise a second
+          // binding whose accelerator ALSO matches (e.g. a custom binding
+          // colliding with a default) would double-fire and the first
+          // handler's side effects would already be applied.
           e.preventDefault();
           run();
           return;

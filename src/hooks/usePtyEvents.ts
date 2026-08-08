@@ -8,7 +8,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
-import { safeListen } from "../lib/ipc";
+import { safeListen, browserNavigateTab } from "../lib/ipc";
 import { openSession } from "../lib/sessionLauncher";
 import { playNotifyChime } from "../lib/sound";
 import { sessionDisplayTitle } from "../lib/sessionTitle";
@@ -140,13 +140,20 @@ export function usePtyEvents(): void {
         // browser pane, reusing an existing one or creating one if none.
         const panesStore = usePanesStore.getState();
         const existing = panesStore.panes.find((p) => p.data.kind === "browser");
-        if (existing) {
+        if (existing && existing.data.kind === "browser") {
           // If the browser was minimized, restore it so the user sees the
           // navigation. Then navigate the existing browser to the detected URL.
-          if (existing.data.kind === "browser" && existing.data.collapsed) {
+          if (existing.data.collapsed) {
             panesStore.toggleBrowserCollapsed(existing.paneId);
           }
-          panesStore.setBrowserUrl(existing.paneId, url);
+          const tab = existing.data.tabs[existing.data.activeTabIndex];
+          if (tab) {
+            panesStore.setBrowserUrl(existing.paneId, url, tab.tabId);
+            // The native webview (Windows) does NOT watch the zustand store —
+            // without this explicit navigate it keeps showing the old page
+            // while the address bar claims we're already at the new URL.
+            void browserNavigateTab(existing.paneId, tab.tabId, url).catch(() => {});
+          }
         } else {
           // Open a new browser pane with the detected URL
           panesStore.addPane({ kind: "browser", url, projectId: null });

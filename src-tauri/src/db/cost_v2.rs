@@ -232,11 +232,16 @@ pub fn get_cost_rollups_v2(conn: &Connection, range_days: u32) -> DbResult<CostR
             let entry = by_provider.entry(grouped.clone()).or_insert((0.0, 0));
             entry.0 += c;
             entry.1 += tokens_i;
-            if let Some(k) = key {
-                let entry = by_model.entry(k.to_string()).or_insert((0.0, 0, Some(grouped.clone())));
-                entry.0 += c;
-                entry.1 += tokens_i;
-            }
+            // Local/unpriced models (GGUF names have no canonical key) still
+            // appear in the per-model breakdown under their raw model name,
+            // with $0 cost — they run on your hardware, not an API.
+            let model_label = key
+                .map(String::from)
+                .or_else(|| session_model.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            let entry = by_model.entry(model_label).or_insert((0.0, 0, Some(grouped.clone())));
+            entry.0 += c;
+            entry.1 += tokens_i;
             let day = date_str(ts);
             let d = daily_map.entry(day.clone()).or_insert_with(|| DailyCost { day: day.clone(), ..Default::default() });
             d.cost_usd += c;
@@ -400,6 +405,27 @@ mod tests {
         assert!((r.daily.iter().map(|d| d.cost_usd).sum::<f64>() - 10.5).abs() < 1e-6);
         // Cost-quality %s are row counts and sum to 100 (spec §13.3).
         assert!((r.cost_quality.provider_reported_pct + r.cost_quality.model_priced_pct + r.cost_quality.unpriced_pct - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rollup_includes_local_models_in_per_model() {
+        let conn = super::super::mem();
+        // Local GGUF chat session — model name has no canonical key.
+        let cs = super::super::create_chat_session(&conn, "local_gguf", "qwen2.5-7b-q4_k_m.gguf").unwrap();
+        super::super::add_chat_message(
+            &conn, &cs.id, "assistant", "hi", Some(1_000_000), Some(500_000), Some(0.0),
+            None, None, None, Some("local_gguf"), None, None,
+        ).unwrap();
+        let r = get_cost_rollups_v2(&conn, 7).unwrap();
+        // Local models appear in the per-model breakdown under their raw name
+        // with $0 cost (no API pricing), tokens still counted.
+        let local = r.per_model.iter().find(|m| m.model_key == "qwen2.5-7b-q4_k_m.gguf").unwrap();
+        assert_eq!(local.cost_usd, 0.0);
+        assert_eq!(local.tokens, 1_500_000);
+        // Grouped under chat:local_gguf in the per-provider breakdown.
+        let prov = r.per_provider.iter().find(|p| p.provider == "chat:local_gguf").unwrap();
+        assert_eq!(prov.tokens, 1_500_000);
+        assert_eq!(prov.cost_usd, 0.0);
     }
 
     #[test]

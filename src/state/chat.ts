@@ -6,6 +6,7 @@
 // to a different chat in the sidebar.
 import { create } from "zustand";
 import {
+  cancelAgentChatMessage,
   cancelChatMessage,
   createChatSession,
   deleteChatApiKey,
@@ -16,19 +17,17 @@ import {
   getChatMessages,
   listChatArtifacts,
   listChatSessions,
-  resolveToolAction,
+  sendAgentChatMessage,
   sendChatMessage,
   setChatApiKey,
   setChatSessionStarred,
   setChatSessionUnread,
   touchChatSession,
+  updateChatSessionAgent,
   updateChatSessionModel,
-  updateChatSessionPermissionMode,
   updateChatSessionProvider,
   updateChatSessionTitle,
   updateChatSessionWatchMode,
-  type ChatApprovalRequestPayload,
-  type ChatApprovalResolvedPayload,
   type ChatAttachmentInput,
   type ChatArtifactPayload,
   type ChatConfigPayload,
@@ -36,11 +35,16 @@ import {
   type ChatSession,
   type ChatTaskProgressPayload,
 } from "../lib/ipc";
+import { generateSessionTitle } from "../lib/sessionTitle";
 import { useArtifactsStore } from "./artifacts";
+import { useProjectsStore } from "./projects";
 
 /** Sessions the user manually renamed — never auto-summarize their title.
- *  Capped at 1000 entries to prevent unbounded growth across long sessions. */
-const manuallyRenamed = new Set<string>();
+ *  Capped at 1000 entries to prevent unbounded growth across long sessions.
+ *  Uses a Map (insertion-ordered) so the OLDEST entry is evicted when the cap
+ *  is hit — protecting the most-recently-touched sessions from premature
+ *  eviction that would re-enable auto-titling for a freshly renamed chat. */
+const manuallyRenamed = new Map<string, number>();
 
 /** Sessions deleted during this app run. Background session-list refreshes
  *  (`selectSession`'s touch-then-relist, `onDone`'s relist) fetch the list
@@ -48,54 +52,42 @@ const manuallyRenamed = new Set<string>();
  *  DELETE commits but its payload is applied after — resurrecting the deleted
  *  chat in the sidebar. Every refresh path filters this tombstone set so a
  *  stale payload can never bring a deleted session back.
- *  Capped at 1000 entries to prevent unbounded growth. */
-const deletedSessions = new Set<string>();
+ *  Capped at 1000 entries to prevent unbounded growth. Using a Map (rather
+ *  than a Set) lets us cap by insertion order so a recently-tombstoned
+ *  session is never silently dropped from the filter (which would let the
+ *  very race condition this set exists to prevent happen again). */
+const deletedSessions = new Map<string, number>();
 
 /** Session list with tombstoned (deleted-this-run) sessions removed. */
 function withoutDeleted(sessions: ChatSession[]): ChatSession[] {
   return sessions.filter((s) => !deletedSessions.has(s.id));
 }
 
-/** Cap a Set to `max` entries by evicting oldest (iteration-order) entries. */
-function capSet<T>(set: Set<T>, max: number) {
-  if (set.size > max) {
-    let toDelete = set.size - max;
-    for (const entry of set) {
-      if (toDelete <= 0) break;
-      set.delete(entry);
-      toDelete--;
-    }
+/** Cap a Map to `max` entries by evicting oldest (insertion-order) entries.
+ *  The map's iteration order is insertion order, so the first key seen is
+ *  the oldest — which is the one we drop. This protects the most-recently
+ *  added entries from being silently lost. */
+function capMap<K>(map: Map<K, number>, max: number) {
+  while (map.size > max) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey === undefined) break;
+    map.delete(oldestKey);
   }
 }
 const SET_CAP = 1000;
 
 function markDeleted(sid: string) {
-  deletedSessions.add(sid);
-  capSet(deletedSessions, SET_CAP);
+  deletedSessions.set(sid, Date.now());
+  capMap(deletedSessions, SET_CAP);
 }
 
 function markManuallyRenamed(sid: string) {
-  manuallyRenamed.add(sid);
-  capSet(manuallyRenamed, SET_CAP);
+  manuallyRenamed.set(sid, Date.now());
+  capMap(manuallyRenamed, SET_CAP);
 }
-
-/** The four filesystem permission postures a chat session can be in. Mirrors
- *  `chat::permission::PermissionMode` in the Rust backend. */
-export type PermissionMode = "read_only" | "manual" | "auto_edit" | "full_auto";
-
-/** Default posture for every new chat session (per the task spec). */
-export const DEFAULT_PERMISSION_MODE: PermissionMode = "manual";
 
 /** Watch-mode pacing for browser actions. "on" | "off". */
 export type WatchMode = "on" | "off";
-
-/** A pending per-action filesystem-tool approval card, one per chat session. */
-export interface PendingApproval {
-  pendingId: string;
-  tool: string;
-  summary: string;
-  args: unknown;
-}
 
 /** Live progress of a background chat task (download_file / run_shell),
  *  keyed by task id within a chat session. Updated by `chat:task-progress`
@@ -112,16 +104,6 @@ export interface ChatTaskProgress {
   destPath: string | null;
 }
 
-/** Sessions in which the user has already confirmed the full_auto modal this
- *  session — the one-time confirmation isn't re-shown within the same session.
- *  (The mode itself persists in the DB; this set only suppresses re-prompting.) */
-const fullAutoConfirmed = new Set<string>();
-
-function markFullAutoConfirmed(sid: string) {
-  fullAutoConfirmed.add(sid);
-  capSet(fullAutoConfirmed, SET_CAP);
-}
-
 /** A file the model generated during a chat, surfaced as a download chip. */
 export interface ChatArtifact {
   path: string;
@@ -130,6 +112,15 @@ export interface ChatArtifact {
    *  block from an assistant message. When set, the preview pane renders it
    *  directly (live React preview) instead of reading `path` from disk. */
   inline?: { kind: "jsx" | "tsx"; code: string };
+}
+
+/** A message stacked while a turn is running (composer queue, FIFO).
+ *  Drained one-by-one when the session's stream finishes. */
+export interface QueuedChatMessage {
+  id: number;
+  content: string;
+  attachments?: ChatAttachmentInput[];
+  forceResearch?: boolean;
 }
 
 /** Float starred chats to the top while preserving the existing (recency)
@@ -180,16 +171,13 @@ export interface ChatState {
   /** Artifacts produced by the in-flight turn, keyed by session, until the
    *  assistant message is persisted and they can be attributed to it. */
   pendingArtifacts: Record<string, ChatArtifact[]>;
-  /** The artifact currently shown in the preview pane (null = pane closed). */
-  previewArtifact: ChatArtifact | null;
-  /** Pending per-action filesystem-tool approvals, keyed by chat session. A
-   *  session has at most one card at a time (the tool loop pauses on it). */
-  pendingApprovals: Record<string, PendingApproval>;
+  /** Artifacts open in the Canvas tab, shown like browser tabs. */
+  previewArtifacts: ChatArtifact[];
+  /** Path of the focused Canvas tab (null = no tab focused). */
+  activePreviewPath: string | null;
   /** Background chat tasks (download_file / run_shell) with live progress,
    *  keyed by chat session id → task id → latest snapshot. */
   tasks: Record<string, Record<string, ChatTaskProgress>>;
-  /** True while the full_auto confirmation modal is open for a session. */
-  fullAutoConfirmingFor: string | null;
   /** Per-turn owner session id (mobile app's session identifier) keyed by
    *  chatSessionId. Set by `sendMessage` when invoked from the mobile relay
    *  so the chat:token / chat:done / chat:error / chat:status / chat:artifact
@@ -199,6 +187,20 @@ export interface ChatState {
    *  variant onto the WS that originated the message. Cleared on the
    *  terminal `chat:done` / `chat:error` for the session. */
   ownerSessionByChatId: Record<string, string>;
+  /** Custom working folder per chat session, chosen via the composer's "+"
+   *  folder picker. Overrides the selected project's path as the harness
+   *  send's cwd and is granted as an extra fs_root on the built-in path.
+   *  In-memory only (a session-scoped convenience, not a persisted setting). */
+  cwdOverrides: Record<string, string>;
+  /** The project each chat session is bound to, recorded when the user sends
+   *  a message or switches projects while viewing that chat. The composer
+   *  notch and the working directory sent to the backend follow this binding
+   *  instead of the global selection, so switching between chats shows each
+   *  chat's own project. In-memory only (same scope as cwdOverrides). */
+  sessionProjects: Record<string, string>;
+  /** Messages queued while a turn is running, per chat session, FIFO. Sent
+   *  one-by-one by `drainQueue` when the session's stream finishes. */
+  messageQueue: Record<string, QueuedChatMessage[]>;
 
   // Actions
   loadSessions: () => Promise<void>;
@@ -230,11 +232,28 @@ export interface ChatState {
   /** Switch a session's provider (e.g. to "local_gguf" when a local model is
    *  picked from the selector in a cloud session, or back again). */
   setSessionProvider: (chatSessionId: string, provider: string) => Promise<void>;
+  /** Set a session's agent selection ("builtin" | "local" | "harness:<id>" |
+   *  null). Persisted per chat session; drives the composer's locked/unlocked
+   *  model chip. */
+  setSessionAgent: (chatSessionId: string, agent: string | null) => Promise<void>;
   setEffort: (effort: string) => void;
   setLocalCtx: (ctx: number) => void;
   setThinking: (thinking: boolean | null) => void;
   setToolsEnabled: (enabled: boolean) => void;
   setCodeExecEnabled: (enabled: boolean) => void;
+  /** Set/clear a session's custom working folder (null clears, reverting to
+   *  the selected project's path). */
+  setCwdOverride: (chatSessionId: string, path: string | null) => void;
+  /** Fully unbind a session from its project: drop the per-chat project
+   *  binding AND any custom-folder override, so the composer notch disappears
+   *  and the working directory falls back to the global selection. */
+  unbindProject: (chatSessionId: string) => void;
+  /** Drop one queued message from a session's FIFO queue (composer "×"). */
+  removeQueuedMessage: (chatSessionId: string, id: number) => void;
+  /** Send the oldest queued message for a session. No-op unless the session
+   *  is active and no stream is running (sendMessage targets the active
+   *  session; queued items for background sessions wait for selectSession). */
+  drainQueue: (chatSessionId: string) => void;
   sendMessage: (
     content: string,
     attachments?: ChatAttachmentInput[],
@@ -248,24 +267,15 @@ export interface ChatState {
    *  drop it locally so the bubble disappears immediately. */
   deleteMessage: (messageId: number) => Promise<void>;
   cancelStream: () => Promise<void>;
-  /** Open/close the artifact preview pane. */
+  /** Open an artifact in the Canvas tab, or focus its tab if already open.
+   *  `null` closes all Canvas tabs. */
   setPreviewArtifact: (artifact: ChatArtifact | null) => void;
-  /** Set the active session's filesystem permission posture. Switching INTO
-   *  `full_auto` first opens a one-time confirmation modal (per session);
-   *  switching OUT of it applies immediately. Returns true if applied, false
-   *  if a confirmation modal was opened instead. */
-  setSessionPermissionMode: (chatSessionId: string, mode: PermissionMode) => Promise<boolean>;
+  /** Close one Canvas tab (default: the focused one). Closing the focused tab
+   *  activates its neighbor. */
+  closePreviewArtifact: (path?: string) => void;
   /** Set a session's watch-mode pacing override. on/off = per-session override;
    *  null clears the override so the session inherits the global setting. */
   setSessionWatchMode: (chatSessionId: string, mode: WatchMode | null) => Promise<void>;
-  /** Confirm the full_auto modal — applies the mode and records that this
-   *  session has confirmed, so it isn't re-prompted. */
-  confirmFullAuto: (chatSessionId: string) => Promise<void>;
-  /** Dismiss the full_auto modal without applying (mode unchanged). */
-  cancelFullAutoConfirm: () => void;
-  /** Resolve a pending per-action approval card (Approve/Deny). Sends the
-   *  decision to the backend; the paused tool loop resumes. */
-  resolveApproval: (chatSessionId: string, approved: boolean) => Promise<void>;
   saveApiKey: (provider: string, key: string, baseUrl?: string, model?: string) => Promise<void>;
   clearApiKey: (provider: string) => Promise<void>;
 
@@ -275,8 +285,6 @@ export interface ChatState {
   onDone: (chatSessionId: string, inputTokens: number | null, outputTokens: number | null, costUsd: number | null) => void;
   onError: (chatSessionId: string, message: string, code: string | null) => void;
   onArtifact: (payload: ChatArtifactPayload) => void;
-  onApprovalRequest: (payload: ChatApprovalRequestPayload) => void;
-  onApprovalResolved: (payload: ChatApprovalResolvedPayload) => void;
   /** Track a background chat task's progress (downloads / shell runs). */
   onTaskProgress: (payload: ChatTaskProgressPayload) => void;
 }
@@ -312,11 +320,49 @@ export const useChatStore = create<ChatState>((set, get) => ({
   artifacts: {},
   artifactsByMessage: {},
   pendingArtifacts: {},
-  previewArtifact: null,
-  pendingApprovals: {},
-  fullAutoConfirmingFor: null,
+  previewArtifacts: [],
+  activePreviewPath: null,
   tasks: {},
   ownerSessionByChatId: {},
+  cwdOverrides: {},
+  sessionProjects: {},
+  messageQueue: {},
+
+  setCwdOverride: (chatSessionId, path) =>
+    set((s) => {
+      const next = { ...s.cwdOverrides };
+      if (path) next[chatSessionId] = path;
+      else delete next[chatSessionId];
+      return { cwdOverrides: next };
+    }),
+
+  unbindProject: (chatSessionId) =>
+    set((s) => {
+      const sessionProjects = { ...s.sessionProjects };
+      delete sessionProjects[chatSessionId];
+      const cwdOverrides = { ...s.cwdOverrides };
+      delete cwdOverrides[chatSessionId];
+      return { sessionProjects, cwdOverrides };
+    }),
+
+  removeQueuedMessage: (chatSessionId, id) =>
+    set((s) => ({
+      messageQueue: {
+        ...s.messageQueue,
+        [chatSessionId]: (s.messageQueue[chatSessionId] ?? []).filter((m) => m.id !== id),
+      },
+    })),
+
+  drainQueue: (chatSessionId) => {
+    // sendMessage targets the ACTIVE session, so a background session's queue
+    // waits until the user opens it (selectSession calls drainQueue too).
+    if (get().activeChatSessionId !== chatSessionId) return;
+    if (get().streamingChatSessionId) return;
+    const [next, ...rest] = get().messageQueue[chatSessionId] ?? [];
+    if (!next) return;
+    set((s) => ({ messageQueue: { ...s.messageQueue, [chatSessionId]: rest } }));
+    void get().sendMessage(next.content, next.attachments, next.forceResearch);
+  },
 
   loadSessions: async () => {
     const sessions = await listChatSessions();
@@ -351,13 +397,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({
       activeChatSessionId: chatSessionId,
       error: null,
-      previewArtifact: null,
+      previewArtifacts: [],
+      activePreviewPath: null,
       thinking: null,
       sessions: s.sessions.map((sess) =>
         sess.id === chatSessionId && sess.unread ? { ...sess, unread: false } : sess,
       ),
     }));
     if (wasUnread) void setChatSessionUnread(chatSessionId, false);
+    // Follow the chat's project binding: switching to a chat that was working
+    // on a different project moves the global selection (and with it the
+    // composer notch, Files tab, and the working directory) to that project.
+    // Without this every chat showed whatever project was clicked last.
+    const boundProjectId = get().sessionProjects[chatSessionId];
+    if (boundProjectId) {
+      const ps = useProjectsStore.getState();
+      if (ps.selectedProjectId !== boundProjectId && ps.projectById(boundProjectId)) {
+        ps.selectProject(boundProjectId);
+      }
+    }
     const [messages, records] = await Promise.all([
       getChatMessages(chatSessionId),
       listChatArtifacts(chatSessionId),
@@ -400,6 +458,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (outgoingId && outgoingId !== chatSessionId && outgoingEmpty) {
       void get().deleteChat(outgoingId);
     }
+    // Opening a session that has messages stacked in its queue (queued while
+    // it was in the background) starts draining them now that it's active.
+    get().drainQueue(chatSessionId);
   },
 
   newChat: async (provider, model) => {
@@ -449,6 +510,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   deleteChat: async (chatSessionId) => {
+    // Kill any running harness CLI process for this session before removing
+    // the DB row. Without this the persistent claude process (or a mid-turn
+    // kimi/opencode child) keeps running and emitting chat:token events for
+    // a session that no longer exists.
+    const session = get().sessions.find((s) => s.id === chatSessionId);
+    if (session?.agent?.startsWith("harness:")) {
+      try { await cancelAgentChatMessage(chatSessionId); } catch { /* best-effort */ }
+    }
     await deleteChatSession(chatSessionId);
     // Tombstone this session for the rest of the app run so background
     // session-list refreshes (selectSession's touch-then-relist, onDone's
@@ -464,8 +533,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       delete nextArtifacts[chatSessionId];
       const nextPendingArtifacts = { ...s.pendingArtifacts };
       delete nextPendingArtifacts[chatSessionId];
-      const nextPendingApprovals = { ...s.pendingApprovals };
-      delete nextPendingApprovals[chatSessionId];
       return {
         sessions: s.sessions.filter((sess) => sess.id !== chatSessionId),
         activeChatSessionId: s.activeChatSessionId === chatSessionId ? null : s.activeChatSessionId,
@@ -475,7 +542,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
           s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
         artifacts: nextArtifacts,
         pendingArtifacts: nextPendingArtifacts,
-        pendingApprovals: nextPendingApprovals,
       };
     });
   },
@@ -522,6 +588,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setSessionModel: async (chatSessionId, model) => {
+    // For a harness session, a model change requires killing the running CLI
+    // process: claude_code is spawned with `--model`, so the old process is
+    // bound to the old model and must be respawned (the next send does that
+    // via the spawned_model check, but killing here stops any in-flight work
+    // immediately instead of letting it finish on the old model).
+    const session = get().sessions.find((s) => s.id === chatSessionId);
+    if (session?.agent?.startsWith("harness:") && session.model !== model) {
+      try { await cancelAgentChatMessage(chatSessionId); } catch { /* best-effort */ }
+    }
     await updateChatSessionModel(chatSessionId, model);
     set((s) => ({
       sessions: s.sessions.map((sess) =>
@@ -535,6 +610,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({
       sessions: s.sessions.map((sess) =>
         sess.id === chatSessionId ? { ...sess, provider } : sess,
+      ),
+    }));
+  },
+
+  setSessionAgent: async (chatSessionId, agent) => {
+    // Switching away from a harness agent, or switching between different
+    // harnesses, must kill the running CLI process — otherwise it keeps
+    // executing and emitting tokens for this session.
+    const prev = get().sessions.find((s) => s.id === chatSessionId);
+    if (prev?.agent?.startsWith("harness:") && prev.agent !== agent) {
+      try { await cancelAgentChatMessage(chatSessionId); } catch { /* best-effort */ }
+    }
+    await updateChatSessionAgent(chatSessionId, agent);
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === chatSessionId ? { ...sess, agent } : sess,
       ),
     }));
   },
@@ -566,10 +657,46 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } = get();
     if (!activeChatSessionId) return;
     if (deletedSessions.has(activeChatSessionId)) return;
-    // Guard against a double-send while a turn is already streaming for this
-    // session (e.g. a duplicate submit during a slow tool-calling turn), which
-    // would persist the same user message twice.
-    if (get().streamingChatSessionId === activeChatSessionId) return;
+    // A turn is already running for this session: stack the message above
+    // the composer instead of dropping it. drainQueue sends the queue FIFO
+    // when the current turn finishes (onDone / onError / cancelStream).
+    if (get().streamingChatSessionId === activeChatSessionId) {
+      const queued: QueuedChatMessage = {
+        id: Date.now(),
+        content,
+        attachments: attachments ?? undefined,
+        forceResearch: forceResearch || undefined,
+      };
+      set((s) => ({
+        messageQueue: {
+          ...s.messageQueue,
+          [activeChatSessionId]: [...(s.messageQueue[activeChatSessionId] ?? []), queued],
+        },
+      }));
+      return;
+    }
+
+    // Client-side fallback title. The LLM auto-titling in onDone
+    // (generateChatTitle) silently no-ops for harness-backed sessions (no
+    // stored API key) and other failure modes, leaving "Untitled Chat"
+    // forever. Derive a deterministic title from the first user message
+    // instead. Persisted via the same backend command renameChat uses, but
+    // WITHOUT markManuallyRenamed — this is an auto title, so the turn-3
+    // generateChatTitle refinement may still improve it later.
+    const untitled = sessions.find((s) => s.id === activeChatSessionId);
+    if (untitled && !(untitled.title ?? "").trim()) {
+      const derived = generateSessionTitle(content);
+      if (derived) {
+        set((s) => ({
+          sessions: s.sessions.map((sess) =>
+            sess.id === activeChatSessionId ? { ...sess, title: derived } : sess,
+          ),
+        }));
+        void updateChatSessionTitle(activeChatSessionId, derived).catch(() => {
+          /* best-effort: the local title above still stands for this run */
+        });
+      }
+    }
 
     // Optimistic bubble mirrors what the backend will persist: the typed text
     // plus a compact note per attachment (the model gets the real content).
@@ -605,8 +732,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       error: null,
     });
 
-    // Bump the session to top of the list.
-    const active = sessions.find((s) => s.id === activeChatSessionId);
+    // Bump the session to top of the list. Re-read from state rather than
+    // using the `sessions` snapshot — the derived-title set() above may
+    // already have updated this session's entry.
+    const active = get().sessions.find((s) => s.id === activeChatSessionId);
     if (active) {
       set((s) => ({
         sessions: sortSessions([
@@ -616,26 +745,115 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }));
     }
 
-    await sendChatMessage(
-      activeChatSessionId,
-      content,
-      effort || undefined,
-      toolsEnabled,
-      codeExecEnabled,
-      attachments,
-      forceResearch,
-      thinking === null ? undefined : thinking,
+    const session = get().sessions.find((s) => s.id === activeChatSessionId);
+
+    // Bind this chat to the currently-selected project (first send, or after
+    // the user deliberately switched projects while viewing it). The binding
+    // drives the composer notch and the working directory on later visits.
+    const projectsState = useProjectsStore.getState();
+    if (
+      projectsState.selectedProjectId &&
+      get().sessionProjects[activeChatSessionId] !== projectsState.selectedProjectId
+    ) {
+      const pid = projectsState.selectedProjectId;
+      set((s) => ({ sessionProjects: { ...s.sessionProjects, [activeChatSessionId]: pid } }));
+    }
+    // Working folder resolution, shared by both send paths: a custom folder
+    // from the composer "+" picker wins, then the chat's bound project,
+    // then the global selection.
+    const boundProject = projectsState.projectById(
+      get().sessionProjects[activeChatSessionId] ?? projectsState.selectedProjectId,
     );
+    const workingDir = get().cwdOverrides[activeChatSessionId] ?? boundProject?.path;
+
+    // CLI harness agents (Phase 2): the turn goes to the headless CLI process
+    // (agent_sessions.rs) instead of the built-in provider path. Same chat:*
+    // events come back, so streaming/done handling above works unchanged.
+    if (session?.agent?.startsWith("harness:")) {
+      const projects = useProjectsStore.getState();
+      const cwd = workingDir;
+      try {
+        await sendAgentChatMessage(
+          activeChatSessionId,
+          content,
+          session.agent.slice("harness:".length),
+          session.model || undefined,
+          cwd,
+          // Feeds the conduit-browser MCP registration (CONDUIT_PROJECT_ID) so
+          // browser auto-open is scoped to the selected project.
+          projects.selectedProjectId ?? undefined,
+        );
+      } catch (err) {
+        console.error('[harness] sendAgentChatMessage failed:', err);
+        // Delete the keys (not `undefined` assignments — those keep the key
+        // present, so `sid in streaming` stays true and the sidebar "Working…"
+        // dot never clears; it also breaks the Record<string, string> type).
+        const streaming = { ...get().streaming };
+        const chatStatus = { ...get().chatStatus };
+        delete streaming[activeChatSessionId];
+        delete chatStatus[activeChatSessionId];
+        set({
+          streamingChatSessionId: null,
+          streaming,
+          chatStatus,
+          error: String(err),
+        });
+        return;
+      }
+      return;
+    }
+
+    // The built-in path can reject synchronously (unknown session/provider,
+    // local-model warmup failure) before any chat:error event exists. Without
+    // a catch the session wedges: streamingChatSessionId stays set, the
+    // double-send guard blocks every later send, and the user stares at a
+    // permanent "thinking" spinner with no error. Mirror the harness reset.
+    try {
+      await sendChatMessage(
+        activeChatSessionId,
+        content,
+        effort || undefined,
+        toolsEnabled,
+        codeExecEnabled,
+        attachments,
+        forceResearch,
+        thinking === null ? undefined : thinking,
+        // Working folder for this chat (custom folder → bound project →
+        // global selection, resolved above). The backend grants it as an
+        // fs_root AND names it in the system prompt so the model knows
+        // which directory it is working in.
+        workingDir,
+      );
+    } catch (err) {
+      console.error('[chat] sendChatMessage failed:', err);
+      const streaming = { ...get().streaming };
+      const chatStatus = { ...get().chatStatus };
+      delete streaming[activeChatSessionId];
+      delete chatStatus[activeChatSessionId];
+      set({
+        streamingChatSessionId: null,
+        streaming,
+        chatStatus,
+        error: String(err),
+      });
+    }
   },
 
   // Regenerate resends the most recent user message. The backend appends a
   // new assistant turn (history is rebuilt from the DB each send).
+  //
+  // IMPORTANT: the bubble's `content` may contain "[Attached image: …]" /
+  // "[Attached file: …]" markers that the UI injected for display purposes
+  // only. Re-sending those markers would let the model misinterpret them as
+  // fresh attachments and try to process nonexistent files. Strip them so
+  // the regenerated turn mirrors what the BACKEND actually persisted.
   regenerate: async () => {
     const { messages, streamingChatSessionId } = get();
     if (streamingChatSessionId) return; // don't regenerate mid-stream
     const lastUser = [...messages].reverse().find((m) => m.role === "user");
     if (!lastUser) return;
-    await get().sendMessage(lastUser.content);
+    const clean = lastUser.content.replace(/\n\n\[Attached (?:image|file)[^\]]*\]/g, "");
+    await get().sendMessage(clean);
   },
 
   // Delete a single chat message by id. Optimistically removes the bubble
@@ -662,29 +880,53 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       await deleteChatMessage(messageId);
     } catch (err) {
+      // Rollback: the backend rejected the delete (e.g. DB error, or the row
+      // was already gone via another path). Re-fetch so the local list
+      // matches persisted state instead of staying out of sync.
       console.warn("deleteMessage failed", err);
+      const activeChatSessionId = get().activeChatSessionId;
+      if (activeChatSessionId) {
+        try {
+          const msgs = await getChatMessages(activeChatSessionId);
+          set({ messages: msgs ?? [] });
+        } catch {
+          /* best-effort rollback */
+        }
+      }
     }
   },
 
-  setPreviewArtifact: (previewArtifact) => set({ previewArtifact }),
-
-  setSessionPermissionMode: async (chatSessionId, mode) => {
-    // Switching INTO full_auto opens a one-time confirmation modal first
-    // (per session — `fullAutoConfirmed` suppresses re-prompting within the
-    // same session). All other transitions apply immediately.
-    if (mode === "full_auto" && !fullAutoConfirmed.has(chatSessionId)) {
-      set({ fullAutoConfirmingFor: chatSessionId });
-      return false;
+  setPreviewArtifact: (artifact) => {
+    // null closes ALL Canvas tabs (the pane's empty state shows).
+    if (!artifact) {
+      set({ previewArtifacts: [], activePreviewPath: null });
+      return;
     }
-    await updateChatSessionPermissionMode(chatSessionId, mode);
+    // Open-or-focus: a new artifact becomes a new focused tab; an already
+    // open one just gets focused (keyed by path, like a browser tab's URL).
     set((s) => ({
-      sessions: s.sessions.map((sess) =>
-        sess.id === chatSessionId ? { ...sess, permissionMode: mode } : sess,
-      ),
-      fullAutoConfirmingFor: null,
+      previewArtifacts: s.previewArtifacts.some((a) => a.path === artifact.path)
+        ? s.previewArtifacts
+        : [...s.previewArtifacts, artifact],
+      activePreviewPath: artifact.path,
     }));
-    return true;
   },
+
+  closePreviewArtifact: (path) =>
+    set((s) => {
+      const closing = path ?? s.activePreviewPath;
+      if (!closing) return s;
+      const idx = s.previewArtifacts.findIndex((a) => a.path === closing);
+      if (idx < 0) return s;
+      const next = s.previewArtifacts.filter((a) => a.path !== closing);
+      // Closing the focused tab activates its neighbor (the one that slid
+      // into the closed tab's slot, or the last tab when closing the tail).
+      const activePreviewPath =
+        s.activePreviewPath === closing
+          ? (next[Math.min(idx, next.length - 1)]?.path ?? null)
+          : s.activePreviewPath;
+      return { previewArtifacts: next, activePreviewPath };
+    }),
 
   setSessionWatchMode: async (chatSessionId, mode) => {
     await updateChatSessionWatchMode(chatSessionId, mode);
@@ -695,19 +937,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
-  confirmFullAuto: async (chatSessionId) => {
-    markFullAutoConfirmed(chatSessionId);
-    await updateChatSessionPermissionMode(chatSessionId, "full_auto");
-    set((s) => ({
-      sessions: s.sessions.map((sess) =>
-        sess.id === chatSessionId ? { ...sess, permissionMode: "full_auto" } : sess,
-      ),
-      fullAutoConfirmingFor: null,
-    }));
-  },
-
-  cancelFullAutoConfirm: () => set({ fullAutoConfirmingFor: null }),
-
   setOwnerSessionId: (chatSessionId, ownerSessionId) =>
     set((s) => ({
       ownerSessionByChatId: { ...s.ownerSessionByChatId, [chatSessionId]: ownerSessionId },
@@ -715,26 +944,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   getOwnerSessionId: (chatSessionId) => get().ownerSessionByChatId[chatSessionId],
 
-  resolveApproval: async (chatSessionId, approved) => {
-    const pending = get().pendingApprovals[chatSessionId];
-    if (!pending) return;
-    // Optimistically remove the card; the backend's `chat:approval-resolved`
-    // would also clear it, but this avoids a flicker if the event is slow.
-    set((s) => {
-      const next = { ...s.pendingApprovals };
-      delete next[chatSessionId];
-      return { pendingApprovals: next };
-    });
-    await resolveToolAction(pending.pendingId, approved);
-  },
-
   cancelStream: async () => {
     const { streamingChatSessionId } = get();
     if (streamingChatSessionId) {
-      await cancelChatMessage(streamingChatSessionId);
+      const session = get().sessions.find((s) => s.id === streamingChatSessionId);
+      if (session?.agent?.startsWith("harness:")) {
+        await cancelAgentChatMessage(streamingChatSessionId);
+      } else {
+        await cancelChatMessage(streamingChatSessionId);
+      }
       // The backend may still fire chat:error or chat:done; our event handler
       // will clear streaming state. But we clear optimistically here too.
       set({ streamingChatSessionId: null });
+      // A cancelled turn frees the queue too — send the next stacked message.
+      get().drainQueue(streamingChatSessionId);
     }
   },
 
@@ -758,10 +981,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => {
       const nextStatus = { ...s.chatStatus };
       delete nextStatus[chatSessionId];
+      const prev = s.streaming[chatSessionId] ?? "";
+      // Cap the streaming buffer to 200KB per session to avoid OOM on
+      // extremely long streaming turns (hundreds of thousands of tokens).
+      // The tail is what matters for rendering; anything beyond ~50K chars
+      // is scrolled out of view already.
+      const next = (prev + token).slice(-200_000);
       return {
         streaming: {
           ...s.streaming,
-          [chatSessionId]: (s.streaming[chatSessionId] ?? "") + token,
+          [chatSessionId]: next,
         },
         // First token arrived — drop any pre-token status notice (e.g. the
         // "local model loading" line) since the wait is over.
@@ -847,7 +1076,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (messages) {
       set((s) => {
         // Attribute the artifacts produced during this turn to the assistant
-        // message that just completed (the last assistant record).
+        // message that just completed (the last assistant record). This must
+        // run even when the user is viewing a DIFFERENT chat: artifactsByMessage
+        // is keyed by the persisted message id (globally unique), so the chips
+        // will be there when the user opens that session — previously they were
+        // silently discarded while the pending buffer was cleared regardless.
+        // Only the flat `messages` buffer (the active session's list) stays
+        // gated on the active session so two sessions finishing simultaneously
+        // don't cross-contaminate.
+        const isActiveSession = s.activeChatSessionId === chatSessionId;
         const pending = s.pendingArtifacts[chatSessionId] ?? [];
         const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
         const artifactsByMessage =
@@ -857,7 +1094,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const nextPending = { ...s.pendingArtifacts };
         delete nextPending[chatSessionId];
         return {
-          messages: s.activeChatSessionId === chatSessionId ? messages : s.messages,
+          messages: isActiveSession ? messages : s.messages,
           artifactsByMessage,
           pendingArtifacts: nextPending,
         };
@@ -867,6 +1104,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Refresh the session list (title may have been updated by the backend).
     const sessions = await listChatSessions();
     if (sessions) set({ sessions: withoutDeleted(sessions) });
+    // Turn finished — send the next queued message, if any (FIFO).
+    get().drainQueue(chatSessionId);
   },
 
   onArtifact: ({ chatSessionId, path, filename }) => {
@@ -889,13 +1128,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
         pendingArtifacts: pendingTracked
           ? s.pendingArtifacts
           : { ...s.pendingArtifacts, [chatSessionId]: [...pending, artifact] },
-        // Auto-open the newly generated file in the preview pane when it
-        // belongs to the chat the user is currently viewing — except diagrams/
-        // HTML, which render inline in the chat.
-        previewArtifact:
-          !rendersInline && s.activeChatSessionId === chatSessionId
-            ? artifact
-            : s.previewArtifact,
+        // Auto-open the newly generated file as a Canvas tab when it belongs
+        // to the chat the user is currently viewing — except diagrams/HTML,
+        // which render inline in the chat. The new tab becomes the focused
+        // one; an already-open path is just focused (no duplicate tab).
+        ...( !rendersInline && s.activeChatSessionId === chatSessionId
+          ? {
+              previewArtifacts: s.previewArtifacts.some((a) => a.path === path)
+                ? s.previewArtifacts
+                : [...s.previewArtifacts, artifact],
+              activePreviewPath: artifact.path,
+            }
+          : {}),
       };
     });
     // Refresh the persistent Artifacts sidebar library.
@@ -918,27 +1162,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           s.activeChatSessionId === chatSessionId ? message : s.error,
       };
     });
-  },
-
-  onApprovalRequest: ({ chatSessionId, pendingId, tool, summary, args }) => {
-    // Surface the per-action approval card for this session. Only one card is
-    // shown at a time (the tool loop pauses on it); a new request replaces any
-    // stale one (the prior would already have been resolved or cancelled).
-    set((s) => ({
-      pendingApprovals: {
-        ...s.pendingApprovals,
-        [chatSessionId]: { pendingId, tool, summary, args },
-      },
-    }));
-  },
-
-  onApprovalResolved: ({ chatSessionId }) => {
-    // The backend resumed the paused tool loop — dismiss the card.
-    set((s) => {
-      const next = { ...s.pendingApprovals };
-      delete next[chatSessionId];
-      return { pendingApprovals: next };
-    });
+    // Turn ended (in error) — keep the queue moving rather than stranding it.
+    get().drainQueue(chatSessionId);
   },
 
   onTaskProgress: ({ chatSessionId, taskId, kind, state, message, downloaded, total, speedBps, destPath }) => {
@@ -949,3 +1174,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 }));
+
+// Bind the active chat to a project when the user switches projects while
+// viewing it — no message send required. The composer notch and the working
+// directory follow the per-chat binding (sessionProjects) instead of the
+// global selection. sendMessage also records this binding; selectSession
+// pushes it back into the global selection when reopening a bound chat.
+useProjectsStore.subscribe((s) => {
+  const pid = s.selectedProjectId;
+  if (!pid) return;
+  const { activeChatSessionId, sessionProjects } = useChatStore.getState();
+  if (!activeChatSessionId || sessionProjects[activeChatSessionId] === pid) return;
+  useChatStore.setState((st) => ({
+    sessionProjects: { ...st.sessionProjects, [activeChatSessionId]: pid },
+  }));
+});

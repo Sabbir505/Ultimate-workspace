@@ -7,9 +7,11 @@
 // inlined into the message.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ModelEffortMenu } from "./ModelEffortMenu";
+import { AgentMenu } from "./AgentMenu";
 import { ContextMeter } from "./ContextMeter";
-import { PermissionModeMenu } from "./PermissionModeMenu";
-import type { PermissionMode } from "../../state/chat";
+import { useUiStore } from "../../state/ui";
+import { useChatStore } from "../../state/chat";
+import { useProjectsStore } from "../../state/projects";
 import { listChatSkills } from "../../lib/ipc";
 
 const MAX_TEXT_BYTES = 512 * 1024;
@@ -58,6 +60,77 @@ function ResearchIcon() {
       <circle cx="11" cy="11" r="7" />
       <line x1="21" y1="21" x2="16.65" y2="16.65" />
     </svg>
+  );
+}
+
+/** Folder icon for the "Choose working folder" menu option + the notch chip. */
+function FolderIcon() {
+  return (
+    <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+
+/** Basename of a filesystem path (last non-empty segment), both separators. */
+function pathBasename(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/, "");
+  return trimmed.split(/[\\/]/).pop() || trimmed;
+}
+
+/** Stable empty list for the queue selector (a fresh [] per call would make
+ *  every store change re-render the composer). */
+const NO_QUEUED_MESSAGES: import("../../state/chat").QueuedChatMessage[] = [];
+
+/** Notch chip beside the agent selector showing the directory the chat is
+ *  working in: the custom folder chosen via the "+" picker when set, else the
+ *  selected project's folder. The × (visible on hover) fully unbinds the chat
+ *  from that project — drop the per-chat binding, any custom-folder override,
+ *  and the global selection when it's the same project. Hidden when neither
+ *  resolves (no project selected). */
+function FolderNotch() {
+  const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
+  const override = useChatStore((s) =>
+    s.activeChatSessionId ? s.cwdOverrides[s.activeChatSessionId] : undefined,
+  );
+  const unbindProject = useChatStore((s) => s.unbindProject);
+  const selectProject = useProjectsStore((s) => s.selectProject);
+  // The chat's own project binding wins over the global selection, so
+  // switching chats shows each chat's project — not whichever project was
+  // clicked last.
+  const boundProjectId = useChatStore((s) =>
+    s.activeChatSessionId ? s.sessionProjects[s.activeChatSessionId] : undefined,
+  );
+  const project = useProjectsStore((s) =>
+    s.projectById(boundProjectId ?? s.selectedProjectId),
+  );
+  const path = override ?? project?.path ?? null;
+  if (!path || !activeChatSessionId) return null;
+  const unbind = () => {
+    unbindProject(activeChatSessionId);
+    // "Come out of that project" also means the global sidebar selection —
+    // only when it's the very project this notch was showing (a chat bound
+    // to a different project keeps the global selection untouched).
+    const ps = useProjectsStore.getState();
+    const showing = boundProjectId ?? ps.selectedProjectId;
+    if (ps.selectedProjectId && ps.selectedProjectId === showing) {
+      selectProject(null);
+    }
+  };
+  return (
+    <div className="composer-notch-folder" title={path}>
+      <FolderIcon />
+      <span className="composer-notch-folder-name">{pathBasename(path)}</span>
+      <button
+        type="button"
+        className="composer-notch-folder-clear"
+        title={`${override ? `Custom folder: ${override}\n` : ""}Click to leave this project`}
+        aria-label="Leave this project"
+        onClick={unbind}
+      >
+        ×
+      </button>
+    </div>
   );
 }
 
@@ -186,6 +259,21 @@ interface Props {
   /** Model/effort selector state — selector is hidden when model is undefined. */
   model?: string;
   models?: string[];
+  /** Optional id → display-label overrides for the model list (CLI-agent
+   *  catalog). Passed through to ModelEffortMenu. */
+  modelLabels?: Record<string, string>;
+  /** Custom endpoint the selected CLI agent is pointed at (discovered from
+   *  the CLI's own config) — shown in the model dropdown so relay/custom
+   *  setups are visible. Passed through to ModelEffortMenu. */
+  modelEndpoint?: string | null;
+  /** Per-session agent selection ("builtin" | "local" | "harness:<id>").
+   *  undefined = no active session (agent chip hidden); null = session active
+   *  but no agent picked yet — the model chip renders locked and Send stays
+   *  disabled until the user chooses one (mockup 02, state A). */
+  agent?: string | null;
+  onAgentChange?: (agent: string) => void;
+  /** Spinner on the agent chip while a harness's config/models load. */
+  agentLoading?: boolean;
   /** Scanned local GGUF display names, shown as a "Local models" section in
    *  the selector regardless of the session's provider. */
   localModels?: string[];
@@ -198,10 +286,12 @@ interface Props {
   onModelChange?: (model: string) => void;
   onEffortChange?: (effort: string) => void;
   onLocalCtxChange?: (ctx: number) => void;
-  /** Per-session filesystem permission posture. The selector is hidden when
-   *  undefined (no active session). */
-  permissionMode?: PermissionMode;
-  onPermissionModeChange?: (mode: PermissionMode) => void;
+  /** Eject the running local-model sidecar and free its VRAM. Wired by
+   *  ChatView only when the local_gguf provider has a live sidecar. */
+  onEjectLocalModel?: () => void;
+  /** True when a local-model sidecar is currently running — the model pill
+   *  shows an ⏏ button when this is set. Defaults to false. */
+  localModelActive?: boolean;
   /** Per-session extended-thinking toggle. `null` (default) lets the provider
    *  decide; `true` / `false` forces it. Hidden entirely when the active
    *  provider is one that doesn't expose thinking (e.g. plain OpenAI). */
@@ -227,6 +317,11 @@ export function ChatComposer({
   draft,
   model,
   models,
+  modelLabels,
+  modelEndpoint,
+  agent,
+  onAgentChange,
+  agentLoading,
   localModels,
   effort,
   provider,
@@ -235,8 +330,8 @@ export function ChatComposer({
   onModelChange,
   onEffortChange,
   onLocalCtxChange,
-  permissionMode,
-  onPermissionModeChange,
+  onEjectLocalModel,
+  localModelActive,
   usedTokens,
   liveMaxTokens,
   thinking,
@@ -254,6 +349,35 @@ export function ChatComposer({
   const attachMenuRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Messages stacked while a turn is running (FIFO — the store enqueues on
+  // send-during-stream and drains when the turn finishes). Rendered as a
+  // collapsible strip (collapsed by default) above the composer card;
+  // "×" drops one from the queue.
+  const [queueExpanded, setQueueExpanded] = useState(false);
+  const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
+  const queuedMessages = useChatStore((s) =>
+    s.activeChatSessionId
+      ? (s.messageQueue[s.activeChatSessionId] ?? NO_QUEUED_MESSAGES)
+      : NO_QUEUED_MESSAGES,
+  );
+  const removeQueuedMessage = useChatStore((s) => s.removeQueuedMessage);
+  const setCwdOverride = useChatStore((s) => s.setCwdOverride);
+
+  // Open the native (OS) folder dialog so any drive/folder can be picked as
+  // the chat session's custom working folder (shown in the FolderNotch).
+  const pickWorkingFolder = useCallback(async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const picked = await open({
+      directory: true,
+      multiple: false,
+      title: "Choose working folder",
+    });
+    if (typeof picked === "string" && activeChatSessionId) {
+      setCwdOverride(activeChatSessionId, picked);
+    }
+    textareaRef.current?.focus();
+  }, [activeChatSessionId, setCwdOverride]);
 
   // Slash-command skill popup: typing "/" as the first character opens a list
   // of every available skill (on-disk harness skills + the built-in
@@ -343,6 +467,19 @@ export function ChatComposer({
     ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
   }, [content]);
 
+  // Re-focus the composer when the right tool panel's tab/collapse state
+  // settles — the panel (e.g. a browser webview) can grab focus when it
+  // opens or switches, and nothing otherwise gives it back. Only take focus
+  // when it was lost to nowhere (activeElement is body); never yank it out
+  // of another input the user is actively typing in.
+  const toolPanelTab = useUiStore((s) => s.toolPanelTab);
+  const toolPanelCollapsed = useUiStore((s) => s.toolPanelCollapsed);
+  useEffect(() => {
+    if (document.activeElement === document.body) {
+      textareaRef.current?.focus();
+    }
+  }, [toolPanelTab, toolPanelCollapsed]);
+
   const handleFiles = useCallback(async (files: FileList | null) => {
     if (!files) return;
     setAttachError(null);
@@ -387,9 +524,13 @@ export function ChatComposer({
 
   // A model must be explicitly chosen before sending (no default model).
   const needsModel = model !== undefined && !model.trim();
+  // No agent picked for the session yet: model chip is locked and Send stays
+  // disabled so a message can never go to the wrong backend (mockup 02,
+  // state A). `agent === undefined` means no active session — hidden entirely.
+  const agentLocked = agent === null;
 
   const handleSend = useCallback(() => {
-    if (needsModel) return;
+    if (needsModel || agentLocked) return;
     const trimmed = content.trim();
     if (!trimmed && attachments.length === 0) return;
     onSend(trimmed, attachments, forceResearch || undefined);
@@ -403,7 +544,7 @@ export function ChatComposer({
     if (ta) {
       ta.style.height = "auto";
     }
-  }, [content, attachments, onSend, needsModel, forceResearch]);
+  }, [content, attachments, onSend, needsModel, agentLocked, forceResearch]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -433,26 +574,61 @@ export function ChatComposer({
       }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        if (!disabled && !streaming && !needsModel) {
+        // Allowed while streaming too: the store stacks the message above
+        // the composer (FIFO queue) and sends it when the turn finishes.
+        if (!disabled && !needsModel && !agentLocked) {
           handleSend();
         }
       }
     },
-    [disabled, streaming, needsModel, handleSend, slashOpen, slashFiltered, slashIndex, applySlashCommand],
+    [disabled, needsModel, agentLocked, handleSend, slashOpen, slashFiltered, slashIndex, applySlashCommand],
   );
 
   const isEmpty = !content.trim() && attachments.length === 0;
   const showSelector = model !== undefined && onModelChange && onEffortChange;
-  // The selector shows whenever there's an active session with a mode.
-  const showModeSelector = permissionMode !== undefined && onPermissionModeChange;
-  // A colored border/glow on the composer whenever a non-default posture is
-  // active, so it's never ambiguous which mode governs tool calls.
-  const modeGlowClass =
-    permissionMode && permissionMode !== "manual" ? ` composer-mode-${permissionMode}` : "";
+  // The agent chip shows whenever there's an active session (agent !==
+  // undefined), including the locked no-agent state.
+  const showAgentSelector = agent !== undefined && onAgentChange;
 
   return (
     <div className="chat-composer">
-      <div className={`chat-composer-card${modeGlowClass}`}>
+      {queuedMessages.length > 0 && (
+        <div className="composer-queue" aria-label="Queued messages">
+          <button
+            type="button"
+            className="composer-queue-header"
+            onClick={() => setQueueExpanded((v) => !v)}
+            aria-expanded={queueExpanded}
+          >
+            <span className="composer-queue-chevron" aria-hidden="true">
+              {queueExpanded ? "▾" : "▸"}
+            </span>
+            Queued ({queuedMessages.length})
+          </button>
+          {queueExpanded &&
+            queuedMessages.map((m, i) => (
+              <div className="composer-queue-item" key={m.id}>
+                <span className="composer-queue-index">{i + 1}</span>
+                <span className="composer-queue-text" title={m.content}>
+                  {m.content ||
+                    `${m.attachments?.length ?? 0} attachment${(m.attachments?.length ?? 0) === 1 ? "" : "s"}`}
+                </span>
+                <button
+                  type="button"
+                  className="composer-queue-remove"
+                  title="Remove from queue"
+                  aria-label="Remove from queue"
+                  onClick={() =>
+                    activeChatSessionId && removeQueuedMessage(activeChatSessionId, m.id)
+                  }
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+        </div>
+      )}
+      <div className="chat-composer-card">
         {attachments.length > 0 && (
           <div className="composer-attachments">
             {attachments.map((a) => (
@@ -492,7 +668,7 @@ export function ChatComposer({
           <textarea
             ref={textareaRef}
             className="chat-composer-textarea"
-            placeholder="Write a message…  type / for skills"
+            placeholder={agentLocked ? "Select an agent to start…" : "Write a message…  type / for skills"}
             value={content}
             onChange={(e) => setContent(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -535,6 +711,18 @@ export function ChatComposer({
                 >
                   <AttachmentIcon />
                   <span>Add files or photos</span>
+                </button>
+                <button
+                  type="button"
+                  className="composer-attach-menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setAttachMenuOpen(false);
+                    void pickWorkingFolder();
+                  }}
+                >
+                  <FolderIcon />
+                  <span>Choose working folder…</span>
                 </button>
                 <button
                   type="button"
@@ -583,22 +771,25 @@ export function ChatComposer({
               <ResearchIcon /> Research
             </button>
           )}
-          {showModeSelector && (
-            <PermissionModeMenu
-              mode={permissionMode!}
-              onModeChange={onPermissionModeChange!}
-              variant="inline"
-            />
-          )}
           {attachError && <span className="composer-attach-error">{attachError}</span>}
-          {!attachError && needsModel && (
+          {!attachError && agentLocked && (
+            <span className="composer-model-hint">Select an agent to start</span>
+          )}
+          {!attachError && !agentLocked && needsModel && (
             <span className="composer-model-hint">Select a model to start</span>
           )}
           <div className="composer-footer-spacer" />
-          {showSelector && (
+          {showSelector && agentLocked && (
+            <span className="model-chip-locked" title="Pick an agent to unlock the model list">
+              🔒 Model — pick an agent first
+            </span>
+          )}
+          {showSelector && !agentLocked && (
             <ModelEffortMenu
               model={model}
               models={models ?? []}
+              labels={modelLabels}
+              endpoint={modelEndpoint ?? null}
               localModels={localModels ?? []}
               effort={effort ?? ""}
               provider={provider}
@@ -607,6 +798,8 @@ export function ChatComposer({
               onModelChange={onModelChange}
               onEffortChange={onEffortChange}
               onLocalCtxChange={onLocalCtxChange}
+              onEjectLocalModel={onEjectLocalModel}
+              localModelActive={localModelActive}
             />
           )}
           <div className="composer-send-wrap">
@@ -623,8 +816,14 @@ export function ChatComposer({
               <button
                 className="composer-send-btn"
                 onClick={handleSend}
-                disabled={isEmpty || disabled || needsModel}
-                title={needsModel ? "Select a model first" : "Send message"}
+                disabled={isEmpty || disabled || needsModel || agentLocked}
+                title={
+                  agentLocked
+                    ? "Select an agent first"
+                    : needsModel
+                      ? "Select a model first"
+                      : "Send message"
+                }
                 aria-label="Send message"
               >
                 ↑
@@ -634,6 +833,13 @@ export function ChatComposer({
         </div>
       </div>
       <div className="composer-context-meter-wrap">
+        {showAgentSelector && (
+          <div className="composer-notch-agent">
+            <AgentMenu agent={agent} onAgentChange={onAgentChange!} loading={agentLoading} />
+          </div>
+        )}
+        <FolderNotch />
+        <div className="composer-context-meter-spacer" />
         <ContextMeter
           usedTokens={usedTokens ?? null}
           model={model}

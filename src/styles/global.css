@@ -6276,10 +6276,18 @@ table.kv th {
   font-size: 13px;
   line-height: 1;
   cursor: pointer;
+  /* The × appears on hover so the notch reads as a passive chip at rest. */
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.composer-notch-folder:hover .composer-notch-folder-clear,
+.composer-notch-folder-clear:focus-visible {
+  opacity: 1;
 }
 .composer-notch-folder-clear:hover {
   background: var(--surface-2);
   color: var(--text);
+  opacity: 1;
 }
 
 /* Message queue — messages stacked while a turn is running, shown above the

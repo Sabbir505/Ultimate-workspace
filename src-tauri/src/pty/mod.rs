@@ -25,7 +25,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use tauri::{AppHandle, Emitter};
 
 use crate::db;
@@ -293,6 +293,43 @@ impl Pane {
         let adapter_id = self.adapter.as_ref().map(|a| a.id()).unwrap_or("unknown");
         let conn = db.lock();
         if db::insert_cost_event(&conn, session_id, &delta, adapter_id, "pty", pricing_estimated_usd).is_ok() {
+            let _ = app.emit(
+                "cost:updated",
+                CostUpdatedEvent {
+                    session_id: session_id.clone(),
+                    version: 2,
+                },
+            );
+        }
+    }
+
+    /// Like record_usage, but routes to source='on_disk' (the cost-quality panel
+    /// distinguishes the two) and backfills model_key on the inserted row from
+    /// the session log. The on-disk sync also de-duplicates: a pty row for the
+    /// same call is updated in place to source='on_disk' + its model_key, so
+    /// the rollup never double-counts.
+    fn record_usage_on_disk(
+        &self,
+        app: &AppHandle,
+        db: &SharedDb,
+        delta: UsageInfo,
+        model: Option<&str>,
+    ) {
+        let Some(session_id) = &self.session_id else { return };
+        let is_zero = delta.input_tokens.unwrap_or(0) == 0
+            && delta.output_tokens.unwrap_or(0) == 0
+            && delta.cost_usd.unwrap_or(0.0) == 0.0;
+        if is_zero {
+            return;
+        }
+        if delta.cost_usd.is_none() {
+            // The harness session log rarely has its own cost (Claude doesn't
+            // print one), so price it the same way the pty path does.
+        }
+        let pricing_estimated_usd = delta.cost_usd;
+        let adapter_id = self.adapter.as_ref().map(|a| a.id()).unwrap_or("unknown");
+        let conn = db.lock();
+        if db::insert_cost_event(&conn, session_id, &delta, adapter_id, "on_disk", pricing_estimated_usd).is_ok() {
             let _ = app.emit(
                 "cost:updated",
                 CostUpdatedEvent {
@@ -822,13 +859,15 @@ impl PtyManager {
 
                 // On-disk usage sync for the cost dashboard (PRD §7.12 prefers
                 // harness session logs over pty scraping). Cheap cadence; each
-                // adapter no-ops when its log has no usage yet.
+                // adapter no-ops when its log has no usage yet. Source is
+                // 'on_disk' (vs 'pty' from the scrape path) so the cost-quality
+                // panel can distinguish.
                 if pane.last_usage_sync.lock().elapsed() >= Duration::from_secs(5) {
                     *pane.last_usage_sync.lock() = Instant::now();
                     let hid = pane.harness_session_id.lock().clone();
                     if let (Some(adapter), Some(hid)) = (&pane.adapter, hid) {
                         if let Some(su) = adapter.usage_from_disk(&pane.cwd, &hid) {
-                            pane.record_usage(&mgr.app, &mgr.db, su.usage, su.model.as_deref());
+                            pane.record_usage_on_disk(&mgr.app, &mgr.db, su.usage, su.model.as_deref());
                         }
                     }
                 }

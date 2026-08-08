@@ -198,24 +198,34 @@ pub fn migrate_cost_v2(conn: &Connection) -> DbResult<()> {
             }
         }
     }
+    // `source` gets the NOT NULL DEFAULT, so the add-column is idempotent;
+    // we track whether this run actually ADDED it so the one-time backfills
+    // below only fire on the migration's first run (re-running them on every
+    // startup would re-label fresh pty rows as 'on_disk' and stamp default
+    // model_keys onto mixed-model sessions — spec §5.4 says those stay NULL).
     let sql_source = "ALTER TABLE cost_events ADD COLUMN source TEXT NOT NULL DEFAULT 'pty'";
-    if let Err(e) = conn.execute(sql_source, []) {
-        if !e.to_string().contains("duplicate column name") {
-            return Err(e);
+    let source_added = match conn.execute(sql_source, []) {
+        Ok(_) => true,
+        Err(e) => {
+            if e.to_string().contains("duplicate column name") {
+                false
+            } else {
+                return Err(e);
+            }
         }
-    }
+    };
 
-    // Backfill: rows whose session was ever on-disk-synced get source='on_disk';
-    // remaining rows keep the 'pty' default. Guarded by the sessions table
-    // having a last_synced_at column (older DBs / pre-migration test schemas
-    // may not have it yet).
+    // Backfill (one-time, only when `source` was just added): rows whose
+    // session was ever on-disk-synced get source='on_disk'; remaining rows
+    // keep the 'pty' default. Guarded by the sessions table having a
+    // last_synced_at column (older DBs / pre-migration test schemas may not).
     let has_last_synced: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'last_synced_at')",
             [], |r| r.get(0),
         )
         .unwrap_or(false);
-    if has_last_synced {
+    if source_added && has_last_synced {
         conn.execute(
             "UPDATE cost_events
                 SET source = 'on_disk'
@@ -515,7 +525,7 @@ pub use secrets::{
 
 // cost
 pub use cost::{
-    get_cost_events, get_cost_rollups, insert_cost_event,
+    get_cost_events, insert_cost_event,
 };
 pub use cost_v2::{get_cost_rollups_v2, read_rate_overrides};
 

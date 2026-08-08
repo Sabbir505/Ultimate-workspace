@@ -261,6 +261,10 @@ impl ChatManager {
                     // Persist the assistant message with usage.
                     {
                         let conn = db.lock();
+                        // provider + model_key on the row let the rollup group
+                        // in-app chat under chat:<provider> and price by the
+                        // session's model (spec §8 / §10.3).
+                        let model_key = crate::harness_adapters::canonical_model_key(&chat_req.model);
                         let persisted = db::add_chat_message(
                             &conn,
                             &sid,
@@ -290,7 +294,9 @@ impl ChatManager {
                             usage.as_ref().and_then(|u| if u.cache_creation_input_tokens > 0 { Some(u.cache_creation_input_tokens) } else { None }),
                             usage.as_ref().and_then(|u| if u.cache_read_input_tokens > 0 { Some(u.cache_read_input_tokens) } else { None }),
                             usage.as_ref().and_then(|u| if u.reasoning_tokens > 0 { Some(u.reasoning_tokens) } else { None }),
-                            None, None, None,
+                            Some(provider_id.as_str()),
+                            model_key,
+                            None,
                         );
                         // Attribute this turn's artifacts to the assistant
                         // message so they reappear on its bubble when the chat

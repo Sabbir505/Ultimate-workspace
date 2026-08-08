@@ -280,16 +280,27 @@ impl Pane {
                 None => usage,
             }
         };
+        // A delta is only "zero" when EVERY field is zero — including
+        // cache/reasoning (a turn served purely from cache has input=0,
+        // output=0 but nonzero cache_read, and must still be recorded).
         let is_zero = delta.input_tokens.unwrap_or(0) == 0
             && delta.output_tokens.unwrap_or(0) == 0
+            && delta.cache_creation_input_tokens.unwrap_or(0) == 0
+            && delta.cache_read_input_tokens.unwrap_or(0) == 0
+            && delta.reasoning_output_tokens.unwrap_or(0) == 0
             && delta.cost_usd.unwrap_or(0.0) == 0.0;
         if is_zero {
             return;
         }
-        if delta.cost_usd.is_none() {
-            delta.cost_usd = self.price_for(db, &delta, model);
-        }
-        let pricing_estimated_usd = delta.cost_usd;
+        // reported_cost_usd = what the harness itself printed (may be None).
+        // pricing_estimated_usd = the computed per-model price, only when the
+        // harness didn't print one (spec §7.5: the two must stay distinct).
+        let harness_reported = delta.cost_usd;
+        let pricing_estimated_usd = if harness_reported.is_none() {
+            self.price_for(db, &delta, model)
+        } else {
+            harness_reported
+        };
         let adapter_id = self.adapter.as_ref().map(|a| a.id()).unwrap_or("unknown");
         let conn = db.lock();
         if db::insert_cost_event(&conn, session_id, &delta, adapter_id, "pty", pricing_estimated_usd).is_ok() {
@@ -303,30 +314,72 @@ impl Pane {
         }
     }
 
-    /// Like record_usage, but routes to source='on_disk' (the cost-quality panel
-    /// distinguishes the two) and backfills model_key on the inserted row from
-    /// the session log. The on-disk sync also de-duplicates: a pty row for the
-    /// same call is updated in place to source='on_disk' + its model_key, so
-    /// the rollup never double-counts.
+    /// On-disk sync path: `usage_from_disk` returns CUMULATIVE session totals
+    /// (the whole session's usage so far), so we MUST delta them against the
+    /// last observed totals before inserting — the same zip `record_usage`
+    /// does. Inserting cumulative snapshots would multiply-count (each 5s tick
+    /// would add the full session total again). The source is 'on_disk' so the
+    /// cost-quality panel can distinguish from pty-scraped rows.
     fn record_usage_on_disk(
         &self,
         app: &AppHandle,
         db: &SharedDb,
-        delta: UsageInfo,
+        usage: UsageInfo,
         model: Option<&str>,
     ) {
         let Some(session_id) = &self.session_id else { return };
+        let mut delta = {
+            let mut last = self.last_usage.lock();
+            let prev = *last;
+            *last = Some(usage);
+            match prev {
+                Some(p) => UsageInfo {
+                    input_tokens: usage
+                        .input_tokens
+                        .zip(p.input_tokens)
+                        .map(|(a, b)| (a - b).max(0)),
+                    output_tokens: usage
+                        .output_tokens
+                        .zip(p.output_tokens)
+                        .map(|(a, b)| (a - b).max(0)),
+                    cache_creation_input_tokens: usage
+                        .cache_creation_input_tokens
+                        .zip(p.cache_creation_input_tokens)
+                        .map(|(a, b)| (a - b).max(0)),
+                    cache_read_input_tokens: usage
+                        .cache_read_input_tokens
+                        .zip(p.cache_read_input_tokens)
+                        .map(|(a, b)| (a - b).max(0)),
+                    reasoning_output_tokens: usage
+                        .reasoning_output_tokens
+                        .zip(p.reasoning_output_tokens)
+                        .map(|(a, b)| (a - b).max(0)),
+                    cost_usd: usage.cost_usd.zip(p.cost_usd).map(|(a, b)| (a - b).max(0.0)),
+                },
+                None => usage,
+            }
+        };
+        // A delta is only "zero" when EVERY field is zero — including
+        // cache/reasoning (a turn served purely from cache has input=0,
+        // output=0 but nonzero cache_read, and must still be recorded).
         let is_zero = delta.input_tokens.unwrap_or(0) == 0
             && delta.output_tokens.unwrap_or(0) == 0
+            && delta.cache_creation_input_tokens.unwrap_or(0) == 0
+            && delta.cache_read_input_tokens.unwrap_or(0) == 0
+            && delta.reasoning_output_tokens.unwrap_or(0) == 0
             && delta.cost_usd.unwrap_or(0.0) == 0.0;
         if is_zero {
             return;
         }
-        if delta.cost_usd.is_none() {
-            // The harness session log rarely has its own cost (Claude doesn't
-            // print one), so price it the same way the pty path does.
-        }
-        let pricing_estimated_usd = delta.cost_usd;
+        // reported_cost_usd = what the harness itself printed (usually None —
+        // session logs don't carry a cost). pricing_estimated_usd = the
+        // computed per-model price (spec §7.5 keeps the two distinct).
+        let harness_reported = delta.cost_usd;
+        let pricing_estimated_usd = if harness_reported.is_none() {
+            self.price_for(db, &delta, model)
+        } else {
+            harness_reported
+        };
         let adapter_id = self.adapter.as_ref().map(|a| a.id()).unwrap_or("unknown");
         let conn = db.lock();
         if db::insert_cost_event(&conn, session_id, &delta, adapter_id, "on_disk", pricing_estimated_usd).is_ok() {

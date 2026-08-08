@@ -79,58 +79,9 @@ pub fn get_cost_events(conn: &Connection, session_id: Option<&str>) -> DbResult<
     }
 }
 
-pub fn get_cost_rollups(conn: &Connection) -> DbResult<CostRollups> {
-    let per_project = {
-        let mut stmt = conn.prepare(
-            "SELECT s.project_id,
-                    COALESCE(SUM(ce.pricing_estimated_usd), 0.0),
-                    COALESCE(SUM(ce.input_tokens), 0),
-                    COALESCE(SUM(ce.output_tokens), 0)
-             FROM cost_events ce
-             JOIN sessions s ON s.id = ce.session_id
-             GROUP BY s.project_id",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(ProjectCostRollup {
-                project_id: r.get(0)?,
-                total_cost_usd: r.get(1)?,
-                total_input_tokens: r.get(2)?,
-                total_output_tokens: r.get(3)?,
-            })
-        })?;
-        rows.collect::<DbResult<Vec<_>>>()?
-    };
-    let daily = {
-        // date(timestamp,'unixepoch') yields 'YYYY-MM-DD' per CONTRACT.md.
-        let mut stmt = conn.prepare(
-            "SELECT date(timestamp, 'unixepoch') AS day,
-                    COALESCE(SUM(pricing_estimated_usd), 0.0)
-             FROM cost_events
-             GROUP BY day
-             ORDER BY day",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(DailyCost {
-                day: r.get(0)?,
-                cost_usd: r.get(1)?,
-                tokens_by_provider: std::collections::BTreeMap::new(),
-            })
-        })?;
-        rows.collect::<DbResult<Vec<_>>>()?
-    };
-    Ok(CostRollups {
-        totals: crate::types::CostTotals::default(),
-        per_provider: Vec::new(),
-        per_project,
-        daily,
-        by_kind: crate::types::CostByKind::default(),
-        per_model: Vec::new(),
-        cost_quality: crate::types::CostQuality::default(),
-        range_start: String::new(),
-        range_end: String::new(),
-        range_days: 30,
-    })
-}
+// NOTE: the rollup lives in cost_v2.rs (get_cost_rollups_v2) — read-time
+// priced, never reading the write-only pricing_estimated_usd column. There is
+// intentionally no legacy rollup shim here anymore.
 
 #[cfg(test)]
 mod tests {
@@ -206,18 +157,10 @@ mod tests {
         assert_eq!(get_cost_events(&conn, Some(&s1.id)).unwrap().len(), 2);
         assert_eq!(get_cost_events(&conn, None).unwrap().len(), 3);
 
-        let rollups = get_cost_rollups(&conn).unwrap();
-        assert_eq!(rollups.per_project.len(), 2);
-        let r1 = rollups.per_project.iter().find(|r| r.project_id == p1.id).unwrap();
-        assert!((r1.total_cost_usd - 0.30).abs() < 1e-9);
-        assert_eq!(r1.total_input_tokens, 300);
-        assert_eq!(r1.total_output_tokens, 50);
-        let r2 = rollups.per_project.iter().find(|r| r.project_id == p2.id).unwrap();
-        assert_eq!(r2.total_input_tokens, 0); // COALESCE null -> 0
-        // Both events share today's date -> exactly one daily bucket.
-        assert_eq!(rollups.daily.len(), 1);
-        assert!((rollups.daily[0].cost_usd - 0.30).abs() < 1e-9);
-        // day format YYYY-MM-DD
-        assert_eq!(rollups.daily[0].day.len(), 10);
+        // Rollup invariants are covered by get_cost_rollups_v2 in cost_v2.rs
+        // (read-time priced). Here we just assert the events round-trip.
+        let events = get_cost_events(&conn, None).unwrap();
+        assert_eq!(events.iter().filter(|e| e.session_id == s1.id).count(), 2);
+        assert_eq!(events.iter().filter(|e| e.session_id == s2.id).count(), 1);
     }
 }

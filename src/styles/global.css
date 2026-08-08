@@ -1,3 +1,9 @@
+/* Tailwind utilities + components, layered on top of the existing
+   hand-written CSS. Preflight is disabled in tailwind.config.js so the
+   Tailwind base reset doesn't clobber the existing global styles. */
+@tailwind components;
+@tailwind utilities;
+
 /* Conduit theme system â€” Cursor-style palette (deep neutral dark / warm
    light), cyan accent. The window is opaque (transparent:false in
    tauri.conf.json), so every surface here is a SOLID color. Surfaces still
@@ -68,6 +74,10 @@
   /* Elevated surfaces (toolbars, headers, popovers) â€” one step lighter. */
   --surface-glass: #1e1e1e;
   --surface-glass-2: #252525;
+  --surface-1: #1e1e1e;
+  --surface-3: #2a2a2a;
+  --bg-elevated: rgba(255, 255, 255, 0.05);
+  --glass-hover: rgba(255, 255, 255, 0.06);
   --border: #2a2a2a;
   --border-strong: #3a3a3a;
   /* Light sheen reads on dark surfaces. */
@@ -188,6 +198,10 @@
   --surface-solid: #fafafa;
   --surface-glass: #ffffff;
   --surface-glass-2: #f3f3f3;
+  --surface-1: #f0f0f0;
+  --surface-3: #e8e8e8;
+  --bg-elevated: rgba(0, 0, 0, 0.04);
+  --glass-hover: rgba(0, 0, 0, 0.06);
   --border: #e0e0e0;
   --border-strong: #c8c8c8;
   --glass-rim: inset 0 1px 0 0 rgba(0, 0, 0, 0.06);
@@ -1340,12 +1354,84 @@ pre,
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--border);
-  background: var(--surface-glass);
-  backdrop-filter: blur(24px) saturate(140%);
-  -webkit-backdrop-filter: blur(24px) saturate(140%);
-  box-shadow: var(--glass-rim);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 85%, rgba(255,255,255,0.08) 15%),
+    color-mix(in srgb, var(--surface-glass) 90%, rgba(255,255,255,0.04) 10%)
+  );
+  backdrop-filter: blur(32px) saturate(160%);
+  -webkit-backdrop-filter: blur(32px) saturate(160%);
+  box-shadow:
+    var(--glass-rim),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08);
   position: relative;
   z-index: 3;
+  overflow: hidden;
+}
+/* Liquid glass sheen — subtle animated shimmer across the sidebar surface */
+.sidebar::before {
+  content: "";
+  position: absolute;
+  inset: -50% -50%;
+  width: 200%;
+  height: 200%;
+  background:
+    radial-gradient(ellipse 80% 50% at 20% 40%, rgba(255,255,255,0.07) 0%, transparent 50%),
+    radial-gradient(ellipse 60% 40% at 80% 60%, rgba(255,255,255,0.04) 0%, transparent 50%);
+  pointer-events: none;
+  animation: liquid-shimmer 8s ease-in-out infinite;
+  z-index: 0;
+}
+@keyframes liquid-shimmer {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  25% { transform: translate(2%, -1%) rotate(0.5deg); }
+  50% { transform: translate(-1%, 2%) rotate(-0.3deg); }
+  75% { transform: translate(1%, 1%) rotate(0.2deg); }
+}
+/* Ensure sidebar children sit above the shimmer layer */
+.sidebar > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Thin scrollbar used inside the sidebar's scroll regions (chat history,
+   connector row, projects list). Overrides the global webkit-scrollbar with a
+   narrower, more translucent thumb suited to a narrow glass panel. */
+.sidebar-thin-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+.sidebar-thin-scroll::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+.sidebar-thin-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sidebar-thin-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+.sidebar-thin-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+/* Projects list: cap height and scroll internally so a long project list
+   can't push CHAT HISTORY off-screen. */
+.sidebar-projects-scroll {
+  max-height: 172px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+.sidebar-projects-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+.sidebar-projects-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+.sidebar-projects-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
 }
 /* "Show sidebar" button â€” rendered inline at the start of the toolbar while
  * the sidebar is collapsed (App.tsx), so it never overlaps the title. */
@@ -1403,6 +1489,45 @@ pre,
   overflow-y: auto;
   padding: 8px;
 }
+/* Pinned upper block: New Chat / ARTIFACTS / CONNECTORS / AUTOMATIONS /
+   PROJECTS stay put; only the chat history below scrolls. */
+.sidebar-fixed {
+  flex-shrink: 0;
+  padding: 8px 8px 0;
+}
+/* The projects list caps its own height (~4 rows) and scrolls internally so
+   a long project list can't push CHAT HISTORY off-screen. */
+.sidebar-projects {
+  max-height: 172px;
+  overflow-y: auto;
+}
+/* Project row: name only — click selects the project and opens a new chat. */
+.sidebar-project-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sidebar-project-row:hover {
+  background: var(--bg-elevated, rgba(255, 255, 255, 0.05));
+}
+.sidebar-project-row.active {
+  background: var(--accent-soft, rgba(255, 255, 255, 0.07));
+  color: var(--accent);
+}
+/* Chat history: the ONLY scrolling region in the sidebar. */
+.sidebar-chat-scroll {
+  min-height: 0;
+}
 .sidebar-section-label {
   font-size: 10px;
   font-weight: 600;
@@ -1410,6 +1535,221 @@ pre,
   color: var(--text-dim);
   padding: 8px 8px 5px;
   opacity: 0.85;
+}
+
+/* Connector icon grid (sidebar): 4 columns, at most 3 rows, then a "more"
+   tile that opens the full list in a modal. */
+.connector-grid-wrap {
+  padding: 0 8px 4px;
+}
+.connector-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+.connector-tile {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.connector-tile:hover {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+.connector-tile-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #4caf7d;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+.connector-tile-more {
+  font-size: 13px;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+}
+.connector-modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 320px;
+  overflow-y: auto;
+  min-width: 280px;
+}
+.connector-modal-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+.connector-modal-row:hover {
+  background: var(--surface-2, rgba(0, 0, 0, 0.04));
+}
+.connector-modal-name {
+  flex: 1;
+  font-size: 13px;
+}
+.connector-modal-status {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.connector-modal-status.on {
+  color: #4caf7d;
+}
+
+/* Automations list (sidebar): name + schedule + hover actions. */
+.automation-list {
+  padding: 0 8px 4px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+.automation-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  cursor: pointer;
+  min-height: 32px;
+}
+.automation-row:hover {
+  background: var(--surface-2, rgba(0, 0, 0, 0.04));
+}
+.automation-row.disabled {
+  opacity: 0.55;
+}
+.automation-status-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+.automation-status-dot.ok {
+  background: #4caf7d;
+}
+.automation-status-dot.skipped {
+  background: #d8a23c;
+}
+.automation-status-dot.err {
+  background: #d85c4c;
+}
+.automation-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.automation-schedule {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.automation-actions {
+  display: none;
+  flex-shrink: 0;
+  gap: 2px;
+  align-items: center;
+}
+.automation-row:hover .automation-actions {
+  display: flex;
+}
+/* While hovering, actions overlay the schedule label to keep the row height stable. */
+.automation-row:hover .automation-schedule {
+  display: none;
+}
+.automation-icon-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.automation-icon-btn:hover {
+  background: var(--accent-soft, rgba(0, 0, 0, 0.06));
+  color: var(--text);
+}
+.automation-icon-btn.danger:hover {
+  color: #d85c4c;
+}
+.automation-icon-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Automation create/edit form (inside the shared Modal). */
+.automation-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 380px;
+}
+.automation-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.automation-form input,
+.automation-form textarea,
+.automation-form select {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 7px 9px;
+  font-family: inherit;
+  /* Native pickers (time/calendar icon, select popup) follow the dark theme. */
+  color-scheme: dark;
+}
+:root[data-theme="light"] .automation-form input,
+:root[data-theme="light"] .automation-form textarea,
+:root[data-theme="light"] .automation-form select {
+  color-scheme: light;
+}
+/* The select dropdown popup is OS-rendered on Windows: without an explicit
+   background it defaults to white while text inherits the theme's near-white
+   --text — unreadable. Pin both. */
+.automation-form select option {
+  background: var(--surface);
+  color: var(--text);
+}
+.automation-form textarea {
+  resize: vertical;
+}
+.automation-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.automation-form-note {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin: 0;
+  line-height: 1.5;
+}
+.automation-form-error {
+  font-size: 12px;
+  color: #d85c4c;
+  margin: 0;
 }
 
 /* Artifact library (chat sidebar) */
@@ -1435,27 +1775,33 @@ pre,
      button), so no horizontal margin here â€” keeps the width identical. */
   margin: 0;
   padding: 6px 12px;
-  border: 1px solid color-mix(in srgb, var(--accent-2) 70%, transparent);
+  border: 1px solid transparent;
   border-radius: var(--radius-xs);
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--accent-2) 92%, #fff 8%),
-    var(--accent-2)
-  );
-  color: #fff;
+  background: transparent;
+  color: var(--text);
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0;
   text-align: left;
   cursor: pointer;
-  box-shadow: var(--glass-rim), 0 4px 14px -6px var(--accent-2-glow);
-  transition: filter 0.12s var(--ease), transform 0.08s var(--ease);
+  box-shadow: none;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease), transform 0.08s var(--ease), color 0.15s var(--ease);
 }
 .artifact-lib-title:hover {
-  filter: brightness(1.08);
+  background: var(--glass-hover);
+  border-color: transparent;
 }
 .artifact-lib-title:active {
   transform: translateY(0.5px);
+}
+.artifact-lib-title.is-active {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+:root[data-theme="dark"] .artifact-lib-title.is-active {
+  background: var(--surface-glass-2);
+  border-color: var(--border-strong);
 }
 .artifact-lib-title-label {
   flex: 1;
@@ -1469,8 +1815,8 @@ pre,
   font-weight: 700;
   padding: 1px 8px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.22);
-  color: #fff;
+  background: var(--surface-2);
+  color: var(--text-dim);
 }
 .artifact-lib-modal {
   display: flex;
@@ -1755,14 +2101,15 @@ pre,
   border-top: 1px solid var(--border);
   padding: 8px;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  justify-content: center;
   gap: 2px;
 }
 .sidebar-footer button {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
-  text-align: left;
   background: transparent;
   border: none;
   padding: 7px 10px;
@@ -2841,6 +3188,130 @@ table.kv th {
   opacity: 0.7;
 }
 
+/* --- Inline diff review card (mockup 01 callout 5) ---
+   A file edit by the chat agent renders as its own card in the message
+   stream: header (filename, +/− stats, Applied + Peek), a short red/green
+   hunk preview, and a "more lines" footer that opens the full diff in
+   PeekPanel. Reuses the shared .diff-line color classes. */
+.diff-card {
+  margin: 10px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-glass);
+  box-shadow: var(--glass-rim-soft);
+  overflow: hidden;
+  /* Accept button matches the mockup's green (default falls back to accent). */
+  --approval-accent: #3fb96b;
+  --approval-accent-contrast: #fff;
+}
+.diff-card.live {
+  opacity: 0.85;
+}
+.diff-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+.diff-card-icon {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+.diff-card-filename {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  /* It's a button now (click opens the file, like Cursor's filename rows). */
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.diff-card-filename:hover {
+  text-decoration: underline;
+}
+.diff-card-stat {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.diff-card-adds { color: #34d17b; }
+.diff-card-dels { color: #ff7b72; }
+.diff-card-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+}
+.diff-card-applied {
+  font-size: 11px;
+  color: #34d17b;
+}
+.diff-card-peek {
+  padding: 3px 11px;
+  font-size: 11px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+}
+.diff-card-peek:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.diff-card-body .diff-line {
+  padding: 1px 12px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.diff-card-body .diff-line.add {
+  color: #34d17b;
+  border-left: none;
+  padding-left: 12px;
+  margin-left: 0;
+}
+.diff-card-body .diff-line.del {
+  color: #ff7b72;
+  border-left: none;
+  padding-left: 12px;
+  margin-left: 0;
+}
+.diff-card-more {
+  display: block;
+  width: 100%;
+  padding: 5px 12px;
+  font-size: 10.5px;
+  text-align: left;
+  color: var(--text-dim);
+  background: none;
+  border: none;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+}
+.diff-card-more:hover:not(:disabled) {
+  color: var(--accent);
+}
+.diff-card-more:disabled {
+  cursor: default;
+}
+/* Expanded state: filename gets a subtle accent underline so the user knows
+   the click target now means "collapse" rather than "expand". */
+.diff-card.expanded .diff-card-filename {
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-underline-offset: 2px;
+}
+
 /* ---------- Cost dashboard ---------- */
 .chart {
   width: 100%;
@@ -2919,6 +3390,260 @@ table.kv th {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 180px;
+}
+
+/* ---------- Cost dashboard v2 (T3 Code layout) ---------- */
+.view-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.range-toggle {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-glass);
+}
+.range-toggle button.ghost {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: var(--radius-xs);
+}
+.range-toggle button.ghost.active {
+  background: var(--accent-soft);
+  color: var(--text);
+  box-shadow: var(--glass-rim-soft);
+}
+
+.cost-hero {
+  display: grid;
+  grid-template-columns: minmax(200px, 0.9fr) 1.1fr;
+  gap: 16px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  box-shadow: var(--glass-rim);
+}
+.cost-hero-headline {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cost-hero-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+.cost-hero-value {
+  font-family: var(--font-mono);
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+.cost-hero-range {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.cost-hero-breakdown {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  border-left: 1px solid var(--border);
+  padding-left: 16px;
+}
+.cost-hero-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto;
+  gap: 12px;
+  align-items: baseline;
+  font-size: 13px;
+}
+.cost-hero-row-label {
+  font-weight: 500;
+  color: var(--text);
+}
+.cost-hero-row-cost {
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+.cost-hero-row-share,
+.cost-hero-row-tokens {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.cost-chart {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  box-shadow: var(--glass-rim);
+}
+.chart-toggle {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  margin-bottom: 12px;
+  width: fit-content;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.chart-toggle button.ghost {
+  padding: 4px 14px;
+  font-size: 12px;
+  border-radius: var(--radius-xs);
+  border: 1px solid transparent;
+}
+.chart-toggle button.ghost.active {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--text);
+  box-shadow: var(--glass-rim-soft);
+}
+.daily-chart {
+  overflow-x: auto;
+  display: block;
+  width: 100%;
+}
+
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 10px;
+}
+.stat {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 84px;
+}
+.stat-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.stat-value {
+  font-family: var(--font-mono);
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text);
+}
+.stat-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.stat-accent {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent-soft) 60%, var(--surface-glass)), var(--surface-glass));
+}
+.stat-accent .stat-value {
+  color: var(--accent);
+}
+
+.cost-quality {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.cost-quality h3 {
+  margin: 0;
+}
+.cost-quality-bar {
+  display: grid;
+  grid-template-columns: 1fr minmax(80px, 140px) 44px;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+}
+.cost-quality-bar-label {
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cost-quality-bar-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.cost-quality-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+}
+.cost-quality-bar-pct {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text);
+  text-align: right;
+}
+.cost-quality-savings {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.cost-quality-savings-label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.cost-quality-savings-value {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.cost-error {
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--danger) 50%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface-glass));
+  color: var(--danger);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.cost-loading {
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 24px 0;
+  text-align: center;
+}
+
+@media (max-width: 900px) {
+  .cost-hero {
+    grid-template-columns: 1fr;
+  }
+  .cost-hero-breakdown {
+    border-left: none;
+    padding-left: 0;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
+  .stats-row {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
 
 /* ---------- Onboarding banner (Â§9) ---------- */
@@ -3291,6 +4016,16 @@ table.kv th {
   letter-spacing: 0.06em;
   color: var(--text-dim);
 }
+/* Custom-endpoint footnote in the model dropdown (CLI agent relay setups). */
+.model-effort-endpoint {
+  padding: 5px 10px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  border-top: 1px solid var(--glass-rim-soft, rgba(255, 255, 255, 0.08));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .model-effort-item {
   display: flex;
   align-items: center;
@@ -3424,6 +4159,149 @@ table.kv th {
   color: #fff;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+}
+
+/* Eject button on the local-model pill. Sits next to the "Local" badge and
+   stops the running llama-server sidecar to free its VRAM. Inline SVG icon
+   (triangle + bar) so it stays consistent with the rest of the icon set. */
+.model-effort-eject {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 4px;
+  padding: 2px;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.model-effort-eject:hover {
+  background: rgba(220, 80, 80, 0.18);
+  border-color: rgba(220, 80, 80, 0.55);
+  color: #f4a3a3;
+}
+.model-effort-eject:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.model-effort-eject:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Agent selector chip + locked model chip (composer, mockup 02). Reuses the
+   model-effort popup/item styles; these are only the agent-specific bits. */
+.agent-menu {
+  position: relative;
+}
+.agent-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* Match the project-folder notch beside it: same height and text color. */
+  padding: 2px 10px;
+  font-size: 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.agent-chip:hover {
+  background: var(--surface);
+}
+.agent-chip.selected {
+  color: var(--text-dim);
+}
+
+/* Agent notch — sits below the composer card with a notch/tab style
+   that visually connects to the card's left edge */
+.composer-notch-agent {
+  position: relative;
+  margin-left: 9px;
+  margin-top: 0;
+  padding: 2px 10px 2px 6px;
+  border: 1px solid var(--border);
+  border-top: none;
+  border-right: none;
+  border-radius: 0 0 8px 8px;
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+}
+.agent-menu-popup {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  min-width: 262px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: var(--glass-rim), 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+  z-index: 60;
+}
+.agent-item-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.agent-item.disabled {
+  color: var(--text-dim);
+  cursor: default;
+  opacity: 0.6;
+}
+.agent-item.disabled:hover {
+  background: transparent;
+}
+.agent-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--state-working);
+  flex-shrink: 0;
+}
+.agent-dot.off {
+  background: var(--state-idle);
+}
+/* Spinner shown on the agent chip while a harness's config/models load. */
+.agent-chip-spinner {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.5px solid var(--text-dim);
+  border-top-color: transparent;
+  animation: agent-chip-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes agent-chip-spin {
+  to { transform: rotate(360deg); }
+}
+.agent-status {
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.agent-status.on {
+  color: var(--state-working);
+}
+/* Locked model chip — shown until an agent is picked (mockup 02, state A). */
+.model-chip-locked {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  cursor: default;
+  user-select: none;
 }
 /* Small inline spinner used while a local model is loading onto the GPU. */
 .local-spinner {
@@ -3659,37 +4537,33 @@ table.kv th {
 }
 
 /* ---------- Chat ---------- */
-/* Mode selector pills under sidebar search */
-.sidebar-mode-toggle {
+/* Plain sidebar nav rows (Connectors, Automations stub) */
+.sidebar-nav-row {
   display: flex;
-  gap: 4px;
-  padding: 0 12px 10px;
-  border-bottom: 1px solid var(--border);
-}
-.sidebar-mode-pill {
-  flex: 1;
-  text-align: center;
-  padding: 6px 0;
-  font-size: 12px;
-  font-weight: 600;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 12px;
+  border: none;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--surface-2);
+  background: transparent;
   color: var(--text-dim);
+  font-size: 12px;
+  text-align: left;
   cursor: pointer;
-  box-shadow: var(--glass-rim-soft);
-  transition: background 0.18s var(--ease), color 0.18s var(--ease),
-    border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
 }
-.sidebar-mode-pill:hover {
+.sidebar-nav-row:hover {
+  background: var(--surface-2);
   color: var(--text);
-  background: var(--surface-glass-2);
 }
-.sidebar-mode-pill.active {
-  color: var(--text);
-  background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
-  box-shadow: var(--glass-rim-soft), 0 0 12px -4px var(--accent-glow);
+.sidebar-nav-row.dim {
+  opacity: 0.6;
+  cursor: default;
+}
+.sidebar-nav-row.dim:hover {
+  background: transparent;
+  color: var(--text-dim);
 }
 
 /* Chat session rows in sidebar */
@@ -4331,19 +5205,30 @@ table.kv th {
 .chat-step-toggle:disabled {
   cursor: default;
 }
-.chat-step-index {
+.chat-step-status {
   flex: none;
-  font-size: 10px;
-  font-family: var(--font-mono);
-  color: var(--text-dim);
-  opacity: 0.4;
-  min-width: 16px;
-  text-align: right;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 14px;
+}
+.chat-step-done-icon {
+  display: inline-flex;
+  color: var(--state-working);
+}
+.chat-step-done-icon svg {
+  width: 12px;
+  height: 12px;
 }
 .chat-step-icon {
   flex: none;
-  font-size: 11px;
-  opacity: 0.7;
+  display: inline-flex;
+  align-items: center;
+  opacity: 0.65;
+}
+.chat-step-icon svg {
+  width: 12px;
+  height: 12px;
 }
 .chat-step-label {
   flex: 1;
@@ -4875,6 +5760,8 @@ table.kv th {
   backdrop-filter: blur(20px) saturate(140%);
   -webkit-backdrop-filter: blur(20px) saturate(140%);
   box-shadow: var(--glass-rim), 0 6px 24px -12px rgba(0, 0, 0, 0.45);
+  position: relative;
+  overflow: visible;
   transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
 }
 .chat-composer-card:focus-within {
@@ -5027,9 +5914,16 @@ table.kv th {
   stroke: var(--surface-3, var(--surface-2));
   opacity: 0.7;
 }
+:root[data-theme="light"] .context-meter-track {
+  stroke: var(--border-strong, #c8c8c8);
+  opacity: 1;
+}
 .context-meter-progress {
   stroke: var(--text-dim);
   transition: stroke-dasharray 0.3s var(--ease, ease), stroke 0.2s var(--ease, ease);
+}
+:root[data-theme="light"] .context-meter-progress {
+  stroke: var(--text, #1a1a1a);
 }
 .context-meter-circle.warn .context-meter-progress {
   stroke: var(--state-waiting, #f2c14e);
@@ -5051,6 +5945,15 @@ table.kv th {
 }
 .context-meter-circle.crit .context-meter-pct {
   color: var(--danger, #e5484d);
+}
+:root[data-theme="light"] .context-meter-pct {
+  color: var(--text, #1a1a1a);
+}
+:root[data-theme="light"] .context-meter-circle.warn .context-meter-pct {
+  color: var(--danger, #d64545);
+}
+:root[data-theme="light"] .context-meter-circle.crit .context-meter-pct {
+  color: var(--danger, #d64545);
 }
 .composer-attach-btn {
   width: 28px;
@@ -5120,8 +6023,142 @@ table.kv th {
 }
 .composer-context-meter-wrap {
   display: flex;
-  justify-content: flex-end;
-  padding: 4px 8px 0;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  position: relative;
+}
+
+/* Folder notch — sits beside the agent notch below the composer card, same
+   notch/tab style, showing the chat's working directory (custom folder or
+   selected project). */
+.composer-notch-folder {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  margin-top: 0;
+  padding: 2px 10px 2px 8px;
+  border: 1px solid var(--border);
+  border-top: none;
+  border-right: none;
+  border-radius: 0 0 8px 8px;
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.composer-notch-folder-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.composer-notch-folder-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.composer-notch-folder-clear:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+/* Message queue — messages stacked while a turn is running, shown above the
+   composer card, oldest on top (FIFO). */
+.composer-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.composer-queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+.composer-queue-index {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+.composer-queue-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.composer-queue-remove {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.composer-queue-remove:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.composer-queue-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+.composer-queue-header:hover {
+  color: var(--text);
+}
+.composer-queue-chevron {
+  font-size: 10px;
+  width: 10px;
+}
+.composer-context-meter-spacer {
+  flex: 1;
 }
 .composer-research-chip {
   display: flex;
@@ -5301,7 +6338,7 @@ table.kv th {
   flex-shrink: 0;
 }
 .composer-send-btn:hover:not(:disabled) {
-  filter: brightness(1.1);
+  filter: brightness(0.9);
 }
 .composer-send-btn:disabled {
   opacity: 0.4;
@@ -5411,9 +6448,6 @@ table.kv th {
   flex: 1;
   min-width: 0;
 }
-.chat-view-wrap.has-preview .chat-view {
-  flex: 1 1 55%;
-}
 .artifact-preview-pane {
   position: relative;
   flex: 1 1 45%;
@@ -5454,6 +6488,21 @@ table.kv th {
   flex: 1;
   min-height: 0;
   box-sizing: border-box;
+  /* Anchor for the gesture layer that covers iframe-based diagrams. */
+  position: relative;
+}
+/* Transparent layer over iframe-rendered diagrams: an iframe swallows every
+   pointer/wheel event before the container can see it, so canvas pan/zoom
+   gestures land on this layer instead and bubble up. Only rendered for
+   diagram-kind artifacts — interactive HTML previews keep direct interaction. */
+.artifact-preview-gesture-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  cursor: grab;
+}
+.artifact-preview-content.panning .artifact-preview-gesture-layer {
+  cursor: grabbing;
 }
 .artifact-preview-zoom-ctrls {
   display: inline-flex;
@@ -5602,11 +6651,67 @@ table.kv th {
   display: flex;
   flex-direction: column;
 }
+/* Canvas gestures (diagrams/images): the container clips the transformed
+   canvas; grab-to-pan cursor, no native image ghost-drag or text selection
+   while panning. Padding is dropped so canvas coordinates match cursor
+   coordinates exactly. */
+.artifact-preview-content.pannable {
+  overflow: hidden;
+  padding: 0;
+  cursor: grab;
+}
+.artifact-preview-content.pannable.panning {
+  cursor: grabbing;
+  user-select: none;
+}
+.artifact-preview-content.pannable img {
+  -webkit-user-drag: none;
+  user-select: none;
+}
+/* Transform-based canvas: translate = pan, scale = zoom, origin top-left so
+   the anchor math (cursor point stays put) holds. */
+.artifact-canvas {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  transform-origin: 0 0;
+}
+.artifact-preview-diagram {
+  /* Natural intrinsic size at 100% zoom — the scroll/pan area grows with
+     zoom instead of the image being boxed to the container. */
+  width: auto;
+  height: auto;
+  max-width: none;
+  object-fit: unset;
+  align-self: flex-start;
+}
+/* HTML diagram iframe: sized to its content by DiagramFrame after load (so
+   nothing is clipped inside the iframe viewport); the pre-measure fallback
+   fills the pane. */
+.artifact-preview-diagram-frame {
+  width: 100%;
+  height: 100%;
+  min-height: 480px;
+  border: none;
+  background: #fff;
+  border-radius: var(--radius-xs);
+  display: block;
+}
 .artifact-preview-loading,
 .artifact-preview-error {
   color: var(--text-dim);
   font-size: 12.5px;
   padding: 8px 2px;
+}
+.artifact-preview-hint {
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  border: 1px solid var(--border-soft, rgba(128, 128, 128, 0.25));
+  border-radius: var(--radius-xs);
+  background: var(--bg-soft, rgba(128, 128, 128, 0.08));
 }
 .artifact-preview-image {
   width: 100%;
@@ -6401,226 +7506,6 @@ table.kv th {
   flex-shrink: 0;
 }
 
-/* --- Filesystem permission-mode selector (matches ModelEffortMenu) --- */
-.permission-mode-menu {
-  position: relative;
-}
-.permission-mode-trigger {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  font-size: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface-2);
-  color: var(--text);
-  cursor: pointer;
-}
-.permission-mode-trigger:hover {
-  background: var(--surface);
-}
-/* Inline variant: borderless, blends into the composer footer next to the `+`
-   attach button â€” no pill border, transparent background, subtle hover only.
-   The colored mode dot still marks the active posture. */
-.permission-mode-trigger.inline {
-  border: none;
-  background: transparent;
-  padding: 4px 8px;
-}
-.permission-mode-trigger.inline:hover {
-  background: var(--surface-2);
-}
-.permission-mode-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--text-dim);
-  flex-shrink: 0;
-}
-/* Per-mode accent on the dot + trigger border so the active posture is visible
-   at a glance, even before opening the menu. */
-.permission-mode-trigger.mode-read_only .permission-mode-dot { background: #6b7280; }
-.permission-mode-trigger.mode-manual .permission-mode-dot { background: var(--text-dim); }
-.permission-mode-trigger.mode-auto_edit .permission-mode-dot { background: #d4a017; }
-.permission-mode-trigger.mode-full_auto .permission-mode-dot {
-  background: var(--danger);
-  box-shadow: 0 0 0 2px rgba(214, 69, 69, 0.2);
-}
-.permission-mode-chevron {
-  color: var(--text-dim);
-  font-size: 10px;
-}
-.permission-mode-popup {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  right: 0;
-  min-width: 280px;
-  max-width: calc(100vw - 16px);
-  padding: 5px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface-glass);
-  backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
-  box-shadow: var(--glass-rim), 0 10px 30px -10px rgba(0, 0, 0, 0.5);
-  z-index: 60;
-}
-.permission-mode-hint {
-  padding: 6px 10px;
-  font-size: 11px;
-  color: var(--text-dim);
-  line-height: 1.4;
-}
-.permission-mode-divider {
-  height: 1px;
-  margin: 4px 4px;
-  background: var(--border);
-}
-.permission-mode-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  width: 100%;
-  padding: 7px 10px;
-  font-size: 12px;
-  text-align: left;
-  border: none;
-  border-radius: var(--radius-xs);
-  background: transparent;
-  color: var(--text);
-  cursor: pointer;
-}
-.permission-mode-item:hover,
-.permission-mode-item.active {
-  background: var(--surface-2);
-}
-.permission-mode-item.selected {
-  font-weight: 600;
-}
-.permission-mode-item-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.permission-mode-item-label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.permission-mode-item-desc {
-  font-size: 10.5px;
-  color: var(--text-dim);
-  font-weight: 400;
-  line-height: 1.35;
-}
-.permission-mode-badge {
-  padding: 1px 6px;
-  font-size: 10px;
-  border-radius: var(--radius-xs);
-  background: var(--surface-2);
-  color: var(--text-dim);
-}
-.permission-mode-check {
-  color: var(--accent, var(--text));
-}
-
-/* --- Composer mode glow (non-default posture) --- */
-/* A subtle colored border/glow on the composer card whenever a non-manual mode
-   is active, so it's never ambiguous which posture governs tool calls. */
-.chat-composer-card.composer-mode-read_only {
-  border-color: #6b7280;
-  box-shadow: var(--glass-rim), 0 0 0 2px rgba(107, 114, 128, 0.18);
-}
-.chat-composer-card.composer-mode-auto_edit {
-  border-color: #d4a017;
-  box-shadow: var(--glass-rim), 0 0 0 2px rgba(212, 160, 23, 0.18);
-}
-.chat-composer-card.composer-mode-full_auto {
-  border-color: var(--danger);
-  box-shadow: var(--glass-rim), 0 0 0 3px rgba(214, 69, 69, 0.22);
-}
-
-/* --- Per-action approval card (filesystem + connected-account tools) ---
-   Codex-style: one compact row (badge + tool + target + Deny/Allow), no
-   side ribbon, no payload dump. */
-.composer-approval-wrap {
-  flex-shrink: 0;
-  padding: 0 max(14px, calc((100% - 780px) / 2)) 6px;
-}
-.approval-card {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface-glass);
-  box-shadow: var(--glass-rim), 0 8px 24px -14px rgba(0, 0, 0, 0.5);
-  outline: none;
-}
-.approval-card:focus-visible {
-  box-shadow: var(--glass-rim), 0 0 0 2px color-mix(in srgb, var(--approval-accent, var(--accent)) 45%, transparent);
-}
-.approval-badge {
-  flex-shrink: 0;
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  color: var(--approval-accent, var(--text));
-  background: color-mix(in srgb, var(--approval-accent, var(--accent)) 16%, transparent);
-  border: 1px solid color-mix(in srgb, var(--approval-accent, var(--accent)) 35%, transparent);
-}
-.approval-card-title {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.approval-card-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-.approval-btn {
-  padding: 4px 12px;
-  font-size: 12px;
-  font-weight: 600;
-  border-radius: var(--radius-xs);
-  border: 1px solid var(--border);
-  cursor: pointer;
-  transition: background 120ms ease, border-color 120ms ease, filter 120ms ease;
-}
-.approval-btn.deny {
-  background: var(--surface-2);
-  color: var(--text);
-}
-.approval-btn.deny:hover {
-  border-color: var(--danger);
-  color: var(--danger);
-  filter: none;
-}
-.approval-btn.approve {
-  background: var(--approval-accent, var(--accent));
-  color: var(--approval-accent-contrast, #fff);
-  border-color: var(--approval-accent, var(--accent));
-}
-.approval-btn.approve:hover {
-  filter: brightness(1.1);
-}
-/* Badge accent per action class (default falls back to the card accent). */
-.approval-card-delete { --approval-accent: var(--danger); --approval-accent-contrast: #fff; }
-.approval-card-send   { --approval-accent: #8b7cf6; --approval-accent-contrast: #fff; }
-.approval-card-write  { --approval-accent: #e3b341; --approval-accent-contrast: #1b1b1f; }
-.approval-card-edit   { --approval-accent: #5aa7f0; --approval-accent-contrast: #fff; }
-
 /* --- Background task progress cards (download_file / run_shell) ---
    Same visual language as the approval card: one compact row with a kind
    badge + a progress bar for downloads / status line for terminals. */
@@ -7347,3 +8232,172 @@ table.kv th {
 }
 .dev-diff-detail .diff-line-content { white-space: pre-wrap; word-break: break-word; }
 
+
+/* ---------- Right tool panel (unified layout, mockups 01/03) ----------
+   One collapsible right column hosting Terminal | Browser | Files | Canvas
+   as tabs. Sibling of .chat-view-wrap inside .grid-wrap.chat-grid-wrap
+   (padding 0), so it sits flush: flat surface + left border, no glass card.
+   Inactive tabs stay mounted with display:none (terminals/webviews keep
+   running); the panel itself also stays mounted while collapsed. */
+.tool-panel {
+  width: 532px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  position: relative;
+}
+/* Hide pane headers inside the tool panel — the tab bar replaces them. */
+.tool-panel .pane-header {
+  display: none;
+}
+.tool-panel-tabs {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.tool-panel-tab {
+  flex: 1;
+  padding: 9px 0;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+.tool-panel-tab:hover {
+  color: var(--text);
+}
+.tool-panel-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  background: var(--surface);
+}
+.tool-panel-collapse {
+  flex: 0 0 auto;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 6px;
+  margin-right: 4px;
+  border-radius: var(--radius-xs);
+  color: var(--text-dim);
+}
+.tool-panel-collapse:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.tool-panel-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.tool-panel-tab-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* Pane slot: terminals/browsers render through PaneFrame, which brings its
+   own glass card — give it breathing room like the old pane grid. */
+.tool-panel-pane-slot {
+  flex: 1;
+  min-height: 0;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+}
+.tool-panel-pane-slot .pane {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+/* Canvas slot: one ArtifactPreviewPane per open artifact tab; inactive tabs
+   stay mounted with display:none (set inline) so preview/zoom state survives
+   tab switches. */
+.tool-panel-canvas-slot {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.tool-panel-canvas-item {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.tool-panel-switcher {
+  padding: 8px 10px 0;
+}
+.tool-panel-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 20px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+/* Collapsed strip — same UX as the diff panel / browser pane minimize. */
+.tool-panel-collapsed {
+  width: 30px;
+  border-left: 1px solid var(--border);
+  align-items: stretch;
+}
+.tool-panel-restore {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  padding: 10px 0;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-family: var(--font-ui);
+}
+.tool-panel-restore:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.tool-panel-restore-label {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+/* Embedded tab contents: strip the standalone chrome (fixed width, glass
+   card, own resizer) so they fill the tab body. */
+.tool-panel .dev-diff-panel-embedded {
+  width: auto;
+  flex: 1;
+  min-height: 0;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.tool-panel .artifact-preview-pane {
+  flex: 1;
+  min-width: 0;
+  border-left: none;
+  background: transparent;
+}
+.tool-panel .artifact-preview-resizer {
+  display: none;
+}

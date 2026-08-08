@@ -25,5 +25,11 @@ export function useCostRollups(rangeDays: 7 | 30 | 90) {
     return () => { cancelled = true; void unlisten.then(fn => fn()); };
   }, [rangeDays]);
 
-  return { rollups, loading, error, refresh: () => void getCostRollups(rangeDays).then(setRollups) };
+  const refresh = () => {
+    getCostRollups(rangeDays)
+      .then(r => { setRollups(r); setError(null); })
+      .catch(e => setError(String(e)));
+  };
+
+  return { rollups, loading, error, refresh };
 }

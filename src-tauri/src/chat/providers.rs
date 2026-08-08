@@ -18,6 +18,21 @@ pub enum ChatProviderId {
     LocalGguf,
 }
 
+impl ChatProviderId {
+    /// Stable string used as the chat_messages.provider value (and thus the
+    /// rollup's `chat:<provider>` grouping, spec §8).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ChatProviderId::Anthropic => "anthropic",
+            ChatProviderId::OpenAI => "openai",
+            ChatProviderId::AnthropicCompatible => "anthropic_compatible",
+            ChatProviderId::OpenAICompatible => "openai_compatible",
+            ChatProviderId::OpenRouter => "openrouter",
+            ChatProviderId::LocalGguf => "local_gguf",
+        }
+    }
+}
+
 /// A base64-encoded image attached to a user message, sent to vision-capable
 /// models as a proper image content part (not inlined as garbled text).
 #[derive(Debug, Clone, Serialize, Deserialize)]

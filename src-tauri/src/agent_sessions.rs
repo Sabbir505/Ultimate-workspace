@@ -1502,8 +1502,17 @@ fn finish_turn(
     // Persist the assistant message FIRST so we can attribute artifacts to it.
     let message_id: Option<i64> = if !full.is_empty() {
         let conn = db.0.lock();
-        let harness_id = ""; // harness id captured in closure; empty placeholder
-        crate::db::add_chat_message(&conn, sid, "assistant", full, input, output, cost, None, None, None, Some(harness_id), None, None)
+        // Provider = the chat session's agent ("harness:<id>"), so the rollup
+        // groups harness-backed CLI chat under a real provider label.
+        let agent: Option<String> = conn
+            .query_row(
+                "SELECT agent FROM chat_sessions WHERE id = ?1",
+                rusqlite::params![sid],
+                |r| r.get(0),
+            )
+            .ok();
+        let provider = agent.as_deref().unwrap_or("harness:unknown");
+        crate::db::add_chat_message(&conn, sid, "assistant", full, input, output, cost, None, None, None, Some(provider), None, None)
             .ok()
             .map(|m| m.id)
     } else {

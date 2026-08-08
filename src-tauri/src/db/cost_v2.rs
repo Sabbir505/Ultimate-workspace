@@ -29,13 +29,14 @@ pub fn read_rate_overrides(conn: &Connection) -> HashMap<String, ModelRate> {
     if let Ok(rows) = rows {
         for row in rows.flatten() {
             let (key, value) = row;
-            let parts: Vec<&str> = key.splitn(3, '.').collect();
-            if parts.len() != 3 { continue; }
-            let model = parts[1].to_string();
-            let suffix = parts[2];
+            // Key shape: "price.<model>.<suffix>". Model keys may contain dots
+            // (e.g. "kimi-k2.7-code"), so split on the LAST dot, not the
+            // second one.
+            let Some((prefix, suffix)) = key.rsplit_once('.') else { continue };
+            let Some(model) = prefix.strip_prefix("price.") else { continue };
             let val: f64 = value.parse().unwrap_or(0.0);
             if val <= 0.0 { continue; }
-            let entry = out.entry(model).or_insert(ModelRate {
+            let entry = out.entry(model.to_string()).or_insert(ModelRate {
                 input_per_mtok: 0.0, cache_read_per_mtok: 0.0, output_per_mtok: 0.0,
             });
             match suffix {
@@ -46,9 +47,6 @@ pub fn read_rate_overrides(conn: &Connection) -> HashMap<String, ModelRate> {
             }
         }
     }
-    // Also populate from get_setting for any keys the LIKE query missed (it
-    // catches all app_settings rows; this is redundant for the in-process
-    // path but documents the helper's contract).
     let _ = get_setting; // silence unused-import lint if it appears
     out
 }
@@ -74,7 +72,9 @@ fn iso_date_for_range(start_ts: i64, end_ts: i64) -> (String, String) {
 }
 
 pub fn get_cost_rollups_v2(conn: &Connection, range_days: u32) -> DbResult<CostRollups> {
-    let days = match range_days { 7 | 30 | 90 => range_days, _ => 30 };
+    // Any positive range is valid here — the 7|30|90 whitelist lives at the
+    // IPC boundary (commands/data.rs) so the mobile relay can ask for 14 days.
+    let days = range_days.max(1);
     let now = crate::db::now_ts();
     let since = now - (days as i64) * 86_400;
     let overrides = read_rate_overrides(conn);
@@ -86,13 +86,28 @@ pub fn get_cost_rollups_v2(conn: &Connection, range_days: u32) -> DbResult<CostR
     let mut by_kind = CostByKind::default();
     let mut daily_map: BTreeMap<String, DailyCost> = BTreeMap::new();
     let mut responses: i64 = 0;
+    // Row-count trackers for the cost-quality panel (spec §13.3: percentages
+    // are shares of rows, and must sum to 100).
+    let mut total_rows: i64 = 0;
+    let mut provider_reported_rows: i64 = 0;
+    let mut unpriced_rows: i64 = 0;
 
     // ----- cost_events (harness panes) -----
+    // session_id → project_id map for the per-project rollup (read-time priced,
+    // NOT the write-only pricing_estimated_usd column).
+    let session_project: HashMap<String, String> = {
+        let mut stmt = conn.prepare("SELECT id, project_id FROM sessions")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.collect::<DbResult<HashMap<_, _>>>()?
+    };
+    let mut by_project: BTreeMap<String, (f64, i64, i64)> = BTreeMap::new();
     {
         let mut stmt = conn.prepare(
             "SELECT timestamp, input_tokens, output_tokens, provider, model_key,
                     cache_creation_input_tokens, cache_read_input_tokens,
-                    reasoning_output_tokens, reported_cost_usd
+                    reasoning_output_tokens, reported_cost_usd, session_id
                FROM cost_events
               WHERE timestamp >= ?1"
         )?;
@@ -107,10 +122,11 @@ pub fn get_cost_rollups_v2(conn: &Connection, range_days: u32) -> DbResult<CostR
                 r.get::<_, Option<i64>>(6)?,
                 r.get::<_, Option<i64>>(7)?,
                 r.get::<_, Option<f64>>(8)?,
+                r.get::<_, String>(9)?,
             ))
         })?;
         for row in rows {
-            let (ts, i, o, provider, model_key, cc, cr, reasoning, reported) = row?;
+            let (ts, i, o, provider, model_key, cc, cr, reasoning, reported, sid) = row?;
             let usage = UsageInfo {
                 input_tokens: i, output_tokens: o,
                 cache_creation_input_tokens: cc, cache_read_input_tokens: cr,
@@ -125,6 +141,7 @@ pub fn get_cost_rollups_v2(conn: &Connection, range_days: u32) -> DbResult<CostR
             let cost = price_usage(&usage, key, &overrides);
             let tokens_i = i.unwrap_or(0) + cc.unwrap_or(0) + cr.unwrap_or(0) + o.unwrap_or(0) + reasoning.unwrap_or(0);
             let day = date_str(ts);
+            total_rows += 1;
             if let Some(c) = cost {
                 totals.raw_token_cost_usd += c;
                 totals.estimated_usd += c;
@@ -144,13 +161,21 @@ pub fn get_cost_rollups_v2(conn: &Connection, range_days: u32) -> DbResult<CostR
                 totals.cache_savings_usd_via_helper += cache_savings(&usage, key, &overrides);
             } else {
                 totals.unpriced_usd += reported.unwrap_or(0.0);
+                unpriced_rows += 1;
             }
             if let Some(r) = reported {
                 totals.provider_reported_usd += r;
+                provider_reported_rows += 1;
+            }
+            if let Some(pid) = session_project.get(&sid) {
+                let entry = by_project.entry(pid.clone()).or_insert((0.0, 0, 0));
+                entry.0 += cost.unwrap_or(0.0);
+                entry.1 += i.unwrap_or(0);
+                entry.2 += o.unwrap_or(0);
             }
             by_kind.uncached_input_tokens += i.unwrap_or(0);
             by_kind.cached_input_tokens += cc.unwrap_or(0) + cr.unwrap_or(0);
-            by_kind.output_tokens += o.unwrap_or(0);
+            by_kind.output_tokens += o.unwrap_or(0) + reasoning.unwrap_or(0);
             by_kind.reasoning_tokens += reasoning.unwrap_or(0);
             responses += 1;
         }
@@ -191,24 +216,35 @@ pub fn get_cost_rollups_v2(conn: &Connection, range_days: u32) -> DbResult<CostR
             let key = model_key
                 .as_deref()
                 .or_else(|| session_model.as_deref().and_then(crate::harness_adapters::canonical_model_key));
-            let cost = price_usage(&usage, key, &overrides).unwrap_or(0.0);
+            let cost = price_usage(&usage, key, &overrides);
             let tokens_i = i.unwrap_or(0) + cc.unwrap_or(0) + cr.unwrap_or(0) + o.unwrap_or(0) + reasoning.unwrap_or(0);
             let grouped = format!("chat:{}", provider.clone().unwrap_or_else(|| "unknown".to_string()));
+            total_rows += 1;
+            let c = cost.unwrap_or(0.0);
+            // Chat rows count toward the hero total too (spec §8: harness + chat
+            // are one universe; per-provider shares must sum to rawTokenCostUsd).
+            totals.raw_token_cost_usd += c;
+            totals.estimated_usd += c;
+            if cost.is_none() {
+                totals.unpriced_usd += c;
+                unpriced_rows += 1;
+            }
             let entry = by_provider.entry(grouped.clone()).or_insert((0.0, 0));
-            entry.0 += cost;
+            entry.0 += c;
             entry.1 += tokens_i;
             if let Some(k) = key {
                 let entry = by_model.entry(k.to_string()).or_insert((0.0, 0, Some(grouped.clone())));
-                entry.0 += cost;
+                entry.0 += c;
                 entry.1 += tokens_i;
             }
             let day = date_str(ts);
             let d = daily_map.entry(day.clone()).or_insert_with(|| DailyCost { day: day.clone(), ..Default::default() });
-            d.cost_usd += cost;
+            d.cost_usd += c;
             *d.tokens_by_provider.entry(grouped).or_insert(0) += tokens_i;
+            totals.cache_savings_usd_via_helper += cache_savings(&usage, key, &overrides);
             by_kind.uncached_input_tokens += i.unwrap_or(0);
             by_kind.cached_input_tokens += cc.unwrap_or(0) + cr.unwrap_or(0);
-            by_kind.output_tokens += o.unwrap_or(0);
+            by_kind.output_tokens += o.unwrap_or(0) + reasoning.unwrap_or(0);
             by_kind.reasoning_tokens += reasoning.unwrap_or(0);
             responses += 1;
         }
@@ -216,12 +252,11 @@ pub fn get_cost_rollups_v2(conn: &Connection, range_days: u32) -> DbResult<CostR
 
     by_kind.processed_tokens = by_kind.uncached_input_tokens + by_kind.cached_input_tokens;
     by_kind.responses = responses;
-    by_kind.sessions = count_distinct_sessions(conn, since).unwrap_or(0);
+    // Sessions: distinct harness sessions (cost_events) + distinct chat
+    // sessions with at least one assistant row in the window.
+    by_kind.sessions = count_distinct_sessions(conn, since).unwrap_or(0)
+        + count_distinct_chat_sessions(conn, since).unwrap_or(0);
 
-    // Sessions: from cost_events + chat_sessions — distinct session_id + chat_session_id.
-    // The simple approach: count distinct session_id in cost_events (harness panes)
-    // plus distinct chat_session_id in chat_messages that have at least one
-    // assistant row in the window. Good enough for a stats row.
     let mut per_provider: Vec<ProviderCostRollup> = by_provider.iter().map(|(p, (c, t))| ProviderCostRollup {
         provider: p.clone(),
         cost_usd: *c,
@@ -240,40 +275,24 @@ pub fn get_cost_rollups_v2(conn: &Connection, range_days: u32) -> DbResult<CostR
     }).collect();
     per_model.sort_by(|a, b| b.cost_usd.partial_cmp(&a.cost_usd).unwrap_or(std::cmp::Ordering::Equal));
 
-    // perProject
-    let per_project: Vec<ProjectCostRollup> = {
-        let mut stmt = conn.prepare(
-            "SELECT s.project_id,
-                    COALESCE(SUM(ce.pricing_estimated_usd), 0.0),
-                    COALESCE(SUM(ce.input_tokens), 0),
-                    COALESCE(SUM(ce.output_tokens), 0)
-               FROM cost_events ce
-               JOIN sessions s ON s.id = ce.session_id
-              WHERE ce.timestamp >= ?1
-              GROUP BY s.project_id"
-        )?;
-        let rows = stmt.query_map(params![since], |r| {
-            Ok(ProjectCostRollup {
-                project_id: r.get(0)?,
-                total_cost_usd: r.get(1)?,
-                total_input_tokens: r.get(2)?,
-                total_output_tokens: r.get(3)?,
-            })
-        })?;
-        rows.collect::<DbResult<Vec<_>>>()?
-    };
+    // perProject — read-time priced (accumulated in the cost_events loop above;
+    // never the write-only pricing_estimated_usd column, spec §7).
+    let per_project: Vec<ProjectCostRollup> = by_project.iter().map(|(pid, (c, ti, to))| ProjectCostRollup {
+        project_id: pid.clone(),
+        total_cost_usd: *c,
+        total_input_tokens: *ti,
+        total_output_tokens: *to,
+    }).collect();
 
     let mut daily: Vec<DailyCost> = daily_map.into_values().collect();
     daily.sort_by(|a, b| a.day.cmp(&b.day));
 
-    // Cost quality: row counts and percentages.
-    let total_rows = (responses as f64).max(1.0);
-    let provider_reported_rows = (totals.provider_reported_usd > 0.0) as i64 as f64;
-    let unpriced_rows = (totals.unpriced_usd > 0.0) as i64 as f64;
+    // Cost quality: ROW COUNTS (spec §13.3 — the three %s must sum to 100).
+    let total_rows_f = (total_rows as f64).max(1.0);
     let cost_quality = CostQuality {
-        provider_reported_pct: provider_reported_rows / total_rows * 100.0,
-        model_priced_pct: (responses as f64 - unpriced_rows) / total_rows * 100.0,
-        unpriced_pct: unpriced_rows / total_rows * 100.0,
+        provider_reported_pct: provider_reported_rows as f64 / total_rows_f * 100.0,
+        model_priced_pct: ((total_rows - unpriced_rows).max(0) as f64) / total_rows_f * 100.0,
+        unpriced_pct: unpriced_rows as f64 / total_rows_f * 100.0,
         cache_savings_usd: totals.cache_savings_usd_via_helper,
     };
 
@@ -314,6 +333,16 @@ fn date_str(ts: i64) -> String {
 fn count_distinct_sessions(conn: &Connection, since: i64) -> DbResult<i64> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(DISTINCT session_id) FROM cost_events WHERE timestamp >= ?1",
+        params![since],
+        |r| r.get(0),
+    )?;
+    Ok(n)
+}
+
+fn count_distinct_chat_sessions(conn: &Connection, since: i64) -> DbResult<i64> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT chat_session_id) FROM chat_messages
+          WHERE created_at >= ?1 AND role = 'assistant'",
         params![since],
         |r| r.get(0),
     )?;
@@ -365,6 +394,32 @@ mod tests {
         // claude-sonnet-4-5: $3 input, $15 output → 1M*3/1M + 0.5M*15/1M = 10.5
         let chat_provider = r.per_provider.iter().find(|p| p.provider == "chat:anthropic").unwrap();
         assert!((chat_provider.cost_usd - 10.5).abs() < 1e-6, "got {}", chat_provider.cost_usd);
+        // The hero total must include chat rows (spec §8: per-provider shares
+        // sum to rawTokenCostUsd). Regression for the missing-totals bug.
+        assert!((r.totals.raw_token_cost_usd - 10.5).abs() < 1e-6, "got {}", r.totals.raw_token_cost_usd);
+        assert!((r.daily.iter().map(|d| d.cost_usd).sum::<f64>() - 10.5).abs() < 1e-6);
+        // Cost-quality %s are row counts and sum to 100 (spec §13.3).
+        assert!((r.cost_quality.provider_reported_pct + r.cost_quality.model_priced_pct + r.cost_quality.unpriced_pct - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rollup_per_project_is_read_time_priced() {
+        let conn = super::super::mem();
+        let p = super::super::add_project(&conn, "/tmp/a", "a", false).unwrap();
+        let s = super::super::create_session(&conn, &p.id, "claude_code").unwrap();
+        // Insert WITHOUT pricing_estimated_usd (NULL — as real on-disk rows
+        // are). The per-project rollup must still show the read-time price.
+        insert_cost_event(
+            &conn, &s.id,
+            &UsageInfo { input_tokens: Some(1_000_000), output_tokens: Some(500_000), ..Default::default() },
+            "claude_code", "on_disk", None,
+        ).unwrap();
+        let r = get_cost_rollups_v2(&conn, 7).unwrap();
+        let proj = r.per_project.iter().find(|x| x.project_id == p.id).unwrap();
+        // claude-sonnet-4-5 (harness default): $3/M input, $15/M output → 10.5
+        assert!((proj.total_cost_usd - 10.5).abs() < 1e-6, "got {}", proj.total_cost_usd);
+        assert_eq!(proj.total_input_tokens, 1_000_000);
+        assert_eq!(proj.total_output_tokens, 500_000);
     }
 }
 

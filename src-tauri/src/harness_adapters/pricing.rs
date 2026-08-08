@@ -20,22 +20,34 @@ pub struct ModelRate {
 /// / `.cache_read_per_mtok` / `.output_per_mtok` keys) into a `ModelRate`.
 /// Missing fields fall back to the built-in default for the same key.
 pub fn resolve_rate(key: &str, settings: &HashMap<String, ModelRate>) -> Option<ModelRate> {
-    let (in_def, out_def) = default_rates(key)?;
-    let default = ModelRate {
-        input_per_mtok: in_def,
-        // Anthropic default cache rate is 0.1× input. The default_rates_v2
-        // table is the source of cache rates; the override is a layered
-        // replacement, not a 0.1× recompute (so OpenAI's 0.5× is preserved).
-        cache_read_per_mtok: in_def * 0.1,
-        output_per_mtok: out_def,
-    };
-    let mut rate = default;
-    if let Some(o) = settings.get(key) {
-        if o.input_per_mtok > 0.0 { rate.input_per_mtok = o.input_per_mtok; }
-        if o.cache_read_per_mtok > 0.0 { rate.cache_read_per_mtok = o.cache_read_per_mtok; }
-        if o.output_per_mtok > 0.0 { rate.output_per_mtok = o.output_per_mtok; }
+    let override_rate = settings.get(key).copied();
+    match default_rates(key) {
+        Some((in_def, out_def)) => {
+            let mut rate = ModelRate {
+                input_per_mtok: in_def,
+                // Anthropic default cache rate is 0.1× input. The default_rates_v2
+                // table is the source of cache rates; the override is a layered
+                // replacement, not a 0.1× recompute (so OpenAI's 0.5× is preserved).
+                cache_read_per_mtok: in_def * 0.1,
+                output_per_mtok: out_def,
+            };
+            if let Some(o) = override_rate {
+                if o.input_per_mtok > 0.0 { rate.input_per_mtok = o.input_per_mtok; }
+                if o.cache_read_per_mtok > 0.0 { rate.cache_read_per_mtok = o.cache_read_per_mtok; }
+                if o.output_per_mtok > 0.0 { rate.output_per_mtok = o.output_per_mtok; }
+            }
+            Some(rate)
+        }
+        // No built-in default, but the user keyed an override for this model
+        // (any OpenAI/OpenRouter/local model) — the override alone prices it.
+        None => override_rate.map(|o| {
+            let mut rate = ModelRate { input_per_mtok: 0.0, cache_read_per_mtok: 0.0, output_per_mtok: 0.0 };
+            if o.input_per_mtok > 0.0 { rate.input_per_mtok = o.input_per_mtok; }
+            if o.cache_read_per_mtok > 0.0 { rate.cache_read_per_mtok = o.cache_read_per_mtok; }
+            if o.output_per_mtok > 0.0 { rate.output_per_mtok = o.output_per_mtok; }
+            rate
+        }),
     }
-    Some(rate)
 }
 
 pub fn price_usage(

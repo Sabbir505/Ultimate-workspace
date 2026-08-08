@@ -14,7 +14,7 @@ export function DailyChart({ rollups }: { rollups: CostRollups }) {
   const barWidth = 18; const gap = 6; const height = 80;
   const totalW = data.length * (barWidth + gap);
   return (
-    <div>
+    <div className="cost-chart">
       <div className="chart-toggle">
         <button className={`ghost ${mode === "cost" ? "active" : ""}`} onClick={() => setMode("cost")}>Cost</button>
         <button className={`ghost ${mode === "tokens" ? "active" : ""}`} onClick={() => setMode("tokens")}>Tokens</button>

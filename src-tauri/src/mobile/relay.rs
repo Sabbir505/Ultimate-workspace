@@ -1045,6 +1045,19 @@ async fn handle_chat_turn(
     // Persist assistant message.
     {
         let conn = db2.lock();
+        // provider + model_key from the chat session so the rollup groups
+        // phone chat under chat:<provider> and prices by the session's model.
+        let (provider, model): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT provider, model FROM chat_sessions WHERE id = ?1",
+                rusqlite::params![&sid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok()
+            .unwrap_or((None, None));
+        let model_key = model
+            .as_deref()
+            .and_then(crate::harness_adapters::canonical_model_key);
         let _ = db::add_chat_message(
             &conn,
             &sid,
@@ -1059,7 +1072,7 @@ async fn handle_chat_turn(
             usage.as_ref().and_then(|u| {
                 if u.input_tokens > 0 || u.output_tokens > 0 { Some(u.cost_usd) } else { None }
             }),
-            None, None, None, None, None, None,
+            None, None, None, provider.as_deref(), model_key, None,
         );
         let _ = db::touch_chat_session(&conn, &sid);
     }

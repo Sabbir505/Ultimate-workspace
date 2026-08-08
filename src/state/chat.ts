@@ -8,6 +8,7 @@ import { create } from "zustand";
 import {
   cancelAgentChatMessage,
   cancelChatMessage,
+  persistPartialChatMessage,
   createChatSession,
   deleteChatApiKey,
   deleteChatMessage,
@@ -948,6 +949,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { streamingChatSessionId } = get();
     if (streamingChatSessionId) {
       const session = get().sessions.find((s) => s.id === streamingChatSessionId);
+      // Persist the partial reply BEFORE cancelling: the backend's abort path
+      // discards its accumulated buffer, and the streaming buffer here holds
+      // exactly the text the user already saw. Best-effort — a cancel with no
+      // streamed tokens writes nothing (the backend no-ops on empty).
+      const partial = get().streaming[streamingChatSessionId] ?? "";
+      if (partial.trim().length > 0) {
+        try {
+          await persistPartialChatMessage(streamingChatSessionId, partial);
+        } catch {
+          /* best-effort: the cancel itself still proceeds */
+        }
+      }
       if (session?.agent?.startsWith("harness:")) {
         await cancelAgentChatMessage(streamingChatSessionId);
       } else {
@@ -958,6 +971,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ streamingChatSessionId: null });
       // A cancelled turn frees the queue too — send the next stacked message.
       get().drainQueue(streamingChatSessionId);
+      // Refresh the message list so the persisted partial shows up inline.
+      try {
+        const messages = await getChatMessages(streamingChatSessionId);
+        if (messages && get().activeChatSessionId === streamingChatSessionId) {
+          set({ messages });
+        }
+      } catch {
+        /* best-effort refresh */
+      }
     }
   },
 

@@ -280,6 +280,7 @@ pub fn run() {
             commands::chat_cmds::touch_chat_session,
             commands::chat_cmds::send_chat_message,
             commands::chat_cmds::cancel_chat_message,
+            commands::chat_cmds::persist_partial_chat_message,
             commands::agent_cmds::send_agent_chat_message,
             commands::agent_cmds::cancel_agent_chat_message,
             commands::agent_cmds::list_harness_models,

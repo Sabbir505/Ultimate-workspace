@@ -606,6 +606,10 @@ export const updateChatSessionAgent = (
   safeInvoke<void>("update_chat_session_agent", { chatSessionId, agent });
 export const cancelChatMessage = (chatSessionId: string) =>
   safeInvoke<void>("cancel_chat_message", { chatSessionId });
+/** Persist the partial assistant reply of a cancelled stream, so the text the
+ *  user already saw survives the cancel instead of vanishing. */
+export const persistPartialChatMessage = (chatSessionId: string, content: string) =>
+  safeInvoke<void>("persist_partial_chat_message", { chatSessionId, content });
 export const setChatApiKey = (
   provider: string,
   key: string,

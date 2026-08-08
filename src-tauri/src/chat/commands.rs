@@ -1310,6 +1310,58 @@ pub fn cancel_chat_message(
     Ok(())
 }
 
+/// Persist the PARTIAL assistant reply a cancelled stream had produced, so a
+/// cancelled turn keeps the text the user already saw instead of vanishing.
+/// The abort path discards the backend's accumulated buffer, so the frontend
+/// ships the streamed text it already rendered here. Best-effort: a cancelled
+/// turn with zero streamed tokens writes nothing meaningful, and failures are
+/// swallowed (the cancel itself already happened).
+#[tauri::command]
+pub fn persist_partial_chat_message(
+    chat_session_id: String,
+    content: String,
+    db: State<'_, crate::DbState>,
+) -> CmdResult<()> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    let conn = db.0.lock();
+    // Mirror the assistant-insert metadata (provider/model_key) so the partial
+    // row prices and groups like a completed turn would.
+    let (provider, model, agent): (Option<String>, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT provider, model, agent FROM chat_sessions WHERE id = ?1",
+            rusqlite::params![chat_session_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap_or((None, None, None));
+    let provider_val = agent
+        .as_deref()
+        .filter(|a| a.starts_with("harness:"))
+        .or(provider.as_deref());
+    let model_key = model
+        .as_deref()
+        .and_then(crate::harness_adapters::canonical_model_key);
+    let _ = db::add_chat_message(
+        &conn,
+        &chat_session_id,
+        "assistant",
+        trimmed,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        provider_val,
+        model_key,
+        None,
+    );
+    let _ = db::touch_chat_session(&conn, &chat_session_id);
+    Ok(())
+}
+
 // ---- Per-action tool approval ----
 
 /// Resolve a pending filesystem-tool approval card. `approved = true` lets the

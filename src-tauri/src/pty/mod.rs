@@ -129,6 +129,11 @@ pub struct Pane {
     /// re-writing identical cost events would flood cost_events. We only
     /// insert when the parsed usage actually changes.
     last_usage: Mutex<Option<UsageInfo>>,
+    /// SEPARATE baseline for the on-disk sync path. The pty scraper reports
+    /// cache/reasoning as None (it can't see them), so sharing `last_usage`
+    /// would zero the on-disk cache deltas (`Some(x).zip(None)` → None) on
+    /// every pty redraw — killing cached-input and cache-savings figures.
+    last_usage_on_disk: Mutex<Option<UsageInfo>>,
 }
 
 impl Pane {
@@ -329,7 +334,10 @@ impl Pane {
     ) {
         let Some(session_id) = &self.session_id else { return };
         let mut delta = {
-            let mut last = self.last_usage.lock();
+            // Own baseline (last_usage_on_disk), NOT the pty scraper's — the
+            // pty path stores cache/reasoning as None and would zero our
+            // cache deltas via the zip (Some(x).zip(None) → None).
+            let mut last = self.last_usage_on_disk.lock();
             let prev = *last;
             *last = Some(usage);
             match prev {
@@ -593,6 +601,7 @@ impl PtyManager {
             last_claude_probe: Mutex::new(Instant::now()),
             last_usage_sync: Mutex::new(Instant::now() - Duration::from_secs(60)),
             last_usage: Mutex::new(None),
+            last_usage_on_disk: Mutex::new(None),
         });
 
         // Writer thread: write_pty commands land on this channel.

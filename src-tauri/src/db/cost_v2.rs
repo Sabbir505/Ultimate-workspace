@@ -183,8 +183,12 @@ pub fn get_cost_rollups_v2(conn: &Connection, range_days: u32) -> DbResult<CostR
 
     // ----- chat_messages (in-app chat) -----
     {
+        // provider: coalesce the row's own provider with the chat session's —
+        // rows written before the provider column existed carry NULL and would
+        // otherwise show as "chat:unknown".
         let mut stmt = conn.prepare(
-            "SELECT cm.created_at, cm.input_tokens, cm.output_tokens, cm.provider, cm.model_key,
+            "SELECT cm.created_at, cm.input_tokens, cm.output_tokens,
+                    COALESCE(cm.provider, cs.provider) AS provider, cm.model_key,
                     cm.cache_creation_input_tokens, cm.cache_read_input_tokens,
                     cm.reasoning_output_tokens, cs.model
                FROM chat_messages cm
@@ -445,6 +449,25 @@ mod tests {
         let prov = r.per_provider.iter().find(|p| p.provider == "chat:local_gguf").unwrap();
         assert_eq!(prov.tokens, 1_500_000);
         assert_eq!(prov.cost_usd, 0.0);
+    }
+
+    #[test]
+    fn chat_rows_with_null_provider_group_by_session_provider() {
+        let conn = super::super::mem();
+        // Legacy chat row: provider column NULL (written before the column
+        // existed). The rollup must fall back to the chat session's provider
+        // instead of showing "chat:unknown".
+        let cs = super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5").unwrap();
+        super::super::add_chat_message(
+            &conn, &cs.id, "assistant", "hi", Some(100_000), Some(50_000), Some(0.0),
+            None, None, None, None, None, None, // provider = NULL, model_key = NULL
+        ).unwrap();
+        let r = get_cost_rollups_v2(&conn, 7).unwrap();
+        assert!(
+            !r.per_provider.iter().any(|p| p.provider == "chat:unknown"),
+            "legacy chat row grouped as chat:unknown"
+        );
+        assert!(r.per_provider.iter().any(|p| p.provider == "chat:anthropic"));
     }
 
     #[test]

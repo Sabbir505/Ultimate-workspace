@@ -503,28 +503,56 @@ async fn handle_connection(
             }
             MobileMessage::GetCostSummary => {
                 // Aggregate spend for the phone Settings tab: today (UTC) and
-                // the rolling last 7 days. cost_events timestamps are unix secs.
+                // the rolling last 7 days. Read-time priced via the shared
+                // pricing module (same source of truth as the desktop rollup).
+                let overrides = {
+                    let conn = db.lock();
+                    crate::db::read_rate_overrides(&conn)
+                };
                 let (today, week) = {
                     let conn = db.lock();
-                    let today: f64 = conn
-                        .query_row(
-                            "SELECT COALESCE(SUM(estimated_cost_usd), 0.0) FROM cost_events
-                             WHERE date(timestamp, 'unixepoch') = date('now')",
-                            [],
-                            |r| r.get(0),
-                        )
-                        .unwrap_or(0.0);
-                    let week: f64 = conn
-                        .query_row(
-                            "SELECT COALESCE(SUM(estimated_cost_usd), 0.0) FROM cost_events
-                             WHERE timestamp >= strftime('%s', 'now', '-7 days')",
-                            [],
-                            |r| r.get(0),
-                        )
-                        .unwrap_or(0.0);
+                    let priced_sum = |since: i64| -> f64 {
+                        let mut total = 0.0;
+                        let mut stmt = match conn.prepare(
+                            "SELECT input_tokens, output_tokens, model_key,
+                                    cache_creation_input_tokens, cache_read_input_tokens,
+                                    reasoning_output_tokens
+                               FROM cost_events
+                              WHERE timestamp >= ?1"
+                        ) { Ok(s) => s, Err(_) => return 0.0 };
+                        let rows = stmt.query_map(rusqlite::params![since], |r| {
+                            Ok((
+                                r.get::<_, Option<i64>>(0)?,
+                                r.get::<_, Option<i64>>(1)?,
+                                r.get::<_, Option<String>>(2)?,
+                                r.get::<_, Option<i64>>(3)?,
+                                r.get::<_, Option<i64>>(4)?,
+                                r.get::<_, Option<i64>>(5)?,
+                            ))
+                        }).ok();
+                        if let Some(rows) = rows {
+                            for row in rows.flatten() {
+                                let (i, o, k, cc, cr, r) = row;
+                                let usage = crate::harness_adapters::UsageInfo {
+                                    input_tokens: i, output_tokens: o,
+                                    cache_creation_input_tokens: cc, cache_read_input_tokens: cr,
+                                    reasoning_output_tokens: r, cost_usd: None,
+                                };
+                                if let Some(c) = crate::harness_adapters::pricing::price_usage(&usage, k.as_deref(), &overrides) {
+                                    total += c;
+                                }
+                            }
+                        }
+                        total
+                    };
+                    let now = crate::db::now_ts();
+                    let today = priced_sum(now - 86_400);
+                    let week = priced_sum(now - 7 * 86_400);
                     (today, week)
                 };
-                let _ = send_msg(&write, &DesktopMessage::CostSummary { today, week }).await;
+                let _ = send_msg(&write, &DesktopMessage::CostSummary {
+                    today, week, version: 2,
+                }).await;
             }
             MobileMessage::GetCostDetails => {
                 let details = build_cost_details(&db);
@@ -1125,8 +1153,10 @@ fn build_cost_details(
 ) {
     let conn = db.lock();
 
-    // Daily + per-project rollups come from the same query the desktop uses.
-    let rollups = crate::db::get_cost_rollups(&conn).unwrap_or_else(|_| crate::types::CostRollups {
+    // Daily + per-project rollups come from the same read-time priced query
+    // the desktop uses (spec §8), so retro rate changes apply on the phone too.
+    // The phone only needs the last 14 days.
+    let rollups = crate::db::get_cost_rollups_v2(&conn, 14).unwrap_or_else(|_| crate::types::CostRollups {
         totals: crate::types::CostTotals::default(),
         per_provider: Vec::new(),
         daily: Vec::new(),
@@ -1136,7 +1166,7 @@ fn build_cost_details(
         per_project: Vec::new(),
         range_start: String::new(),
         range_end: String::new(),
-        range_days: 30,
+        range_days: 14,
     });
 
     let daily = rollups

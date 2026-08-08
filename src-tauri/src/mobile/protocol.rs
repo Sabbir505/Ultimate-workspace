@@ -118,7 +118,8 @@ pub enum DesktopMessage {
     /// A new session was successfully created.
     SessionCreated { session: SessionInfo },
     /// Aggregate spend response (today + rolling 7 days).
-    CostSummary { today: f64, week: f64 },
+    /// `version: 2` = read-time priced (same source as the desktop rollup).
+    CostSummary { today: f64, week: f64, version: u32 },
     /// Detailed cost breakdown response — same shape the desktop
     /// CostDashboard renders: daily spend, per-project totals, and per
     /// local-model token usage. All figures are best-effort estimates.

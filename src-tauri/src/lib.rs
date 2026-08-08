@@ -72,11 +72,16 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            let data_dir = app.path().app_data_dir().map_err(|e| {
+            // Chat DB location: `storage.dbDir` (Settings → Data) when set,
+            // else the default `<app data dir>/conduit.db`. The setting is
+            // read by peeking at the default DB, which always exists.
+            let db_path = db::chat_db_path(app.handle()).map_err(|e| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, format!("no app data dir: {e}"))
             })?;
-            fs::create_dir_all(&data_dir)?;
-            let conn = db::open(&data_dir.join("conduit.db"))?;
+            if let Some(parent) = db_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let conn = db::open(&db_path)?;
             let shared_db = Arc::new(Mutex::new(conn));
             // Sweep artifacts past their 30-day retention window on startup.
             chat::commands::sweep_expired_artifacts(&shared_db);
@@ -235,6 +240,8 @@ pub fn run() {
             commands::data::get_setting,
             commands::data::set_setting,
             commands::data::get_chat_db_path,
+            commands::data::set_chat_db_dir,
+            commands::data::get_data_paths,
             commands::data::list_skills,
             commands::data::create_skill,
             commands::data::update_skill,

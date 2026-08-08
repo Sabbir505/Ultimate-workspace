@@ -30,16 +30,137 @@ pub fn set_setting(key: String, value: String, db: State<DbState>) -> CmdResult<
     db::set_setting(&conn, &key, &value).map_err(|e| e.to_string())
 }
 
-/// Absolute path of the chat database (`<app data dir>/conduit.db`). Shown
-/// read-only in Settings → Storage & Data — the location is fixed at the
-/// app data dir.
+/// Absolute path of the chat database. Defaults to `<app data dir>/conduit.db`,
+/// overridable via `storage.dbDir` (Settings → Data) — the directory is read at
+/// startup and on every `set_chat_db_dir` call.
 #[tauri::command]
 pub fn get_chat_db_path(app: AppHandle) -> CmdResult<String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("no app data dir: {e}"))?;
-    Ok(dir.join("conduit.db").to_string_lossy().to_string())
+    Ok(crate::db::chat_db_path(&app)
+        .map_err(|e| e.to_string())?
+        .to_string_lossy()
+        .to_string())
+}
+
+/// Settings key for the user-configured chat database directory (Settings →
+/// Data). Empty/unset = default `<app data dir>`.
+pub const CHAT_DB_DIR_SETTING_KEY: &str = "storage.dbDir";
+
+/// Move the chat database to a new directory (or back to the app data dir when
+/// `None`). The DB is checkpointed, copied to the destination, and the live
+/// connection is swapped in place — no restart required. The destination
+/// directory is created if missing; an existing `conduit.db` there is
+/// overwritten only after a backup-free move (the user picked this location).
+#[tauri::command]
+pub fn set_chat_db_dir(
+    dir: Option<String>,
+    app: AppHandle,
+    db: State<DbState>,
+) -> CmdResult<()> {
+    let current = crate::db::chat_db_path(&app).map_err(|e| e.to_string())?;
+    // The setting value stored in the DB (empty string = default location).
+    let setting_value = dir.as_deref().unwrap_or("").trim().to_string();
+    let target_dir = match dir.as_deref() {
+        Some(d) => {
+            let d = d.trim();
+            if d.is_empty() {
+                // Empty string = reset to the app-data default.
+                app.path()
+                    .app_data_dir()
+                    .map_err(|e| format!("no app data dir: {e}"))?
+            } else {
+                std::path::PathBuf::from(d)
+            }
+        }
+        None => app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("no app data dir: {e}"))?,
+    };
+    let target = target_dir.join("conduit.db");
+
+    // Same location → nothing to do (still update the setting so a blank
+    // override is cleared).
+    if target == current {
+        let conn = db.0.lock();
+        let _ = db::set_setting(&conn, CHAT_DB_DIR_SETTING_KEY, &setting_value);
+        return Ok(());
+    }
+
+    // Checkpoint the WAL so the main .db file holds all committed data, then
+    // copy it to the destination (WAL/SHM files are transient — the copy is
+    // taken from the checkpointed main file).
+    {
+        let conn = db.0.lock();
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    }
+
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("failed to create directory: {e}"))?;
+    std::fs::copy(&current, &target)
+        .map_err(|e| format!("failed to copy database: {e}"))?;
+
+    // Reopen the copied DB and swap it into the shared connection. Every
+    // consumer locks per-use, so replacing the Connection inside the Arc is
+    // safe — the next lock on any thread sees the new location.
+    let new_conn = crate::db::open(&target).map_err(|e| e.to_string())?;
+    {
+        let mut conn = db.0.lock();
+        // Record the new location in the DB itself BEFORE the swap (the old
+        // connection still points at the pre-copy file).
+        let _ = db::set_setting(&conn, CHAT_DB_DIR_SETTING_KEY, &setting_value);
+        *conn = new_conn;
+    }
+
+    // A relocated DB means the configured artifacts dir may be stale relative
+    // to expectations, but that's independent — leave it. Sweep expired
+    // artifacts against the (new) DB so retention runs on the moved file.
+    crate::chat::commands::sweep_expired_artifacts(&db.0);
+
+    Ok(())
+}
+
+/// Aggregate paths + sizes for the Settings → Data panel: chat DB (with
+/// storage.dbDir override info) and artifacts dir.
+#[tauri::command]
+pub fn get_data_paths(app: AppHandle, db: State<DbState>) -> CmdResult<DataPaths> {
+    let db_path = crate::db::chat_db_path(&app).map_err(|e| e.to_string())?;
+    let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+    let conn = db.0.lock();
+    let artifacts = crate::chat::dispatch::artifacts_dir(&app);
+    let artifacts_size = dir_size(&artifacts);
+    let _ = conn;
+    Ok(DataPaths {
+        chat_db_path: db_path.to_string_lossy().to_string(),
+        chat_db_size: db_size,
+        artifacts_dir: artifacts.to_string_lossy().to_string(),
+        artifacts_size,
+    })
+}
+
+fn dir_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if let Ok(meta) = p.metadata() {
+                if meta.is_dir() {
+                    total += dir_size(&p);
+                } else {
+                    total += meta.len();
+                }
+            }
+        }
+    }
+    total
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataPaths {
+    pub chat_db_path: String,
+    pub chat_db_size: u64,
+    pub artifacts_dir: String,
+    pub artifacts_size: u64,
 }
 
 // ---- skills ----

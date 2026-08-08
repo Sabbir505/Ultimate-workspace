@@ -22,6 +22,7 @@ mod workspaces;
 
 use rusqlite::Connection;
 use std::path::Path;
+use tauri::Manager;
 use uuid::Uuid;
 
 pub type DbResult<T> = Result<T, rusqlite::Error>;
@@ -42,6 +43,29 @@ pub fn open(path: &Path) -> DbResult<Connection> {
     let conn = Connection::open(path)?;
     configure(&conn)?;
     Ok(conn)
+}
+
+/// Absolute path of the chat database. Defaults to `<app data dir>/conduit.db` —
+/// overridable via the `storage.dbDir` setting (Settings → Data), which must
+/// be read from the CURRENT database before a move. Returns an `io::Error`
+/// when the app data dir cannot be resolved.
+pub fn chat_db_path(app: &tauri::AppHandle) -> std::io::Result<std::path::PathBuf> {
+    let default_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()))?;
+    let default = default_dir.join("conduit.db");
+    // The setting lives IN the DB, so resolve it by peeking at the default
+    // location's DB (which always exists — it's created at first launch).
+    if let Ok(conn) = Connection::open(&default) {
+        if let Ok(Some(dir)) = settings::get_setting(&conn, "storage.dbDir") {
+            let dir = dir.trim();
+            if !dir.is_empty() {
+                return Ok(std::path::PathBuf::from(dir).join("conduit.db"));
+            }
+        }
+    }
+    Ok(default)
 }
 
 /// One-time cleanup for rows written before the \\?\ prefix fix: early

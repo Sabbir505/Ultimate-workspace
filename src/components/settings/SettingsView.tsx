@@ -6,7 +6,7 @@
 // categories — or an empty harness list — does not reflow the modal.
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel } from "../../lib/ipc";
+import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel, getDataPaths, setChatDbDir, deleteAllChatSessions, deleteAllArtifacts, type DataPaths } from "../../lib/ipc";
 import { runLoginFlow } from "../../lib/sessionLauncher";
 import { shortModelName } from "../../lib/modelLabel";
 import { useProjectsStore } from "../../state/projects";
@@ -25,7 +25,8 @@ type Category =
   | "harnesses"
   | "localmodels"
   | "apikeys"
-  | "connectors";
+  | "connectors"
+  | "data";
 
 const CATEGORY_KEYS: Category[] = [
   "appearance",
@@ -35,6 +36,7 @@ const CATEGORY_KEYS: Category[] = [
   "localmodels",
   "apikeys",
   "connectors",
+  "data",
 ];
 
 function isCategory(v: string | null): v is Category {
@@ -49,6 +51,7 @@ const CATEGORIES: Array<{ key: Category; label: string; sub: string }> = [
   { key: "localmodels", label: "Local Models", sub: "GGUF via llama-server" },
   { key: "apikeys", label: "API Keys", sub: "Chat provider keys" },
   { key: "connectors", label: "Connectors", sub: "Notion & more (OAuth)" },
+  { key: "data", label: "Data", sub: "Storage & delete" },
 ];
 
 const MODELS: Array<[string, string, string, string]> = [
@@ -267,6 +270,8 @@ export function SettingsView() {
               {category === "apikeys" && <ApiKeysPanel />}
 
               {category === "connectors" && <ConnectorsPanel />}
+
+              {category === "data" && <DataPanel />}
             </div>
           </div>
         </div>
@@ -1450,5 +1455,184 @@ function RateField({ settingsKey, fallback }: { settingsKey: string; fallback: s
       }}
       inputMode="decimal"
     />
+  );
+}
+
+// ---- Data (chat DB + artifacts storage + delete) ----
+
+function fmtSize(bytes: number): string {
+  if (bytes >= 1 << 30) return `${(bytes / (1 << 30)).toFixed(1)} GB`;
+  if (bytes >= 1 << 20) return `${(bytes / (1 << 20)).toFixed(1)} MB`;
+  if (bytes >= 1 << 10) return `${(bytes / (1 << 10)).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
+
+function DataPanel() {
+  const [paths, setPaths] = useState<DataPaths | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState<"chats" | "artifacts" | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+
+  const refresh = () => {
+    void getDataPaths().then((p) => p && setPaths(p));
+  };
+  useEffect(refresh, []);
+
+  const pickDbDir = async () => {
+    const picked = await open({
+      directory: true,
+      title: "Choose where to store chats (database)",
+    });
+    if (typeof picked !== "string") return;
+    setBusy(true);
+    try {
+      await setChatDbDir(picked);
+      setNote(`Chat database moved to ${picked}`);
+      refresh();
+    } catch (err) {
+      setNote(`Failed to move chat database: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resetDbDir = async () => {
+    setBusy(true);
+    try {
+      await setChatDbDir(null);
+      setNote("Chat database moved back to the default location");
+      refresh();
+    } catch (err) {
+      setNote(`Failed to reset chat database: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pickArtifactsDir = async () => {
+    const picked = await open({
+      directory: true,
+      title: "Choose where to store artifacts",
+    });
+    if (typeof picked !== "string") return;
+    await setSetting("storage.artifactsDir", picked);
+    setNote(`Artifacts will be stored in ${picked}`);
+    refresh();
+  };
+
+  const resetArtifactsDir = async () => {
+    await setSetting("storage.artifactsDir", "");
+    setNote("Artifacts will be stored in the default location");
+    refresh();
+  };
+
+  const runDelete = async () => {
+    if (!confirm) return;
+    setBusy(true);
+    try {
+      if (confirm === "chats") {
+        const n = await deleteAllChatSessions();
+        setNote(`Deleted ${n} chat session(s)`);
+      } else {
+        const n = await deleteAllArtifacts();
+        setNote(`Deleted ${n} artifact(s)`);
+      }
+      refresh();
+    } catch (err) {
+      setNote(`Delete failed: ${String(err)}`);
+    } finally {
+      setBusy(false);
+      setConfirm(null);
+    }
+  };
+
+  return (
+    <div className="settings-form">
+      <div className="panel-head">
+        <h3>Data</h3>
+      </div>
+
+      {note && <div className="settings-note">{note}</div>}
+
+      {/* Chat database location */}
+      <div className="settings-form-row" style={{ alignItems: "flex-start" }}>
+        <label className="settings-form-label">Chats (database)</label>
+        <div className="settings-form-control" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
+          <div className="mono" style={{ fontSize: 12, wordBreak: "break-all" }}>
+            {paths?.chatDbPath ?? "…"}
+            {paths ? ` (${fmtSize(paths.chatDbSize)})` : ""}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="ghost" onClick={pickDbDir} disabled={busy}>
+              Change…
+            </button>
+            <button className="ghost" onClick={resetDbDir} disabled={busy}>
+              Reset to default
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Artifacts location */}
+      <div className="settings-form-row" style={{ alignItems: "flex-start" }}>
+        <label className="settings-form-label">Artifacts</label>
+        <div className="settings-form-control" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
+          <div className="mono" style={{ fontSize: 12, wordBreak: "break-all" }}>
+            {paths?.artifactsDir ?? "…"}
+            {paths ? ` (${fmtSize(paths.artifactsSize)})` : ""}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="ghost" onClick={pickArtifactsDir}>
+              Change…
+            </button>
+            <button className="ghost" onClick={resetArtifactsDir}>
+              Reset to default
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Delete */}
+      <div className="settings-form-row" style={{ alignItems: "flex-start" }}>
+        <label className="settings-form-label">Delete</label>
+        <div className="settings-form-control" style={{ flexDirection: "column", alignItems: "stretch", gap: 8 }}>
+          <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+            Permanently delete all chat sessions and their messages, or all
+            generated artifacts. This cannot be undone.
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="danger" onClick={() => setConfirm("chats")} disabled={busy}>
+              Delete all chats
+            </button>
+            <button className="danger" onClick={() => setConfirm("artifacts")} disabled={busy}>
+              Delete all artifacts
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {confirm && (
+        <Modal
+          title={confirm === "chats" ? "Delete all chats?" : "Delete all artifacts?"}
+          onClose={() => setConfirm(null)}
+          actions={
+            <>
+              <button className="ghost" onClick={() => setConfirm(null)}>
+                Cancel
+              </button>
+              <button className="danger" onClick={runDelete} disabled={busy}>
+                {busy ? "Deleting…" : "Delete"}
+              </button>
+            </>
+          }
+        >
+          <p>
+            {confirm === "chats"
+              ? "This permanently deletes every chat session and all of their messages. Generated artifacts are kept."
+              : "This permanently deletes every generated artifact (files and diagrams). Chat history is kept."}
+          </p>
+        </Modal>
+      )}
+    </div>
   );
 }

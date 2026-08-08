@@ -190,6 +190,15 @@ export const getSetting = (key: string) => safeInvoke<string | null>("get_settin
 export const setSetting = (key: string, value: string) => safeInvoke<void>("set_setting", { key, value });
 /** Absolute path of the chat DB (read-only; fixed at the app data dir). */
 export const getChatDbPath = () => safeInvoke<string | null>("get_chat_db_path", {});
+export interface DataPaths {
+  chatDbPath: string;
+  chatDbSize: number;
+  artifactsDir: string;
+  artifactsSize: number;
+}
+export const getDataPaths = () => safeInvoke<DataPaths | null>("get_data_paths", {});
+export const setChatDbDir = (dir: string | null) =>
+  safeInvoke<void>("set_chat_db_dir", { dir });
 export const listSkills = (projectId?: string) =>
   safeInvoke<Skill[] | null>("list_skills", projectId ? { projectId } : {});
 export const createSkill = (name: string, slashCommand: string, content: string, scope: string) =>

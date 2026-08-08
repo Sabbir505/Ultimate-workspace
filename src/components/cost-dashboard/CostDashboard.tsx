@@ -47,8 +47,12 @@ export function CostDashboard() {
                 <DailyChart rollups={rollups} />
               </div>
               <StatsRow byKind={rollups.byKind} cacheSavingsUsd={rollups.costQuality.cacheSavingsUsd} />
-              <ModelBreakdownTable rows={rollups.perModel} />
-              <CostQualityPanel q={rollups.costQuality} cacheSavingsUsd={rollups.costQuality.cacheSavingsUsd} />
+              {/* T3 Code layout: model breakdown table LEFT, cost quality
+                  panel RIGHT, side by side. */}
+              <div className="cost-bottom-grid">
+                <ModelBreakdownTable rows={rollups.perModel} />
+                <CostQualityPanel q={rollups.costQuality} cacheSavingsUsd={rollups.costQuality.cacheSavingsUsd} />
+              </div>
             </>
           ) : null}
         </div>

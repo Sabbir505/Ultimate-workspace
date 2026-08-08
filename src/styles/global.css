@@ -3690,6 +3690,36 @@ table.kv th {
   text-align: center;
 }
 
+/* T3 Code layout: model breakdown table LEFT, cost quality panel RIGHT. */
+.cost-bottom-grid {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+.cost-bottom-grid .model-breakdown {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  box-shadow: var(--glass-rim);
+  padding: 14px;
+  overflow-x: auto;
+}
+.cost-bottom-grid .model-breakdown h3 {
+  margin: 0 0 10px;
+}
+.cost-bottom-grid .model-breakdown table.kv {
+  margin: 0;
+}
+.cost-bottom-grid .cost-quality {
+  height: 100%;
+}
+@media (max-width: 1100px) {
+  .cost-bottom-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 900px) {
   .stats-row {
     grid-template-columns: repeat(2, 1fr);

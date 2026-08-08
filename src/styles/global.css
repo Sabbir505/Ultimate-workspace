@@ -3319,6 +3319,16 @@ table.kv th {
 .chart .bar {
   fill: var(--accent);
 }
+/* Daily chart (cost/tokens toggle): warm terracotta bars that read clearly on
+   the dark glass surface (the neutral --accent gray is nearly invisible). */
+.daily-chart .bar {
+  fill: #c15f3c;
+  opacity: 0.9;
+}
+.daily-chart .bar:hover {
+  opacity: 1;
+  filter: brightness(1.15);
+}
 .chart .bar-label {
   fill: var(--text-dim);
   font-size: 10px;
@@ -3390,6 +3400,20 @@ table.kv th {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 180px;
+}
+
+/* Screen-reader-only content (chart fallback data tables, etc.) — visually
+   hidden but still in the accessibility tree. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* ---------- Cost dashboard v2 (T3 Code layout) ---------- */
@@ -3508,10 +3532,21 @@ table.kv th {
   color: var(--text);
   box-shadow: var(--glass-rim-soft);
 }
-.daily-chart {
+.cost-chart .chart-frame {
   overflow-x: auto;
+  padding-bottom: 4px;
+}
+.daily-chart {
   display: block;
-  width: 100%;
+  min-width: 100%;
+}
+.daily-chart .bar {
+  fill: #c15f3c;
+  opacity: 0.9;
+}
+.daily-chart .bar:hover {
+  opacity: 1;
+  filter: brightness(1.15);
 }
 
 .stats-row {

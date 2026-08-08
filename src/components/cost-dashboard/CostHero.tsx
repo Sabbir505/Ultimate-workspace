@@ -6,6 +6,9 @@ function usd(n: number): string {
 
 export function CostHero({ rollups }: { rollups: CostRollups }) {
   const { totals, perProvider, rangeStart, rangeEnd } = rollups;
+  // Only providers that actually incurred cost appear in the breakdown —
+  // local/openai-compatible models are free (cost 0) and add noise.
+  const priced = perProvider.filter(p => p.costUsd > 0);
   return (
     <section className="cost-hero">
       <div className="cost-hero-headline">
@@ -14,7 +17,10 @@ export function CostHero({ rollups }: { rollups: CostRollups }) {
         <div className="cost-hero-range">{formatDate(rangeStart)} to {formatDate(rangeEnd)}</div>
       </div>
       <div className="cost-hero-breakdown">
-        {perProvider.map(p => <ProviderRow key={p.provider} p={p} total={totals.rawTokenCostUsd} />)}
+        {priced.map(p => <ProviderRow key={p.provider} p={p} total={totals.rawTokenCostUsd} />)}
+        {priced.length === 0 && (
+          <div className="cost-hero-row-empty">No paid usage in this range.</div>
+        )}
       </div>
     </section>
   );
@@ -35,7 +41,9 @@ function labelFor(p: string): string {
   if (p === "claude_code") return "Claude Code";
   if (p === "kimi_code") return "Kimi Code";
   if (p === "opencode") return "OpenCode";
-  if (p.startsWith("chat:")) return "Chat: " + p.slice(5);
+  // "chat:anthropic" → "Anthropic" (the prefix is a grouping artifact, not a
+  // user-facing label).
+  if (p.startsWith("chat:")) return p.slice(5);
   return p;
 }
 

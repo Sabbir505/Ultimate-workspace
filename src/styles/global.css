@@ -3483,6 +3483,11 @@ table.kv th {
   justify-content: center;
   gap: 8px;
 }
+.cost-hero-row-empty {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-style: italic;
+}
 .cost-hero-row {
   display: grid;
   grid-template-columns: 1fr auto auto auto;

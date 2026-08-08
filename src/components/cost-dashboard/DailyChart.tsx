@@ -21,17 +21,26 @@ function seriesLabel(p: string): string {
     case "claude_code": return "Claude Code";
     case "kimi_code": return "Kimi";
     case "opencode": return "OpenCode";
-    case "chat:anthropic": return "Chat: Anthropic";
-    case "chat:openai": return "Chat: OpenAI";
-    case "chat:openrouter": return "Chat: OpenRouter";
+    // "chat:anthropic" → "Anthropic" etc. — the prefix is a grouping artifact.
+    case "chat:anthropic": return "Anthropic";
+    case "chat:openai": return "OpenAI";
+    case "chat:openrouter": return "OpenRouter";
     case "chat:local_gguf": return "Local GGUF";
-    default: return p === "other" ? "Other" : p;
+    default: return p === "other" ? "Other" : p.startsWith("chat:") ? p.slice(5) : p;
   }
 }
 
 function dayValue(d: DailyCost, mode: Mode, p: string): number {
   const m = mode === "cost" ? d.costByProvider : d.tokensByProvider;
   return m[p] ?? 0;
+}
+
+// Normalize compatible providers into their native buckets so
+// "chat:anthropic_compatible" stacks under Anthropic (same wire family).
+function normalizeProvider(p: string): string {
+  if (p === "chat:anthropic_compatible" || p === "chat:anthropic") return "chat:anthropic";
+  if (p === "chat:openai_compatible" || p === "chat:openai") return "chat:openai";
+  return p;
 }
 
 export function DailyChart({ rollups }: { rollups: CostRollups }) {
@@ -48,7 +57,7 @@ export function DailyChart({ rollups }: { rollups: CostRollups }) {
     const present = new Set<string>();
     for (const d of data) {
       const m = mode === "cost" ? d.costByProvider : d.tokensByProvider;
-      for (const p of Object.keys(m)) present.add(p);
+      for (const p of Object.keys(m)) present.add(normalizeProvider(p));
     }
     const ordered = SERIES_ORDER.filter(p => present.has(p));
     const others = [...present].filter(p => !SERIES_ORDER.includes(p)).sort();
@@ -59,8 +68,12 @@ export function DailyChart({ rollups }: { rollups: CostRollups }) {
       let acc = 0;
       for (const p of series) {
         const v = p === "other"
-          ? others.reduce((s, o) => s + dayValue(d, mode, o), 0)
-          : dayValue(d, mode, p);
+          ? Object.entries(mode === "cost" ? d.costByProvider : d.tokensByProvider)
+              .filter(([o]) => !SERIES_ORDER.includes(normalizeProvider(o)))
+              .reduce((s, [, v]) => s + v, 0)
+          : Object.entries(mode === "cost" ? d.costByProvider : d.tokensByProvider)
+              .filter(([o]) => normalizeProvider(o) === p)
+              .reduce((s, [, v]) => s + v, 0);
         acc += v;
         tops.push(acc);
       }
@@ -144,10 +157,12 @@ export function DailyChart({ rollups }: { rollups: CostRollups }) {
           <div className="chart-tooltip-day">{hovered.day}</div>
           {series.map((p, sIdx) => {
             const v = p === "other"
-              ? Object.keys(mode === "cost" ? hovered.costByProvider : hovered.tokensByProvider)
-                  .filter(o => !SERIES_ORDER.includes(o))
-                  .reduce((s, o) => s + dayValue(hovered, mode, o), 0)
-              : dayValue(hovered, mode, p);
+              ? Object.entries(mode === "cost" ? hovered.costByProvider : hovered.tokensByProvider)
+                  .filter(([o]) => !SERIES_ORDER.includes(normalizeProvider(o)))
+                  .reduce((s, [, v]) => s + v, 0)
+              : Object.entries(mode === "cost" ? hovered.costByProvider : hovered.tokensByProvider)
+                  .filter(([o]) => normalizeProvider(o) === p)
+                  .reduce((s, [, v]) => s + v, 0);
             if (v <= 0) return null;
             return (
               <div key={p} className="chart-tooltip-row">

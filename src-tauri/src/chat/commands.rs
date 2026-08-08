@@ -1219,11 +1219,16 @@ pub async fn send_chat_message(
                 fs_roots.push(root.clone());
             }
             let section = format!(
-                "\n\n## Working directory\nThis chat is scoped to `{root}`. Treat it as \
-                 the current working directory: resolve relative paths against it, and \
-                 default `list_directory`/`search_files`/`search_content`/`write_file`/\
-                 `edit_file` calls to paths inside it unless the user explicitly points \
-                 elsewhere."
+                "\n\n## Working directory\nThis chat's working directory is `{root}`. \
+                 Treat it as the current working directory: resolve RELATIVE paths against \
+                 it, and default `list_directory`/`search_files`/`search_content` calls to \
+                 it when the user hasn't said where. This is NOT a restriction: you may \
+                 `list_directory`, `read_file`, `search_files`, and `search_content` ANY \
+                 directory on the machine — pass an absolute path (e.g. \
+                 `search_content(path: \"C:/Users/me/Documents\", query: ...)`) whenever \
+                 the user asks about files outside the working directory. Only WRITES \
+                 (`write_file`/`edit_file`/`delete_file`/`move_file`/`copy_file`) are \
+                 limited to granted roots."
             );
             system = Some(system.unwrap_or_default() + &section);
         }

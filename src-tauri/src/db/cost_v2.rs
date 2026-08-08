@@ -235,9 +235,12 @@ pub fn get_cost_rollups_v2(conn: &Connection, range_days: u32) -> DbResult<CostR
             // Local/unpriced models (GGUF names have no canonical key) still
             // appear in the per-model breakdown under their raw model name,
             // with $0 cost — they run on your hardware, not an API.
+            // The session model may be a full file path (GGUF files without a
+            // metadata name); display just the basename so the table reads
+            // "qwen2.5-7b-q4_k_m.gguf" not "C:\models\qwen2.5-7b-q4_k_m.gguf".
             let model_label = key
                 .map(String::from)
-                .or_else(|| session_model.clone())
+                .or_else(|| session_model.as_deref().map(basename))
                 .unwrap_or_else(|| "unknown".to_string());
             let entry = by_model.entry(model_label).or_insert((0.0, 0, Some(grouped.clone())));
             entry.0 += c;
@@ -317,6 +320,18 @@ pub fn get_cost_rollups_v2(conn: &Connection, range_days: u32) -> DbResult<CostR
         range_end,
         range_days: days,
     })
+}
+
+/// Last path segment of a model string, minus the extension. Local GGUF
+/// sessions store the model as a full file path when the GGUF header has no
+/// `general.name` metadata; the dashboard shows only the filename.
+fn basename(s: &str) -> String {
+    let trimmed = s.trim_end_matches(['/', '\\']);
+    let leaf = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
+    match leaf.rsplit_once('.') {
+        Some((stem, ext)) if !ext.is_empty() && ext.len() <= 8 && ext.chars().all(|c| c.is_ascii_alphanumeric()) => stem.to_string(),
+        _ => leaf.to_string(),
+    }
 }
 
 fn date_str(ts: i64) -> String {
@@ -410,22 +425,35 @@ mod tests {
     #[test]
     fn rollup_includes_local_models_in_per_model() {
         let conn = super::super::mem();
-        // Local GGUF chat session — model name has no canonical key.
-        let cs = super::super::create_chat_session(&conn, "local_gguf", "qwen2.5-7b-q4_k_m.gguf").unwrap();
+        // Local GGUF chat session — model name has no canonical key. The
+        // session model is a full file path (GGUF without metadata name);
+        // the breakdown must show the basename, not the path.
+        let cs = super::super::create_chat_session(
+            &conn, "local_gguf", r"D:\models\qwen2.5-7b-q4_k_m.gguf",
+        ).unwrap();
         super::super::add_chat_message(
             &conn, &cs.id, "assistant", "hi", Some(1_000_000), Some(500_000), Some(0.0),
             None, None, None, Some("local_gguf"), None, None,
         ).unwrap();
         let r = get_cost_rollups_v2(&conn, 7).unwrap();
-        // Local models appear in the per-model breakdown under their raw name
+        // Local models appear in the per-model breakdown under their basename
         // with $0 cost (no API pricing), tokens still counted.
-        let local = r.per_model.iter().find(|m| m.model_key == "qwen2.5-7b-q4_k_m.gguf").unwrap();
+        let local = r.per_model.iter().find(|m| m.model_key == "qwen2.5-7b-q4_k_m").unwrap();
         assert_eq!(local.cost_usd, 0.0);
         assert_eq!(local.tokens, 1_500_000);
         // Grouped under chat:local_gguf in the per-provider breakdown.
         let prov = r.per_provider.iter().find(|p| p.provider == "chat:local_gguf").unwrap();
         assert_eq!(prov.tokens, 1_500_000);
         assert_eq!(prov.cost_usd, 0.0);
+    }
+
+    #[test]
+    fn basename_strips_path_and_extension() {
+        assert_eq!(basename(r"D:\models\qwen2.5-7b-q4_k_m.gguf"), "qwen2.5-7b-q4_k_m");
+        assert_eq!(basename("/home/u/models/llama-3b.gguf"), "llama-3b");
+        // Plain names and dotted-but-short extensions survive untouched.
+        assert_eq!(basename("DeepSeek R1 0528"), "DeepSeek R1 0528");
+        assert_eq!(basename("my.model.name"), "my.model");
     }
 
     #[test]

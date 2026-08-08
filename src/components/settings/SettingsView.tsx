@@ -7,7 +7,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel } from "../../lib/ipc";
-import { acceleratorFromEvent, DEFAULT_KEYBINDINGS, type KeybindingAction } from "../../lib/keybindings";
 import { runLoginFlow } from "../../lib/sessionLauncher";
 import { shortModelName } from "../../lib/modelLabel";
 import { useProjectsStore } from "../../state/projects";
@@ -19,39 +18,34 @@ import { ModelMarket } from "./ModelMarket";
 import { ConnectorIcon, FamilyIcon, FAMILY_NAMES } from "./ConnectorIcon";
 import { Modal } from "../common/Modal";
 
-const ACTION_LABELS: Record<KeybindingAction, string> = {
-  openPalette: "Open command palette",
-  focusPane1: "Focus pane 1",
-  focusPane2: "Focus pane 2",
-  focusPane3: "Focus pane 3",
-  focusPane4: "Focus pane 4",
-  focusPane5: "Focus pane 5",
-  focusPane6: "Focus pane 6",
-  cyclePane: "Cycle pane focus",
-  newSession: "New session in current project",
-  closePane: "Close focused pane",
-  toggleBroadcast: "Toggle broadcast mode",
-  openSettings: "Open Settings",
-  spotlightNext: "Cycle terminal pair forward (split layout)",
-  spotlightPrev: "Cycle terminal pair backward (split layout)",
-};
-
 type Category =
   | "appearance"
   | "assistant"
   | "pricing"
   | "harnesses"
-  | "shortcuts"
   | "localmodels"
   | "apikeys"
   | "connectors";
+
+const CATEGORY_KEYS: Category[] = [
+  "appearance",
+  "assistant",
+  "pricing",
+  "harnesses",
+  "localmodels",
+  "apikeys",
+  "connectors",
+];
+
+function isCategory(v: string | null): v is Category {
+  return v !== null && (CATEGORY_KEYS as string[]).includes(v);
+}
 
 const CATEGORIES: Array<{ key: Category; label: string; sub: string }> = [
   { key: "appearance", label: "Appearance", sub: "Theme, notifications" },
   { key: "assistant", label: "Assistant", sub: "System prompt & skills" },
   { key: "pricing", label: "Pricing", sub: "Per-model $/Mtok rates" },
   { key: "harnesses", label: "Harnesses", sub: "CLI install & login" },
-  { key: "shortcuts", label: "Shortcuts", sub: "Remap keybindings" },
   { key: "localmodels", label: "Local Models", sub: "GGUF via llama-server" },
   { key: "apikeys", label: "API Keys", sub: "Chat provider keys" },
   { key: "connectors", label: "Connectors", sub: "Notion & more (OAuth)" },
@@ -74,31 +68,40 @@ const MODELS: Array<[string, string, string, string]> = [
 
 export function SettingsView() {
   const setActiveView = useUiStore((s) => s.setActiveView);
-  const activeView = useUiStore((s) => s.activeView);
   const theme = useSettingsStore((s) => s.theme);
   const dnd = useSettingsStore((s) => s.dnd);
   const notifySound = useSettingsStore((s) => s.notifySound);
   const watchMode = useSettingsStore((s) => s.watchMode);
-  const keybindings = useSettingsStore((s) => s.keybindings);
   const setTheme = useSettingsStore((s) => s.setTheme);
   const setDnd = useSettingsStore((s) => s.setDnd);
   const setNotifySound = useSettingsStore((s) => s.setNotifySound);
   const setWatchMode = useSettingsStore((s) => s.setWatchMode);
-  const setKeybinding = useSettingsStore((s) => s.setKeybinding);
-  const resetKeybindings = useSettingsStore((s) => s.resetKeybindings);
   const harnesses = useProjectsStore((s) => s.harnesses);
   const projects = useProjectsStore((s) => s.projects);
   const refreshHarnesses = useProjectsStore((s) => s.refreshHarnesses);
 
-  const [recording, setRecording] = useState<KeybindingAction | null>(null);
+  // Category lives in the ui store so other views (sidebar "Manage
+  // connectors") can deep-link into a specific Settings section; local state
+  // mirrors it for instant nav clicks.
+  const settingsCategory = useUiStore((s) => s.settingsCategory);
+  const setSettingsCategory = useUiStore((s) => s.setSettingsCategory);
   const [category, setCategory] = useState<Category>("appearance");
+  useEffect(() => {
+    if (settingsCategory && isCategory(settingsCategory)) {
+      setCategory(settingsCategory as Category);
+    }
+  }, [settingsCategory]);
+  const pickCategory = (c: Category) => {
+    setCategory(c);
+    setSettingsCategory(c);
+  };
 
   return (
-    <div className="view-overlay modal-centered" onPointerDown={(e) => e.target === e.currentTarget && setActiveView(activeView === "chat" ? "chat" : "grid")}>
+    <div className="view-overlay modal-centered" onPointerDown={(e) => e.target === e.currentTarget && setActiveView("chat")}>
       <div className="view-panel">
         <div className="view-header">
           <h2>Settings</h2>
-          <button className="ghost" onClick={() => setActiveView(activeView === "chat" ? "chat" : "grid")}>
+          <button className="ghost" onClick={() => setActiveView("chat")}>
             ✕
           </button>
         </div>
@@ -109,7 +112,7 @@ export function SettingsView() {
                 <button
                   key={c.key}
                   className={`nav-item${category === c.key ? " active" : ""}`}
-                  onClick={() => setCategory(c.key)}
+                  onClick={() => pickCategory(c.key)}
                 >
                   {c.label}
                   <span className="nav-sub">{c.sub}</span>
@@ -244,7 +247,7 @@ export function SettingsView() {
                                   onClick={() => {
                                     const cwd = projects[0]?.path ?? ".";
                                     void runLoginFlow(h.id, cwd, `${h.displayName} login`);
-                                    setActiveView(activeView === "chat" ? "chat" : "grid");
+                                    setActiveView("chat");
                                   }}
                                 >
                                   Run login
@@ -256,55 +259,6 @@ export function SettingsView() {
                       </tbody>
                     </table>
                   )}
-                </>
-              )}
-
-              {category === "shortcuts" && (
-                <>
-                  <div className="panel-head">
-                    <h3>Keyboard shortcuts</h3>
-                    <button className="ghost" onClick={resetKeybindings} style={{ padding: "2px 8px" }}>
-                      Reset defaults
-                    </button>
-                  </div>
-                  <p className="estimate-note">
-                    “Mod” means Cmd on macOS and Ctrl elsewhere. Click a shortcut to remap it.
-                  </p>
-                  <table className="kv">
-                    <tbody>
-                      {(Object.keys(ACTION_LABELS) as KeybindingAction[]).map((action) => (
-                        <tr key={action}>
-                          <td>{ACTION_LABELS[action]}</td>
-                          <td style={{ textAlign: "right" }}>
-                            <button
-                              className={`kbd-chip${recording === action ? " recording" : ""}`}
-                              onClick={() => setRecording(action)}
-                              onKeyDown={(e) => {
-                                if (recording !== action) return;
-                                e.preventDefault();
-                                e.stopPropagation();
-                                if (e.key === "Escape") {
-                                  setRecording(null);
-                                  return;
-                                }
-                                const accel = acceleratorFromEvent(e);
-                                if (accel) {
-                                  setKeybinding(action, accel);
-                                  setRecording(null);
-                                }
-                              }}
-                              onBlur={() => recording === action && setRecording(null)}
-                            >
-                              {recording === action ? "press keys…" : keybindings[action]}
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
-                    Defaults: {DEFAULT_KEYBINDINGS.openPalette} palette, {DEFAULT_KEYBINDINGS.closePane} close pane
-                  </span>
                 </>
               )}
 

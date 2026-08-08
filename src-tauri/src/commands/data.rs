@@ -50,11 +50,16 @@ pub const CHAT_DB_DIR_SETTING_KEY: &str = "storage.dbDir";
 /// connection is swapped in place — no restart required. The destination
 /// directory is created if missing; an existing `conduit.db` there is
 /// overwritten only after a backup-free move (the user picked this location).
+///
+/// ASYNC on purpose: the file copy + full reopen (which runs all migrations)
+/// must NOT block the main thread — a synchronous command here froze the UI
+/// hard enough to read as an app crash. All heavy work runs on the async
+/// runtime's thread pool.
 #[tauri::command]
-pub fn set_chat_db_dir(
+pub async fn set_chat_db_dir(
     dir: Option<String>,
     app: AppHandle,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     let current = crate::db::chat_db_path(&app).map_err(|e| e.to_string())?;
     // The setting value stored in the DB (empty string = default location).
@@ -86,30 +91,53 @@ pub fn set_chat_db_dir(
         return Ok(());
     }
 
-    // Checkpoint the WAL so the main .db file holds all committed data, then
-    // copy it to the destination (WAL/SHM files are transient — the copy is
-    // taken from the checkpointed main file).
-    {
-        let conn = db.0.lock();
-        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
-    }
+    // The heavy sequence (checkpoint → copy → reopen → swap) runs off the
+    // main thread so the UI stays live. The DbState Arc is cloned in; the
+    // connection swap happens under the lock at the end.
+    let db_arc = db.0.clone();
+    let current2 = current.clone();
+    let target2 = target.clone();
+    let target_dir2 = target_dir.clone();
+    let setting_value2 = setting_value.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        // 1. Checkpoint the WAL so the main .db file holds every committed
+        //    row — the copy must be a complete snapshot, not a WAL-less stub.
+        {
+            let conn = db_arc.lock();
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .map_err(|e| format!("checkpoint failed: {e}"))?;
+        }
 
-    std::fs::create_dir_all(&target_dir)
-        .map_err(|e| format!("failed to create directory: {e}"))?;
-    std::fs::copy(&current, &target)
-        .map_err(|e| format!("failed to copy database: {e}"))?;
+        // 2. Copy ALL of the SQLite files (main + WAL + SHM) so the moved DB
+        //    is complete even if a write lands between checkpoint and copy.
+        std::fs::create_dir_all(&target_dir2)
+            .map_err(|e| format!("failed to create directory: {e}"))?;
+        for suffix in ["", "-wal", "-shm"] {
+            let src = std::path::PathBuf::from(format!("{}{}", current2.display(), suffix));
+            if src.exists() {
+                let dst = std::path::PathBuf::from(format!("{}{}", target2.display(), suffix));
+                std::fs::copy(&src, &dst)
+                    .map_err(|e| format!("failed to copy {suffix}: {e}"))?;
+            }
+        }
 
-    // Reopen the copied DB and swap it into the shared connection. Every
-    // consumer locks per-use, so replacing the Connection inside the Arc is
-    // safe — the next lock on any thread sees the new location.
-    let new_conn = crate::db::open(&target).map_err(|e| e.to_string())?;
-    {
-        let mut conn = db.0.lock();
-        // Record the new location in the DB itself BEFORE the swap (the old
-        // connection still points at the pre-copy file).
-        let _ = db::set_setting(&conn, CHAT_DB_DIR_SETTING_KEY, &setting_value);
-        *conn = new_conn;
-    }
+        // 3. Reopen the copy (runs migrations on it) and swap it into the
+        //    shared connection. Consumers lock per-use, so replacing the
+        //    Connection inside the Arc is safe — the next lock sees the new
+        //    location. The setting is written on the NEW connection so the
+        //    moved DB records its own location (the old file is stale after
+        //    the swap).
+        let new_conn = crate::db::open(&target2).map_err(|e| e.to_string())?;
+        {
+            let mut conn = db_arc.lock();
+            let _ = db::set_setting(&conn, CHAT_DB_DIR_SETTING_KEY, &setting_value2);
+            *conn = new_conn;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("database move task failed: {e}"))?
+    .map_err(|e| e)?;
 
     // A relocated DB means the configured artifacts dir may be stale relative
     // to expectations, but that's independent — leave it. Sweep expired
@@ -120,15 +148,18 @@ pub fn set_chat_db_dir(
 }
 
 /// Aggregate paths + sizes for the Settings → Data panel: chat DB (with
-/// storage.dbDir override info) and artifacts dir.
+/// storage.dbDir override info) and artifacts dir. ASYNC: the recursive
+/// directory walk must not run on the main thread (a large artifacts folder
+/// would freeze the UI).
 #[tauri::command]
-pub fn get_data_paths(app: AppHandle, db: State<DbState>) -> CmdResult<DataPaths> {
+pub async fn get_data_paths(app: AppHandle, db: State<'_, DbState>) -> CmdResult<DataPaths> {
     let db_path = crate::db::chat_db_path(&app).map_err(|e| e.to_string())?;
     let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
-    let conn = db.0.lock();
     let artifacts = crate::chat::dispatch::artifacts_dir(&app);
-    let artifacts_size = dir_size(&artifacts);
-    let _ = conn;
+    let artifacts2 = artifacts.clone();
+    let artifacts_size = tauri::async_runtime::spawn_blocking(move || dir_size(&artifacts2))
+        .await
+        .unwrap_or(0);
     Ok(DataPaths {
         chat_db_path: db_path.to_string_lossy().to_string(),
         chat_db_size: db_size,
@@ -137,6 +168,8 @@ pub fn get_data_paths(app: AppHandle, db: State<DbState>) -> CmdResult<DataPaths
     })
 }
 
+/// Recursive directory size (bytes). Only ever runs on a worker thread via
+/// `get_data_paths` — a deep or large artifacts tree must not block the UI.
 fn dir_size(dir: &std::path::Path) -> u64 {
     let mut total = 0u64;
     if let Ok(rd) = std::fs::read_dir(dir) {

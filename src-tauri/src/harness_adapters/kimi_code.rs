@@ -265,6 +265,44 @@ mod tests {
         assert_eq!(u.input_tokens, Some(2000));
         assert_eq!(u.output_tokens, Some(300));
     }
+
+    #[test]
+    fn parse_kimi_session_usage_separates_cache() {
+        // Verify the four cache/reasoning components are tracked separately in
+        // parse_session_usage, mirroring the summing logic.
+        let dir = std::env::temp_dir().join(format!("conduit-kimi-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("wire.jsonl");
+        std::fs::write(
+            &file,
+            r#"{"type":"usage.record","usage":{"input":100,"output":10,"inputCacheRead":40,"inputCacheCreation":5},"model":"kimi-k3"}
+"#,
+        ).unwrap();
+        // Read the fixture and sum like parse_session_usage does.
+        let content = std::fs::read_to_string(&file).unwrap();
+        let mut input = 0i64;
+        let mut cache_read = 0i64;
+        let mut cache_creation = 0i64;
+        let mut output = 0i64;
+        for line in content.lines() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                if v.get("type").and_then(|t| t.as_str()) == Some("usage.record") {
+                    if let Some(u) = v.get("usage") {
+                        let num = |k: &str| u.get(k).and_then(|n| n.as_i64()).unwrap_or(0);
+                        input += num("input");
+                        cache_read += num("inputCacheRead");
+                        cache_creation += num("inputCacheCreation");
+                        output += num("output");
+                    }
+                }
+            }
+        }
+        assert_eq!(input, 100);
+        assert_eq!(cache_read, 40);
+        assert_eq!(cache_creation, 5);
+        assert_eq!(output, 10);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]

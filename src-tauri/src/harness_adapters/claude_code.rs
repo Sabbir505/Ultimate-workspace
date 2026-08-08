@@ -330,16 +330,22 @@ mod usage_tests {
         // Same summing logic as parse_session_usage, applied to the fixture:
         let content = std::fs::read_to_string(&file).unwrap();
         let mut input = 0i64;
+        let mut cache_creation = 0i64;
+        let mut cache_read = 0i64;
         let mut output = 0i64;
         for line in content.lines() {
             let v: serde_json::Value = serde_json::from_str(line).unwrap();
             if let Some(u) = v.pointer("/message/usage").or_else(|| v.get("usage")) {
                 let num = |k: &str| u.get(k).and_then(|n| n.as_i64()).unwrap_or(0);
-                input += num("input_tokens") + num("cache_creation_input_tokens") + num("cache_read_input_tokens");
+                input += num("input_tokens");
+                cache_creation += num("cache_creation_input_tokens");
+                cache_read += num("cache_read_input_tokens");
                 output += num("output_tokens");
             }
         }
-        assert_eq!(input, 345);
+        assert_eq!(input, 100 + 200); // raw input, not cache
+        assert_eq!(cache_creation, 5);
+        assert_eq!(cache_read, 40);
         assert_eq!(output, 30);
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -55,19 +55,9 @@ jobs:
       - name: Install npm deps
         run: npm ci
 
-      # tauri build only compiles the main binary — the conduit-browser-mcp
-      # sidecar must be built and staged explicitly. tauri-build validates the
-      # externalBin path at compile time, so create a placeholder first, build
-      # the binary, then stage it.
-      - name: Build browser-mcp sidecar
-        working-directory: src-tauri
-        run: |
-          New-Item -ItemType File -Force "binaries/conduit-browser-mcp-x86_64-pc-windows-msvc.exe" | Out-Null
-          cargo build --release --bin conduit-browser-mcp
-          node ../scripts/stage-browser-mcp.mjs
-
-      # Resource staging is explicit (not in beforeBuildCommand) so each step
-      # has its own log output and failures are unambiguous.
+      # Resources MUST be staged before any `cargo build` — even the sidecar
+      # binary triggers the main build script (same Cargo package), which checks
+      # the resource globs.
       - name: Stage bundled Python
         run: node scripts/fetch-bundled-python.mjs
 
@@ -90,6 +80,14 @@ jobs:
           } else {
             Write-Host "✗ soffice.exe NOT FOUND"
           }
+
+      # Sidecar build: resources exist now, so the build script won't fail.
+      - name: Build browser-mcp sidecar
+        working-directory: src-tauri
+        run: |
+          New-Item -ItemType File -Force "binaries/conduit-browser-mcp-x86_64-pc-windows-msvc.exe" | Out-Null
+          cargo build --release --bin conduit-browser-mcp
+          node ../scripts/stage-browser-mcp.mjs
 
       - name: Build (do NOT set signing env vars — the release job signs)
         env:

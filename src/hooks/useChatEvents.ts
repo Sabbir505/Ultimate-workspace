@@ -17,7 +17,9 @@ import {
   listenChatStatus,
   listenChatTaskProgress,
   listenChatToken,
+  listenPlanStepProgress,
 } from "../lib/ipc";
+import { matchPlanStep } from "../lib/planMatcher";
 import { openInBrowserPane } from "../lib/openBrowserPane";
 import { useChatStore } from "../state/chat";
 
@@ -86,6 +88,29 @@ export function useChatEvents(): void {
     unlistens.push(
       listenChatTaskProgress((payload) => {
         useChatStore.getState().onTaskProgress(payload);
+      }),
+    );
+
+    // Plan step progress from backend — matches against parsed plan steps
+    // via fuzzy label matching. No mobile relay (desktop-only).
+    unlistens.push(
+      listenPlanStepProgress(({ chatSessionId, stepLabel, status, detail, toolCall }) => {
+        const store = useChatStore.getState();
+        const steps = store.planSteps[chatSessionId];
+        if (!steps) return;
+        const matched = matchPlanStep(
+          { stepLabel, toolCall: toolCall ?? undefined },
+          steps,
+        );
+        if (matched) {
+          store.onPlanStepProgress(
+            chatSessionId,
+            matched.stepId,
+            status,
+            detail ?? undefined,
+            toolCall ?? undefined,
+          );
+        }
       }),
     );
 

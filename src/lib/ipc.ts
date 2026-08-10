@@ -413,6 +413,16 @@ export interface ChatTaskProgressPayload {
   destPath: string | null;
 }
 
+/** Plan step progress pushed as `chat:plan-step-progress`. Lighter than
+ *  ChatTaskProgressPayload — no download/speed fields, just status. */
+export interface PlanStepProgressPayload {
+  chatSessionId: string;
+  stepLabel: string;
+  status: "pending" | "in_progress" | "completed" | "failed";
+  detail: string | null;
+  toolCall: string | null;
+}
+
 /** A persisted artifact in the sidebar library (30-day retention). */
 export interface ArtifactRecord {
   id: string;
@@ -790,6 +800,9 @@ export const listenChatOpenBrowser = (handler: (payload: ChatOpenBrowserPayload)
 
 export const listenChatTaskProgress = (handler: (payload: ChatTaskProgressPayload) => void) =>
   safeListen<ChatTaskProgressPayload>("chat:task-progress", handler);
+
+export const listenPlanStepProgress = (handler: (payload: PlanStepProgressPayload) => void) =>
+  safeListen<PlanStepProgressPayload>("chat:plan-step-progress", handler);
 
 /** Re-broadcast a chat event to the mobile relay. Used from useChatEvents.ts to
  *  forward chat:token, chat:status, chat:done, chat:error,

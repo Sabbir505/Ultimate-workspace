@@ -56,16 +56,40 @@ jobs:
         run: npm ci
 
       # tauri build only compiles the main binary — the conduit-browser-mcp
-      # sidecar must be built and staged explicitly (stage-browser-mcp.mjs is
-      # no longer in beforeBuildCommand to avoid double-staging). tauri-build
-      # validates the externalBin path at compile time, so create a placeholder
-      # first, build the binary, then stage it.
+      # sidecar must be built and staged explicitly. tauri-build validates the
+      # externalBin path at compile time, so create a placeholder first, build
+      # the binary, then stage it.
       - name: Build browser-mcp sidecar
         working-directory: src-tauri
         run: |
           New-Item -ItemType File -Force "binaries/conduit-browser-mcp-x86_64-pc-windows-msvc.exe" | Out-Null
           cargo build --release --bin conduit-browser-mcp
           node ../scripts/stage-browser-mcp.mjs
+
+      # Resource staging is explicit (not in beforeBuildCommand) so each step
+      # has its own log output and failures are unambiguous.
+      - name: Stage bundled Python
+        run: node scripts/fetch-bundled-python.mjs
+
+      - name: Stage bundled LibreOffice
+        run: node scripts/fetch-bundled-libreoffice.mjs
+
+      - name: Verify staged resources
+        run: |
+          Write-Host "=== resources/python ==="
+          if (Test-Path "src-tauri/resources/python/python.exe") {
+            Write-Host "✓ python.exe found"
+            Get-ChildItem "src-tauri/resources/python" -Directory | Select-Object -First 5 | ForEach-Object { Write-Host "  $($_.Name)" }
+          } else {
+            Write-Host "✗ python.exe NOT FOUND"
+            Get-ChildItem "src-tauri/resources" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name)" }
+          }
+          Write-Host "=== resources/libreoffice ==="
+          if (Test-Path "src-tauri/resources/libreoffice/program/soffice.exe") {
+            Write-Host "✓ soffice.exe found"
+          } else {
+            Write-Host "✗ soffice.exe NOT FOUND"
+          }
 
       - name: Build (do NOT set signing env vars — the release job signs)
         env:

@@ -328,9 +328,13 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   // Watch for external diff requests (e.g. peek icon in branch-switch modal).
   const diffPanelFile = useUiStore((s) => s.diffPanelFile);
   const diffPanelCwd = useUiStore((s) => s.diffPanelCwd);
+  // When an external peek sets a file, store its cwd here so the diff-loading
+  // effect can use it (the panel's own `cwd` is bound to a terminal pane).
+  const [externalCwd, setExternalCwd] = useState<string | null>(null);
   useEffect(() => {
     if (diffPanelFile && diffPanelCwd) {
       setSelectedFile(diffPanelFile);
+      setExternalCwd(diffPanelCwd);
       // Clear the store so the same file can be selected again later.
       useUiStore.getState().setDiffPanelFile(null, null);
     }
@@ -342,7 +346,12 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   useEffect(() => {
     setSelectedFile(null);
     setDiffText(null);
+    setExternalCwd(null);
   }, [bindKey]);
+
+  // The working directory for fetching diffs: external peek takes priority,
+  // otherwise fall back to the bound pane/project cwd.
+  const diffCwd = externalCwd ?? cwd;
 
   // Fetch the file's diff whenever the selection (or cwd) changes. Guarded
   // internally so it no-ops when nothing is selected.
@@ -367,7 +376,7 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   // freshness matters most. Driven by the same FS watcher event the file
   // list uses — no 2s poll left.
   useEffect(() => {
-    if (!selectedFile || !cwd) {
+    if (!selectedFile || !diffCwd) {
       setDiffText(null);
       return;
     }
@@ -376,7 +385,7 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     const tick = () => {
       if (cancelled) return;
       if (firstLoad) setDiffLoading(true);
-      void getGitFileDiff(cwd, selectedFile).then((d) => {
+      void getGitFileDiff(diffCwd, selectedFile).then((d) => {
         if (cancelled) return;
         const next = d ?? "";
         // Skip the state update when the diff text is unchanged — a
@@ -409,7 +418,7 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
       cancelled = true;
       if (unlisten) unlisten();
     };
-  }, [selectedFile, cwd]);
+  }, [selectedFile, diffCwd]);
   // Memoized: parseUnifiedDiff on a large diff is expensive, and this used
   // to re-run on EVERY panel render (each 4s file-list poll included).
   const diffFiles = useMemo(

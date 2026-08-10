@@ -328,7 +328,7 @@ export function BranchDropdown({ onClose }: { onClose?: () => void }) {
               <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {f.path}
               </span>
-              <PeekButton filePath={f.path} projectPath={path!} />
+              <PeekButton filePath={f.path} projectPath={path!} onPeek={() => { setDirtyCheckout(null); setDirtyFiles([]); if (onClose) onClose(); }} />
             </div>
           ))}
         </div>
@@ -339,16 +339,16 @@ export function BranchDropdown({ onClose }: { onClose?: () => void }) {
 }
 
 /** A small eye/peek icon that opens the diff panel in the ToolPanel. */
-function PeekButton({ filePath, projectPath }: { filePath: string; projectPath: string; projectId?: string }) {
+function PeekButton({ filePath, projectPath, onPeek }: { filePath: string; projectPath: string; projectId?: string; onPeek?: () => void }) {
   const setToolPanelTab = useUiStore((s) => s.setToolPanelTab);
   const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
   const setDiffPanelFile = useUiStore((s) => s.setDiffPanelFile);
 
   const handlePeek = () => {
-    // Set the file to diff + open the ToolPanel's Changes tab
     setDiffPanelFile(filePath, projectPath);
     setToolPanelTab("files");
     setToolPanelCollapsed(false);
+    onPeek?.();
   };
 
   return (

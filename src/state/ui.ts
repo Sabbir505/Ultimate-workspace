@@ -155,7 +155,7 @@ export const useUiStore = create<UiState>((set) => ({
   toolPanelCollapsed: true,
   toolPanelWidth: 532,
   // Open by default — it's the primary git surface now.
-  gitSidebarCollapsed: false,
+  gitSidebarCollapsed: true,
   planCanvasContent: null,
   planCanvasTitle: null,
   diffPanelFile: null,

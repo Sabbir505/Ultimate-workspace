@@ -116,13 +116,17 @@ export function GitToolsSidebar() {
   }, [path]);
 
   // Outside-click handler for the portaled branch popover.
+  // Skips clicks inside portaled modals (commit modal, dirty checkout, etc.)
+  // since they render to <body> and would otherwise be seen as "outside".
   useEffect(() => {
     if (!branchOpen) return;
     const handler = (e: MouseEvent) => {
       const target = e.target as Node;
       const insideBtn = branchBtnRef.current?.contains(target);
       const insidePopover = popoverRef.current?.contains(target);
-      if (!insideBtn && !insidePopover) {
+      // Don't close if the click is inside a portaled overlay (Modal, popover, etc.)
+      const insideModal = target instanceof Element && target.closest(".modal-overlay") !== null;
+      if (!insideBtn && !insidePopover && !insideModal) {
         setBranchOpen(false);
       }
     };

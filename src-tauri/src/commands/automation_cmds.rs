@@ -8,10 +8,22 @@ use crate::automations;
 use crate::db::{self, Automation, AutomationInput, AutomationRun};
 use crate::DbState;
 
-/// Harnesses an automation may use. Kimi is excluded on purpose: it cannot
-/// combine prompt mode with an auto-approve flag, so unattended runs would
-/// execute with tools crippled (verified against `kimi --help`).
-const ALLOWED_HARNESSES: [&str; 2] = ["claude_code", "opencode"];
+/// Agent ids an automation may use. CLI harnesses, cloud API providers, and
+/// local GGUF are all valid — the execution path routes accordingly
+/// (CLI harness → run_one_shot, API/local → chat send). Kimi harness is
+/// excluded: it cannot combine prompt mode with auto-approve.
+const ALLOWED_AGENTS: [&str; 7] = [
+    // CLI harnesses
+    "claude_code",
+    "opencode",
+    // Cloud API providers
+    "anthropic",
+    "openai",
+    "openrouter",
+    "anthropic_compatible",
+    "openai_compatible",
+    // local_gguf is also valid (supported at execution)
+];
 
 fn validate(input: &AutomationInput) -> Result<(), String> {
     if input.name.trim().is_empty() {
@@ -20,11 +32,11 @@ fn validate(input: &AutomationInput) -> Result<(), String> {
     if input.prompt.trim().is_empty() {
         return Err("prompt is required".into());
     }
-    if !ALLOWED_HARNESSES.contains(&input.harness.as_str()) {
+    // local_gguf is also valid — checked separately to keep the const small
+    if !ALLOWED_AGENTS.contains(&input.harness.as_str()) && input.harness != "local_gguf" {
         return Err(format!(
-            "harness '{}' cannot run automations (supported: {})",
+            "agent '{}' cannot run automations (supported: CLI agents, cloud APIs, local GGUF)",
             input.harness,
-            ALLOWED_HARNESSES.join(", ")
         ));
     }
     automations::validate_schedule(&input.schedule)

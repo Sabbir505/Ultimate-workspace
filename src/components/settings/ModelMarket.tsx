@@ -29,6 +29,7 @@ import {
   type MarketSettings,
   type ModelSort,
 } from "../../lib/ipc";
+import { Modal } from "../common/Modal";
 
 type SortKey = ModelSort;
 
@@ -65,11 +66,11 @@ interface PerDownload {
 }
 
 export interface ModelMarketProps {
-  /** Called after a successful download so the parent can re-scan disk. */
   onDownloadComplete: () => void;
+  localModels?: { filename: string; name?: string | null }[];
 }
 
-export function ModelMarket({ onDownloadComplete }: ModelMarketProps) {
+export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProps) {
   const [settings, setSettings] = useState<MarketSettings | null>(null);
   const [entries, setEntries] = useState<CatalogEntry[]>([]);
   const [query, setQuery] = useState("");
@@ -183,6 +184,7 @@ export function ModelMarket({ onDownloadComplete }: ModelMarketProps) {
           : prev,
       );
     } catch (e) {
+      console.error("[ModelMarket] fetch error:", e);
       setLoadError(e instanceof Error ? e.message : String(e));
       setEntries([]);
     } finally {
@@ -326,6 +328,12 @@ export function ModelMarket({ onDownloadComplete }: ModelMarketProps) {
       )}
 
       <div className="model-market-grid" data-fetch-tick={fetchTick}>
+        {loading && entries.length === 0 && (
+          <div className="empty-reserved">
+            <span className="local-spinner" />
+            <span className="empty-text">Loading catalog from Hugging Face…</span>
+          </div>
+        )}
         {entries.length === 0 && !loading && !loadError && (
           <div className="empty-reserved">
             <span className="empty-text">
@@ -333,15 +341,47 @@ export function ModelMarket({ onDownloadComplete }: ModelMarketProps) {
             </span>
           </div>
         )}
-        {entries.map((e) => (
-          <ModelCard
-            key={e.id}
-            entry={e}
-            download={downloads[e.id]}
-            totalRam={totalRam}
-            onAction={() => onStartDownload(e)}
-          />
-        ))}
+        {(() => {
+          // Group by repo, dedup, and collect available quants
+          const byRepo = new Map<string, { entries: CatalogEntry[]; quants: { label: string; entry: CatalogEntry }[] }>();
+          for (const e of entries) {
+            const group = byRepo.get(e.repoId) || { entries: [], quants: [] };
+            group.entries.push(e);
+            if (e.quantization) {
+              group.quants.push({ label: e.quantization, entry: e });
+            }
+            byRepo.set(e.repoId, group);
+          }
+          // Pick best entry per repo (prefer Q4_K_M)
+          const deduped: CatalogEntry[] = [];
+          for (const [, group] of byRepo) {
+            const best = group.entries.reduce((a, b) => {
+              const aQ4 = (a.quantization || "").toLowerCase().includes("q4_k_m");
+              const bQ4 = (b.quantization || "").toLowerCase().includes("q4_k_m");
+              if (aQ4 !== bQ4) return aQ4 ? a : b;
+              return (b.sizeBytes || 0) > (a.sizeBytes || 0) ? b : a;
+            });
+            deduped.push(best);
+          }
+          return deduped.map((e) => {
+            const isDownloaded = localModels?.some((m) =>
+              (m.filename && e.filename === m.filename) ||
+              (m.name && e.displayName && m.name.includes(e.displayName.split(" ").slice(0, 3).join(" ")))
+            );
+            const quants = byRepo.get(e.repoId)?.quants || [];
+            return (
+              <ModelCard
+                key={e.repoId}
+                entry={e}
+                download={downloads[e.id]}
+                totalRam={totalRam}
+                isDownloaded={!!isDownloaded}
+                availableQuants={quants}
+                onAction={(entry) => onStartDownload(entry)}
+              />
+            );
+          });
+        })()}
       </div>
     </div>
   );
@@ -359,93 +399,233 @@ interface ModelCardProps {
   entry: CatalogEntry;
   download: PerDownload | undefined;
   totalRam: number;
-  onAction: () => void;
+  isDownloaded: boolean;
+  availableQuants: { label: string; entry: CatalogEntry }[];
+  onAction: (entry: CatalogEntry) => void;
 }
 
-function ModelCard({ entry, download, totalRam, onAction }: ModelCardProps) {
-  const ram = ramClass(entry.sizeBytes, totalRam);
+function fmtNum(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return n.toLocaleString();
+}
+
+function fmtDate(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const now = Date.now();
+  const diff = now - d.getTime();
+  if (diff < 86400000) return "Today";
+  if (diff < 172800000) return "Yesterday";
+  if (diff < 604800000) return `${Math.floor(diff / 86400000)}d ago`;
+  if (diff < 2592000000) return `${Math.floor(diff / 604800000)}w ago`;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function ModelCard({ entry, download, totalRam, isDownloaded, availableQuants, onAction }: ModelCardProps) {
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [selectedQuantEntry, setSelectedQuantEntry] = useState<CatalogEntry>(entry);
+  const activeEntry = selectedQuantEntry || entry;
+  const [quantsExpanded, setQuantsExpanded] = useState(false);
+  const visibleQuants = quantsExpanded ? availableQuants : availableQuants.slice(0, 5);
+  const ram = ramClass(activeEntry.sizeBytes, totalRam);
+  const ramLabel = ram === "fits" ? "Fits RAM" : ram === "tight" ? "Tight fit" : "Too large";
+  const ramColor = ram === "fits" ? "var(--green)" : ram === "tight" ? "var(--yellow)" : "var(--red)";
   const state = download?.state;
-  const pct =
-    download?.total && download.total > 0
-      ? Math.min(100, Math.round((download.downloaded / download.total) * 100))
-      : null;
+  const pct = download?.total && download.total > 0
+    ? Math.min(100, Math.round((download.downloaded / download.total) * 100))
+    : null;
 
   const actionLabel = useMemo(() => {
-    if (!state || state === "done" || state === "cancelled" || state === "error")
-      return "Download";
+    if (!state || state === "done" || state === "cancelled" || state === "error") return "Download";
     if (state === "starting") return "Starting…";
     if (state === "downloading") return "Cancel";
     if (state === "verifying") return "Verifying…";
     return "Download";
   }, [state]);
 
+  const isDone = state === "done";
+  const isActive = state && state !== "done" && state !== "cancelled" && state !== "error";
+  const isError = state === "error";
+
+  // Extract structured info from tags
+  const tags = entry.tags || [];
+  const pipelineTag = tags.find((t) => ["text-generation", "feature-extraction", "text-to-image", "automatic-speech-recognition", "image-text-to-text", "text-classification", "token-classification", "question-answering", "translation", "summarization", "fill-mask", "sentence-similarity", "image-classification", "object-detection", "image-segmentation", "text-to-speech", "visual-question-answering", "document-question-answering"].includes(t));
+  const library = tags.find((t) => ["transformers", "sentence-transformers", "diffusers", "gguf", "mlx", "transformers.js", "llama.cpp"].includes(t));
+  const baseModel = tags.find((t) => t.startsWith("base_model:"))?.replace("base_model:", "");
+
   return (
-    <div className={`model-card ram-${ram}`}>
-      <div className="model-card-head">
-        <div className="model-card-title" title={entry.displayName}>
-          {entry.displayName}
-        </div>
-        <div className="model-card-badges">
-          {entry.paramsLabel && <span className="badge">{entry.paramsLabel}</span>}
-          {entry.quantization && <span className="badge">{entry.quantization}</span>}
-          {entry.vision && <span className="badge vision">vision</span>}
-          <span className={`badge ram-badge ram-${ram}`}>
-            {ram === "fits" ? "Fits RAM" : ram === "tight" ? "Tight" : "Too large"}
-          </span>
-        </div>
-      </div>
-      <div className="model-card-meta">
-        <span className="model-card-author" title={entry.repoId}>
-          {entry.author || entry.repoId}
-        </span>
-        <span className="model-card-size">{formatBytes(entry.sizeBytes)}</span>
-        <span className="model-card-dl">↓ {entry.downloads.toLocaleString()}</span>
-      </div>
-      {entry.description && (
-        <div className="model-card-desc">{entry.description}</div>
-      )}
-      {entry.license && (
-        <div className="model-card-license">License: {entry.license}</div>
-      )}
-
-      {state && state !== "done" && state !== "cancelled" && state !== "error" && (
-        <div className="model-card-progress">
-          <div className="model-card-progress-bar">
-            <div
-              className="model-card-progress-fill"
-              style={{ width: `${pct ?? 0}%` }}
-            />
+    <>
+      <div
+        className={`model-card${isActive ? " downloading" : ""}${isDone ? " done" : ""}${isError ? " errored" : ""}`}
+        onClick={() => { if (!isActive) setDetailOpen(true); }}
+      >
+        {/* Header: avatar + name + stats */}
+        <div className="model-card-header">
+          <div className="model-card-avatar">
+            {entry.author ? entry.author.charAt(0).toUpperCase() : "?"}
           </div>
-          <div className="model-card-progress-info">
-            <span>
-              {pct !== null ? `${pct}% · ` : ""}
-              {formatBytes(download?.downloaded ?? 0)}
-              {download?.total ? ` / ${formatBytes(download.total)}` : ""}
+          <div className="model-card-header-info">
+            <div className="model-card-name" title={entry.displayName}>{entry.displayName}</div>
+            <div className="model-card-repo" title={entry.repoId}>
+              {entry.author || "Unknown"}/{entry.repoId.split("/").slice(1).join("/") || entry.repoId}
+            </div>
+          </div>
+          <div className="model-card-stats">
+            <span className="model-card-stat" title={`${entry.downloads.toLocaleString()} downloads`}>
+              <svg width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+              {fmtNum(entry.downloads)}
             </span>
-            <span>{formatRate(download?.bps ?? 0)}</span>
+            <span className="model-card-stat" title={`${entry.likes.toLocaleString()} likes`}>
+              <svg width={11} height={11} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" /></svg>
+              {fmtNum(entry.likes)}
+            </span>
           </div>
         </div>
-      )}
 
-      {state === "done" && (
-        <div className="model-card-status done">Saved · ready to use</div>
-      )}
-      {state === "cancelled" && (
-        <div className="model-card-status cancelled">Cancelled</div>
-      )}
-      {state === "error" && (
-        <div className="model-card-status error">{download?.error ?? "Download failed"}</div>
-      )}
+        {/* Tags + quant selector */}
+        <div className="model-card-tags">
+          {entry.paramsLabel && <span className="model-card-tag params">{entry.paramsLabel}</span>}
+          {availableQuants.length > 1 ? (
+            <>
+              {visibleQuants.map((q) => (
+                <span
+                  key={q.entry.filename}
+                  className={`model-card-tag quant${q.entry.filename === activeEntry.filename ? " active" : ""}`}
+                  onClick={(e) => { e.stopPropagation(); setSelectedQuantEntry(q.entry); }}
+                  title={`${q.label} — ${formatBytes(q.entry.sizeBytes)}`}
+                  style={{ cursor: "pointer" }}
+                >
+                  {q.label}
+                </span>
+              ))}
+              {availableQuants.length > 5 && (
+                <span
+                  className="model-card-tag quant"
+                  onClick={(e) => { e.stopPropagation(); setQuantsExpanded(!quantsExpanded); }}
+                  style={{ cursor: "pointer" }}
+                >
+                  {quantsExpanded ? "▲ less" : `+${availableQuants.length - 5} more`}
+                </span>
+              )}
+            </>
+          ) : entry.quantization ? (
+            <span className="model-card-tag quant">{entry.quantization}</span>
+          ) : null}
+          <span className="model-card-tag size">{formatBytes(activeEntry.sizeBytes)}</span>
+          {pipelineTag && <span className="model-card-tag pipeline">{pipelineTag}</span>}
+          {library && <span className="model-card-tag library">{library}</span>}
+          {baseModel && <span className="model-card-tag base" title={baseModel}>Based on {baseModel.split("/").pop()}</span>}
+          {entry.vision && <span className="model-card-tag vision">Vision</span>}
+          <span className="model-card-tag ram" style={{ color: ramColor, borderColor: ramColor }}>{ramLabel}</span>
+          {fmtDate(entry.lastModified) && <span className="model-card-tag updated">Updated {fmtDate(entry.lastModified)}</span>}
+        </div>
 
-      <div className="model-card-actions">
-        <button
-          className="primary"
-          onClick={onAction}
-          disabled={state === "starting" || state === "verifying" || ram === "too_large"}
-        >
-          {actionLabel}
-        </button>
+        {/* Description */}
+        {entry.description && <div className="model-card-desc">{entry.description}</div>}
+
+        {/* Progress */}
+        {isActive && (
+          <div className="model-card-progress">
+            <div className="model-card-progress-bar"><div className="model-card-progress-fill" style={{ width: `${pct ?? 0}%` }} /></div>
+            <div className="model-card-progress-info">
+              <span>{pct !== null ? `${pct}% · ` : ""}{formatBytes(download?.downloaded ?? 0)}{download?.total ? ` / ${formatBytes(download.total)}` : ""}</span>
+              <span>{formatRate(download?.bps ?? 0)}</span>
+            </div>
+          </div>
+        )}
+
+        {/* Status */}
+        {isDone && <div className="model-card-status done">✓ Downloaded · Ready to use</div>}
+        {state === "cancelled" && <div className="model-card-status cancelled">Cancelled</div>}
+        {isError && <div className="model-card-status error">{download?.error ?? "Download failed"}</div>}
+
+        {/* Action */}
+        <div className="model-card-actions">
+          {isDownloaded && !isActive ? (
+            <div className="model-card-status done" style={{ margin: 0, flex: 1, textAlign: "center" }}>
+              ✓ Already downloaded · Ready to use
+            </div>
+          ) : (
+            <button className="primary" onClick={(e) => { e.stopPropagation(); onAction(activeEntry); }} disabled={state === "starting" || state === "verifying" || ram === "too_large"}>
+              {isActive ? `${pct ?? 0}%` : actionLabel}
+            </button>
+          )}
+        </div>
       </div>
-    </div>
+
+      {/* Detail modal */}
+      {detailOpen && (
+        <Modal
+          title={entry.displayName}
+          onClose={() => setDetailOpen(false)}
+          actions={
+            isDownloaded && !isActive ? (
+              <div className="model-card-status done" style={{ margin: 0, textAlign: "center", flex: 1 }}>✓ Already downloaded and ready</div>
+            ) : (
+              <button className="primary" onClick={(e) => { onAction(activeEntry); setDetailOpen(false); }} disabled={state === "starting" || state === "verifying" || ram === "too_large"}>
+                {actionLabel} ({formatBytes(activeEntry.sizeBytes)})
+              </button>
+            )
+          }
+        >
+          <div className="model-detail-modal">
+            <div className="model-detail-hero">
+              <div className="model-detail-avatar-lg">{entry.author ? entry.author.charAt(0).toUpperCase() : "?"}</div>
+              <div>
+                <div className="model-detail-repo">{entry.author || "Unknown"} / {entry.repoId.split("/").slice(1).join("/")}</div>
+                <div className="model-detail-stats">
+                  <span>↓ {entry.downloads.toLocaleString()} downloads</span>
+                  <span>♥ {entry.likes.toLocaleString()} likes</span>
+                </div>
+              </div>
+            </div>
+            {entry.description && <p className="model-detail-desc">{entry.description}</p>}
+            {availableQuants.length > 1 && (
+              <div className="model-detail-quants">
+                <span className="model-detail-quants-label">Quantization ({availableQuants.length}):</span>
+                <div className="model-detail-quants-list">
+                  {(quantsExpanded ? availableQuants : availableQuants.slice(0, 5)).map((q) => (
+                    <span
+                      key={q.entry.filename}
+                      className={`model-card-tag quant${q.entry.filename === activeEntry.filename ? " active" : ""}`}
+                      onClick={() => setSelectedQuantEntry(q.entry)}
+                      style={{ cursor: "pointer" }}
+                    >
+                      {q.label} ({formatBytes(q.entry.sizeBytes)})
+                    </span>
+                  ))}
+                  {availableQuants.length > 5 && (
+                    <span
+                      className="model-card-tag quant"
+                      onClick={() => setQuantsExpanded(!quantsExpanded)}
+                      style={{ cursor: "pointer" }}
+                    >
+                      {quantsExpanded ? "▲ less" : `+${availableQuants.length - 5} more`}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+            <div className="model-detail-grid">
+              <div className="model-detail-item"><span className="model-detail-item-label">Size</span><span className="model-detail-item-value mono">{formatBytes(activeEntry.sizeBytes)}</span></div>
+              <div className="model-detail-item"><span className="model-detail-item-label">Parameters</span><span className="model-detail-item-value">{entry.paramsLabel || "—"}</span></div>
+              <div className="model-detail-item"><span className="model-detail-item-label">Quantization</span><span className="model-detail-item-value">{entry.quantization || "—"}</span></div>
+              <div className="model-detail-item"><span className="model-detail-item-label">License</span><span className="model-detail-item-value">{entry.license || "—"}</span></div>
+              <div className="model-detail-item"><span className="model-detail-item-label">RAM Fit</span><span className="model-detail-item-value" style={{ color: ramColor }}>{ramLabel}</span></div>
+              <div className="model-detail-item"><span className="model-detail-item-label">Pipeline</span><span className="model-detail-item-value" style={{ textTransform: "capitalize" }}>{pipelineTag || "—"}</span></div>
+              <div className="model-detail-item"><span className="model-detail-item-label">Library</span><span className="model-detail-item-value">{library || "—"}</span></div>
+              <div className="model-detail-item"><span className="model-detail-item-label">Downloads</span><span className="model-detail-item-value">{fmtNum(entry.downloads)}</span></div>
+              <div className="model-detail-item"><span className="model-detail-item-label">Likes</span><span className="model-detail-item-value">{fmtNum(entry.likes)}</span></div>
+              {entry.lastModified && <div className="model-detail-item"><span className="model-detail-item-label">Updated</span><span className="model-detail-item-value">{fmtDate(entry.lastModified)}</span></div>}
+              {baseModel && <div className="model-detail-item"><span className="model-detail-item-label">Base Model</span><span className="model-detail-item-value">{baseModel}</span></div>}
+              {entry.vision && <div className="model-detail-item"><span className="model-detail-item-label">Vision</span><span className="model-detail-item-value" style={{ color: "#a78bfa" }}>✓ Multimodal</span></div>}
+              {tags.length > 0 && <div className="model-detail-item" style={{ gridColumn: "1 / -1" }}><span className="model-detail-item-label">Tags</span><span className="model-detail-item-value">{tags.slice(0, 10).join(", ")}</span></div>}
+            </div>
+            {entry.sha256 && <div className="model-detail-sha">SHA-256: <code>{entry.sha256.slice(0, 32)}…</code></div>}
+          </div>
+        </Modal>
+      )}
+    </>
   );
 }

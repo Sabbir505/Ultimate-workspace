@@ -651,7 +651,7 @@ function LocalModelsPanel() {
         const isRunning = active?.modelId === m.id;
         const displayName = shortModelName(m.name || m.filename);
         return (
-          <div key={m.id} className={`model-card ram-${ram}${isRunning ? " running" : ""}`}>
+          <div key={m.id} className={`local-model-card model-card${isRunning ? " running" : ""}`}>
             <button
               className="model-card-delete"
               title="Delete this model file from disk"
@@ -675,23 +675,20 @@ function LocalModelsPanel() {
               </svg>
             </button>
             <div className="model-card-head">
-              <div className="model-card-title" title={displayName}>
-                {displayName}
+              <div className="model-info">
+                <div className="model-name" title={displayName}>{displayName}</div>
+                <div className="model-meta">
+                  <span>{m.architecture || m.source}</span>
+                  <span>·</span>
+                  <span>{humanSize(m.sizeBytes)}</span>
+                  {m.quantization && <span className="model-tag">{m.quantization}</span>}
+                  {m.paramCountLabel && <span className="model-tag">{m.paramCountLabel}</span>}
+                  {m.hasVision && <span className="model-tag vision">Vision</span>}
+                  <span className={`model-tag memory-status`} style={{ color: ram === "fits" ? "var(--green)" : ram === "tight" ? "var(--yellow)" : "var(--red)" }}>
+                    {ram === "fits" ? "Fits RAM" : ram === "tight" ? "Tight" : "Too large"}
+                  </span>
+                </div>
               </div>
-              <div className="model-card-badges">
-                {m.paramCountLabel && <span className="badge">{m.paramCountLabel}</span>}
-                {m.quantization && <span className="badge">{m.quantization}</span>}
-                {m.hasVision && <span className="badge vision">vision</span>}
-                <span className={`badge ram-badge ram-${ram}`}>
-                  {ram === "fits" ? "Fits RAM" : ram === "tight" ? "Tight" : "Too large"}
-                </span>
-              </div>
-            </div>
-            <div className="model-card-meta">
-              <span className="model-card-author" title={m.source}>
-                {m.architecture || m.source}
-              </span>
-              <span className="model-card-size">{humanSize(m.sizeBytes)}</span>
             </div>
 
             {isStarting && (
@@ -788,6 +785,9 @@ function LocalModelsPanel() {
         <LocalCompactionControls />
       </details>
       </>
+      )}
+      {tab === "market" && (
+        <ModelMarket onDownloadComplete={() => void runScan()} localModels={models} />
       )}
     </>
   );

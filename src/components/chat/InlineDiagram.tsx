@@ -20,9 +20,9 @@ import { sanitizeHtml } from "../../lib/sanitize";
 const FIT_PAD_X = 12;
 const FIT_PAD_Y = 8;
 const FIT_STYLE =
-  `<style>html{margin:0}body{margin:0;padding:${FIT_PAD_Y}px ${FIT_PAD_X}px;` +
-  "overflow:hidden;background:#fff;display:flex;justify-content:center}" +
-  "svg{display:block;max-width:100%;height:auto}</style>";
+  `<style>html{margin:0;overflow:hidden}body{margin:0;padding:${FIT_PAD_Y}px ${FIT_PAD_X}px;` +
+  "overflow:hidden;background:#fff;display:flex;justify-content:center;align-items:center}" +
+  "svg{display:block;max-width:100%!important;height:auto!important;width:auto!important}</style>";
 
 function withFitStyle(html: string): string {
   if (/<head[^>]*>/i.test(html)) {
@@ -131,7 +131,8 @@ export function InlineDiagram({
         title={artifact.filename}
         sandbox=""
         srcDoc={srcDoc}
-        style={{ height }}
+        scrolling="no"
+        style={{ height: Math.min(height, 480) }}
       />
     </div>
   );

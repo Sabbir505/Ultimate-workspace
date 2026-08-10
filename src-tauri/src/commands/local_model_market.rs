@@ -215,17 +215,25 @@ fn dirs_home() -> Option<PathBuf> {
 struct HfModel {
     id: String,
     #[serde(default)]
+    author: Option<String>,
+    #[serde(default)]
     downloads: u64,
     #[serde(default)]
     likes: u64,
     #[serde(default)]
     last_modified: Option<String>,
     #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
     description: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
+    #[serde(default)]
+    pipeline_tag: Option<String>,
+    #[serde(default)]
+    library_name: Option<String>,
     /// `siblings` lists the files in the repo. We use this to find the
-    /// GGUF filename + size + sha256.
+    /// GGUF filename. Size is estimated from quant + params.
     #[serde(default)]
     siblings: Vec<HfSibling>,
 }
@@ -264,54 +272,81 @@ fn build_hf_request(
 }
 
 fn normalize_hf_model(m: HfModel) -> Vec<CatalogEntry> {
-    let mut out = Vec::new();
-    let author = m.id.split('/').next().unwrap_or("").to_string();
-    let description = m
-        .description
-        .as_deref()
-        .map(|s| s.chars().take(300).collect::<String>());
+    let gguf_files: Vec<&HfSibling> = m.siblings.iter()
+        .filter(|s| s.rfilename.to_ascii_lowercase().ends_with(".gguf"))
+        .collect();
+    if gguf_files.is_empty() { return Vec::new(); }
 
-    let license = m
-        .tags
-        .iter()
+    let author = m.author.as_deref()
+        .or_else(|| m.id.split('/').next())
+        .unwrap_or("")
+        .to_string();
+    let description = m.description.as_deref()
+        .map(|s| s.chars().take(400).collect::<String>());
+    let license = m.tags.iter()
         .find(|t| t.starts_with("license:"))
         .map(|t| t.trim_start_matches("license:").to_string());
 
-    for s in m.siblings {
-        if !s.rfilename.to_ascii_lowercase().ends_with(".gguf") {
-            continue;
-        }
-        let size = s.size.unwrap_or(0);
-        let id = format!("{}::{}", m.id, s.rfilename);
-        let download_url =
-            format!("https://huggingface.co/{}/resolve/main/{}", m.id, s.rfilename);
-        let lower = s.rfilename.to_ascii_lowercase();
+    let model_name = m.id.split('/').last().unwrap_or(&m.id);
+    let display_name = model_name
+        .replace("-GGUF", "")
+        .replace("-gguf", "")
+        .replace("_", " ")
+        .replace("-", " ");
+    let lower_all = m.id.to_ascii_lowercase();
+    let params = extract_params_label("", &lower_all);
+    let vision = m.tags.iter().any(|t| t == "multimodal" || t == "vision");
+
+    let mut entries: Vec<CatalogEntry> = Vec::new();
+    for f in gguf_files {
+        let lower = f.rfilename.to_ascii_lowercase();
         let quant = extract_quantization(&lower);
-        let params = extract_params_label(&lower, &m.id.to_ascii_lowercase());
-        let vision = lower.contains("mmproj")
-            || m.tags.iter().any(|t| t == "multimodal" || t == "vision");
-        out.push(CatalogEntry {
+        let size = if f.size.unwrap_or(0) > 0 { f.size.unwrap_or(0) }
+            else { estimate_gguf_size(params.as_deref(), quant.as_deref()) };
+        let id = format!("{}::{}", m.id, f.rfilename);
+        let dl = format!("https://huggingface.co/{}/resolve/main/{}", m.id, f.rfilename);
+        entries.push(CatalogEntry {
             id,
-            display_name: s.rfilename.trim_end_matches(".gguf").to_string(),
+            display_name: display_name.clone(),
             author: author.clone(),
             repo_id: m.id.clone(),
-            filename: s.rfilename.clone(),
+            filename: f.rfilename.clone(),
             downloads: m.downloads,
             likes: m.likes,
             last_modified: m.last_modified.clone(),
             size_bytes: size,
             description: description.clone(),
             tags: m.tags.clone(),
-            sha256: s.sha256.clone(),
-            download_url,
+            sha256: f.sha256.clone(),
+            download_url: dl,
             vision,
-            params_label: params,
+            params_label: params.clone(),
             quantization: quant,
             license: license.clone(),
-            gated: false, // resolved on first download attempt
+            gated: false,
         });
     }
-    out
+    entries
+}
+
+/// Estimate GGUF file size from model parameters and quantization.
+/// Bit-per-weight values are approximate industry standards.
+fn estimate_gguf_size(params_label: Option<&str>, quant: Option<&str>) -> u64 {
+    let billions: f64 = params_label
+        .and_then(|p| p.trim_end_matches('B').parse::<f64>().ok())
+        .unwrap_or(7.0);
+    let bpw: f64 = match quant.unwrap_or("Q4_K_M") {
+        "Q2_K" | "IQ2_XXS" | "IQ2_XS" => 2.5,
+        "Q3_K_S" | "Q3_K_M" | "Q3_K_L" | "IQ3_XXS" | "IQ3_XS" => 3.5,
+        "Q4_0" | "Q4_1" | "Q4_K_S" | "Q4_K_M" | "IQ4_XS" | "IQ4_NL" => 4.5,
+        "Q5_0" | "Q5_1" | "Q5_K_S" | "Q5_K_M" => 5.5,
+        "Q6_K" => 6.5,
+        "Q8_0" => 8.5,
+        "F16" | "BF16" => 16.0,
+        _ => 4.5,
+    };
+    // Size ≈ params_billion * 1e9 * bpw / 8, plus ~5% overhead
+    ((billions * 1_000_000_000.0 * bpw / 8.0) * 1.05) as u64
 }
 
 /// Pull a quantization label from a filename. Matches the common cases:
@@ -416,9 +451,10 @@ pub async fn fetch_model_catalog(
 
     let client = http_client();
 
+    // full=true is required to get the `siblings` file list for each model
     let url = if !query.trim().is_empty() {
         format!(
-            "https://huggingface.co/api/models?search={}&filter=gguf&limit={limit}",
+            "https://huggingface.co/api/models?search={}&filter=gguf&full=true&limit={limit}",
             urlencoding_lite(&query)
         )
     } else {
@@ -428,7 +464,7 @@ pub async fn fetch_model_catalog(
             _ => "downloads",
         };
         format!(
-            "https://huggingface.co/api/models?filter=gguf&sort={sort_param}&direction=-1&limit={limit}"
+            "https://huggingface.co/api/models?filter=gguf&sort={sort_param}&direction=-1&full=true&limit={limit}"
         )
     };
 

@@ -1,11 +1,11 @@
-# Build & release Conduit for Windows (NSIS) — the Linux pipeline is paused
-# until the product stabilizes (see AI CONTEXT/RELEASE.md).
+# Build & release Conduit for Windows (NSIS).
 #
-# Triggers on tag push (v*). The job:
+# Triggers on tag push (v*) or manual dispatch. The job:
 # 1. Installs Tauri system deps.
-# 2. Builds the Tauri bundle (npm run tauri build), producing an unsigned
+# 2. Builds the conduit-browser-mcp sidecar + stages it.
+# 3. Builds the Tauri bundle (npm run tauri build), producing an unsigned
 #    (Windows) installer.
-# 3. Uploads the bundle as a workflow artifact.
+# 4. Uploads the bundle as a workflow artifact.
 #
 # After the job completes, the `release` job downloads the artifact, signs the
 # NSIS installer with the updater key, generates `latest.json`, and creates the
@@ -57,9 +57,10 @@ jobs:
         run: npm ci
 
       # tauri build only compiles the main binary — the conduit-browser-mcp
-      # sidecar must be built explicitly. tauri-build validates the externalBin
-      # path at compile time, so touch a placeholder first, then stage the real
-      # binary once cargo has produced it.
+      # sidecar must be built and staged explicitly (stage-browser-mcp.mjs is
+      # no longer in beforeBuildCommand to avoid double-staging). tauri-build
+      # validates the externalBin path at compile time, so create a placeholder
+      # first, build the binary, then stage it.
       - name: Build browser-mcp sidecar
         working-directory: src-tauri
         run: |
@@ -85,7 +86,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     needs: [build-windows]
     steps:
       - uses: actions/checkout@v4
@@ -119,7 +120,7 @@ jobs:
           set -euo pipefail
           mkdir -p src-tauri/target/release/bundle/nsis
           cp -r artifacts/windows/* src-tauri/target/release/bundle/nsis/ 2>/dev/null || true
-          npm run release:latest-json -- --notes "See CHANGELOG.md for release notes."
+          npm run release:latest-json -- --notes "See the GitHub Release description for release notes."
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

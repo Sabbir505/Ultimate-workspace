@@ -1,11 +1,13 @@
 # Releasing Conduit (auto-update)
 
-Conduit ships updates to your friends automatically. When you publish a new
-version, every running copy checks GitHub Releases on startup (and every 4
+Conduit ships updates automatically via the Tauri updater plugin. When you publish
+a new version, every running copy checks GitHub Releases on startup (and every 4
 hours), shows a banner with the changelog, and downloads + installs the update
-with one click — no more hand-distributing `.exe` files.
+with one click.
 
-This doc is the exact recipe. Follow it top-to-bottom each time you release.
+Releases are built and published automatically by the CI pipeline
+(`.github/workflows/build.yml`). You just need to bump versions, push a tag,
+and CI handles the rest.
 
 ---
 
@@ -19,201 +21,128 @@ This doc is the exact recipe. Follow it top-to-bottom each time you release.
   so every install can verify updates are genuinely from you.
 - The **update endpoint** is
   `https://github.com/Sabbir505/Ultimate-workspace/releases/latest/download/latest.json`
-  — a file Tauri generates automatically on build and you attach to a GitHub
-  Release. GitHub serves the latest release's assets at that stable URL.
+  — a file attached as a release asset to each GitHub Release. GitHub serves the
+  latest release's assets at that stable URL.
 
-## Platforms
+## Platform
 
-Conduit ships for **Windows (NSIS)** and **Linux (AppImage + deb)**. The GitHub Actions workflow (`.github/workflows/build.yml`) builds **Windows-only** (the Linux pipeline is paused until the product stabilizes — see the workflow's header). A future release will resume Linux builds from CI; for now, manual builds (`npm run tauri build` on Linux) produce the AppImage and deb artifacts.
-
-- **Windows** installs download the signed `.exe` updater package; the updater runs it in `passive` mode (a progress UI, no manual steps).
-- **Linux AppImage** updates: the Tauri updater plugin surfaces "a new version is available" and links to the release; AppImage auto-replace is best-effort (the `.AppImage` is a portable single-file binary — to update, download the new one and replace the old file). The `latest.json` `linux-x86_64` entry carries the download URL for this.
-- **Linux deb** packages are for apt-based distros; `sudo dpkg -i` installs, but the updater plugin does not auto-replace debs — treat deb as the install-once path; use the AppImage for auto-updates.
-
-## Prerequisites
-
-- The private key on the machine that builds releases. It's already at
-  `.tauri/conduit-update.key` on the dev machine. If you build elsewhere, copy
-  that file over (it's gitignored, so `git clone` won't bring it).
-- `gh` CLI authenticated (`gh auth login`), OR willingness to attach files via
-  the GitHub web UI. (The script below uses `gh` if present, else prints
-  instructions.)
+Conduit ships for **Windows (NSIS installer)** only. The installer is built on
+`windows-latest` in CI, signed on `ubuntu-latest`, and distributed via GitHub
+Releases.
 
 ---
 
-## Release steps
+## Release steps (CI path)
 
 ### 1. Bump the version
 
-Edit `src-tauri/tauri.conf.json` and bump `"version"` (e.g. `0.1.0` → `0.2.0`).
+Edit these three files and set the same version in all of them:
+
+- `src-tauri/tauri.conf.json` → `"version"`
+- `package.json` → `"version"`
+- `src-tauri/Cargo.toml` → `[package] version`
+
 Use [semver](https://semver.org): patch for bugfixes, minor for features,
 major for breaking changes.
 
-Also update the version in `package.json` **and** `src-tauri/Cargo.toml`
-to match (keeps all three in sync — `tauri.conf.json`, `package.json`,
-and `Cargo.toml` must agree).
-
-### 2. Write the changelog
-
-The release notes come from the **GitHub Release description**, which becomes
-the `body` field in `latest.json`. Tauri copies the notes you write on the
-GitHub Release into the JSON. So: write your changelog as the release
-description when you create the release (step 5). Markdown is supported and
-renders in the update banner.
-
-### 3. Build the bundle (do NOT set signing env vars)
-
-> **Important:** do *not* set `TAURI_SIGNING_PRIVATE_KEY_PATH` /
-> `TAURI_SIGNING_PRIVATE_KEY` before `tauri build`. Tauri's built-in signing
-> step hangs on an interactive password prompt that the env var does not
-> suppress, and the build never finishes. Instead, build plain, then sign in
-> the next step with `tauri signer sign` (which *is* non-interactive).
-
-> **Connector credentials required at build time.** `option_env!` in
-> `src-tauri/src/connectors/config.rs` bakes the Notion `client_id` /
-> `client_secret`, GitHub `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`, and
-> Google `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` into the binary when cargo
-> compiles. Canva uses Dynamic Client Registration (DCR, public client) and
-> needs no build-time secret. If these are unset, the published build ships
-> with empty credentials and every user's **Settings → Connectors → Connect**
-> fails with "no client_id configured". Set them in the same shell before the
-> build command (PowerShell):
->
-> ```powershell
-> $env:NOTION_CLIENT_ID = "3a9d872b-..."        # your integration's client id
-> $env:NOTION_CLIENT_SECRET = "secret_..."      # your integration's secret
-> $env:GITHUB_CLIENT_ID = "Iv1.1234567890abcdef"  # GitHub OAuth App client id
-> $env:GITHUB_CLIENT_SECRET = "abcdef0123456789..."  # GitHub OAuth App secret
-> $env:GOOGLE_CLIENT_ID = "..."  # Google Cloud Console "Desktop app" client id
-> $env:GOOGLE_CLIENT_SECRET = "..."  # Google Cloud Console "Desktop app" secret
-> ```
->
-> The Notion + Google credentials are the *integration's* credentials; the
-> GitHub ones are a registered **GitHub OAuth App** (see the GitHub connector
-> entry in BUILD_LOG.md). Google's `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`
-> (Cloud Console "Desktop app" client) also follow this pattern. These are NOT
-> per-user: each end user still connects **their own** account and gets their
-> own access token stored in their own OS keychain. The shared secrets let the
-> app complete the confidential-client token exchange on behalf of any
-> authorizing user.
-> **The secrets are extractable from the published `.exe`** — accepted
-> trade-off for the embedded-secret model; rotate them in the vendor dashboards
-> if they leak. (See `src-tauri/src/connectors/config.rs` doc comments.)
+### 2. Commit and tag
 
 ```powershell
-npm run tauri build
+git add -A
+git commit -m "chore: bump to v0.5.0"
+git tag v0.5.0
+git push origin master --tags
 ```
 
-This produces, under `src-tauri/target/release/bundle/`:
-- `nsis/Conduit_<version>_x64-setup.exe` — the installer your friends run once.
-- `msi/Conduit_<version>_x64_en-US.msi` — alternate installer.
+### 3. CI does the rest
 
-No signature yet — that's step 3b.
+Pushing the tag triggers `.github/workflows/build.yml`, which:
 
-### 3b. Sign + generate `latest.json` (one command)
+1. **Build (Windows):** Builds the `conduit-browser-mcp` sidecar, stages it,
+   runs `npm run tauri build` (no signing env vars — avoids password prompt
+   hang), and uploads the NSIS installer as an artifact.
+2. **Release (Ubuntu):** Downloads the installer, restores the signing key from
+   GitHub Actions secrets, signs the `.exe` with `tauri signer sign`, generates
+   `latest.json`, and creates the GitHub Release with both files attached.
 
-```powershell
-# write your changelog to a file, then:
-npm run release:latest-json -- --notes-file src-tauri/target/release/bundle/release-notes-0.2.0.md
-```
-
-The `release:latest-json` script (`scripts/make-latest-json.mjs`):
-1. Signs the built `-setup.exe` with `tauri signer sign -f .tauri/conduit-update.key -p ""` (non-interactive).
-2. Reads the resulting `.sig`.
-3. Writes `latest.json` (version + notes + signature + download URL).
-
-You can also pass `--notes "..."` for a short inline changelog, or omit both
-for a default placeholder.
-
-> The `.exe` setup file is what the updater downloads and runs silently. The
-> `.msi` is optional. Either works for the initial hand-out install.
-
-### 4. (First time only) Give your friends the initial installer
-
-For someone to receive updates, they must first install a **signed** build. So
-the very first time, send them the `Conduit_<version>_x64-setup.exe` from step
-3. After that, they never need a manual install again — updates flow
-automatically. (If you previously gave them an unsigned build, they need to
-reinstall once with a signed one.)
-
-### 5. Publish the GitHub Release
-
-Create a release tagged `v<version>` (e.g. `v0.2.0`) on
-`https://github.com/Sabbir505/Ultimate-workspace/releases/new`, then attach:
-- The signed installer: `Conduit_<version>_x64-setup.exe`
-- (optional) the `.msi`
-- `latest.json` (generated by the helper script in step 6)
-
-Paste your changelog into the release description. Publish.
+Monitor the run at:
+`https://github.com/Sabbir505/Ultimate-workspace/actions`
 
 The moment the release is live, every running Conduit sees it within 4 hours
 (or on their next launch) and shows the update banner.
 
-### 6. Generate `latest.json` (helper script)
+### Release notes
 
-Run the helper, which reads the built bundle + signature and writes a
-`latest.json` you attach to the release:
-
-```bash
-npm run release:latest-json
-```
-
-This prints the path to `latest.json`. Attach it to the GitHub Release (same
-release, as a release asset named exactly `latest.json`).
-
-The file looks like:
-
-```json
-{
-  "version": "0.2.0",
-  "notes": "...",
-  "pub_date": "2026-07-24T15:00:00Z",
-  "platforms": {
-    "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6...",
-      "url": "https://github.com/Sabbir505/Ultimate-workspace/releases/download/v0.2.0/Conduit_0.2.0_x64-setup.exe"
-    }
-  }
-}
-```
-
-The `signature` field is what the client checks against the baked-in public key
-before installing. If it doesn't match, the update is refused.
+The CI workflow uses `generate_release_notes: true`, so GitHub auto-generates
+release notes from merged PRs. The `latest.json` notes field carries a pointer
+to the full GitHub Release description.
 
 ---
 
-## Quick reference (every release)
+## Manual release (fallback)
+
+If CI is unavailable, you can cut a release manually:
 
 ```powershell
-# 1. bump version in src-tauri/tauri.conf.json + package.json
-# 2. build (no signing env vars — signing hangs the build; the script signs)
+# 1. Bump version in all three files (as above)
+
+# 2. Build the sidecar and stage it
+cd src-tauri
+cargo build --release --bin conduit-browser-mcp
+node ../scripts/stage-browser-mcp.mjs
+cd ..
+
+# 3. Build (no signing env vars — signing hangs the build)
+#    Set connector credentials as needed (see CI workflow for env vars)
 npm run tauri build
-# 3. write changelog to a .md file, then sign + generate latest.json:
-npm run release:latest-json -- --notes-file src-tauri/target/release/bundle/release-notes-<ver>.md
-# 4. create GitHub Release v<version>, attach the -setup.exe + latest.json,
-#    paste changelog as the description, publish.
+
+# 4. Sign + generate latest.json
+npm run release:latest-json -- --notes "Your release notes here"
+
+# 5. Create GitHub Release at:
+#    https://github.com/Sabbir505/Ultimate-workspace/releases/new
+#    Tag: v<version>
+#    Attach: the .exe from src-tauri/target/release/bundle/nsis/
+#             latest.json from src-tauri/target/release/bundle/
 ```
+
+---
+
+## Required GitHub Secrets
+
+Configured in Settings → Secrets and variables → Actions:
+
+| Secret | Description |
+|--------|-------------|
+| `TAURI_SIGNING_PRIVATE_KEY` | Contents of `.tauri/conduit-update.key` |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Empty string (signer is invoked `-p ""`) |
+| `NOTION_CLIENT_ID` | Notion integration client ID |
+| `NOTION_CLIENT_SECRET` | Notion integration secret |
+| `GOOGLE_CLIENT_ID` | Google Cloud Console "Desktop app" client ID |
+| `GOOGLE_CLIENT_SECRET` | Google Cloud Console "Desktop app" secret |
+| `GH_CLIENT_ID` | GitHub OAuth App client ID |
+| `GH_CLIENT_SECRET` | GitHub OAuth App secret |
+
+---
 
 ## Troubleshooting
 
-- **`tauri build` hangs at "Decrypting updater signing key, expect a prompt"**
-  — you set `TAURI_SIGNING_PRIVATE_KEY*` env vars before the build. Don't:
-  Tauri's built-in signing prompts for a password that the env var doesn't
-  suppress, so the build never returns. Build plain (no signing env vars), then
-  sign with `npm run release:latest-json`, which calls
-  `tauri signer sign -f … -p ""` non-interactively.
-- **"Could not fetch a valid release JSON"** in dev logs — that's expected until
-  you publish your first release with a `latest.json`. After publishing it goes
-  away.
+- **CI build fails at sidecar step** — the placeholder touch + `cargo build`
+  must complete before `tauri build` runs. Check that the sidecar binary name
+  matches the target triple in `stage-browser-mcp.mjs`.
+- **"Could not fetch a valid release JSON"** in dev logs — expected until you
+  publish your first release with a `latest.json`. After publishing it goes away.
 - **Update downloads but won't install ("signature mismatch")** — you signed
   the build with a different key than the `pubkey` in `tauri.conf.json`. Re-sign
-  with the matching `.tauri/conduit-update.key` (via the script), or regenerate
-  the keypair and update `pubkey` (then everyone reinstalls once).
-- **Friends don't see the banner** — make sure they're on a *signed* build
-  (produced via the release script). Builds that were never signed skip update
-  checks. Also confirm the release is marked "Latest" on GitHub (not a
-  draft/prerelease).
+  with the matching `.tauri/conduit-update.key`, or regenerate the keypair and
+  update `pubkey` (then everyone reinstalls once).
+- **Users don't see the banner** — confirm the release is marked "Latest" on
+  GitHub (not a draft/prerelease).
 - **`latest.json` 404s** — the file must be attached as a release asset named
   exactly `latest.json`, on the release tagged "Latest". The
   `/releases/latest/download/latest.json` URL only resolves for the latest
   non-prerelease release.
+- **`tauri build` hangs at "Decrypting updater signing key"** — you set
+  `TAURI_SIGNING_PRIVATE_KEY*` env vars before the build. Don't: Tauri's
+  built-in signing prompts for a password that the env var doesn't suppress.
+  Build plain, then sign with `tauri signer sign` (non-interactive).

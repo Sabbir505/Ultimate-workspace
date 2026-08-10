@@ -4,10 +4,6 @@
 //
 // Platform support:
 //   windows-x86_64  → signs the .exe with the updater key
-//   linux-x86_64    → AppImage artifact (signature not required by Tauri
-//                      updater plugin on Linux; metadata is included so the
-//                      client knows a newer version is available)
-//   linux-aarch64   → deb artifact (same)
 //
 // WHY THIS EXISTS: `tauri build` hangs on an interactive password prompt during
 // its built-in signing phase (the TAURI_SIGNING_PRIVATE_KEY_PASSWORD env var is
@@ -43,33 +39,12 @@ function argValue(name) {
   return i >= 0 ? args[i + 1] : null;
 }
 
-// --- platform discovery ---
-// Each entry: where to find the artifact in bundleDir, what filename pattern to
-// match, and whether it needs to be signed (only the Windows NSIS installer is
-// signed today; Linux artifacts are not signed because the Tauri updater
-// plugin on Linux uses a different signature mechanism — AppImage verifies via
-// its embedded update-info JSON, and the apt repository flow doesn't apply
-// here). The latest.json still includes the Linux platform entries so the
-// updater client can surface "a new version is available" and link to the
-// release.
 const PLATFORMS = {
   "windows-x86_64": {
     dir: "nsis",
     pattern: new RegExp(`^Conduit_${version.replace(/\./g, "\\.")}_x64-setup\\.exe$`),
-    fallbackPattern: /^Conduit_[\d.]+_x64-setup\.exe$/,
+    fallbackPattern: /^Conduit_[\d.]+_x64-setup\\.exe$/,
     sign: true,
-  },
-  "linux-x86_64": {
-    dir: "appimage",
-    pattern: new RegExp(`^Conduit_${version.replace(/\./g, "\\.")}_amd64\\.AppImage$`),
-    fallbackPattern: /^Conduit_[\d.]+_amd64\.AppImage$/,
-    sign: false,
-  },
-  "linux-aarch64": {
-    dir: "deb",
-    pattern: new RegExp(`^Conduit_${version.replace(/\./g, "\\.")}_arm64\\.deb$`),
-    fallbackPattern: /^Conduit_[\d.]+_arm64\.deb$/,
-    sign: false,
   },
 };
 
@@ -127,28 +102,24 @@ for (const [key, spec] of Object.entries(PLATFORMS)) {
   const filePath = join(platformDir, fileName);
   let signature = "";
 
-  if (spec.sign) {
-    // Windows: non-interactive sign with tauri signer.
-    const sigPath = `${filePath}.sig`;
-    console.log(`Signing ${fileName} …`);
-    try {
-      execSync(
-        `npx @tauri-apps/cli signer sign -f "${keyPath}" -p "" "${filePath}"`,
-        { stdio: "inherit", cwd: root },
-      );
-    } catch {
-      console.error(`Signing failed for ${fileName}. See error above.`);
-      process.exit(1);
-    }
-    if (!existsSync(sigPath)) {
-      console.error(`Expected signature at ${sigPath} but it wasn't created.`);
-      process.exit(1);
-    }
-    signature = readFileSync(sigPath, "utf8").trim();
-    console.log(`✓ Signed ${fileName}`);
-  } else {
-    console.log(`(note) ${key}: artifact not signed (Tauri updater does not verify Linux signatures today)`);
+  // Non-interactive sign with tauri signer.
+  const sigPath = `${filePath}.sig`;
+  console.log(`Signing ${fileName} …`);
+  try {
+    execSync(
+      `npx @tauri-apps/cli signer sign -f "${keyPath}" -p "" "${filePath}"`,
+      { stdio: "inherit", cwd: root },
+    );
+  } catch {
+    console.error(`Signing failed for ${fileName}. See error above.`);
+    process.exit(1);
   }
+  if (!existsSync(sigPath)) {
+    console.error(`Expected signature at ${sigPath} but it wasn't created.`);
+    process.exit(1);
+  }
+  signature = readFileSync(sigPath, "utf8").trim();
+  console.log(`✓ Signed ${fileName}`);
 
   platforms[key] = {
     signature,
@@ -159,7 +130,7 @@ for (const [key, spec] of Object.entries(PLATFORMS)) {
 if (Object.keys(platforms).length === 0) {
   console.error(
     `\nNo platform artifacts found under ${bundleDir}.\n` +
-      `Expected: nsis/, appimage/, deb/ (run \`npm run tauri build\` first).`,
+      `Expected: nsis/ (run \`npm run tauri build\` first).`,
   );
   process.exit(1);
 }

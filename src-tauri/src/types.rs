@@ -279,6 +279,12 @@ pub struct ChatSession {
     /// `"harness:claude_code"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// Bound project id. `None` = project-less chat (the legacy default);
+    /// otherwise a `projects.id`. Drives which project's harness bundle the
+    /// chat spawns into, which skills catalog it sees, and where artifacts
+    /// land. Bind/unbind is a Tauri command (`set_chat_session_project`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 /// A file attached to a chat message from the composer. Images are forwarded

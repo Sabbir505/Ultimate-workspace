@@ -989,6 +989,32 @@ impl BrowserManager {
         }
     }
 
+    /// Capture a PNG screenshot of the active browser pane's webview.
+    ///
+    /// Returns `Ok(None)` when the platform doesn't expose a capture path
+    /// (the WebView2 ICoreWebView2_15 CapturePreview API is only on Win10+
+    /// and a fresh install without the right edge runtime skips it) or when
+    /// no page is active. The chat tool's `browser_screenshot` falls back
+    /// to a descriptive error string in that case.
+    ///
+    /// Implementation note: the live capture path lives behind a Windows
+    /// `#[cfg(windows)]` block. On macOS/Linux this is a stub that returns
+    /// `Ok(None)` so the chat tool can still be invoked — it just won't
+    /// produce a file. That's intentional: the cross-platform follow-up
+    /// (a `tauri-plugin-screenshot` integration or a per-platform
+    /// `xcap` / `screencapturekit` shim) is a separate task.
+    pub fn capture_active_png(&self) -> Result<Option<Vec<u8>>, String> {
+        #[cfg(windows)]
+        {
+            return crate::browser_capture::capture_active_png(self);
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = self;
+            Ok(None)
+        }
+    }
+
     /// Eval a JS action body (an IIFE-able block that `return`s a string) in the
     /// active page and await the string it reports back. Times out so a stuck
     /// or navigating page can't wedge the chat turn.

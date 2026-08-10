@@ -106,6 +106,16 @@ grep = "0.3"
 # Glob pattern matching for the `search_content` tool's `glob` parameter
 # (`*.rs`, `**/test_*.py`, etc.). Pure-Rust, no native deps.
 globset = "0.4"
+# Rot fix additions (refactor session 2026-08-10): these deps were
+# referenced by src/automations.rs (cron + chrono) and src/git_watcher.rs
+# (notify) but not declared. Adding the smallest feasible versions:
+cron = "0.12"
+chrono = "0.4"
+notify = "6"
+# Kimi CLI config parser — `.kimi-code/config.toml`. Pure-Rust, no native
+# deps. Used by `harness_config::kimi_config` to discover the user's
+# configured providers and default model.
+toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

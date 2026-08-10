@@ -6,6 +6,7 @@
 //! agent processes after the app closes).
 
 mod browser;
+mod browser_capture;
 mod browser_mcp;
 mod browser_mcp_register;
 pub mod agent_sessions;

@@ -144,7 +144,7 @@ pub fn create_chat_session(
     db: State<DbState>,
 ) -> CmdResult<ChatSession> {
     let conn = db.0.lock();
-    db::create_chat_session(&conn, &provider, &model).map_err(|e| e.to_string())
+    db::create_chat_session(&conn, &provider, &model, None).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -164,6 +164,33 @@ pub fn delete_chat_session(
         );
     }
     db::delete_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())
+}
+
+/// Bind (or unbind with `None`) a chat session to a project. Drives the
+/// chat's nesting under the project's expandable sidebar row.
+#[tauri::command]
+pub fn set_chat_session_project(
+    chat_session_id: String,
+    project_id: Option<String>,
+    db: State<DbState>,
+) -> CmdResult<()> {
+    let conn = db.0.lock();
+    db::set_chat_session_project(&conn, &chat_session_id, project_id.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// Delete every chat session that has no messages AND is not starred —
+/// the empty "Untitled" rows left behind when a brand-new chat was closed
+/// before the user typed anything. `keep` (when Some) protects a single
+/// session from the sweep; useful when the caller is about to select it.
+/// Returns the number of rows deleted.
+#[tauri::command]
+pub fn delete_empty_chat_sessions(
+    keep: Option<String>,
+    db: State<DbState>,
+) -> CmdResult<usize> {
+    let conn = db.0.lock();
+    db::delete_empty_chat_sessions(&conn, keep.as_deref()).map_err(|e| e.to_string())
 }
 
 /// Delete every chat session and all of its messages — the bulk form of
@@ -1386,8 +1413,11 @@ pub fn resolve_tool_action(
 
 // ---- Artifact preview ----
 
-/// Standard base64 encode (no external crate).
-fn base64_encode(data: &[u8]) -> String {
+/// Standard base64 encode (no external crate). `pub(crate)` so
+/// `browser_mcp.rs:391` can call it for the screenshot-encoding path —
+/// `browser_mcp` is the legitimate external consumer (it builds the data
+/// URI for the `browser_screenshot` tool's return payload).
+pub(crate) fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8; 64] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
@@ -1527,8 +1557,8 @@ pub async fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
     // timeout, corrupt file) fall through to the office→HTML preview below.
     if ext == "pptx" && size <= MAX_MEDIA {
         let path_for_convert = path.clone();
-        let pdf_bytes = tokio::task::spawn_blocking(move || {
-            crate::chat::office::pptx_to_pdf(Path::new(&path_for_convert))
+        let pdf_bytes = tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
+            crate::chat::office::office_to_pdf(Path::new(&path_for_convert))
         })
         .await
         .ok()

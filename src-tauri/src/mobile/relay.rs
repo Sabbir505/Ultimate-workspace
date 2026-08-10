@@ -911,7 +911,7 @@ async fn handle_chat_turn(
     // Create a temporary chat session in the DB.
     let chat_session_id = {
         let conn = db.lock();
-        match db::create_chat_session(&conn, &provider_id_str, &model) {
+        match db::create_chat_session(&conn, &provider_id_str, &model, None) {
             Ok(cs) => cs.id,
             Err(e) => return Err(e.to_string()),
         }

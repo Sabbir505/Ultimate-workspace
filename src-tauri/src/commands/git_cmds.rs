@@ -106,3 +106,104 @@ pub fn get_git_file_diff(path: String, file_path: String, db: State<DbState>) ->
     verify_project_path(Path::new(&path), &db)?;
     git::get_git_file_diff(Path::new(&path), &file_path)
 }
+
+/// List the local git branches in the repo at `path`, most recent first.
+#[tauri::command]
+pub fn list_git_branches(path: String, db: State<DbState>) -> CmdResult<Vec<String>> {
+    verify_project_path(Path::new(&path), &db)?;
+    git::list_branches(Path::new(&path)).map_err(|e| e.to_string())
+}
+
+/// Create a new branch at the current HEAD of the repo at `path`.
+#[tauri::command]
+pub fn create_git_branch(path: String, name: String, db: State<DbState>) -> CmdResult<()> {
+    verify_project_path(Path::new(&path), &db)?;
+    git::create_branch(Path::new(&path), &name).map_err(|e| e.to_string())
+}
+
+/// Switch the repo at `path` to the named branch.
+#[tauri::command]
+pub fn checkout_git_branch(path: String, name: String, db: State<DbState>) -> CmdResult<()> {
+    verify_project_path(Path::new(&path), &db)?;
+    git::checkout_branch(Path::new(&path), &name).map_err(|e| e.to_string())
+}
+
+/// Delete the named branch in the repo at `path`.
+#[tauri::command]
+pub fn delete_git_branch(path: String, name: String, db: State<DbState>) -> CmdResult<()> {
+    verify_project_path(Path::new(&path), &db)?;
+    git::delete_branch(Path::new(&path), &name).map_err(|e| e.to_string())
+}
+
+/// Last `n` commits (default 30) for the repo at `path`, oldest first
+/// within the returned window. Used by the Dev tab's history view.
+#[tauri::command]
+pub fn get_git_log(path: String, limit: Option<usize>, db: State<DbState>) -> CmdResult<Vec<git::CommitEntry>> {
+    verify_project_path(Path::new(&path), &db)?;
+    git::log(Path::new(&path), limit.unwrap_or(30)).map_err(|e| e.to_string())
+}
+
+/// Remote URL for the repo at `path` (the `origin` fetch URL, or empty
+/// when the repo has no remote).
+#[tauri::command]
+pub fn get_remote_url(path: String, db: State<DbState>) -> CmdResult<String> {
+    verify_project_path(Path::new(&path), &db)?;
+    git::remote_url(Path::new(&path)).map_err(|e| e.to_string())
+}
+
+/// Stage the listed files (empty = all) and create a commit with the
+/// given message. Returns the new commit hash. Must be called on a
+/// verified-project path.
+#[tauri::command]
+pub fn git_commit(
+    path: String,
+    message: String,
+    files: Option<Vec<String>>,
+    db: State<DbState>,
+) -> CmdResult<String> {
+    verify_project_path(Path::new(&path), &db)?;
+    git::commit(Path::new(&path), &message, files.as_deref()).map_err(|e| e.to_string())
+}
+
+/// Push the current branch to `origin`. No-op when the branch has no
+/// upstream.
+#[tauri::command]
+pub fn git_push(path: String, db: State<DbState>) -> CmdResult<()> {
+    verify_project_path(Path::new(&path), &db)?;
+    git::push(Path::new(&path)).map_err(|e| e.to_string())
+}
+
+/// Install a `notify` filesystem watcher for the given project. The
+/// watcher fires `project:fs-changed` events that the frontend uses to
+/// refresh git badges and changed-files panels without polling.
+#[tauri::command]
+pub fn install_git_watcher(
+    project_id: String,
+    app: tauri::AppHandle,
+    db: State<DbState>,
+) -> CmdResult<()> {
+    let conn = db.0.lock();
+    let projects = db::list_projects(&conn).map_err(|e| e.to_string())?;
+    let project = projects
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| format!("project not found: {project_id}"))?;
+    drop(conn);
+    crate::git_watcher::install(&app, &project_id, Path::new(&project.path));
+    Ok(())
+}
+
+/// Stop watching the given project's filesystem.
+#[tauri::command]
+pub fn uninstall_git_watcher(project_id: String, app: tauri::AppHandle) -> CmdResult<()> {
+    crate::git_watcher::uninstall(&app, &project_id);
+    Ok(())
+}
+
+/// Re-scan every registered watcher (call after a window regains focus
+/// to pick up filesystem changes that fired while the app was idle).
+#[tauri::command]
+pub fn refresh_git_watchers(app: tauri::AppHandle) -> CmdResult<()> {
+    crate::git_watcher::refresh_all(&app);
+    Ok(())
+}

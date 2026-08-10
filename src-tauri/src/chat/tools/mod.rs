@@ -54,6 +54,7 @@ pub const BROWSER_READ: &str = "browser_read";
 pub const BROWSER_CLICK: &str = "browser_click";
 pub const BROWSER_TYPE: &str = "browser_type";
 pub const BROWSER_SCROLL: &str = "browser_scroll";
+pub const BROWSER_SCREENSHOT: &str = "browser_screenshot";
 
 // ---- System tools (background downloads + native shell) ----
 //

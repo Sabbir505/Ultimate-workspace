@@ -24,6 +24,8 @@ fn map_chat_session(row: &rusqlite::Row) -> rusqlite::Result<ChatSession> {
         // NULL = no agent picked yet (fresh chat); otherwise "builtin" |
         // "local" | "harness:<id>".
         agent: row.get::<_, Option<String>>("agent")?,
+        // NULL = project-less chat; otherwise a projects.id.
+        project_id: row.get::<_, Option<String>>("project_id")?,
     })
 }
 
@@ -66,13 +68,14 @@ pub fn create_chat_session(
     conn: &Connection,
     provider: &str,
     model: &str,
+    project_id: Option<&str>,
 ) -> DbResult<ChatSession> {
     let now = now_ts();
     let id = new_id();
     conn.execute(
-        "INSERT INTO chat_sessions (id, title, provider, model, created_at, last_active_at, watch_mode)
-         VALUES (?1, NULL, ?2, ?3, ?4, ?4, NULL)",
-        params![id, provider, model, now],
+        "INSERT INTO chat_sessions (id, title, provider, model, project_id, created_at, last_active_at, watch_mode)
+         VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?5, NULL)",
+        params![id, provider, model, project_id, now],
     )?;
     conn.query_row(
         "SELECT * FROM chat_sessions WHERE id = ?1",
@@ -97,6 +100,46 @@ pub fn delete_chat_session(conn: &Connection, chat_session_id: &str) -> DbResult
         params![chat_session_id],
     )?;
     Ok(())
+}
+
+/// Bind (or unbind with `None`) a chat session to a project. Drives the
+/// chat's nesting under the project's expandable sidebar row.
+pub fn set_chat_session_project(
+    conn: &Connection,
+    chat_session_id: &str,
+    project_id: Option<&str>,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE chat_sessions SET project_id = ?2 WHERE id = ?1",
+        params![chat_session_id, project_id],
+    )?;
+    Ok(())
+}
+
+/// Delete every chat session bound to a project (and, via FK cascade, its
+/// messages). Used when a project is removed from the sidebar.
+pub fn delete_chat_sessions_for_project(conn: &Connection, project_id: &str) -> DbResult<usize> {
+    let n = conn.execute(
+        "DELETE FROM chat_sessions WHERE project_id = ?1",
+        params![project_id],
+    )?;
+    Ok(n)
+}
+
+/// Delete every session that has no messages — the empty "Untitled" rows
+/// left behind when the app (or the user) closed a brand-new chat that
+/// was never typed into. `keep` protects the session the caller is about
+/// to select; starred sessions are never swept. Returns the number of
+/// rows deleted.
+pub fn delete_empty_chat_sessions(conn: &Connection, keep: Option<&str>) -> DbResult<usize> {
+    let n = conn.execute(
+        "DELETE FROM chat_sessions
+         WHERE starred = 0
+           AND id NOT IN (SELECT DISTINCT chat_session_id FROM chat_messages)
+           AND (?1 IS NULL OR id <> ?1)",
+        params![keep],
+    )?;
+    Ok(n)
 }
 
 pub fn update_chat_session_title(
@@ -371,7 +414,7 @@ mod tests {
     #[test]
     fn chat_session_and_messages_round_trip() {
         let conn = super::super::mem();
-        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5").unwrap();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
         assert_eq!(cs.provider, "anthropic");
         assert_eq!(cs.model, "claude-sonnet-4-5");
         assert!(cs.title.is_none());
@@ -407,7 +450,7 @@ mod tests {
     #[test]
     fn watch_mode_persists_and_restores() {
         let conn = super::super::mem();
-        let cs = create_chat_session(&conn, "openai", "gpt-4o").unwrap();
+        let cs = create_chat_session(&conn, "openai", "gpt-4o", None).unwrap();
         // Starts at None (inherit global).
         assert!(cs.watch_mode.is_none());
 
@@ -435,7 +478,7 @@ mod tests {
     #[test]
     fn agent_persists_and_restores() {
         let conn = super::super::mem();
-        let cs = create_chat_session(&conn, "openai", "gpt-4o").unwrap();
+        let cs = create_chat_session(&conn, "openai", "gpt-4o", None).unwrap();
         // New sessions start unselected (None = locked model chip).
         assert!(cs.agent.is_none());
 
@@ -466,7 +509,7 @@ mod tests {
     #[test]
     fn delete_chat_message_removes_row_and_detaches_artifacts() {
         let conn = super::super::mem();
-        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5").unwrap();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
         let m1 = add_chat_message(&conn, &cs.id, "user", "hi", None, None, None, None, None, None, None, None, None).unwrap();
         let m2 =
             add_chat_message(&conn, &cs.id, "assistant", "hello", None, None, None, None, None, None, None, None, None).unwrap();

@@ -15,6 +15,7 @@
 pub mod config;
 pub mod gmail_api;
 pub mod google_rest;
+pub mod harness;
 pub mod mcp;
 pub mod oauth;
 pub mod session;
@@ -28,4 +29,5 @@ pub use config::{
     GOOGLE_SLIDES_CALLBACK_PORT, KIWI, NOTION, NOTION_CALLBACK_PORT, connector_by_id,
     family_members, family_redirect_uri,
 };
+pub use harness::{harness_mcp_server_ids, harness_mcp_servers, HarnessMcpServer};
 pub use session::{AttachedConnector, RemoteToolRef, connect_all, find_tool};

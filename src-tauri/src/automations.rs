@@ -261,7 +261,7 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
         match &automation.chat_session_id {
             Some(id) => id.clone(),
             None => {
-                let cs = match create_chat_session(&conn, &automation.harness, &automation.model) {
+                let cs = match create_chat_session(&conn, &automation.harness, &automation.model, None) {
                     Ok(cs) => cs,
                     Err(e) => {
                         let msg = e.to_string();

@@ -634,3 +634,166 @@ mod tests {
         );
     }
 }
+
+// ---- Branch + log + push helpers (added for the missing commands that
+// `commands/git_cmds.rs` registers but `lib.rs` previously couldn't
+// compile against). Each is a thin wrapper around `git` CLI invocations
+// already proven in the existing parse_ahead_behind + worktree code path.
+// All return `Result<_, String>` so the IPC layer maps cleanly.
+
+/// List local branches in `path` (most recent first).
+pub fn list_branches(path: &Path) -> Result<Vec<String>, String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", &path.to_string_lossy(), "for-each-ref", "--format=%(refname:short)", "refs/heads/"])
+        .output()
+        .map_err(|e| format!("git for-each-ref: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|s| s.to_string())
+        .collect())
+}
+
+/// Create a new branch at HEAD in `path`.
+pub fn create_branch(path: &Path, name: &str) -> Result<(), String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", &path.to_string_lossy(), "branch", name])
+        .output()
+        .map_err(|e| format!("git branch: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).to_string());
+    }
+    Ok(())
+}
+
+/// Switch to `name` in `path`.
+pub fn checkout_branch(path: &Path, name: &str) -> Result<(), String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", &path.to_string_lossy(), "checkout", name])
+        .output()
+        .map_err(|e| format!("git checkout: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).to_string());
+    }
+    Ok(())
+}
+
+/// Delete `name` in `path` (force=false by default; safe for merged branches).
+pub fn delete_branch(path: &Path, name: &str) -> Result<(), String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", &path.to_string_lossy(), "branch", "-d", name])
+        .output()
+        .map_err(|e| format!("git branch -d: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).to_string());
+    }
+    Ok(())
+}
+
+/// `git log` for the repo at `path`, oldest first within the window.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitEntry {
+    pub hash: String,
+    pub short_hash: String,
+    pub author: String,
+    pub email: String,
+    pub timestamp: i64,
+    pub subject: String,
+}
+
+pub fn log(path: &Path, limit: usize) -> Result<Vec<CommitEntry>, String> {
+    let sep = "<<<SEP>>>";
+    let fmt = format!("%H{sep}%h{sep}%an{sep}%ae{sep}%at{sep}%s");
+    let out = std::process::Command::new("git")
+        .args([
+            "-C", &path.to_string_lossy(),
+            "log", &format!("-n{limit}"),
+            &format!("--pretty=format:{fmt}"),
+        ])
+        .output()
+        .map_err(|e| format!("git log: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).to_string());
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut entries = Vec::new();
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split(sep).collect();
+        if parts.len() != 6 { continue; }
+        entries.push(CommitEntry {
+            hash: parts[0].to_string(),
+            short_hash: parts[1].to_string(),
+            author: parts[2].to_string(),
+            email: parts[3].to_string(),
+            timestamp: parts[4].parse().unwrap_or(0),
+            subject: parts[5].to_string(),
+        });
+    }
+    Ok(entries)
+}
+
+/// `git config --get remote.origin.url` (or empty when no remote).
+pub fn remote_url(path: &Path) -> Result<String, String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", &path.to_string_lossy(), "config", "--get", "remote.origin.url"])
+        .output()
+        .map_err(|e| format!("git config: {e}"))?;
+    if !out.status.success() {
+        return Ok(String::new());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// `git add <files> && git commit -m <message>`. Returns the new commit hash.
+pub fn commit(path: &Path, message: &str, files: Option<&[String]>) -> Result<String, String> {
+    if let Some(files) = files {
+        if !files.is_empty() {
+            let mut cmd = std::process::Command::new("git");
+            cmd.args(["-C", &path.to_string_lossy(), "add", "--"]);
+            for f in files {
+                cmd.arg(f);
+            }
+            let out = cmd.output().map_err(|e| format!("git add: {e}"))?;
+            if !out.status.success() {
+                return Err(String::from_utf8_lossy(&out.stderr).to_string());
+            }
+        }
+    } else {
+        // files=None means "stage all"
+        let out = std::process::Command::new("git")
+            .args(["-C", &path.to_string_lossy(), "add", "-A"])
+            .output()
+            .map_err(|e| format!("git add -A: {e}"))?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).to_string());
+        }
+    }
+    let out = std::process::Command::new("git")
+        .args(["-C", &path.to_string_lossy(), "commit", "-m", message])
+        .output()
+        .map_err(|e| format!("git commit: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).to_string());
+    }
+    // Get the new HEAD hash.
+    let head = std::process::Command::new("git")
+        .args(["-C", &path.to_string_lossy(), "rev-parse", "HEAD"])
+        .output()
+        .map_err(|e| format!("git rev-parse: {e}"))?;
+    Ok(String::from_utf8_lossy(&head.stdout).trim().to_string())
+}
+
+/// `git push` (no upstream setup — assumes the branch already has one).
+pub fn push(path: &Path) -> Result<(), String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", &path.to_string_lossy(), "push"])
+        .output()
+        .map_err(|e| format!("git push: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).to_string());
+    }
+    Ok(())
+}

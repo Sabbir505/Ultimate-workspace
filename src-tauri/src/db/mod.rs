@@ -102,6 +102,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_session_flags(conn)?;
     migrate_chat_session_watch_mode(conn)?;
     migrate_chat_session_agent(conn)?;
+    migrate_chat_session_project_id(conn)?;
     migrate_artifacts_message_id(conn)?;
     migrate_chat_messages_superseded(conn)?;
     migrate_cost_v2(conn)?;
@@ -131,6 +132,22 @@ fn migrate_chat_session_flags(conn: &Connection) -> DbResult<()> {
 /// means "inherit global setting"; per-session values are `"on"` | `"off"`.
 fn migrate_chat_session_watch_mode(conn: &Connection) -> DbResult<()> {
     let sql = "ALTER TABLE chat_sessions ADD COLUMN watch_mode TEXT";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Add the `project_id` column to `chat_sessions` on databases created before
+/// project-binding existed. Same idempotent pattern as the other
+/// `migrate_chat_session_*` helpers — duplicate-column error is a no-op. The
+/// column has no FK to `projects.id`: project deletion doesn't cascade chat
+/// deletion (a projectless chat still has its own history), and the user
+/// could re-attach the chat to another project after deletion.
+fn migrate_chat_session_project_id(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE chat_sessions ADD COLUMN project_id TEXT";
     if let Err(e) = conn.execute(sql, []) {
         if !e.to_string().contains("duplicate column name") {
             return Err(e);
@@ -394,7 +411,8 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           starred INTEGER NOT NULL DEFAULT 0,
           unread INTEGER NOT NULL DEFAULT 0,
           watch_mode TEXT,
-          agent TEXT
+          agent TEXT,
+          project_id TEXT
         );
 
         CREATE TABLE IF NOT EXISTS chat_messages (
@@ -556,10 +574,11 @@ pub use cost_v2::{get_cost_rollups_v2, read_rate_overrides};
 // chat
 pub use chat::{
     add_chat_message, create_chat_session, delete_chat_message, delete_chat_session,
-    get_chat_session, list_active_chat_messages, list_chat_messages, list_chat_sessions,
+    delete_chat_sessions_for_project, delete_empty_chat_sessions, get_chat_session,
+    list_active_chat_messages, list_chat_messages, list_chat_sessions,
     list_chat_session_connectors, mark_superseded, set_chat_session_connectors,
-    set_chat_session_starred, set_chat_session_unread, touch_chat_session,
-    update_chat_session_agent, update_chat_session_model,
+    set_chat_session_project, set_chat_session_starred, set_chat_session_unread,
+    touch_chat_session, update_chat_session_agent, update_chat_session_model,
     update_chat_session_provider, update_chat_session_title, update_chat_session_watch_mode,
 };
 

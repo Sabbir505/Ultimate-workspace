@@ -758,6 +758,97 @@ tr:nth-child(even) td{background:#f8fafc}";
     )
 }
 
+/// Convert a pptx to PDF for the in-app PDF preview. The function shells out
+/// to LibreOffice (best-effort, with a short timeout) and returns the raw
+/// PDF bytes. Returns None on any failure (LibreOffice missing, timeout,
+/// corrupt file) — the caller falls back to the HTML preview path.
+///
+/// Why this lives here instead of in `commands.rs`: the conversion is
+/// `Send`-friendly (pure I/O, no Tauri state), and `spawn_blocking` would
+/// rather the heavy lifting live next to the other Office helpers where the
+/// extraction paths already are.
+pub fn office_to_pdf(path: &std::path::Path) -> Option<Vec<u8>> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    // Look up LibreOffice. On Windows the canonical install path is
+    // `C:\Program Files\LibreOffice\program\soffice.exe`; on macOS it's
+    // `/Applications/LibreOffice.app/Contents/MacOS/soffice`; on Linux the
+    // `soffice` binary is on PATH. Try the common locations first, then PATH.
+    let candidates: &[&str] = &[
+        r"C:\Program Files\LibreOffice\program\soffice.exe",
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+        "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+        "soffice",
+        "libreoffice",
+    ];
+    let exe = candidates.iter().find(|p| std::path::Path::new(p).exists()).copied()
+        .or_else(|| candidates.last().copied())?;
+
+    // Use a unique per-call outdir so concurrent previews don't race. A
+    // random subdir under the system temp is fine — the CLI writes
+    // `<filename>.pdf` there and we read it back.
+    let outdir = std::env::temp_dir().join(format!(
+        "conduit-lo-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    if std::fs::create_dir_all(&outdir).is_err() {
+        return None;
+    }
+
+    let mut cmd = Command::new(exe);
+    cmd.args([
+        "--headless",
+        "--convert-to",
+        "pdf",
+        "--outdir",
+    ])
+    .arg(&outdir)
+    .arg(path)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = cmd.spawn().ok()?;
+    // Generous timeout: a multi-MB pptx on a cold LO process can take 15s+;
+    // the preview pane is already in a "Loading…" state so blocking is fine,
+    // but a hung process must not wedge the UI forever.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_dir_all(&outdir);
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => {
+                let _ = std::fs::remove_dir_all(&outdir);
+                return None;
+            }
+        }
+    };
+    if !status?.success() {
+        let _ = std::fs::remove_dir_all(&outdir);
+        return None;
+    }
+    // Find the produced PDF (same basename as the source, .pdf extension).
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+    let pdf_path = outdir.join(format!("{stem}.pdf"));
+    let bytes = std::fs::read(&pdf_path).ok();
+    let _ = std::fs::remove_dir_all(&outdir);
+    bytes
+}
+
 /// Extract readable plain text from a supported Office file's bytes, so it can
 /// be handed to the model as message context. Returns `None` for unsupported
 /// formats or unparseable files. `format` is the lowercase extension.

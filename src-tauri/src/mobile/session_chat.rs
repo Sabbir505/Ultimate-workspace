@@ -56,7 +56,7 @@ fn resolve_chat_session(
         Ok(chat_session_id)
     } else {
         // Create a new chat session and link it to owner_session_id.
-        let cs = db::create_chat_session(conn, provider, model)
+        let cs = db::create_chat_session(conn, provider, model, None)
             .map_err(|e| format!("failed to create chat session: {e}"))?;
         conn.execute(
             "UPDATE chat_sessions SET owner_session_id = ?2 WHERE id = ?1",

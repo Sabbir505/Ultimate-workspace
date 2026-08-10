@@ -34,7 +34,7 @@ fn history_pagination_query() {
     let conn = db::mem();
 
     // Create a chat session linked to owner_session_id = "s1".
-    let cs = db::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5").unwrap();
+    let cs = db::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
     session_chat::ensure_chat_session_owner_column(&conn).unwrap();
     conn.execute(
         "UPDATE chat_sessions SET owner_session_id = ?1 WHERE id = ?2",

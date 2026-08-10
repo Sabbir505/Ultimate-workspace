@@ -412,7 +412,7 @@ mod tests {
     #[test]
     fn rollup_unions_chat_messages() {
         let conn = super::super::mem();
-        let cs = super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5").unwrap();
+        let cs = super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
         super::super::add_chat_message(
             &conn, &cs.id, "assistant", "hi", Some(1_000_000), Some(500_000), Some(0.0),
             None, None, None, Some("anthropic"), None, None,
@@ -436,7 +436,7 @@ mod tests {
         // session model is a full file path (GGUF without metadata name);
         // the breakdown must show the basename, not the path.
         let cs = super::super::create_chat_session(
-            &conn, "local_gguf", r"D:\models\qwen2.5-7b-q4_k_m.gguf",
+            &conn, "local_gguf", r"D:\models\qwen2.5-7b-q4_k_m.gguf", None,
         ).unwrap();
         super::super::add_chat_message(
             &conn, &cs.id, "assistant", "hi", Some(1_000_000), Some(500_000), Some(0.0),
@@ -460,7 +460,7 @@ mod tests {
         // Legacy chat row: provider column NULL (written before the column
         // existed). The rollup must fall back to the chat session's provider
         // instead of showing "chat:unknown".
-        let cs = super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5").unwrap();
+        let cs = super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
         super::super::add_chat_message(
             &conn, &cs.id, "assistant", "hi", Some(100_000), Some(50_000), Some(0.0),
             None, None, None, None, None, None, // provider = NULL, model_key = NULL

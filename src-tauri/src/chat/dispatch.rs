@@ -669,10 +669,11 @@ async fn run_browser_tool(
     // gets its own branch instead of the shared match below.
     if name == BROWSER_SCREENSHOT {
         let png = match tokio::task::spawn_blocking(move || mgr.capture_active_png()).await {
-            Ok(Some(png)) => png,
-            Ok(None) => {
+            Ok(Ok(Some(png))) => png,
+            Ok(Ok(None)) => {
                 return Some("browser_screenshot failed: capture unavailable (no page is open in the browser pane, or the platform doesn't support capture).".to_string())
             }
+            Ok(Err(e)) => return Some(format!("browser_screenshot failed: {e}")),
             Err(e) => return Some(format!("browser_screenshot failed: {e}")),
         };
         let _ = std::fs::create_dir_all(artifacts_dir);

@@ -100,7 +100,7 @@ mod tests {
     #[test]
     fn add_list_clear_round_trip() {
         let conn = mem();
-        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-5").unwrap();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-5", None).unwrap();
         let n1 = add_source_note(
             &conn,
             &cs.id,
@@ -139,8 +139,8 @@ mod tests {
     #[test]
     fn notes_are_scoped_per_session() {
         let conn = mem();
-        let a = create_chat_session(&conn, "openai", "gpt-4o").unwrap();
-        let b = create_chat_session(&conn, "openai", "gpt-4o").unwrap();
+        let a = create_chat_session(&conn, "openai", "gpt-4o", None).unwrap();
+        let b = create_chat_session(&conn, "openai", "gpt-4o", None).unwrap();
         add_source_note(&conn, &a.id, "https://a", "A", "a", "a", None).unwrap();
         add_source_note(&conn, &b.id, "https://b", "B", "b", "b", None).unwrap();
         assert_eq!(list_source_notes(&conn, &a.id).unwrap().len(), 1);
@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn list_caps_at_most_recent_50_in_chronological_order() {
         let conn = mem();
-        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-5").unwrap();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-5", None).unwrap();
         for i in 0..55 {
             let url = format!("https://example.com/{i}");
             add_source_note(&conn, &cs.id, &url, "T", "f", "e", None).unwrap();
@@ -172,7 +172,7 @@ mod tests {
         // FK cascade: deleting a chat session must remove its source notes.
         // Requires foreign_keys = ON (the `mem()` helper sets it).
         let conn = mem();
-        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-5").unwrap();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-5", None).unwrap();
         add_source_note(&conn, &cs.id, "https://x", "X", "x", "x", None).unwrap();
         assert_eq!(list_source_notes(&conn, &cs.id).unwrap().len(), 1);
 

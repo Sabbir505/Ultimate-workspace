@@ -2805,3 +2805,75 @@ The `#[tauri::command]` macro generates a `__cmd__<name>` companion at the funct
   4. Phases 2-5 still have ~22 tasks of real work; spec acceptance criteria in `docs/superpowers/specs/2026-08-10-refactor-design.md` §4 are the done-bar
 
 **Time cost:** ~3 hours session, 5 commits, 1 attempt-and-revert, net 0 perf regressions.
+
+---
+
+## 2026-08-10 — Baseline rot-fix session
+
+**What was broken:** the 8 pre-existing `cargo check` errors that the prior
+session deferred to "next session". The rot had multiple independent
+surface areas — each from a half-landed change in earlier sessions — that
+needed to be brought back into a consistent baseline before the refactor
+plan could resume.
+
+**What was fixed (commit `2c78151`):**
+
+- **Cargo.toml dep placement** — `cron = "0.12"`, `chrono = "0.4"`,
+  `notify = "6"` had been placed *after* `[profile.release]`, so they
+  never resolved. Moved into `[dependencies]`. Added `toml = "0.8"` for
+  the Kimi CLI config parser.
+- **Missing `HarnessMcpServer` + `harness_mcp_servers`** — `agent_sessions.rs`
+  and `commands/agent_cmds.rs` referenced a connector-snapshot type and
+  function that had no definition. New `connectors/harness.rs`:
+  - `enum HarnessMcpServer { Http { id, display_name, url, token }, Stdio { ... } }`
+  - `harness_mcp_servers(app)` iterates CONNECTORS, refreshes each via
+    `ensure_valid_access_token` (HTTP only), returns one entry per
+    connected server.
+- **Missing `office_to_pdf`** — `chat/commands.rs` invoked it but
+  `chat/office.rs` never defined it. Added a LibreOffice headless
+  converter (`--convert-to pdf`, 30s deadline, unique temp outdir,
+  Windows `CREATE_NO_WINDOW`). Returns `None` on every failure.
+- **Missing `capture_active_png`** — `chat/dispatch.rs` called it on
+  `Arc<BrowserManager>`. Added the method delegating to a new
+  `browser_capture.rs` stub that returns `Ok(None)` off-Windows; the
+  real WebView2 `ICoreWebView2_15::CapturePreview` binding is a
+  follow-up. Fixed the `spawn_blocking` match arms for the nested
+  `Result<Result<Option<Vec<u8>>, String>, JoinError>` shape
+  (`Ok(Ok(Some(png)) | Ok(Ok(None)))`).
+- **`create_chat_session` arity drift** — DB function was 3-arg, but
+  `chat/commands.rs` passed 4 args (`project_id`). Resolved by:
+  - Changing DB fn to genuinely 4-arg (`project_id: Option<&str>`)
+  - Adding `project_id TEXT` to `chat_sessions` CREATE TABLE
+  - Adding `migrate_chat_session_project_id` idempotent migration
+  - Adding `pub project_id: Option<String>` to `ChatSession` type
+  - Updating all 14+ call sites (mobile relay, automations, mobile
+    session_chat, 5 test files) to pass `None`
+- **`harness_bundle` MCP builders** — `build_tools_mcp_json`,
+  `build_opencode_tools_config`, `write_bundle` now take
+  `&[HarnessMcpServer]` and merge per-connector HTTP entries into the
+  Claude/Kimi/OpenCode mcp maps. Tests pass `&[]`.
+
+**What was tested and how:**
+- `cargo check --lib` → clean (64 warnings, 0 errors)
+- `cargo check --tests` → clean (57 warnings, 0 errors)
+- `npx tsc --noEmit` not re-run — no frontend changes
+
+**Files:** 25 changed, 943 insertions(+), 50 deletions(-)
+- Created: `connectors/harness.rs`, `browser_capture.rs`,
+  `git_watcher.rs`
+- Modified: `Cargo.toml`, `connectors/mod.rs`, `harness_bundle.rs`,
+  `chat/office.rs`, `chat/dispatch.rs`, `chat/commands.rs`,
+  `db/chat.rs`, `db/mod.rs`, `db/cost_v2.rs`, `db/source_ledger.rs`,
+  `types.rs`, `browser.rs`, `lib.rs`, `automations.rs`,
+  `mobile/relay.rs`, `mobile/session_chat.rs`,
+  `mobile/relay_tests.rs`, `mobile/session_chat_tests.rs`
+
+**Next:**
+- Phase 1 autoreview on the 3 shipped Tasks (1.1 PTY Channel, 1.2 chat
+  Channel, 1.3 useStreamingText)
+- Task 2.1 retry (chat/commands.rs split) using the corrected pattern
+  from the plan: move `#[tauri::command]` *with* the function body
+  into the submodule, then `use submodule::*` in the parent (not
+  `pub use`)
+- Task 0.2: `bulk_load_projects` helper (the only Phase 0 task with
+  real work)

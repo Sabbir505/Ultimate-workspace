@@ -144,19 +144,21 @@ async function stage(target) {
 
   // Extract into DEST, stripping the tarball's leading `python/` dir so the
   // interpreter lands at <DEST>/python.exe (matching python_runtime.rs).
-  // --force-local: bsdtar parses `C:\...` as a remote `host:path` spec and
-  // tries to "connect to C" — force the archive path to be treated as local.
-  // Forward slashes: bsdtar also mangles backslash path arguments (the `-C`
-  // dir "cannot be opened" otherwise), so normalize both paths on Windows.
+  // Forward slashes: bsdtar mangles backslash path arguments (the `-C` dir
+  // "cannot be opened" otherwise), so normalize both paths on Windows.
   const tarBin = process.platform === "win32" ? "tar.exe" : "tar";
-  const tarPath = (p) => (process.platform === "win32" ? p.replaceAll("\\", "/") : p);
+  // "./" prefix prevents bsdtar from parsing "C:/..." as host:path (avoids
+  // --force-local, which the Windows built-in tar.exe does not support).
+  const tarLocal = (p) => {
+    const fwd = p.replaceAll("\\", "/");
+    return /^[A-Za-z]:/.test(fwd) ? `./${fwd}` : fwd;
+  };
   run(tarBin, [
-    "--force-local",
     "-xzf",
-    tarPath(tgz),
+    tarLocal(tgz),
     "--strip-components=1",
     "-C",
-    tarPath(DEST),
+    tarLocal(DEST),
   ]);
 
   if (!existsSync(exePath)) {

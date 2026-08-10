@@ -118,6 +118,20 @@ export interface ChatTaskProgress {
   destPath: string | null;
 }
 
+/** A single checkpoint/step extracted from a model-generated plan. Displayed
+ *  in the Git sidebar Progress section alongside background task items. */
+export interface PlanStep {
+  stepId: string;           // "plan-{sessionId}-{planIndex}-{stepIndex}"
+  label: string;            // human-readable step text
+  status: "pending" | "in_progress" | "completed" | "failed";
+  source: "parsed" | "todo_write";  // how this step was discovered
+  planIndex: number;        // which plan (increments per plan detected)
+  stepIndex: number;        // order within the plan
+  completedAt?: number;     // Date.now() when marked done
+  failedReason?: string;
+  matchedToolCall?: string; // e.g. file path that triggered completion
+}
+
 /** A file the model generated during a chat, surfaced as a download chip. */
 export interface ChatArtifact {
   path: string;
@@ -192,6 +206,9 @@ export interface ChatState {
   /** Background chat tasks (download_file / run_shell) with live progress,
    *  keyed by chat session id → task id → latest snapshot. */
   tasks: Record<string, Record<string, ChatTaskProgress>>;
+  /** Plan checkpoints extracted from model-generated plans, keyed by
+   *  chat session id → steps array. Displayed in Git sidebar Progress. */
+  planSteps: Record<string, PlanStep[]>;
   /** Per-turn owner session id (mobile app's session identifier) keyed by
    *  chatSessionId. Set by `sendMessage` when invoked from the mobile relay
    *  so the chat:token / chat:done / chat:error / chat:status / chat:artifact
@@ -305,6 +322,10 @@ export interface ChatState {
   onArtifact: (payload: ChatArtifactPayload) => void;
   /** Track a background chat task's progress (downloads / shell runs). */
   onTaskProgress: (payload: ChatTaskProgressPayload) => void;
+  /** Replace all plan steps for a session (called after parsing a new plan). */
+  setPlanSteps: (chatSessionId: string, steps: PlanStep[]) => void;
+  /** Update a single plan step's status from a backend event or text match. */
+  onPlanStepProgress: (chatSessionId: string, stepId: string, status: PlanStep["status"], detail?: string, toolCall?: string) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -341,6 +362,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   previewArtifacts: [],
   activePreviewPath: null,
   tasks: {},
+  planSteps: {},
   ownerSessionByChatId: {},
   cwdOverrides: {},
   sessionProjects: {},
@@ -616,6 +638,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       artifactsByMessage: {},
       pendingArtifacts: {},
       tasks: {},
+      planSteps: {},
       messageQueue: {},
       cwdOverrides: {},
       sessionProjects: {},
@@ -1312,6 +1335,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const sessionTasks = { ...(s.tasks[chatSessionId] ?? {}) };
       sessionTasks[taskId] = { taskId, kind, state, message, downloaded, total, speedBps, destPath };
       return { tasks: { ...s.tasks, [chatSessionId]: sessionTasks } };
+    });
+  },
+
+  setPlanSteps: (chatSessionId, steps) => {
+    set((s) => ({
+      planSteps: { ...s.planSteps, [chatSessionId]: steps },
+    }));
+  },
+
+  onPlanStepProgress: (chatSessionId, stepId, status, detail, toolCall) => {
+    set((s) => {
+      const sessionSteps = s.planSteps[chatSessionId];
+      if (!sessionSteps) return {};
+      const updated = sessionSteps.map((st) => {
+        if (st.stepId !== stepId) return st;
+        return {
+          ...st,
+          status,
+          completedAt: status === "completed" ? Date.now() : st.completedAt,
+          failedReason: status === "failed" ? (detail ?? st.failedReason) : st.failedReason,
+          matchedToolCall: toolCall ?? st.matchedToolCall,
+        };
+      });
+      // Set the first pending step as in_progress when the active one completes
+      const hasActive = updated.some((st) => st.status === "in_progress");
+      if (!hasActive && status === "completed") {
+        const nextPendingIdx = updated.findIndex((st) => st.status === "pending");
+        if (nextPendingIdx !== -1) {
+          const next = updated[nextPendingIdx];
+          updated[nextPendingIdx] = { ...next, status: "in_progress" };
+        }
+      }
+      return { planSteps: { ...s.planSteps, [chatSessionId]: updated } };
     });
   },
 }));

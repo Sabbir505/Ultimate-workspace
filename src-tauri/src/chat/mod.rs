@@ -16,6 +16,7 @@ pub mod proto;
 pub mod providers;
 pub mod pygen;
 pub mod python_runtime;
+pub mod stream_events;
 pub mod streaming;
 pub mod tasks;
 pub mod tools;
@@ -471,13 +472,13 @@ pub(crate) async fn run_chat_stream(
                         out.push_str(&token);
                     }
                     full_text.push_str(&out);
-                    let _ = app.emit(
-                        "chat:token",
-                        ChatTokenPayload {
-                            chat_session_id: chat_session_id.to_string(),
-                            token: out,
-                        },
-                    );
+                    let payload = ChatTokenPayload {
+                        chat_session_id: chat_session_id.to_string(),
+                        token: out,
+                    };
+                    if !crate::chat::stream_events::try_send(chat_session_id, &payload) {
+                        let _ = app.emit("chat:token", payload);
+                    }
                 }
                 (_, true) => {
                     // Stream done — usage will be parsed from buffer below.
@@ -511,25 +512,25 @@ pub(crate) async fn run_chat_stream(
                 out.push_str(&token);
             }
             full_text.push_str(&out);
-            let _ = app.emit(
-                "chat:token",
-                ChatTokenPayload {
-                    chat_session_id: chat_session_id.to_string(),
-                    token: out,
-                },
-            );
+            let payload = ChatTokenPayload {
+                chat_session_id: chat_session_id.to_string(),
+                token: out,
+            };
+            if !crate::chat::stream_events::try_send(chat_session_id, &payload) {
+                let _ = app.emit("chat:token", payload);
+            }
         }
     }
 
     if in_think {
         full_text.push_str("</think>");
-        let _ = app.emit(
-            "chat:token",
-            ChatTokenPayload {
+        let payload = ChatTokenPayload {
                 chat_session_id: chat_session_id.to_string(),
                 token: "</think>".to_string(),
-            },
-        );
+            };
+            if !crate::chat::stream_events::try_send(chat_session_id, &payload) {
+                let _ = app.emit("chat:token", payload);
+            }
     }
 
     let usage = provider.parse_usage(&buf);

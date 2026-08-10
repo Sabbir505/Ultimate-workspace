@@ -16,8 +16,13 @@ use crate::DbState;
 /// (CONDUIT_PROJECT_ID) so browser auto-open is scoped to the project.
 /// All harnesses are spawned with full permissions — no per-session
 /// permission selector is surfaced or consulted.
+///
+/// Connectors: every connector connected in Settings → Connectors (plus
+/// public ones) is registered into the spawn's MCP config as a remote
+/// server with a freshly-refreshed OAuth token, so harness sessions see
+/// the same connector tools the built-in chat does.
 #[tauri::command]
-pub fn send_agent_chat_message(
+pub async fn send_agent_chat_message(
     app: AppHandle,
     state: State<'_, AgentSessionState>,
     db: State<'_, DbState>,
@@ -28,6 +33,10 @@ pub fn send_agent_chat_message(
     cwd: Option<String>,
     project_id: Option<String>,
 ) -> Result<(), String> {
+    // Snapshot connected connectors (refreshing OAuth tokens) BEFORE the
+    // sync spawn path — the CLIs only read static MCP config at startup, so
+    // this is the one place fresh tokens can reach them.
+    let connectors = crate::connectors::harness_mcp_servers(&app).await;
     state.0.send(
         &app,
         &db,
@@ -37,6 +46,7 @@ pub fn send_agent_chat_message(
         model.as_deref().unwrap_or(""),
         cwd.as_deref(),
         project_id.as_deref(),
+        &connectors,
     )
 }
 
@@ -55,4 +65,23 @@ pub fn cancel_agent_chat_message(
 #[tauri::command]
 pub fn list_harness_models(harness_id: String) -> crate::harness_config::HarnessModelConfig {
     crate::harness_config::harness_model_config(&harness_id)
+}
+
+/// Register a typed `Channel<ChatTokenPayload>` for a chat session. The
+/// chat streaming code in `chat::dispatch::emit_token` and the headless CLI
+/// chat path in `agent_sessions::emit_token` will route tokens through this
+/// channel when one is registered; otherwise they fall back to
+/// `app.emit("chat:token", ...)` (preserving the legacy event path for
+/// tests and any frontend that hasn't migrated).
+///
+/// One subscriber per session. The frontend is expected to call this once
+/// per chat-session open; the channel is dropped automatically when the
+/// React effect unmounts.
+#[tauri::command]
+pub fn chat_token_subscribe(
+    session_id: String,
+    channel: tauri::ipc::Channel<crate::types::ChatTokenPayload>,
+) -> Result<(), String> {
+    crate::chat::stream_events::register(&session_id, channel);
+    Ok(())
 }

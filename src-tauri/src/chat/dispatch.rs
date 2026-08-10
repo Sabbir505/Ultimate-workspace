@@ -17,6 +17,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::chat::stream_events;
 use crate::chat::{permission, tools, ChatManager};
 use crate::types::{
     ChatApprovalRequestPayload, ChatApprovalResolvedPayload, ChatArtifactPayload,
@@ -26,18 +27,23 @@ use crate::db;
 
 /// Push a token to the accumulated full message and emit it to the frontend as
 /// a `chat:token` event. Empty tokens are no-ops.
+///
+/// Perf (refactor Task 1.2): prefers the typed `Channel<ChatTokenPayload>`
+/// registered by the frontend's `chat_token_subscribe` IPC command. Falls
+/// back to `app.emit("chat:token", ...)` when no consumer is registered
+/// (tests, headless dev, transient drops).
 pub(crate) fn emit_token(app: &AppHandle, sid: &str, token: &str, full: &mut String) {
     if token.is_empty() {
         return;
     }
     full.push_str(token);
-    let _ = app.emit(
-        "chat:token",
-        ChatTokenPayload {
-            chat_session_id: sid.to_string(),
-            token: token.to_string(),
-        },
-    );
+    let payload = ChatTokenPayload {
+        chat_session_id: sid.to_string(),
+        token: token.to_string(),
+    };
+    if !stream_events::try_send(sid, &payload) {
+        let _ = app.emit("chat:token", payload);
+    }
 }
 
 /// Setting key for the user-configured artifacts directory (Settings →
@@ -492,7 +498,7 @@ pub(crate) async fn run_tool(
     // Agentic browser tools act on the live browser-pane webview, so they run
     // here (where the AppHandle -> BrowserState is available) rather than in
     // the provider-agnostic execute_tool dispatcher.
-    if let Some(text) = run_browser_tool(app, name, args).await {
+    if let Some(text) = run_browser_tool(app, name, args, artifacts_dir, sid).await {
         return text;
     }
 
@@ -638,16 +644,68 @@ pub(crate) async fn run_tool(
 }
 
 /// Dispatch the agentic browser tools (`browser_read`/`browser_click`/
-/// `browser_type`/`browser_scroll`) against the active browser-pane webview.
-/// Returns `None` for any other tool name so the caller falls through to the
-/// normal tool dispatcher.
-async fn run_browser_tool(app: &AppHandle, name: &str, args: &Value) -> Option<String> {
-    use tools::{BROWSER_CLICK, BROWSER_READ, BROWSER_SCROLL, BROWSER_TYPE};
-    if !matches!(name, BROWSER_READ | BROWSER_CLICK | BROWSER_TYPE | BROWSER_SCROLL) {
+/// `browser_type`/`browser_scroll`/`browser_screenshot`) against the active
+/// browser-pane webview. Returns `None` for any other tool name so the caller
+/// falls through to the normal tool dispatcher.
+async fn run_browser_tool(
+    app: &AppHandle,
+    name: &str,
+    args: &Value,
+    artifacts_dir: &std::path::Path,
+    sid: &str,
+) -> Option<String> {
+    use tools::{BROWSER_CLICK, BROWSER_READ, BROWSER_SCREENSHOT, BROWSER_SCROLL, BROWSER_TYPE};
+    if !matches!(name, BROWSER_READ | BROWSER_CLICK | BROWSER_TYPE | BROWSER_SCROLL | BROWSER_SCREENSHOT) {
         return None;
     }
+    // Surface the Browser tab so the user can watch the agent work (same
+    // auto-open contract as generated artifacts and the harness MCP path).
+    let _ = app.emit("browser:activity", serde_json::json!({ "pane_id": null }));
     let browser = app.state::<crate::BrowserState>();
     let mgr = browser.0.clone();
+
+    // Screenshot is blocking COM work (UI-thread CapturePreview roundtrip) and
+    // unlike the other tools it saves a file + emits an artifact event, so it
+    // gets its own branch instead of the shared match below.
+    if name == BROWSER_SCREENSHOT {
+        let png = match tokio::task::spawn_blocking(move || mgr.capture_active_png()).await {
+            Ok(Some(png)) => png,
+            Ok(None) => {
+                return Some("browser_screenshot failed: capture unavailable (no page is open in the browser pane, or the platform doesn't support capture).".to_string())
+            }
+            Err(e) => return Some(format!("browser_screenshot failed: {e}")),
+        };
+        let _ = std::fs::create_dir_all(artifacts_dir);
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let filename = format!("browser-shot-{millis}.png");
+        let path = artifacts_dir.join(&filename);
+        if let Err(e) = std::fs::write(&path, &png) {
+            return Some(format!("browser_screenshot failed: could not save PNG: {e}"));
+        }
+        let path_str = path.to_string_lossy().into_owned();
+        // Persist + surface like a generated artifact: the shot pops open in
+        // the canvas immediately and lands in the Artifacts sidebar.
+        {
+            let db = app.state::<crate::DbState>();
+            let conn = db.0.lock();
+            let _ = db::insert_artifact(&conn, Some(sid), &filename, &path_str, "png");
+        }
+        let _ = app.emit(
+            "chat:artifact",
+            ChatArtifactPayload {
+                chat_session_id: sid.to_string(),
+                path: path_str.clone(),
+                filename,
+            },
+        );
+        return Some(format!(
+            "Screenshot saved to {path_str}. It has been opened in the user's canvas. To show it inline, embed it in your reply as ![screenshot]({path_str})."
+        ));
+    }
+
     let result = match name {
         BROWSER_READ => {
             let mode_str = args

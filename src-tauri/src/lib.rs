@@ -325,6 +325,7 @@ pub fn run() {
             commands::agent_cmds::send_agent_chat_message,
             commands::agent_cmds::cancel_agent_chat_message,
             commands::agent_cmds::list_harness_models,
+            commands::agent_cmds::chat_token_subscribe,
             commands::chat_cmds::resolve_tool_action,
             commands::chat_cmds::set_chat_api_key,
             commands::chat_cmds::delete_chat_api_key,

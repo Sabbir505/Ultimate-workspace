@@ -92,6 +92,8 @@ impl AgentSessionManager {
 
     /// Send one user turn. The harness id comes from the chat session's
     /// `agent` field ("harness:<id>"), passed by the command layer.
+    /// `connectors` is the command layer's snapshot of connected connectors
+    /// (tokens already refreshed), merged into the spawn's MCP config.
     pub fn send(
         &self,
         app: &AppHandle,
@@ -102,6 +104,7 @@ impl AgentSessionManager {
         model: &str,
         cwd: Option<&str>,
         project_id: Option<&str>,
+        connectors: &[crate::connectors::HarnessMcpServer],
     ) -> Result<(), String> {
         let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
         let entry = sessions
@@ -174,9 +177,9 @@ impl AgentSessionManager {
         };
 
         match harness {
-            "claude_code" => send_claude_turn(app, db, chat_session_id, &effective, entry, cwd, project_id),
-            "kimi_code" => spawn_per_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, PerTurn::Kimi),
-            "opencode" => spawn_per_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, PerTurn::OpenCode),
+            "claude_code" => send_claude_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, connectors),
+            "kimi_code" => spawn_per_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, PerTurn::Kimi, connectors),
+            "opencode" => spawn_per_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, PerTurn::OpenCode, connectors),
             other => Err(format!("harness '{other}' has no headless chat backend yet")),
         }
     }
@@ -339,6 +342,7 @@ fn send_claude_turn(
     entry: &mut AgentChild,
     cwd: Option<&str>,
     project_id: Option<&str>,
+    connectors: &[crate::connectors::HarnessMcpServer],
 ) -> Result<(), String> {
     if entry.child.is_none() || entry.spawned_model.as_deref() != Some(entry.model.as_str()) {
         if let Some(mut old) = entry.child.take() {
@@ -359,6 +363,7 @@ fn send_claude_turn(
             &entry.cli_session_id,
             &cancelled,
             &entry.stdin,
+            connectors,
         )?);
         entry.spawned_model = Some(entry.model.clone());
     }
@@ -438,6 +443,44 @@ fn spawn_dir(
         let _ = std::fs::create_dir_all(d);
     }
     dir
+}
+
+/// Directories a harness turn's artifact diff must watch: the spawn dir
+/// (files the CLI writes into its workspace) PLUS the artifacts dir
+/// (files the conduit-tools MCP writes — mcp_tools_bridge always resolves
+/// `dispatch::artifacts_dir`, which differs from the spawn dir whenever a
+/// project is selected or the user configured a custom `storage.artifactsDir`).
+/// Watching only the spawn dir silently drops every MCP-generated docx/pptx/
+/// pdf: no artifact row, no `chat:artifact` event, no canvas auto-open.
+/// Deduped (canonicalized); spawn dir first.
+fn turn_watch_dirs(
+    cwd: Option<&str>,
+    db: &Arc<parking_lot::Mutex<rusqlite::Connection>>,
+) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(d) = spawn_dir(cwd, db) {
+        dirs.push(d);
+    }
+    // Mirror dispatch::artifacts_dir's default without needing an AppHandle:
+    // configured dir, else <Documents>/Conduit (falling back to home).
+    let artifacts = {
+        let conn = db.lock();
+        crate::chat::dispatch::configured_artifacts_dir(&conn)
+    }
+    .or_else(|| {
+        dirs::document_dir()
+            .or_else(dirs::home_dir)
+            .map(|base| base.join("Conduit"))
+    });
+    if let Some(a) = artifacts {
+        let _ = std::fs::create_dir_all(&a);
+        let canon = |p: &PathBuf| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+        let a_canon = canon(&a);
+        if !dirs.iter().any(|d| canon(d) == a_canon) {
+            dirs.push(a);
+        }
+    }
+    dirs
 }
 
 /// A harness turn's spawn directory plus its pre-turn snapshot, moved into
@@ -558,18 +601,28 @@ fn artifacts_dir_for_bundle(app: &AppHandle, cwd: Option<&str>) -> String {
     crate::chat::dispatch::artifacts_dir(app).to_string_lossy().into_owned()
 }
 
-/// Resolve (write if needed) the per-project harness bundle. Returns None
-/// when no project is selected or the write fails — bundle failure must
-/// never fail the turn (same contract as the old resolve_mcp_config).
+/// Bundle slug for sessions with no selected project. Connectors and
+/// conduit-tools work project-less too, so a bundle is always written; the
+/// tradeoff is that browser panes and artifacts of ALL project-less sessions
+/// share this one scope.
+const NO_PROJECT_BUNDLE_SLUG: &str = "_no_project";
+
+/// Resolve (write if needed) the per-project harness bundle. Project-less
+/// sessions fall back to the `_no_project` slug so connectors + conduit-tools
+/// still reach the CLI. Returns None only when the app data dir or the write
+/// fails — bundle failure must never fail the turn (same contract as the old
+/// resolve_mcp_config). `connectors` are merged into the bundle's MCP configs
+/// as remote servers (tokens already refreshed by the command layer).
 fn resolve_harness_bundle(
     app: &AppHandle,
     project_id: Option<&str>,
     cwd: Option<&str>,
     artifacts_dir: String,
+    connectors: &[crate::connectors::HarnessMcpServer],
 ) -> Option<crate::harness_bundle::HarnessBundlePaths> {
     let data_dir = app.path().app_data_dir().ok()?;
     crate::harness_bundle::write_bundle(
-        &data_dir, project_id?, cwd, Some(artifacts_dir.as_str()), None, crate::browser::BROWSER_MCP_PORT)
+        &data_dir, project_id.unwrap_or(NO_PROJECT_BUNDLE_SLUG), cwd, Some(artifacts_dir.as_str()), None, crate::browser::BROWSER_MCP_PORT, connectors)
 }
 
 fn spawn_claude(
@@ -583,6 +636,7 @@ fn spawn_claude(
     session_cell: &Arc<Mutex<Option<String>>>,
     cancelled: &Arc<AtomicBool>,
     shared_stdin: &Arc<Mutex<Option<std::process::ChildStdin>>>,
+    connectors: &[crate::connectors::HarnessMcpServer],
 ) -> Result<Child, String> {
     let alias = claude_model_alias(model);
     let mut args: Vec<String> = vec![
@@ -607,7 +661,7 @@ fn spawn_claude(
     // Conduit-owned bundle: instructions, permissions, and both MCP servers
     // (browser + tools). Registration failure degrades to no extra flags —
     // the turn still runs, just without conduit's prompt/tools.
-    if let Some(bundle) = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd)) {
+    if let Some(bundle) = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd), connectors) {
         args.extend(crate::harness_bundle::claude_bundle_args(&bundle, &artifacts_dir_for_bundle(app, cwd)));
     }
     let spec = resolve_for_spawn(&CommandSpec {
@@ -619,13 +673,15 @@ fn spawn_claude(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    // Snapshot the spawn dir once per (re)spawn so finish_turn can diff it
-    // after each turn and surface files the CLI created as artifacts.
-    let mut watch = None;
-    if let Some(dir) = spawn_dir(cwd, &db.0) {
-        cmd.current_dir(&dir);
-        watch = Some(DirWatch::new(dir));
+    // Snapshot the watch dirs once per (re)spawn so finish_turn can diff them
+    // after each turn and surface files the CLI created as artifacts. The
+    // first dir is the spawn dir (the CLI's workspace); the second (when
+    // different) is the artifacts dir conduit-tools MCP writes into.
+    let watch_dirs = turn_watch_dirs(cwd, &db.0);
+    if let Some(dir) = watch_dirs.first() {
+        cmd.current_dir(dir);
     }
+    let mut watches: Vec<DirWatch> = watch_dirs.into_iter().map(DirWatch::new).collect();
     no_console_window(&mut cmd);
     let mut child = cmd
         .spawn()
@@ -658,7 +714,7 @@ fn spawn_claude(
             &session_cell2,
             &cancelled2,
             stdin2,
-            watch,
+            watches,
         );
     });
     Ok(child)
@@ -674,7 +730,7 @@ fn read_claude_stream(
     session_cell: &Arc<Mutex<Option<String>>>,
     cancelled: &AtomicBool,
     shared_stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
-    mut watch: Option<DirWatch>,
+    mut watches: Vec<DirWatch>,
 ) {
     let mut full = String::new();
     // Whether a thinking block is currently streaming: thinking deltas are
@@ -795,7 +851,7 @@ fn read_claude_stream(
                     let input = usage.and_then(|u| u.get("input_tokens")).and_then(|t| t.as_i64());
                     let output = usage.and_then(|u| u.get("output_tokens")).and_then(|t| t.as_i64());
                     let cost = v.get("total_cost_usd").and_then(|c| c.as_f64());
-                    finish_turn(app, db, sid, &mut full, input, output, cost, &mut watch);
+                    finish_turn(app, db, sid, &mut full, input, output, cost, &mut watches);
                 } else {
                     let msg = v
                         .get("error")
@@ -846,13 +902,14 @@ fn spawn_per_turn(
     cwd: Option<&str>,
     project_id: Option<&str>,
     kind: PerTurn,
+    connectors: &[crate::connectors::HarnessMcpServer],
 ) -> Result<(), String> {
     let resume = entry.cli_session_id.lock().ok().and_then(|g| g.clone());
     // Conduit-owned bundle: instructions, permissions, and MCP registration.
     // Failure degrades to the legacy browser-only configs below (or none).
     // The bundle hardcodes bypassPermissions in settings.json so claude
     // runs with full-auto approval.
-    let bundle = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd));
+    let bundle = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd), connectors);
     // Legacy fallback: browser-only MCP when the bundle (or its mcp part)
     // didn't write — keeps pty-style browser tools working in degraded mode.
     let opencode_legacy_cfg = if bundle.is_none() {
@@ -940,13 +997,14 @@ fn spawn_per_turn(
             cmd.env("OPENCODE_CONFIG", cfg);
         }
     }
-    // Snapshot the spawn dir once for this turn so finish_turn can diff it
-    // afterwards and surface files the CLI created as artifacts.
-    let mut watch = None;
-    if let Some(dir) = spawn_dir(cwd, &db.0) {
-        cmd.current_dir(&dir);
-        watch = Some(DirWatch::new(dir));
+    // Snapshot the watch dirs once for this turn so finish_turn can diff them
+    // afterwards and surface files the CLI created as artifacts (spawn dir +
+    // the artifacts dir conduit-tools MCP writes into, when different).
+    let watch_dirs = turn_watch_dirs(cwd, &db.0);
+    if let Some(dir) = watch_dirs.first() {
+        cmd.current_dir(dir);
     }
+    let watches: Vec<DirWatch> = watch_dirs.into_iter().map(DirWatch::new).collect();
     no_console_window(&mut cmd);
     let mut child = cmd
         .spawn()
@@ -979,7 +1037,7 @@ fn spawn_per_turn(
             &session_cell,
             is_kimi,
             &cancelled,
-            watch,
+            watches,
         );
     });
     Ok(())
@@ -997,7 +1055,7 @@ fn read_per_turn_stream(
     session_cell: &Arc<Mutex<Option<String>>>,
     is_kimi: bool,
     cancelled: &AtomicBool,
-    mut watch: Option<DirWatch>,
+    mut watches: Vec<DirWatch>,
 ) {
     let mut full = String::new();
     // OpenCode buffers deltas internally in `run` mode: each "text" event
@@ -1030,7 +1088,7 @@ fn read_per_turn_stream(
     if cancelled.load(Ordering::SeqCst) {
         full.clear();
     } else {
-        finish_turn(app, db, sid, &mut full, input, output, cost, &mut watch);
+        finish_turn(app, db, sid, &mut full, input, output, cost, &mut watches);
     }
 }
 
@@ -1203,13 +1261,14 @@ pub fn run_one_shot(
     if let Some((k, v)) = &prompt_env {
         cmd.env(k, v);
     }
-    // Same artifact detection as the chat-session paths: diff the spawn dir
-    // after the turn and surface created/modified files.
-    let mut watch = None;
-    if let Some(dir) = spawn_dir(cwd, db) {
-        cmd.current_dir(&dir);
-        watch = Some(DirWatch::new(dir));
+    // Same artifact detection as the chat-session paths: diff the watch dirs
+    // (spawn dir + artifacts dir) after the turn and surface created/modified
+    // files.
+    let watch_dirs = turn_watch_dirs(cwd, db);
+    if let Some(dir) = watch_dirs.first() {
+        cmd.current_dir(dir);
     }
+    let watches: Vec<DirWatch> = watch_dirs.into_iter().map(DirWatch::new).collect();
     no_console_window(&mut cmd);
     let mut child = cmd
         .spawn()
@@ -1263,10 +1322,10 @@ pub fn run_one_shot(
         if is_claude {
             let cell = Arc::new(Mutex::new(None));
             let dummy_stdin = Arc::new(Mutex::new(None));
-            read_claude_stream(app2.as_ref(), &db2, &sid2, stdout, &in_flight2, &cell, &never_cancelled, dummy_stdin, watch);
+            read_claude_stream(app2.as_ref(), &db2, &sid2, stdout, &in_flight2, &cell, &never_cancelled, dummy_stdin, watches);
         } else {
             let cell = Arc::new(Mutex::new(None));
-            read_per_turn_stream(app2.as_ref(), &db2, &sid2, stdout, &in_flight2, &cell, is_kimi, &never_cancelled, watch);
+            read_per_turn_stream(app2.as_ref(), &db2, &sid2, stdout, &in_flight2, &cell, is_kimi, &never_cancelled, watches);
         }
     });
 
@@ -1497,7 +1556,7 @@ fn finish_turn(
     input: Option<i64>,
     output: Option<i64>,
     cost: Option<f64>,
-    watch: &mut Option<DirWatch>,
+    watches: &mut Vec<DirWatch>,
 ) {
     // Persist the assistant message FIRST so we can attribute artifacts to it.
     let message_id: Option<i64> = if !full.is_empty() {
@@ -1520,7 +1579,10 @@ fn finish_turn(
     };
     full.clear();
 
-    if let Some(w) = watch.as_mut() {
+    // Diff every watch dir (spawn dir + artifacts dir). `emitted` dedups the
+    // (rare) case of overlapping dirs reporting the same file twice.
+    let mut emitted = std::collections::HashSet::new();
+    for w in watches.iter_mut() {
         let after = snapshot_dir(&w.dir);
         let changed = changed_previewable_files(&w.before, &after);
         // Refresh the baseline so the next turn (claude's persistent process
@@ -1528,6 +1590,9 @@ fn finish_turn(
         w.before = after;
         for rel in changed {
             let path = w.dir.join(&rel).to_string_lossy().to_string();
+            if !emitted.insert(path.clone()) {
+                continue;
+            }
             let filename = rel.rsplit('/').next().unwrap_or(&rel).to_string();
             let kind = Path::new(&filename)
                 .extension()
@@ -1563,7 +1628,13 @@ fn finish_turn(
 
 fn emit_token(app: Option<&AppHandle>, sid: &str, token: &str) {
     if let Some(app) = app {
-        let _ = app.emit("chat:token", json!({ "chatSessionId": sid, "token": token }));
+        let payload = crate::types::ChatTokenPayload {
+            chat_session_id: sid.to_string(),
+            token: token.to_string(),
+        };
+        if !crate::chat::stream_events::try_send(sid, &payload) {
+            let _ = app.emit("chat:token", payload);
+        }
     }
 }
 
@@ -1687,5 +1758,39 @@ mod tests {
         // Diffing an unchanged tree reports nothing.
         let again = snapshot_dir(dir);
         assert!(changed_previewable_files(&after, &again).is_empty());
+    }
+
+    /// The artifact watch covers BOTH the spawn dir and the configured
+    /// artifacts dir: conduit-tools MCP writes into `storage.artifactsDir`
+    /// regardless of the CLI's workspace, so a project-selected turn (or a
+    /// custom folder) must still surface MCP-generated files.
+    #[test]
+    fn turn_watch_dirs_includes_configured_artifacts_dir() {
+        let proj = tempfile::tempdir().unwrap();
+        let arts = tempfile::tempdir().unwrap();
+        let conn = crate::db::mem();
+        crate::db::set_setting(
+            &conn,
+            crate::chat::dispatch::ARTIFACTS_DIR_SETTING_KEY,
+            arts.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let db = Arc::new(parking_lot::Mutex::new(conn));
+        let dirs = turn_watch_dirs(Some(proj.path().to_str().unwrap()), &db);
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        assert_eq!(dirs.len(), 2, "spawn dir + configured artifacts dir: {dirs:?}");
+        assert_eq!(canon(&dirs[0]), canon(proj.path()));
+        assert_eq!(canon(&dirs[1]), canon(arts.path()));
+    }
+
+    /// With no project and no configured dir, the spawn dir and the artifacts
+    /// fallback are the same <Documents>/Conduit — the watch must dedup to
+    /// one dir, not snapshot the same tree twice.
+    #[test]
+    fn turn_watch_dirs_dedups_when_dirs_coincide() {
+        let conn = crate::db::mem();
+        let db = Arc::new(parking_lot::Mutex::new(conn));
+        let dirs = turn_watch_dirs(None, &db);
+        assert_eq!(dirs.len(), 1, "{dirs:?}");
     }
 }

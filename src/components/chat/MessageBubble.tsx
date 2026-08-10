@@ -19,6 +19,7 @@ import rehypeKatex from "rehype-katex";
 import type { ChatMessage } from "../../lib/ipc";
 import { readArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
+import { useUiStore } from "../../state/ui";
 import { parseUnifiedDiff } from "../../lib/diff";
 import { openInBrowserPane } from "../../lib/openBrowserPane";
 import { DiffCard, type EditPayload } from "./DiffCard";
@@ -1225,10 +1226,16 @@ function MessageBubbleInner({
   // fix for the noisy per-call rows + interleaved-blocks layout.
   const blocks = isUser ? null : groupSegments(segments);
 
+  // Detect if this assistant message contains a plan section
+  const planSection = !isUser ? detectPlan(message.content) : null;
+
   return (
     <div className={`chat-bubble${isUser ? " user" : " assistant"}`} data-msg-id={msgId}>
       {msgAttachments.length > 0 && <MessageAttachments attachments={msgAttachments} />}
       <div className="chat-bubble-inner">
+        {planSection && (
+          <PlanBanner title={planSection.title} summary={planSection.summary} full={planSection.full} />
+        )}
         {isUser
           ? cleanContent.trim().length > 0 && (
               <Markdown content={cleanContent} onPreviewArtifact={onPreviewArtifact} />
@@ -1262,6 +1269,72 @@ function MessageBubbleInner({
           onRepeat={onRepeat}
           onDelete={onDelete}
         />
+      )}
+    </div>
+  );
+}
+
+// ---- Plan detection & banner ----
+
+const PLAN_PATTERNS = [
+  /^#+\s*(Plan|Planning|Approach|Strategy|Steps|Implementation Plan)/im,
+  /^(?:Here(?:'s| is) (?:my |the |a )?plan)/im,
+  /^(?:Let me (?:plan|think about|outline|break down))/im,
+  /^(?:I(?:'ll| will) (?:plan|break|outline|do the following))/im,
+  /^(?:My plan (?:is|:))/im,
+];
+
+interface PlanInfo { title: string; summary: string; full: string; }
+
+function detectPlan(content: string): PlanInfo | null {
+  const cleaned = content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  if (cleaned.length < 50) return null;
+
+  for (const pattern of PLAN_PATTERNS) {
+    const m = pattern.exec(cleaned);
+    if (m) {
+      const start = m.index;
+      const after = cleaned.slice(start);
+      const nextSection = after.slice(m[0].length).search(/^#+\s/m);
+      const full = nextSection !== -1
+        ? after.slice(0, m[0].length + nextSection).trim()
+        : after.trim();
+      const title = after.split("\n")[0].replace(/^#+\s*/, "").replace(/[*_]/g, "").trim().slice(0, 60);
+      // First 2-3 lines as summary
+      const lines = full.split("\n").filter((l) => l.trim());
+      const summary = lines.slice(1, 4).join(" ").replace(/[*_#]/g, "").trim().slice(0, 120);
+      return { title, summary, full };
+    }
+  }
+  return null;
+}
+
+function PlanBanner({ title, summary, full }: PlanInfo) {
+  const [open, setOpen] = useState(false);
+  const setPlanCanvas = useUiStore((s) => s.setPlanCanvas);
+  const setToolPanelTab = useUiStore((s) => s.setToolPanelTab);
+  const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
+
+  const openInCanvas = () => {
+    setPlanCanvas(full, title);
+    setToolPanelTab("canvas");
+    setToolPanelCollapsed(false);
+  };
+
+  return (
+    <div className="chat-plan-banner">
+      <div className="chat-plan-banner-header" onClick={() => setOpen(!open)}>
+        <span className="chat-plan-banner-icon">📋</span>
+        <span className="chat-plan-banner-title">Plan: {title}</span>
+        <span className="chat-plan-banner-chevron">{open ? "▾" : "▸"}</span>
+      </div>
+      {open && (
+        <div className="chat-plan-banner-body">
+          <div className="chat-plan-banner-summary">{summary}</div>
+          <button className="chat-plan-banner-canvas-btn" onClick={openInCanvas}>
+            Open full plan in Canvas →
+          </button>
+        </div>
       )}
     </div>
   );

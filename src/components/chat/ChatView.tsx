@@ -11,6 +11,7 @@
 // arrives. TypingIndicator stays eager (it's a 3-line spinner).
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChatStore } from "../../state/chat";
+import { useUiStore } from "../../state/ui";
 import { ChatComposer, type ChatAttachment } from "./ChatComposer";
 import { TypingIndicator } from "./MessageBubble";
 const MessageBubble = lazy(() => import("./MessageBubble").then((m) => ({ default: m.MessageBubble })));
@@ -722,6 +723,14 @@ export function ChatView() {
         </div>
       )}
 
+      {/* Plan preview: appears above composer when the latest assistant message contains a plan */}
+      <PlanPreview
+        messages={messages}
+        activeSessionId={activeChatSessionId}
+        streaming={streamingChatSessionId === activeChatSessionId}
+        onSend={handleSend}
+      />
+
       <ChatComposer
         draft={draft}
         onSend={handleSend}
@@ -756,6 +765,133 @@ export function ChatView() {
         thinkingSupported={thinkingSupported}
       />
     </div>
+    </div>
+  );
+}
+
+// ---- Plan Preview (above composer) ----
+
+// Plan detection: matches common plan/approach headers that models produce.
+// Designed to be inclusive enough for real-world responses (Claude, GPT, etc.)
+// but not so loose it triggers on every bullet list.
+const PLAN_PATTERNS = [
+  // Markdown heading with plan keywords
+  /^#{1,3}\s*(?:Plan|Planning|Approach|Strategy|Steps|Implementation|Proposed Solution|Game Plan|Roadmap|To[- ]Do|Action Plan)/im,
+  // Phrasal intros — model says "Here's my plan" or "Let me outline"
+  /(?:^|\n\n)(?:Here(?:'s| is) (?:my |the |a |an )?(?:plan|approach|breakdown|strategy|outline|steps?))/im,
+  /(?:^|\n\n)(?:Let me (?:(?:quickly )?(?:plan|outline|break(?:\s+down)?|sketch|lay out|map out|walk through)|explain (?:my |the )?(?:plan|approach|thinking)))/im,
+  /(?:^|\n\n)(?:I(?:'ll| will) (?:plan|break|outline|do the following|take the following|proceed (?:as follows|in these steps)|tackle this (?:in |with )?steps?|start by))/im,
+  /(?:^|\n\n)(?:My (?:plan|approach|strategy|recommendation|suggestion) (?:is|would be|:))/im,
+  /(?:^|\n\n)(?:Here(?:'s| is) (?:how|what) I(?:'ll| will) (?:do|approach|proceed|tackle|handle|implement))/im,
+  // Numbered plan marker
+  /(?:^|\n)(?:\d+[.)]\s+)(?:\*\*[^*]+\*\*\s*)?(?:\d+[.)]\s+)/m,
+];
+
+function detectPlanSection(content: string): { title: string; lines: string[]; full: string } | null {
+  // Strip reasoning blocks first
+  const cleaned = content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  if (cleaned.length < 60) return null;
+
+  for (const pattern of PLAN_PATTERNS) {
+    const m = pattern.exec(cleaned);
+    if (m && m.index >= 0) {
+      const start = m.index;
+      const after = cleaned.slice(start);
+      const headerEnd = m[0].length;
+      // Take content from the plan header to the next ## section, or ~500 chars
+      const nextSection = after.slice(headerEnd).search(/^#{1,3}\s+(?!Plan|Step)/m);
+      const full = nextSection !== -1
+        ? after.slice(0, headerEnd + nextSection).trim()
+        : after.slice(0, Math.min(after.length, 600)).trim();
+      // Only count as a plan if there's substantial content after the header
+      const bodyAfterHeader = full.slice(headerEnd).trim();
+      if (bodyAfterHeader.length < 30) continue;
+      const title = m[0]
+        .replace(/^#{1,3}\s*/, "")
+        .replace(/[*_`]/g, "")
+        .trim()
+        .slice(0, 70);
+      const allLines = full.split("\n").filter((l) => l.trim().length > 0);
+      if (allLines.length < 2) continue;
+      return { title, lines: allLines, full };
+    }
+  }
+  return null;
+}
+
+function PlanPreview({
+  messages,
+  activeSessionId,
+  streaming,
+  onSend,
+}: {
+  messages: import("../../lib/ipc").ChatMessageRecord[];
+  activeSessionId: string | null;
+  streaming: boolean;
+  onSend: (content: string, attachments: import("./ChatComposer").ChatAttachment[], forceResearch?: boolean) => void;
+}) {
+  const setPlanCanvas = useUiStore((s) => s.setPlanCanvas);
+  const setToolPanelTab = useUiStore((s) => s.setToolPanelTab);
+  const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
+
+  // Only show plan preview when NOT streaming and we have messages
+  if (!activeSessionId || streaming) return null;
+
+  // Find the latest assistant message that contains a plan
+  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+  if (!lastAssistant) return null;
+
+  const plan = detectPlanSection(lastAssistant.content);
+  if (!plan) return null;
+
+  // Show first 4 lines clearly, rest with blur
+  const visibleLines = plan.lines.slice(0, 4);
+  const blurLines = plan.lines.slice(4, 6);
+
+  const handleAgree = () => {
+    onSend("I agree with this plan. Proceed with the implementation.", []);
+  };
+
+  const handleExpand = () => {
+    // Strip the plan's own heading from the body so Canvas doesn't double-display
+    const bodyWithoutHeader = plan.full.replace(/^#{1,3}\s+[^\n]+\n*/, "").trim();
+    setPlanCanvas(bodyWithoutHeader || plan.full, plan.title);
+    setToolPanelTab("canvas");
+    setToolPanelCollapsed(false);
+  };
+
+  return (
+    <div className="plan-preview">
+      <div className="plan-preview-card">
+        <div className="plan-preview-title">
+          <svg className="plan-preview-icon" width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" />
+            <rect x="9" y="3" width="6" height="4" rx="1" />
+            <path d="M9 14l2 2 4-4" />
+          </svg>
+          {plan.title}
+        </div>
+        <div className="plan-preview-lines">
+          {visibleLines.map((line, i) => (
+            <div key={i} className="plan-preview-line">{line}</div>
+          ))}
+          {blurLines.length > 0 && (
+            <div className="plan-preview-blur">
+              {blurLines.map((line, i) => (
+                <div key={i} className="plan-preview-line">{line}</div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="plan-preview-actions">
+          <button className="plan-preview-btn expand" onClick={handleExpand}>
+            Expand
+          </button>
+          <button className="plan-preview-btn agree" onClick={handleAgree}>
+            Agree &amp; proceed
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

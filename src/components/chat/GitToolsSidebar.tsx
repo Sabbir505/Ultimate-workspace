@@ -139,29 +139,32 @@ export function GitToolsSidebar() {
     };
   }, [branchOpen]);
 
-  // -- Plans: derived from recent user messages, MEMOIZED so streaming
-  //    chat output (which changes `messages` 50×/s) doesn't re-filter the
-  //    array and thrash the component on every token. --
+  // -- Plans: extract actual planning content from ASSISTANT messages.
+  //    Looks for structured plans (numbered steps, "Plan:" sections, todo
+  //    lists) that the model generated before implementing. Works for both
+  //    CLI harness output and API chat responses.
   const messages = useChatStore((s) => s.messages);
   const plans = useMemo(() => {
-    return messages
-      .filter((m) => m.role === "user" && m.content.trim().length > 20)
-      .slice(-5)
-      .reverse()
-      .map((m) => ({
-        raw: m.content,
-        label: m.content
-          .replace(/```[\s\S]*?```/g, "")
-          .replace(/[#*_>~]/g, "")
-          .replace(/\n+/g, " ")
-          .trim()
-          .slice(0, 48),
-      }))
-      .filter((p) => p.label.length > 0);
+    const found: { raw: string; label: string }[] = [];
+    // Scan all assistant messages (newest first) for planning content
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role !== "assistant") continue;
+      const content = m.content || "";
+      if (content.trim().length < 50) continue;
+
+      // Try to find a "Plan" section header
+      const planSection = extractPlanSection(content);
+      if (planSection) {
+        const label = planSectionTitle(planSection) || planSection.slice(0, 60).replace(/\n/g, " ");
+        found.push({ raw: planSection, label });
+      }
+    }
+    return found.slice(0, 10);
   }, [messages]);
 
   // Last plan summary line for the collapsed strip.
-  const lastPlanSummary = plans.length > 0 ? plans[plans.length - 1].label : null;
+  const lastPlanSummary = plans.length > 0 ? plans[0].label : null;
 
   // Progress items — from completed tasks.
   const taskList = Object.values(tasks);
@@ -176,7 +179,8 @@ export function GitToolsSidebar() {
 
   // Open a plan in the Canvas tab.
   const openPlan = (plan: { raw: string; label: string }) => {
-    setPlanCanvas(plan.raw, plan.label);
+    const body = plan.raw.replace(/^#{1,3}\s+[^\n]+\n*/, "").trim();
+    setPlanCanvas(body || plan.raw, plan.label);
     setToolPanelTab("canvas");
     setToolPanelCollapsed(false);
   };
@@ -359,4 +363,65 @@ export function GitToolsSidebar() {
       )}
     </div>
   );
+}
+
+// ---- Plan extraction helpers ----
+
+// Same patterns as ChatView's PlanPreview — keep in sync.
+const PLAN_HEADERS = [
+  /^#{1,3}\s*(?:Plan|Planning|Approach|Strategy|Steps|Implementation|Proposed Solution|Game Plan|Roadmap|To[- ]Do|Action Plan)/im,
+  /(?:^|\n\n)(?:Here(?:'s| is) (?:my |the |a |an )?(?:plan|approach|breakdown|strategy|outline|steps?))/im,
+  /(?:^|\n\n)(?:Let me (?:(?:quickly )?(?:plan|outline|break(?:\s+down)?|sketch|lay out|map out|walk through)|explain (?:my |the )?(?:plan|approach|thinking)))/im,
+  /(?:^|\n\n)(?:I(?:'ll| will) (?:plan|break|outline|do the following|take the following|proceed (?:as follows|in these steps)|tackle this (?:in |with )?steps?|start by))/im,
+  /(?:^|\n\n)(?:My (?:plan|approach|strategy|recommendation|suggestion) (?:is|would be|:))/im,
+  /(?:^|\n\n)(?:Here(?:'s| is) (?:how|what) I(?:'ll| will) (?:do|approach|proceed|tackle|handle|implement))/im,
+  /(?:^|\n)(?:\d+[.)]\s+)(?:\*\*[^*]+\*\*\s*)?(?:\d+[.)]\s+)/m,
+];
+
+/** Try to extract a structured plan section from an assistant message.
+ *  Returns the plan text (from the plan header to the next section or end),
+ *  or null if no plan detected. */
+function extractPlanSection(content: string): string | null {
+  const cleaned = content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  if (cleaned.length < 50) return null;
+
+  for (const pattern of PLAN_HEADERS) {
+    const m = pattern.exec(cleaned);
+    if (m && m.index >= 0) {
+      const start = m.index;
+      const after = cleaned.slice(start);
+      // Take from plan header to next major section or ~500 chars
+      const headerLen = m[0].length;
+      const nextSection = after.slice(headerLen).search(/^#{1,3}\s+(?!Plan|Step)/m);
+      const full = nextSection !== -1
+        ? after.slice(0, headerLen + nextSection).trim()
+        : after.slice(0, Math.min(after.length, 500)).trim();
+      // Must have meaningful content after header
+      if (full.slice(headerLen).trim().length < 30) continue;
+      return full;
+    }
+  }
+
+  // Fallback: check for numbered/bullet lists in first paragraph as plan
+  const firstPara = cleaned.split(/\n\n+/)[0];
+  if (!firstPara) return null;
+  const lines = firstPara.split("\n").filter((l) => l.trim().length > 0);
+  const planItems = lines.filter((l) => /^\s*(?:\d+[.)]\s|[-*]\s|•\s)/.test(l));
+  if (planItems.length >= 3 && planItems.length >= lines.length * 0.5) {
+    return firstPara.trim();
+  }
+  return null;
+}
+
+/** Generate a short title from a plan section. */
+function planSectionTitle(plan: string): string {
+  const firstLine = plan.split("\n")[0] || "";
+  return firstLine
+    .replace(/^#{1,3}\s*/, "")
+    .replace(/\*\*/g, "")
+    .replace(/\*/g, "")
+    .replace(/_/g, "")
+    .replace(/`/g, "")
+    .trim()
+    .slice(0, 60);
 }

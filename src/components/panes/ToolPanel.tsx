@@ -11,6 +11,8 @@
 // left-edge drag handle doubles as the chat|panel splitter (same pattern as
 // DevDiffPanel's resize handle), with the width persisted in the ui store.
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { openBrowserPane, openShellTerminal, restoreMinimizedBrowser } from "../../lib/sessionLauncher";
 import { useChatStore } from "../../state/chat";
 import {
@@ -278,7 +280,9 @@ export function ToolPanel() {
                       </button>
                     </div>
                     <div className="canvas-plan-body">
-                      <pre className="canvas-plan-md">{planCanvasContent}</pre>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {planCanvasContent}
+                      </ReactMarkdown>
                     </div>
                   </div>
                 )}

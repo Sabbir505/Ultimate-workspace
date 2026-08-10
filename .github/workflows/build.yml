@@ -141,7 +141,7 @@ jobs:
           set -euo pipefail
           mkdir -p src-tauri/target/release/bundle/nsis
           cp -r artifacts/windows/* src-tauri/target/release/bundle/nsis/ 2>/dev/null || true
-          npm run release:latest-json -- --notes "See the GitHub Release description for release notes."
+          npm run release:latest-json -- --notes-file CHANGELOG.md
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

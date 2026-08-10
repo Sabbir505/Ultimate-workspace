@@ -2799,7 +2799,8 @@ pre,
 
 /* ── Automations View (full-page master-detail) ── */
 .automations-view {
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--surface);
@@ -2971,7 +2972,8 @@ pre,
   display: flex;
   flex-direction: column;
   min-width: 0;
-  overflow-y: auto;
+  min-height: 0;
+  overflow: hidden;
 }
 .automations-detail-empty {
   flex: 1;
@@ -2988,7 +2990,8 @@ pre,
 .automation-detail {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  flex: 1;
+  min-height: 0;
 }
 .automation-detail-header {
   padding: 20px 24px 16px;
@@ -3176,7 +3179,8 @@ pre,
 .automation-form {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  flex: 1;
+  min-height: 0;
 }
 .automation-form-header {
   display: flex;

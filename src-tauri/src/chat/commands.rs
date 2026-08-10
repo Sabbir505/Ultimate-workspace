@@ -377,7 +377,7 @@ fn format_compact_token_count(n: i64) -> String {
 }
 
 /// One-shot (non-streaming) OpenAI-style completion returning the message text.
-async fn openai_oneshot(
+pub async fn openai_oneshot(
     client: &reqwest::Client,
     api_key: &str,
     base: &str,
@@ -410,7 +410,7 @@ async fn openai_oneshot(
 }
 
 /// One-shot (non-streaming) Anthropic-style completion returning the text.
-async fn anthropic_oneshot(
+pub async fn anthropic_oneshot(
     client: &reqwest::Client,
     api_key: &str,
     base: &str,

@@ -315,15 +315,31 @@ fn execute(
     automation: &Automation,
     prepared: &PreparedRun,
 ) -> Result<(), String> {
-    agent_sessions::run_one_shot(
-        app,
-        db,
-        &prepared.chat_session_id,
-        &automation.prompt,
-        &automation.harness,
-        &automation.model,
-        if automation.cwd.is_empty() { None } else { Some(automation.cwd.as_str()) },
-    )
+    // Route based on agent type:
+    // - CLI harnesses (claude_code, opencode) → spawn CLI process
+    // - API providers and local_gguf → chat HTTP API
+    match automation.harness.as_str() {
+        "claude_code" | "opencode" => {
+            agent_sessions::run_one_shot(
+                app,
+                db,
+                &prepared.chat_session_id,
+                &automation.prompt,
+                &automation.harness,
+                &automation.model,
+                if automation.cwd.is_empty() { None } else { Some(automation.cwd.as_str()) },
+            )
+        }
+        _ => {
+            crate::chat::run_one_shot_chat(
+                db,
+                &prepared.chat_session_id,
+                &automation.prompt,
+                &automation.harness,
+                &automation.model,
+            )
+        }
+    }
 }
 
 /// Record the outcome and release both overlap guards.

@@ -38,12 +38,14 @@ function ProviderRow({ p, total }: { p: ProviderCostRollup; total: number }) {
 }
 
 function labelFor(p: string): string {
-  if (p === "claude_code") return "Claude Code";
-  if (p === "kimi_code") return "Kimi Code";
-  if (p === "opencode") return "OpenCode";
-  // "chat:anthropic" → "Anthropic" (the prefix is a grouping artifact, not a
-  // user-facing label).
+  // Harness agent ids: "harness:claude_code" → "Claude Code"
+  if (p === "harness:claude_code" || p === "claude_code") return "Claude Code";
+  if (p === "harness:kimi_code" || p === "kimi_code") return "Kimi Code";
+  if (p === "harness:opencode" || p === "opencode") return "OpenCode";
+  // API providers: "chat:anthropic" → "Anthropic"
   if (p.startsWith("chat:")) return p.slice(5);
+  // Other harness-prefixed ids
+  if (p.startsWith("harness:")) return p.slice(8).replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
   return p;
 }
 

@@ -1561,8 +1561,9 @@ fn finish_turn(
     // Persist the assistant message FIRST so we can attribute artifacts to it.
     let message_id: Option<i64> = if !full.is_empty() {
         let conn = db.0.lock();
-        // Provider = the chat session's agent ("harness:<id>"), so the rollup
-        // groups harness-backed CLI chat under a real provider label.
+        // Strip the "harness:" prefix from the agent so the rollup
+        // groups harness-backed CLI chat under a clean provider label
+        // (e.g. "claude_code" instead of "harness:claude_code").
         let agent: Option<String> = conn
             .query_row(
                 "SELECT agent FROM chat_sessions WHERE id = ?1",
@@ -1570,7 +1571,10 @@ fn finish_turn(
                 |r| r.get(0),
             )
             .ok();
-        let provider = agent.as_deref().unwrap_or("harness:unknown");
+        let provider = agent
+            .as_deref()
+            .and_then(|a| a.strip_prefix("harness:"))
+            .unwrap_or("unknown");
         crate::db::add_chat_message(&conn, sid, "assistant", full, input, output, cost, None, None, None, Some(provider), None, None)
             .ok()
             .map(|m| m.id)

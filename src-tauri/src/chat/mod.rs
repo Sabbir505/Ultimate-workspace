@@ -537,6 +537,124 @@ pub(crate) async fn run_chat_stream(
     Ok((full_text, usage))
 }
 
+/// Headless one-shot for automations with API providers / local GGUF.
+/// Sends the prompt via the chat HTTP API, collects the full response,
+/// and persists both user + assistant messages. Blocking — runs the
+/// async stream on a temporary tokio runtime.
+pub fn run_one_shot_chat(
+    db: &Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    chat_session_id: &str,
+    prompt: &str,
+    provider_str: &str,
+    model_str: &str,
+) -> Result<(), String> {
+    let (api_key, base_url) = {
+        let conn = db.lock();
+        let key = crate::secrets::get_chat_api_key(&conn, provider_str);
+        if key.is_none() && provider_str != "local_gguf" {
+            return Err(format!(
+                "No API key configured for {provider_str}. Set one in Settings → Connectors."
+            ));
+        }
+        let base = crate::db::get_setting(&conn, &format!("chat.{provider_str}.base_url"))
+            .ok()
+            .flatten();
+        (key.unwrap_or_default(), base)
+    };
+
+    // Persist the user message
+    {
+        let conn = db.lock();
+        crate::db::add_chat_message(
+            &conn, chat_session_id, "user",
+            prompt, None, None, None, None, None, None, None, None, None,
+        ).map_err(|e| e.to_string())?;
+        crate::db::touch_chat_session(&conn, chat_session_id).map_err(|e| e.to_string())?;
+    }
+
+    let model = if model_str.is_empty() {
+        let conn = db.lock();
+        crate::db::get_setting(&conn, &format!("chat.{provider_str}.model"))
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    } else {
+        model_str.to_string()
+    };
+    if model.is_empty() && provider_str != "local_gguf" {
+        return Err("No model configured for this provider".into());
+    }
+
+    let system_prompt = {
+        let conn = db.lock();
+        crate::db::get_setting(&conn, "assistant.systemPrompt")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    };
+
+    let system = system_prompt.trim().to_string();
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("failed to create HTTP client: {e}"))?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {e}"))?;
+
+    let (response_text, _usage) = rt.block_on(async {
+        match provider_str {
+            "openai" | "openrouter" => {
+                let base = base_url.as_deref().unwrap_or(if provider_str == "openrouter" {
+                    crate::chat::providers::OpenRouterProvider::DEFAULT_BASE
+                } else {
+                    crate::chat::providers::OpenAIProvider::DEFAULT_BASE
+                });
+                crate::chat::commands::openai_oneshot(
+                    &client, &api_key, base, &model, &system, prompt,
+                )
+                .await
+                .map(|t| (t, None::<crate::chat::providers::ChatUsage>))
+            }
+            "openai_compatible" | "local_gguf" => {
+                let Some(base) = base_url.as_deref() else {
+                    return Err("No base URL configured for this provider. Set one in Settings \u{2192} Connectors.".into());
+                };
+                crate::chat::commands::openai_oneshot(
+                    &client, &api_key, base, &model, &system, prompt,
+                )
+                .await
+                .map(|t| (t, None::<crate::chat::providers::ChatUsage>))
+            }
+            "anthropic" | "anthropic_compatible" => {
+                let base = base_url.as_deref().unwrap_or(
+                    crate::chat::providers::AnthropicProvider::DEFAULT_BASE,
+                );
+                crate::chat::commands::anthropic_oneshot(
+                    &client, &api_key, base, &model, &system, prompt,
+                )
+                .await
+                .map(|t| (t, None::<crate::chat::providers::ChatUsage>))
+            }
+            other => Err(format!("unsupported provider for one-shot: {other}")),
+        }
+    })?;
+
+    // Persist the assistant response
+    {
+        let conn = db.lock();
+        crate::db::add_chat_message(
+            &conn, chat_session_id, "assistant",
+            &response_text,
+            None, None, None, None, None, None, None, None, None,
+        ).map_err(|e| e.to_string())?;
+        crate::db::touch_chat_session(&conn, chat_session_id).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

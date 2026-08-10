@@ -4,7 +4,137 @@ Running log per PRD §13.3: what was built, what was tested and how, assumptions
 
 ---
 
-## 2026-08-08 — Cost model v2 (T3-Code parity)
+## 2026-08-09 — `--jinja` fallback for Clang 20.1.8 llama-server + artifact routing (SVG→Canvas, HTML/JSX→browser)
+
+Two fixes finished from a half-landed changeset: the local-model sidecar
+crashed on llama-server builds (Clang 20.1.8) that reject `--jinja`, and
+the artifact open-routing referenced helpers that were never defined, so
+the frontend would not compile.
+
+**What was built:**
+- **`--jinja` strip on rejection** (`chat/local_models.rs`): the ngl
+  fallback ladder already descends on OOM; added a sibling branch for the
+  "non-OOM early exit" case that detects `unrecognized argument` /
+  `invalid option flag` in the captured stderr, strips `--jinja` from
+  `args_template` (declaration now `mut`), and retries. The ladder is
+  always multi-step (`[ngl, 64, 32, 16, 8, 4, 0]`, deduped), so `--jinja`
+  is present only on attempt 0 and the retry lands on attempt 1 — no
+  fall-through to the "all attempts failed" error.
+- **Artifact open-routing** (`state/chat.ts` `onArtifact` +
+  `lib/sessionLauncher.ts:openArtifactInBrowserPane`): `.html`/`.htm`/
+  `.jsx` artifacts now open in a browser pane (new tab on an existing
+  visible browser, else spawn one, else skip when the grid is full) and
+  surface the Browser tab; `.svg` stays inline in the chat bubble;
+  everything else still opens in the Canvas preview. Replaced an earlier
+  content-probe (`fileStartsWith`/`fileContains`) that was never defined.
+
+**What was tested and how:**
+- `cargo check --manifest-path src-tauri/Cargo.toml` → clean. (The prior
+  change had left `args_template` immutable → `E0384`; fixed by adding
+  `mut`.)
+- `npx tsc --noEmit` → exit 0. (The prior change referenced undefined
+  helpers; the extension-only check resolves it.)
+
+**Assumptions / deviations:**
+1. The Clang 20.1.8 build's `--jinja` rejection surfaces as
+   `unrecognized argument` / `invalid option flag` in the stderr captured
+   by `take_streams`; if the wording differs the branch won't fire and the
+   caller sees the real startup error.
+2. Routing is by content, not extension: `.jsx` → browser; `.html` is
+   classified via `readArtifactPreview` — a diagram (`kind "diagram"`, i.e.
+   starts with the `<!-- conduit:diagram -->` marker) stays in the Canvas
+   preview (pan/zoom + PNG/SVG export), a plain webpage (`kind "html"`) goes
+   to the browser so its scripts run. SVG renders inline in the chat bubble.
+   Classification failure / `null` defaults to Canvas.
+
+**Known issues:**
+- When the pane grid is full and no visible browser exists, an HTML/JSX
+  artifact open is silently skipped (no pane freed, no error surfaced).
+
+---
+
+## 2026-08-08 — Connectors in harness sessions (Claude Code / Kimi / OpenCode)
+
+Harness chat sessions never saw connected connectors: the built-in chat
+attaches them in-process (`connectors::session::connect_all`), but the CLI
+harnesses only read static MCP config at spawn — and the generated bundle
+registered only `conduit-browser` + `conduit-tools`. API-key and local-GGUF
+chat worked, harnesses didn't.
+
+**What was built:**
+- **Connector snapshot for harnesses** (`connectors/harness.rs`):
+  `harness_mcp_servers(app)` collects every connector with a credential row
+  plus public connectors (Kiwi) — same set the built-in chat uses — and
+  resolves a fresh OAuth bearer per connector via
+  `ensure_valid_access_token` (refreshes when expired; failures skip that
+  connector, never the turn).
+- **Bundle merge** (`harness_bundle.rs`): `build_tools_mcp_json` /
+  `build_opencode_tools_config` take the connector list and emit one remote
+  server per connector — Claude flavor `{ "type": "http", url, headers }`,
+  Kimi flavor `{ url, headers }` (HTTP inferred from `url`; no `type` field),
+  OpenCode `{ "type": "remote", url, headers, "oauth": false }` (`oauth:
+  false` keeps OpenCode from starting its own OAuth flow on token expiry —
+  refresh is Conduit's job, done per spawn). Claude and Kimi `mcp.json`
+  contents are now generated per-flavor (previously one shared document).
+- **Plumbing**: `send_agent_chat_message` is now async; it snapshots the
+  connectors before the sync spawn path and threads them through
+  `AgentSessionManager::send` → `send_claude_turn` / `spawn_per_turn` →
+  `resolve_harness_bundle` → `write_bundle`.
+
+**What was tested and how:**
+- `cargo test --lib` → **362 passed, 0 failed, 10 ignored** (new:
+  `tools_mcp_json_merges_connectors_per_flavor`,
+  `opencode_config_merges_connectors_as_remote`).
+- `npx tsc --noEmit` clean (no frontend changes — the invoke signature is
+  unchanged).
+
+**Assumptions / deviations:**
+1. Claude Code's process is persistent (respawned only on model change /
+   cancel / restart), so a long-lived Claude session can hold a connector
+   token past its ~1h expiry until the next respawn; Kimi/OpenCode spawn per
+   turn and always get a fresh token. GitHub tokens never expire.
+2. Google's Workspace MCP servers that deny `tools/call` in preview behave
+   the same as in the built-in chat; the local REST fallbacks (`gmail_*`,
+   `gdrive_*`, …) are chat-only and not bridged into harnesses.
+3. Dev-tab PTY sessions and automation one-shots (`one_shot_spec`) don't use
+   the harness bundle and are unchanged.
+
+**Follow-up (same day) — project-less sessions:** the bundle no longer
+requires a selected project. `resolve_harness_bundle` falls back to a
+`_no_project` slug when `project_id` is `None`, so connectors + conduit-tools
+reach the CLI in every harness session (previously a project-less spawn got
+NO Conduit MCP config at all — the CLI fell back to the user's own Claude
+plugin config, which read as "connectors not detected"). Tradeoff: browser
+panes and artifacts of all project-less sessions share the `_no_project`
+scope. `build_instructions_md` / `build_claude_settings_json` tolerate an
+empty project path (no bogus "project is at ``" sentence, empty
+`additionalDirectories` entries filtered). New test:
+`project_less_bundle_tolerates_empty_project_path`.
+
+**Follow-up 2 (same day) — canvas/artifact bug fixes:**
+
+1. **Docx preview lost all styling** — an uncommitted `MammothDocxPreview`
+   branch in `ArtifactPreviewPane.tsx` routed every docx through mammoth.js
+   (bare semantic HTML, no fonts/colors/table styles) instead of the styled
+   Rust converter's `preview.text`. Removed the branch + component; docx
+   renders via the styled converter HTML again.
+2. **Generated files never surfaced as artifacts in harness sessions when a
+   project was selected or `storage.artifactsDir` was customized** — the
+   harness `DirWatch` only diffed the spawn dir (project path), but the
+   conduit-tools MCP (`mcp_tools_bridge`) always writes into
+   `dispatch::artifacts_dir` (the configured/default folder). Files landed
+   outside the watched dir → no artifact row, no `chat:artifact` event, no
+   canvas auto-open, no sidebar entry. Fix: `turn_watch_dirs()` watches BOTH
+   dirs (deduped, canonicalized) through all three spawn paths
+   (`spawn_claude` / `spawn_per_turn` / `run_one_shot`); `finish_turn`
+   iterates the watches and dedups reported paths. New tests:
+   `turn_watch_dirs_includes_configured_artifacts_dir`,
+   `turn_watch_dirs_dedups_when_dirs_coincide`.
+
+**Verified:** `cargo test --lib` → **365 passed, 0 failed, 10 ignored**;
+`npx tsc --noEmit` clean.
+
+---
 
 Cost model redesign to match the T3 Code usage dashboard (design spec:
 `AI CONTEXT/COST_MODEL_REDESIGN.md`; implementation plan:
@@ -2475,3 +2605,203 @@ dropped from ConnectorIcon.tsx, and the registry test now asserts Canva is
 absent from CONNECTORS while its const still carries correct endpoints.
 GitHub's icon became the canonical brand mark: octocat on a white tile
 (visible on both app themes, replacing the bare black silhouette).
+
+## 2026-08-08 — Follow-up 3: soffice preview conversion spawned stuck console windows
+
+Symptom: opening a doc/ppt in the canvas popped a terminal window showing the
+LibreOffice usage dump ("Error in option: -env:UserInstallation", "Press Enter
+to continue..."), and every open added another.
+
+Root cause: `pptx_to_pdf` in `src-tauri/src/chat/office.rs` passed the profile
+bootstrap variable as TWO process arguments (`-env:UserInstallation`, then the
+`file:///...` URI). soffice requires it as ONE token
+(`-env:UserInstallation=<uri>`); the value-less form is a fatal argument error,
+so every conversion failed (and was therefore never cached — each open
+retried). On Windows soffice.exe is a GUI-subsystem binary, so on this error it
+AllocConsole()s its own window to print the usage text and blocks on Enter —
+CREATE_NO_WINDOW on our side can't suppress a console the child allocates
+itself. Result: one stuck console per attempted conversion.
+
+Fix: pass `.arg(format!("-env:UserInstallation={profile_uri}"))` as a single
+argument (office.rs, `pptx_to_pdf`), with a comment explaining why.
+
+Verification:
+- Ran the bundled soffice (`src-tauri/resources/libreoffice/program/soffice.exe`)
+  with the exact fixed argument form against `test_files/test_presentation.pptx`:
+  exit 0, valid 38 KB PDF produced in the run dir, profile dir created, no
+  console window.
+- `cargo test --lib office`: 9 passed / 0 failed.
+- Dev app hot-rebuilt and relaunched with the fix.
+
+Side note: the "mac os things" the user saw in the window were lines of
+LibreOffice's own usage text (the `--nstemporarydirectory` switch is documented
+as "MacOS X sandbox only"), not anything macOS-related in our code.
+
+## 2026-08-08 — Follow-up 4: preview-open restarts the dev app; docx full-fidelity render
+
+**Dev app auto-restarting when opening a ppt/doc preview.** Every soffice
+conversion touches files inside its own bundled install tree (e.g. the OpenCL
+probe leaves `resources/libreoffice/program/opencl/.~lock.cl-test.ods#`).
+`tauri dev` watches all of `src-tauri`, so each conversion triggered a rebuild
++ relaunch. Fix: new `src-tauri/.taurignore` (gitignore-style, read by the
+dev watcher at startup) ignoring `resources/`. The dev app must be restarted
+once to pick it up.
+
+**Docx rendered without styling in the canvas.** The built-in docx→HTML
+converter only preserves headings/basic runs. The user wants the same full
+fidelity Word/WPS shows. Fix: the pptx PDF preview path was generalized —
+`office.rs::pptx_to_pdf` is now `office_to_pdf` (soffice auto-detects the
+input filter; same cache, timeout, and single-arg `-env:UserInstallation`
+fix), and `chat/commands.rs` routes `pptx | docx | doc` previews through it,
+returning `kind: "pdf"` rendered by the native PDF viewer. On conversion
+failure it still falls through to the built-in HTML converter, and the
+frontend's LibreOffice hint (`ArtifactPreviewPane.tsx`) now shows for
+pptx/docx/doc instead of pptx only. xlsx keeps its HTML table preview.
+
+Verification:
+- `cargo test --lib`: 365 passed / 0 failed; `npx tsc --noEmit` clean.
+- Live: bundled soffice converted `test_files/test_document.docx` with the
+  exact production argument form — exit 0, valid 79 KB PDF.
+- Dev app relaunched fresh so the new watcher ignore is active.
+
+## 2026-08-09 — Browser subsystem: auto-open, screenshots, chat images, pacing
+
+Four user-reported browser issues fixed together.
+
+**1. Agent browser work now surfaces the Browser tab automatically.**
+Agent browser actions never revealed the panel — only user clicks did.
+New `browser:activity { pane_id }` event, emitted from the single funnel every
+harness browser op passes through (`browser_mcp.rs::resolve_or_open`) and from
+chat-mode `run_browser_tool` (`chat/dispatch.rs`). Frontend:
+`useBrowserMcpEvents.ts` gained a `surfaceBrowserPanel()` helper (mirror of the
+canvas auto-open contract: `setToolPanelTab("browser")` + uncollapse + focus)
+and a listener for the event; `openInBrowserPane` (`lib/openBrowserPane.ts` —
+chat open_url, pty URL detection, markdown link clicks) and
+`openBrowserPaneForProject` now surface the panel too. New IPC wrapper
+`listenBrowserActivity` in `lib/ipc.ts`.
+
+**2. `browser_screenshot` tool (new capability).**
+No screenshot path existed anywhere (no CDP, no screencast). Implemented on
+Windows via WebView2 `CapturePreview`: `browser.rs::capture_webview_png`
+(runs on the UI thread via `Webview::with_webview` +
+`CapturePreviewCompletedHandler::wait_for_async_operation`, which pumps the
+message loop while waiting; PNG written to a `CreateStreamOnHGlobal` memory
+stream and drained), exposed as `BrowserManager::capture_pane_png` /
+`capture_active_png` (blocking ≤15 s, always called via `spawn_blocking`).
+Deps added (Windows-only, versions pinned to what tauri 2.11 already links):
+`webview2-com 0.38`, `windows 0.61` (Win32_Foundation, Win32_System_Com,
+Win32_System_Com_StructuredStorage). Non-Windows returns None for now.
+- Harness mode: new `screenshot` op in `browser_mcp.rs` (saves
+  `browser-shot-<ms>.png` to the artifacts dir, returns path + base64);
+  `conduit-browser-mcp` binary gained the `browser_screenshot` tool whose
+  result is a real MCP image content block (the agent SEES the page) plus a
+  text block with the path to embed in chat. Staged binary refreshed
+  (debug copy into src-tauri/binaries for dev).
+- Chat mode: `browser_screenshot` added to the tool registry
+  (`chat/tools/mod.rs`, specs in both OpenAI + Anthropic wire formats) and to
+  `run_browser_tool`; the shot is persisted via `insert_artifact` and emitted
+  as `chat:artifact`, so it pops open in the canvas immediately, and the tool
+  result tells the model the `![screenshot](path)` embed form.
+
+**3. Broken image previews in chat.**
+Agent-referenced local images (`![shot](C:\…png)`) could never render: CSP
+`img-src 'self' data: blob: https:`, no asset protocol registered, bare paths
+404 against the app origin. Fix: `ChatImage` component in `MessageBubble.tsx`
+wired into react-markdown's `img` override — remote/data/blob URLs render
+as-is; local refs (incl. `file:///…` and `/C:/…` normalization) load bytes via
+the existing `read_artifact_preview` IPC and render as a data URI (the same
+CSP-clean path the canvas uses). Failure shows a small note instead of a
+broken-image glyph.
+
+**4. In-app browser lag during agent control.**
+No frame streaming exists (native webview, OS-composited) — the lag was
+deliberate watch-mode pacing on the action critical path. Tuned:
+watch-mode post-action delay 600→250 ms (`ActionOpts` default +
+`browser_mcp::resolve_action_opts`), cursor tween 400→150 ms (click + type),
+per-character typing 30–60→8–20 ms, browser_read settle 1000→400 ms,
+lazy-scroll step 700→350 ms. Visual feedback is kept, just faster; pacing
+still auto-disables when the pane is backgrounded. Two unit tests updated to
+the new defaults.
+
+Verification: `cargo test --lib` 365 passed / 0 failed; `cargo build --bins`
+clean; `npx tsc --noEmit` clean; dev app hot-rebuilt and relaunched. The
+CapturePreview roundtrip itself needs a live browser pane — to be exercised
+by the user (ask the agent to open a site and take a screenshot).
+
+## 2026-08-09 — Chat restore on launch + empty "Untitled" session sweep
+
+Bug: closing the app on a brand-new chat with no messages left an empty
+"Untitled" session row in the DB, and the next launch auto-started yet another
+new chat instead of reopening it — the rows accumulated.
+
+Root cause: `ChatView`'s auto-start effect created a session (DB row written
+eagerly by `newChat`) whenever `activeChatSessionId` was null — which it
+always is on launch, since the id is only kept in memory, never persisted.
+
+Fix:
+- On startup with no active session, the app now restores the most recently
+  active chat (`max last_active_at`) via `selectSession` — including an empty
+  one — and only mints a fresh chat when no sessions exist at all
+  (`src/components/chat/ChatView.tsx`).
+- New `delete_empty_chat_sessions` DB fn + command + IPC wrapper sweeps stale
+  message-less, unstarred rows (keeping the one being restored), cleaning up
+  the duplicates earlier launches created. Unit test
+  `delete_empty_sessions_sweeps_only_messageless_unstarred` covers keep /
+  starred / with-messages cases.
+- No frontend state persistence added: "most recently active" from the DB is
+  the restore target, so no new stored state to get stale.
+
+Verification: cargo test --lib 366 passed / 0 failed; tsc clean.
+
+## 2026-08-10 — Browser read_page timeout; HTML artifact rendering
+
+Two user-reported browser issues.
+
+**1. browser_read timeout.**
+Individual `run_action_for_pane` rounds (JS eval → result) keep a fixed timeout
+(gate per-op); the lazy-load scroll loop in `read_page` executes up to
+4 extra extractions, each with its own timeout budget. Raising the per-op
+timeout 15s → 45s (`src-tauri/src/browser.rs:1027`) accommodates slow
+scrollHeight checks and re-extractions without exceeding the limit. Unit test
+updated to 45s. The scroll-loop is bounded (4 steps), so the worst-case 180s
+is still reasonable.
+
+**2. HTML/web artifacts now auto-open in Canvas for inline preview.**
+Generated .html files (and .svg) used to open as file artifacts; only
+non-inline (`.ext !== "html" || ext !== "svg"`) auto-open was annotated
+(with the "...") comment. Flip the guard: `rendersInline = ext === "svg"`
+removes `html` from exclusion, keeping SVG inline-only and restoring
+auto-open for web pages. Web artifacts pop into Canvas and for
+`.html` sketch as annotated previews.
+
+Verification: `cargo test --lib` 390 passed / 0 failed; tsc clean.
+html SVG auto-open behavior matches test artifacts.
+
+---
+
+## 2026-08-10 — Refactor session: Phase 1 streaming primitives (Tasks 1.1, 1.2, 1.3) + spec/plan + audit
+
+**What shipped (5 commits on `master`):**
+
+- `e0c5512` — docs: refactor design spec + 30-task implementation plan (`docs/superpowers/specs/2026-08-10-refactor-design.md` + `docs/superpowers/plans/2026-08-10-refactor.md`)
+- `0b01052` — docs(plan): audit-against-code patch (3 tasks shipped, 1 partial, 26 real)
+- `62c856c` — perf(pty): route pty output via `Channel<Vec<u8>>` (raw bytes, no JSON) — 5 files
+- `6edd82a` — perf(chat): route `chat:token` via `Channel<ChatTokenPayload>` — 7 files, 2 new tests
+- `9bba1fe` — feat(chat): `useStreamingText` hook with rAF batching — 2 files, 4 vitest tests
+
+**Audit findings (3 already-shipped, 1 partial, 26 real):**
+- 0.1 (WAL + busy_timeout) — `db::configure` already sets all 4 pragmas
+- 4.1 (N+1 fix) — `mobile/relay.rs:1110-1338` already does the two-phase bulk-resolve
+- 4.2 (drop GetCostDetails from poll) — `useRelay.ts:158-167` already moved it to on-demand
+- 5.2 (React.lazy) — 5 of 9 candidates already lazy in `App.tsx:25,44-47`
+
+**What got reverted mid-session (Task 2.1 chat/commands.rs split):**
+The `#[tauri::command]` macro generates a `__cmd__<name>` companion at the function's source location; `pub use` re-exports in a parent `mod.rs` do NOT bring the companion along, so `tauri::generate_handler!` in `lib.rs:203` cannot find the macro artifacts. The proven split pattern (used by `chat/tools/{mod,specs,search,...}.rs`) is: move the function body + `#[tauri::command]` attribute into the submodule, then `use submodule::*` (not `pub use`) in the parent. Plan was updated with this constraint (commit-stage note in `docs/superpowers/plans/2026-08-10-refactor.md`). The reverted split attempt left no on-disk artifacts.
+
+**Working tree at session end:** pre-existing rot in the baseline (unrelated to this session's commits) — `cargo check --lib` reports 8 errors including `cannot find __cmd__delete_empty_chat_sessions` (the function is referenced in `lib.rs:309,319` but its body is missing from `chat/commands.rs`; same for `pptx_to_pdf` in `chat/office.rs`; `base64_encode` is private). These predate this session. The 5 new commits each compiled clean at the time of commit. Next session should:
+  1. Diagnose + fix the pre-existing rot before resuming the plan
+  2. Start at Task 0.2 (bulk_load_projects) — the only Phase 0 task with real work
+  3. Continue with Task 2.1 retry (using the corrected Tauri-macro split pattern)
+  4. Phases 2-5 still have ~22 tasks of real work; spec acceptance criteria in `docs/superpowers/specs/2026-08-10-refactor-design.md` §4 are the done-bar
+
+**Time cost:** ~3 hours session, 5 commits, 1 attempt-and-revert, net 0 perf regressions.

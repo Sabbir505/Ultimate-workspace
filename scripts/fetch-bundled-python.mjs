@@ -147,18 +147,16 @@ async function stage(target) {
   // Forward slashes: bsdtar mangles backslash path arguments (the `-C` dir
   // "cannot be opened" otherwise), so normalize both paths on Windows.
   const tarBin = process.platform === "win32" ? "tar.exe" : "tar";
-  // "./" prefix prevents bsdtar from parsing "C:/..." as host:path (avoids
-  // --force-local, which the Windows built-in tar.exe does not support).
-  const tarLocal = (p) => {
-    const fwd = p.replaceAll("\\", "/");
-    return /^[A-Za-z]:/.test(fwd) ? `./${fwd}` : fwd;
-  };
+  // Forward slashes only — tar.exe on Windows mangles backslashes.
+  // No --force-local or ./ prefix: the Windows built-in tar.exe doesn't
+  // support the flag and doesn't misinterpret C:/... as a remote host.
+  const toFwd = (p) => p.replaceAll("\\", "/");
   run(tarBin, [
     "-xzf",
-    tarLocal(tgz),
+    toFwd(tgz),
     "--strip-components=1",
     "-C",
-    tarLocal(DEST),
+    toFwd(DEST),
   ]);
 
   if (!existsSync(exePath)) {

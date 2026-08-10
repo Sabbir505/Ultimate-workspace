@@ -342,6 +342,35 @@ fn connector_tool_summary(
     format!("{connector}: {task}")
 }
 
+/// Short description of a tool execution for plan-step matching.
+/// Returns a concise label the frontend can fuzzy-match against pending steps.
+fn tool_step_description(name: &str, args: &Value) -> String {
+    match name {
+        "write_file" | "write" | "Edit" => {
+            let path = args.get("file_path").or_else(|| args.get("path"))
+                .and_then(|v| v.as_str()).unwrap_or("file");
+            format!("Write {}", path)
+        }
+        "read_file" | "read" | "Read" => {
+            let path = args.get("file_path").or_else(|| args.get("path"))
+                .and_then(|v| v.as_str()).unwrap_or("file");
+            format!("Read {}", path)
+        }
+        "run_shell" | "shell" | "RunShell" => {
+            let cmd = args.get("command").or_else(|| args.get("cmd"))
+                .and_then(|v| v.as_str()).unwrap_or("command");
+            // Truncate long commands
+            let short = if cmd.len() > 60 { &cmd[..57] } else { cmd };
+            format!("Run {}", short)
+        }
+        "download_file" | "download" => {
+            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("file");
+            format!("Download {}", url)
+        }
+        other => format!("{}", other),
+    }
+}
+
 /// Human-facing summary for a system-tool approval card — a plain sentence of
 /// the task ("Download https://… to D:\…\model.safetensors" / "Run shell
 /// command: huggingface-cli download …").
@@ -640,6 +669,22 @@ pub(crate) async fn run_tool(
             },
         );
     }
+
+    // Emit a plan-step-progress signal so the frontend can mark the
+    // corresponding checkpoint as complete. The frontend fuzzy-matches
+    // the label against parsed PlanStep items.
+    if !outcome.text.starts_with("Error:") {
+        let desc = tool_step_description(name, args);
+        crate::chat::tasks::emit_plan_step_progress(
+            app,
+            sid,
+            &desc,
+            "completed",
+            Some("tool executed successfully"),
+            None::<&str>,
+        );
+    }
+
     outcome.text
 }
 

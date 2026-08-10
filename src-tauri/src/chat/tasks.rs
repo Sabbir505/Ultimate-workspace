@@ -304,6 +304,29 @@ impl TaskManager {
     }
 }
 
+/// Emit a `chat:plan-step-progress` event for the frontend to match against
+/// parsed PlanStep items. Separate from the TaskManager emit (which is for
+/// download/shell progress) — this is a lightweight signal, no throttling.
+pub fn emit_plan_step_progress<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    sid: &str,
+    step_label: &str,
+    status: &str,
+    detail: Option<&str>,
+    tool_call: Option<&str>,
+) {
+    let _ = app.emit(
+        "chat:plan-step-progress",
+        crate::types::PlanStepProgressPayload {
+            chat_session_id: sid.to_string(),
+            step_label: step_label.to_string(),
+            status: status.to_string(),
+            detail: detail.map(|s| s.to_string()),
+            tool_call: tool_call.map(|s| s.to_string()),
+        },
+    );
+}
+
 /// Escape hatch for the SSRF guard in `download_task`: when
 /// `CONDUIT_ALLOW_PRIVATE_DOWNLOADS` is set in the APP's environment, the
 /// download task may reach loopback/private hosts. Two legitimate uses: LAN

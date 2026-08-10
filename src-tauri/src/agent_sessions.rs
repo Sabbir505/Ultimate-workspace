@@ -1178,6 +1178,26 @@ fn handle_opencode_event(
             let part = v.get("part").cloned().unwrap_or(json!({}));
             let name = part.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
             let inp = part.pointer("/state/input").cloned().unwrap_or(json!({}));
+            // Parse TodoWrite JSON to emit structured plan-step progress events.
+            // This lets the frontend track individual task items with status
+            // instead of seeing a generic "Updating task list" marker.
+            if name.eq_ignore_ascii_case("TodoWrite") {
+                if let Some(todos) = inp.get("todos").and_then(|v| v.as_array()) {
+                    for todo in todos {
+                        let content = todo.get("content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let status = todo.get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("pending");
+                        if !content.is_empty() {
+                            crate::chat::tasks::emit_plan_step_progress(
+                                app, sid, content, status, None, None::<&str>,
+                            );
+                        }
+                    }
+                }
+            }
             let marker = format!("<tool>{}</tool>", tool_meta_generic(name, &inp));
             full.push_str(&marker);
             emit_token(app, sid, &marker);

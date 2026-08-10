@@ -480,6 +480,24 @@ pub struct ChatTaskProgressPayload {
     pub dest_path: Option<String>,
 }
 
+/// Plan step progress — lighter than ChatTaskProgressPayload (no download/speed
+/// fields). Emitted when backend tools execute or TodoWrite tool calls carry
+/// structured task updates. The frontend fuzzy-matches `step_label` against
+/// parsed PlanStep items.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanStepProgressPayload {
+    pub chat_session_id: String,
+    /// Human-readable step label — frontend fuzzy-matches against PlanStep.label
+    pub step_label: String,
+    /// "pending" | "in_progress" | "completed" | "failed"
+    pub status: String,
+    /// Optional detail (error message for failed, "tool executed" for completed)
+    pub detail: Option<String>,
+    /// Optional tool-call context (e.g. the file path from a Write tool)
+    pub tool_call: Option<String>,
+}
+
 /// In-app preview of a generated artifact file (see `read_artifact_preview`).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -141,10 +141,11 @@ pub fn sweep_expired_artifacts(db: &Arc<parking_lot::Mutex<rusqlite::Connection>
 pub fn create_chat_session(
     provider: String,
     model: String,
+    project_id: Option<String>,
     db: State<DbState>,
 ) -> CmdResult<ChatSession> {
     let conn = db.0.lock();
-    db::create_chat_session(&conn, &provider, &model, None).map_err(|e| e.to_string())
+    db::create_chat_session(&conn, &provider, &model, project_id.as_deref()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -166,8 +167,8 @@ pub fn delete_chat_session(
     db::delete_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())
 }
 
-/// Bind (or unbind with `None`) a chat session to a project. Drives the
-/// chat's nesting under the project's expandable sidebar row.
+/// Bind (or unbind with `None`) a chat session to a project. Drives the chat's
+/// nesting under the project's expandable sidebar row.
 #[tauri::command]
 pub fn set_chat_session_project(
     chat_session_id: String,
@@ -1413,10 +1414,11 @@ pub fn resolve_tool_action(
 
 // ---- Artifact preview ----
 
-/// Standard base64 encode (no external crate). `pub(crate)` so
+/// Standard base64 encode (no external crate). `pub` so
 /// `browser_mcp.rs:391` can call it for the screenshot-encoding path —
-/// `browser_mcp` is the legitimate external consumer (it builds the data
-/// URI for the `browser_screenshot` tool's return payload).
+/// kept module-private in the past, but `browser_mcp` is the legitimate
+/// external consumer (it builds the data URI for the
+/// `browser_screenshot` tool's return payload).
 pub(crate) fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8; 64] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

@@ -22,6 +22,9 @@ interface UpdaterState {
   error: string | null;
   /** True while a check is in flight (avoids overlapping timer checks). */
   checking: boolean;
+  /** Version the user dismissed with "Later" — not re-prompted until restart.
+   *  Without recording it, the next periodic check resurfaces the banner. */
+  dismissedVersion: string | null;
 
   /** Query the endpoint. Called on startup + every 4h, and manually from Settings. */
   check: () => Promise<void>;
@@ -39,6 +42,7 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
   total: null,
   error: null,
   checking: false,
+  dismissedVersion: null,
 
   check: async () => {
     if (get().checking) return;
@@ -47,9 +51,8 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
       const info = await checkForUpdate();
       if (info && info.updateAvailable) {
         // If the user dismissed this exact version already, don't resurface it.
-        const current = get().update;
-        if (current?.version === info.version && get().install === "idle") {
-          // Already dismissed (update is null after dismiss); leave it hidden.
+        if (get().dismissedVersion !== null && get().dismissedVersion === info.version) {
+          // Dismissed with "Later" — keep the banner hidden until restart.
         } else if (get().install === "idle") {
           set({ update: info });
         }
@@ -74,7 +77,13 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
     }
   },
 
-  dismiss: () => set({ update: null }),
+  dismiss: () =>
+    set((s) => ({
+      update: null,
+      // Record WHICH version was dismissed so the next periodic check
+      // doesn't resurface it (a null-version payload keeps the old value).
+      dismissedVersion: s.update?.version ?? s.dismissedVersion,
+    })),
 
   reset: () =>
     set({

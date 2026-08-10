@@ -2,7 +2,7 @@
 // truncated preview of the last message. A vertical three-dot button reveals
 // a context menu (star/pin, rename, mark unread, delete) on hover. Styled to
 // match the existing .session-row and .project-row patterns.
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { relativeTime } from "../../lib/relativeTime";
 
 export interface ChatSessionRowData {
@@ -36,6 +36,7 @@ export function ChatSessionRow({
   onToggleStar,
   onSetUnread,
 }: Props) {
+
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuAbove, setMenuAbove] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -220,3 +221,11 @@ export function ChatSessionRow({
     </div>
   );
 }
+
+// PERF (PERFORMANCE_AUDIT.md F5): wrap the row in React.memo so a streaming
+// token in one chat (which re-renders the Sidebar on every store change) does
+// not force every other row to re-render. The Sidebar now passes stable
+// `handleSelectChat` etc. via useCallback so the per-row props stay
+// reference-stable across renders.
+export const ChatSessionRowMemo = memo(ChatSessionRow);
+ChatSessionRowMemo.displayName = "ChatSessionRow";

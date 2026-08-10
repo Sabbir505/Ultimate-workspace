@@ -140,22 +140,6 @@ fn migrate_chat_session_watch_mode(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
-/// Add the `project_id` column to `chat_sessions` on databases created before
-/// project-binding existed. Same idempotent pattern as the other
-/// `migrate_chat_session_*` helpers — duplicate-column error is a no-op. The
-/// column has no FK to `projects.id`: project deletion doesn't cascade chat
-/// deletion (a projectless chat still has its own history), and the user
-/// could re-attach the chat to another project after deletion.
-fn migrate_chat_session_project_id(conn: &Connection) -> DbResult<()> {
-    let sql = "ALTER TABLE chat_sessions ADD COLUMN project_id TEXT";
-    if let Err(e) = conn.execute(sql, []) {
-        if !e.to_string().contains("duplicate column name") {
-            return Err(e);
-        }
-    }
-    Ok(())
-}
-
 /// Add the `agent` column to `chat_sessions` on databases created before the
 /// composer's agent-then-model selector existed. `ALTER TABLE … ADD COLUMN`
 /// errors if the column is already present, so a duplicate-column error is a
@@ -184,6 +168,23 @@ fn migrate_chat_session_agent(conn: &Connection) -> DbResult<()> {
             "UPDATE chat_sessions SET agent = CASE WHEN provider = 'local_gguf' THEN 'local' ELSE 'builtin' END WHERE agent IS NULL",
             [],
         )?;
+    }
+    Ok(())
+}
+
+/// Add the `project_id` column to `chat_sessions` on databases created before
+/// chats could be nested under a project in the sidebar. NULL means the chat
+/// is unbound and shows in the flat "Chat History" list; a project id nests it
+/// under that project's expandable row. `ALTER TABLE … ADD COLUMN` errors if
+/// the column already exists, so a duplicate-column error is a no-op. The FK
+/// is `ON DELETE SET NULL` as a safety net; project removal also explicitly
+/// deletes the project's chats (see `remove_project`).
+fn migrate_chat_session_project_id(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE chat_sessions ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
     }
     Ok(())
 }
@@ -412,7 +413,7 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           unread INTEGER NOT NULL DEFAULT 0,
           watch_mode TEXT,
           agent TEXT,
-          project_id TEXT
+          project_id TEXT REFERENCES projects(id) ON DELETE SET NULL
         );
 
         CREATE TABLE IF NOT EXISTS chat_messages (
@@ -574,8 +575,8 @@ pub use cost_v2::{get_cost_rollups_v2, read_rate_overrides};
 // chat
 pub use chat::{
     add_chat_message, create_chat_session, delete_chat_message, delete_chat_session,
-    delete_chat_sessions_for_project, delete_empty_chat_sessions, get_chat_session,
-    list_active_chat_messages, list_chat_messages, list_chat_sessions,
+    delete_chat_sessions_for_project, delete_empty_chat_sessions,
+    get_chat_session, list_active_chat_messages, list_chat_messages, list_chat_sessions,
     list_chat_session_connectors, mark_superseded, set_chat_session_connectors,
     set_chat_session_project, set_chat_session_starred, set_chat_session_unread,
     touch_chat_session, update_chat_session_agent, update_chat_session_model,

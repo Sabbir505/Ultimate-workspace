@@ -29,5 +29,5 @@ pub use config::{
     GOOGLE_SLIDES_CALLBACK_PORT, KIWI, NOTION, NOTION_CALLBACK_PORT, connector_by_id,
     family_members, family_redirect_uri,
 };
-pub use harness::{harness_mcp_server_ids, harness_mcp_servers, HarnessMcpServer};
 pub use session::{AttachedConnector, RemoteToolRef, connect_all, find_tool};
+pub use harness::{HarnessMcpServer, harness_mcp_servers};

@@ -16,11 +16,12 @@
 //
 // IFRAME FALLBACK (Linux, or any browser_create failure): render one iframe
 // per tab, only active visible via CSS display toggle.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   createHistory,
   currentUrl,
+  DEFAULT_BROWSER_URL,
   normalizeUrl,
   pushUrl,
   type BrowserHistory,
@@ -69,8 +70,6 @@ interface TabState {
   /** null = still deciding, true = native child webview, false = iframe fallback. */
   nativeOk: boolean | null;
   createError: string | null;
-  /** Whether the native webview has been created (lazy: created on first activation). */
-  webviewCreated: boolean;
 }
 
 function rectOf(el: HTMLElement): BrowserRect {
@@ -86,7 +85,6 @@ function makeTabState(url: string): TabState {
     loadFailed: false,
     nativeOk: null,
     createError: null,
-    webviewCreated: false,
   };
 }
 
@@ -111,6 +109,17 @@ export function BrowserPane({ pane, visible = true }: Props) {
   const paletteOpen = useUiStore((s) => s.paletteOpen);
   const peekOpen = useUiStore((s) => s.peek.open);
   const modalOpen = useUiStore((s) => s.modalOpen);
+  // The Browser tab's content only renders when this tool-panel tab is the
+  // active one AND the panel is not collapsed. PaneFrame's `visible` prop only
+  // reflects the active-browser-vs-hidden-browser decision inside the slot —
+  // it does NOT encode the tool-panel-tab switch or the panel-collapsed state.
+  // Without feeding those in, switching to Terminal/Files/Canvas or closing
+  // the whole panel leaves the active browser pane's `visible` prop unchanged
+  // (still true), so the native webview is never told to hide and it stays
+  // painted on top of whatever the user is now looking at.
+  const toolPanelTab = useUiStore((s) => s.toolPanelTab);
+  const toolPanelCollapsed = useUiStore((s) => s.toolPanelCollapsed);
+  const inActiveBrowserTab = toolPanelTab === "browser" && !toolPanelCollapsed;
 
   // Per-tab state: Map<tabId, TabState>. Lazily populated.
   const [tabStates, setTabStates] = useState<Map<string, TabState>>(() => {
@@ -125,17 +134,26 @@ export function BrowserPane({ pane, visible = true }: Props) {
   const iframeRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   const bodyRef = useRef<HTMLDivElement>(null);
   const timeoutRefs = useRef<Map<string, number>>(new Map());
+  // Latest tabStates snapshot for the unmount cleanup — the cleanup closure
+  // would otherwise capture a stale Map from effect-creation time.
+  const tabStatesRef = useRef<Map<string, TabState>>(tabStates);
+  tabStatesRef.current = tabStates;
+  // Track which tabs have a native webview (nativeOk === true). Unlike
+  // tabStates, this is NEVER pruned when tabs are closed — the ghost-hide
+  // effect needs to know "did this tab have a native webview?" even after
+  // the tab is removed from the tabs array and its tabState entry is purged.
+  const nativeTabsRef = useRef<Set<string>>(new Set());
 
   const activeTabId = getActiveTabId(pane);
   const activeTab = tabs[activeTabIndex];
   const activeTabState = tabStates.get(activeTabId);
-  const frameSrc = activeTabState ? currentUrl(activeTabState.history) : (activeTab?.url ?? "http://localhost:3000");
+  const frameSrc = activeTabState ? currentUrl(activeTabState.history) : (activeTab?.url ?? DEFAULT_BROWSER_URL);
   const occluded = browserOccluded({
     activeView,
     paletteOpen,
     peekOpen,
     modalOpen,
-    paneVisible: visible,
+    paneVisible: visible && inActiveBrowserTab,
     collapsed,
   });
 
@@ -157,8 +175,24 @@ export function BrowserPane({ pane, visible = true }: Props) {
     });
   }, [tabs]);
 
+  // In-flight native webview creates, keyed by tabId. This MUST be a ref,
+  // not component state: the create effect below re-runs on every tabStates
+  // change (new Map identity), and each re-run executes the previous run's
+  // cleanup — which set `cancelled = true`. The in-flight browserCreateTab
+  // promise then resolved with `cancelled` already true, so `nativeOk` was
+  // never set: the OS-level webview stayed alive but untracked — a ghost
+  // overlay that no occlusion effect would ever hide, while the iframe
+  // fallback rendered underneath it.
+  const createInFlightRef = useRef<Set<string>>(new Set());
+
   // --- Native lifecycle: create webview for the active tab only (lazy). ---
   // When the active tab changes and its webview hasn't been created yet, create it.
+  // Depends on `tabStates` too: the tabState-ensure effect above adds an entry
+  // for a brand-new tab asynchronously (via setTabState → re-render). If this
+  // effect only re-ran on `activeTabId`, it would read a stale `tabStates`
+  // snapshot from the render where the tab became active but its entry didn't
+  // exist yet, return early, and NEVER create the webview. Re-running when the
+  // entry lands closes that race.
   useEffect(() => {
     if (!tauriRuntimeAvailable()) {
       // Mark all tabs as iframe-fallback.
@@ -177,48 +211,40 @@ export function BrowserPane({ pane, visible = true }: Props) {
     // Don't create webview if the tab has no URL yet.
     const tabUrl = activeTab?.url;
     if (!tabUrl) return;
+    const tabId = activeTabId;
+    // One create per tab at a time — the guard survives effect re-runs
+    // (see createInFlightRef above).
+    if (createInFlightRef.current.has(tabId)) return;
+    createInFlightRef.current.add(tabId);
 
-    let cancelled = false;
     const body = bodyRef.current;
     const rect: BrowserRect = body ? rectOf(body) : { x: 0, y: 0, width: 1, height: 1 };
-    const tabId = activeTabId;
-
-    // Mark webviewCreated = true so we don't re-create.
-    setTabStates((prev) => {
-      const next = new Map(prev);
-      const existing = next.get(tabId);
-      if (existing) next.set(tabId, { ...existing, webviewCreated: true });
-      return next;
-    });
 
     browserCreateTab(paneId, tabId, tabUrl, rect)
       .then(() => {
-        if (!cancelled) {
-          setTabStates((prev) => {
-            const next = new Map(prev);
-            const existing = next.get(tabId);
-            if (existing) next.set(tabId, { ...existing, nativeOk: true });
-            return next;
-          });
-        }
+        // setState after unmount is a React 18 no-op; the unmount cleanup
+        // closes the pane's webviews, so a late resolve can't leak one.
+        setTabStates((prev) => {
+          const next = new Map(prev);
+          const existing = next.get(tabId);
+          if (existing) next.set(tabId, { ...existing, nativeOk: true });
+          return next;
+        });
       })
       .catch((err) => {
         const msg = typeof err === "string" ? err : err?.message ?? String(err);
         console.warn(`[conduit] browser_create failed for tab ${tabId}, using iframe fallback: ${msg}`);
-        if (!cancelled) {
-          setTabStates((prev) => {
-            const next = new Map(prev);
-            const existing = next.get(tabId);
-            if (existing) next.set(tabId, { ...existing, nativeOk: false, createError: msg });
-            return next;
-          });
-        }
+        setTabStates((prev) => {
+          const next = new Map(prev);
+          const existing = next.get(tabId);
+          if (existing) next.set(tabId, { ...existing, nativeOk: false, createError: msg });
+          return next;
+        });
+      })
+      .finally(() => {
+        createInFlightRef.current.delete(tabId);
       });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paneId, activeTabId]);
+  }, [paneId, activeTabId, tabStates, activeTab?.url]);
 
   // --- Destroy native webviews on pane unmount. ---
   // The store's closePane already calls browserClosePane, but React may unmount
@@ -227,28 +253,55 @@ export function BrowserPane({ pane, visible = true }: Props) {
   // the body div — floating above the UI as a frozen overlay. Calling the
   // full-pane close here too is idempotent on the backend (close_pane_tabs
   // drains all `browser-{paneId}-tab-*` webviews) and closes the race.
+  //
+  // Before closing, hide AND move every tab's webview off-screen. The close
+  // call may fail silently (e.g. backend I/O error), and then the webview
+  // stays as a frozen ghost overlay covering the chat. Hiding + off-screen
+  // as a belt-and-suspenders ensures the ghost isn't VISIBLE even if the
+  // close IPC fails.
+  //
+  // DEPENDENCY: only [paneId]. Adding `tabs` or `tabStates` here would cause
+  // the cleanup to fire on every tab add/remove/switch (destroying webviews),
+  // which crashes the app. Refs provide the latest values without re-running
+  // the cleanup.
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
   useEffect(() => {
     return () => {
+      const latestTabs = tabsRef.current;
+      const latestStates = tabStatesRef.current;
+      const offScreen: BrowserRect = { x: -9999, y: -9999, width: 1, height: 1 };
+      for (const tab of latestTabs) {
+        const ts = latestStates.get(tab.tabId);
+        if (ts?.nativeOk !== true) continue;
+        void browserSetVisibleTab(paneId, tab.tabId, false).catch(() => {});
+        void browserSetBoundsTab(paneId, tab.tabId, offScreen).catch(() => {});
+      }
       void browserClosePane(paneId).catch(() => {});
     };
   }, [paneId]);
 
-  // --- Native bounds: track the body div, debounced. Set bounds for ALL tabs. ---
+  // --- Native bounds: track the body div, debounced. Set bounds for VISIBLE
+  // tabs only (occluded tabs are kept off-screen by the occlusion effect). ---
+  // A ref holds the timer id so the cleanup function can cancel pending debounces
+  // even after a re-render swaps the closure.
+  const boundsTimerRef = useRef<number | null>(null);
+
   useEffect(() => {
     const body = bodyRef.current;
     if (!body) return;
-    let timer: number | null = null;
     const sync = () => {
-      if (timer !== null) window.clearTimeout(timer);
-      timer = window.setTimeout(() => {
+      if (boundsTimerRef.current !== null) window.clearTimeout(boundsTimerRef.current);
+      boundsTimerRef.current = window.setTimeout(() => {
         const r = rectOf(body);
-        // Set bounds for all tab webviews (even hidden ones) so they don't
-        // flash at stale positions when shown.
-        for (const tab of tabs) {
-          const ts = tabStates.get(tab.tabId);
-          if (ts?.nativeOk === true) {
-            void browserSetBoundsTab(paneId, tab.tabId, r).catch(() => {});
-          }
+        // Only sync bounds for the active, visible tab — occluded/hidden tabs
+        // should stay off-screen (set by the occlusion effect). Syncing ALL
+        // tabs was pulling occluded webviews back into view after the occlusion
+        // moved them off-screen, causing browser content to bleed through
+        // settings and other overlays.
+        const ts = tabStates.get(activeTabId);
+        if (ts?.nativeOk === true && !occluded) {
+          void browserSetBoundsTab(paneId, activeTabId, r).catch(() => {});
         }
       }, BOUNDS_DEBOUNCE_MS);
     };
@@ -259,19 +312,80 @@ export function BrowserPane({ pane, visible = true }: Props) {
     return () => {
       observer.disconnect();
       window.removeEventListener("resize", sync);
-      if (timer !== null) window.clearTimeout(timer);
+      if (boundsTimerRef.current !== null) window.clearTimeout(boundsTimerRef.current);
     };
-  }, [paneId, tabs, tabStates]);
+  }, [paneId, tabs, tabStates, occluded, activeTabId]);
 
-  // --- Native occlusion + per-tab visibility. ---
-  // When occluded: hide ALL tab webviews.
-  // When not occluded: hide all tabs except the active one; show the active one.
+  // Track the previous tabs + activeTabId so we can hide webviews that
+  // were visible last render but are now gone (closed tab) or no longer
+  // active (tab switch). Without this, a closed tab's native webview can
+  // stay on screen as a ghost overlay: the occlusion effect below iterates
+  // the CURRENT tabs array (which no longer contains the closed tab), so it
+  // never calls browserSetVisibleTab(false) on it. The backend's
+  // browser_close IPC is fire-and-forget, so if it fails or is slow the
+  // webview keeps painting above the DOM.
+  //
+  // We use nativeTabsRef (a Set that is never pruned on tab close) instead
+  // of tabStates.get(tabId) because the tabState-ensure effect may purge
+  // the closed tab's entry from tabStates before this effect runs.
+  const prevTabsRef = useRef<{ tabs: typeof tabs; activeTabId: string }>({ tabs, activeTabId });
+
+  // Sync nativeTabsRef: any tab whose nativeOk is true gets tracked in the set.
+  // This set is never pruned on tab close (unlike tabStates), so the ghost-hide
+  // effect can still look up a closed tab and hide its webview.
+  for (const [tid, st] of tabStates) {
+    if (st.nativeOk === true) nativeTabsRef.current.add(tid);
+  }
+
   useEffect(() => {
+    const prev = prevTabsRef.current;
+    const offScreen: BrowserRect = { x: -9999, y: -9999, width: 1, height: 1 };
+    // Hide + move off-screen any tab that was the active tab in the previous
+    // render but is now gone (closed) or no longer active (tab switch).
+    // We use nativeTabsRef instead of tabStates because a closed tab may have
+    // already been purged from tabStates by the tabState-ensure effect.
+    const prevActiveId = prev.activeTabId;
+    if (prevActiveId && nativeTabsRef.current.has(prevActiveId)) {
+      const stillExists = tabs.some((t) => t.tabId === prevActiveId);
+      const stillActive = prevActiveId === activeTabId;
+      if (!stillExists || !stillActive) {
+        void browserSetVisibleTab(paneId, prevActiveId, false).catch(() => {});
+        void browserSetBoundsTab(paneId, prevActiveId, offScreen).catch(() => {});
+      }
+    }
+    prevTabsRef.current = { tabs, activeTabId };
+  }, [paneId, tabs, activeTabId, tabStates]);
+
+  // --- Native occlusion + per-tab visibility ---
+  // useLayoutEffect so hide/size runs synchronously BEFORE the browser paints
+  // the next frame — preventing a flash of the webview in the wrong position.
+  // When occluded: hide ALL tab webviews AND move them off-screen so they
+  // can't peek through even if the visibility call hasn't taken effect yet
+  // (native webviews are OS-level child windows that float above the DOM —
+  // CSS z-index has no effect on them).
+  // When not occluded: hide all tabs except the active one; show the active one.
+  useLayoutEffect(() => {
+    const offScreen: BrowserRect = { x: -9999, y: -9999, width: 1, height: 1 };
+    // Collect every tab ID that has a native webview — both from the current
+    // tabs array AND from nativeTabsRef (which tracks webviews that may have
+    // been closed/removed from tabs but whose OS-level window still exists).
+    const allNativeTabIds = new Set<string>();
     for (const tab of tabs) {
       const ts = tabStates.get(tab.tabId);
-      if (ts?.nativeOk !== true) continue;
-      const shouldShow = !occluded && tab.tabId === activeTabId;
-      void browserSetVisibleTab(paneId, tab.tabId, shouldShow).catch(() => {});
+      if (ts?.nativeOk === true) allNativeTabIds.add(tab.tabId);
+    }
+    for (const tid of nativeTabsRef.current) {
+      allNativeTabIds.add(tid);
+    }
+    for (const tabId of allNativeTabIds) {
+      const shouldShow = !occluded && tabId === activeTabId;
+      void browserSetVisibleTab(paneId, tabId, shouldShow).catch(() => {});
+      // Move off-screen when hidden as a safety net — native webviews don't
+      // respect CSS z-index and the visibility call may not take effect
+      // immediately (or at all on some platforms).
+      if (!shouldShow) {
+        void browserSetBoundsTab(paneId, tabId, offScreen).catch(() => {});
+      }
     }
   }, [paneId, tabs, tabStates, occluded, activeTabId]);
 

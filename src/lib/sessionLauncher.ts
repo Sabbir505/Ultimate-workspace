@@ -12,6 +12,7 @@ import {
   type TerminalSpawnSpec,
 } from "../state/panes";
 import { useProjectsStore } from "../state/projects";
+import { useSettingsStore } from "../state/settings";
 import { useUiStore } from "../state/ui";
 import { sessionDisplayTitle } from "./sessionTitle";
 import type { HarnessId, SessionRecord } from "../types";
@@ -168,4 +169,99 @@ export async function runLoginFlow(harnessId: HarnessId, cwd: string, label: str
     terminalDescriptor({ type: "login", harnessId, cwd }, label, null, harnessId),
   );
   await spawnForPane(paneId, { type: "login", harnessId, cwd });
+}
+
+/** Count of panes occupying slots — minimized browsers are parked out of the
+ *  layout and don't count (same guard the old toolbar buttons used). */
+function visiblePaneCount(): number {
+  return visibleCount(usePanesStore.getState().panes);
+}
+
+/** Open a browser pane in the tool panel's Browser tab. Used to live on the
+ *  toolbar globe button; now the Browser tab's empty state / "+" affordance
+ *  calls it. */
+export function openBrowserPane(): void {
+  const store = usePanesStore.getState();
+  if (visiblePaneCount() >= MAX_PANES) return;
+  const selectedProjectId = useProjectsStore.getState().selectedProjectId;
+  store.addPane({
+    kind: "browser",
+    url: useSettingsStore.getState().lastBrowserUrl(selectedProjectId),
+    projectId: selectedProjectId,
+  });
+  // Browsers live in the right tool panel — surface it so the new pane is
+  // immediately visible.
+  const ui = useUiStore.getState();
+  ui.setToolPanelTab("browser");
+  ui.setToolPanelCollapsed(false);
+}
+
+/** Open a file artifact in the Browser tab. Adds a new tab (or focuses an
+ *  existing one) on a browser pane, navigates it to the local file, and
+ *  surfaces the panel. */
+export function openArtifactInBrowserPane(path: string): void {
+  const store = usePanesStore.getState();
+  const selectedProjectId = useProjectsStore.getState().selectedProjectId;
+  // Tauri resolves plain paths to a `tauri://localhost/...` URL when WebView2
+  // is configured with the `assetProtocol.scope`; for artifacts, we pass the
+  // raw absolute path and let the backend mount it via the existing
+  // `convertFileSrc` helper. The pane's webview already runs in `tauri://`
+  // origin, so this round-trips.
+  const browsers = store.panes.filter(
+    (p) => p.data.kind === "browser" && !p.data.collapsed,
+  );
+  const fileUrl = encodeURI(`file:///${path.replace(/^\/+/, "")}`);
+  if (browsers.length > 0) {
+    const target = browsers[browsers.length - 1];
+    if (target.data.kind === "browser") {
+      const tabId = store.addBrowserTab(target.paneId, fileUrl);
+      store.focusPane(target.paneId);
+    }
+  } else if (visiblePaneCount() < MAX_PANES) {
+    const paneId = store.addPane({
+      kind: "browser",
+      url: fileUrl,
+      projectId: selectedProjectId,
+    });
+    store.focusPane(paneId);
+  } else {
+    return; // grid full — silently skip
+  }
+  const ui = useUiStore.getState();
+  ui.setToolPanelTab("browser");
+  ui.setToolPanelCollapsed(false);
+}
+
+/** Restore the most-recently-used minimized browser pane (flips `collapsed`
+ *  back to false) and surface the Browser tab. Bails when the visible slots
+ *  are full — same guard as openBrowserPane. */
+export function restoreMinimizedBrowser(): void {
+  const store = usePanesStore.getState();
+  const minimized = store.panes.filter((p) => p.data.kind === "browser" && p.data.collapsed);
+  if (minimized.length === 0) return;
+  if (visiblePaneCount() >= MAX_PANES) return;
+  const target = minimized.reduce((a, b) => (a.lastUsedAt > b.lastUsedAt ? a : b));
+  store.toggleBrowserCollapsed(target.paneId);
+  const ui = useUiStore.getState();
+  ui.setToolPanelTab("browser");
+  ui.setToolPanelCollapsed(false);
+}
+
+/** Open a plain interactive shell pane (no agent) — the Terminal tab's
+ *  empty-state action. spawn_shell wraps the command in `cmd.exe /C`
+ *  (Windows) / `$SHELL -lc` (POSIX), so the command itself is the interactive
+ *  shell to run: PowerShell on Windows, bash elsewhere. */
+export async function openShellTerminal(): Promise<void> {
+  const panesStore = usePanesStore.getState();
+  if (visiblePaneCount() >= MAX_PANES) return;
+  const projectId = useProjectsStore.getState().selectedProjectId;
+  const project = useProjectsStore.getState().projectById(projectId);
+  const cwd = project?.path ?? ".";
+  const command = navigator.platform.startsWith("Win") ? "powershell.exe" : "bash";
+  const spec: TerminalSpawnSpec = { type: "shell", cwd, command };
+  const paneId = panesStore.addPane(terminalDescriptor(spec, "Terminal", null, null));
+  await spawnForPane(paneId, spec);
+  const ui = useUiStore.getState();
+  ui.setToolPanelTab("terminal");
+  ui.setToolPanelCollapsed(false);
 }

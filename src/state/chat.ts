@@ -10,6 +10,7 @@ import {
   cancelChatMessage,
   persistPartialChatMessage,
   createChatSession,
+  setChatSessionProject,
   deleteChatApiKey,
   deleteAllChatSessions,
   deleteChatMessage,
@@ -19,6 +20,7 @@ import {
   getChatMessages,
   listChatArtifacts,
   listChatSessions,
+  readArtifactPreview,
   sendAgentChatMessage,
   sendChatMessage,
   setChatApiKey,
@@ -38,6 +40,7 @@ import {
   type ChatTaskProgressPayload,
 } from "../lib/ipc";
 import { generateSessionTitle } from "../lib/sessionTitle";
+import { openArtifactInBrowserPane } from "../lib/sessionLauncher";
 import { useArtifactsStore } from "./artifacts";
 import { useProjectsStore } from "./projects";
 
@@ -90,6 +93,15 @@ function markManuallyRenamed(sid: string) {
 
 /** Watch-mode pacing for browser actions. "on" | "off". */
 export type WatchMode = "on" | "off";
+
+/** Tool permission mode for chat sessions. */
+export type PermissionMode = "read_only" | "manual" | "auto_edit" | "full_auto";
+
+/** A pending tool-approval shown inline in the message stream. */
+export interface PendingApproval {
+  tool: string;
+  summary: string;
+}
 
 /** Live progress of a background chat task (download_file / run_shell),
  *  keyed by task id within a chat session. Updated by `chat:task-progress`
@@ -209,7 +221,7 @@ export interface ChatState {
   loadMessages: (chatSessionId: string) => Promise<void>;
   loadConfig: (provider?: string) => Promise<void>;
   selectSession: (chatSessionId: string) => Promise<void>;
-  newChat: (provider: string, model: string) => Promise<ChatSession | null>;
+  newChat: (provider: string, model: string, projectId?: string | null) => Promise<ChatSession | null>;
   deleteChat: (chatSessionId: string) => Promise<void>;
   /** Delete EVERY chat session + message (Settings → Data). Uses the backend
    *  bulk command, then wipes all in-memory chat state so the sidebar and
@@ -342,14 +354,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return { cwdOverrides: next };
     }),
 
-  unbindProject: (chatSessionId) =>
+  unbindProject: (chatSessionId) => {
+    void setChatSessionProject(chatSessionId, null);
     set((s) => {
       const sessionProjects = { ...s.sessionProjects };
       delete sessionProjects[chatSessionId];
       const cwdOverrides = { ...s.cwdOverrides };
       delete cwdOverrides[chatSessionId];
-      return { sessionProjects, cwdOverrides };
-    }),
+      return {
+        sessionProjects,
+        cwdOverrides,
+        sessions: s.sessions.map((sess) =>
+          sess.id === chatSessionId ? { ...sess, projectId: null } : sess,
+        ),
+      };
+    });
+  },
 
   removeQueuedMessage: (chatSessionId, id) =>
     set((s) => ({
@@ -372,7 +392,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   loadSessions: async () => {
     const sessions = await listChatSessions();
-    set({ loaded: true, sessions: withoutDeleted(sessions ?? []) });
+    const clean = withoutDeleted(sessions ?? []);
+    // Seed the in-memory binding cache from the persisted project_id so the
+    // sidebar nesting + composer notch survive an app restart.
+    const seeded: Record<string, string> = {};
+    for (const s of clean) if (s.projectId) seeded[s.id] = s.projectId;
+    set({ loaded: true, sessions: clean, sessionProjects: seeded });
   },
 
   loadMessages: async (chatSessionId) => {
@@ -469,7 +494,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     get().drainQueue(chatSessionId);
   },
 
-  newChat: async (provider, model) => {
+  newChat: async (provider, model, projectId) => {
     // Reuse the active session when it already has no turns — clicking "New
     // Chat" while sitting in a fresh empty chat should not spawn yet another
     // empty session. If the caller wants a different provider/model than the
@@ -486,6 +511,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (model && active.model !== model) {
         await updateChatSessionModel(active.id, model);
       }
+      // Adopt the requested project binding so the reused chat nests under
+      // the right project (e.g. clicking "+" on a different project).
+      const targetProject = projectId !== undefined ? projectId : active.projectId;
+      if (targetProject !== active.projectId) {
+        await setChatSessionProject(active.id, targetProject ?? null);
+      }
       set((s) => ({
         sessions: s.sessions.map((sess) =>
           sess.id === active.id
@@ -493,15 +524,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 ...sess,
                 provider: provider || sess.provider,
                 model: model || sess.model,
+                projectId: targetProject ?? null,
               }
             : sess,
         ),
+        // Keep the in-memory binding cache in sync with the persisted value.
+        sessionProjects:
+          targetProject != null
+            ? { ...s.sessionProjects, [active.id]: targetProject }
+            : Object.fromEntries(
+                Object.entries(s.sessionProjects).filter(([id]) => id !== active.id),
+              ),
         error: null,
       }));
       return active;
     }
 
-    const session = await createChatSession(provider, model);
+    const session = await createChatSession(provider, model, projectId ?? null);
     if (session) {
       // Insert at the top so it appears immediately in the sidebar (below
       // any starred chats).
@@ -510,6 +549,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         activeChatSessionId: session.id,
         messages: [],
         error: null,
+        // Seed the in-memory binding cache from the persisted value so the
+        // composer notch + working-dir resolution work before first send.
+        sessionProjects:
+          session.projectId != null
+            ? { ...s.sessionProjects, [session.id]: session.projectId }
+            : s.sessionProjects,
       }));
     }
     return session;
@@ -539,6 +584,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       delete nextArtifacts[chatSessionId];
       const nextPendingArtifacts = { ...s.pendingArtifacts };
       delete nextPendingArtifacts[chatSessionId];
+      const nextSessionProjects = { ...s.sessionProjects };
+      delete nextSessionProjects[chatSessionId];
       return {
         sessions: s.sessions.filter((sess) => sess.id !== chatSessionId),
         activeChatSessionId: s.activeChatSessionId === chatSessionId ? null : s.activeChatSessionId,
@@ -548,6 +595,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
         artifacts: nextArtifacts,
         pendingArtifacts: nextPendingArtifacts,
+        sessionProjects: nextSessionProjects,
       };
     });
   },
@@ -780,13 +828,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Bind this chat to the currently-selected project (first send, or after
     // the user deliberately switched projects while viewing it). The binding
     // drives the composer notch and the working directory on later visits.
+    // Persist it to the DB so the chat stays nested under the project across
+    // restarts, and mirror into the in-memory cache.
     const projectsState = useProjectsStore.getState();
     if (
       projectsState.selectedProjectId &&
       get().sessionProjects[activeChatSessionId] !== projectsState.selectedProjectId
     ) {
       const pid = projectsState.selectedProjectId;
-      set((s) => ({ sessionProjects: { ...s.sessionProjects, [activeChatSessionId]: pid } }));
+      void setChatSessionProject(activeChatSessionId, pid);
+      set((s) => ({
+        sessionProjects: { ...s.sessionProjects, [activeChatSessionId]: pid },
+        sessions: s.sessions.map((sess) =>
+          sess.id === activeChatSessionId ? { ...sess, projectId: pid } : sess,
+        ),
+      }));
     }
     // Working folder resolution, shared by both send paths: a custom folder
     // from the composer "+" picker wins, then the chat's bound project,
@@ -1046,8 +1102,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // First token arrived — drop any pre-token status notice (e.g. the
         // "local model loading" line) since the wait is over.
         chatStatus: nextStatus,
-        // Don't change streamingChatSessionId — it stays on the session that
-        // sent the message, not the currently viewed session.
+        // The session is actively streaming — the sidebar's "working" dot is
+        // driven by this flag. Don't change it if the streaming session is
+        // the one the user is currently viewing; switching away keeps it set
+        // so the sidebar shows the streaming session is still in progress.
+        streamingChatSessionId: chatSessionId,
       };
     });
   },
@@ -1153,18 +1212,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     // Refresh the session list (title may have been updated by the backend).
+    // Also re-seed sessionProjects from the refreshed sessions so newly
+    // project-bound chats (via the composer's implicit binding on first
+    // sendMessage) stay nested under their project after onDone.
     const sessions = await listChatSessions();
-    if (sessions) set({ sessions: withoutDeleted(sessions) });
+    if (sessions) {
+      const clean = withoutDeleted(sessions);
+      const nextProjects = { ...get().sessionProjects };
+      for (const s of clean) {
+        if (s.projectId) nextProjects[s.id] = s.projectId;
+      }
+      set({ sessions: clean, sessionProjects: nextProjects });
+    }
     // Turn finished — send the next queued message, if any (FIFO).
     get().drainQueue(chatSessionId);
   },
 
   onArtifact: ({ chatSessionId, path, filename }) => {
     const artifact = { path, filename };
-    // Diagrams / HTML render inline in the chat message, so they must NOT
-    // hijack the preview pane; other files still auto-open there.
     const ext = filename.split(".").pop()?.toLowerCase();
-    const rendersInline = ext === "html" || ext === "svg";
+    // Track the artifact regardless of where it opens.
     set((s) => {
       const existing = s.artifacts[chatSessionId] ?? [];
       const alreadyTracked = existing.some((a) => a.path === path);
@@ -1174,27 +1241,50 @@ export const useChatStore = create<ChatState>((set, get) => ({
         artifacts: alreadyTracked
           ? s.artifacts
           : { ...s.artifacts, [chatSessionId]: [...existing, artifact] },
-        // Buffer the artifact so it can be attributed to the assistant message
-        // that produced it once that message is persisted (on chat:done).
         pendingArtifacts: pendingTracked
           ? s.pendingArtifacts
           : { ...s.pendingArtifacts, [chatSessionId]: [...pending, artifact] },
-        // Auto-open the newly generated file as a Canvas tab when it belongs
-        // to the chat the user is currently viewing — except diagrams/HTML,
-        // which render inline in the chat. The new tab becomes the focused
-        // one; an already-open path is just focused (no duplicate tab).
-        ...( !rendersInline && s.activeChatSessionId === chatSessionId
-          ? {
-              previewArtifacts: s.previewArtifacts.some((a) => a.path === path)
-                ? s.previewArtifacts
-                : [...s.previewArtifacts, artifact],
-              activePreviewPath: artifact.path,
-            }
-          : {}),
       };
     });
-    // Refresh the persistent Artifacts sidebar library.
     void useArtifactsStore.getState().load();
+
+    // SVG renders inline in the chat bubble — no pane, no browser.
+    if (ext === "svg") return;
+
+    // Route to the browser pane or the Canvas preview. JSX opens in the
+    // browser; HTML is classified by the backend — a diagram (kind "diagram")
+    // stays in the Canvas where pan/zoom + PNG/SVG export work, a plain
+    // webpage goes to the browser so its scripts can run; everything else
+    // opens in the Canvas preview.
+    void (async () => {
+      let openInBrowser: boolean;
+      if (ext === "jsx") {
+        openInBrowser = true;
+      } else if (ext === "html" || ext === "htm") {
+        try {
+          const preview = await readArtifactPreview(path);
+          openInBrowser = preview != null && preview.kind !== "diagram";
+        } catch {
+          openInBrowser = false; // unknown → Canvas (safe default)
+        }
+      } else {
+        openInBrowser = false;
+      }
+      if (openInBrowser) {
+        setTimeout(() => void openArtifactInBrowserPane(path), 0);
+      } else {
+        set((s) =>
+          s.activeChatSessionId === chatSessionId
+            ? {
+                previewArtifacts: s.previewArtifacts.some((a) => a.path === path)
+                  ? s.previewArtifacts
+                  : [...s.previewArtifacts, artifact],
+                activePreviewPath: artifact.path,
+              }
+            : {},
+        );
+      }
+    })();
   },
 
   onError: (chatSessionId, message, code) => {
@@ -1234,9 +1324,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
 useProjectsStore.subscribe((s) => {
   const pid = s.selectedProjectId;
   if (!pid) return;
-  const { activeChatSessionId, sessionProjects } = useChatStore.getState();
+  const { activeChatSessionId, sessionProjects, sessions } = useChatStore.getState();
   if (!activeChatSessionId || sessionProjects[activeChatSessionId] === pid) return;
+  const sess = sessions.find((x) => x.id === activeChatSessionId);
+  // Mirror both the in-memory cache and the session's persisted projectId so
+  // the sidebar nesting tracks the project switch live. Persistence to the DB
+  // is committed on the next sendMessage (see the binding block there).
   useChatStore.setState((st) => ({
     sessionProjects: { ...st.sessionProjects, [activeChatSessionId]: pid },
+    sessions:
+      sess && sess.projectId !== pid
+        ? st.sessions.map((x) => (x.id === activeChatSessionId ? { ...x, projectId: pid } : x))
+        : st.sessions,
   }));
 });

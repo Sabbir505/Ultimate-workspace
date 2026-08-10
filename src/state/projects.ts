@@ -37,6 +37,9 @@ interface ProjectsState {
   setSessionTitle: (sessionId: string, title: string) => Promise<void>;
   setHarnessSessionId: (sessionId: string, harnessSessionId: string) => void;
   refreshGitStatus: () => Promise<void>;
+  /** Targeted single-project refresh — used by the FS watcher listener
+   *  to avoid re-querying every project when only one changed. */
+  refreshGitStatusFor: (projectId: string) => Promise<void>;
   toggleExpanded: (projectId: string) => void;
   setExpanded: (projectId: string, expanded: boolean) => void;
   selectProject: (projectId: string | null) => void;
@@ -146,6 +149,17 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     const gitStatuses: Record<string, GitStatusInfo> = {};
     for (const [id, status] of entries) if (status) gitStatuses[id] = status;
     set({ gitStatuses });
+  },
+
+  refreshGitStatusFor: async (projectId: string) => {
+    // Single-project refresh — used by the FS watcher listener
+    // (src/hooks/useGitStatusPolling.ts). Cheaper than a full sweep
+    // when the watcher fires for one project out of many.
+    const project = get().projects.find((p) => p.id === projectId);
+    if (!project) return;
+    const status = await getGitStatus(project.path);
+    if (!status) return;
+    set((s) => ({ gitStatuses: { ...s.gitStatuses, [projectId]: status } }));
   },
 
   toggleExpanded: (projectId) =>

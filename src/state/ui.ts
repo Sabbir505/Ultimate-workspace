@@ -2,9 +2,32 @@
 // and the "grid is full — replace LRU pane?" confirmation (§4.3 step 4).
 import { create } from "zustand";
 
-export type ActiveView = "grid" | "settings" | "skills" | "cost" | "chat";
+export type ActiveView = "chat" | "settings" | "skills" | "cost" | "automations";
 
-export type SidebarMode = "projects" | "chats";
+/** Tabs in the right-side tool panel (mockups 01/03). */
+export type ToolPanelTab =
+  | "terminal"
+  | "browser"
+  | "files" // "Changes" — DevDiffPanel (changed files + inline diffs)
+  | "canvas"
+  | "branch" // Branch switcher + git graph
+  | "commit" // Commit/push panel
+  | "plans" // Agent plan/step timeline
+  | "progress"; // Task progress panel
+
+/** Live progress of a model download from the Hugging Face model market.
+ *  Keyed by download id (repo::filename). Updated by local-model:download:progress
+ *  events; persisted globally so the user sees progress even after navigating
+ *  away from the Model Market tab. */
+export interface ModelDownloadProgress {
+  id: string;
+  state: "starting" | "downloading" | "verifying" | "done" | "error" | "cancelled";
+  downloaded: number;
+  total: number | null;
+  bps: number;
+  finalPath: string | null;
+  error: string | null;
+}
 
 export interface PeekState {
   open: boolean;
@@ -32,7 +55,10 @@ export interface UiState {
   projectSettingsFor: string | null; // projectId with an open Project Settings panel
   gitPromptProjectId: string | null; // projectId that should be prompted to init git (§4.1)
   sidebarCollapsed: boolean; // hide the sidebar to give the main area full width
-  sidebarMode: SidebarMode; // dev (projects) vs chat list — persists across collapse
+  /** When set, the next SettingsView mount opens directly on this category
+   *  (e.g. "connectors" from the sidebar's Connectors row). SettingsView
+   *  consumes and clears it. */
+  settingsCategory: string | null;
   /** When true, the Dev-tab diff side panel is hidden and replaced with a
    *  thin restore strip (matches the browser pane's minimize UX). */
   diffPanelCollapsed: boolean;
@@ -41,15 +67,46 @@ export interface UiState {
    *  scoped to a single side panel). */
   diffPanelWidth: number;
   /** True when ANY modal is open (artifacts library, etc.) so native webviews
-   *  know to hide themselves. Modals that use local useState should call
-   *  setModalOpen(true/false) around their open/close lifecycle. */
+   *  know to hide themselves. DERIVED from `openModalIds` — writers register
+   *  their own modal id via setModalOpen(id, open) so competing modals can't
+   *  stomp each other (M22): with a single shared boolean, closing modal A
+   *  set it false while modal B was still open and the native webview
+   *  painted over B. */
   modalOpen: boolean;
+  /** Ids of the currently open modals — `modalOpen` is true while non-empty. */
+  openModalIds: string[];
   /** Per-pane inline diff overlay. When `paneId` is set, the file at
    *  `filePath` is rendered as a unified diff over the focused pane (NOT in
    *  the global PeekPanel) — this is what the user asked for: clicking a
    *  file row in the right-side Files panel shows the diff in the pane the
    *  click came from, with the pane still visible/usable underneath. */
   paneDiff: { paneId: string; filePath: string; cwd: string } | null;
+  /** Active tab in the right-side tool panel. */
+  toolPanelTab: ToolPanelTab;
+  /** When true, the tool panel is hidden and replaced with a thin restore
+   *  strip (same UX as the diff panel / browser pane minimize). Tab contents
+   *  stay mounted so terminals and browser webviews keep running. */
+  toolPanelCollapsed: boolean;
+  /** User-resized width of the tool panel, in pixels (280–640). */
+  toolPanelWidth: number;
+  /** Whether the Git tools sidebar (right-side vertical panel) is collapsed. */
+  gitSidebarCollapsed: boolean;
+  /** Plan markdown content to show in the Canvas tab. Set when a plan
+   *  row is clicked in the Git tools sidebar. */
+  planCanvasContent: string | null;
+  planCanvasTitle: string | null;
+  /** File path to diff in the ToolPanel's Changes tab. Set when a peek
+   *  icon is clicked on a dirty file listing (branch switch modal, etc.). */
+  diffPanelFile: string | null;
+  diffPanelCwd: string | null;
+  /** Global model download progress from the Hugging Face market, keyed by
+   *  download id (repo::filename). Updated by local-model:download:progress
+   *  events so the user sees progress even after leaving the Model Market. */
+  modelDownloads: Record<string, ModelDownloadProgress>;
+  /** Apply a download-progress event payload to the global download map.
+   *  Completed/cancelled/errored downloads are removed on a short delay so
+   *  the user can see the terminal state. */
+  updateModelDownload: (p: ModelDownloadProgress) => void;
 
   setActiveView: (view: ActiveView) => void;
   setPaletteOpen: (open: boolean) => void;
@@ -61,27 +118,66 @@ export interface UiState {
   setGitPromptProjectId: (projectId: string | null) => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebar: () => void;
+  setSettingsCategory: (category: string | null) => void;
   setDiffPanelCollapsed: (collapsed: boolean) => void;
   toggleDiffPanel: () => void;
   setDiffPanelWidth: (width: number) => void;
-  setSidebarMode: (mode: SidebarMode) => void;
-  setModalOpen: (open: boolean) => void;
+  /** Register/unregister a modal id; `modalOpen` derives from the id set.
+   *  Idempotent — re-passing the current state returns the same store slice
+   *  so effect loops don't churn. */
+  setModalOpen: (id: string, open: boolean) => void;
   setPaneDiff: (diff: { paneId: string; filePath: string; cwd: string } | null) => void;
+  setToolPanelTab: (tab: ToolPanelTab) => void;
+  setToolPanelCollapsed: (collapsed: boolean) => void;
+  toggleToolPanel: () => void;
+  toggleGitSidebar: () => void;
+  setPlanCanvas: (content: string | null, title: string | null) => void;
+  setDiffPanelFile: (file: string | null, cwd: string | null) => void;
+  setToolPanelWidth: (width: number) => void;
 }
 
 export const useUiStore = create<UiState>((set) => ({
-  activeView: "grid",
+  activeView: "chat",
   paletteOpen: false,
   peek: { open: false, mode: "file", projectId: null, filePath: null, cwd: null },
   pendingReplace: null,
   projectSettingsFor: null,
   gitPromptProjectId: null,
   sidebarCollapsed: false,
-  sidebarMode: "projects",
+  settingsCategory: null,
   modalOpen: false,
+  openModalIds: [],
   diffPanelCollapsed: false,
   diffPanelWidth: 280,
   paneDiff: null,
+  toolPanelTab: "terminal",
+  // Collapsed by default — the header split icon opens it on demand.
+  toolPanelCollapsed: true,
+  toolPanelWidth: 532,
+  // Open by default — it's the primary git surface now.
+  gitSidebarCollapsed: false,
+  planCanvasContent: null,
+  planCanvasTitle: null,
+  diffPanelFile: null,
+  diffPanelCwd: null,
+  modelDownloads: {},
+
+  updateModelDownload: (p) =>
+    set((s) => {
+      const next = { ...s.modelDownloads, [p.id]: p };
+      // Remove terminal downloads after a short visible window (3s) so the
+      // user sees the "done" / "error" / "cancelled" state before it vanishes.
+      if (p.state === "done" || p.state === "error" || p.state === "cancelled") {
+        window.setTimeout(() => {
+          useUiStore.setState((s2) => {
+            const cleaned = { ...s2.modelDownloads };
+            delete cleaned[p.id];
+            return { modelDownloads: cleaned };
+          });
+        }, 3000);
+      }
+      return { modelDownloads: next };
+    }),
 
   setActiveView: (activeView) => set({ activeView }),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
@@ -93,10 +189,26 @@ export const useUiStore = create<UiState>((set) => ({
   setGitPromptProjectId: (gitPromptProjectId) => set({ gitPromptProjectId }),
   setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
-  setSidebarMode: (sidebarMode) => set({ sidebarMode }),
+  setSettingsCategory: (settingsCategory) => set({ settingsCategory }),
   setDiffPanelCollapsed: (diffPanelCollapsed) => set({ diffPanelCollapsed }),
   toggleDiffPanel: () => set((s) => ({ diffPanelCollapsed: !s.diffPanelCollapsed })),
   setDiffPanelWidth: (diffPanelWidth) => set({ diffPanelWidth: Math.max(180, Math.min(720, diffPanelWidth)) }),
-  setModalOpen: (modalOpen) => set({ modalOpen }),
+  setModalOpen: (id, open) =>
+    set((s) => {
+      const has = s.openModalIds.includes(id);
+      if (open === has) return s; // no-op: don't churn renderers
+      const openModalIds = open
+        ? [...s.openModalIds, id]
+        : s.openModalIds.filter((x) => x !== id);
+      return { openModalIds, modalOpen: openModalIds.length > 0 };
+    }),
   setPaneDiff: (paneDiff) => set({ paneDiff }),
+  setToolPanelTab: (toolPanelTab) => set({ toolPanelTab }),
+  setToolPanelCollapsed: (toolPanelCollapsed) => set({ toolPanelCollapsed }),
+  toggleToolPanel: () => set((s) => ({ toolPanelCollapsed: !s.toolPanelCollapsed })),
+  toggleGitSidebar: () => set((s) => ({ gitSidebarCollapsed: !s.gitSidebarCollapsed })),
+  setPlanCanvas: (content, title) => set({ planCanvasContent: content, planCanvasTitle: title }),
+  setDiffPanelFile: (diffPanelFile, diffPanelCwd) => set({ diffPanelFile, diffPanelCwd }),
+  setToolPanelWidth: (toolPanelWidth) =>
+    set({ toolPanelWidth: Math.max(280, Math.min(900, toolPanelWidth)) }),
 }));

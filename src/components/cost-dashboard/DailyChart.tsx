@@ -147,37 +147,40 @@ export function DailyChart({ rollups }: { rollups: CostRollups }) {
             </g>
           ))}
         </svg>
-      </div>
 
-      {/* Hover tooltip: absolute in the card, follows the crosshair */}
-      {hovered && (
-        <div className="chart-tooltip" style={{
-          left: `min(${hoverIdx! * step + barW / 2 - scrollLeft}px, calc(100% - 150px))`,
-        }}>
-          <div className="chart-tooltip-day">{hovered.day}</div>
-          {series.map((p, sIdx) => {
-            const v = p === "other"
-              ? Object.entries(mode === "cost" ? hovered.costByProvider : hovered.tokensByProvider)
-                  .filter(([o]) => !SERIES_ORDER.includes(normalizeProvider(o)))
-                  .reduce((s, [, v]) => s + v, 0)
-              : Object.entries(mode === "cost" ? hovered.costByProvider : hovered.tokensByProvider)
-                  .filter(([o]) => normalizeProvider(o) === p)
-                  .reduce((s, [, v]) => s + v, 0);
-            if (v <= 0) return null;
-            return (
-              <div key={p} className="chart-tooltip-row">
-                <span className="chart-tooltip-swatch" style={{ background: `var(--series-${sIdx + 1}, var(--series-other))` }} />
-                <span className="chart-tooltip-name">{seriesLabel(p)}</span>
-                <span className="chart-tooltip-value">{fmt(v)}</span>
-              </div>
-            );
-          })}
-          <div className="chart-tooltip-total">
-            <span>Total</span>
-            <span className="chart-tooltip-value">{fmt(mode === "cost" ? hovered.costUsd : sumTokens(hovered.tokensByProvider))}</span>
+        {/* Hover tooltip: absolute inside the chart-frame (which is
+            position: relative) so left/top resolve in the chart's own
+            coordinate space and the tooltip sits over the hovered bar,
+            not over the RAW TOKEN COST hero. */}
+        {hovered && (
+          <div className="chart-tooltip" style={{
+            left: `min(${hoverIdx! * step + barW / 2 - scrollLeft}px, calc(100% - 150px))`,
+          }}>
+            <div className="chart-tooltip-day">{hovered.day}</div>
+            {series.map((p, sIdx) => {
+              const v = p === "other"
+                ? Object.entries(mode === "cost" ? hovered.costByProvider : hovered.tokensByProvider)
+                    .filter(([o]) => !SERIES_ORDER.includes(normalizeProvider(o)))
+                    .reduce((s, [, v]) => s + v, 0)
+                : Object.entries(mode === "cost" ? hovered.costByProvider : hovered.tokensByProvider)
+                    .filter(([o]) => normalizeProvider(o) === p)
+                    .reduce((s, [, v]) => s + v, 0);
+              if (v <= 0) return null;
+              return (
+                <div key={p} className="chart-tooltip-row">
+                  <span className="chart-tooltip-swatch" style={{ background: `var(--series-${sIdx + 1}, var(--series-other))` }} />
+                  <span className="chart-tooltip-name">{seriesLabel(p)}</span>
+                  <span className="chart-tooltip-value">{fmt(v)}</span>
+                </div>
+              );
+            })}
+            <div className="chart-tooltip-total">
+              <span>Total</span>
+              <span className="chart-tooltip-value">{fmt(mode === "cost" ? hovered.costUsd : sumTokens(hovered.tokensByProvider))}</span>
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Legend — required for ≥2 series; text in text tokens, swatch carries identity */}
       {series.length >= 2 && (

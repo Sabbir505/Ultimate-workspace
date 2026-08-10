@@ -120,7 +120,7 @@ export function cycleTerminalPair(
   if (direction === 1) {
     // Forward: bottom moves to top, new bottom is the most-recent not in the pair.
     const newTop = bottom;
-    const newBottom = allIds.find((id) => id !== newTop) ?? null;
+    const newBottom = allIds.find((id) => id !== newTop && id !== top) ?? top;
     return [newTop, newBottom];
   } else {
     // Backward: top moves to bottom, new top is the most-recent not in the pair.
@@ -132,7 +132,7 @@ export function cycleTerminalPair(
     // 3+ terminals: find a "previous" terminal that isn't the current pair.
     // Take the most-recent terminal that is neither top nor bottom as new top,
     // keep the old top as the new bottom.
-    const newTop = allIds.find((id) => id !== top && id !== bottom) ?? top;
+    const newTop = allIds.find((id) => id !== top && id !== bottom) ?? bottom;
     const newBottom = top;
     return [newTop, newBottom];
   }

@@ -7,21 +7,35 @@
 // that we actually use (code + comment + string + keyword + function +
 // variable + number + operator + tag + attr-name + attr-value + punctuation
 // + deleted + inserted). Untyped keys fall back to editor-fg.
+//
+// Memoized: building the 40-entry style object reads ~16 CSS custom
+// properties off the document root each call; that work is identical for a
+// given data-theme, so we cache by theme name and only rebuild on a real
+// theme change. The MutationObserver in useSyntaxTheme fires on every
+// data-theme attribute mutation — without this cache it would rebuild the
+// whole object (and re-render every SyntaxHighlighter in the chat) on each
+// toggle, even when the value didn't actually change.
 import type { CSSProperties } from "react";
 
 type SyntaxStyle = Record<string, CSSProperties>;
+
+let cachedTheme: string | null = null;
+let cachedStyle: SyntaxStyle | null = null;
 
 /** Returns the current theme's syntax style by reading CSS custom properties
  *  off the document root. Reactivity comes from the data-theme attribute
  *  change; callers should re-invoke this when the theme changes. */
 export function getSyntaxTheme(): SyntaxStyle {
   if (typeof document === "undefined") return {};
+  const theme = document.documentElement.getAttribute("data-theme") || "";
+  if (cachedStyle && cachedTheme === theme) return cachedStyle;
+
   const cs = getComputedStyle(document.documentElement);
   const cssVar = (name: string) => cs.getPropertyValue(name).trim();
 
   const v = (name: string, fallback: string): string => cssVar(name) || fallback;
 
-  return {
+  const style: SyntaxStyle = {
     "code[class*=\"language-\"]": {
       color: v("--syntax-variable", v("--editor-fg", "#e4e4e4")),
       fontFamily: "var(--font-mono)",
@@ -87,4 +101,8 @@ export function getSyntaxTheme(): SyntaxStyle {
     bold: { fontWeight: "bold" },
     italic: { fontStyle: "italic" },
   };
+
+  cachedTheme = theme;
+  cachedStyle = style;
+  return style;
 }

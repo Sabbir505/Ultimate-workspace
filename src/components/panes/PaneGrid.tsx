@@ -11,7 +11,14 @@
 // (display:none) so xterm instances, scrollback and pty processes are
 // untouched (§6.5: never kill on blur). Closing the last browser pane
 // returns to the normal grid.
-import { useCallback, memo, useMemo, useRef, useState } from "react";
+//
+// BUNDLE: TerminalPane pulls in xterm.js + FitAddon (~80 KB) and
+// BrowserPane pulls in tauri webview shims. The grid renders ZERO panes
+// on the empty welcome screen — only chat and tool panel. So both are
+// lazy-loaded: they're downloaded the first time the user actually opens
+// a terminal or a browser pane (e.g. via the tool panel's Terminal /
+// Browser tab). This keeps xterm out of the initial bundle.
+import { useCallback, lazy, memo, Suspense, useMemo, useRef, useState } from "react";
 import {
   activeTerminalPair,
   cycleTerminalPair,
@@ -21,9 +28,9 @@ import {
 } from "../../state/panes";
 import { useProjectsStore } from "../../state/projects";
 import { harnessShortName } from "../../types";
-import { BrowserPane } from "./BrowserPane";
+const BrowserPane = lazy(() => import("./BrowserPane").then((m) => ({ default: m.BrowserPane })));
+const TerminalPane = lazy(() => import("./TerminalPane").then((m) => ({ default: m.TerminalPane })));
 import { DevDiffPanel } from "./DevDiffPanel";
-import { TerminalPane } from "./TerminalPane";
 const GAP_PX = 10;
 
 interface GridFractions {
@@ -281,16 +288,18 @@ export function ChatBrowserSplit({ children }: { children: React.ReactNode }) {
  * the toolbar's "Browser" button, which flips collapsed back to false and
  * re-renders the pane in the grid/split.
  */
-function DormantBrowsers({ panes }: { panes: Pane[] }) {
+export function DormantBrowsers({ panes }: { panes: Pane[] }) {
   const dormant = panes.filter(
     (p) => p.data.kind === "browser" && p.data.collapsed,
   );
   if (dormant.length === 0) return null;
   return (
     <div className="dormant-browsers" aria-hidden="true">
-      {dormant.map((p) => (
-        <BrowserPane key={p.paneId} pane={p} visible={false} />
-      ))}
+      <Suspense fallback={null}>
+        {dormant.map((p) => (
+          <BrowserPane key={p.paneId} pane={p} visible={false} />
+        ))}
+      </Suspense>
     </div>
   );
 }
@@ -506,7 +515,7 @@ function SplitterOverlay({
 // happen in TerminalPane's own event listener, independent of these renders,
 // so skipping them loses nothing. The `broadcast`/`closePane`/etc. the frame
 // subscribes to internally still trigger re-renders via their own selectors.
-const PaneFrame = memo(function PaneFrame({
+export const PaneFrame = memo(function PaneFrame({
   pane,
   index,
   focused,
@@ -525,7 +534,6 @@ const PaneFrame = memo(function PaneFrame({
   const closePane = usePanesStore((s) => s.closePane);
   const focusPane = usePanesStore((s) => s.focusPane);
   const toggleBroadcastPane = usePanesStore((s) => s.toggleBroadcastPane);
-  const toggleBrowserCollapsed = usePanesStore((s) => s.toggleBrowserCollapsed);
   // Dev-only live memory reading for this pane (bytes). Selected per-pane so a
   // single header re-renders when its value changes, not the whole grid.
   const memBytes = usePanesStore((s) => s.paneMemory[pane.paneId] ?? 0);
@@ -582,18 +590,6 @@ const PaneFrame = memo(function PaneFrame({
           // exact thing the DevDiffPanel was added to fix.
           null
         )}
-        {isBrowser && (
-          <button
-            className="ghost pane-action"
-            title={browserCollapsed ? "Show browser" : "Minimize browser"}
-            onClick={(e) => {
-              e.stopPropagation();
-              toggleBrowserCollapsed(pane.paneId);
-            }}
-          >
-            {browserCollapsed ? "⊞" : "⊟"}
-          </button>
-        )}
         <button
           className="ghost pane-action pane-close"
           title="Close pane"
@@ -606,7 +602,9 @@ const PaneFrame = memo(function PaneFrame({
         </button>
       </div>
       {pane.data.kind === "terminal" ? (
-        <TerminalPane pane={pane} focused={focused} visible={visible} />
+        <Suspense fallback={<div className="pane-body pane-loading">Loading terminal…</div>}>
+          <TerminalPane pane={pane} focused={focused} visible={visible} />
+        </Suspense>
       ) : (
         // Keep <BrowserPane> mounted even when collapsed: minimizing must HIDE
         // the native webview (browser_set_visible(false) via the occlusion
@@ -615,7 +613,9 @@ const PaneFrame = memo(function PaneFrame({
         // a full reload (losing scroll/form/history state) on expand. The CSS
         // rule `.pane.collapsed .pane-body { display: none }` shrinks the body
         // div, so the bounds effect stops fighting the hidden webview.
-        <BrowserPane pane={pane} visible={visible} />
+        <Suspense fallback={<div className="pane-body pane-loading">Loading browser…</div>}>
+          <BrowserPane pane={pane} visible={visible} />
+        </Suspense>
       )}
     </div>
   );

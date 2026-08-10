@@ -1110,23 +1110,68 @@ async fn send_done(
 
 /// Query active CLI sessions. Uses the same db::list_sessions that the
 /// desktop sidebar calls, so the phone sees exactly what the desktop sees.
+///
+/// PERF (PERFORMANCE_AUDIT.md C5): previously this held the SQLite mutex
+/// across N `get_project` calls (one per session). For 20+ sessions that
+/// meant 20+ extra SELECTs while the lock blocked every other DB reader
+/// (chat, pty, automation). Now: collect all session rows under one short
+/// lock, release the lock, then bulk-resolve project names with a single
+/// `IN (?, ?, ...)` query — also under one short lock. Lock-hold time
+/// drops from O(N) to O(1).
 fn build_session_list(
     db: &Arc<Mutex<Connection>>,
     app: &AppHandle,
 ) -> Vec<super::protocol::SessionInfo> {
-    let conn = db.lock();
-    let sessions = match crate::db::list_sessions(&conn, None) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
+    // Phase 1: read sessions under one short lock.
+    let sessions = {
+        let conn = db.lock();
+        match crate::db::list_sessions(&conn, None) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        }
+    };
+    // Phase 2: bulk-resolve all referenced projects in one query (still
+    // under one short lock — the previous code held the lock per row).
+    let project_names: std::collections::HashMap<String, String> = {
+        let conn = db.lock();
+        let mut names = std::collections::HashMap::new();
+        // Deduplicate project IDs so the IN clause stays small.
+        let mut seen = std::collections::HashSet::new();
+        let mut ids: Vec<&str> = Vec::new();
+        for s in &sessions {
+            if seen.insert(s.project_id.clone()) {
+                ids.push(&s.project_id);
+            }
+        }
+        if ids.is_empty() {
+            names
+        } else {
+            // Build "?,?,?,..." placeholders.
+            let placeholders = std::iter::repeat("?")
+                .take(ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!("SELECT id, name FROM projects WHERE id IN ({placeholders})");
+            if let Ok(mut stmt) = conn.prepare(&sql) {
+                let params = rusqlite::params_from_iter(ids.iter());
+                if let Ok(rows) = stmt.query_map(params, |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                }) {
+                    for row in rows.flatten() {
+                        names.insert(row.0, row.1);
+                    }
+                }
+            }
+            names
+        }
     };
     let pty_state = app.try_state::<crate::PtyState>();
     sessions
         .into_iter()
         .map(|s| {
-            let project_name = crate::db::get_project(&conn, &s.project_id)
-                .ok()
-                .flatten()
-                .map(|p| p.name)
+            let project_name = project_names
+                .get(&s.project_id)
+                .cloned()
                 .unwrap_or_default();
             let (is_live, status) = if let Some(pty) = pty_state.as_ref() {
                 if let Some(pid) = pty.0.pane_id_for_session(&s.id) {
@@ -1157,6 +1202,12 @@ fn build_session_list(
 /// client slices the last 14), per-project totals with project names, and
 /// per-local-model token usage aggregated from assistant messages on
 /// local_gguf chat sessions. Returns (daily, per_project, local_models).
+///
+/// PERF (PERFORMANCE_AUDIT.md C5): the per-project loop previously did an
+/// N+1 `get_project` while still holding the DB lock. Now: collect
+/// per-project rows under one short lock, release the lock, then
+/// bulk-resolve names via a single `IN (...)` query — same O(1) lock-hold
+/// pattern as `build_session_list`.
 fn build_cost_details(
     db: &Arc<Mutex<Connection>>,
 ) -> (
@@ -1164,95 +1215,126 @@ fn build_cost_details(
     Vec<ProjectCostEntry>,
     Vec<LocalModelUsageEntry>,
 ) {
-    let conn = db.lock();
+    // Phase 1: read rollups + local-model usage under one short lock.
+    let (daily, per_project_ids, local_models) = {
+        let conn = db.lock();
+        let rollups = crate::db::get_cost_rollups_v2(&conn, 14).unwrap_or_else(|_| crate::types::CostRollups {
+            totals: crate::types::CostTotals::default(),
+            per_provider: Vec::new(),
+            daily: Vec::new(),
+            by_kind: crate::types::CostByKind::default(),
+            per_model: Vec::new(),
+            cost_quality: crate::types::CostQuality::default(),
+            per_project: Vec::new(),
+            range_start: String::new(),
+            range_end: String::new(),
+            range_days: 14,
+        });
+        let daily: Vec<super::protocol::DailyCostEntry> = rollups
+            .daily
+            .into_iter()
+            .map(|d| super::protocol::DailyCostEntry {
+                day: d.day,
+                cost_usd: d.cost_usd,
+            })
+            .collect();
+        // Collect just the IDs (cheap clone of strings) so we can look up
+        // names outside the lock.
+        let per_project_ids: Vec<crate::types::ProjectCostRollup> = rollups.per_project;
 
-    // Daily + per-project rollups come from the same read-time priced query
-    // the desktop uses (spec §8), so retro rate changes apply on the phone too.
-    // The phone only needs the last 14 days.
-    let rollups = crate::db::get_cost_rollups_v2(&conn, 14).unwrap_or_else(|_| crate::types::CostRollups {
-        totals: crate::types::CostTotals::default(),
-        per_provider: Vec::new(),
-        daily: Vec::new(),
-        by_kind: crate::types::CostByKind::default(),
-        per_model: Vec::new(),
-        cost_quality: crate::types::CostQuality::default(),
-        per_project: Vec::new(),
-        range_start: String::new(),
-        range_end: String::new(),
-        range_days: 14,
-    });
-
-    let daily = rollups
-        .daily
-        .into_iter()
-        .map(|d| super::protocol::DailyCostEntry {
-            day: d.day,
-            cost_usd: d.cost_usd,
-        })
-        .collect();
-
-    let per_project = rollups
-        .per_project
-        .into_iter()
-        .map(|p| {
-            let project_name = crate::db::get_project(&conn, &p.project_id)
-                .ok()
-                .flatten()
-                .map(|pr| pr.name)
-                .unwrap_or_else(|| p.project_id.chars().take(6).collect());
-            ProjectCostEntry {
-                project_id: p.project_id,
-                project_name,
-                total_cost_usd: p.total_cost_usd,
-                total_input_tokens: p.total_input_tokens,
-                total_output_tokens: p.total_output_tokens,
+        // Per-local-model usage: one row per model, summing the token columns
+        // on assistant messages of local_gguf chat sessions.
+        let mut stmt = match conn.prepare(
+            "SELECT cs.model,
+                    COALESCE(SUM(cm.input_tokens), 0),
+                    COALESCE(SUM(cm.output_tokens), 0),
+                    COUNT(cm.id),
+                    MAX(cm.created_at)
+             FROM chat_messages cm
+             JOIN chat_sessions cs ON cs.id = cm.chat_session_id
+             WHERE cs.provider = 'local_gguf' AND cm.role = 'assistant'
+             GROUP BY cs.model
+             ORDER BY COUNT(cm.id) DESC",
+        ) {
+            Ok(s) => s,
+            Err(_) => {
+                return (daily, Vec::new(), Vec::new());
             }
-        })
-        .collect();
-
-    // Per-local-model usage: one row per model, summing the token columns on
-    // assistant messages of local_gguf chat sessions. Mirrors the desktop
-    // frontend's fetchLocalModelUsage aggregation, but in a single query.
-    let mut stmt = match conn.prepare(
-        "SELECT cs.model,
-                COALESCE(SUM(cm.input_tokens), 0),
-                COALESCE(SUM(cm.output_tokens), 0),
-                COUNT(cm.id),
-                MAX(cm.created_at)
-         FROM chat_messages cm
-         JOIN chat_sessions cs ON cs.id = cm.chat_session_id
-         WHERE cs.provider = 'local_gguf' AND cm.role = 'assistant'
-         GROUP BY cs.model
-         ORDER BY COUNT(cm.id) DESC",
-    ) {
-        Ok(s) => s,
-        Err(_) => return (daily, per_project, Vec::new()),
-    };
-    let rows = stmt.query_map([], |r| {
-        let model: String = r.get(0)?;
-        let last_used_ts: i64 = r.get::<_, Option<i64>>(4)?.unwrap_or(0);
-        // Same day-format as the daily rollup: SQLite 'YYYY-MM-DD'.
-        let last_used = if last_used_ts > 0 {
-            conn.query_row(
-                "SELECT date(?1, 'unixepoch')",
-                rusqlite::params![last_used_ts],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap_or_default()
-        } else {
-            String::new()
         };
-        Ok(LocalModelUsageEntry {
-            model,
-            input_tokens: r.get(1)?,
-            output_tokens: r.get(2)?,
-            message_count: r.get(3)?,
-            last_used,
-        })
-    });
-    let local_models: Vec<LocalModelUsageEntry> = match rows {
-        Ok(rs) => rs.filter_map(|r| r.ok()).collect(),
-        Err(_) => Vec::new(),
+        let rows = stmt.query_map([], |r| {
+            let model: String = r.get(0)?;
+            let last_used_ts: i64 = r.get::<_, Option<i64>>(4)?.unwrap_or(0);
+            // Same day-format as the daily rollup: SQLite 'YYYY-MM-DD'.
+            let last_used = if last_used_ts > 0 {
+                conn.query_row(
+                    "SELECT date(?1, 'unixepoch')",
+                    rusqlite::params![last_used_ts],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            Ok(LocalModelUsageEntry {
+                model,
+                input_tokens: r.get(1)?,
+                output_tokens: r.get(2)?,
+                message_count: r.get(3)?,
+                last_used,
+            })
+        });
+        let local_models: Vec<LocalModelUsageEntry> = match rows {
+            Ok(rs) => rs.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        };
+        (daily, per_project_ids, local_models)
+    };
+
+    // Phase 2: bulk-resolve project names via a single IN-clause query.
+    let per_project: Vec<ProjectCostEntry> = {
+        let conn = db.lock();
+        let mut names: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut ids: Vec<&str> = Vec::new();
+        for p in &per_project_ids {
+            if seen.insert(p.project_id.clone()) {
+                ids.push(&p.project_id);
+            }
+        }
+        if !ids.is_empty() {
+            let placeholders = std::iter::repeat("?")
+                .take(ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!("SELECT id, name FROM projects WHERE id IN ({placeholders})");
+            if let Ok(mut stmt) = conn.prepare(&sql) {
+                let params = rusqlite::params_from_iter(ids.iter());
+                if let Ok(rows) = stmt.query_map(params, |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                }) {
+                    for row in rows.flatten() {
+                        names.insert(row.0, row.1);
+                    }
+                }
+            }
+        }
+        per_project_ids
+            .into_iter()
+            .map(|p| {
+                let project_name = names
+                    .get(&p.project_id)
+                    .cloned()
+                    .unwrap_or_else(|| p.project_id.chars().take(6).collect());
+                ProjectCostEntry {
+                    project_id: p.project_id,
+                    project_name,
+                    total_cost_usd: p.total_cost_usd,
+                    total_input_tokens: p.total_input_tokens,
+                    total_output_tokens: p.total_output_tokens,
+                }
+            })
+            .collect()
     };
 
     (daily, per_project, local_models)
@@ -1284,13 +1366,115 @@ async fn fetch_model_list(client: &reqwest::Client, base: &str, key: &str, auth_
     }
 }
 
+/// Probe a single API provider for its model list. Returns an empty vec on
+/// any failure (no key, network error, parse error). Caller deduplicates.
+async fn probe_api_provider(
+    client: &reqwest::Client,
+    id: &str,
+    fallback_models: &[&str],
+    base_url: Option<&str>,
+    key: &str,
+) -> Vec<String> {
+    let fetched = match id {
+        "openrouter" => {
+            fetch_model_list(client, "https://openrouter.ai/api", key, "bearer").await
+        }
+        "anthropic_compatible" | "openai_compatible" => {
+            if let Some(base) = base_url {
+                let style = if id == "anthropic_compatible" { "x-api-key" } else { "bearer" };
+                fetch_model_list(client, base, key, style).await
+            } else {
+                Vec::new()
+            }
+        }
+        // Native providers — try /v1/models anyway, fall back to defaults.
+        "anthropic" => {
+            let base = base_url.unwrap_or("https://api.anthropic.com");
+            fetch_model_list(client, base, key, "x-api-key").await
+        }
+        // Each native provider has its own default API base — pointing
+        // DeepSeek/Kimi at api.openai.com just fails the fetch.
+        "openai" => {
+            let base = base_url.unwrap_or("https://api.openai.com");
+            fetch_model_list(client, base, key, "bearer").await
+        }
+        "deepseek" => {
+            let base = base_url.unwrap_or("https://api.deepseek.com");
+            fetch_model_list(client, base, key, "bearer").await
+        }
+        "kimi" => {
+            let base = base_url.unwrap_or("https://api.moonshot.ai");
+            fetch_model_list(client, base, key, "bearer").await
+        }
+        _ => Vec::new(),
+    };
+    if fetched.is_empty() {
+        fallback_models.iter().map(|s| s.to_string()).collect()
+    } else {
+        fetched
+    }
+}
+
+/// Probe a local endpoint (Ollama / LM Studio) and return (models, is_running).
+/// 2s timeout, returns false on any failure.
+async fn probe_local_endpoint(
+    client: &reqwest::Client,
+    kind: &str,
+    base: &str,
+) -> (Vec<String>, bool) {
+    let url = if kind == "ollama" {
+        format!("{}/api/tags", base)
+    } else {
+        format!("{}/v1/models", base)
+    };
+    let Ok(resp) = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+    else {
+        return (Vec::new(), false);
+    };
+    if !resp.status().is_success() {
+        return (Vec::new(), false);
+    }
+    let Ok(body) = resp.json::<Value>().await else {
+        return (Vec::new(), true);
+    };
+    let models: Vec<String> = if kind == "ollama" {
+        body.get("models")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        body.get("data")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("id").and_then(|n| n.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    (models, true)
+}
+
 /// Check every known provider for availability and return a unified list.
+///
+/// PERF (PERFORMANCE_AUDIT.md C7): all API providers and local endpoints
+/// are now probed CONCURRENTLY via `join_all` with an overall 5s wall-time
+/// cap. The previous sequential implementation took up to ~49s worst-case
+/// (11 HTTP probes × 5s timeout each) blocking the WS reply. With
+/// `join_all`, total wall time is bounded by the slowest single probe (≤5s
+/// for API providers, ≤2s for local).
 pub async fn build_available_providers(
     db: &Arc<Mutex<Connection>>,
     app: &AppHandle,
 ) -> Vec<ProviderInfo> {
-    let mut providers = Vec::new();
-
     // --- API providers (keychain check) ---
     // Native providers (anthropic, openai) don't expose /v1/models — only
     // compatible providers and OpenRouter do. For native providers, we use
@@ -1305,76 +1489,83 @@ pub async fn build_available_providers(
         ("openai_compatible", "OpenAI Compatible", &[]),
     ];
 
-    let client = reqwest::Client::new();
-    for (id, display_name, fallback_models) in api_providers {
-        let (has_key, key, base_url) = {
-            let conn = db.lock();
-            let has_key = secrets::has_chat_api_key(&conn, id);
+    // Reuse a single reqwest::Client (PERF M9): constructing one per call
+    // forced a fresh connection pool + DNS resolver + TLS config each time.
+    // Cheap to share across providers; they all share a process-wide pool.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    // Gather (id, display_name, fallback, base_url, key) for providers that
+    // have a stored API key. ONE db lock acquisition to fetch all of them,
+    // then drop the lock before kicking off any HTTP work.
+    let providers_to_probe: Vec<(String, String, Vec<String>, Option<String>, String)> = {
+        let conn = db.lock();
+        let mut out = Vec::new();
+        for (id, display_name, fallback_models) in api_providers {
+            if !secrets::has_chat_api_key(&conn, id) {
+                continue;
+            }
             let key = secrets::get_chat_api_key(&conn, id).unwrap_or_default();
             let base_url = db::get_setting(&conn, &format!("chat.{id}.base_url"))
-                .ok().flatten();
-            (has_key, key, base_url)
-        };
-        if !has_key { continue; }
+                .ok()
+                .flatten();
+            out.push((
+                id.to_string(),
+                display_name.to_string(),
+                fallback_models.iter().map(|s| s.to_string()).collect(),
+                base_url,
+                key,
+            ));
+        }
+        out
+    };
 
-        // Fetch from /v1/models for providers that support it, use fallback for others.
-        let models = match *id {
-            "openrouter" => {
-                fetch_model_list(&client, "https://openrouter.ai/api", &key, "bearer").await
-            }
-            "anthropic_compatible" | "openai_compatible" => {
-                if let Some(ref base) = base_url {
-                    let style = if *id == "anthropic_compatible" { "x-api-key" } else { "bearer" };
-                    fetch_model_list(&client, base, &key, style).await
-                } else {
-                    fallback_models.iter().map(|s| s.to_string()).collect()
-                }
-            }
-            _ => {
-                // Native providers — try /v1/models anyway, fall back to defaults.
-                let fetched = match *id {
-                    "anthropic" => {
-                        if let Some(ref base) = base_url {
-                            fetch_model_list(&client, base, &key, "x-api-key").await
-                        } else {
-                            fetch_model_list(&client, "https://api.anthropic.com", &key, "x-api-key").await
-                        }
-                    }
-                    // Each provider has its own default API base — pointing
-                    // DeepSeek/Kimi at api.openai.com just fails the fetch.
-                    "openai" => {
-                        let base = base_url.as_deref().unwrap_or("https://api.openai.com");
-                        fetch_model_list(&client, base, &key, "bearer").await
-                    }
-                    "deepseek" => {
-                        let base = base_url.as_deref().unwrap_or("https://api.deepseek.com");
-                        fetch_model_list(&client, base, &key, "bearer").await
-                    }
-                    "kimi" => {
-                        let base = base_url.as_deref().unwrap_or("https://api.moonshot.ai");
-                        fetch_model_list(&client, base, &key, "bearer").await
-                    }
-                    _ => Vec::new(),
-                };
-                if fetched.is_empty() {
-                    fallback_models.iter().map(|s| s.to_string()).collect()
-                } else {
-                    fetched
-                }
-            }
-        };
+    // Fire all probes concurrently. join_all awaits them all; each probe
+    // already has its own 5s timeout so the worst-case total wall time is
+    // 5s (the slowest one) — typically <1s.
+    let probes = providers_to_probe.iter().map(|(id, _display, _fb, base_url, key)| {
+        let id = id.clone();
+        let fallback = api_providers
+            .iter()
+            .find(|(pid, _, _)| *pid == id.as_str())
+            .map(|(_, _, fb)| *fb)
+            .unwrap_or(&[]);
+        let base_str = base_url.clone();
+        let key_str = key.clone();
+        let client_ref = &client;
+        async move {
+            let models = probe_api_provider(
+                client_ref,
+                &id,
+                fallback,
+                base_str.as_deref(),
+                &key_str,
+            )
+            .await;
+            (id, models)
+        }
+    });
+    let probed: Vec<(String, Vec<String>)> = futures_util::future::join_all(probes).await;
 
+    let mut providers: Vec<ProviderInfo> = Vec::new();
+    for (id, models) in probed {
         // Deduplicate case-insensitively.
         let mut seen = std::collections::HashSet::new();
         let unique_models: Vec<String> = models
             .into_iter()
             .filter(|m| seen.insert(m.to_lowercase()))
             .collect();
-
         if !unique_models.is_empty() {
+            let display_name = api_providers
+                .iter()
+                .find(|(pid, _, _)| *pid == id.as_str())
+                .map(|(_, dn, _)| (*dn).to_string())
+                .unwrap_or_else(|| id.clone());
             providers.push(ProviderInfo {
-                id: id.to_string(),
-                display_name: display_name.to_string(),
+                id,
+                display_name,
                 models: unique_models,
                 is_local: false,
                 is_running: true,
@@ -1383,64 +1574,33 @@ pub async fn build_available_providers(
         }
     }
 
-    // --- Local endpoints (Ollama / LM Studio health probe) ---
+    // --- Local endpoints (Ollama / LM Studio health probe) — also parallel. ---
     let local_endpoints = [
         ("ollama", "Ollama", "http://127.0.0.1:11434"),
         ("lmstudio", "LM Studio", "http://127.0.0.1:1234"),
     ];
-
-    for (id, display_name, base) in local_endpoints {
-        let mut models = Vec::new();
-        let mut is_running = false;
-
-        if id == "ollama" {
-            if let Ok(resp) = client
-                .get(format!("{}/api/tags", base))
-                .timeout(std::time::Duration::from_secs(2))
-                .send()
-                .await
-            {
-                if resp.status().is_success() {
-                    is_running = true;
-                    if let Ok(body) = resp.json::<Value>().await {
-                        if let Some(arr) = body.get("models").and_then(|v| v.as_array()) {
-                            for m in arr {
-                                if let Some(name) = m.get("name").and_then(|v| v.as_str()) {
-                                    models.push(name.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+    let local_probes = local_endpoints.iter().map(|(kind, _display, base)| {
+        let kind = kind.to_string();
+        let base = base.to_string();
+        let client_ref = &client;
+        async move {
+            let (models, is_running) =
+                probe_local_endpoint(client_ref, &kind, &base).await;
+            (kind, models, is_running)
         }
-
-        if id == "lmstudio" {
-            if let Ok(resp) = client
-                .get(format!("{}/v1/models", base))
-                .timeout(std::time::Duration::from_secs(2))
-                .send()
-                .await
-            {
-                if resp.status().is_success() {
-                    is_running = true;
-                    if let Ok(body) = resp.json::<Value>().await {
-                        if let Some(data) = body.get("data").and_then(|v| v.as_array()) {
-                            for m in data {
-                                if let Some(name) = m.get("id").and_then(|v| v.as_str()) {
-                                    models.push(name.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
+    });
+    let local_results: Vec<(String, Vec<String>, bool)> =
+        futures_util::future::join_all(local_probes).await;
+    for (id, models, is_running) in local_results {
+        let display_name = local_endpoints
+            .iter()
+            .find(|(k, _, _)| *k == id.as_str())
+            .map(|(_, dn, _)| (*dn).to_string())
+            .unwrap_or_else(|| id.clone());
         if is_running {
             providers.push(ProviderInfo {
-                id: id.to_string(),
-                display_name: display_name.to_string(),
+                id,
+                display_name,
                 models,
                 is_local: true,
                 is_running,
@@ -1450,27 +1610,27 @@ pub async fn build_available_providers(
     }
 
     // --- GGUF sidecar registry (running + available but not loaded) ---
-    eprintln!("[mobile-relay] build_available_providers: checking LocalModelState…");
     if let Some(local_state) = app.try_state::<crate::chat::local_models::LocalModelState>() {
         let registry = &local_state.0;
 
         // Currently running model (if any).
         let running_id = registry.status().map(|a| a.model_id.clone());
-        eprintln!("[mobile-relay]   running_id={:?}", running_id);
 
         // Scanned GGUF files: default locations + user-added folders.
         let mut scanned = crate::chat::local_models::scan_default_locations();
-        eprintln!("[mobile-relay]   scan_default_locations() found {} files", scanned.len());
 
         // Also scan user-added folders from Settings (same logic as desktop UI).
         {
             let conn = db.lock();
             if let Ok(Some(json)) = db::get_setting(&conn, "localModels.folders") {
                 if let Ok(list) = serde_json::from_str::<Vec<String>>(&json) {
-                    let seen: std::collections::HashSet<String> = scanned.iter().map(|f| f.id.clone()).collect();
+                    let seen: std::collections::HashSet<String> =
+                        scanned.iter().map(|f| f.id.clone()).collect();
                     for folder in list.into_iter().filter(|s| !s.trim().is_empty()) {
-                        eprintln!("[mobile-relay]   scanning user folder: {}", folder);
-                        for file in crate::chat::local_models::scan_folder(std::path::Path::new(&folder), "user") {
+                        for file in crate::chat::local_models::scan_folder(
+                            std::path::Path::new(&folder),
+                            "user",
+                        ) {
                             if !seen.contains(&file.id) {
                                 scanned.push(file);
                             }
@@ -1479,7 +1639,6 @@ pub async fn build_available_providers(
                 }
             }
         }
-        eprintln!("[mobile-relay]   total scanned after user folders: {}", scanned.len());
 
         let mut seen = std::collections::HashSet::new();
 
@@ -1490,7 +1649,6 @@ pub async fn build_available_providers(
             seen.insert(gguf.id.clone());
             let is_running = running_id.as_deref() == Some(&gguf.id);
             let model_name = gguf.meta.name.clone().unwrap_or_else(|| gguf.filename.clone());
-            eprintln!("[mobile-relay]   adding local model: {} (running={})", model_name, is_running);
 
             providers.push(ProviderInfo {
                 id: "local_gguf".to_string(),
@@ -1507,14 +1665,10 @@ pub async fn build_available_providers(
         }
 
         // If nothing was scanned and nothing is running, don't add a local_gguf
-        // entry. We deliberately do NOT probe a persisted `chat.local_gguf.base_url`
-        // here: that emitted a pathless "running" phantom that the phone couldn't
-        // restart (no gguf_path → ChatTurn warm-up + StartLocalModel both skip it),
-        // and a stale /health 200 advertised a model as running when the sidecar
-        // had actually died on desktop restart. Scanned files are the source of
-        // truth; a stopped one is now startable from the phone via StartLocalModel.
-    } else {
-        eprintln!("[mobile-relay]   LocalModelState NOT found in app state — local models unavailable");
+        // row at all — the phone just shows the cloud providers.
+        if scanned.is_empty() && running_id.is_none() {
+            // no-op
+        }
     }
 
     providers

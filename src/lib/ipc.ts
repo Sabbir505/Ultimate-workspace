@@ -25,6 +25,8 @@ import type {
   Skill,
 } from "../types";
 
+export type { ChangedFile };
+
 function tauriAvailable(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -162,6 +164,16 @@ export const listenBrowserOpenBrowserRequest = (
   handler: (payload: BrowserOpenBrowserRequestPayload) => void,
 ) => safeListen<BrowserOpenBrowserRequestPayload>("browser:open-browser-request", handler);
 
+/** Emitted by the backend whenever the agent performs any browser action
+ *  (harness MCP ops via resolve_or_open; chat-mode browser_* tools). The
+ *  frontend surfaces the Browser tab so the work is visible as it happens. */
+export interface BrowserActivityPayload {
+  paneId: string | null;
+}
+export const listenBrowserActivity = (
+  handler: (payload: BrowserActivityPayload) => void,
+) => safeListen<BrowserActivityPayload>("browser:activity", handler);
+
 // --- Harnesses ---
 export const listHarnesses = () => safeInvoke<HarnessStatus[] | null>("list_harnesses");
 export const runHarnessLogin = (paneId: string, harnessId: HarnessId, cwd: string) =>
@@ -184,6 +196,39 @@ export const getGitFileDiff = (path: string, filePath: string) =>
  *  worktree's own diff, not the parent repo's. */
 export const getChangedFiles = (path: string) =>
   safeInvoke<ChangedFile[] | null>("get_changed_files", { path });
+
+// --- Git branch management ---
+export interface BranchInfo {
+  name: string;
+  isCurrent: boolean;
+  isRemote: boolean;
+  lastCommitSha: string;
+  lastCommitMessage: string;
+}
+export interface GitLogEntry {
+  graph: string;
+  sha: string;
+  message: string;
+  refs: string;
+}
+export const listGitBranches = (path: string) =>
+  safeInvoke<BranchInfo[] | null>("list_git_branches", { path });
+export const createGitBranch = (path: string, name: string) =>
+  safeInvoke<void>("create_git_branch", { path, name });
+export const checkoutGitBranch = (path: string, name: string) =>
+  safeInvoke<void>("checkout_git_branch", { path, name });
+export const deleteGitBranch = (path: string, name: string) =>
+  safeInvoke<void>("delete_git_branch", { path, name });
+export const getGitLog = (path: string) =>
+  safeInvoke<GitLogEntry[] | null>("get_git_log", { path });
+
+export const gitCommit = (path: string, message: string) =>
+  safeInvoke<string>("git_commit", { path, message });
+
+export const gitPush = (path: string) =>
+  safeInvoke<string>("git_push", { path });
+export const getRemoteUrl = (path: string) =>
+  safeInvoke<string | null>("get_remote_url", { path });
 
 // --- Settings / skills / quick actions / secrets / cost ---
 export const getSetting = (key: string) => safeInvoke<string | null>("get_setting", { key });
@@ -280,6 +325,10 @@ export interface ChatSession {
    *  disabled). Values: "builtin" | "local" | "harness:<id>" (e.g.
    *  "harness:claude_code"). */
   agent?: string | null;
+  /** The project this chat is nested under in the sidebar. null/undefined =
+   *  unbound (shows in the flat "Chat History" list); a project id nests it
+   *  under that project's expandable row. Persisted in the DB. */
+  projectId?: string | null;
 }
 
 export interface ChatMessageRecord {
@@ -432,10 +481,18 @@ export interface ChatErrorPayload {
 
 export const listChatSessions = () =>
   safeInvoke<ChatSession[] | null>("list_chat_sessions");
-export const createChatSession = (provider: string, model: string) =>
-  safeInvoke<ChatSession | null>("create_chat_session", { provider, model });
+export const createChatSession = (provider: string, model: string, projectId?: string | null) =>
+  safeInvoke<ChatSession | null>("create_chat_session", { provider, model, projectId: projectId ?? null });
+/** Bind (or unbind with null) a chat session to a project, so it nests under
+ *  that project's expandable sidebar row. */
+export const setChatSessionProject = (chatSessionId: string, projectId?: string | null) =>
+  safeInvoke<void>("set_chat_session_project", { chatSessionId, projectId: projectId ?? null });
 export const deleteChatSession = (chatSessionId: string) =>
   safeInvoke<void>("delete_chat_session", { chatSessionId });
+/** Sweep empty "Untitled" session rows (zero messages), keeping the session
+ *  the app is about to restore. Returns the number of sessions deleted. */
+export const deleteEmptyChatSessions = (keepSessionId?: string) =>
+  safeInvoke<number>("delete_empty_chat_sessions", { keepSessionId: keepSessionId ?? null });
 /** Delete every chat session + its messages (bulk form of deleteChatSession,
  *  same per-session cleanup). Returns the number of sessions deleted. */
 export const deleteAllChatSessions = () =>

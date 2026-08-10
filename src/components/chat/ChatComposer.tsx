@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ModelEffortMenu } from "./ModelEffortMenu";
 import { AgentMenu } from "./AgentMenu";
 import { ContextMeter } from "./ContextMeter";
+import { BranchDropdown } from "./BranchDropdown";
 import { useUiStore } from "../../state/ui";
 import { useChatStore } from "../../state/chat";
 import { useProjectsStore } from "../../state/projects";
@@ -130,6 +131,71 @@ function FolderNotch() {
       >
         ×
       </button>
+    </div>
+  );
+}
+
+/** GitHub / branch pill — sits beside the project pill. Shows a git-branch
+ *  icon + the current branch name. Clicking it opens a small dropdown popover
+ *  (right there at the composer) with the branch list, search, create, and git
+ *  log — NOT the tool panel. Hidden when the project isn't a git repo. */
+function GitHubNotch() {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const boundProjectId = useChatStore((s) =>
+    s.activeChatSessionId ? s.sessionProjects[s.activeChatSessionId] : undefined,
+  );
+  const selectedProjectId = useProjectsStore((s) => s.selectedProjectId);
+  const projectId = boundProjectId ?? selectedProjectId;
+  const gitStatus = useProjectsStore((s) =>
+    projectId ? s.gitStatuses[projectId] : undefined,
+  );
+
+  // Close on outside click.
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  if (!gitStatus?.isRepo || !gitStatus.branch) return null;
+  return (
+    <div className="composer-notch-github-wrap" ref={wrapRef}>
+      <button
+        type="button"
+        className={`composer-notch-github${open ? " open" : ""}`}
+        title={`Branch: ${gitStatus.branch}`}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <svg
+          width={13}
+          height={13}
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={1.5}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="4" cy="3" r="1.5" />
+          <circle cx="4" cy="13" r="1.5" />
+          <circle cx="12" cy="3" r="1.5" />
+          <path d="M4 4.5v7" />
+          <path d="M12 4.5c0 4-4 2-4 4.5" />
+        </svg>
+        <span className="composer-notch-github-name">{gitStatus.branch}</span>
+      </button>
+      {open && (
+        <div className="composer-notch-github-popover">
+          <BranchDropdown onClose={() => setOpen(false)} />
+        </div>
+      )}
     </div>
   );
 }
@@ -839,6 +905,7 @@ export function ChatComposer({
           </div>
         )}
         <FolderNotch />
+        <GitHubNotch />
         <div className="composer-context-meter-spacer" />
         <ContextMeter
           usedTokens={usedTokens ?? null}

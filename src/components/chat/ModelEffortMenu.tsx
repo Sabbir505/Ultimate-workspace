@@ -16,6 +16,14 @@ export const EFFORT_LABELS: Record<string, string> = {
 interface Props {
   model: string;
   models: string[];
+  /** Optional id → display-label overrides (e.g. the per-harness CLI model
+   *  catalog: "claude-sonnet-4-5" → "Sonnet 4.5"). Ids without an entry
+   *  render as-is. */
+  labels?: Record<string, string>;
+  /** Custom endpoint the selected CLI agent is pointed at (from its own
+   *  config) — shown as a footnote in the dropdown so relay/custom setups
+   *  are visible. */
+  endpoint?: string | null;
   /** Scanned local GGUF display names — rendered as a separate "Local models"
    *  section so local models are reachable from any session's selector. */
   localModels?: string[];
@@ -30,6 +38,12 @@ interface Props {
   onModelChange: (model: string) => void;
   onEffortChange: (effort: string) => void;
   onLocalCtxChange?: (ctx: number) => void;
+  /** Stop the active local-model sidecar and free its VRAM. Wired by
+   *  ChatView only when the local_gguf provider has a running model. */
+  onEjectLocalModel?: () => void;
+  /** True when a local-model sidecar is currently running and the eject
+   *  button should be visible on the trigger pill. Defaults to false. */
+  localModelActive?: boolean;
 }
 
 /** Render `text` with the matched indices from `res` wrapped in <mark>. */
@@ -136,6 +150,8 @@ function LocalContextInput({
 export function ModelEffortMenu({
   model,
   models,
+  labels,
+  endpoint,
   localModels,
   effort,
   provider,
@@ -144,6 +160,8 @@ export function ModelEffortMenu({
   onModelChange,
   onEffortChange,
   onLocalCtxChange,
+  onEjectLocalModel,
+  localModelActive,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
@@ -188,13 +206,17 @@ export function ModelEffortMenu({
 
   // Fuzzy-filter each section by the search query (empty query shows all).
   // Keyboard navigation spans the concatenation: cloud items first, local after.
+  // When `labels` is provided (CLI-agent catalog), filter and highlight
+  // against the display label so typing "sonnet" matches "Sonnet 4.5" and the
+  // match indices line up with the rendered text.
+  const labelOf = (id: string) => labels?.[id] ?? id;
   const rankedCloud = useMemo<Ranked[]>(() => {
     if (query.trim().length === 0) {
-      return cloudItems.map((m) => ({ id: m, label: m, matches: [], score: 0 }));
+      return cloudItems.map((m) => ({ id: m, label: labelOf(m), matches: [], score: 0 }));
     }
-    const hits = fuzzyFilter(query, cloudItems, (m) => m);
-    return hits.map((h) => ({ id: h.item, label: h.item, matches: h.matches, score: h.score }));
-  }, [query, models, localModels]);
+    const hits = fuzzyFilter(query, cloudItems, labelOf);
+    return hits.map((h) => ({ id: h.item, label: labelOf(h.item), matches: h.matches, score: h.score }));
+  }, [query, models, localModels, labels]);
 
   const rankedLocal = useMemo<Ranked[]>(() => {
     if (query.trim().length === 0) {
@@ -296,16 +318,26 @@ export function ModelEffortMenu({
 
   return (
     <div className="model-effort-menu" ref={rootRef}>
-      <button
-        type="button"
+      <div
+        role="button"
+        tabIndex={0}
         className="model-effort-trigger"
         onClick={() => {
           if (modelLoading) return;
           setOpen((o) => !o);
           setEffortOpen(false);
         }}
+        onKeyDown={(e) => {
+          if (modelLoading) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpen((o) => !o);
+            setEffortOpen(false);
+          }
+        }}
         title={modelLoading ? "Loading local model…" : "Model & effort"}
-        disabled={modelLoading}
+        aria-haspopup="menu"
+        aria-expanded={open}
       >
         <span className="model-effort-model">
           {modelLoading ? (
@@ -315,15 +347,44 @@ export function ModelEffortMenu({
           ) : (
             // Show the shortened base name for local models (no quant suffix /
             // .gguf) so the pill stays readable; cloud ids are already short.
-            provider === "local_gguf" && model ? shortModelName(model) : model || "Select model"
+            // CLI-agent catalog ids use their display label (e.g. "Sonnet 4.5").
+            provider === "local_gguf" && model ? shortModelName(model) : (labels?.[model] ?? model) || "Select model"
           )}
           {provider === "local_gguf" && !modelLoading && (
             <span className="model-effort-local-badge">Local</span>
           )}
+          {provider === "local_gguf" && localModelActive && onEjectLocalModel && !modelLoading && (
+            <button
+              type="button"
+              className="model-effort-eject"
+              onClick={(e) => {
+                // Don't toggle the dropdown open.
+                e.stopPropagation();
+                onEjectLocalModel();
+              }}
+              title="Eject model and free VRAM"
+              aria-label="Eject model"
+            >
+              <svg
+                width={12}
+                height={12}
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M12 2 L4 14 H20 Z" />
+                <line x1="6" y1="20" x2="18" y2="20" />
+              </svg>
+            </button>
+          )}
         </span>
         <span className="model-effort-effort">{EFFORT_LABELS[effort] ?? effort}</span>
         <span className="model-effort-chevron" aria-hidden="true">▾</span>
-      </button>
+      </div>
 
       {open && (
         <div className="model-effort-popup" role="menu">
@@ -351,6 +412,11 @@ export function ModelEffortMenu({
               <div className="model-effort-empty">No models match “{query}”.</div>
             )}
             {rankedCloud.map((r, i) => renderItem(r, i))}
+            {endpoint && (
+              <div className="model-effort-endpoint" title={endpoint}>
+                ↦ via {endpoint}
+              </div>
+            )}
             {rankedLocal.length > 0 && (
               <>
                 {rankedCloud.length > 0 && <div className="model-effort-divider" />}

@@ -75,15 +75,19 @@ pub struct ProviderCaps {
 }
 
 pub fn provider_capabilities(id: ChatProviderId, model: &str) -> ProviderCaps {
-    let model_class = classify_model(model);
     match id {
+        // A LocalGguf provider is ALWAYS a local model regardless of its name
+        // — the name heuristic (classify_model) misses models like LiquidAI/
+        // LFM that don't appear in the marker list, which would wrongly give
+        // them the full Frontier prompt (bloating context). If it runs through
+        // the bundled llama-server sidecar, it gets the compact local prompt.
         ChatProviderId::LocalGguf => ProviderCaps {
-            model_class,
+            model_class: ModelClass::Local,
             native_web_search: false,
             requires_local_sandbox: true,
         },
         _ => ProviderCaps {
-            model_class,
+            model_class: classify_model(model),
             native_web_search: true,
             requires_local_sandbox: false,
         },
@@ -204,16 +208,65 @@ pub(crate) fn core_prompt_base() -> String {
      `search_files`/`list_directory` from the cwd. Only ask if your search returns \
      nothing and you genuinely cannot locate it.\n\n\
      ## Session isolation\n\
-     No memory of other Conduit sessions unless explicitly pasted or referenced here. \
-     Do not assume continuity you lack context for."
+       No memory of other Conduit sessions unless explicitly pasted or referenced here. \
+       Do not assume continuity you lack context for."
         .to_string()
 }
+
+/// Compact CORE prompt for locally-run / small-context models. Drops the
+/// per-tool description blocks (the `tools` array sent alongside already
+/// carries full name/description/parameter schemas — restating them here is
+/// pure bloat that eats context). Keeps ONLY the behavioral guidance that is
+/// NOT in the tool schemas: when to search vs. answer, the artifact/skill
+/// mechanics, and a pointer to the tool list. This keeps the system overhead
+/// small enough that a 32k context window comfortably fits a real
+/// tool-enabled conversation.
+pub(crate) fn core_prompt_base_local() -> String {
+    "You are in Conduit — a unified workspace (chat + coding + in-app browser). \
+     There is no separation between \"chat\" and \"dev\" modes.\n\n\
+     ## Response style\n\
+     Be concise and direct. Answer the user's question or do the task — do NOT \
+     introduce yourself, list your tools/skills/capabilities, or describe what you \
+     *can* do. Never output your tool inventory or a greeting like \"I have access \
+     to…\". The user already knows your tools. Just respond to what they asked.\n\n\
+     ## Tools\n\
+     Your tool list this turn carries each tool's name, description, and exact \
+     parameters. Call only tools in that list, and match their schemas exactly — \
+     do not invent parameters or tool names. If a tool is unavailable, say so in \
+     one plain sentence; don't continue as if it succeeded.\n\n\
+     ## Search vs. just answer\n\
+     Your training has a cutoff and you can hallucinate specific facts. Apply per-question:\n\
+     - **MUST `web_search` first** for: versions/\"latest\" releases, API signatures that \
+     may have changed, recent events/people, current prices/stats, anything about \
+     \"now\"/\"today\"/\"recently\". Cite the source URL. If search is unavailable, say the \
+     answer is unverified rather than guessing.\n\
+     - **Answer directly** for stable knowledge: math, definitions, established \
+     algorithms, mature syntax, writing/editing. Don't search \"what is 2+2\".\n\
+     - `web_search` = public web. `search_files`/`search_content` = local disk. A bare \
+     topic with no file/path/\"my files\" phrasing is a knowledge question → `web_search`. \
+     Only use filesystem tools when the user means local content. For genuine local file \
+     questions, search from the cwd proactively — never ask for a path.\n\n\
+     ## Artifacts\n\
+     Files produced via `generate_document`/`generate_file` surface in the artifact panel \
+     automatically. Put Markdown/SVG/HTML meant for in-app reading directly in your text. \
+     After producing an artifact, a short one-line acknowledgment is enough.\n\n\
+     ## Skills\n\
+     Skills (`~/.claude/skills/`, `~/.agents/skills/`, plus built-in `docx`/`pptx`/`pdf`/\
+     `diagram`) are in context ONLY when invoked via `/slug` — if no `## Skill:` section \
+     appears below, none was invoked. Call `get_skill(slug)` to pull specialist guidance \
+     on demand."
+        .to_string()
+}
+
 
 /// STRICT addendum — appended only when `ModelClass == Local`. Restates the
 /// highest-risk rules explicitly because smaller/local models follow implied
 /// instructions less reliably and this app cannot afford silent tool-use failures.
 fn core_prompt_strict() -> &'static str {
     "\n\n## STRICT (local model)\n\
+0. Do NOT introduce yourself or list/recap your tools, skills, or capabilities. \
+Never output a greeting like \"I have access to…\" or \"Here are my tools:\". Just \
+answer the user's question or do the task directly.\n\
 1. If the request needs current info, prices, or anything you can't know with \
 certainty, `web_search` first if available — don't answer from memory and imply it's current.\n\
 2. \"search X\"/\"look up X\"/\"find out about X\" = WEB, not filesystem. A bare topic \
@@ -239,12 +292,15 @@ with JSON `{tool, arguments}` — the app parses it."
 pub fn core_prompt_for(provider: ChatProviderId, model: &str) -> String {
     // The model class is derived from the same `provider_capabilities`
     // contract the send path consults — single source of truth for which
-    // models get the STRICT addendum.
+    // models get the STRICT addendum and the compact prompt.
     let caps = provider_capabilities(provider, model);
-    let base = core_prompt_base();
     match caps.model_class {
-        ModelClass::Frontier => base,
-        ModelClass::Local => format!("{}{}", base, core_prompt_strict()),
+        // Frontier hosted models have ample context — keep the full prompt
+        // with inline tool guidance and the browser-workflow recipe.
+        ModelClass::Frontier => core_prompt_base(),
+        // Local / small-context models get the COMPACT prompt (the tool
+        // schemas already describe each tool) + the STRICT addendum.
+        ModelClass::Local => format!("{}{}", core_prompt_base_local(), core_prompt_strict()),
     }
 }
 
@@ -401,9 +457,18 @@ pub fn build_system_prompt(
     research_mode: bool,
 ) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
+    // Compute is_local BEFORE moving `provider` into core_prompt_for. Use
+    // provider_capabilities (not classify_model) so ANY LocalGguf model is
+    // treated as local regardless of its name string.
+    let is_local = provider_capabilities(provider, model).model_class == ModelClass::Local;
     parts.push(core_prompt_for(provider, model));
-    if tools_enabled {
+    // TOOL_GUIDE restates artifact-generation guidance already covered by the
+    // full base prompt + the tools array. Skip it for local models (compact
+    // prompt path) to save context — their tool schemas carry everything.
+    if tools_enabled && !is_local {
         parts.push(TOOL_GUIDE.to_string());
+    }
+    if tools_enabled {
         // One-line catalog of every available skill so the model can decide
         // whether to call `get_skill(slug)` for a given request. Distinct from
         // the invoked-skills block below (which carries full bodies for

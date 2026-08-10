@@ -20,6 +20,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toPng, toSvg } from "html-to-image";
 import { downloadArtifact } from "../../lib/ipc";
+import { sanitizeHtml } from "../../lib/sanitize";
 import type { ArtifactPreview } from "../../lib/ipc";
 
 interface Props {
@@ -152,7 +153,10 @@ async function rasterizeHtml(html: string): Promise<string> {
   // Use the diagram's own page background so the export matches chat.
   holder.style.background = bg;
   holder.style.padding = "24px";
-  holder.innerHTML = html;
+  // SECURITY: `html` is raw model-authored markup and this node is attached
+  // to the MAIN document (not the sandboxed preview iframe) — inline event
+  // handlers would execute with full Tauri IPC access. Sanitize first.
+  holder.innerHTML = sanitizeHtml(html);
   document.body.appendChild(holder);
   try {
     // Give the browser a frame to lay out / paint before capture.
@@ -271,7 +275,9 @@ async function rasterizeToSvg(html: string): Promise<string> {
   holder.style.top = "0";
   holder.style.background = bg;
   holder.style.padding = "24px";
-  holder.innerHTML = html;
+  // SECURITY: same as rasterizeHtml — model-authored markup attached to the
+  // main document must be sanitized before innerHTML assignment.
+  holder.innerHTML = sanitizeHtml(html);
   document.body.appendChild(holder);
   try {
     await new Promise((r) => requestAnimationFrame(() => r(null)));

@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "node scripts/fetch-bundled-python.mjs && node scripts/stage-browser-mcp.mjs && node scripts/stage-llama-server.mjs && npm run build",
+    "beforeBuildCommand": "node scripts/fetch-bundled-python.mjs && node scripts/fetch-bundled-libreoffice.mjs && node scripts/stage-browser-mcp.mjs && node scripts/stage-llama-server.mjs && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -51,7 +51,8 @@
       }
     },
     "resources": [
-      "resources/python/**/*"
+      "resources/python/**/*",
+      "resources/libreoffice/**/*"
     ],
     "externalBin": [
       "binaries/conduit-browser-mcp"

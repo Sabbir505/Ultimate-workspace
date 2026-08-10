@@ -2,10 +2,18 @@
 // Replaces the old top banner with a focused, centered modal that appears on app
 // startup. Displays the new version, release notes (markdown), a download
 // progress bar, and Download & restart / Later actions.
-import { useMemo } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+//
+// BUNDLE: react-markdown + remark-gfm are heavy (~150 KB raw). The update
+// modal is almost never visible (only when an update is available AND the
+// user hasn't dismissed it), so we lazy-load the markdown rendering as a
+// small MarkdownNotes sub-component. The Suspense boundary in the parent
+// shows the raw release notes as a fallback while the chunk downloads.
+import { lazy, Suspense, useMemo, useState } from "react";
 import { useUpdaterStore } from "../../state/updater";
+
+/** Self-contained markdown renderer. Imported lazily; the parent's Suspense
+ *  boundary shows the raw notes for one frame if it's the first render. */
+const MarkdownNotes = lazy(() => import("./UpdateBannerMarkdown").then((m) => ({ default: m.MarkdownNotes })));
 
 /** Human-readable byte count, no trailing decimals unless needed. */
 function formatBytes(n: number): string {
@@ -75,7 +83,9 @@ export function UpdateBanner() {
           <div className="update-modal-notes">
             <div className="update-modal-notes-header">What&apos;s new</div>
             <div className="update-modal-notes-body">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{update.notes}</ReactMarkdown>
+              <Suspense fallback={<pre className="update-modal-notes-raw">{update.notes}</pre>}>
+                <MarkdownNotes notes={update.notes} />
+              </Suspense>
             </div>
           </div>
         )}

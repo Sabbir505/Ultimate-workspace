@@ -220,7 +220,7 @@ pub enum ReadMode {
 #[derive(Debug, Clone)]
 pub struct ReadOpts {
     /// Milliseconds to wait after injection before the first extraction
-    /// (settle for JS-rendered content). Default 1000.
+    /// (settle for JS-rendered content). Default 400.
     pub settle_ms: u32,
     /// Max number of scroll-down steps for lazy-load handling. Default 4.
     pub max_scroll_steps: u32,
@@ -229,7 +229,7 @@ pub struct ReadOpts {
 impl Default for ReadOpts {
     fn default() -> Self {
         Self {
-            settle_ms: 1000,
+            settle_ms: 400,
             max_scroll_steps: 4,
         }
     }
@@ -249,7 +249,7 @@ impl Default for ActionOpts {
     fn default() -> Self {
         Self {
             watch_mode: false,
-            pane_delay_ms: 600,
+            pane_delay_ms: 250,
         }
     }
 }
@@ -989,32 +989,6 @@ impl BrowserManager {
         }
     }
 
-    /// Capture a PNG screenshot of the active browser pane's webview.
-    ///
-    /// Returns `Ok(None)` when the platform doesn't expose a capture path
-    /// (the WebView2 ICoreWebView2_15 CapturePreview API is only on Win10+
-    /// and a fresh install without the right edge runtime skips it) or when
-    /// no page is active. The chat tool's `browser_screenshot` falls back
-    /// to a descriptive error string in that case.
-    ///
-    /// Implementation note: the live capture path lives behind a Windows
-    /// `#[cfg(windows)]` block. On macOS/Linux this is a stub that returns
-    /// `Ok(None)` so the chat tool can still be invoked — it just won't
-    /// produce a file. That's intentional: the cross-platform follow-up
-    /// (a `tauri-plugin-screenshot` integration or a per-platform
-    /// `xcap` / `screencapturekit` shim) is a separate task.
-    pub fn capture_active_png(&self) -> Result<Option<Vec<u8>>, String> {
-        #[cfg(windows)]
-        {
-            return crate::browser_capture::capture_active_png(self);
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = self;
-            Ok(None)
-        }
-    }
-
     /// Eval a JS action body (an IIFE-able block that `return`s a string) in the
     /// active page and await the string it reports back. Times out so a stuck
     /// or navigating page can't wedge the chat turn.
@@ -1050,7 +1024,7 @@ impl BrowserManager {
             self.pending.lock().remove(&req_id);
             return Err(e.to_string());
         }
-        match tokio::time::timeout(Duration::from_secs(15), rx).await {
+        match tokio::time::timeout(Duration::from_secs(45), rx).await {
             Ok(Ok(s)) => Ok(s),
             Ok(Err(_)) => Err("browser action channel closed".to_string()),
             Err(_) => {
@@ -1058,6 +1032,43 @@ impl BrowserManager {
                 Err("browser action timed out — the page may still be loading.".to_string())
             }
         }
+    }
+
+    /// Capture the page currently shown in a pane's webview as PNG bytes.
+    /// Backs the `browser_screenshot` tool so the agent can show the user
+    /// exactly what the page looks like. Blocking (up to a 15 s roundtrip) —
+    /// call inside `tokio::task::spawn_blocking` from async contexts.
+    ///
+    /// Windows: WebView2 `CapturePreview` on the pane's child webview. The
+    /// WebView2 API is UI-thread-affine, so the call is marshalled onto the
+    /// main thread; `wait_for_async_operation` pumps the message loop while
+    /// it waits, so the UI stays alive during the capture. Returns `None` on
+    /// failure and on platforms without a capture path (Linux/macOS today).
+    pub fn capture_pane_png(&self, label: &str) -> Option<Vec<u8>> {
+        #[cfg(windows)]
+        {
+            let pane = self.get(label).ok()?;
+            let (tx, rx) = std::sync::mpsc::channel();
+            // with_webview runs the closure on the UI thread (the WebView2 API
+            // is thread-affine); the completed-handler's wait pumps the
+            // message loop, so the UI stays alive during the capture.
+            let _ = pane.webview.with_webview(move |platform_webview| {
+                let _ = tx.send(capture_webview_png(&platform_webview));
+            });
+            rx.recv_timeout(Duration::from_secs(15)).ok().flatten()
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = label;
+            None
+        }
+    }
+
+    /// Capture the active chat-mode page (same as `capture_pane_png` but
+    /// resolves the global active pane first, like `run_action`).
+    pub fn capture_active_png(&self) -> Option<Vec<u8>> {
+        let label = self.active_label().ok()?;
+        self.capture_pane_png(&label)
     }
 
     /// Read the active page with structured readability-style extraction.
@@ -1068,7 +1079,7 @@ impl BrowserManager {
     ///    single eval and await the structured JSON result.
     /// 2. If the extracted markdown is suspiciously short relative to the page's
     ///    scrollHeight, run a bounded scroll-down loop (up to `opts.max_scroll_steps`
-    ///    steps, 600-900ms between each) to surface lazy-loaded content, then
+    ///    steps, ~350ms between each) to surface lazy-loaded content, then
     ///    re-extract.
     /// 3. Serialize the `ExtractedContent` as pretty-printed JSON, capped at 50k
     ///    chars of markdown, and return it as the tool result string.
@@ -1146,7 +1157,7 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
                                 scroll_step
                             );
                             let _ = self.run_action_for_pane(label, &scroll_js_body).await;
-                            tokio::time::sleep(Duration::from_millis(700)).await;
+                            tokio::time::sleep(Duration::from_millis(350)).await;
 
                             // Re-extract
                             if let Ok(re_json) = self.run_action_for_pane(label, &body).await {
@@ -1588,7 +1599,7 @@ var rect = el.getBoundingClientRect();
 var cx = rect.left + rect.width / 2;
 var cy = rect.top + rect.height / 2;
 __conduit_highlight(rect);
-return __conduit_tweenCursor(cx, cy, 400).then(function() {{
+return __conduit_tweenCursor(cx, cy, 150).then(function() {{
     __conduit_showRipple(cx, cy);
     return doClick();
 }}).then(function(msg) {{
@@ -1601,7 +1612,7 @@ return __conduit_tweenCursor(cx, cy, 400).then(function() {{
 
 /// Type `text` into the element tagged with `data-conduit-ref="{r}"`. Returns a
 /// JS body that returns a PROMISE: it tweens the cursor to the field, shows a
-/// caret, then inserts the text CHARACTER BY CHARACTER (~45ms±15ms per char,
+/// caret, then inserts the text CHARACTER BY CHARACTER (~14ms±6ms per char,
 /// randomized) dispatching real keydown/keyup/input events per keystroke —
 /// this is functionally required (not just visual) so React/Vue controlled
 /// inputs register the change the same way a real user typing does. The tool
@@ -1626,7 +1637,7 @@ var rect = el.getBoundingClientRect();
 var cx = rect.left + rect.width / 2;
 var cy = rect.top + rect.height / 2;
 __conduit_highlight(rect);
-return __conduit_tweenCursor(cx, cy, 400).then(function() {{
+return __conduit_tweenCursor(cx, cy, 150).then(function() {{
     el.focus();
     __conduit_showCaret(cx + rect.width / 2 - 2, cy);
     var existing = ('value' in el && typeof el.value === 'string') ? el.value : '';
@@ -1651,7 +1662,7 @@ return __conduit_tweenCursor(cx, cy, 400).then(function() {{
         var r2 = el.getBoundingClientRect();
         __conduit_showCaret(r2.left + Math.min(r2.width, 8), r2.top + r2.height / 2 - 9);
         i++;
-        var delay = 30 + Math.random() * 30;
+        var delay = 8 + Math.random() * 12;
         return new Promise(function(resolve) {{ setTimeout(function() {{ resolve(next()); }}, delay); }});
     }}
     return next();
@@ -1668,6 +1679,72 @@ return 'Scrolled by {dy}px. scrollY=' + Math.round(window.scrollY) +
     ' of ' + Math.round(document.body ? document.body.scrollHeight : 0) + '.';
 "#
     )
+}
+
+// ---- Page capture (browser_screenshot) ------------------------------------
+
+/// WebView2 `CapturePreview` → PNG bytes. MUST run on the UI thread (the
+/// WebView2 API is thread-affine; `BrowserManager::capture_pane_png` does the
+/// marshalling via `with_webview`). `wait_for_async_operation` pumps this
+/// thread's message loop while the capture completes, which is what lets the
+/// completed-handler fire on the same thread without deadlocking the UI.
+#[cfg(windows)]
+fn capture_webview_png(webview: &tauri::webview::PlatformWebview) -> Option<Vec<u8>> {
+    use webview2_com::CapturePreviewCompletedHandler;
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG;
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
+    use windows::Win32::System::Com::IStream;
+
+    let core = unsafe { webview.controller().CoreWebView2() }.ok()?;
+    let stream: IStream = unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) }.ok()?;
+    let stream_for_call = stream.clone();
+    CapturePreviewCompletedHandler::wait_for_async_operation(
+        Box::new(move |handler| {
+            unsafe {
+                core.CapturePreview(
+                    COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+                    &stream_for_call,
+                    &handler,
+                )
+            }
+            .map_err(webview2_com::Error::WindowsError)
+        }),
+        Box::new(|result| result),
+    )
+    .ok()?;
+    read_stream_to_end(&stream)
+}
+
+/// Drain a COM memory stream into a Vec. The stream's position is past the
+/// PNG after CapturePreview writes it, so seek back to the start first.
+#[cfg(windows)]
+fn read_stream_to_end(stream: &windows::Win32::System::Com::IStream) -> Option<Vec<u8>> {
+    use windows::Win32::System::Com::STREAM_SEEK_SET;
+    unsafe {
+        stream.Seek(0, STREAM_SEEK_SET, None).ok()?;
+        let mut out = Vec::new();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let mut got: u32 = 0;
+            let hr = stream.Read(
+                buf.as_mut_ptr() as *mut core::ffi::c_void,
+                buf.len() as u32,
+                Some(&mut got),
+            );
+            if hr.is_err() {
+                return None;
+            }
+            if got == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..got as usize]);
+            if (got as usize) < buf.len() {
+                break;
+            }
+        }
+        (!out.is_empty()).then_some(out)
+    }
 }
 
 #[cfg(test)]
@@ -1714,7 +1791,7 @@ mod tests {
         let opts = ActionOpts::default();
         let js = action_wrapper_js(1, "return 'ok';", &opts);
         assert!(js.contains("var WATCH_MODE = false;"));
-        assert!(js.contains("var PANE_DELAY_MS = 600;"));
+        assert!(js.contains("var PANE_DELAY_MS = 250;"));
         assert!(js.contains("if (WATCH_MODE)"));
         // __finish still wraps the report (unified path), but the setTimeout
         // branch won't fire.
@@ -1986,7 +2063,7 @@ mod tests {
     #[test]
     fn read_opts_default_values() {
         let opts = ReadOpts::default();
-        assert_eq!(opts.settle_ms, 1000);
+        assert_eq!(opts.settle_ms, 400);
         assert_eq!(opts.max_scroll_steps, 4);
     }
 }

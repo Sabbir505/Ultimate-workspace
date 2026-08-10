@@ -14,6 +14,7 @@
 import { create } from "zustand";
 import { uuid } from "../lib/id";
 import { browserClosePane, browserCloseTab, killPty, registerBrowserPaneProject, unregisterBrowserPaneProject } from "../lib/ipc";
+import { DEFAULT_BROWSER_URL } from "../lib/browserHistory";
 import type { HarnessId, PaneState } from "../types";
 
 export const MAX_PANES = 6;
@@ -225,7 +226,7 @@ function disposePaneResources(pane: Pane): void {
 
 /** Get the active tab's url from a browser pane. */
 export function activeTabUrl(pane: Pane): string {
-  if (pane.data.kind !== "browser") return "http://localhost:3000";
+  if (pane.data.kind !== "browser") return DEFAULT_BROWSER_URL;
   const tabs = pane.data.tabs;
   return tabs[pane.data.activeTabIndex]?.url ?? pane.data.url;
 }
@@ -239,7 +240,7 @@ export function ensureBrowserTabs(panes: Pane[]): Pane[] {
     if (p.data.tabs && p.data.tabs.length > 0 && p.data.activeTabIndex !== undefined) return p;
     const defaultTab: BrowserTabData = {
       tabId: "default",
-      url: p.data.url || "http://localhost:3000",
+      url: p.data.url || DEFAULT_BROWSER_URL,
       title: "",
     };
     return {
@@ -382,15 +383,20 @@ export const usePanesStore = create<PanesState>((set, get) => ({
   },
 
   focusPaneByIndex: (index) => {
-    const pane = get().panes[index];
+    // Index into VISIBLE panes only (M21): minimized browser panes are
+    // parked out of the layout — counting them would focus an invisible
+    // pane and let Mod+W kill a live webview the user can't see.
+    const pane = visiblePanes(get().panes)[index];
     if (pane) get().focusPane(pane.paneId);
   },
 
   cycleFocus: () => {
-    const { panes, focusedPaneId } = get();
-    if (panes.length === 0) return;
-    const idx = panes.findIndex((p) => p.paneId === focusedPaneId);
-    const next = panes[(idx + 1) % panes.length];
+    const { focusedPaneId } = get();
+    const visible = visiblePanes(get().panes);
+    if (visible.length === 0) return;
+    const idx = visible.findIndex((p) => p.paneId === focusedPaneId);
+    // idx == -1 when the focused pane was just minimized — start at the top.
+    const next = visible[(idx + 1) % visible.length];
     get().focusPane(next.paneId);
   },
 

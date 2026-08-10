@@ -9,11 +9,28 @@ import {
   browserNavigateTab,
   browserOpenPaneResult,
   browserResolvePaneResult,
+  listenBrowserActivity,
   listenBrowserOpenBrowserRequest,
   listenBrowserResolvePaneRequest,
 } from "../lib/ipc";
 import { usePanesStore } from "../state/panes";
 import { useProjectsStore } from "../state/projects";
+import { useUiStore } from "../state/ui";
+
+/** Bring the Browser tab of the right tool panel into view — mirrors the
+ *  canvas auto-open for generated artifacts. `paneId`, when known, is also
+ *  focused so its webview gets the visible slot. */
+function surfaceBrowserPanel(paneId?: string | null): void {
+  const ui = useUiStore.getState();
+  ui.setToolPanelTab("browser");
+  ui.setToolPanelCollapsed(false);
+  if (paneId) {
+    const panes = usePanesStore.getState();
+    if (panes.panes.some((p) => p.paneId === paneId)) {
+      panes.focusPane(paneId);
+    }
+  }
+}
 
 /**
  * Open (or reuse) a built-in browser pane for a specific project pointed at
@@ -31,14 +48,16 @@ export function openBrowserPaneForProject(url: string, projectId: string | null)
       panes.setBrowserUrl(existing.paneId, url, tab.tabId);
       void browserNavigateTab(existing.paneId, tab.tabId, url).catch(() => {});
     }
-    panes.focusPane(existing.paneId);
+    surfaceBrowserPanel(existing.paneId);
     return existing.paneId;
   }
-  return panes.addPane({
+  const paneId = panes.addPane({
     kind: "browser",
     url,
     projectId,
   });
+  surfaceBrowserPanel(paneId);
+  return paneId;
 }
 
 export function useBrowserMcpEvents(): void {
@@ -71,6 +90,14 @@ export function useBrowserMcpEvents(): void {
         } catch {
           void browserOpenPaneResult(reqId, null).catch(() => {});
         }
+      }),
+    );
+
+    // Browser-activity: the agent performed a browser action (harness MCP op
+    // or chat browser_* tool) — surface the Browser tab so it's visible.
+    unlistens.push(
+      listenBrowserActivity(({ paneId }) => {
+        surfaceBrowserPanel(paneId);
       }),
     );
 

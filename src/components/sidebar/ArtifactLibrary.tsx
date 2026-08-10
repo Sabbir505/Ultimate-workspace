@@ -6,7 +6,7 @@
 // a minimalist outline icon (for everything else), a bold title, and a muted
 // "Edited … ago" footer. Selecting a card jumps to the chat that produced it
 // and opens it in that chat's preview pane; the trash button deletes it.
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { useArtifactsStore } from "../../state/artifacts";
 import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
@@ -190,9 +190,11 @@ export function ArtifactLibrary({
   }, [loaded, load]);
 
   // Sync modal-open state into the UI store so native webviews know to hide.
+  // Registered under OUR id (M22) — another modal closing must not flip the
+  // shared flag while this one is still open.
   useEffect(() => {
-    setModalOpen(open);
-    return () => { setModalOpen(false); };
+    setModalOpen("artifact-library", open);
+    return () => { setModalOpen("artifact-library", false); };
   }, [open, setModalOpen]);
 
   // Open the artifact in the preview pane of the chat that produced it: switch
@@ -290,7 +292,7 @@ export function ArtifactLibrary({
                       ×
                     </button>
                     <div className="doc-card-thumb">
-                      <ArtifactCardThumb artifact={a} />
+                      <ArtifactCardThumbMemo artifact={a} />
                     </div>
                     <div className="doc-card-body">
                       <div className="doc-card-title">{displayTitle(a.filename)}</div>
@@ -310,3 +312,11 @@ export function ArtifactLibrary({
     </>
   );
 }
+
+// PERF (PERFORMANCE_AUDIT.md F5): wrap the card thumbnail in React.memo so
+// scrolling or filtering the grid doesn't re-fetch the artifact preview for
+// every card on every render. The component is the most repeated node in
+// the artifact library and was previously re-rendering the full grid on
+// every store change.
+const ArtifactCardThumbMemo = memo(ArtifactCardThumb);
+ArtifactCardThumbMemo.displayName = "ArtifactCardThumb";

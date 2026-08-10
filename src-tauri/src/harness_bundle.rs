@@ -9,15 +9,65 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+
+use crate::connectors::HarnessMcpServer;
+
+/// Which CLI a generated `mcp.json` is for. Claude Code and Kimi share the
+/// top-level `mcpServers` shape but describe REMOTE servers differently:
+/// Claude wants `"type": "http"`, Kimi infers HTTP from the presence of
+/// `url` and documents no `type` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpFlavor {
+    Claude,
+    Kimi,
+}
+
+/// A connected connector as a remote-server entry in a claude/kimi
+/// `mcp.json`. Auth rides a static `Authorization: Bearer` header (token
+/// refreshed at bundle-write time); public connectors (Kiwi) send none.
+fn connector_mcp_json_entry(s: &HarnessMcpServer, flavor: McpFlavor) -> Value {
+    let mut v = match flavor {
+        McpFlavor::Claude => json!({ "type": "http", "url": s.url }),
+        McpFlavor::Kimi => json!({ "url": s.url }),
+    };
+    if let Some(tok) = &s.bearer_token {
+        v["headers"] = json!({ "Authorization": format!("Bearer {tok}") });
+    }
+    v
+}
+
+/// Same, for OpenCode's config: remote servers are `"type": "remote"` under
+/// the top-level `mcp` object. `oauth: false` stops OpenCode from starting
+/// its own OAuth dance if the baked-in token expires mid-session — token
+/// refresh is Conduit's job (done per spawn).
+fn connector_opencode_entry(s: &HarnessMcpServer) -> Value {
+    let mut v = json!({
+        "type": "remote",
+        "url": s.url,
+        "enabled": true,
+        "oauth": false
+    });
+    if let Some(tok) = &s.bearer_token {
+        v["headers"] = json!({ "Authorization": format!("Bearer {tok}") });
+    }
+    v
+}
 
 /// Environment preamble + Conduit core system prompt + skill catalog.
 /// Provider-specific parts of the built-in chat prompt are excluded — the
 /// CLI has its own provider personality.
 pub fn build_instructions_md(project_path: &str, artifacts_dir: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
+    // Project-less sessions get a bundle too (connectors + conduit-tools) —
+    // the preamble just has no project path to point at.
+    let location = if project_path.is_empty() {
+        "No project folder is selected for this session.".to_string()
+    } else {
+        format!("The project is at `{project_path}`.")
+    };
     parts.push(format!(
-        "You are running inside Conduit. The project is at `{project_path}`. \
+        "You are running inside Conduit. {location} \
          Generated documents and diagrams must go to `{artifacts_dir}` via the \
          `conduit-tools` MCP tools (`generate_document`, `generate_diagram`, \
          `generate_file`) — do not hand-build docx/pptx/pdf yourself. Use \
@@ -76,6 +126,12 @@ pub fn build_instructions_md(project_path: &str, artifacts_dir: &str) -> String 
 /// spawned with `--dangerously-skip-permissions`, the settings file must
 /// agree or one silently overrides the other).
 pub fn build_claude_settings_json(project_path: &str, artifacts_dir: &str) -> Value {
+    // Empty entries (project-less sessions have no project path) must not
+    // reach the CLI — an empty additionalDirectory is meaningless.
+    let dirs: Vec<&str> = [project_path, artifacts_dir]
+        .into_iter()
+        .filter(|d| !d.is_empty())
+        .collect();
     json!({
         "permissions": {
             "defaultMode": "bypassPermissions",
@@ -83,7 +139,7 @@ pub fn build_claude_settings_json(project_path: &str, artifacts_dir: &str) -> Va
                 "mcp__conduit-tools__*",
                 "Bash(git:*)"
             ],
-            "additionalDirectories": [project_path, artifacts_dir]
+            "additionalDirectories": dirs
         }
     })
 }
@@ -98,21 +154,19 @@ pub fn build_kimi_agent_md(project_path: &str, artifacts_dir: &str) -> String {
 }
 
 /// `.mcp.json` registering BOTH conduit-browser and conduit-tools (same
-/// binary, same env — the binary routes by tool name). `auth_token` is the
-/// WS auth token (`browser_mcp::mcp_auth_token()`); it travels in the
-/// per-server env block so only the MCP child process sees it.
-/// `connectors` are merged as additional HTTP-style remote servers (one entry
-/// per connected connector) so the harness CLI can call vendor tools
-/// (Notion/Gmail/Drive/etc.) via the same `tools/call` path the built-in chat
-/// uses.
+/// binary, same env — the binary routes by tool name) PLUS one remote server
+/// per connected connector. `auth_token` is the WS auth token
+/// (`browser_mcp::mcp_auth_token()`); it travels in the per-server env block
+/// so only the MCP child process sees it.
 pub fn build_tools_mcp_json(
     mcp_binary_path: &str,
     project_id: &str,
     ws_port: u16,
     auth_token: &str,
-    connectors: &[crate::connectors::HarnessMcpServer],
+    connectors: &[HarnessMcpServer],
+    flavor: McpFlavor,
 ) -> Value {
-    let local_server = || {
+    let server = || {
         json!({
             "command": mcp_binary_path,
             "env": {
@@ -122,24 +176,14 @@ pub fn build_tools_mcp_json(
             }
         })
     };
-    let mut servers = serde_json::Map::new();
-    servers.insert("conduit-browser".into(), local_server());
-    servers.insert("conduit-tools".into(), local_server());
+    let mut servers = json!({
+        "conduit-browser": server(),
+        "conduit-tools": server()
+    });
     for c in connectors {
-        if let crate::connectors::HarnessMcpServer::Http { id, url, token, .. } = c {
-            let entry = if token.is_empty() {
-                json!({ "type": "http", "url": url })
-            } else {
-                json!({
-                    "type": "http",
-                    "url": url,
-                    "headers": { "Authorization": format!("Bearer {token}") }
-                })
-            };
-            servers.insert((*id).to_string(), entry);
-        }
+        servers[c.name.clone()] = connector_mcp_json_entry(c, flavor);
     }
-    json!({ "mcpServers": serde_json::Value::Object(servers) })
+    json!({ "mcpServers": servers })
 }
 
 /// OpenCode config: mcp (both servers) + permission section.
@@ -156,9 +200,9 @@ pub fn build_opencode_tools_config(
     project_id: &str,
     ws_port: u16,
     auth_token: &str,
-    connectors: &[crate::connectors::HarnessMcpServer],
+    connectors: &[HarnessMcpServer],
 ) -> Value {
-    let local = |name: &str| {
+    let server = |name: &str| {
         json!({
             "type": "local",
             "command": [mcp_binary_path],
@@ -166,29 +210,18 @@ pub fn build_opencode_tools_config(
                 "CONDUIT_PROJECT_ID": project_id,
                 "CONDUIT_WS_PORT": ws_port.to_string(),
                 "CONDUIT_MCP_AUTH_TOKEN": auth_token
-            },
-            "__conduit_name": name
+            }
         })
     };
-    let mut servers = serde_json::Map::new();
-    servers.insert("conduit-browser".into(), local("conduit-browser"));
-    servers.insert("conduit-tools".into(), local("conduit-tools"));
+    let mut mcp = json!({
+        "conduit-browser": server("conduit-browser"),
+        "conduit-tools": server("conduit-tools")
+    });
     for c in connectors {
-        if let crate::connectors::HarnessMcpServer::Http { id, url, token, .. } = c {
-            let entry = if token.is_empty() {
-                json!({ "type": "remote", "url": url })
-            } else {
-                json!({
-                    "type": "remote",
-                    "url": url,
-                    "headers": { "Authorization": format!("Bearer {token}") }
-                })
-            };
-            servers.insert((*id).to_string(), entry);
-        }
+        mcp[c.name.clone()] = connector_opencode_entry(c);
     }
     json!({
-        "mcp": serde_json::Value::Object(servers),
+        "mcp": mcp,
         "permission": {
             "allow": ["mcp__conduit-tools"],
             "edit": ["*"]
@@ -216,9 +249,9 @@ fn safe_id(project_id: &str) -> String {
 /// Write the full per-project harness bundle. The mcp.json / opencode.json
 /// parts require the sidecar binary (mcp_binary_path()); when it's absent
 /// those two files are skipped but instructions/settings/agent still write.
-/// `connectors` (already refreshed OAuth tokens) are merged into the
-/// `.mcp.json` / `opencode.json` MCP blocks as HTTP-style remote servers.
-/// Returns None only when the base dir cannot be created.
+/// `connectors` are merged into the MCP configs as remote servers (tokens
+/// already refreshed by the caller). Returns None only when the base dir
+/// cannot be created.
 pub fn write_bundle(
     data_dir: &Path,
     project_id: &str,
@@ -226,7 +259,7 @@ pub fn write_bundle(
     artifacts_dir: Option<&str>,
     _permission: Option<&str>,
     ws_port: u16,
-    connectors: &[crate::connectors::HarnessMcpServer],
+    connectors: &[HarnessMcpServer],
 ) -> Option<HarnessBundlePaths> {
     let base = data_dir.join("harness").join(safe_id(project_id));
     if std::fs::create_dir_all(&base).is_err() {
@@ -261,11 +294,12 @@ pub fn write_bundle(
     if let Some(bin) = crate::browser_mcp_register::mcp_binary_path() {
         let bin_str = bin.to_string_lossy().replace('\\', "/");
         let token = crate::browser_mcp::mcp_auth_token();
-        let mcp = build_tools_mcp_json(&bin_str, project_id, ws_port, token, connectors);
+        let claude_mcp = build_tools_mcp_json(&bin_str, project_id, ws_port, token, connectors, McpFlavor::Claude);
         let _ = std::fs::write(&paths.claude_mcp,
-            serde_json::to_string_pretty(&mcp).unwrap_or_default());
+            serde_json::to_string_pretty(&claude_mcp).unwrap_or_default());
+        let kimi_mcp = build_tools_mcp_json(&bin_str, project_id, ws_port, token, connectors, McpFlavor::Kimi);
         let _ = std::fs::write(&paths.kimi_mcp,
-            serde_json::to_string_pretty(&mcp).unwrap_or_default());
+            serde_json::to_string_pretty(&kimi_mcp).unwrap_or_default());
         let oc = build_opencode_tools_config(&bin_str, project_id, ws_port, token, connectors);
         let _ = std::fs::write(&paths.opencode_config,
             serde_json::to_string_pretty(&oc).unwrap_or_default());
@@ -359,8 +393,21 @@ mod tests {
     }
 
     #[test]
+    fn project_less_bundle_tolerates_empty_project_path() {
+        // Sessions with no selected project still get a bundle (connectors +
+        // conduit-tools); instructions and settings must not emit empty paths.
+        let md = build_instructions_md("", "C:/work/out");
+        assert!(md.contains("No project folder is selected"));
+        assert!(!md.contains("The project is at ``"));
+        let v = build_claude_settings_json("", "C:/work/out");
+        let dirs = v["permissions"]["additionalDirectories"].as_array().unwrap();
+        assert_eq!(dirs.len(), 1, "empty project path must be filtered out");
+        assert_eq!(dirs[0], "C:/work/out");
+    }
+
+    #[test]
     fn tools_mcp_json_registers_both_servers() {
-        let v = build_tools_mcp_json("C:/app/conduit-browser-mcp.exe", "p1", 7681, "tok-abc", &[]);
+        let v = build_tools_mcp_json("C:/app/conduit-browser-mcp.exe", "p1", 7681, "tok-abc", &[], McpFlavor::Claude);
         assert!(v["mcpServers"]["conduit-browser"]["command"].is_string());
         assert!(v["mcpServers"]["conduit-tools"]["command"].is_string());
         assert_eq!(v["mcpServers"]["conduit-tools"]["env"]["CONDUIT_WS_PORT"], "7681");
@@ -371,6 +418,38 @@ mod tests {
     }
 
     #[test]
+    fn tools_mcp_json_merges_connectors_per_flavor() {
+        let connectors = vec![
+            HarnessMcpServer {
+                name: "notion".into(),
+                url: "https://mcp.notion.com/mcp".into(),
+                bearer_token: Some("tok-notion".into()),
+            },
+            // Public connector (Kiwi): no auth header at all.
+            HarnessMcpServer {
+                name: "kiwi".into(),
+                url: "https://mcp.kiwi.com".into(),
+                bearer_token: None,
+            },
+        ];
+        // Claude flavor: remote servers carry "type": "http".
+        let v = build_tools_mcp_json("C:/app/exe", "p1", 7681, "tok", &connectors, McpFlavor::Claude);
+        assert_eq!(v["mcpServers"]["notion"]["type"], "http");
+        assert_eq!(v["mcpServers"]["notion"]["url"], "https://mcp.notion.com/mcp");
+        assert_eq!(v["mcpServers"]["notion"]["headers"]["Authorization"], "Bearer tok-notion");
+        assert_eq!(v["mcpServers"]["kiwi"]["type"], "http");
+        assert!(v["mcpServers"]["kiwi"]["headers"].is_null());
+        // Built-in servers still present alongside connectors.
+        assert!(v["mcpServers"]["conduit-tools"]["command"].is_string());
+        // Kimi flavor: HTTP inferred from `url`, no "type" field.
+        let v = build_tools_mcp_json("C:/app/exe", "p1", 7681, "tok", &connectors, McpFlavor::Kimi);
+        assert!(v["mcpServers"]["notion"]["type"].is_null());
+        assert_eq!(v["mcpServers"]["notion"]["url"], "https://mcp.notion.com/mcp");
+        assert_eq!(v["mcpServers"]["notion"]["headers"]["Authorization"], "Bearer tok-notion");
+        assert!(v["mcpServers"]["kiwi"]["headers"].is_null());
+    }
+
+    #[test]
     fn opencode_config_has_mcp_permission() {
         let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok-abc", &[]);
         assert!(v["mcp"]["conduit-browser"]["type"] == "local");
@@ -378,6 +457,23 @@ mod tests {
         assert_eq!(v["mcp"]["conduit-browser"]["environment"]["CONDUIT_MCP_AUTH_TOKEN"], "tok-abc");
         assert!(v["permission"]["allow"].as_array().unwrap().iter().any(|x| x == "mcp__conduit-tools"));
         assert!(v["permission"]["edit"].as_array().unwrap().iter().any(|x| x == "*"));
+    }
+
+    #[test]
+    fn opencode_config_merges_connectors_as_remote() {
+        let connectors = vec![HarnessMcpServer {
+            name: "github".into(),
+            url: "https://api.githubcopilot.com/mcp/".into(),
+            bearer_token: Some("gho_x".into()),
+        }];
+        let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok", &connectors);
+        assert_eq!(v["mcp"]["github"]["type"], "remote");
+        assert_eq!(v["mcp"]["github"]["url"], "https://api.githubcopilot.com/mcp/");
+        assert_eq!(v["mcp"]["github"]["headers"]["Authorization"], "Bearer gho_x");
+        // Conduit owns token refresh — OpenCode must not start its own OAuth
+        // flow when the baked-in token expires.
+        assert_eq!(v["mcp"]["github"]["oauth"], false);
+        assert!(v["mcp"]["conduit-tools"]["type"] == "local");
     }
 
     #[test]

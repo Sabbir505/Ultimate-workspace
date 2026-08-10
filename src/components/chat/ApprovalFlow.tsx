@@ -76,8 +76,8 @@ export function FullAutoConfirmModal({
   const setModalOpen = useUiStore((s) => s.setModalOpen);
 
   useEffect(() => {
-    setModalOpen(true);
-    return () => setModalOpen(false);
+    setModalOpen("approval:full-auto", true);
+    return () => setModalOpen("approval:full-auto", false);
   }, [setModalOpen]);
 
   return (

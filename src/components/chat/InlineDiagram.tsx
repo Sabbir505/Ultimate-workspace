@@ -10,6 +10,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { readArtifactPreview, type ArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { ArtifactExportMenu } from "./ArtifactExportMenu";
+import { sanitizeHtml } from "../../lib/sanitize";
 
 /** Injected into the iframe document (display only) so the diagram scales down
  *  to the chat width instead of overflowing with a scrollbar. Export still uses
@@ -91,7 +92,7 @@ export function InlineDiagram({
   }, [preview]);
 
   const srcDoc = useMemo(
-    () => (preview?.text != null ? withFitStyle(preview.text) : ""),
+    () => (preview?.text != null ? sanitizeHtml(withFitStyle(preview.text)) : ""),
     [preview],
   );
 

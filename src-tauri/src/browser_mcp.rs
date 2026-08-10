@@ -21,6 +21,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::AppHandle;
+use tauri::Emitter;
 use tauri::Manager;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -229,32 +230,43 @@ struct Request {
 
 /// Resolve the target pane label for a request, auto-opening one on `navigate`
 /// when none exists for the project. Returns the label or a structured error.
+/// Every successfully-resolved op also emits `browser:activity` so the
+/// frontend surfaces the Browser tab — agent browser work should be visible
+/// the moment it happens (same auto-open contract as generated artifacts).
 async fn resolve_or_open(
     req: &Request,
     browser: &BrowserManager,
-    _app: &AppHandle,
+    app: &AppHandle,
 ) -> Result<String, McpError> {
-    // Explicit pane_id always wins. A genuine resolution failure (stale
-    // pane_id, missing active tab) propagates — it must NOT be mistaken for
-    // "no pane yet", or navigate would silently auto-open a duplicate pane.
-    if let Some(label) = resolve_label(browser, req.project_id.as_deref(), req.pane_id.as_deref()).await? {
-        return Ok(label);
+    let label = if let Some(label) =
+        resolve_label(browser, req.project_id.as_deref(), req.pane_id.as_deref()).await?
+    {
+        // Explicit pane_id always wins. A genuine resolution failure (stale
+        // pane_id, missing active tab) propagates — it must NOT be mistaken for
+        // "no pane yet", or navigate would silently auto-open a duplicate pane.
+        label
+    } else if req.op == "navigate" {
+        // No resolvable pane. For navigate we auto-open; for everything else the
+        // caller must read_page first (or the agent should navigate).
+        let project_id = req.project_id.as_deref().ok_or_else(|| McpError {
+            code: "pane_not_found",
+            message: "no browser pane is open for this project — call navigate first".to_string(),
+        })?;
+        let url = req.args.get("url").and_then(|v| v.as_str()).unwrap_or("about:blank");
+        browser
+            .open_pane_for_project(project_id, url)
+            .await
+            .map_err(|e| McpError { code: "pane_not_found", message: e })?
+    } else {
+        return Err(McpError {
+            code: "pane_not_found",
+            message: "no browser pane is open for this project — call navigate first".to_string(),
+        });
+    };
+    if let Some((pane_id, _tab_id)) = parse_label(&label) {
+        let _ = app.emit("browser:activity", serde_json::json!({ "pane_id": pane_id }));
     }
-    // No resolvable pane. For navigate we auto-open; for everything else the
-    // caller must read_page first (or the agent should navigate).
-    if req.op == "navigate" {
-        if let Some(project_id) = &req.project_id {
-            let url = req.args.get("url").and_then(|v| v.as_str()).unwrap_or("about:blank");
-            return browser
-                .open_pane_for_project(project_id, url)
-                .await
-                .map_err(|e| McpError { code: "pane_not_found", message: e });
-        }
-    }
-    Err(McpError {
-        code: "pane_not_found",
-        message: "no browser pane is open for this project — call navigate first".to_string(),
-    })
+    Ok(label)
 }
 
 /// Thin wrapper around BrowserManager::resolve_pane_label: Ok(Some) resolved
@@ -298,6 +310,7 @@ async fn dispatch(
         "type_text" => op_type_text(req, browser, app).await,
         "scroll" => op_scroll(req, browser, app).await,
         "wait_for" => op_wait_for(req, browser, app).await,
+        "screenshot" => op_screenshot(req, browser, app).await,
         op if crate::mcp_tools_bridge::tool_from_op(op).is_some() => {
             let tool = crate::mcp_tools_bridge::tool_from_op(op).unwrap();
             let args = req.args.clone();
@@ -332,10 +345,52 @@ fn resolve_action_opts(app: &AppHandle, pane_id: Option<&str>) -> ActionOpts {
     } else {
         false
     };
-    ActionOpts { watch_mode, pane_delay_ms: 600 }
+    ActionOpts { watch_mode, pane_delay_ms: 250 }
 }
 
 // ---- per-op handlers -------------------------------------------------------
+
+/// Capture the pane's current page as PNG. Saves the shot into the artifacts
+/// dir (so the user can open it in the canvas and the agent can embed the
+/// path in chat — local images render via the chat's IPC image loader) and
+/// returns the path + base64 payload; the MCP binary turns the base64 into
+/// an MCP image content block so the agent can actually SEE the page.
+async fn op_screenshot(
+    req: &Request,
+    browser: &BrowserManager,
+    app: &AppHandle,
+) -> Result<Value, McpError> {
+    let label = resolve_or_open(req, browser, app).await?;
+    let mgr = app.state::<crate::BrowserState>().0.clone();
+    let png = tokio::task::spawn_blocking(move || mgr.capture_pane_png(&label))
+        .await
+        .map_err(|e| McpError {
+            code: "browser_unavailable",
+            message: format!("capture task failed: {e}"),
+        })?
+        .ok_or_else(|| McpError {
+            code: "browser_unavailable",
+            message: "screenshot capture failed (unsupported platform or no page is open)".to_string(),
+        })?;
+    let dir = crate::chat::dispatch::artifacts_dir(app);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("[conduit:browser-mcp] artifacts dir create failed: {e}");
+    }
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let filename = format!("browser-shot-{millis}.png");
+    let path = dir.join(&filename);
+    std::fs::write(&path, &png).map_err(|e| McpError {
+        code: "browser_unavailable",
+        message: format!("could not save screenshot: {e}"),
+    })?;
+    Ok(serde_json::json!({
+        "path": path.to_string_lossy(),
+        "png_base64": crate::chat::commands::base64_encode(&png),
+    }))
+}
 
 async fn op_navigate(
     req: &Request,

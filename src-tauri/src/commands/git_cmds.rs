@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::db;
 use crate::git;
@@ -107,103 +107,87 @@ pub fn get_git_file_diff(path: String, file_path: String, db: State<DbState>) ->
     git::get_git_file_diff(Path::new(&path), &file_path)
 }
 
-/// List the local git branches in the repo at `path`, most recent first.
+// ---- Branch management ----
+
 #[tauri::command]
-pub fn list_git_branches(path: String, db: State<DbState>) -> CmdResult<Vec<String>> {
+pub fn list_git_branches(path: String, db: State<DbState>) -> CmdResult<Vec<git::BranchInfo>> {
     verify_project_path(Path::new(&path), &db)?;
-    git::list_branches(Path::new(&path)).map_err(|e| e.to_string())
+    git::list_branches(Path::new(&path))
 }
 
-/// Create a new branch at the current HEAD of the repo at `path`.
 #[tauri::command]
 pub fn create_git_branch(path: String, name: String, db: State<DbState>) -> CmdResult<()> {
     verify_project_path(Path::new(&path), &db)?;
-    git::create_branch(Path::new(&path), &name).map_err(|e| e.to_string())
+    git::create_branch(Path::new(&path), &name)
 }
 
-/// Switch the repo at `path` to the named branch.
 #[tauri::command]
 pub fn checkout_git_branch(path: String, name: String, db: State<DbState>) -> CmdResult<()> {
     verify_project_path(Path::new(&path), &db)?;
-    git::checkout_branch(Path::new(&path), &name).map_err(|e| e.to_string())
+    git::checkout_branch(Path::new(&path), &name)
 }
 
-/// Delete the named branch in the repo at `path`.
 #[tauri::command]
 pub fn delete_git_branch(path: String, name: String, db: State<DbState>) -> CmdResult<()> {
     verify_project_path(Path::new(&path), &db)?;
-    git::delete_branch(Path::new(&path), &name).map_err(|e| e.to_string())
+    git::delete_branch(Path::new(&path), &name)
 }
 
-/// Last `n` commits (default 30) for the repo at `path`, oldest first
-/// within the returned window. Used by the Dev tab's history view.
 #[tauri::command]
-pub fn get_git_log(path: String, limit: Option<usize>, db: State<DbState>) -> CmdResult<Vec<git::CommitEntry>> {
+pub fn get_git_log(path: String, db: State<DbState>) -> CmdResult<Vec<git::GitLogEntry>> {
     verify_project_path(Path::new(&path), &db)?;
-    git::log(Path::new(&path), limit.unwrap_or(30)).map_err(|e| e.to_string())
+    git::get_git_log(Path::new(&path))
 }
 
-/// Remote URL for the repo at `path` (the `origin` fetch URL, or empty
-/// when the repo has no remote).
 #[tauri::command]
-pub fn get_remote_url(path: String, db: State<DbState>) -> CmdResult<String> {
+pub fn get_remote_url(path: String, db: State<DbState>) -> CmdResult<Option<String>> {
     verify_project_path(Path::new(&path), &db)?;
-    git::remote_url(Path::new(&path)).map_err(|e| e.to_string())
+    Ok(git::get_remote_url(Path::new(&path)))
 }
 
-/// Stage the listed files (empty = all) and create a commit with the
-/// given message. Returns the new commit hash. Must be called on a
-/// verified-project path.
+/// Stage all changes and commit with the given message. Returns the short SHA.
 #[tauri::command]
-pub fn git_commit(
-    path: String,
-    message: String,
-    files: Option<Vec<String>>,
-    db: State<DbState>,
-) -> CmdResult<String> {
+pub fn git_commit(path: String, message: String, db: State<DbState>) -> CmdResult<String> {
     verify_project_path(Path::new(&path), &db)?;
-    git::commit(Path::new(&path), &message, files.as_deref()).map_err(|e| e.to_string())
+    git::git_commit(Path::new(&path), &message)
 }
 
-/// Push the current branch to `origin`. No-op when the branch has no
-/// upstream.
+/// Push the current branch to origin.
 #[tauri::command]
-pub fn git_push(path: String, db: State<DbState>) -> CmdResult<()> {
+pub fn git_push(path: String, db: State<DbState>) -> CmdResult<String> {
     verify_project_path(Path::new(&path), &db)?;
-    git::push(Path::new(&path)).map_err(|e| e.to_string())
+    git::git_push(Path::new(&path))
 }
 
-/// Install a `notify` filesystem watcher for the given project. The
-/// watcher fires `project:fs-changed` events that the frontend uses to
-/// refresh git badges and changed-files panels without polling.
+// ---- Filesystem watcher (drives project:fs-changed) ----
+//
+// These three commands replace the 4-8s polling loops in the frontend
+// (useGitStatusPolling, DevDiffPanel, BranchDropdown, GitToolsSidebar).
+// The OS tells us when something changed; the watcher debounces; the
+// frontend reacts. See src-tauri/src/git_watcher.rs.
+
+/// Install a watcher for `path` (a project root or worktree path).
+/// Idempotent — re-installing an already-watched path is a no-op.
 #[tauri::command]
-pub fn install_git_watcher(
-    project_id: String,
-    app: tauri::AppHandle,
-    db: State<DbState>,
-) -> CmdResult<()> {
-    let conn = db.0.lock();
-    let projects = db::list_projects(&conn).map_err(|e| e.to_string())?;
-    let project = projects
-        .into_iter()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| format!("project not found: {project_id}"))?;
-    drop(conn);
-    crate::git_watcher::install(&app, &project_id, Path::new(&project.path));
+pub fn install_git_watcher(path: String, app: AppHandle, db: State<DbState>) -> CmdResult<()> {
+    verify_project_path(Path::new(&path), &db)?;
+    crate::git_watcher::install(&app, &db, Path::new(&path));
     Ok(())
 }
 
-/// Stop watching the given project's filesystem.
+/// Drop the watcher for `path`. No-op if the path isn't being watched.
 #[tauri::command]
-pub fn uninstall_git_watcher(project_id: String, app: tauri::AppHandle) -> CmdResult<()> {
-    crate::git_watcher::uninstall(&app, &project_id);
+pub fn uninstall_git_watcher(path: String, app: AppHandle) -> CmdResult<()> {
+    let state = app.state::<crate::git_watcher::WatcherState>();
+    crate::git_watcher::uninstall(&state, Path::new(&path));
     Ok(())
 }
 
-/// Re-scan every registered watcher (call after a window regains focus
-/// to pick up filesystem changes that fired while the app was idle).
+/// Re-scan the projects + worktrees tables and install watchers for any
+/// paths that don't have one yet. Called by the frontend after project
+/// add/remove and after the projects store reloads.
 #[tauri::command]
-pub fn refresh_git_watchers(app: tauri::AppHandle) -> CmdResult<()> {
-    crate::git_watcher::refresh_all(&app);
+pub fn refresh_git_watchers(app: AppHandle, db: State<DbState>) -> CmdResult<()> {
+    crate::git_watcher::install_all_known(&app, &db);
     Ok(())
 }

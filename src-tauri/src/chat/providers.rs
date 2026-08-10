@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 // ---- Shared types ----
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatProviderId {
     Anthropic,

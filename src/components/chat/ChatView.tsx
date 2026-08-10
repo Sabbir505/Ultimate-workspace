@@ -3,14 +3,29 @@
 // Shows an empty state when no chat session is selected.
 // Live streaming: accumulates tokens into an assistant bubble that updates
 // as they arrive, then swaps to the final persisted message on chat:done.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useChatStore, type PermissionMode } from "../../state/chat";
+//
+// BUNDLE: MessageBubble is the heaviest chat component (react-markdown +
+// katex + remark-gfm + remark-math + rehype-katex). The empty welcome screen
+// doesn't render any bubbles at all, so MessageBubble is lazy-loaded — the
+// initial chat page only fetches the bubble code when the first message
+// arrives. TypingIndicator stays eager (it's a 3-line spinner).
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useChatStore } from "../../state/chat";
 import { ChatComposer, type ChatAttachment } from "./ChatComposer";
-import { MessageBubble, TypingIndicator } from "./MessageBubble";
-import { ArtifactPreviewPane } from "./ArtifactPreviewPane";
-import { ApprovalCard, FullAutoConfirmModal } from "./ApprovalFlow";
-import { TaskProgressCard } from "./TaskProgressCard";
-import { listChatModels, scanLocalModels, startLocalModel, type ChatMessage, type GgufModel } from "../../lib/ipc";
+import { TypingIndicator } from "./MessageBubble";
+const MessageBubble = lazy(() => import("./MessageBubble").then((m) => ({ default: m.MessageBubble })));
+// Heavy chat features (artifact previews with syntax-highlighting + markdown,
+// inline mermaid diagrams, file diff cards) are split into separate chunks so
+// the initial chat page only downloads the message + composer code. The
+// previews download lazily the first time an artifact is previewed; the
+// mermaid diagram chunk downloads lazily on first diagram render (via its own
+// internal `import('mermaid')`); the diff card chunk downloads on first
+// edit-tool call. None of these appear on the empty welcome screen.
+const TaskProgressCard = lazy(() => import("./TaskProgressCard").then((m) => ({ default: m.TaskProgressCard })));
+import { listChatModels, listHarnessModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, deleteEmptyChatSessions, type ChatMessage, type GgufModel, type HarnessModelConfig } from "../../lib/ipc";
+import { harnessModelCatalog } from "../../lib/harnessModels";
+import { setChatScrollToMessage } from "../../lib/chatScroll";
+import { TurnNavigator } from "./TurnNavigator";
 import { useContextMeter } from "../../hooks/useContextMeter";
 
 /** Format a backend error message for display. Strips raw JSON blobs,
@@ -82,17 +97,11 @@ export function ChatView() {
   const regenerate = useChatStore((s) => s.regenerate);
   const cancelStream = useChatStore((s) => s.cancelStream);
   const deleteMessage = useChatStore((s) => s.deleteMessage);
-  const previewArtifact = useChatStore((s) => s.previewArtifact);
   const setPreviewArtifact = useChatStore((s) => s.setPreviewArtifact);
   const sessions = useChatStore((s) => s.sessions);
   const setSessionModel = useChatStore((s) => s.setSessionModel);
   const setSessionProvider = useChatStore((s) => s.setSessionProvider);
-  const setSessionPermissionMode = useChatStore((s) => s.setSessionPermissionMode);
-  const confirmFullAuto = useChatStore((s) => s.confirmFullAuto);
-  const cancelFullAutoConfirm = useChatStore((s) => s.cancelFullAutoConfirm);
-  const fullAutoConfirmingFor = useChatStore((s) => s.fullAutoConfirmingFor);
-  const pendingApprovals = useChatStore((s) => s.pendingApprovals);
-  const resolveApproval = useChatStore((s) => s.resolveApproval);
+  const setSessionAgent = useChatStore((s) => s.setSessionAgent);
   const effort = useChatStore((s) => s.effort);
   const setEffort = useChatStore((s) => s.setEffort);
   const localCtx = useChatStore((s) => s.localCtx);
@@ -112,6 +121,58 @@ export function ChatView() {
 
   const activeSession = sessions.find((s) => s.id === activeChatSessionId) ?? null;
   const isLocal = activeSession?.provider === "local_gguf";
+  // CLI agent selected for this session ("harness:<id>") — the model chip is
+  // populated from the CLI's OWN config files (settings.json / config.toml /
+  // opencode.json via listHarnessModels), merged with the static catalog as a
+  // fallback. Sends for these sessions route to the headless CLI process
+  // (agent_sessions.rs), not the built-in provider path.
+  const harnessAgent = activeSession?.agent?.startsWith("harness:")
+    ? activeSession.agent.slice("harness:".length)
+    : null;
+  const [harnessCfg, setHarnessCfg] = useState<HarnessModelConfig | null>(null);
+  const [harnessLoading, setHarnessLoading] = useState(false);
+
+  // Discover the CLI's configured models/endpoint whenever the agent changes.
+  // The agent chip shows a spinner while this runs (live CLI queries like
+  // `opencode models` can take a second or two).
+  useEffect(() => {
+    if (!harnessAgent) {
+      setHarnessCfg(null);
+      setHarnessLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setHarnessLoading(true);
+    void listHarnessModels(harnessAgent)
+      .then((cfg) => {
+        if (!cancelled) setHarnessCfg(cfg);
+      })
+      .finally(() => {
+        if (!cancelled) setHarnessLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [harnessAgent]);
+
+  // Config-discovered models first, then static-catalog entries the config
+  // didn't mention (e.g. built-in aliases a stock setup still accepts).
+  const harnessModels = useMemo(() => {
+    if (!harnessAgent) return [];
+    const fromCfg = harnessCfg?.models ?? [];
+    const cfgIds = new Set(fromCfg.map((m) => m.id));
+    const extra = harnessModelCatalog(harnessAgent).filter((m) => !cfgIds.has(m.id));
+    return [...fromCfg, ...extra];
+  }, [harnessAgent, harnessCfg]);
+
+  // A fresh harness chat with no model yet adopts the CLI's configured
+  // default (settings.json `model` / config.toml `default_model` / …).
+  useEffect(() => {
+    if (harnessAgent && harnessCfg?.defaultModel && activeSession && !activeSession.model) {
+      handleModelChange(harnessCfg.defaultModel);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [harnessAgent, harnessCfg, activeSession?.id]);
   // Extended thinking is exposed by:
   //  - Anthropic (and anthropic_compatible proxies that forward the field),
   //  - Local GGUF models whose template honors chat_template_kwargs (Qwen3,
@@ -140,6 +201,12 @@ export function ChatView() {
   const [models, setModels] = useState<string[]>([]);
   const [localModels, setLocalModels] = useState<GgufModel[]>([]);
   const [localLoading, setLocalLoading] = useState(false);
+  // id of the running local-model sidecar, or null if none. Drives the ⏏
+  // button on the model pill — the button is only shown when a sidecar is
+  // actually live (verified via local_model_status, not just inferred from
+  // the session's stored model, since the user may have killed the sidecar
+  // manually between sessions).
+  const [activeLocalModelId, setActiveLocalModelId] = useState<string | null>(null);
 
   // Fetch the cloud model list (uses the stored key and base URL from
   // Settings). Refetched when the listed provider changes.
@@ -167,6 +234,21 @@ export function ChatView() {
       stale = true;
     };
   }, [activeChatSessionId]);
+
+  // Track the running sidecar so the ⏏ button on the model pill only shows
+  // when a llama-server is actually live. Polled on mount, whenever the
+  // active session changes, and whenever a local model finishes loading
+  // (so the button appears the moment a pick completes).
+  useEffect(() => {
+    let stale = false;
+    void localModelStatus().then((status) => {
+      if (stale) return;
+      setActiveLocalModelId(status?.modelId ?? null);
+    });
+    return () => {
+      stale = true;
+    };
+  }, [activeChatSessionId, localLoading, activeSession?.model]);
 
   // Cloud ids for the selector, deduped case-insensitively. The session's
   // current cloud model is always included, even if not in the endpoint list.
@@ -349,13 +431,39 @@ export function ChatView() {
     return () => clearTimeout(t);
   }, [localCtx, isLocal, activeSession?.model, localModels]);
 
-  // Switching permission mode. The store intercepts a switch INTO full_auto and
-  // opens the one-time confirmation modal instead of applying it directly.
-  const handlePermissionModeChange = useCallback(
-    (mode: PermissionMode) => {
-      if (activeChatSessionId) void setSessionPermissionMode(activeChatSessionId, mode);
+  // Eject the running local-model sidecar. Stops the llama-server process
+  // (releasing its VRAM), clears the model on the active session so the chat
+  // is no longer pinned to a dead sidecar, and shows a brief confirmation.
+  // Provider stays "local_gguf" — the user can pick a different local model
+  // or switch the agent, no need to flip the whole session back to cloud.
+  const ejectLocalModel = useCallback(async () => {
+    const id = activeLocalModelId;
+    if (!id || !activeChatSessionId) return;
+    // Optimistic UI: clear the ⏏ button and the active model immediately so
+    // the pill rolls back to "Select a model to start" before the IPC round
+    // trip. The status effect below reconciles once the kill lands.
+    setActiveLocalModelId(null);
+    try {
+      await stopLocalModel(id);
+    } catch (err) {
+      console.warn("eject local model failed", err);
+    }
+    try {
+      await setSessionModel(activeChatSessionId, "");
+    } catch (err) {
+      console.warn("clear session model after eject failed", err);
+    }
+  }, [activeLocalModelId, activeChatSessionId, setSessionModel]);
+
+  // Agent selection from the composer's agent chip. Persisted per session;
+  // "builtin"/"local" keep today's provider behavior (the model menu's cloud
+  // and local sections drive provider switches as before), a "harness:<id>"
+  // pick only records the agent + unlocks the per-harness model catalog.
+  const handleAgentChange = useCallback(
+    (agent: string) => {
+      if (activeChatSessionId) void setSessionAgent(activeChatSessionId, agent);
     },
-    [activeChatSessionId, setSessionPermissionMode],
+    [activeChatSessionId, setSessionAgent],
   );
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -385,12 +493,17 @@ export function ChatView() {
     if (!config) void loadConfig();
   }, [config, loadConfig]);
 
-  // Entering chat with no session selected auto-starts a fresh one, so the
-  // user can type immediately without picking/creating a chat first.
+  // Entering chat with no session selected always starts a FRESH chat so the
+  // user can type immediately. First sweep any empty "Untitled" rows — chats
+  // opened but never typed into (including the auto-started one from the
+  // previous launch) — so they never accumulate in the sidebar.
   const autoStarted = useRef(false);
   useEffect(() => {
     if (!loaded || !config || activeChatSessionId || autoStarted.current) return;
     autoStarted.current = true;
+    void deleteEmptyChatSessions().then((deleted) => {
+      if (deleted) void loadSessions();
+    });
     const provider = config.provider ?? "openai_compatible";
     // Seed the new session with the provider's persisted default model
     // (chat.<provider>.model) so the model selector stays populated instead of
@@ -399,7 +512,7 @@ export function ChatView() {
     // to "" only when no default model is configured for the provider, in
     // which case the user must still pick one before sending.
     void newChat(provider, config.model ?? "");
-  }, [loaded, activeChatSessionId, config, newChat]);
+  }, [loaded, activeChatSessionId, config, newChat, loadSessions]);
 
   // Track whether the user is pinned near the bottom. Runs on every scroll
   // (user- or programmatic). Once they scroll up past the threshold, auto
@@ -426,6 +539,20 @@ export function ChatView() {
   useEffect(() => {
     stickToBottomRef.current = true;
   }, [activeChatSessionId]);
+
+  // Register a scroll-to-message helper so the TurnNavigator can jump to a
+  // specific turn. Sets stickToBottom OFF first so the auto-follow effect
+  // doesn't yank the scroll back to the bottom while streaming.
+  useEffect(() => {
+    setChatScrollToMessage((msgId: number) => {
+      stickToBottomRef.current = false;
+      const el = messagesContainerRef.current?.querySelector(
+        `[data-msg-id="${msgId}"]`,
+      );
+      el?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    return () => setChatScrollToMessage(null);
+  }, []);
 
   // Build the list of items to render: persisted messages, plus a live
   // streaming bubble for the active session if tokens are arriving.
@@ -479,20 +606,32 @@ export function ChatView() {
   // Convert persisted messages for the bubble component.
   // MessageBubble expects { role, content } (its own ChatMessage type), so we
   // map ChatMessageRecord to that shape.
-  const items: Array<ChatMessage & { key: string; id?: number; live?: boolean }> = messages.map(
-    (m) => ({
+  //
+  // MEMOIZED: MessageBubble is wrapped in React.memo and re-parses markdown
+  // on every render — rebuilding this array on each render (new object
+  // identities) defeated that memo and re-rendered EVERY bubble on every
+  // streaming token / composer keystroke. The per-item onDelete closure is
+  // created inside the memo too, so it stays reference-stable between
+  // renders and doesn't break the memo either.
+  const items: Array<
+    ChatMessage & { key: string; id?: number; live?: boolean; onDelete?: () => void }
+  > = useMemo(() => {
+    const list: Array<
+      ChatMessage & { key: string; id?: number; live?: boolean; onDelete?: () => void }
+    > = messages.map((m) => ({
       role: m.role as "user" | "assistant" | "system",
       content: m.content,
       attachments: m.attachments,
       key: `msg-${m.id}`,
       id: m.id,
-    }),
-  );
-
-  // If streaming, append the live assistant bubble (no action bar while live).
-  if (isStreaming) {
-    items.push({ role: "assistant", content: activeStream, key: "streaming", live: true });
-  }
+      onDelete: () => handleDelete(m.id),
+    }));
+    // If streaming, append the live assistant bubble (no action bar while live).
+    if (isStreaming) {
+      list.push({ role: "assistant", content: activeStream, key: "streaming", live: true });
+    }
+    return list;
+  }, [messages, isStreaming, activeStream, handleDelete]);
 
   const hasItems = items.length > 0;
   // Regenerate applies to the most recent assistant message only.
@@ -501,25 +640,28 @@ export function ChatView() {
     .find((i) => i.role === "assistant" && !i.live)?.key;
 
   return (
-    <div className={`chat-view-wrap${previewArtifact ? " has-preview" : ""}`}>
+    <div className="chat-view-wrap">
+    <TurnNavigator />
     <div className={`chat-view${artifacts && artifacts.length > 0 ? " has-artifacts" : ""}`}>
       {!activeChatSessionId || hasItems ? (
         <div className="chat-messages" ref={messagesContainerRef} onScroll={handleScroll}>
           {items.map((item) => (
-            <MessageBubble
-              key={item.key}
-              message={{ role: item.role as "user" | "assistant" | "system", content: item.content }}
-              live={item.live}
-              onEdit={item.role === "user" ? handleEdit : undefined}
-              onRepeat={
-                item.role === "assistant" && item.key === lastAssistantKey
-                  ? handleRepeat
-                  : undefined
-              }
-              onDelete={!item.live ? () => handleDelete(item.id) : undefined}
-              artifacts={item.id != null ? artifactsByMessage[item.id] : undefined}
-              onPreviewArtifact={setPreviewArtifact}
-            />
+            <Suspense key={item.key} fallback={null}>
+              <MessageBubble
+                message={item}
+                live={item.live}
+                msgId={item.id}
+                onEdit={item.role === "user" ? handleEdit : undefined}
+                onRepeat={
+                  item.role === "assistant" && item.key === lastAssistantKey
+                    ? handleRepeat
+                    : undefined
+                }
+                onDelete={!item.live ? item.onDelete : undefined}
+                artifacts={item.id != null ? artifactsByMessage[item.id] : undefined}
+                onPreviewArtifact={setPreviewArtifact}
+              />
+            </Suspense>
           ))}
           {waitingForFirstToken &&
             (statusNotice && statusNotice.message ? (
@@ -533,7 +675,9 @@ export function ChatView() {
           {sessionTasks.length > 0 && (
             <div className="chat-tasks">
               {sessionTasks.map((t) => (
-                <TaskProgressCard key={t.taskId} task={t} />
+                <Suspense key={t.taskId} fallback={null}>
+                  <TaskProgressCard task={t} />
+                </Suspense>
               ))}
             </div>
           )}
@@ -578,17 +722,6 @@ export function ChatView() {
         </div>
       )}
 
-      {activeChatSessionId && pendingApprovals[activeChatSessionId] && (
-        <div className="composer-approval-wrap">
-          <ApprovalCard
-            approval={pendingApprovals[activeChatSessionId]}
-            onResolve={(approved) =>
-              void resolveApproval(activeChatSessionId, approved)
-            }
-          />
-        </div>
-      )}
-
       <ChatComposer
         draft={draft}
         onSend={handleSend}
@@ -596,7 +729,16 @@ export function ChatView() {
         streaming={streamingChatSessionId === activeChatSessionId && streamingChatSessionId !== null}
         disabled={false}
         model={activeChatSessionId ? (resolvedModel ?? "") : undefined}
-        models={cloudIds}
+        models={harnessAgent ? harnessModels.map((m) => m.id) : cloudIds}
+        modelLabels={
+          harnessAgent
+            ? Object.fromEntries(harnessModels.map((m) => [m.id, m.label]))
+            : undefined
+        }
+        modelEndpoint={harnessAgent ? (harnessCfg?.endpoint ?? null) : undefined}
+        agent={activeChatSessionId ? (activeSession?.agent ?? null) : undefined}
+        onAgentChange={handleAgentChange}
+        agentLoading={harnessAgent ? harnessLoading : false}
         localModels={localIds}
         effort={effort}
         provider={activeSession?.provider}
@@ -605,12 +747,8 @@ export function ChatView() {
         onModelChange={handleModelChange}
         onEffortChange={setEffort}
         onLocalCtxChange={setLocalCtx}
-        permissionMode={
-          activeChatSessionId
-            ? ((activeSession?.permissionMode as PermissionMode) ?? "manual")
-            : undefined
-        }
-        onPermissionModeChange={handlePermissionModeChange}
+        onEjectLocalModel={ejectLocalModel}
+        localModelActive={isLocal && !!activeLocalModelId}
         usedTokens={usedTokens}
         liveMaxTokens={isLocal ? liveUsage.maxTokens : 0}
         thinking={thinking}
@@ -618,18 +756,6 @@ export function ChatView() {
         thinkingSupported={thinkingSupported}
       />
     </div>
-    {previewArtifact && (
-      <ArtifactPreviewPane
-        artifact={previewArtifact}
-        onClose={() => setPreviewArtifact(null)}
-      />
-    )}
-    {fullAutoConfirmingFor && (
-      <FullAutoConfirmModal
-        onConfirm={() => void confirmFullAuto(fullAutoConfirmingFor)}
-        onCancel={cancelFullAutoConfirm}
-      />
-    )}
     </div>
   );
 }

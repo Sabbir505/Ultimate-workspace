@@ -144,8 +144,20 @@ async function stage(target) {
 
   // Extract into DEST, stripping the tarball's leading `python/` dir so the
   // interpreter lands at <DEST>/python.exe (matching python_runtime.rs).
+  // --force-local: bsdtar parses `C:\...` as a remote `host:path` spec and
+  // tries to "connect to C" — force the archive path to be treated as local.
+  // Forward slashes: bsdtar also mangles backslash path arguments (the `-C`
+  // dir "cannot be opened" otherwise), so normalize both paths on Windows.
   const tarBin = process.platform === "win32" ? "tar.exe" : "tar";
-  run(tarBin, ["-xzf", tgz, "--strip-components=1", "-C", DEST]);
+  const tarPath = (p) => (process.platform === "win32" ? p.replaceAll("\\", "/") : p);
+  run(tarBin, [
+    "--force-local",
+    "-xzf",
+    tarPath(tgz),
+    "--strip-components=1",
+    "-C",
+    tarPath(DEST),
+  ]);
 
   if (!existsSync(exePath)) {
     throw new Error(`extracted tree missing interpreter at ${spec.exe}`);

@@ -20,6 +20,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "conduit-browser-mcp"
 path = "src/bin/conduit_browser_mcp.rs"
 
+# Headless automation runner (see automations.rs): `conduit-automation run <id>`
+# executes one scheduled turn with no GUI. This is the entry point a Windows
+# Task Scheduler task invokes so automations can fire while Conduit is closed.
+[[bin]]
+name = "conduit-automation"
+path = "src/bin/conduit_automation.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 # Embeds a comctl32 v6 application manifest into test harnesses only (see
@@ -30,6 +37,9 @@ embed-resource = "3"
 # "unstable" enables Window::add_child / WebviewBuilder — required for the
 # native child-webview browser panes (see src/browser.rs).
 tauri = { version = "2", features = ["macos-private-api", "unstable"] }
+# TOML parsing for reading CLI harness configs (Kimi's config.toml) — see
+# harness_config.rs.
+toml = "0.8"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-fs = "2"
@@ -47,6 +57,13 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 once_cell = "1"
 parking_lot = "0.12"
+# Per-project filesystem watcher that drives the `project:fs-changed` Tauri
+# event. Replaces the 4-8s polling loops in `useGitStatusPolling` /
+# `DevDiffPanel` / `BranchDropdown` — git status is event-driven now: the OS
+# tells us when a file under a project changes, we coalesce + debounce, then
+# emit. notify uses the native backend per platform (ReadDirectoryChangesW /
+# inotify / FSEvents). Pure-Rust, no extra native deps.
+notify = "6"
 regex = "1"
 strip-ansi-escapes = "0.2"
 window-vibrancy = "0.5"
@@ -106,16 +123,12 @@ grep = "0.3"
 # Glob pattern matching for the `search_content` tool's `glob` parameter
 # (`*.rs`, `**/test_*.py`, etc.). Pure-Rust, no native deps.
 globset = "0.4"
-# Rot fix additions (refactor session 2026-08-10): these deps were
-# referenced by src/automations.rs (cron + chrono) and src/git_watcher.rs
-# (notify) but not declared. Adding the smallest feasible versions:
+# Cron schedule parsing for the Automations scheduler (automations.rs):
+# evaluates each automation's 5-field cron expression against its last run.
 cron = "0.12"
-chrono = "0.4"
-notify = "6"
-# Kimi CLI config parser — `.kimi-code/config.toml`. Pure-Rust, no native
-# deps. Used by `harness_config::kimi_config` to discover the user's
-# configured providers and default model.
-toml = "0.8"
+# chrono types are named directly in the scheduler's due-time math (cron's
+# API is generic over them); clock only, no formatting/serde.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -127,6 +140,10 @@ keyring = { version = "3", features = ["windows-native"] }
 # NVML dynamic-load entry points for free-VRAM probing (see chat/local_models.rs).
 # Feature flags match the small surface we actually use.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+# WebView2 CapturePreview for the browser_screenshot tool (browser.rs). Versions
+# pinned to what tauri 2.11 already links so no duplicate windows crate lands.
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }

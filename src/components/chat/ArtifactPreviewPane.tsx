@@ -7,11 +7,14 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import "katex/dist/katex.min.css";
+// NOTE: katex.min.css is imported at app entry (src/main.tsx) so this file
+// does NOT re-import it — see PERFORMANCE_AUDIT.md C8. Doing it twice would
+// ship two copies in the lazy ArtifactPreviewPane chunk.
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { useSyntaxTheme } from "../../hooks/useSyntaxTheme";
 import {
   downloadArtifact,
+  isLibreofficeAvailable,
   openArtifact,
   readArtifactPreview,
   type ArtifactPreview,
@@ -19,6 +22,7 @@ import {
 import type { ChatArtifact } from "../../state/chat";
 import { ArtifactExportMenu } from "./ArtifactExportMenu";
 import { JsxPreview } from "./JsxPreview";
+import { sanitizeHtml } from "../../lib/sanitize";
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -61,6 +65,66 @@ function CsvTable({ text }: { text: string }) {
   );
 }
 
+/** One-line notice shown above an office preview (pptx/docx/doc) that fell
+ *  back to the built-in HTML converter because LibreOffice isn't installed.
+ *  Renders nothing when soffice IS available (in which case the backend would
+ *  have sent a PDF instead of this fallback anyway). */
+function LibreOfficeHint() {
+  const [available, setAvailable] = useState<boolean | null>(null);
+  useEffect(() => {
+    let stale = false;
+    void isLibreofficeAvailable()
+      .then((v) => {
+        if (!stale) setAvailable(v ?? false);
+      })
+      .catch(() => {
+        if (!stale) setAvailable(false);
+      });
+    return () => {
+      stale = true;
+    };
+  }, []);
+  if (available !== false) return null;
+  return (
+    <div className="artifact-preview-hint">
+      Simplified preview — install LibreOffice for a full-fidelity PDF render.
+    </div>
+  );
+}
+
+/** HTML diagram frame sized to its CONTENT, not the pane: with a pane-sized
+ *  iframe any overflow is clipped inside the iframe viewport where canvas
+ *  pan/zoom can never reach it. After load we measure the document and set
+ *  explicit pixel dimensions, so the whole diagram exists in the layout and
+ *  the canvas can pan/zoom to every corner.
+ *  Sandbox keeps scripts blocked; allow-same-origin is required for the
+ *  parent to read contentDocument measurements (no allow-scripts, so nothing
+ *  inside can execute). */
+function DiagramFrame({ html, title }: { html: string; title: string }) {
+  const ref = useRef<HTMLIFrameElement>(null);
+  const [size, setSize] = useState<{ w: number; h: number } | null>(null);
+
+  const measure = useCallback(() => {
+    const doc = ref.current?.contentDocument;
+    if (!doc) return;
+    const w = Math.max(doc.documentElement.scrollWidth, doc.body?.scrollWidth ?? 0);
+    const h = Math.max(doc.documentElement.scrollHeight, doc.body?.scrollHeight ?? 0);
+    if (w > 0 && h > 0) setSize({ w, h });
+  }, []);
+
+  return (
+    <iframe
+      ref={ref}
+      className="artifact-preview-diagram-frame"
+      title={title}
+      sandbox="allow-same-origin"
+      srcDoc={sanitizeHtml(html)}
+      onLoad={measure}
+      style={size ? { width: size.w, height: size.h } : undefined}
+    />
+  );
+}
+
 function PreviewBody({ preview }: { preview: ArtifactPreview }) {
   const { kind, text, dataUri, ext } = preview;
 
@@ -79,21 +143,41 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
   }
   if (kind === "office" && text != null) {
     return (
-      <iframe
-        className={`artifact-preview-html office ${ext}`}
-        title={preview.filename}
-        sandbox=""
-        srcDoc={text}
+      <>
+        {(ext === "pptx" || ext === "docx" || ext === "doc") && <LibreOfficeHint />}
+        <iframe
+          className={`artifact-preview-html office ${ext}`}
+          title={preview.filename}
+          sandbox=""
+          srcDoc={sanitizeHtml(text)}
+        />
+      </>
+    );
+  }
+  // SVG diagrams render as an <img> (not the sandboxed iframe) so the canvas
+  // pan/zoom gestures reach the container — an iframe would swallow every
+  // pointer/wheel event. <img> keeps the safety property too: embedded
+  // scripts in SVG never execute in an image context.
+  if (kind === "diagram" && text != null && ext.toLowerCase() === "svg") {
+    return (
+      <img
+        className="artifact-preview-image artifact-preview-diagram"
+        src={`data:image/svg+xml;utf8,${encodeURIComponent(text)}`}
+        alt={preview.filename}
+        draggable={false}
       />
     );
   }
   if ((kind === "html" || kind === "diagram") && text != null) {
+    if (kind === "diagram") {
+      return <DiagramFrame html={text} title={preview.filename} />;
+    }
     return (
       <iframe
         className="artifact-preview-html"
         title={preview.filename}
         sandbox=""
-        srcDoc={text}
+        srcDoc={sanitizeHtml(text)}
       />
     );
   }
@@ -232,11 +316,97 @@ export function ArtifactPreviewPane({
   const [zoom, setZoom] = useState(1);
   const [paneWidth, setPaneWidth] = useState<number | null>(null);
   const paneRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const inline = artifact.inline;
 
-  // Reset zoom when switching to a different artifact.
+  // Canvas gestures (scroll-wheel zoom + left-drag pan) apply to visual
+  // artifacts — diagrams and images — and use a transform-based canvas
+  // (translate + scale), independent of scroll ranges: the iframe/html
+  // sizing quirks never leave a reliable scrollable overflow to pan with.
+  // Text-like previews keep normal scroll and the CSS-zoom reflow.
+  const pannable = !!preview && (preview.kind === "diagram" || preview.kind === "image");
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const zoomRef = useRef(1);
+  zoomRef.current = zoom;
+  const panRef = useRef(pan);
+  panRef.current = pan;
+  const wheelZoomed = useRef(false);
+  const prevZoom = useRef(1);
+  const panDrag = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
+
+  // Scroll-wheel zoom, anchored at the cursor: the content point under the
+  // pointer stays put. Attached non-passively so preventDefault works.
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el || !pannable) return;
+    const clamp = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const cx = e.clientX - rect.left;
+      const cy = e.clientY - rect.top;
+      const z1 = zoomRef.current;
+      const z2 = clamp(z1 * (e.deltaY < 0 ? 1.12 : 1 / 1.12));
+      wheelZoomed.current = true;
+      setPan((p) => ({
+        x: cx - (cx - p.x) * (z2 / z1),
+        y: cy - (cy - p.y) * (z2 / z1),
+      }));
+      setZoom(z2);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [pannable]);
+
+  // Button zooms (± / reset) have no cursor anchor — re-anchor at the pane
+  // center instead. Wheel zooms set their own anchor and skip this pass.
+  useEffect(() => {
+    const el = contentRef.current;
+    const z1 = prevZoom.current;
+    prevZoom.current = zoom;
+    if (!el || !pannable || z1 === zoom) return;
+    if (wheelZoomed.current) {
+      wheelZoomed.current = false;
+      return;
+    }
+    const rect = el.getBoundingClientRect();
+    const cx = rect.width / 2;
+    const cy = rect.height / 2;
+    setPan((p) => ({
+      x: cx - (cx - p.x) * (zoom / z1),
+      y: cy - (cy - p.y) * (zoom / z1),
+    }));
+  }, [zoom, pannable]);
+
+  // Left-drag pan: translate the canvas with the pointer.
+  const onPanStart = useCallback(
+    (e: React.PointerEvent) => {
+      const el = contentRef.current;
+      if (!el || !pannable || e.button !== 0) return;
+      e.preventDefault();
+      panDrag.current = { x: e.clientX, y: e.clientY, px: panRef.current.x, py: panRef.current.y };
+      el.setPointerCapture(e.pointerId);
+      el.classList.add("panning");
+    },
+    [pannable],
+  );
+  const onPanMove = useCallback((e: React.PointerEvent) => {
+    const d = panDrag.current;
+    if (!d) return;
+    setPan({ x: d.px + (e.clientX - d.x), y: d.py + (e.clientY - d.y) });
+  }, []);
+  const onPanEnd = useCallback((e: React.PointerEvent) => {
+    panDrag.current = null;
+    const el = contentRef.current;
+    if (!el) return;
+    el.classList.remove("panning");
+    if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
+  }, []);
+
+  // Reset zoom + pan when switching to a different artifact.
   useEffect(() => {
     setZoom(1);
+    setPan({ x: 0, y: 0 });
   }, [artifact.path, artifact.filename]);
 
   // Drag the left edge to resize the pane, mirroring the browser pane.
@@ -371,11 +541,30 @@ export function ArtifactPreviewPane({
           </button>
         </div>
       </div>
-      <div className="artifact-preview-content">
+      <div
+        className={`artifact-preview-content${pannable ? " pannable" : ""}`}
+        ref={contentRef}
+        onPointerDown={onPanStart}
+        onPointerMove={onPanMove}
+        onPointerUp={onPanEnd}
+        onPointerCancel={onPanEnd}
+      >
         {error ? (
           <div className="artifact-preview-error">Could not open preview: {error}</div>
         ) : !preview ? (
           <div className="artifact-preview-loading">Loading preview…</div>
+        ) : pannable ? (
+          <div
+            className="artifact-canvas"
+            style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
+          >
+            <PreviewBody preview={preview} />
+            {/* Iframe-rendered diagrams (HTML kind) swallow pointer/wheel
+                events — this layer catches them for the pan/zoom handlers. */}
+            {preview.kind === "diagram" && preview.ext.toLowerCase() !== "svg" && (
+              <div className="artifact-preview-gesture-layer" aria-hidden="true" />
+            )}
+          </div>
         ) : (
           <div className="artifact-preview-zoom" style={zoomStyle}>
             <PreviewBody preview={preview} />

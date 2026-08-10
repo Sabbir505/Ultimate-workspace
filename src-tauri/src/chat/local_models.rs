@@ -439,12 +439,21 @@ impl LocalModelRegistry {
         // as a health-check timeout. Omitting it keeps the default path
         // universal and fast. (A future iteration can add it as an opt-in once
         // we detect a CUDA/Metal build.)
-        let args_template: Vec<String> = {
+        let mut args_template: Vec<String> = {
             let mut v = vec![
                 "--model".to_string(), gguf_path.to_string(),
                 "--port".to_string(), port.to_string(),
                 "--host".to_string(), "127.0.0.1".to_string(),
                 "-c".to_string(), ctx.to_string(),
+                // Required for the chat completions endpoint to accept a
+                // `tools` array. Without it, llama-server returns HTTP 400
+                // with "tools param requires --jinja flag" (pre-b4400 also
+                // rejects `tools` + `stream` outright). Bundled builds stage
+                // a recent llama.cpp; legacy user binaries (e.g. an old
+                // llama-cuda drop) may not recognize the flag — the spawn
+                // ladder below surfaces that as a start failure with the
+                // real reason in stderr.
+                "--jinja".to_string(),
             ];
             if let Some(mp) = mmproj_path {
                 if !mp.is_empty() {
@@ -643,6 +652,24 @@ impl LocalModelRegistry {
 
             // Non-OOM early exit: real error (bad model, wrong mmproj, etc.)
             if !is_oom && had_early_exit {
+                // Special-case the --jinja flag: Clang 20.1.8 builds reject it
+                // with "unrecognized argument" — try once more without it.
+                let stderr = output.trim();
+                let no_jinja =
+                    stderr.contains("unrecognized argument")
+                    || stderr.contains("invalid option flag");
+                if no_jinja && args_template.contains(&"--jinja".to_string()) {
+                    eprintln!(
+                        "[local-models] --jinja rejected; retrying without it. Snippet: {}",
+                        stderr.lines().take(1).collect::<String>()
+                    );
+                    args_template = args_template
+                        .iter()
+                        .filter(|arg| arg.as_str() != "--jinja")
+                        .cloned()
+                        .collect();
+                    continue;
+                }
                 return Err(format!(
                     "llama-server exited during startup with --n-gpu-layers={}.\n{}",
                     try_ngl, output
@@ -1111,18 +1138,17 @@ fn query_free_vram_bytes() -> Option<u64> {
 
 fn auto_ctx_size(gguf_path: &str) -> u32 {
     // The context must fit the app's OWN prompt overhead, not just the chat
-    // history: tool-mode turns add the full tool schema (~10k tokens for the
-    // built-in tool set) plus the system prompt on top of the conversation,
-    // and llama-server hard-rejects any prompt that exceeds n_ctx with a 400
-    // (exceed_context_size_error). 8192 was too small for even a SHORT
-    // tool-enabled chat — the first message already overflowed it. Tiering:
+    // history: tool-mode turns add the full tool schema (~5-6k tokens) plus
+    // the system prompt on top of the conversation, and llama-server hard-
+    // rejects any prompt that exceeds n_ctx with a 400
+    // (exceed_context_size_error). The local-model system prompt is kept
+    // compact (tool descriptions live in the tools array, not duplicated in
+    // the prompt), so 32768 fits a real tool-enabled conversation. Tiering:
     // models <= 8GB get 32768, larger models 16384 / 8192. KV-cache memory
     // scales with ctx, but at these tiers it stays practical on CPU-only and
     // low-VRAM machines (excess KV spills to CPU; llama-server handles the
     // mixed placement). All locally-supported models carry n_ctx_train >=
-    // 32768, so these sizes load cleanly. 4096 proved far too small in
-    // practice — a medium-length chat already overflows it (llama-server
-    // then rejects the request with a 400).
+    // 32768, so these sizes load cleanly.
     let size = match fs::metadata(gguf_path) {
         Ok(m) => m.len(),
         Err(_) => return 32768,

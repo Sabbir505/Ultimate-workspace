@@ -190,7 +190,7 @@ export function DocumentsLibrary() {
   return (
     <div
       className="view-overlay modal-centered"
-      onPointerDown={(e) => e.target === e.currentTarget && setActiveView("grid")}
+      onPointerDown={(e) => e.target === e.currentTarget && setActiveView("chat")}
     >
       <div className="view-panel documents-panel">
         <div className="view-header">
@@ -205,7 +205,7 @@ export function DocumentsLibrary() {
             >
               Export all
             </button>
-            <button className="ghost" onClick={() => setActiveView("grid")}>
+            <button className="ghost" onClick={() => setActiveView("chat")}>
               ✕
             </button>
           </div>
@@ -256,11 +256,12 @@ export function DocumentsLibrary() {
                       aria-label="Download"
                       onClick={(e) => {
                         e.stopPropagation();
-                        const a2 = document.createElement("a");
-                        a2.href = a.path;
-                        a2.download = a.filename;
-                        a2.click();
-                        void downloadArtifact(a.path, a.path).catch(() => {});
+                        // M24: pass the FILENAME as the suggested save name —
+                        // the full path pre-filled the dialog with the
+                        // artifact's own location (overwrite-in-place). The
+                        // anchor hack below did nothing in the Tauri webview
+                        // and is gone.
+                        void downloadArtifact(a.path, a.filename).catch(() => {});
                       }}
                     >
                       ⬇

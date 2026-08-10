@@ -20,6 +20,11 @@ export function PeekPanel() {
 
   useEffect(() => {
     if (!peek.open) return;
+    // M26: clear the previous target's content FIRST — until the new read
+    // resolves, the panel must show nothing (loading), not the stale file
+    // or diff from the last peek target.
+    setFileText(null);
+    setDiffText(null);
     if (peek.mode === "file" && peek.filePath) {
       void readFileText(peek.filePath).then((t) => setFileText(t ?? "(unable to read file)"));
     } else if (peek.mode === "diff" && project) {

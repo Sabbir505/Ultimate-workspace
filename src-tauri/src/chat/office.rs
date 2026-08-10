@@ -758,97 +758,6 @@ tr:nth-child(even) td{background:#f8fafc}";
     )
 }
 
-/// Convert a pptx to PDF for the in-app PDF preview. The function shells out
-/// to LibreOffice (best-effort, with a short timeout) and returns the raw
-/// PDF bytes. Returns None on any failure (LibreOffice missing, timeout,
-/// corrupt file) — the caller falls back to the HTML preview path.
-///
-/// Why this lives here instead of in `commands.rs`: the conversion is
-/// `Send`-friendly (pure I/O, no Tauri state), and `spawn_blocking` would
-/// rather the heavy lifting live next to the other Office helpers where the
-/// extraction paths already are.
-pub fn office_to_pdf(path: &std::path::Path) -> Option<Vec<u8>> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
-
-    // Look up LibreOffice. On Windows the canonical install path is
-    // `C:\Program Files\LibreOffice\program\soffice.exe`; on macOS it's
-    // `/Applications/LibreOffice.app/Contents/MacOS/soffice`; on Linux the
-    // `soffice` binary is on PATH. Try the common locations first, then PATH.
-    let candidates: &[&str] = &[
-        r"C:\Program Files\LibreOffice\program\soffice.exe",
-        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
-        "/Applications/LibreOffice.app/Contents/MacOS/soffice",
-        "soffice",
-        "libreoffice",
-    ];
-    let exe = candidates.iter().find(|p| std::path::Path::new(p).exists()).copied()
-        .or_else(|| candidates.last().copied())?;
-
-    // Use a unique per-call outdir so concurrent previews don't race. A
-    // random subdir under the system temp is fine — the CLI writes
-    // `<filename>.pdf` there and we read it back.
-    let outdir = std::env::temp_dir().join(format!(
-        "conduit-lo-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
-    if std::fs::create_dir_all(&outdir).is_err() {
-        return None;
-    }
-
-    let mut cmd = Command::new(exe);
-    cmd.args([
-        "--headless",
-        "--convert-to",
-        "pdf",
-        "--outdir",
-    ])
-    .arg(&outdir)
-    .arg(path)
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let mut child = cmd.spawn().ok()?;
-    // Generous timeout: a multi-MB pptx on a cold LO process can take 15s+;
-    // the preview pane is already in a "Loading…" state so blocking is fine,
-    // but a hung process must not wedge the UI forever.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break Some(s),
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = std::fs::remove_dir_all(&outdir);
-                return None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(_) => {
-                let _ = std::fs::remove_dir_all(&outdir);
-                return None;
-            }
-        }
-    };
-    if !status?.success() {
-        let _ = std::fs::remove_dir_all(&outdir);
-        return None;
-    }
-    // Find the produced PDF (same basename as the source, .pdf extension).
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
-    let pdf_path = outdir.join(format!("{stem}.pdf"));
-    let bytes = std::fs::read(&pdf_path).ok();
-    let _ = std::fs::remove_dir_all(&outdir);
-    bytes
-}
-
 /// Extract readable plain text from a supported Office file's bytes, so it can
 /// be handed to the model as message context. Returns `None` for unsupported
 /// formats or unparseable files. `format` is the lowercase extension.
@@ -1108,25 +1017,25 @@ fn soffice_run_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("conduit-soffice-{}-{seq}", std::process::id()))
 }
 
-/// Convert a `.pptx` file to PDF bytes via `soffice --headless --convert-to
-/// pdf`. Returns `None` when LibreOffice is missing, the conversion fails, or
-/// it exceeds `SOFFICE_TIMEOUT` (the process is killed). Results are cached in
-/// the temp dir keyed by (path, len, mtime) so re-opening the same deck's
-/// preview doesn't re-run LibreOffice.
+/// Convert an office document (`.pptx`, `.docx`, `.doc`) to PDF bytes via
+/// `soffice --headless --convert-to pdf`. Returns `None` when LibreOffice is
+/// missing, the conversion fails, or it exceeds `SOFFICE_TIMEOUT` (the process
+/// is killed). Results are cached in the temp dir keyed by (path, len, mtime)
+/// so re-opening the same file's preview doesn't re-run LibreOffice.
 ///
 /// This is blocking (subprocess wait loop) — call it inside
 /// `tokio::task::spawn_blocking` from async command handlers so the IPC
 /// thread pool isn't stalled for the conversion's multi-second runtime.
-pub fn pptx_to_pdf(pptx_path: &Path) -> Option<Vec<u8>> {
+pub fn office_to_pdf(input_path: &Path) -> Option<Vec<u8>> {
     let soffice = find_soffice()?;
 
-    let meta = std::fs::metadata(pptx_path).ok()?;
+    let meta = std::fs::metadata(input_path).ok()?;
     // Cache key: absolute path + length + mtime. DefaultHasher is fine here —
     // collisions only cost a stale-but-valid PDF of another deck, and the key
     // includes path so cross-file collisions are astronomically unlikely.
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    pptx_path.to_string_lossy().hash(&mut hasher);
+    input_path.to_string_lossy().hash(&mut hasher);
     meta.len().hash(&mut hasher);
     if let Ok(mtime) = meta.modified() {
         if let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH) {
@@ -1152,16 +1061,20 @@ pub fn pptx_to_pdf(pptx_path: &Path) -> Option<Vec<u8>> {
     std::fs::create_dir_all(&run_dir).ok()?;
     let profile_uri = format!("file:///{}", run_dir.join("profile").to_string_lossy().replace('\\', "/"));
 
+    // The -env: bootstrap variable must be ONE argument ("-env:Name=Value").
+    // Passed as two args, soffice parses "-env:UserInstallation" as a value-less
+    // option, aborts with "Error in option", and on Windows pops a visible
+    // console with the usage text that blocks on "Press Enter to continue" —
+    // every conversion attempt then left a stuck terminal window behind.
     let mut cmd = Command::new(&soffice);
     cmd.arg("--headless")
         .arg("--norestore")
-        .arg("-env:UserInstallation")
-        .arg(&profile_uri)
+        .arg(format!("-env:UserInstallation={profile_uri}"))
         .arg("--convert-to")
         .arg("pdf")
         .arg("--outdir")
         .arg(&run_dir)
-        .arg(pptx_path)
+        .arg(input_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -1198,7 +1111,7 @@ pub fn pptx_to_pdf(pptx_path: &Path) -> Option<Vec<u8>> {
     }
 
     // soffice names the output after the input stem.
-    let stem = pptx_path.file_stem()?.to_string_lossy();
+    let stem = input_path.file_stem()?.to_string_lossy();
     let produced = run_dir.join(format!("{stem}.pdf"));
     let bytes = std::fs::read(&produced).ok();
     let _ = std::fs::remove_dir_all(&run_dir);

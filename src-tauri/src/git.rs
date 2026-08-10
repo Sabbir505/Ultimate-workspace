@@ -419,6 +419,190 @@ fn porcelain_kind(status: &str) -> String {
     }
 }
 
+// ---- Branch management ----
+
+/// A local or remote branch from `git branch`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchInfo {
+    pub name: String,
+    pub is_current: bool,
+    pub is_remote: bool,
+    pub last_commit_sha: String,
+    pub last_commit_message: String,
+}
+
+/// List all branches (local + remote) with their last commit info.
+/// Format: `%(refname:short)|%(objectname:short)|%(contents:subject)` per
+/// line, prefixed with `*` for the current branch and `remotes/` for remote.
+pub fn list_branches(path: &Path) -> Result<Vec<BranchInfo>, String> {
+    let format = "%(refname:short)|%(objectname:short)|%(contents:subject)";
+    // Use --format with a marker for the current branch.
+    let out = git_command(
+        path,
+        &[
+            "branch",
+            "--all",
+            "--format=%(HEAD)%(refname:short)\u{1f}",
+        ],
+    )
+    .map_err(|e| format!("failed to run git branch: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // We need the format with sha + subject too — do a second call with the
+    // full format and match by name. Simpler: one call with everything.
+    let detailed = run_git(
+        path,
+        &[
+            "for-each-ref",
+            "--format=%(HEAD)\u{1f}%(refname:short)\u{1f}%(objectname:short)\u{1f}%(contents:subject)",
+            "refs/heads/",
+            "refs/remotes/",
+        ],
+    )?;
+
+    let mut branches = Vec::new();
+    for line in detailed.lines() {
+        let parts: Vec<&str> = line.split('\u{1f}').collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let head_marker = parts[0].trim();
+        let full_name = parts[1].trim();
+        let sha = parts[2].trim();
+        let msg = parts[3].trim();
+        let is_current = head_marker == "*";
+        let is_remote = full_name.starts_with("remotes/");
+        // Strip "remotes/" prefix for a cleaner display name.
+        let name = if is_remote {
+            full_name.strip_prefix("remotes/").unwrap_or(full_name).to_string()
+        } else {
+            full_name.to_string()
+        };
+        // Skip HEAD symlink ref (e.g. "origin/HEAD -> origin/main").
+        if name.contains(" -> ") {
+            continue;
+        }
+        branches.push(BranchInfo {
+            name,
+            is_current,
+            is_remote,
+            last_commit_sha: sha.to_string(),
+            last_commit_message: msg.to_string(),
+        });
+    }
+    // Suppress unused warning for the first stdout parse.
+    let _ = stdout;
+    Ok(branches)
+}
+
+/// Create a new branch and check it out (`git checkout -b <name>`).
+pub fn create_branch(path: &Path, name: &str) -> Result<(), String> {
+    // Reject names that could be interpreted as flags.
+    if name.starts_with('-') || name.is_empty() {
+        return Err("invalid branch name".to_string());
+    }
+    run_git(path, &["checkout", "-b", name]).map(|_| ())
+}
+
+/// Switch to an existing branch (`git checkout <name>`).
+pub fn checkout_branch(path: &Path, name: &str) -> Result<(), String> {
+    if name.starts_with('-') || name.is_empty() {
+        return Err("invalid branch name".to_string());
+    }
+    // For remote branches, strip the remote prefix so checkout creates a local
+    // tracking branch automatically.
+    let local_name = name.strip_prefix("origin/").unwrap_or(name);
+    run_git(path, &["checkout", local_name]).map(|_| ())
+}
+
+/// Delete a local branch (`git branch -d <name>`).
+pub fn delete_branch(path: &Path, name: &str) -> Result<(), String> {
+    if name.starts_with('-') || name.is_empty() {
+        return Err("invalid branch name".to_string());
+    }
+    run_git(path, &["branch", "-d", name]).map(|_| ())
+}
+
+/// Get the origin remote URL (for the GitHub pill link). None if no remote.
+pub fn get_remote_url(path: &Path) -> Option<String> {
+    run_git(path, &["remote", "get-url", "origin"]).ok()
+}
+
+/// Stage all changes and commit with the given message.
+/// Returns the commit SHA on success.
+pub fn git_commit(path: &Path, message: &str) -> Result<String, String> {
+    if message.trim().is_empty() {
+        return Err("commit message must not be empty".to_string());
+    }
+    run_git(path, &["add", "."])?;
+    run_git(path, &["commit", "-m", message])?;
+    // Get the new commit SHA for feedback.
+    run_git(path, &["rev-parse", "--short", "HEAD"])
+}
+
+/// Push the current branch to origin. Returns the push output.
+pub fn git_push(path: &Path) -> Result<String, String> {
+    let branch = run_git(path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    run_git(path, &["push", "origin", &branch])
+}
+
+/// A compact `git log --oneline --graph` line for the git graph view.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitLogEntry {
+    pub graph: String,
+    pub sha: String,
+    pub message: String,
+    pub refs: String,
+}
+
+/// Recent commit log with graph lines (last 50 commits).
+pub fn get_git_log(path: &Path) -> Result<Vec<GitLogEntry>, String> {
+    let out = run_git(
+        path,
+        &[
+            "log",
+            "--oneline",
+            "--graph",
+            "--decorate",
+            "-n",
+            "50",
+            "--format=%h\u{1f}%s\u{1f}%d",
+        ],
+    )?;
+    let mut entries = Vec::new();
+    for line in out.lines() {
+        // Graph prefix is everything before the first SHA (short hash pattern).
+        // Format: [<graph chars>] <sha> <subject> (<refs>)
+        // Split on the first space to separate graph from the rest.
+        let trimmed = line;
+        // Find where the graph ends: the graph is leading * | / \ characters.
+        let graph_end = trimmed
+            .char_indices()
+            .take_while(|(_, c)| matches!(c, '*' | '|' | '/' | '\\' | ' ' | '_' | '.'))
+            .last()
+            .map(|(i, _)| i + 1)
+            .unwrap_or(0);
+        let graph = trimmed[..graph_end].trim_end().to_string();
+        let rest = trimmed[graph_end..].trim();
+        // rest = "<sha> <subject> (<refs>)" — split on first space.
+        let (sha_part, msg_part) = rest
+            .split_once(' ')
+            .unwrap_or((rest, ""));
+        entries.push(GitLogEntry {
+            graph,
+            sha: sha_part.to_string(),
+            message: msg_part.to_string(),
+            refs: String::new(), // refs are embedded in message with --decorate
+        });
+    }
+    Ok(entries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,167 +817,4 @@ mod tests {
             "untracked diff header should be the repo-relative b/<path> form, got: {untracked_diff}"
         );
     }
-}
-
-// ---- Branch + log + push helpers (added for the missing commands that
-// `commands/git_cmds.rs` registers but `lib.rs` previously couldn't
-// compile against). Each is a thin wrapper around `git` CLI invocations
-// already proven in the existing parse_ahead_behind + worktree code path.
-// All return `Result<_, String>` so the IPC layer maps cleanly.
-
-/// List local branches in `path` (most recent first).
-pub fn list_branches(path: &Path) -> Result<Vec<String>, String> {
-    let out = std::process::Command::new("git")
-        .args(["-C", &path.to_string_lossy(), "for-each-ref", "--format=%(refname:short)", "refs/heads/"])
-        .output()
-        .map_err(|e| format!("git for-each-ref: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).to_string());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(|s| s.to_string())
-        .collect())
-}
-
-/// Create a new branch at HEAD in `path`.
-pub fn create_branch(path: &Path, name: &str) -> Result<(), String> {
-    let out = std::process::Command::new("git")
-        .args(["-C", &path.to_string_lossy(), "branch", name])
-        .output()
-        .map_err(|e| format!("git branch: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).to_string());
-    }
-    Ok(())
-}
-
-/// Switch to `name` in `path`.
-pub fn checkout_branch(path: &Path, name: &str) -> Result<(), String> {
-    let out = std::process::Command::new("git")
-        .args(["-C", &path.to_string_lossy(), "checkout", name])
-        .output()
-        .map_err(|e| format!("git checkout: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).to_string());
-    }
-    Ok(())
-}
-
-/// Delete `name` in `path` (force=false by default; safe for merged branches).
-pub fn delete_branch(path: &Path, name: &str) -> Result<(), String> {
-    let out = std::process::Command::new("git")
-        .args(["-C", &path.to_string_lossy(), "branch", "-d", name])
-        .output()
-        .map_err(|e| format!("git branch -d: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).to_string());
-    }
-    Ok(())
-}
-
-/// `git log` for the repo at `path`, oldest first within the window.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CommitEntry {
-    pub hash: String,
-    pub short_hash: String,
-    pub author: String,
-    pub email: String,
-    pub timestamp: i64,
-    pub subject: String,
-}
-
-pub fn log(path: &Path, limit: usize) -> Result<Vec<CommitEntry>, String> {
-    let sep = "<<<SEP>>>";
-    let fmt = format!("%H{sep}%h{sep}%an{sep}%ae{sep}%at{sep}%s");
-    let out = std::process::Command::new("git")
-        .args([
-            "-C", &path.to_string_lossy(),
-            "log", &format!("-n{limit}"),
-            &format!("--pretty=format:{fmt}"),
-        ])
-        .output()
-        .map_err(|e| format!("git log: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).to_string());
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut entries = Vec::new();
-    for line in stdout.lines() {
-        let parts: Vec<&str> = line.split(sep).collect();
-        if parts.len() != 6 { continue; }
-        entries.push(CommitEntry {
-            hash: parts[0].to_string(),
-            short_hash: parts[1].to_string(),
-            author: parts[2].to_string(),
-            email: parts[3].to_string(),
-            timestamp: parts[4].parse().unwrap_or(0),
-            subject: parts[5].to_string(),
-        });
-    }
-    Ok(entries)
-}
-
-/// `git config --get remote.origin.url` (or empty when no remote).
-pub fn remote_url(path: &Path) -> Result<String, String> {
-    let out = std::process::Command::new("git")
-        .args(["-C", &path.to_string_lossy(), "config", "--get", "remote.origin.url"])
-        .output()
-        .map_err(|e| format!("git config: {e}"))?;
-    if !out.status.success() {
-        return Ok(String::new());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-/// `git add <files> && git commit -m <message>`. Returns the new commit hash.
-pub fn commit(path: &Path, message: &str, files: Option<&[String]>) -> Result<String, String> {
-    if let Some(files) = files {
-        if !files.is_empty() {
-            let mut cmd = std::process::Command::new("git");
-            cmd.args(["-C", &path.to_string_lossy(), "add", "--"]);
-            for f in files {
-                cmd.arg(f);
-            }
-            let out = cmd.output().map_err(|e| format!("git add: {e}"))?;
-            if !out.status.success() {
-                return Err(String::from_utf8_lossy(&out.stderr).to_string());
-            }
-        }
-    } else {
-        // files=None means "stage all"
-        let out = std::process::Command::new("git")
-            .args(["-C", &path.to_string_lossy(), "add", "-A"])
-            .output()
-            .map_err(|e| format!("git add -A: {e}"))?;
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).to_string());
-        }
-    }
-    let out = std::process::Command::new("git")
-        .args(["-C", &path.to_string_lossy(), "commit", "-m", message])
-        .output()
-        .map_err(|e| format!("git commit: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).to_string());
-    }
-    // Get the new HEAD hash.
-    let head = std::process::Command::new("git")
-        .args(["-C", &path.to_string_lossy(), "rev-parse", "HEAD"])
-        .output()
-        .map_err(|e| format!("git rev-parse: {e}"))?;
-    Ok(String::from_utf8_lossy(&head.stdout).trim().to_string())
-}
-
-/// `git push` (no upstream setup — assumes the branch already has one).
-pub fn push(path: &Path) -> Result<(), String> {
-    let out = std::process::Command::new("git")
-        .args(["-C", &path.to_string_lossy(), "push"])
-        .output()
-        .map_err(|e| format!("git push: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).to_string());
-    }
-    Ok(())
 }

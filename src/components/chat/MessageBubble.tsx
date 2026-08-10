@@ -2,20 +2,61 @@
 // left-aligned. Renders markdown via react-markdown with syntax highlighting.
 // Streaming token-by-token updates are debounced to ~50ms by the caller —
 // this component simply accepts a `content: string` prop and renders it.
-import { useCallback, useMemo, useState } from "react";
+//
+// BUNDLE: react-syntax-highlighter + its Prism/refractor language pack (~700
+// KB raw / ~230 KB gzip) is the single biggest dep in the main chunk. It's
+// only needed once a code block or tool step actually renders, NOT on the
+// empty welcome screen — so we lazy-load it via dynamic import() in
+// StepCodeHighlighter below. That moves it out of the initial bundle.
+import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import "katex/dist/katex.min.css";
+// NOTE: katex.min.css is imported at app entry (src/main.tsx) so this file
+// does NOT re-import it — see PERFORMANCE_AUDIT.md C8. Doing it twice would
+// ship two copies in the lazy MessageBubble chunk.
 import type { ChatMessage } from "../../lib/ipc";
+import { readArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { parseUnifiedDiff } from "../../lib/diff";
-import { InlineDiagram } from "./InlineDiagram";
-import { MermaidDiagram } from "./MermaidDiagram";
+import { openInBrowserPane } from "../../lib/openBrowserPane";
+import { DiffCard, type EditPayload } from "./DiffCard";
+// InlineDiagram (vector diagrams) and MermaidDiagram (mermaid + its
+// highlight.js language pack) are rarely seen on the initial chat surface and
+// pull in heavy dependencies; lazy-load both so the main bundle stays small.
+// The mermaid bundle in particular drags ~1.4 MB of diagram + language-
+// definition code that the empty welcome screen never touches. DiffCard stays
+// eager: it's a tiny component (no heavy deps) and the per-edit review card
+// must render synchronously with the rest of the message.
+const InlineDiagram = lazy(() => import("./InlineDiagram").then((m) => ({ default: m.InlineDiagram })));
+const MermaidDiagram = lazy(() => import("./MermaidDiagram").then((m) => ({ default: m.MermaidDiagram })));
 import { MessageAttachments, parseAttachments } from "./MessageAttachments";
 import { useSyntaxTheme } from "../../hooks/useSyntaxTheme";
+import type { SyntaxHighlighterProps, SyntaxStyle } from "../../lib/syntaxHighlighter";
+import { loadSyntaxHighlighter } from "../../lib/syntaxHighlighter";
+
+type SyntaxHighlighterComponent = (props: SyntaxHighlighterProps) => React.ReactNode;
+
+/** Hook that loads a lazy component once (on mount) and resolves it via the
+ *  provided async loader. The component stays null until the dynamic import
+ *  finishes, then re-renders with the loaded module. Safe across StrictMode
+ *  double-invoke (the loader memoizes internally). */
+function useLazyComponent<T>(
+  loader: () => Promise<T>,
+  onReady: (value: T) => void,
+) {
+  useEffect(() => {
+    let mounted = true;
+    void loader().then((mod) => {
+      if (mounted) onReady(mod);
+    });
+    return () => {
+      mounted = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+}
 
 interface Props {
   message: ChatMessage;
@@ -34,6 +75,9 @@ interface Props {
   artifacts?: ChatArtifact[];
   /** Open an artifact in the preview pane (used by the inline chips). */
   onPreviewArtifact?: (artifact: ChatArtifact) => void;
+  /** Numeric message id, emitted as `data-msg-id` on the root bubble so the
+   *  TurnNavigator can scroll to it. Omitted on the live streaming bubble. */
+  msgId?: number;
 }
 
 // --- Inline SVG icons (Claude-style, stroke-based, currentColor). ---
@@ -159,15 +203,20 @@ function MessageArtifacts({
   return (
     <>
       {visuals.map((a) => (
-        <InlineDiagram
-          key={a.path}
-          artifact={a}
-          onFallback={() => (
-            <div className="chat-msg-artifacts">
-              <ArtifactChip artifact={a} onPreviewArtifact={onPreviewArtifact} />
-            </div>
-          )}
-        />
+        <Suspense key={a.path} fallback={
+          <div className="chat-msg-artifacts">
+            <ArtifactChip artifact={a} onPreviewArtifact={onPreviewArtifact} />
+          </div>
+        }>
+          <InlineDiagram
+            artifact={a}
+            onFallback={() => (
+              <div className="chat-msg-artifacts">
+                <ArtifactChip artifact={a} onPreviewArtifact={onPreviewArtifact} />
+              </div>
+            )}
+          />
+        </Suspense>
       ))}
       {chips.length > 0 && (
         <div className="chat-msg-artifacts" aria-label="Generated files">
@@ -313,6 +362,11 @@ interface ToolData {
   detail?: string;
   lang?: string;
   code?: string;
+  /** File-edit payloads (write_file / edit_file) carry the target path and
+   *  the old/new content so the UI can render an inline diff review card
+   *  (mockup 01 callout 5). See `tool_block` in src-tauri/src/chat/proto.rs. */
+  path?: string;
+  edit?: EditPayload;
   /** Optional result text rendered once the call completes. The backend
    *  doesn't populate this today (tool output is summarized by the model in
    *  the following narration), but the expandable step detail shows args/code
@@ -379,27 +433,78 @@ function ThinkingBlock({ thinking, done }: { thinking: string; done: boolean }) 
         <span className="chat-thinking-icon">›</span>
         {done ? "Thinking" : "Thinking…"}
       </button>
-      {open && <div className="chat-thinking-body">{thinking}</div>}
+      {open && (
+        <div className="chat-thinking-body" onClick={() => setOpen(false)}>
+          {thinking}
+        </div>
+      )}
     </div>
   );
 }
 
-/** Minimal text glyph for a tool step, keyed by the backend-provided `kind`.
- *  Uses monochrome symbols instead of colorful emoji for the Codex aesthetic. */
-function toolGlyph(kind?: string): string {
+function SearchIcon() {
+  return (
+    <svg {...iconProps} aria-hidden="true">
+      <circle cx="11" cy="11" r="8" />
+      <path d="m21 21-4.3-4.3" />
+    </svg>
+  );
+}
+
+function GlobeIcon() {
+  return (
+    <svg {...iconProps} aria-hidden="true">
+      <circle cx="12" cy="12" r="10" />
+      <path d="M2 12h20" />
+      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+    </svg>
+  );
+}
+
+function TerminalIcon() {
+  return (
+    <svg {...iconProps} aria-hidden="true">
+      <polyline points="4 17 10 11 4 5" />
+      <line x1="12" y1="19" x2="20" y2="19" />
+    </svg>
+  );
+}
+
+function WrenchIcon() {
+  return (
+    <svg {...iconProps} aria-hidden="true">
+      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+    </svg>
+  );
+}
+
+/** Per-tool-kind icon for an activity step (Cursor-style: recognizable glyph
+ *  per action instead of one uniform dot). */
+function ToolIcon({ kind }: { kind?: string }) {
   switch (kind) {
     case "search":
-      return "◦";
+      return <SearchIcon />;
     case "web":
-      return "◦";
     case "browser":
-      return "◦";
+      return <GlobeIcon />;
     case "file":
+      return <FileIcon />;
     case "code":
-      return "◦";
+      return <TerminalIcon />;
     default:
-      return "◦";
+      return <WrenchIcon />;
   }
+}
+
+/** Step status: spinner while the call runs, green check once it completes —
+ *  the at-a-glance progress signal Cursor gives every tool row. */
+function StepStatusIcon({ done }: { done: boolean }) {
+  if (!done) return <span className="chat-activity-spinner" aria-label="running" />;
+  return (
+    <span className="chat-step-done-icon" aria-label="done">
+      <CheckIcon />
+    </span>
+  );
 }
 
 /** A short, *specific* label for one tool step — rendered in monospace like a
@@ -412,6 +517,11 @@ function stepLabel(data: ToolData | null): string {
   if (!data) return "working…";
   const title = data.title?.trim() || "working…";
   const detail = data.detail?.trim();
+  // Shell commands read terminal-style, like Cursor's command rows.
+  if (data.kind === "code" && data.code) {
+    const cmd = data.code.trim();
+    return `$ ${cmd.length > 90 ? `${cmd.slice(0, 90)}…` : cmd}`;
+  }
   if (!detail) return title;
   // For code-producing tools the "detail" is sometimes the full code body —
   // too long for a row label; in that case keep the title.
@@ -502,9 +612,42 @@ function InlineDiff({ diffText }: { diffText: string }) {
  *  tools. File edits that contain a unified diff render as an inline diff. */
 /** Syntax highlighter component for tool-step and markdown code blocks.
  *  Uses the current theme's CSS custom properties (--syntax-*) for token
- *  colors, switching instantly when data-theme changes. */
+ *  colors, switching instantly when data-theme changes.
+ *
+ *  BUNDLE: the Prism highlighter + language pack is ~700 KB and only needed
+ *  once a code block renders — so we load it via dynamic import() on first
+ *  use. Before then we render the raw code in a <pre> (styled the same) so
+ *  the user sees content immediately; it upgrades to highlighted once the
+ *  chunk lands. */
 function StepCodeHighlighter({ code, language }: { code: string; language: string }) {
   const theme = useSyntaxTheme();
+  // `comp` resolves to the lazy-loaded Prism component after first use.
+  const [comp, setComp] = useState<SyntaxHighlighterComponent | null>(null);
+  // The loaded value IS a function component — pass it via an updater fn,
+  // otherwise React treats it as a setState updater and calls it with the
+  // previous state (null) as props, crashing inside the highlighter.
+  useLazyComponent(loadSyntaxHighlighter, (c) => setComp(() => c));
+  if (!comp) {
+    // Fallback <pre> before the chunk loads — styled to match the highlighter's
+    // output so there's no layout shift when it upgrades.
+    return (
+      <pre
+        className="code-block-pre-fallback"
+        style={{
+          margin: 0,
+          background: "transparent",
+          padding: "12px 16px",
+          fontSize: "12px",
+          fontFamily: "var(--font-mono)",
+          lineHeight: 1.5,
+          overflowX: "auto",
+        }}
+      >
+        <code>{code}</code>
+      </pre>
+    );
+  }
+  const SyntaxHighlighter = comp;
   return (
     <SyntaxHighlighter
       style={theme}
@@ -529,11 +672,9 @@ function StepCodeHighlighter({ code, language }: { code: string; language: strin
 function ActivityStepRow({
   step,
   done,
-  index,
 }: {
   step: ActivityStep;
   done: boolean;
-  index: number;
 }) {
   const [open, setOpen] = useState(false);
   const hasBody = Boolean(
@@ -547,8 +688,12 @@ function ActivityStepRow({
         title={hasBody ? (open ? "Hide details" : "Show details") : undefined}
         disabled={!hasBody}
       >
-        <span className="chat-step-index">{index + 1}</span>
-        <span className="chat-step-icon">{toolGlyph(step.data?.kind)}</span>
+        <span className="chat-step-status">
+          <StepStatusIcon done={done} />
+        </span>
+        <span className="chat-step-icon">
+          <ToolIcon kind={step.data?.kind} />
+        </span>
         <span className="chat-step-label">{stepLabel(step.data)}</span>
         {hasBody && (
           <span className={`chat-thinking-chevron${open ? " open" : ""}`}>›</span>
@@ -605,6 +750,14 @@ function ActivitySummary({ group }: { group: ActivityGroup }) {
   const [open, setOpen] = useState(false);
   const live = group.steps.some((s) => !s.done);
   const summary = summarizeGroup(group.steps);
+  // While running, name the current action (Cursor-style "Reading App.tsx…")
+  // instead of a generic "working…" — the specific step is the useful signal.
+  const currentStep = live ? [...group.steps].reverse().find((s) => !s.done) : undefined;
+  const liveLabel = currentStep
+    ? currentStep.think != null
+      ? "Thinking…"
+      : `${stepLabel(currentStep.data)}…`
+    : "working…";
   return (
     <div className={`chat-activity${live ? " live" : ""}`}>
       <button
@@ -613,11 +766,11 @@ function ActivitySummary({ group }: { group: ActivityGroup }) {
         title={open ? "Collapse activity" : "Show activity steps"}
       >
         <span className="chat-activity-icon" aria-hidden="true">
-          {live ? <span className="chat-activity-spinner" /> : "◦"}
+          <StepStatusIcon done={!live} />
         </span>
-        <span className="chat-activity-summary">{live ? "working…" : summary}</span>
+        <span className="chat-activity-summary">{live ? liveLabel : summary}</span>
         <span className={`chat-thinking-chevron${open ? " open" : ""}`}>›</span>
-        <span className="chat-activity-count">{group.steps.length}</span>
+        <span className="chat-activity-count">{group.steps.length} steps</span>
       </button>
       {open && (
         <div className="chat-activity-steps">
@@ -634,7 +787,6 @@ function ActivitySummary({ group }: { group: ActivityGroup }) {
                 key={i}
                 step={step}
                 done={step.done}
-                index={i}
               />
             ),
           )}
@@ -742,6 +894,58 @@ function ReactIcon() {
   );
 }
 
+/** Renders `![alt](src)` inside assistant markdown. Remote/data/blob URLs
+ *  render directly. LOCAL file references — what the agent produces when it
+ *  saves a screenshot or image to disk (`C:\…`, `file:///…`, `/…`) — can never
+ *  work as an <img> src here: the CSP allows only 'self' data: blob: https:,
+ *  no asset protocol is registered, and a bare path resolves against the app
+ *  origin and 404s. So local refs load their bytes over IPC (the same
+ *  read_artifact_preview the canvas uses) and render as a data URI. */
+function ChatImage({ src, alt }: { src: string; alt?: string }) {
+  const isRemote = /^(https?:|data:|blob:)/i.test(src);
+  const [dataUri, setDataUri] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (isRemote) return;
+    let stale = false;
+    let path = src.trim();
+    const fileMatch = /^file:\/\/\/?(.*)$/i.exec(path);
+    if (fileMatch) path = fileMatch[1];
+    try {
+      path = decodeURIComponent(path);
+    } catch {
+      // Not URL-encoded (e.g. a raw Windows path with %) — keep it as-is.
+    }
+    // "file:///C:/…" leaves a leading slash before the drive letter.
+    if (/^\/[A-Za-z]:\//.test(path)) path = path.slice(1);
+    void readArtifactPreview(path)
+      .then((preview) => {
+        if (stale) return;
+        if (preview?.kind === "image" && preview.dataUri) setDataUri(preview.dataUri);
+        else setFailed(true);
+      })
+      .catch(() => {
+        if (!stale) setFailed(true);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [src, isRemote]);
+
+  if (isRemote || dataUri) {
+    return <img src={isRemote ? src : dataUri!} alt={alt ?? ""} />;
+  }
+  if (failed) {
+    return (
+      <span style={{ color: "var(--muted, #888)", fontSize: "0.85em" }}>
+        {alt || "Image"} — preview unavailable ({src})
+      </span>
+    );
+  }
+  return <span style={{ color: "var(--muted, #888)", fontSize: "0.85em" }}>Loading image…</span>;
+}
+
 /** Renders a markdown string with syntax-highlighted code fences, mermaid
  *  diagrams and glass-styled links — the assistant's normal answer body. */
 function Markdown({
@@ -781,7 +985,11 @@ function Markdown({
 
             // Mermaid diagrams render as inline SVG, not as highlighted text.
             if (match && match[1] === "mermaid") {
-              return <MermaidDiagram code={codeString} />;
+              return (
+                <Suspense fallback={<pre className="chat-markdown-mermaid-fallback">{codeString}</pre>}>
+                  <MermaidDiagram code={codeString} />
+                </Suspense>
+              );
             }
 
             // React/JSX artifacts open as a live preview in the side pane
@@ -807,14 +1015,32 @@ function Markdown({
               </div>
             );
           },
-          // Render links with target=_blank and glass-appropriate styling.
+          // Images: remote URLs render as-is; local file paths (agent-saved
+          // screenshots/images) are loaded over IPC into a data URI — see
+          // ChatImage for why a bare path can never render in this webview.
+          img({ src, alt }) {
+            return <ChatImage src={typeof src === "string" ? src : ""} alt={alt} />;
+          },
+          // Links open in the built-in browser pane, NOT the system browser:
+          // in a Tauri webview a target=_blank navigation falls through to the
+          // OS default handler. Intercept the click and route it to the pane.
           a({ href, children }) {
+            const isHttp = !!href && /^https?:\/\//i.test(href);
             return (
               <a
                 href={href}
                 target="_blank"
                 rel="noopener noreferrer"
                 style={{ color: "var(--accent)" }}
+                title={isHttp ? `${href}\n(opens in the built-in browser)` : href}
+                onClick={
+                  isHttp
+                    ? (e) => {
+                        e.preventDefault();
+                        openInBrowserPane(href!);
+                      }
+                    : undefined
+                }
               >
                 {children}
               </a>
@@ -850,14 +1076,16 @@ interface ActivityGroup {
 }
 
 /** A render block: either a standalone text/think segment (rendered as
- *  before) or a collapsed activity group spanning a contiguous tool run. */
+ *  before), a collapsed activity group spanning a contiguous tool run, or an
+ *  inline diff review card for a file-edit tool call (mockup 01 callout 5). */
 type Block =
   | { kind: "text"; text: string }
   | { kind: "think"; text: string; done: boolean }
-  | { kind: "activity"; group: ActivityGroup };
+  | { kind: "activity"; group: ActivityGroup }
+  | { kind: "diff"; step: ActivityStep };
 
-/** Walk the parsed segments and collapse ALL of a turn's tool activity into a
- *  single ActivityGroup block — including any `<think>` reasoning interludes,
+/** Walk the parsed segments and collapse the turn's tool activity into
+ *  ActivityGroup blocks — including any `<think>` reasoning interludes,
  *  which become think steps inside the group rather than breaking it (the old
  *  break-at-think rule produced one top-level activity block + one "Thought
  *  process" block per tool call, scrolling forever on multi-step tasks).
@@ -865,8 +1093,11 @@ type Block =
  *  Boundary rules:
  *  - Text before the first tool/think renders ABOVE the container as markdown.
  *  - A group starts at the first `tool` or `think` segment and absorbs every
- *    following `tool`/`think`/`text` segment to the end of the message —
- *    at most ONE activity block per turn.
+ *    following `tool`/`think`/`text` segment — except file-edit tool calls
+ *    (`kind: "edit"`), which break out into their own inline diff review card
+ *    so an edit is reviewable at a glance instead of buried in the collapsed
+ *    group. A diff card flushes the in-progress group, so a turn with edits
+ *    renders as alternating activity/diff blocks in call order.
  *  - Mid-run text is narration: it folds into the next step's `before`.
  *  - Text trailing the last tool/think is the model's synthesized answer and
  *    renders OUTSIDE the group as markdown, after the summary.
@@ -884,9 +1115,17 @@ function groupSegments(segments: Segment[]): Block[] {
   }
 
   const blocks: Block[] = [];
-  const steps: ActivityStep[] = [];
+  let steps: ActivityStep[] = [];
   let pendingText: string | null = null; // narration held for the next step
   let started = false;
+
+  // Close out the in-progress activity group (a diff card splits the run).
+  const flushSteps = () => {
+    if (steps.length > 0) {
+      blocks.push({ kind: "activity", group: { steps } });
+      steps = [];
+    }
+  };
 
   for (const seg of segments) {
     if (seg.type === "text" && !started) {
@@ -896,12 +1135,18 @@ function groupSegments(segments: Segment[]): Block[] {
     }
     if (seg.type === "tool") {
       started = true;
-      steps.push({
+      const step: ActivityStep = {
         data: seg.data,
         done: seg.done,
         before: pendingText ?? undefined,
-      });
+      };
       pendingText = null;
+      if (seg.data?.kind === "edit" && seg.data.path && seg.data.edit) {
+        flushSteps();
+        blocks.push({ kind: "diff", step });
+      } else {
+        steps.push(step);
+      }
       continue;
     }
     if (seg.type === "think") {
@@ -924,16 +1169,14 @@ function groupSegments(segments: Segment[]): Block[] {
     pendingText = (pendingText ?? "") + seg.text;
   }
 
-  if (steps.length > 0) {
-    blocks.push({ kind: "activity", group: { steps } });
-  }
+  flushSteps();
   if (pendingText != null && pendingText.trim().length > 0) {
     blocks.push({ kind: "text", text: pendingText });
   }
   return blocks;
 }
 
-export function MessageBubble({
+function MessageBubbleInner({
   message,
   live,
   onEdit,
@@ -941,6 +1184,7 @@ export function MessageBubble({
   onDelete,
   artifacts,
   onPreviewArtifact,
+  msgId,
 }: Props) {
   const isUser = message.role === "user";
 
@@ -982,7 +1226,7 @@ export function MessageBubble({
   const blocks = isUser ? null : groupSegments(segments);
 
   return (
-    <div className={`chat-bubble${isUser ? " user" : " assistant"}`}>
+    <div className={`chat-bubble${isUser ? " user" : " assistant"}`} data-msg-id={msgId}>
       {msgAttachments.length > 0 && <MessageAttachments attachments={msgAttachments} />}
       <div className="chat-bubble-inner">
         {isUser
@@ -992,6 +1236,13 @@ export function MessageBubble({
           : blocks!.map((b, i) =>
               b.kind === "activity" ? (
                 <ActivitySummary key={i} group={b.group} />
+              ) : b.kind === "diff" ? (
+                <Fragment key={i}>
+                  {b.step.before && b.step.before.trim().length > 0 && (
+                    <Markdown content={b.step.before} onPreviewArtifact={onPreviewArtifact} />
+                  )}
+                  <DiffCard path={b.step.data!.path!} edit={b.step.data!.edit!} done={b.step.done} />
+                </Fragment>
               ) : b.kind === "think" ? (
                 b.text.length > 0 ? (
                   <ThinkingBlock key={i} thinking={b.text} done={b.done} />
@@ -1015,3 +1266,10 @@ export function MessageBubble({
     </div>
   );
 }
+
+// Memoized: a bubble re-parses its markdown (react-markdown + katex) on every
+// render, so re-rendering the whole list on each streaming token or composer
+// keystroke made long chats laggy. ChatView keeps the `items` array (and the
+// per-item callbacks) reference-stable via useMemo, so an unchanged bubble
+// now skips re-render entirely.
+export const MessageBubble = memo(MessageBubbleInner);

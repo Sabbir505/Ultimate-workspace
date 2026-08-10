@@ -24,7 +24,8 @@ fn map_chat_session(row: &rusqlite::Row) -> rusqlite::Result<ChatSession> {
         // NULL = no agent picked yet (fresh chat); otherwise "builtin" |
         // "local" | "harness:<id>".
         agent: row.get::<_, Option<String>>("agent")?,
-        // NULL = project-less chat; otherwise a projects.id.
+        // NULL = unbound (shows in the flat "Chat History" list); otherwise the
+        // chat is nested under this project's expandable sidebar row.
         project_id: row.get::<_, Option<String>>("project_id")?,
     })
 }
@@ -73,9 +74,9 @@ pub fn create_chat_session(
     let now = now_ts();
     let id = new_id();
     conn.execute(
-        "INSERT INTO chat_sessions (id, title, provider, model, project_id, created_at, last_active_at, watch_mode)
-         VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?5, NULL)",
-        params![id, provider, model, project_id, now],
+        "INSERT INTO chat_sessions (id, title, provider, model, created_at, last_active_at, watch_mode, project_id)
+         VALUES (?1, NULL, ?2, ?3, ?4, ?4, NULL, ?5)",
+        params![id, provider, model, now, project_id],
     )?;
     conn.query_row(
         "SELECT * FROM chat_sessions WHERE id = ?1",
@@ -84,26 +85,8 @@ pub fn create_chat_session(
     )
 }
 
-pub fn get_chat_session(conn: &Connection, chat_session_id: &str) -> DbResult<Option<ChatSession>> {
-    conn.query_row(
-        "SELECT * FROM chat_sessions WHERE id = ?1",
-        params![chat_session_id],
-        map_chat_session,
-    )
-    .optional()
-}
-
-pub fn delete_chat_session(conn: &Connection, chat_session_id: &str) -> DbResult<()> {
-    // FK cascade handles chat_messages.
-    conn.execute(
-        "DELETE FROM chat_sessions WHERE id = ?1",
-        params![chat_session_id],
-    )?;
-    Ok(())
-}
-
-/// Bind (or unbind with `None`) a chat session to a project. Drives the
-/// chat's nesting under the project's expandable sidebar row.
+/// Bind (or unbind with `None`) a chat session to a project. Drives the chat's
+/// nesting under the project's expandable sidebar row.
 pub fn set_chat_session_project(
     conn: &Connection,
     chat_session_id: &str,
@@ -126,11 +109,28 @@ pub fn delete_chat_sessions_for_project(conn: &Connection, project_id: &str) -> 
     Ok(n)
 }
 
-/// Delete every session that has no messages — the empty "Untitled" rows
-/// left behind when the app (or the user) closed a brand-new chat that
-/// was never typed into. `keep` protects the session the caller is about
-/// to select; starred sessions are never swept. Returns the number of
-/// rows deleted.
+pub fn get_chat_session(conn: &Connection, chat_session_id: &str) -> DbResult<Option<ChatSession>> {
+    conn.query_row(
+        "SELECT * FROM chat_sessions WHERE id = ?1",
+        params![chat_session_id],
+        map_chat_session,
+    )
+    .optional()
+}
+
+pub fn delete_chat_session(conn: &Connection, chat_session_id: &str) -> DbResult<()> {
+    // FK cascade handles chat_messages.
+    conn.execute(
+        "DELETE FROM chat_sessions WHERE id = ?1",
+        params![chat_session_id],
+    )?;
+    Ok(())
+}
+
+/// Delete every session that has no messages — the empty "Untitled" rows left
+/// behind when the app (or the user) closed a brand-new chat that was never
+/// typed into. `keep` protects the session the caller is about to select;
+/// starred sessions are never swept. Returns the number of rows deleted.
 pub fn delete_empty_chat_sessions(conn: &Connection, keep: Option<&str>) -> DbResult<usize> {
     let n = conn.execute(
         "DELETE FROM chat_sessions
@@ -445,6 +445,32 @@ mod tests {
         delete_chat_session(&conn, &cs.id).unwrap();
         assert!(get_chat_session(&conn, &cs.id).unwrap().is_none());
         assert!(list_chat_messages(&conn, &cs.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_empty_sessions_sweeps_only_messageless_unstarred() {
+        let conn = super::super::mem();
+        let empty_a = create_chat_session(&conn, "openai", "gpt-4o", None).unwrap();
+        let empty_b = create_chat_session(&conn, "openai", "gpt-4o", None).unwrap();
+        let empty_starred = create_chat_session(&conn, "openai", "gpt-4o", None).unwrap();
+        set_chat_session_starred(&conn, &empty_starred.id, true).unwrap();
+        let with_msgs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        add_chat_message(&conn, &with_msgs.id, "user", "hello", None, None, None, None, None, None, None, None, None).unwrap();
+
+        // Keep empty_a (the one being restored) — sweep the rest.
+        let n = delete_empty_chat_sessions(&conn, Some(&empty_a.id)).unwrap();
+        assert_eq!(n, 1, "only empty_b should be swept");
+        assert!(get_chat_session(&conn, &empty_a.id).unwrap().is_some());
+        assert!(get_chat_session(&conn, &empty_b.id).unwrap().is_none());
+        assert!(get_chat_session(&conn, &empty_starred.id).unwrap().is_some());
+        assert!(get_chat_session(&conn, &with_msgs.id).unwrap().is_some());
+
+        // With no keep, remaining empties (except starred) go too.
+        let n = delete_empty_chat_sessions(&conn, None).unwrap();
+        assert_eq!(n, 1);
+        assert!(get_chat_session(&conn, &empty_a.id).unwrap().is_none());
+        assert!(get_chat_session(&conn, &empty_starred.id).unwrap().is_some());
+        assert!(get_chat_session(&conn, &with_msgs.id).unwrap().is_some());
     }
 
     #[test]

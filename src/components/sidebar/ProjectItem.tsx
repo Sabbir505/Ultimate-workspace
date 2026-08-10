@@ -40,9 +40,10 @@ export function ProjectItem({ project }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
 
   // Sync worktree modal state into UI store so native webviews hide.
+  // Registered under OUR id (M22) — see ui.ts setModalOpen.
   useEffect(() => {
-    setModalOpen(worktreeOpen);
-    return () => { setModalOpen(false); };
+    setModalOpen("project-item:worktree", worktreeOpen);
+    return () => { setModalOpen("project-item:worktree", false); };
   }, [worktreeOpen, setModalOpen]);
 
   useEffect(() => {

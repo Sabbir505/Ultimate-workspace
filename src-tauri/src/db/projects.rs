@@ -43,8 +43,9 @@ pub fn add_project(conn: &Connection, path: &str, name: &str, is_git_repo: bool)
 }
 
 /// Also removes the project's sessions, their cost events, quick actions,
-/// secret key rows, and workspaces (CONTRACT.md). Foreign keys have no ON DELETE
-/// CASCADE in the PRD schema, so the cleanup is explicit here.
+/// secret key rows, workspaces (CONTRACT.md), and chat sessions nested under
+/// the project in the sidebar. Foreign keys have no ON DELETE CASCADE in the
+/// PRD schema, so the cleanup is explicit here.
 pub fn remove_project(conn: &Connection, project_id: &str) -> DbResult<()> {
     conn.execute(
         "DELETE FROM cost_events WHERE session_id IN (SELECT id FROM sessions WHERE project_id = ?1)",
@@ -54,6 +55,8 @@ pub fn remove_project(conn: &Connection, project_id: &str) -> DbResult<()> {
     conn.execute("DELETE FROM quick_actions WHERE project_id = ?1", params![project_id])?;
     conn.execute("DELETE FROM project_secrets WHERE project_id = ?1", params![project_id])?;
     conn.execute("DELETE FROM workspaces WHERE project_id = ?1", params![project_id])?;
+    // Chat messages cascade off chat_sessions via FK ON DELETE CASCADE.
+    let _ = super::chat::delete_chat_sessions_for_project(conn, project_id);
     conn.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
     Ok(())
 }

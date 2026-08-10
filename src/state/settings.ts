@@ -4,6 +4,7 @@
 import { create } from "zustand";
 import { getSetting, setSetting } from "../lib/ipc";
 import { DEFAULT_KEYBINDINGS, type KeybindingAction, type KeybindingMap } from "../lib/keybindings";
+import { DEFAULT_BROWSER_URL } from "../lib/browserHistory";
 
 export type ThemeSetting = "light" | "dark" | "system";
 
@@ -191,7 +192,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   lastBrowserUrl: (projectId) => {
     const { browserUrls } = get();
     if (projectId && browserUrls.perProject[projectId]) return browserUrls.perProject[projectId];
-    return browserUrls.global || "https://www.google.com";
+    // Older builds persisted "http://localhost:3000" as the global URL; treat
+    // that legacy value as unset so the default (google.com) wins instead.
+    const global = browserUrls.global;
+    if (!global || /^https?:\/\/localhost(:\d+)?\/?$/.test(global)) return DEFAULT_BROWSER_URL;
+    return global;
   },
 
   rememberBrowserUrl: (projectId, url) => {

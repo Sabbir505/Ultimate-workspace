@@ -43,6 +43,10 @@ export function parseUnifiedDiff(diffText: string): DiffFile[] {
   // which the user flagged as the diff being unreadable.
   let oldNo: number | null = null;
   let newNo: number | null = null;
+  // True once the current file's first `@@` hunk header has been seen. Before
+  // that, `--- `/`+++ ` lines are file headers; inside hunk bodies they are
+  // ordinary del/add lines and must not be reparsed as headers (L14).
+  let seenHunk = false;
 
   for (const rawLine of diffText.split("\n")) {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
@@ -53,17 +57,19 @@ export function parseUnifiedDiff(diffText: string): DiffFile[] {
       current.lines.push({ type: "meta", text: line, oldLine: null, newLine: null });
       oldNo = null;
       newNo = null;
+      seenHunk = false;
       continue;
     }
     if (!current) continue;
 
-    if (line.startsWith("--- ")) {
+    if (!seenHunk && line.startsWith("--- ")) {
       current.oldPath = stripPrefix(line.slice(4));
       current.lines.push({ type: "meta", text: line, oldLine: null, newLine: null });
-    } else if (line.startsWith("+++ ")) {
+    } else if (!seenHunk && line.startsWith("+++ ")) {
       current.newPath = stripPrefix(line.slice(4));
       current.lines.push({ type: "meta", text: line, oldLine: null, newLine: null });
     } else if (line.startsWith("@@")) {
+      seenHunk = true;
       const hunk = parseHunkHeader(line);
       oldNo = hunk?.oldStart ?? null;
       newNo = hunk?.newStart ?? null;

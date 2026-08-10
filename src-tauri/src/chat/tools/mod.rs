@@ -384,6 +384,13 @@ const BROWSER_SCROLL_DESC: &str = "Scroll the page in the built-in browser pane 
     vertically by `amount` pixels (negative scrolls up). Use to reveal content \
     below the fold before reading again.";
 
+const BROWSER_SCREENSHOT_DESC: &str = "Take a screenshot of the page currently \
+    open in the built-in browser pane. Saves a PNG to the artifacts dir and \
+    returns its path — embed it in your reply as ![screenshot](path) so the \
+    user sees exactly what the page looks like. Use after open_url/browser_click \
+    when you need visual confirmation of the rendered page (layout, dialogs, \
+    error states), or whenever the user asks to see the page.";
+
 const OPEN_URL_DESC: &str = "Open a web page in the app's built-in browser so \
     the user can see it, and return its readable text to you. Use when the user \
     asks to open/show/visit a site, or when it helps to display a page visually \

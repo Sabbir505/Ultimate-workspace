@@ -10,6 +10,7 @@
 // While the diagram is still being created we show "Creating the diagram of
 // <topic>…" where <topic> is a short label guessed from the source.
 import { useEffect, useRef, useState } from "react";
+import { sanitizeSvg } from "../../lib/sanitize";
 
 export interface MermaidDiagramProps {
   /** The raw mermaid source (the text inside the ```mermaid fence). */
@@ -36,7 +37,11 @@ async function loadMermaid(theme: string): Promise<MermaidModule> {
     const isDark = theme === "dark";
     mermaid.initialize({
       startOnLoad: false,
-      securityLevel: "loose",
+      // "antiscript" (not "loose") strips <script> from labels while keeping
+      // htmlLabels/foreignObject working. It is only the FIRST layer: label
+      // HTML still reaches the DOM with inline event handlers intact, so the
+      // rendered SVG is ALSO run through sanitizeSvg() before injection.
+      securityLevel: "antiscript",
       theme: isDark ? "dark" : "default",
       fontFamily: "var(--font-sans)",
       themeVariables: isDark
@@ -85,17 +90,26 @@ async function loadMermaid(theme: string): Promise<MermaidModule> {
 
 /// Normalize the rendered SVG so it displays cleanly in-app: strip the solid
 /// background Mermaid bakes in (so the diagram floats on the app's glass
-/// surface) and pin width/height to the viewBox's pixel size (so node boxes
-/// keep their natural dimensions and node text is never clipped by a forced
-/// shrink-to-fit).
+/// surface) and ensure the viewBox drives scaling so the diagram shrinks to
+/// fit the chat column without clipping node text.
+///
+/// We strip any explicit width/height attributes Mermaid emits and keep only
+/// the viewBox. With a viewBox present, the CSS `max-width: 100%` scales the
+/// SVG down proportionally (the browser preserves aspect ratio from the
+/// viewBox), so wide diagrams shrink-to-fit instead of overflowing with a
+/// scrollbar. Pinning explicit pixel width/height here (as an earlier version
+/// did) fights the CSS: the fixed attributes take precedence over
+/// `width: auto`, which breaks aspect-ratio scaling and produces BOTH x and y
+/// scrollbars on diagrams wider than the column.
 ///
 /// SECURITY: the output of this function is fed to `dangerouslySetInnerHTML`
-/// (see the JSX below). The mermaid renderer runs with `securityLevel:"loose"`
-/// which can emit arbitrary HTML inside `<foreignObject>` for some diagram
-/// types. We don't try to filter the output (that's the renderer's job) but
-/// we cap the input source to bound the work Mermaid does on untrusted model
-/// output, and we wrap the render in a try/catch so a malformed diagram
-/// surfaces a clear error instead of a broken page.
+/// (see the JSX below). Callers must pass the raw mermaid SVG through
+/// `sanitizeSvg` FIRST (mermaid emits label HTML into <foreignObject> for
+/// htmlLabels; event handlers inside it would execute in the app window).
+/// This function then only adjusts presentation, and we cap the input source
+/// to bound the work Mermaid does on untrusted model output, wrapping the
+/// render in a try/catch so a malformed diagram surfaces a clear error
+/// instead of a broken page.
 function normalizeSvg(svg: string): string {
   let out = svg
     // `background: #fff;` / `background-color: ...;` inside the inline <style>.
@@ -107,21 +121,15 @@ function normalizeSvg(svg: string): string {
     .replace(/<rect[^>]*class="[^"]*background[^"]*"[^>]*\/?>/gi, "")
     .replace(/<rect[^>]*fill="(?:white|#ffffff|#fff|#00000000|transparent)"[^>]*\/>/gi, "");
 
-  // Pin width/height to the viewBox's pixel size so diagrams that emit
-  // width="100%" don't shrink-to-fit and clip node text.
-  const viewBoxMatch = out.match(/viewBox="([^"]+)"/);
-  if (viewBoxMatch) {
-    const parts = viewBoxMatch[1].split(/[\s,]+/).map(Number);
-    if (parts.length === 4 && parts.every((n) => Number.isFinite(n))) {
-      const [, , w, h] = parts;
-      out = out.replace(/<svg\b([^>]*)>/, (_m, attrs: string) => {
-        const a = attrs
-          .replace(/\swidth="[^"]*"/i, "")
-          .replace(/\sheight="[^"]*"/i, "");
-        return `<svg${a} width="${w}" height="${h}">`;
-      });
-    }
-  }
+  // Strip explicit width/height so the viewBox (which Mermaid always bakes
+  // in) can drive proportional scaling via CSS max-width. A diagram that
+  // omits a viewBox falls back to its native intrinsic size, which the CSS
+  // still caps via max-width/max-height.
+  out = out.replace(
+    /<svg\b([^>]*)>/,
+    (_m, attrs: string) =>
+      `<svg${attrs.replace(/\swidth="[^"]*"/i, "").replace(/\sheight="[^"]*"/i, "")}>`,
+  );
   return out;
 }
 
@@ -242,7 +250,10 @@ export function MermaidDiagram({ code }: MermaidDiagramProps) {
           // mermaid.render returns { svg, bindFunctions }; we only need svg.
           const result = (await mermaid.render(id, source)) as RenderResult;
           if (cancelled) return;
-          setSvg(normalizeSvg(result.svg));
+          // SECURITY: the source is untrusted model output and the result is
+          // injected via dangerouslySetInnerHTML in the privileged app window.
+          // Sanitize BEFORE normalizeSvg so no onerror/script survives.
+          setSvg(normalizeSvg(sanitizeSvg(result.svg)));
           setError(null);
           setRenderedFrom(source);
         } catch (e) {
@@ -265,9 +276,9 @@ export function MermaidDiagram({ code }: MermaidDiagramProps) {
     : "Creating the diagram…";
 
   // SVG (or error fallback) is injected via dangerouslySetInnerHTML because
-  // mermaid.render returns a pre-built SVG string. securityLevel:"loose" is
-  // required for some diagram features (click events, foreignObject); the
-  // source comes from the model but is rendered in a sandboxed app context.
+  // mermaid.render returns a pre-built SVG string. The SVG has already been
+  // through sanitizeSvg (DOMPurify) at render time, so no scripts or event
+  // handlers from model-authored labels can reach the app window.
   return (
     <div className="chat-mermaid-block">
       <div className="chat-mermaid-body" ref={containerRef}>

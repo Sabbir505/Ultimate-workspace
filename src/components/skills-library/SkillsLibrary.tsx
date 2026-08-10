@@ -28,11 +28,11 @@ export function SkillsLibrary() {
   const [tab, setTab] = useState<Tab>("skills");
 
   return (
-    <div className="view-overlay modal-centered" onPointerDown={(e) => e.target === e.currentTarget && setActiveView("grid")}>
+    <div className="view-overlay modal-centered" onPointerDown={(e) => e.target === e.currentTarget && setActiveView("chat")}>
       <div className="view-panel">
         <div className="view-header">
           <h2>Skills &amp; Loops Library</h2>
-          <button className="ghost" onClick={() => setActiveView("grid")}>
+          <button className="ghost" onClick={() => setActiveView("chat")}>
             ✕
           </button>
         </div>

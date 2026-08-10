@@ -15,6 +15,7 @@ mod commands;
 mod connectors;
 pub mod db;
 mod git;
+mod git_watcher;
 mod harness_adapters;
 mod harness_bundle;
 mod harness_config;
@@ -127,6 +128,22 @@ pub fn run() {
             app.manage(std::sync::Arc::new(
                 commands::local_model_market::DownloadRegistry::default(),
             ));
+            // Git filesystem watcher — drives the `project:fs-changed` Tauri
+            // event that replaces the 4-8s polling loops in
+            // `useGitStatusPolling` / `DevDiffPanel` / `BranchDropdown`. See
+            // src-tauri/src/git_watcher.rs for the design.
+            app.manage(git_watcher::WatcherState::new());
+            {
+                let app_handle = app.handle().clone();
+                let db_state = DbState(Arc::clone(&shared_db));
+                // Defer watcher install slightly so the rest of the setup
+                // (PTY manager, etc.) finishes first — we don't want
+                // watcher events to fire before the frontend is listening.
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    git_watcher::install_all_known(&app_handle, &db_state);
+                });
+            }
 
             // Spawn the mobile relay server on a random localhost port so the
             // companion mobile app can connect and route chat requests through
@@ -204,6 +221,7 @@ pub fn run() {
             commands::pty_cmds::pane_memory,
             commands::pty_cmds::list_harnesses,
             commands::pty_cmds::run_harness_login,
+            commands::pty_cmds::pty_subscribe,
             // native browser panes (child webviews)
             commands::browser_cmds::browser_create,
             commands::browser_cmds::browser_navigate,
@@ -227,6 +245,20 @@ pub fn run() {
             commands::git_cmds::create_worktree,
             commands::git_cmds::get_git_diff,
             commands::git_cmds::get_git_file_diff,
+            commands::git_cmds::list_git_branches,
+            commands::git_cmds::create_git_branch,
+            commands::git_cmds::checkout_git_branch,
+            commands::git_cmds::delete_git_branch,
+            commands::git_cmds::get_git_log,
+            commands::git_cmds::get_remote_url,
+            commands::git_cmds::git_commit,
+            commands::git_cmds::git_push,
+            // git filesystem watcher — installs/uninstalls per-path watchers
+            // that drive the `project:fs-changed` Tauri event. Replaces the
+            // 4-8s polling loops in the frontend. See git_watcher.rs.
+            commands::git_cmds::install_git_watcher,
+            commands::git_cmds::uninstall_git_watcher,
+            commands::git_cmds::refresh_git_watchers,
             // automations (scheduled headless agent runs)
             commands::automation_cmds::list_automations,
             commands::automation_cmds::create_automation,
@@ -274,6 +306,7 @@ pub fn run() {
             commands::chat_cmds::create_chat_session,
             commands::chat_cmds::delete_chat_session,
             commands::chat_cmds::delete_all_chat_sessions,
+            commands::chat_cmds::delete_empty_chat_sessions,
             commands::chat_cmds::delete_chat_message,
             commands::chat_cmds::update_chat_session_title,
             commands::chat_cmds::generate_chat_title,
@@ -283,6 +316,7 @@ pub fn run() {
             commands::chat_cmds::update_chat_session_provider,
             commands::chat_cmds::update_chat_session_watch_mode,
             commands::chat_cmds::update_chat_session_agent,
+            commands::chat_cmds::set_chat_session_project,
             commands::chat_cmds::get_chat_messages,
             commands::chat_cmds::touch_chat_session,
             commands::chat_cmds::send_chat_message,

@@ -248,3 +248,25 @@ pub fn run_harness_login(
     let spec = adapter.login_command();
     pty.0.spawn(&pane_id, None, Some(adapter), Path::new(&cwd), &spec, vec![])
 }
+
+/// Register a typed `Channel<Vec<u8>>` for raw PTY output on this pane. The
+/// reader thread coalesces output into 16ms/64KB frames and sends each
+/// frame as raw bytes through the channel — no JSON serialization, no
+/// UTF-8 lossy conversion. Replaces the legacy `app.emit("pty:output",
+/// PtyOutputEvent { data: String })` path.
+///
+/// The frontend calls this once per pane-open; the channel is held for the
+/// pane's lifetime. When the consumer drops (pane closes, navigation), the
+/// reader thread falls back to `app.emit("pty:output", ...)` automatically
+/// because `Pane.output_channel` is `Option<Channel>`. No-op when the pane
+/// is unknown (the pane may have been killed before the React effect
+/// mounted).
+#[tauri::command]
+pub fn pty_subscribe(
+    pane_id: String,
+    channel: tauri::ipc::Channel<Vec<u8>>,
+    pty: State<PtyState>,
+) -> CmdResult<()> {
+    pty.0.attach_output_channel(&pane_id, channel);
+    Ok(())
+}

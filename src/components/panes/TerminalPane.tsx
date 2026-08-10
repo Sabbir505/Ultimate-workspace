@@ -10,11 +10,12 @@
 //    xterm foreground is white, which is invisible on light glass)
 //  - Activity feed below the terminal: detects ```mermaid, ```html, ```jsx/tsx
 //    blocks in PTY output and renders them as expandable cards.
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { resizePty, safeListen, updateSessionTitle, writePty } from "../../lib/ipc";
+import { ptyChannel } from "../../lib/channels";
 import { respawnPane } from "../../lib/sessionLauncher";
 import { expandSkillCommand } from "../../lib/skillExpansion";
 import { generateSessionTitle } from "../../lib/sessionTitle";
@@ -22,7 +23,13 @@ import { usePanesStore, type Pane } from "../../state/panes";
 import { useProjectsStore } from "../../state/projects";
 import { useSkillsStore } from "../../state/skills";
 import { useSettingsStore } from "../../state/settings";
-import { MermaidDiagram } from "../chat/MermaidDiagram";
+// MermaidDiagram pulls in the heavy mermaid bundle (and its highlight.js
+// language pack) on first render — lazy-load it so the terminal pane (the
+// most common tool-panel tab) doesn't pay that cost on mount. The diagram
+// only appears inside an expanded activity-feed card, so the chunk loads
+// only when a user actually opens a mermaid block from terminal output.
+const MermaidDiagram = lazy(() => import("../chat/MermaidDiagram").then((m) => ({ default: m.MermaidDiagram })));
+import { sanitizeHtml } from "../../lib/sanitize";
 import type { PtyOutputPayload } from "../../types";
 
 const MIN_FONT_SIZE = 8;
@@ -191,12 +198,19 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
         if (p && p.activity !== detected) {
           store.setPaneActivity(paneId, detected);
         }
-        // Scan for new feed blocks in the accumulated buffer.
+        // Scan for new feed blocks in the accumulated buffer (M23): the
+        // rolling 8KB window keeps matched blocks alive for many ticks, so
+        // filter out anything already in the feed by content — otherwise
+        // the same block is re-added every 500ms as a duplicate card.
         const newBlocks = parseFeedBlocks(buf);
         if (newBlocks.length > 0) {
           setFeedItems((prev) => {
-            const merged = [...prev, ...newBlocks];
-            return merged.slice(-MAX_FEED_ITEMS);
+            const existing = new Set(prev.map((b) => `${b.kind}\n${b.code}`));
+            const fresh = newBlocks.filter((b) => !existing.has(`${b.kind}\n${b.code}`));
+            if (fresh.length === 0) return prev;
+            // A block that rolls out of the feed while still inside the 8KB
+            // window can re-appear once — bounded by MAX_FEED_ITEMS churn.
+            return [...prev, ...fresh].slice(-MAX_FEED_ITEMS);
           });
         }
       }, 500);
@@ -204,6 +218,7 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
     return () => {
       void unlisten.then((fn) => fn());
       if (activityTimerRef.current) clearTimeout(activityTimerRef.current);
+      activityTimerRef.current = null;
     };
   }, [paneId]);
 
@@ -259,6 +274,30 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
     });
 
     // Terminal output stream for THIS pane only.
+    //
+    // Perf (PERFORMANCE_AUDIT.md C1, refactor Task 1.1): prefer the typed
+    // `Channel<Vec<u8>>` over the legacy `pty:output` event. The backend
+    // coalesces output into 16ms/64KB frames and sends each frame as raw
+    // bytes (no JSON, no UTF-8 lossy). The Channel is the hot path; the
+    // `safeListen("pty:output", ...)` path remains as a fallback for tests
+    // and headless dev where no consumer subscribed, so the listener gets
+    // re-attached automatically if the Channel path is unavailable.
+    let channelUnsub: (() => void) | null = null;
+    let subscribedChannel: { onmessage: ((frame: number[]) => void) | null } | null = null;
+    void ptyChannel(paneId).then((ch) => {
+      const handler = (frame: number[]) => {
+        if (term) term.write(new Uint8Array(frame));
+      };
+      ch.onmessage = handler;
+      subscribedChannel = ch;
+      channelUnsub = () => {
+        if (subscribedChannel) subscribedChannel.onmessage = null;
+      };
+    }).catch(() => {
+      // Channel unavailable (e.g. Tauri runtime absent in tests); the
+      // safeListen fallback below is already in flight.
+    });
+
     const unlistenOutput = safeListen<PtyOutputPayload>("pty:output", ({ paneId: id, data }) => {
       if (id === paneId) term.write(data);
     });
@@ -371,6 +410,7 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
       container.removeEventListener("contextmenu", onCtxMenu);
       container.removeEventListener("wheel", onWheel);
       dataSub.dispose();
+      if (channelUnsub) channelUnsub();
       void unlistenOutput.then((fn) => fn());
       term.dispose();
       termRef.current = null;
@@ -500,13 +540,15 @@ function FeedCard({ block }: { block: DetectedBlock }) {
       {open && (
         <div className="terminal-feed-card-body">
           {block.kind === "mermaid" ? (
-            <MermaidDiagram code={block.code} />
+            <Suspense fallback={<pre className="terminal-feed-code">{block.code}</pre>}>
+              <MermaidDiagram code={block.code} />
+            </Suspense>
           ) : block.kind === "html" ? (
             <iframe
               className="terminal-feed-iframe"
               title="HTML preview"
               sandbox=""
-              srcDoc={block.code}
+              srcDoc={sanitizeHtml(block.code)}
             />
           ) : (
             <pre className="terminal-feed-code">{block.code}</pre>

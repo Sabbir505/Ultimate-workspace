@@ -1016,6 +1016,18 @@ pre,
   white-space: nowrap;
 }
 
+/* Plan step status variations */
+.git-sidebar-progress-item.progress-completed .git-sidebar-progress-text {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+.git-sidebar-progress-item.progress-failed .git-sidebar-progress-text {
+  color: #ef4444;
+}
+.git-sidebar-progress-item.progress-in_progress .git-sidebar-progress-text {
+  color: #93c5fd; /* blue-300 */
+}
+
 /* Empty-state text inside sections */
 .git-sidebar-empty {
   padding: 4px 8px 8px;

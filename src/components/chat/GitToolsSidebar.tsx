@@ -23,6 +23,7 @@ import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { BranchDropdown } from "./BranchDropdown";
 import { CommitModal } from "./CommitModal";
+import { usePlanTracker } from "../../hooks/usePlanTracker";
 
 export function GitToolsSidebar() {
   const boundProjectId = useChatStore((s) =>
@@ -34,6 +35,12 @@ export function GitToolsSidebar() {
   const tasks = useChatStore((s) =>
     s.activeChatSessionId ? s.tasks[s.activeChatSessionId] ?? {} : {},
   );
+  const planSteps = useChatStore((s) =>
+    s.activeChatSessionId ? s.planSteps[s.activeChatSessionId] ?? [] : [],
+  );
+
+  // Activate plan-step parsing and completion tracking
+  usePlanTracker();
 
   // Tool panel / UI store hooks — select individually to avoid churn.
   const setToolPanelTab = useUiStore((s) => s.setToolPanelTab);
@@ -170,6 +177,10 @@ export function GitToolsSidebar() {
   const taskList = Object.values(tasks);
   const completed = taskList.filter((t) => t.state === "completed");
   const totalTasks = taskList.length;
+
+  // Plan step counts
+  const totalPlanStepsNum = planSteps.length;
+  const completedPlanStepsNum = planSteps.filter((s) => s.status === "completed").length;
 
   // Open the ToolPanel Changes tab when the "changes" row is clicked.
   const openChanges = () => {
@@ -312,27 +323,61 @@ export function GitToolsSidebar() {
         )}
       </div>
 
-      {/* Progress section */}
+      {/* Progress section — plan steps + completed background tasks */}
       <div className="git-sidebar-section">
         <div className="git-sidebar-section-header">
           <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
             <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
           </svg>
           <span className="git-sidebar-section-title">
-            Progress {completed.length}/{totalTasks || completed.length}
+            Progress {completedPlanStepsNum + completed.length}/{totalPlanStepsNum + totalTasks || completedPlanStepsNum + completed.length}
           </span>
         </div>
-        {completed.length === 0 ? (
-          <div className="git-sidebar-empty">No completed tasks.</div>
+        {planSteps.length === 0 && completed.length === 0 ? (
+          <div className="git-sidebar-empty">No progress yet.</div>
         ) : (
-          completed.map((t) => (
-            <div key={t.taskId} className="git-sidebar-progress-item">
-              <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
-                <path d="M20 6 9 17l-5-5" />
-              </svg>
-              <span className="git-sidebar-progress-text">{t.message || t.kind}</span>
-            </div>
-          ))
+          <>
+            {/* Plan steps — all statuses */}
+            {planSteps.map((step) => (
+              <div
+                key={step.stepId}
+                className={`git-sidebar-progress-item progress-${step.status}`}
+                title={step.status === "failed" ? (step.failedReason ?? "Failed") : step.label}
+              >
+                {step.status === "completed" ? (
+                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M20 6 9 17l-5-5" />
+                  </svg>
+                ) : step.status === "in_progress" ? (
+                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#3b82f6" strokeWidth={2} strokeLinecap="round">
+                    <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+                  </svg>
+                ) : step.status === "failed" ? (
+                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth={2.5} strokeLinecap="round">
+                    <path d="M18 6 6 18M6 6l12 12" />
+                  </svg>
+                ) : (
+                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth={2} strokeLinecap="round">
+                    <circle cx="12" cy="12" r="3" />
+                  </svg>
+                )}
+                <span
+                  className={`git-sidebar-progress-text${step.status === "completed" ? " completed" : ""}`}
+                >
+                  {step.label}
+                </span>
+              </div>
+            ))}
+            {/* Completed background tasks (downloads/shells) — unchanged */}
+            {completed.map((t) => (
+              <div key={t.taskId} className="git-sidebar-progress-item">
+                <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M20 6 9 17l-5-5" />
+                </svg>
+                <span className="git-sidebar-progress-text">{t.message || t.kind}</span>
+              </div>
+            ))}
+          </>
         )}
       </div>
 

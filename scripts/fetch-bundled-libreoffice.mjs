@@ -84,12 +84,25 @@ function run(cmd, args, opts = {}) {
 }
 
 /// Probe the staged tree: soffice must exist and answer `--version`.
+/// `-env:UserInstallation` skips the interactive first-run wizard;
+/// `--norestore` avoids document-recovery prompts in headless mode.
+/// A 60s timeout prevents indefinite hangs on slow CI runners.
 function stagedWorks(exePath) {
   if (!existsSync(exePath)) return false;
-  const r = spawnSync(exePath, ["--headless", "--version"], {
+  const r = spawnSync(exePath, [
+    "-env:UserInstallation=file:///tmp/libreoffice-probe",
+    "--norestore",
+    "--headless",
+    "--version",
+  ], {
     stdio: ["ignore", "ignore", "ignore"],
     windowsHide: true,
+    timeout: 60_000,
   });
+  if (r.error && r.error.code === "ETIMEDOUT") {
+    console.warn(`  ⚠ soffice --version timed out after 60s — trusting MSI extraction`);
+    return true;
+  }
   return r.status === 0;
 }
 

@@ -7,9 +7,10 @@
 // truly needs (tall diagrams are capped and scroll). A compact toolbar carries
 // the same Copy / PNG / SVG export controls the pane offered.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { readArtifactPreview, type ArtifactPreview } from "../../lib/ipc";
+import { readArtifactPreview, downloadArtifact, type ArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
-import { ArtifactExportMenu } from "./ArtifactExportMenu";
+import { useChatStore } from "../../state/chat";
+import { useUiStore } from "../../state/ui";
 import { sanitizeHtml } from "../../lib/sanitize";
 
 /** Injected into the iframe document (display only) so the diagram scales down
@@ -60,8 +61,38 @@ export function InlineDiagram({
 }) {
   const [preview, setPreview] = useState<ArtifactPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
   const blockRef = useRef<HTMLDivElement>(null);
+  const kebabRef = useRef<HTMLDivElement>(null);
   const [containerW, setContainerW] = useState(0);
+
+  const setPreviewArtifact = useChatStore((s) => s.setPreviewArtifact);
+  const setToolPanelTab = useUiStore((s) => s.setToolPanelTab);
+  const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
+
+  // Close kebab on outside click
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (kebabRef.current && !kebabRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [menuOpen]);
+
+  const openInCanvas = () => {
+    setMenuOpen(false);
+    setPreviewArtifact(artifact);
+    setToolPanelTab("canvas");
+    setToolPanelCollapsed(false);
+  };
+
+  const downloadFile = () => {
+    setMenuOpen(false);
+    void downloadArtifact(artifact.path, artifact.filename);
+  };
 
   useEffect(() => {
     let stale = false;
@@ -134,6 +165,45 @@ export function InlineDiagram({
         scrolling="no"
         style={{ height: Math.min(height, 480) }}
       />
+      <div className="chat-diagram-actions" ref={kebabRef}>
+        <div className="artifact-kebab">
+          <button
+            type="button"
+            className="artifact-kebab-btn"
+            title="Diagram actions"
+            aria-label="Diagram actions"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((o) => !o)}
+          >
+            <svg width={16} height={16} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <circle cx="12" cy="5" r="1.8" />
+              <circle cx="12" cy="12" r="1.8" />
+              <circle cx="12" cy="19" r="1.8" />
+            </svg>
+          </button>
+          {menuOpen && (
+            <div className="artifact-kebab-menu" role="menu">
+              <button
+                type="button"
+                role="menuitem"
+                className="artifact-kebab-item"
+                onClick={downloadFile}
+              >
+                Download
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="artifact-kebab-item"
+                onClick={openInCanvas}
+              >
+                Open in Canvas
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

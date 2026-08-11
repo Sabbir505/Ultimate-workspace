@@ -143,7 +143,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 # WebView2 CapturePreview for the browser_screenshot tool (browser.rs). Versions
 # pinned to what tauri 2.11 already links so no duplicate windows crate lands.
 webview2-com = "0.38"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_Graphics_Dxgi"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }

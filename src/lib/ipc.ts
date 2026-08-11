@@ -1018,7 +1018,7 @@ export const getMobileRelayStatus = () =>
 
 // ---- Local Models market (Hugging Face browse + download) ----
 
-export type ModelSort = "downloads" | "likes" | "modified";
+export type ModelSort = "downloads" | "likes" | "modified" | "trending";
 
 export interface CatalogEntry {
   id: string;
@@ -1095,6 +1095,14 @@ export const fetchModelCatalog = (args: FetchCatalogArgs = {}) =>
     sort: args.sort ?? null,
     limit: args.limit ?? null,
   });
+
+/** GPU VRAM info for the model-market size gate. Null when no discrete GPU. */
+export interface GpuVramInfo {
+  totalVramBytes: number | null;
+  deviceName: string | null;
+}
+
+export const getGpuVram = () => safeInvoke<GpuVramInfo | null>("get_gpu_vram");
 
 export const getMarketSettings = () =>
   safeInvoke<MarketSettings | null>("get_market_settings");

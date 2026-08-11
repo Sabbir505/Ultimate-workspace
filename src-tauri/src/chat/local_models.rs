@@ -1136,6 +1136,71 @@ fn query_free_vram_bytes() -> Option<u64> {
     None
 }
 
+/// Query the largest TOTAL dedicated VRAM across all discrete GPUs via DXGI.
+/// Unlike `query_free_vram_bytes` (NVIDIA-only, free VRAM, used for logging),
+/// this is vendor-agnostic (NVIDIA + AMD + Intel) and reads total capacity —
+/// the stable "will the model fit resident" metric used by the model-market
+/// size gate. Integrated GPUs (Intel UHD, AMD APUs) report 0 dedicated VRAM
+/// and are skipped; callers fall back to system RAM for those.
+///
+/// Returns `Some((bytes, device_name))` for the adapter with the most dedicated
+/// VRAM, or `None` when no discrete GPU is found / DXGI is unavailable.
+#[cfg(windows)]
+pub fn query_total_vram_bytes() -> Option<(u64, String)> {
+    use std::sync::OnceLock;
+    use windows::core::Interface;
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+
+    static DXGI: OnceLock<Option<(u64, String)>> = OnceLock::new();
+    DXGI.get_or_init(|| unsafe {
+        // CreateDXGIFactory1 fails if DirectX isn't available (headless / RDP
+        // without GPU remoting). Treat as "no GPU" rather than crashing.
+        let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
+        let mut best_bytes: u64 = 0;
+        let mut best_name = String::new();
+        // EnumAdapters1 returns Err at the first invalid index, so loop until err.
+        for idx in 0..8u32 {
+            let adapter = match factory.EnumAdapters1(idx) {
+                Ok(a) => a,
+                Err(_) => break,
+            };
+            let desc = match adapter.GetDesc1() {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            // Skip the Microsoft Basic Render Driver and other software adapters.
+            if desc.VendorId == 0x1414 {
+                continue;
+            }
+            if (desc.DedicatedVideoMemory as u64) > best_bytes {
+                best_bytes = desc.DedicatedVideoMemory as u64;
+                // Description is a wide UTF-16 string; trim trailing NULs.
+                let name = String::from_utf16_lossy(
+                    &desc.Description
+                        .iter()
+                        .take_while(|c| **c != 0)
+                        .copied()
+                        .collect::<Vec<u16>>(),
+                );
+                best_name = name.trim().to_string();
+            }
+        }
+        if best_bytes == 0 {
+            None
+        } else {
+            Some((best_bytes, best_name))
+        }
+    })
+    .clone()
+}
+
+/// Non-Windows stub: DXGI probe is Windows-only in this build. Callers fall
+/// back to system-RAM-based sizing on other platforms.
+#[cfg(not(windows))]
+pub fn query_total_vram_bytes() -> Option<(u64, String)> {
+    None
+}
+
 fn auto_ctx_size(gguf_path: &str) -> u32 {
     // The context must fit the app's OWN prompt overhead, not just the chat
     // history: tool-mode turns add the full tool schema (~5-6k tokens) plus

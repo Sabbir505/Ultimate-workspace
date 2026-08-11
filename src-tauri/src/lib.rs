@@ -362,6 +362,7 @@ pub fn run() {
             mobile::commands::get_mobile_relay_status,
             // local model market (Hugging Face browse + download)
             commands::local_model_market::fetch_model_catalog,
+            commands::local_model_market::get_gpu_vram,
             commands::local_model_market::get_market_settings,
             commands::local_model_market::set_models_directory,
             commands::local_model_market::pick_models_directory,

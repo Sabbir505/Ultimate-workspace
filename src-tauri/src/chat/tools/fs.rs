@@ -116,6 +116,9 @@ pub(super) fn fs_search_files(args: &Value) -> ToolOutcome {
 }
 
 /// Create or overwrite a file, creating parent directories as needed.
+/// For visual file types (.html, .svg), returns an ArtifactRef so the UI
+/// can render it inline in the chat — API/local models often use write_file
+/// to create diagrams instead of the dedicated generate_diagram tool.
 pub(super) fn fs_write_file(args: &Value) -> ToolOutcome {
     let path = arg_str(args, "path");
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -131,11 +134,34 @@ pub(super) fn fs_write_file(args: &Value) -> ToolOutcome {
         }
     }
     match std::fs::write(p, content) {
-        Ok(_) => ToolOutcome::text(format!(
-            "Wrote {} bytes ({} chars) to {path}.",
-            content.len(),
-            content.chars().count()
-        )),
+        Ok(_) => {
+            let msg = format!(
+                "Wrote {} bytes ({} chars) to {path}.",
+                content.len(),
+                content.chars().count()
+            );
+            // Surface .html and .svg files as artifacts so the chat can
+            // render them inline (InlineDiagram). Without this, diagrams
+            // created via write_file are invisible to the UI.
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+            let artifact = if ext == "html" || ext == "svg" {
+                let filename = p
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.clone());
+                Some(super::ArtifactRef {
+                    path: path.clone(),
+                    filename,
+                })
+            } else {
+                None
+            };
+            ToolOutcome {
+                text: msg,
+                artifact,
+                browse_url: None,
+            }
+        }
         Err(e) => ToolOutcome::text(format!("write_file failed: {e}")),
     }
 }

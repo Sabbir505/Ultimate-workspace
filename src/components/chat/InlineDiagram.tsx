@@ -17,19 +17,18 @@ import { sanitizeHtml } from "../../lib/sanitize";
  *  to the chat width instead of overflowing with a scrollbar. Export still uses
  *  the untouched `preview.text`, so downloads keep the original resolution. */
 /** Horizontal padding (px per side) inside the iframe so the diagram never
- *  touches the frame edge; kept in sync with the height calculation below. */
+ *  touches the frame edge. */
 const FIT_PAD_X = 12;
 const FIT_PAD_Y = 8;
 const FIT_STYLE =
   `<style>html{margin:0;overflow:hidden}body{margin:0;padding:${FIT_PAD_Y}px ${FIT_PAD_X}px;` +
-  "overflow:hidden;background:#fff;display:flex;justify-content:center;align-items:center}" +
+  // No flex — flex collapses the body to the iframe height and breaks
+  // scrollHeight measurement. Let the SVG flow as a block element.
+  "background:#fff}" +
   // Force the SVG to shrink-to-fit the container width, preserving aspect ratio.
-  // width:100%!important ensures it always fills the frame; height:auto keeps
-  // the aspect ratio so the whole diagram is visible, not just the top-left.
   "svg{display:block;width:100%!important;height:auto!important;max-height:none!important}" +
-  // Also handle diagrams that wrap the SVG in a container div — scale the whole
-  // content, not just the SVG element.
-  "body > div, body > *:not(svg){max-width:100%!important}" +
+  // Also constrain wrapper divs so nothing overflows the frame.
+  "body > div{max-width:100%!important}" +
   "</style>";
 
 function withFitStyle(html: string): string {
@@ -106,6 +105,7 @@ export function InlineDiagram({
     let stale = false;
     setPreview(null);
     setError(null);
+    setMeasuredH(0);
     void readArtifactPreview(artifact.path)
       .then((p) => {
         if (!stale) setPreview(p);
@@ -137,22 +137,44 @@ export function InlineDiagram({
 
   // Measure the actual rendered height of the iframe content after it loads.
   // Uses allow-same-origin sandbox (no allow-scripts) so we can read
-  // contentDocument — same approach as ArtifactPreviewPane. This replaces
-  // the fragile SVG-dimension-guessing that clipped diagrams that didn't have
-  // standard width/height/viewBox attributes.
-  const onFrameLoad = useCallback(() => {
+  // contentDocument — same approach as ArtifactPreviewPane. We measure the
+  // SVG element's bounding rect directly (more reliable than body.scrollHeight
+  // which can be wrong when body has flex/overflow styles) and wait a frame
+  // for layout to settle before reading dimensions.
+  const measureFrame = useCallback(() => {
     const frame = blockRef.current?.querySelector<HTMLIFrameElement>(".chat-diagram-frame");
-    if (!frame?.contentDocument?.body) return;
-    // Force a reflow then measure the full content height.
-    const h = frame.contentDocument.body.scrollHeight;
-    if (h > 0) setMeasuredH(Math.min(h + FIT_PAD_Y * 2, 600));
+    const doc = frame?.contentDocument;
+    if (!doc) return;
+    // Prefer the SVG element's rendered height — this is the actual content.
+    const svg = doc.querySelector("svg");
+    if (svg) {
+      const rect = svg.getBoundingClientRect();
+      if (rect.height > 0) {
+        setMeasuredH(Math.round(rect.height) + FIT_PAD_Y * 2);
+        return;
+      }
+    }
+    // Fallback: body scrollHeight (includes all content, not just SVG).
+    const h = doc.body?.scrollHeight ?? doc.documentElement?.scrollHeight ?? 0;
+    if (h > 0) setMeasuredH(h);
   }, []);
+
+  const onFrameLoad = useCallback(() => {
+    // Wait one animation frame for the SVG to finish layout before measuring.
+    requestAnimationFrame(() => {
+      measureFrame();
+      // Some diagrams (complex CSS, external font loading) need a second pass.
+      setTimeout(measureFrame, 150);
+    });
+  }, [measureFrame]);
 
   // Re-measure when the container width changes (responsive resize).
   useEffect(() => {
     if (measuredH === 0) return;
-    onFrameLoad();
-  }, [containerW, onFrameLoad, measuredH]);
+    // Defer to let the SVG re-layout at the new width.
+    const t = setTimeout(measureFrame, 50);
+    return () => clearTimeout(t);
+  }, [containerW, measureFrame, measuredH]);
 
   // Fallback height from SVG dims while waiting for the load event.
   const height = useMemo(() => {
@@ -190,7 +212,7 @@ export function InlineDiagram({
         srcDoc={srcDoc}
         scrolling="no"
         onLoad={onFrameLoad}
-        style={{ height: Math.min(height, 600) }}
+        style={{ height }}
       />
       <div className="chat-diagram-actions" ref={kebabRef}>
         <div className="artifact-kebab">

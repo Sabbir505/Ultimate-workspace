@@ -5689,7 +5689,247 @@ table.kv th {
 }
 
 /* Update banner â€” mirrors the onboarding banner's glass look, accent-tinted. */
-/* ---------- Update modal (centered overlay) ---------- */
+/* ---------- Sidebar Update button + hover popover ---------- */
+.update-button-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.update-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  border: none;
+  cursor: pointer;
+  background: #10b981;
+  color: #fff;
+  transition: background 0.15s ease, transform 0.08s ease, box-shadow 0.15s ease;
+  box-shadow: 0 1px 2px rgba(16, 185, 129, 0.35);
+}
+.update-button:hover {
+  background: #059669;
+}
+.update-button:active {
+  transform: scale(0.96);
+}
+.update-button.downloading {
+  background: #6b7280;
+  cursor: progress;
+  box-shadow: none;
+}
+.update-button.installed {
+  background: #10b981;
+  cursor: default;
+  box-shadow: 0 1px 2px rgba(16, 185, 129, 0.35);
+}
+.update-button.errored {
+  background: #ef4444;
+  box-shadow: 0 1px 2px rgba(239, 68, 68, 0.35);
+}
+.update-button-check {
+  font-size: 12px;
+  line-height: 1;
+}
+.update-button .spin {
+  animation: update-spin 0.9s linear infinite;
+}
+@keyframes update-spin {
+  to { transform: rotate(360deg); }
+}
+
+.update-popover {
+  /* position/top/left/z-index are set INLINE by UpdateButton (position:fixed
+     with viewport coords) to escape the sidebar's overflow:hidden + stacking
+     context. Only visual styles live here. */
+  width: 300px;
+  max-width: 78vw;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #111827;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18), 0 2px 6px rgba(0, 0, 0, 0.08);
+  animation: update-popover-in 0.12s ease-out;
+}
+@keyframes update-popover-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+:root[data-theme="dark"] .update-popover,
+:root:not([data-theme="light"]) .update-popover {
+  /* default (system-dark) — mirror only when the viewer is dark */
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .update-popover {
+    background: #1c1c1c;
+    color: #e5e7eb;
+    border-color: rgba(255, 255, 255, 0.12);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3);
+  }
+}
+:root[data-theme="dark"] .update-popover {
+  background: #1c1c1c;
+  color: #e5e7eb;
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+.update-popover-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.update-popover-titles {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.update-popover-heading {
+  font-size: 12px;
+  font-weight: 700;
+}
+.update-popover-version {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  background: rgba(16, 185, 129, 0.14);
+  color: #059669;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .update-popover-version {
+    background: rgba(16, 185, 129, 0.22);
+    color: #34d399;
+  }
+}
+:root[data-theme="dark"] .update-popover-version {
+  background: rgba(16, 185, 129, 0.22);
+  color: #34d399;
+}
+.update-popover-date {
+  font-size: 10px;
+  color: #6b7280;
+  white-space: nowrap;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .update-popover-date { color: #9ca3af; }
+}
+:root[data-theme="dark"] .update-popover-date { color: #9ca3af; }
+
+.update-popover-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.update-popover-section-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+  margin-bottom: 3px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .update-popover-section-title { color: #9ca3af; }
+}
+:root[data-theme="dark"] .update-popover-section-title { color: #9ca3af; }
+
+.update-popover-list {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: inherit;
+}
+.update-popover-list li { margin: 1px 0; }
+.update-popover-empty {
+  font-size: 11px;
+  color: #9ca3af;
+  font-style: italic;
+}
+
+.update-popover-progress {
+  margin: 4px 0 10px;
+}
+.update-popover-progress-top {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+.update-popover-bar {
+  height: 6px;
+  border-radius: 9999px;
+  background: rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .update-popover-bar { background: rgba(255,255,255,0.12); }
+}
+:root[data-theme="dark"] .update-popover-bar { background: rgba(255,255,255,0.12); }
+.update-popover-bar-fill {
+  height: 100%;
+  border-radius: 9999px;
+  background: #10b981;
+  transition: width 0.2s ease;
+}
+.update-popover-progress-meta {
+  font-size: 10px;
+  color: #6b7280;
+  margin-top: 3px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .update-popover-progress-meta { color: #9ca3af; }
+}
+:root[data-theme="dark"] .update-popover-progress-meta { color: #9ca3af; }
+
+.update-popover-installed {
+  font-size: 11.5px;
+  color: #059669;
+  margin: 4px 0 10px;
+}
+
+.update-popover-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 11px;
+  color: #ef4444;
+  margin: 4px 0 10px;
+}
+
+.update-popover-cta {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  background: #10b981;
+  color: #fff;
+  transition: background 0.15s ease;
+}
+.update-popover-cta:hover:not(:disabled) { background: #059669; }
+.update-popover-cta:disabled {
+  background: #9ca3af;
+  cursor: progress;
+}
+
+/* ---------- Update modal (centered overlay, legacy — superseded by sidebar button) ---------- */
 .update-modal-overlay {
   position: fixed;
   inset: 0;

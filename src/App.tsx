@@ -13,7 +13,6 @@
 import { lazy, Suspense, useEffect, useRef } from "react";
 import { Modal } from "./components/common/Modal";
 import { OnboardingBanner } from "./components/onboarding/OnboardingBanner";
-import { UpdateBanner } from "./components/onboarding/UpdateBanner";
 import { ToolPanel } from "./components/panes/ToolPanel";
 import { PeekPanel } from "./components/peek/PeekPanel";
 import { ProjectSettingsPanel } from "./components/sidebar/ProjectSettingsPanel";
@@ -36,7 +35,7 @@ import { useProjectsStore } from "./state/projects";
 import { useSettingsStore } from "./state/settings";
 import { useSkillsStore } from "./state/skills";
 import { useUiStore } from "./state/ui";
-import { useUpdaterStore, wireUpdaterEvents } from "./state/updater";
+import { useUpdaterStore, wireUpdaterEvents, SHOW_FAKE_UPDATE } from "./state/updater";
 
 // Lazy-loaded overlay views. They're only fetched the first time the user
 // opens them, so the initial chat page skips downloading ~700 KB of
@@ -70,8 +69,11 @@ export default function App() {
 
     // Auto-updater: wire download-progress + installed events, then check on
     // startup and every 4 hours. A check is a single HTTP GET + semver compare;
-    // a found update surfaces the banner (UpdateBanner) with the changelog.
+    // a found update surfaces the green Update button in the sidebar header.
+    // Skipped entirely when the dev-only fake-update flag is on, so the real
+    // check's "up to date" response doesn't clobber the mock seed.
     wireUpdaterEvents();
+    if (SHOW_FAKE_UPDATE) return;
     const updaterStore = useUpdaterStore.getState();
     void updaterStore.check();
     const FOUR_HOURS = 4 * 60 * 60 * 1000;
@@ -170,7 +172,6 @@ export default function App() {
       <Suspense fallback={null}>
         <CommandPalette />
       </Suspense>
-      <UpdateBanner />
 
       {pendingReplace && (
         <Modal

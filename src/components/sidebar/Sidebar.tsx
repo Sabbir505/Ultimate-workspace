@@ -35,6 +35,8 @@ import { ArtifactLibrary } from "./ArtifactLibrary";
 import { ChatSessionRowMemo as ChatSessionRow, type ChatSessionRowData } from "../chat/ChatSessionRow";
 import { PanelIcon } from "../common/PanelIcon";
 import { relativeTime } from "../../lib/relativeTime";
+import { UpdateButton } from "./UpdateButton";
+import { seedFakeUpdate, SHOW_FAKE_UPDATE } from "../../state/updater";
 
 export function Sidebar() {
   const [projectsCollapsed, setProjectsCollapsed] = useState(true);
@@ -70,6 +72,12 @@ export function Sidebar() {
 
   // Artifacts count
   const artifactItems = useArtifactsStore((s) => s.items);
+
+  // DEV-ONLY mock update for visual review (see SHOW_FAKE_UPDATE in state/updater).
+  useEffect(() => {
+    if (!SHOW_FAKE_UPDATE) return;
+    seedFakeUpdate();
+  }, []);
 
   const handleNewChat = useCallback(() => {
     const provider = chatConfig?.provider ?? "openai_compatible";
@@ -217,6 +225,7 @@ export function Sidebar() {
         {/* Branding */}
         <div className="flex items-center justify-between mb-2">
           <strong className="text-sm font-bold text-gray-900 dark:text-white select-none">Conduit</strong>
+          <UpdateButton />
         </div>
         <div className="flex items-center gap-2">
           {/* Search / command palette trigger */}

@@ -1,8 +1,9 @@
-// Tests the InlineDiagram gating: only artifacts classified `kind: "diagram"`
-// (authored via generate_diagram, carrying the conduit:diagram marker) render
-// inline in the chat. A plain `kind: "html"` file the model produced via
-// generate_file (a webpage, landing page, etc.) must NOT render inline — it
-// falls back to the download chip so the user opens it in the preview pane.
+// Tests the InlineDiagram gating: artifacts classified as `kind: "diagram"`
+// OR `kind: "html"` render inline in the chat. This includes diagrams from
+// generate_diagram (with the conduit:diagram marker) AND HTML files from
+// write_file/generate_file — API/local models often create diagrams via those
+// tools instead of generate_diagram, so both kinds render inline. Non-visual
+// kinds (image, text, code) fall back to the download chip.
 // readArtifactPreview is mocked so no live artifact on disk is needed.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, waitFor } from "@testing-library/react";
@@ -73,20 +74,21 @@ describe("InlineDiagram gating (diagram vs plain html)", () => {
     expect(container.querySelector(".chip-fallback")).toBeNull();
   });
 
-  it("falls back to the chip for a plain html (non-diagram) file", async () => {
-    // A webpage the model made via generate_file: kind stays "html" (no
-    // conduit:diagram marker), so it must NOT be crammed inline.
+  it("renders an inline iframe for a plain html file (e.g. from write_file)", async () => {
+    // API/local models often create HTML diagrams via write_file or
+    // generate_file — kind stays "html" (no conduit:diagram marker), but
+    // it should still render inline since it's visual content.
     mockedRead.mockResolvedValue(
-      preview({ kind: "html", text: "<!doctype html><html><body><h1>My landing page</h1></body></html>" }),
+      preview({ kind: "html", text: "<!doctype html><html><body><h1>My diagram</h1></body></html>" }),
     );
     const { container } = render(
       <InlineDiagram artifact={artifact("landing.html")} onFallback={() => <div className="chip-fallback" />} />,
     );
     await waitFor(() => {
-      expect(container.querySelector(".chip-fallback")).not.toBeNull();
+      expect(container.querySelector(".chat-diagram-frame")).not.toBeNull();
     });
-    // No inline diagram frame for a plain html page.
-    expect(container.querySelector(".chat-diagram-frame")).toBeNull();
+    // The fallback chip must NOT have rendered.
+    expect(container.querySelector(".chip-fallback")).toBeNull();
   });
 
   it("falls back to the chip for an svg image artifact", async () => {

@@ -1191,9 +1191,11 @@ fn handle_opencode_event(
                             .and_then(|v| v.as_str())
                             .unwrap_or("pending");
                         if !content.is_empty() {
-                            crate::chat::tasks::emit_plan_step_progress(
-                                app, sid, content, status, None, None::<&str>,
-                            );
+                            if let Some(app_handle) = app {
+                                crate::chat::tasks::emit_plan_step_progress(
+                                    app_handle, sid, content, status, None, None::<&str>,
+                                );
+                            }
                         }
                     }
                 }

@@ -13,6 +13,33 @@ import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { sanitizeHtml } from "../../lib/sanitize";
 
+/** Classify whether an HTML artifact is a static diagram (render inline) or
+ *  an interactive webapp (fall back to chip → Canvas). Diagrams typically
+ *  contain <svg> and no interactive elements; webapps have scripts, forms,
+ *  buttons, or event handlers that need a full-size pane to be useful. */
+function isDiagramContent(html: string): boolean {
+  const lower = html.toLowerCase();
+  // Interactive signals → it's a webapp, not a diagram
+  const hasScript = /<script\b[^>]*>[\s\S]*?<\/script>/i.test(html) ||
+    /\bon(?:click|load|change|submit|input|mouseover|keyup|keydown)\s*=/i.test(html);
+  const hasForm = /<\s*(?:form|input|textarea|select|button)\b/i.test(lower);
+  const hasEventListener = /addeventlistener\s*\(/i.test(lower);
+  if (hasScript || hasForm || hasEventListener) {
+    // But if it ALSO has an SVG and the script is tiny (inline style only),
+    // it might still be a diagram with minor styling. Check the script size.
+    if (/<svg\b/i.test(lower)) {
+      // Extract all script contents and check total size
+      const scripts = html.match(/<script\b[^>]*>([\s\S]*?)<\/script>/gi) ?? [];
+      const totalScriptSize = scripts.reduce((sum, s) => sum + s.length, 0);
+      // Under 200 chars of script = probably just styling, not a real app
+      if (totalScriptSize < 200) return true;
+    }
+    return false;
+  }
+  // No interactive elements → safe to render inline
+  return true;
+}
+
 /** Injected into the iframe document (display only) so the diagram scales down
  *  to the chat width instead of overflowing with a scrollbar. Export still uses
  *  the untouched `preview.text`, so downloads keep the original resolution. */
@@ -198,7 +225,14 @@ export function InlineDiagram({
   // case. But API/local models often create HTML diagrams via write_file or
   // generate_file — those come through as kind "html" and should also render
   // inline instead of falling back to a download chip.
+  // However, interactive HTML webapps (with <script>, <form>, <button>, etc.)
+  // fall back to a chip → Canvas preview, where they get the full-size
+  // interactive pane they need.
   if (preview.text == null || (preview.kind !== "diagram" && preview.kind !== "html")) {
+    return onFallback();
+  }
+  // Classify HTML content: diagrams render inline, webapps get the chip.
+  if (preview.kind === "html" && !isDiagramContent(preview.text)) {
     return onFallback();
   }
 

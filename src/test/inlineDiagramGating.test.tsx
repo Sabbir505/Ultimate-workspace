@@ -1,9 +1,8 @@
 // Tests the InlineDiagram gating: artifacts classified as `kind: "diagram"`
-// OR `kind: "html"` render inline in the chat. This includes diagrams from
-// generate_diagram (with the conduit:diagram marker) AND HTML files from
-// write_file/generate_file — API/local models often create diagrams via those
-// tools instead of generate_diagram, so both kinds render inline. Non-visual
-// kinds (image, text, code) fall back to the download chip.
+// OR `kind: "html"` render inline in the chat — BUT only if the HTML content
+// looks like a static diagram (has SVG, no scripts/forms). Interactive HTML
+// webapps (with <script>, <form>, <button>) fall back to the chip → Canvas
+// preview, where they get the full-size interactive pane they need.
 // readArtifactPreview is mocked so no live artifact on disk is needed.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, waitFor } from "@testing-library/react";
@@ -79,15 +78,50 @@ describe("InlineDiagram gating (diagram vs plain html)", () => {
     // generate_file — kind stays "html" (no conduit:diagram marker), but
     // it should still render inline since it's visual content.
     mockedRead.mockResolvedValue(
-      preview({ kind: "html", text: "<!doctype html><html><body><h1>My diagram</h1></body></html>" }),
+      preview({ kind: "html", text: "<!doctype html><html><body><svg viewBox='0 0 100 50'><rect/></svg></body></html>" }),
     );
     const { container } = render(
-      <InlineDiagram artifact={artifact("landing.html")} onFallback={() => <div className="chip-fallback" />} />,
+      <InlineDiagram artifact={artifact("diagram.html")} onFallback={() => <div className="chip-fallback" />} />,
     );
     await waitFor(() => {
       expect(container.querySelector(".chat-diagram-frame")).not.toBeNull();
     });
     // The fallback chip must NOT have rendered.
+    expect(container.querySelector(".chip-fallback")).toBeNull();
+  });
+
+  it("falls back to chip for an interactive HTML webapp (scripts/forms)", async () => {
+    // An HTML file with <script> or <form> is an interactive webapp, not a
+    // static diagram — it needs the full-size Canvas pane.
+    mockedRead.mockResolvedValue(
+      preview({
+        kind: "html",
+        text: "<!doctype html><html><body><script>document.querySelector('button').onclick=()=>alert('hi')</script><button>Click</button></body></html>",
+      }),
+    );
+    const { container } = render(
+      <InlineDiagram artifact={artifact("app.html")} onFallback={() => <div className="chip-fallback" />} />,
+    );
+    await waitFor(() => {
+      expect(container.querySelector(".chip-fallback")).not.toBeNull();
+    });
+    expect(container.querySelector(".chat-diagram-frame")).toBeNull();
+  });
+
+  it("renders inline for HTML with SVG + tiny script (styling only)", async () => {
+    // A diagram with a small <script> for styling is still a diagram.
+    mockedRead.mockResolvedValue(
+      preview({
+        kind: "html",
+        text: "<!doctype html><html><body><svg viewBox='0 0 200 100'><rect/></svg><script>var x=1</script></body></html>",
+      }),
+    );
+    const { container } = render(
+      <InlineDiagram artifact={artifact("styled.html")} onFallback={() => <div className="chip-fallback" />} />,
+    );
+    await waitFor(() => {
+      expect(container.querySelector(".chat-diagram-frame")).not.toBeNull();
+    });
     expect(container.querySelector(".chip-fallback")).toBeNull();
   });
 

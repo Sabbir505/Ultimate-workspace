@@ -469,9 +469,6 @@ export function ArtifactPreviewPane({
       <div className="artifact-preview-pane" ref={paneRef} style={paneStyle}>
         {resizer}
         <div className="artifact-preview-header">
-          <span className="artifact-preview-title" title={artifact.filename}>
-            {artifact.filename}
-          </span>
           <div className="artifact-preview-header-actions">
             <ZoomControls zoom={zoom} setZoom={setZoom} />
             <button
@@ -498,11 +495,7 @@ export function ArtifactPreviewPane({
     <div className="artifact-preview-pane" ref={paneRef} style={paneStyle}>
       {resizer}
       <div className="artifact-preview-header">
-        <span className="artifact-preview-title" title={artifact.filename}>
-          {artifact.filename}
-        </span>
         <div className="artifact-preview-header-actions">
-          <ZoomControls zoom={zoom} setZoom={setZoom} />
           {preview && (preview.kind === "diagram" || preview.kind === "html" || preview.kind === "image") ? (
             <ArtifactExportMenu
               preview={preview}

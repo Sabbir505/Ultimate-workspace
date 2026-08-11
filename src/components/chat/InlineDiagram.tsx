@@ -6,7 +6,7 @@
 // to the diagram's intrinsic height so it takes only the vertical space it
 // truly needs (tall diagrams are capped and scroll). A compact toolbar carries
 // the same Copy / PNG / SVG export controls the pane offered.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { readArtifactPreview, downloadArtifact, type ArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { useChatStore } from "../../state/chat";
@@ -23,7 +23,14 @@ const FIT_PAD_Y = 8;
 const FIT_STYLE =
   `<style>html{margin:0;overflow:hidden}body{margin:0;padding:${FIT_PAD_Y}px ${FIT_PAD_X}px;` +
   "overflow:hidden;background:#fff;display:flex;justify-content:center;align-items:center}" +
-  "svg{display:block;max-width:100%!important;height:auto!important;width:auto!important}</style>";
+  // Force the SVG to shrink-to-fit the container width, preserving aspect ratio.
+  // width:100%!important ensures it always fills the frame; height:auto keeps
+  // the aspect ratio so the whole diagram is visible, not just the top-left.
+  "svg{display:block;width:100%!important;height:auto!important;max-height:none!important}" +
+  // Also handle diagrams that wrap the SVG in a container div — scale the whole
+  // content, not just the SVG element.
+  "body > div, body > *:not(svg){max-width:100%!important}" +
+  "</style>";
 
 function withFitStyle(html: string): string {
   if (/<head[^>]*>/i.test(html)) {
@@ -62,6 +69,7 @@ export function InlineDiagram({
   const [preview, setPreview] = useState<ArtifactPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [measuredH, setMeasuredH] = useState(0);
   const blockRef = useRef<HTMLDivElement>(null);
   const kebabRef = useRef<HTMLDivElement>(null);
   const [containerW, setContainerW] = useState(0);
@@ -127,17 +135,35 @@ export function InlineDiagram({
     [preview],
   );
 
+  // Measure the actual rendered height of the iframe content after it loads.
+  // Uses allow-same-origin sandbox (no allow-scripts) so we can read
+  // contentDocument — same approach as ArtifactPreviewPane. This replaces
+  // the fragile SVG-dimension-guessing that clipped diagrams that didn't have
+  // standard width/height/viewBox attributes.
+  const onFrameLoad = useCallback(() => {
+    const frame = blockRef.current?.querySelector<HTMLIFrameElement>(".chat-diagram-frame");
+    if (!frame?.contentDocument?.body) return;
+    // Force a reflow then measure the full content height.
+    const h = frame.contentDocument.body.scrollHeight;
+    if (h > 0) setMeasuredH(Math.min(h + FIT_PAD_Y * 2, 600));
+  }, []);
+
+  // Re-measure when the container width changes (responsive resize).
+  useEffect(() => {
+    if (measuredH === 0) return;
+    onFrameLoad();
+  }, [containerW, onFrameLoad, measuredH]);
+
+  // Fallback height from SVG dims while waiting for the load event.
   const height = useMemo(() => {
+    if (measuredH > 0) return measuredH;
     if (!preview?.text) return 320;
     const d = svgDims(preview.text);
     if (!d || d.w <= 0) return 320;
-    // The SVG scales down to the available width (container minus padding) via
-    // max-width:100%, so the rendered height scales by the same ratio. Never
-    // upscale small diagrams. Add the vertical padding back on.
     const avail = containerW - FIT_PAD_X * 2;
     const ratio = avail > 0 && d.w > avail ? avail / d.w : 1;
     return Math.max(Math.round(d.h * ratio) + FIT_PAD_Y * 2, 120);
-  }, [preview, containerW]);
+  }, [preview, containerW, measuredH]);
 
   if (error) {
     return <div className="chat-diagram-error">Could not load diagram: {error}</div>;
@@ -160,10 +186,11 @@ export function InlineDiagram({
       <iframe
         className="chat-diagram-frame"
         title={artifact.filename}
-        sandbox=""
+        sandbox="allow-same-origin"
         srcDoc={srcDoc}
         scrolling="no"
-        style={{ height: Math.min(height, 480) }}
+        onLoad={onFrameLoad}
+        style={{ height: Math.min(height, 600) }}
       />
       <div className="chat-diagram-actions" ref={kebabRef}>
         <div className="artifact-kebab">

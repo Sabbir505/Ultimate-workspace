@@ -9834,6 +9834,17 @@ table.kv th {
   gap: 14px;
   margin-top: 12px;
 }
+/* Bypassable "model is large for your hardware" confirm modal body. */
+.oversized-warning p {
+  margin: 0 0 8px;
+  line-height: 1.5;
+  font-size: 13px;
+}
+.oversized-warning .muted {
+  color: var(--text-muted, #6b7280);
+  font-size: 12px;
+  margin: 0;
+}
 .model-market-toolbar {
   display: flex;
   gap: 12px;

@@ -18,6 +18,7 @@ import {
   clearHuggingFaceToken,
   downloadMmproj,
   fetchModelCatalog,
+  getGpuVram,
   getMarketSettings,
   onModelDownloadProgress,
   pickModelsDirectory,
@@ -26,6 +27,7 @@ import {
   startModelDownload,
   type CatalogEntry,
   type DownloadProgress,
+  type GpuVramInfo,
   type MarketSettings,
   type ModelSort,
 } from "../../lib/ipc";
@@ -34,6 +36,7 @@ import { Modal } from "../common/Modal";
 type SortKey = ModelSort;
 
 const SORT_LABELS: Record<SortKey, string> = {
+  trending: "Trending",
   downloads: "Most downloaded",
   likes: "Most liked",
   modified: "Recently updated",
@@ -74,7 +77,7 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
   const [settings, setSettings] = useState<MarketSettings | null>(null);
   const [entries, setEntries] = useState<CatalogEntry[]>([]);
   const [query, setQuery] = useState("");
-  const [sort, setSort] = useState<SortKey>("downloads");
+  const [sort, setSort] = useState<SortKey>("trending");
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tokenInput, setTokenInput] = useState("");
@@ -82,7 +85,13 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
   const [downloads, setDownloads] = useState<Record<string, PerDownload>>({});
   // Bump on every successful fetch so effect deps stay cheap.
   const [fetchTick, setFetchTick] = useState(0);
-  // Rescan the system RAM for the "fits my RAM" badge.
+  // When non-null, a too-large-for-hardware download is pending user confirmation
+  // (bypassable warning). Set by onStartDownload, cleared by the confirm modal.
+  const [oversizedConfirm, setOversizedConfirm] = useState<CatalogEntry | null>(null);
+  // Memory budget for the "fits my hardware" badge + bypassable warning.
+  // VRAM (vendor-agnostic via DXGI on Windows) is the bottleneck for discrete
+  // GPUs; we fall back to system RAM for integrated GPUs / no GPU. The probe
+  // runs once on mount; the ref holds the resolved budget + a label for display.
   const systemRamRef = useRef<number | null>(null);
   if (systemRamRef.current === null) {
     // Heuristic: navigator.deviceMemory is in GiB and is only set on
@@ -91,14 +100,28 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
     const dm = (navigator as unknown as { deviceMemory?: number }).deviceMemory;
     systemRamRef.current = (dm && dm > 0 ? dm : 16) * 1024 * 1024 * 1024;
   }
+  // VRAM budget + device name, resolved async from the Rust DXGI probe.
+  // When null/0 the market uses systemRamRef (RAM) as the budget instead.
+  const [vram, setVram] = useState<{ bytes: number; name: string } | null>(null);
+  // The effective budget for ramClass — VRAM when available, else system RAM.
+  // Recomputed as a plain value each render (cheap).
+  const memoryBudget = vram && vram.bytes > 0 ? vram.bytes : (systemRamRef.current ?? 16 * 1024 * 1024 * 1024);
+  const memoryBudgetLabel = vram && vram.bytes > 0
+    ? (vram.name || "GPU VRAM")
+    : "system RAM";
 
-  // Load settings + first catalog fetch on mount.
+  // Load settings, probe GPU VRAM, and fetch the trending catalog on mount.
   useEffect(() => {
     let stale = false;
     void (async () => {
       const s = await getMarketSettings();
       if (!stale) setSettings(s);
-      await doFetch("", "downloads");
+      // VRAM probe (vendor-agnostic DXGI). Null/zero → fall back to RAM budget.
+      const gpu = await getGpuVram();
+      if (!stale && gpu && gpu.totalVramBytes && gpu.totalVramBytes > 0) {
+        setVram({ bytes: gpu.totalVramBytes, name: gpu.deviceName ?? "" });
+      }
+      await doFetch("", "trending");
     })();
     return () => {
       stale = true;
@@ -229,11 +252,7 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
     void doFetch(query, sort);
   };
 
-  const onStartDownload = (e: CatalogEntry) => {
-    if (downloads[e.id]?.state === "downloading" || downloads[e.id]?.state === "starting") {
-      void cancelModelDownload(e.id);
-      return;
-    }
+  const doDownload = (e: CatalogEntry) => {
     void startModelDownload({
       id: e.id,
       repoId: e.repoId,
@@ -244,7 +263,19 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
     });
   };
 
-  const totalRam = systemRamRef.current ?? 16 * 1024 * 1024 * 1024;
+  const onStartDownload = (e: CatalogEntry) => {
+    if (downloads[e.id]?.state === "downloading" || downloads[e.id]?.state === "starting") {
+      void cancelModelDownload(e.id);
+      return;
+    }
+    // Bypassable warning for models that look too large for the detected RAM.
+    // The user can confirm and download anyway; we don't hard-block it.
+    if (ramClass(e.sizeBytes, memoryBudget) === "too_large") {
+      setOversizedConfirm(e);
+      return;
+    }
+    doDownload(e);
+  };
 
   return (
     <div className="model-market">
@@ -374,7 +405,7 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
                 key={e.repoId}
                 entry={e}
                 download={downloads[e.id]}
-                totalRam={totalRam}
+                totalRam={memoryBudget}
                 isDownloaded={!!isDownloaded}
                 availableQuants={quants}
                 onAction={(entry) => onStartDownload(entry)}
@@ -383,6 +414,40 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
           });
         })()}
       </div>
+
+      {/* Bypassable warning for models that exceed detected hardware. */}
+      {oversizedConfirm && (
+        <Modal
+          title="Large model for your hardware"
+          onClose={() => setOversizedConfirm(null)}
+          actions={
+            <>
+              <button className="ghost" onClick={() => setOversizedConfirm(null)}>
+                Cancel
+              </button>
+              <button
+                className="primary"
+                onClick={() => {
+                  doDownload(oversizedConfirm);
+                  setOversizedConfirm(null);
+                }}
+              >
+                Download anyway
+              </button>
+            </>
+          }
+        >
+          <div className="oversized-warning">
+            <p>
+              <strong>{oversizedConfirm.displayName || oversizedConfirm.filename}</strong> is{" "}
+              {formatBytes(oversizedConfirm.sizeBytes)}, which may exceed your detected{" "}
+              {memoryBudgetLabel} (~{formatBytes(memoryBudget)}). It may run slowly, cause
+              swapping, or fail to load at runtime.
+            </p>
+            <p className="muted">You can still download it — this is just a heads-up.</p>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -429,7 +494,7 @@ function ModelCard({ entry, download, totalRam, isDownloaded, availableQuants, o
   const [quantsExpanded, setQuantsExpanded] = useState(false);
   const visibleQuants = quantsExpanded ? availableQuants : availableQuants.slice(0, 5);
   const ram = ramClass(activeEntry.sizeBytes, totalRam);
-  const ramLabel = ram === "fits" ? "Fits RAM" : ram === "tight" ? "Tight fit" : "Too large";
+  const ramLabel = ram === "fits" ? "Fits" : ram === "tight" ? "Tight fit" : "Too large";
   const ramColor = ram === "fits" ? "var(--green)" : ram === "tight" ? "var(--yellow)" : "var(--red)";
   const state = download?.state;
   const pct = download?.total && download.total > 0
@@ -547,7 +612,7 @@ function ModelCard({ entry, download, totalRam, isDownloaded, availableQuants, o
               ✓ Already downloaded · Ready to use
             </div>
           ) : (
-            <button className="primary" onClick={(e) => { e.stopPropagation(); onAction(activeEntry); }} disabled={state === "starting" || state === "verifying" || ram === "too_large"}>
+            <button className="primary" onClick={(e) => { e.stopPropagation(); onAction(activeEntry); }} disabled={state === "starting" || state === "verifying"}>
               {isActive ? `${pct ?? 0}%` : actionLabel}
             </button>
           )}
@@ -563,7 +628,7 @@ function ModelCard({ entry, download, totalRam, isDownloaded, availableQuants, o
             isDownloaded && !isActive ? (
               <div className="model-card-status done" style={{ margin: 0, textAlign: "center", flex: 1 }}>✓ Already downloaded and ready</div>
             ) : (
-              <button className="primary" onClick={(e) => { onAction(activeEntry); setDetailOpen(false); }} disabled={state === "starting" || state === "verifying" || ram === "too_large"}>
+              <button className="primary" onClick={(e) => { onAction(activeEntry); setDetailOpen(false); }} disabled={state === "starting" || state === "verifying"}>
                 {actionLabel} ({formatBytes(activeEntry.sizeBytes)})
               </button>
             )

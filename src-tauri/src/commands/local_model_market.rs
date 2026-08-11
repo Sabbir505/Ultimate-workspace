@@ -43,6 +43,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 
+use crate::chat::local_models::query_total_vram_bytes;
 use crate::db;
 use crate::DbState;
 use crate::secrets;
@@ -460,7 +461,13 @@ pub async fn fetch_model_catalog(
     } else {
         let sort_param = match sort.as_str() {
             "likes" => "likes",
-            "modified" => "modified",
+            // "trending": HF /api/models rejects sort=trending (HTTP 400).
+            // Likes are the best available proxy for recent momentum, and the
+            // GGUF filter keeps the catalog relevant.
+            "trending" => "likes",
+            // "modified": HF rejects "modified" (HTTP 400); the REST value is
+            // camelCase "lastModified".
+            "modified" => "lastModified",
             _ => "downloads",
         };
         format!(
@@ -492,6 +499,30 @@ pub async fn fetch_model_catalog(
         has_hugging_face_token: token.is_some(),
         default_models_dir,
     })
+}
+
+/// GPU VRAM info for the model-market size gate. Returns the largest dedicated
+/// VRAM across discrete GPUs (vendor-agnostic via DXGI) plus the device name,
+/// or `{null, null}` when no discrete GPU is found (caller falls back to RAM).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuVramInfo {
+    pub total_vram_bytes: Option<u64>,
+    pub device_name: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_gpu_vram() -> CmdResult<GpuVramInfo> {
+    match query_total_vram_bytes() {
+        Some((bytes, name)) => Ok(GpuVramInfo {
+            total_vram_bytes: Some(bytes),
+            device_name: Some(name),
+        }),
+        None => Ok(GpuVramInfo {
+            total_vram_bytes: None,
+            device_name: None,
+        }),
+    }
 }
 
 /// Tiny URL-encoder — we only need to escape spaces, `&`, `=`, and `+`

@@ -80,10 +80,14 @@ export function Sidebar() {
 
   const handleProjectClick = useCallback(
     (projectId: string) => {
-      selectProject(projectId);
+      // Only toggle expansion — do NOT select the project here.
+      // Selecting triggers the project-store subscription which rebinds
+      // the active chat to this project, stealing it from its original
+      // project. Project selection happens implicitly when the user clicks
+      // a nested chat or uses the "New chat for project" button.
       toggleExpanded(projectId);
     },
-    [selectProject, toggleExpanded],
+    [toggleExpanded],
   );
 
   // Start a brand-new chat explicitly bound to this project, and expand the

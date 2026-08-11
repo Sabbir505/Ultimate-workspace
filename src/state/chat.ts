@@ -1375,17 +1375,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
 // Bind the active chat to a project when the user switches projects while
 // viewing it — no message send required. The composer notch and the working
 // directory follow the per-chat binding (sessionProjects) instead of the
-// global selection. sendMessage also records this binding; selectSession
-// pushes it back into the global selection when reopening a bound chat.
+// global selection. The binding is persisted to the DB immediately so the
+// sidebar nesting survives app restarts. selectSession pushes the binding
+// back into the global selection when reopening a bound chat.
 useProjectsStore.subscribe((s) => {
   const pid = s.selectedProjectId;
   if (!pid) return;
   const { activeChatSessionId, sessionProjects, sessions } = useChatStore.getState();
   if (!activeChatSessionId || sessionProjects[activeChatSessionId] === pid) return;
   const sess = sessions.find((x) => x.id === activeChatSessionId);
-  // Mirror both the in-memory cache and the session's persisted projectId so
-  // the sidebar nesting tracks the project switch live. Persistence to the DB
-  // is committed on the next sendMessage (see the binding block there).
+  // Persist to DB immediately so the binding survives restarts, and mirror
+  // into the in-memory cache + sessions array so the sidebar updates live.
+  void setChatSessionProject(activeChatSessionId, pid);
   useChatStore.setState((st) => ({
     sessionProjects: { ...st.sessionProjects, [activeChatSessionId]: pid },
     sessions:

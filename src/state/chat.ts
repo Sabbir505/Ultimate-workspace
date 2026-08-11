@@ -848,28 +848,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     const session = get().sessions.find((s) => s.id === activeChatSessionId);
 
-    // Bind this chat to the currently-selected project (first send, or after
-    // the user deliberately switched projects while viewing it). The binding
-    // drives the composer notch and the working directory on later visits.
-    // Persist it to the DB so the chat stays nested under the project across
-    // restarts, and mirror into the in-memory cache.
-    const projectsState = useProjectsStore.getState();
-    if (
-      projectsState.selectedProjectId &&
-      get().sessionProjects[activeChatSessionId] !== projectsState.selectedProjectId
-    ) {
-      const pid = projectsState.selectedProjectId;
-      void setChatSessionProject(activeChatSessionId, pid);
-      set((s) => ({
-        sessionProjects: { ...s.sessionProjects, [activeChatSessionId]: pid },
-        sessions: s.sessions.map((sess) =>
-          sess.id === activeChatSessionId ? { ...sess, projectId: pid } : sess,
-        ),
-      }));
-    }
     // Working folder resolution, shared by both send paths: a custom folder
     // from the composer "+" picker wins, then the chat's bound project,
-    // then the global selection.
+    // then the global selection. This is read-only — browsing a project
+    // does NOT rebind the chat to it (binding is explicit; see newChat and
+    // unbindProject). An unbound chat resolves its working directory against
+    // the currently-selected project without persisting a binding.
+    const projectsState = useProjectsStore.getState();
     const boundProject = projectsState.projectById(
       get().sessionProjects[activeChatSessionId] ?? projectsState.selectedProjectId,
     );
@@ -1235,9 +1220,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     // Refresh the session list (title may have been updated by the backend).
-    // Also re-seed sessionProjects from the refreshed sessions so newly
-    // project-bound chats (via the composer's implicit binding on first
-    // sendMessage) stay nested under their project after onDone.
+    // Also re-seed sessionProjects from the refreshed sessions so any
+    // project-bound chats stay nested under their project after onDone.
     const sessions = await listChatSessions();
     if (sessions) {
       const clean = withoutDeleted(sessions);
@@ -1372,26 +1356,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 }));
 
-// Bind the active chat to a project when the user switches projects while
-// viewing it — no message send required. The composer notch and the working
-// directory follow the per-chat binding (sessionProjects) instead of the
-// global selection. The binding is persisted to the DB immediately so the
-// sidebar nesting survives app restarts. selectSession pushes the binding
-// back into the global selection when reopening a bound chat.
-useProjectsStore.subscribe((s) => {
-  const pid = s.selectedProjectId;
-  if (!pid) return;
-  const { activeChatSessionId, sessionProjects, sessions } = useChatStore.getState();
-  if (!activeChatSessionId || sessionProjects[activeChatSessionId] === pid) return;
-  const sess = sessions.find((x) => x.id === activeChatSessionId);
-  // Persist to DB immediately so the binding survives restarts, and mirror
-  // into the in-memory cache + sessions array so the sidebar updates live.
-  void setChatSessionProject(activeChatSessionId, pid);
-  useChatStore.setState((st) => ({
-    sessionProjects: { ...st.sessionProjects, [activeChatSessionId]: pid },
-    sessions:
-      sess && sess.projectId !== pid
-        ? st.sessions.map((x) => (x.id === activeChatSessionId ? { ...x, projectId: pid } : x))
-        : st.sessions,
-  }));
-});
+// NOTE: browsing a project (selectProject) must NEVER rebind the active
+// chat to it. A chat's project binding (sessionProjects) is explicit — set
+// only by "New chat for project", newChat's bind param, unbindProject, or
+// the legacy send-time bind in newChat. selectSession pushes the chat's
+// binding back into the global selection (binding → selection), so opening
+// a chat highlights its project; the reverse direction (selection → binding)
+// is intentionally absent so that clicking around the sidebar to browse
+// projects does not move the chat you're viewing into them.

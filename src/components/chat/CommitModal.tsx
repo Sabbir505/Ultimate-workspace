@@ -3,23 +3,50 @@
 // GitToolsSidebar's "Commit or push" row.
 import { useState, useRef, useEffect } from "react";
 import { Modal } from "../common/Modal";
-import { gitCommit, gitPush } from "../../lib/ipc";
+import { gitCommit, gitPush, generateCommitMessage } from "../../lib/ipc";
 
 interface CommitModalProps {
   path: string;
   branch: string;
+  chatSessionId: string;
   onClose: () => void;
 }
 
-export function CommitModal({ path, branch, onClose }: CommitModalProps) {
+export function CommitModal({ path, branch, chatSessionId, onClose }: CommitModalProps) {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<string | null>(null); // "commit" | "commit-push" | "push"
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const [generating, setGenerating] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     textareaRef.current?.focus();
   }, []);
+
+  // Auto-generate a commit message from the working-tree diff on open. The
+  // result pre-fills the textarea but is fully editable; if the user has
+  // typed anything by the time it resolves, don't clobber their input.
+  useEffect(() => {
+    if (!path || !chatSessionId) return;
+    let stale = false;
+    setGenerating(true);
+    void (async () => {
+      try {
+        const suggestion = await generateCommitMessage(path, chatSessionId);
+        if (stale) return;
+        if (suggestion && suggestion.trim()) {
+          setMessage((prev) => (prev.trim() ? prev : suggestion));
+        }
+      } catch {
+        // Silent — the user just gets an empty textarea to fill in themselves.
+      } finally {
+        if (!stale) setGenerating(false);
+      }
+    })();
+    return () => {
+      stale = true;
+    };
+  }, [path, chatSessionId]);
 
   const handleCommit = async () => {
     if (!message.trim()) return;
@@ -127,6 +154,9 @@ export function CommitModal({ path, branch, onClose }: CommitModalProps) {
         rows={4}
         disabled={busy !== null}
       />
+      {generating && (
+        <div className="commit-modal-hint">Generating suggestion from diff…</div>
+      )}
       {result && (
         <div className={`commit-modal-result${result.ok ? " ok" : " err"}`}>
           {result.text}

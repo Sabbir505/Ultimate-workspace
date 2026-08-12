@@ -221,6 +221,8 @@ impl ChatManager {
         let mgr = Arc::clone(self);
 
         let handle = tokio::spawn(async move {
+            // Capture the turn's start instant for the "Worked for Xs" label.
+            let started_at = db::now_ts();
             // When tools are enabled and the session has connectors attached,
             // connect to each vendor's remote MCP server now (refreshing the
             // OAuth token, listing + classifying its tools). This is per-turn
@@ -298,6 +300,8 @@ impl ChatManager {
                             Some(provider_id.as_str()),
                             model_key,
                             None,
+                            Some(started_at),
+                            Some(db::now_ts()),
                         );
                         // Attribute this turn's artifacts to the assistant
                         // message so they reappear on its bubble when the chat
@@ -567,7 +571,7 @@ pub fn run_one_shot_chat(
         let conn = db.lock();
         crate::db::add_chat_message(
             &conn, chat_session_id, "user",
-            prompt, None, None, None, None, None, None, None, None, None,
+            prompt, None, None, None, None, None, None, None, None, None, None, None,
         ).map_err(|e| e.to_string())?;
         crate::db::touch_chat_session(&conn, chat_session_id).map_err(|e| e.to_string())?;
     }
@@ -604,6 +608,7 @@ pub fn run_one_shot_chat(
         .build()
         .map_err(|e| format!("tokio runtime: {e}"))?;
 
+    let started_at = crate::db::now_ts();
     let (response_text, _usage) = rt.block_on(async {
         match provider_str {
             "openai" | "openrouter" => {
@@ -633,7 +638,7 @@ pub fn run_one_shot_chat(
                     crate::chat::providers::AnthropicProvider::DEFAULT_BASE,
                 );
                 crate::chat::commands::anthropic_oneshot(
-                    &client, &api_key, base, &model, &system, prompt,
+                    &client, &api_key, base, &model, &system, prompt, 1024,
                 )
                 .await
                 .map(|t| (t, None::<crate::chat::providers::ChatUsage>))
@@ -649,6 +654,7 @@ pub fn run_one_shot_chat(
             &conn, chat_session_id, "assistant",
             &response_text,
             None, None, None, None, None, None, None, None, None,
+            Some(started_at), Some(crate::db::now_ts()),
         ).map_err(|e| e.to_string())?;
         crate::db::touch_chat_session(&conn, chat_session_id).map_err(|e| e.to_string())?;
     }

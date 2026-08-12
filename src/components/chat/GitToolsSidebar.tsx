@@ -29,6 +29,7 @@ export function GitToolsSidebar() {
   const boundProjectId = useChatStore((s) =>
     s.activeChatSessionId ? s.sessionProjects[s.activeChatSessionId] : undefined,
   );
+  const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
   const selectedProjectId = useProjectsStore((s) => s.selectedProjectId);
   const projects = useProjectsStore((s) => s.projects);
   const gitStatuses = useProjectsStore((s) => s.gitStatuses);
@@ -403,6 +404,7 @@ export function GitToolsSidebar() {
         <CommitModal
           path={path}
           branch={gitStatus?.branch ?? "HEAD"}
+          chatSessionId={activeChatSessionId ?? ""}
           onClose={() => setCommitModalOpen(false)}
         />
       )}

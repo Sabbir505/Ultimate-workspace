@@ -122,6 +122,8 @@ pub fn fetch_page(
                     provider: None,
                     model_key: None,
                     pricing_estimated_usd: None,
+                    started_at: None,
+                    completed_at: None,
                 })
             },
         )
@@ -282,7 +284,7 @@ fn handle_send_chat_message(
     //    shape the desktop sends.
     {
         let conn = db.lock();
-        db::add_chat_message(&conn, &chat_session_id, "user", &text, None, None, None, None, None, None, None, None, None)
+        db::add_chat_message(&conn, &chat_session_id, "user", &text, None, None, None, None, None, None, None, None, None, None, None)
             .map_err(|e| format!("failed to persist user message: {e}"))?;
         db::touch_chat_session(&conn, &chat_session_id)
             .map_err(|e| format!("failed to touch chat session: {e}"))?;

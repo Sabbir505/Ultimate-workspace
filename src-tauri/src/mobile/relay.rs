@@ -924,7 +924,7 @@ async fn handle_chat_turn(
     if let Some(last) = messages.last() {
         if last.role == "user" {
             let conn = db.lock();
-            let _ = db::add_chat_message(&conn, &chat_session_id, "user", &last.content, None, None, None, None, None, None, None, None, None);
+            let _ = db::add_chat_message(&conn, &chat_session_id, "user", &last.content, None, None, None, None, None, None, None, None, None, None, None);
             let _ = db::touch_chat_session(&conn, &chat_session_id);
         }
     }
@@ -1073,6 +1073,7 @@ async fn handle_chat_turn(
                 if u.input_tokens > 0 || u.output_tokens > 0 { Some(u.cost_usd) } else { None }
             }),
             None, None, None, provider.as_deref(), model_key, None,
+            None, Some(db::now_ts()),
         );
         let _ = db::touch_chat_session(&conn, &sid);
     }

@@ -56,6 +56,23 @@ function toLines(text: string): string[] {
   return lines;
 }
 
+/** Added/deleted line counts for an edit payload. Shared by the inline diff
+ *  card and the per-turn "files changed" summary so both report the same stats
+ *  from the model's claimed find/replace args. */
+export function editLineStats(edit: EditPayload): { adds: number; dels: number } {
+  let dels: string[] = [];
+  let adds: string[] = [];
+  if (edit.mode === "replace") {
+    dels = toLines(edit.find);
+    adds = toLines(edit.replace);
+  } else if (edit.mode === "append") {
+    adds = toLines(edit.append);
+  } else {
+    adds = toLines(edit.content);
+  }
+  return { adds: adds.length, dels: dels.length };
+}
+
 /** Compute the card's preview lines and stats from the edit payload. A single
  *  edit_file call is one replacement (one hunk); a write is one all-adds hunk. */
 function buildPreview(edit: EditPayload): {

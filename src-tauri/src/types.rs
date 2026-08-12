@@ -358,6 +358,16 @@ pub struct ChatMessageRecord {
     pub model_key: Option<String>,
     #[serde(default)]
     pub pricing_estimated_usd: Option<f64>,
+    /// Wall-clock window of the turn that produced this row (assistant only),
+    /// in Unix seconds. `started_at` is captured when streaming begins and
+    /// `completed_at` when the reply is persisted; the UI shows "Worked for
+    /// Xs" from the difference. Both are `None` for user/system rows, for
+    /// legacy rows predating the columns, and when the start instant is
+    /// unknown (e.g. a partial message persisted on abort).
+    #[serde(default)]
+    pub started_at: Option<i64>,
+    #[serde(default)]
+    pub completed_at: Option<i64>,
 }
 
 /// One recorded fact/claim a research turn extracted from a single source page.

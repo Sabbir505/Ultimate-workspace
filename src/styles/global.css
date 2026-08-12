@@ -7410,6 +7410,159 @@ table.kv th {
   opacity: 0.5;
 }
 
+/* ---- Process row ("Worked for Xs") wrapping an entire turn's activity ---- */
+.chat-process {
+  margin: 4px 0;
+}
+.chat-process-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-left: 2px solid var(--border);
+  border-radius: 0;
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.chat-process-toggle:hover {
+  color: var(--text);
+  border-left-color: var(--text-dim);
+}
+.chat-process.live .chat-process-toggle {
+  border-left-color: var(--text-dim);
+}
+.chat-process-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  color: var(--text-dim);
+}
+.chat-process-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-process-meta {
+  flex: none;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  opacity: 0.5;
+}
+.chat-process-body {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* ---- Files-changed summary at the end of a turn ---- */
+.chat-files-summary {
+  margin: 6px 0 2px;
+}
+.chat-files-summary-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 8px;
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-left: 2px solid var(--border);
+  border-radius: 0;
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.chat-files-summary-toggle:hover {
+  color: var(--text);
+  border-left-color: var(--text-dim);
+}
+.chat-files-summary-count {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-files-summary-stats {
+  flex: none;
+  display: inline-flex;
+  gap: 6px;
+  font-size: 11px;
+}
+.chat-files-list {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0 0 0 8px;
+  border-left: 2px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.chat-files-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 8px;
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+}
+.chat-files-name {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
+.chat-files-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.7;
+}
+.chat-files-stats {
+  flex: none;
+  display: inline-flex;
+  gap: 6px;
+  font-size: 11px;
+}
+.chat-files-review {
+  flex: none;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: color 0.15s var(--ease), border-color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.chat-files-review:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+  background: var(--surface-2);
+}
+
 /* Expanded step list */
 .chat-activity-steps {
   margin-top: 2px;
@@ -7488,14 +7641,6 @@ table.kv th {
   font-size: 12px;
   line-height: 1.5;
   overflow-wrap: break-word;
-}
-
-/* Thinking interlude inside an activity group */
-.chat-step-think {
-  margin: 1px 0 1px 18px;
-}
-.chat-step-think .chat-thinking {
-  margin: 0;
 }
 
 /* Step detail / code / result bodies */

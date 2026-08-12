@@ -155,7 +155,7 @@ impl AgentSessionManager {
         // check so a rejected turn can't orphan a user message.
         {
             let conn = db.0.lock();
-            crate::db::add_chat_message(&conn, chat_session_id, "user", content, None, None, None, None, None, None, None, None, None)
+            crate::db::add_chat_message(&conn, chat_session_id, "user", content, None, None, None, None, None, None, None, None, None, None, None)
                 .map_err(|e| e.to_string())?;
         }
 
@@ -1253,7 +1253,7 @@ pub fn run_one_shot(
 ) -> Result<(), String> {
     {
         let conn = db.lock();
-        crate::db::add_chat_message(&conn, chat_session_id, "user", prompt, None, None, None, None, None, None, None, None, None)
+        crate::db::add_chat_message(&conn, chat_session_id, "user", prompt, None, None, None, None, None, None, None, None, None, None, None)
             .map_err(|e| e.to_string())?;
     }
 
@@ -1597,7 +1597,7 @@ fn finish_turn(
             .as_deref()
             .and_then(|a| a.strip_prefix("harness:"))
             .unwrap_or("unknown");
-        crate::db::add_chat_message(&conn, sid, "assistant", full, input, output, cost, None, None, None, Some(provider), None, None)
+        crate::db::add_chat_message(&conn, sid, "assistant", full, input, output, cost, None, None, None, Some(provider), None, None, None, Some(crate::db::now_ts()))
             .ok()
             .map(|m| m.id)
     } else {

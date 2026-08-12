@@ -8,7 +8,7 @@
 // only needed once a code block or tool step actually renders, NOT on the
 // empty welcome screen — so we lazy-load it via dynamic import() in
 // StepCodeHighlighter below. That moves it out of the initial bundle.
-import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -20,9 +20,10 @@ import type { ChatMessage } from "../../lib/ipc";
 import { readArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
+import { useProjectsStore } from "../../state/projects";
 import { parseUnifiedDiff } from "../../lib/diff";
 import { openInBrowserPane } from "../../lib/openBrowserPane";
-import { DiffCard, type EditPayload } from "./DiffCard";
+import { DiffCard, editLineStats, type EditPayload } from "./DiffCard";
 // InlineDiagram (vector diagrams) and MermaidDiagram (mermaid + its
 // highlight.js language pack) are rarely seen on the initial chat surface and
 // pull in heavy dependencies; lazy-load both so the main bundle stays small.
@@ -604,7 +605,7 @@ function InlineDiff({ diffText }: { diffText: string }) {
   );
 }
 
-/** A single tool-call row inside an expanded ActivitySummary. Renders the
+/** A single tool-call row inside an expanded ProcessSummary. Renders the
  *  step's type icon + a specific label (the actual URL/query/filename, not a
  *  repeated generic title). Any narration text the model produced around
  *  this step is folded into the row above/below the label. The whole row is
@@ -737,66 +738,175 @@ function ActivityStepRow({
   );
 }
 
-/** One collapsed activity group: a synthesized one-line summary of what the
- *  whole turn accomplished, expandable into the ordered step list. Tool steps
- *  render as ActivityStepRow (each itself further expandable); think steps
- *  render as compact nested ThinkingBlocks. A "Done" checkmark appears once
- *  the run has no live step remaining.
+/** The single collapsed row that wraps an assistant turn's ENTIRE process —
+ *  thinking, tool calls, and file edits — into one line ("Worked for Xs" once
+ *  done; a live action label while streaming). Expanding reveals what the turn
+ *  actually did, in source order: ThinkingBlock disclosures, ActivityStepRow
+ *  tool rows, and inline DiffCards. The model's synthesized answer and the
+ *  files-changed summary render OUTSIDE this row, after it.
  *
- *  Grouping boundary: the caller folds the turn's ENTIRE tool activity —
- *  including thinking interludes — into this one container, so a multi-step
- *  task takes up a single collapsed row by default. A trailing plain-text
- *  answer renders outside this block. */
-function ActivitySummary({ group }: { group: ActivityGroup }) {
+ *  The label is computed by the caller (MessageBubbleInner) so this component
+ *  stays presentational: `live` drives the spinner/check icon and `label` is
+ *  either the live action, "Worked for Xs" (when a duration is known), or a
+ *  legacy one-line summary fallback. */
+function ProcessSummary({
+  live,
+  label,
+  stepCount,
+  children,
+}: {
+  live: boolean;
+  label: string;
+  stepCount: number;
+  children: ReactNode;
+}) {
   const [open, setOpen] = useState(false);
-  const live = group.steps.some((s) => !s.done);
-  const summary = summarizeGroup(group.steps);
-  // While running, name the current action (Cursor-style "Reading App.tsx…")
-  // instead of a generic "working…" — the specific step is the useful signal.
-  const currentStep = live ? [...group.steps].reverse().find((s) => !s.done) : undefined;
-  const liveLabel = currentStep
-    ? currentStep.think != null
-      ? "Thinking…"
-      : `${stepLabel(currentStep.data)}…`
-    : "working…";
   return (
-    <div className={`chat-activity${live ? " live" : ""}`}>
+    <div className={`chat-process${live ? " live" : ""}`}>
       <button
-        className="chat-activity-toggle"
+        className="chat-process-toggle"
         onClick={() => setOpen((o) => !o)}
-        title={open ? "Collapse activity" : "Show activity steps"}
+        title={open ? "Hide process" : "Show what was done"}
       >
-        <span className="chat-activity-icon" aria-hidden="true">
+        <span className="chat-process-icon" aria-hidden="true">
           <StepStatusIcon done={!live} />
         </span>
-        <span className="chat-activity-summary">{live ? liveLabel : summary}</span>
-        <span className={`chat-thinking-chevron${open ? " open" : ""}`}>›</span>
-        <span className="chat-activity-count">{group.steps.length} steps</span>
+        <span className="chat-process-label">{label}</span>
+        {stepCount > 0 && (
+          <span className="chat-process-meta">
+            {stepCount} {stepCount === 1 ? "step" : "steps"}
+          </span>
+        )}
+        <span className={`chat-thinking-chevron${open ? " open" : ""}`} aria-hidden="true">
+          ›
+        </span>
+      </button>
+      {open && <div className="chat-process-body">{children}</div>}
+    </div>
+  );
+}
+
+/** One render block of an assistant turn's process region. `activity` flattens
+ *  to its step rows (the outer ProcessSummary is the single collapse; nested
+ *  collapsibles would be confusing). `diff` keeps its inline DiffCard. `think`
+ *  is its own disclosure. `text` is mid-run narration as markdown. */
+function renderProcessBlock(
+  b: Block,
+  i: number,
+  onPreviewArtifact?: (artifact: ChatArtifact) => void,
+) {
+  switch (b.kind) {
+    case "activity":
+      return (
+        <div className="chat-activity-steps" key={i}>
+          {b.group.steps.map((step, j) => (
+            <ActivityStepRow key={j} step={step} done={step.done} />
+          ))}
+        </div>
+      );
+    case "diff":
+      return (
+        <Fragment key={i}>
+          {b.step.before && b.step.before.trim().length > 0 && (
+            <Markdown content={b.step.before} onPreviewArtifact={onPreviewArtifact} />
+          )}
+          <DiffCard path={b.step.data!.path!} edit={b.step.data!.edit!} done={b.step.done} />
+        </Fragment>
+      );
+    case "think":
+      return b.text.length > 0 ? (
+        <ThinkingBlock key={i} thinking={b.text} done={b.done} />
+      ) : null;
+    case "text":
+      return b.text.trim().length > 0 ? (
+        <Markdown key={i} content={b.text} onPreviewArtifact={onPreviewArtifact} />
+      ) : null;
+  }
+}
+
+/** Format a worked-duration (seconds) as "8s", "2m 13s", or "<1s". */
+function formatDuration(sec: number): string {
+  if (sec < 1) return "<1s";
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return s ? `${m}m ${s}s` : `${m}m`;
+}
+
+/** Collapsible "N files changed · +adds −dels" row placed at the end of an
+ *  assistant turn that touched files. Expanding lists each edited file with its
+ *  own +/− stats and a Review button that opens that file's working-tree diff
+ *  in the right side panel (DevDiffPanel). */
+function FilesChangedSummary({ files }: { files: { path: string; edit: EditPayload }[] }) {
+  const [open, setOpen] = useState(false);
+  const setDiffPanelFile = useUiStore((s) => s.setDiffPanelFile);
+  const setToolPanelTab = useUiStore((s) => s.setToolPanelTab);
+  const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
+  const projects = useProjectsStore((s) => s.projects);
+  const selectedProjectId = useProjectsStore((s) => s.selectedProjectId);
+  const cwd = projects.find((p) => p.id === selectedProjectId)?.path ?? null;
+
+  if (files.length === 0) return null;
+
+  let totalAdds = 0;
+  let totalDels = 0;
+  for (const f of files) {
+    const { adds, dels } = editLineStats(f.edit);
+    totalAdds += adds;
+    totalDels += dels;
+  }
+
+  const review = (path: string) => {
+    setDiffPanelFile(path, cwd);
+    setToolPanelTab("files");
+    setToolPanelCollapsed(false);
+  };
+
+  return (
+    <div className="chat-files-summary">
+      <button
+        className="chat-files-summary-toggle"
+        onClick={() => setOpen((o) => !o)}
+        title={open ? "Hide files" : "Show changed files"}
+      >
+        <span className="chat-files-summary-count">
+          {files.length} {files.length === 1 ? "file" : "files"} changed
+        </span>
+        <span className="chat-files-summary-stats">
+          {totalAdds > 0 && <span className="dev-diff-stat-add">+{totalAdds.toLocaleString()}</span>}
+          {totalDels > 0 && <span className="dev-diff-stat-del">−{totalDels.toLocaleString()}</span>}
+        </span>
+        <span className={`chat-thinking-chevron${open ? " open" : ""}`} aria-hidden="true">
+          ›
+        </span>
       </button>
       {open && (
-        <div className="chat-activity-steps">
-          {group.steps.map((step, i) =>
-            step.think != null ? (
-              <div className="chat-step-think" key={i}>
-                {step.before && step.before.trim().length > 0 && (
-                  <div className="chat-step-narration">{step.before}</div>
-                )}
-                <ThinkingBlock thinking={step.think} done={step.done} />
-              </div>
-            ) : (
-              <ActivityStepRow
-                key={i}
-                step={step}
-                done={step.done}
-              />
-            ),
-          )}
-          {!live && group.steps.length > 0 && (
-            <div className="chat-activity-done">
-              <span>—</span> done
-            </div>
-          )}
-        </div>
+        <ul className="chat-files-list">
+          {files.map((f, i) => {
+            const { adds, dels } = editLineStats(f.edit);
+            const sep = Math.max(f.path.lastIndexOf("/"), f.path.lastIndexOf("\\"));
+            const basename = sep >= 0 ? f.path.slice(sep + 1) : f.path;
+            const dirname = sep >= 0 ? f.path.slice(0, sep) : "";
+            return (
+              <li className="chat-files-row" key={i} title={f.path}>
+                <span className="chat-files-name">{basename}</span>
+                {dirname && <span className="chat-files-path">→ {dirname}</span>}
+                <span className="chat-files-stats">
+                  {adds > 0 && <span className="dev-diff-stat-add">+{adds.toLocaleString()}</span>}
+                  {dels > 0 && <span className="dev-diff-stat-del">−{dels.toLocaleString()}</span>}
+                </span>
+                <button
+                  type="button"
+                  className="chat-files-review"
+                  onClick={() => review(f.path)}
+                  title={`Review diff for ${f.path}`}
+                >
+                  Review
+                </button>
+              </li>
+            );
+          })}
+        </ul>
       )}
     </div>
   );
@@ -1067,8 +1177,6 @@ interface ActivityStep {
   done: boolean;
   before?: string;
   after?: string;
-  /** Reasoning text when this step is a thinking interlude. */
-  think?: string;
 }
 
 /** A grouped run of tool steps, collapsed into one summary line by default. */
@@ -1085,20 +1193,23 @@ type Block =
   | { kind: "activity"; group: ActivityGroup }
   | { kind: "diff"; step: ActivityStep };
 
-/** Walk the parsed segments and collapse the turn's tool activity into
- *  ActivityGroup blocks — including any `<think>` reasoning interludes,
- *  which become think steps inside the group rather than breaking it (the old
- *  break-at-think rule produced one top-level activity block + one "Thought
- *  process" block per tool call, scrolling forever on multi-step tasks).
+/** Walk the parsed segments and collapse the turn's TOOL activity into
+ *  ActivityGroup blocks. Thinking (`<think>`) never enters a group: each
+ *  reasoning interlude is emitted as its own standalone disclosure beside the
+ *  collapsed tool-call summary, so it stays visible without expanding the
+ *  group and only tool calls live inside the collapsible.
  *
  *  Boundary rules:
  *  - Text before the first tool/think renders ABOVE the container as markdown.
- *  - A group starts at the first `tool` or `think` segment and absorbs every
- *    following `tool`/`think`/`text` segment — except file-edit tool calls
- *    (`kind: "edit"`), which break out into their own inline diff review card
- *    so an edit is reviewable at a glance instead of buried in the collapsed
- *    group. A diff card flushes the in-progress group, so a turn with edits
- *    renders as alternating activity/diff blocks in call order.
+ *  - A group starts at the first `tool` segment and absorbs every following
+ *    `tool`/`text` segment — except file-edit tool calls (`kind: "edit"`),
+ *    which break out into their own inline diff review card so an edit is
+ *    reviewable at a glance instead of buried in the collapsed group. A diff
+ *    card flushes the in-progress group, so a turn with edits renders as
+ *    alternating activity/diff blocks in call order.
+ *  - A `think` segment flushes the in-progress group (if any) and renders as
+ *    its own block; a following tool starts a fresh group. A turn thus renders
+ *    as alternating think/activity blocks in source order.
  *  - Mid-run text is narration: it folds into the next step's `before`.
  *  - Text trailing the last tool/think is the model's synthesized answer and
  *    renders OUTSIDE the group as markdown, after the summary.
@@ -1151,18 +1262,21 @@ function groupSegments(segments: Segment[]): Block[] {
       continue;
     }
     if (seg.type === "think") {
-      started = true;
       // Skip empty think shells (e.g. an opening tag that just started
       // streaming); any pending narration stays held for the next step.
-      if (seg.text.length > 0) {
-        steps.push({
-          data: null,
-          done: seg.done,
-          think: seg.text,
-          before: pendingText ?? undefined,
-        });
-        pendingText = null;
+      if (seg.text.length === 0) continue;
+      // Pull thinking OUT of the activity group: close any in-progress tool
+      // run, surface held narration as plain text, then emit the reasoning as
+      // its own disclosure beside the collapsed tool-call summary (not buried
+      // inside it). A following tool starts a fresh group, so a turn renders
+      // as alternating think/activity blocks in source order.
+      flushSteps();
+      if (pendingText != null && pendingText.trim().length > 0) {
+        blocks.push({ kind: "text", text: pendingText });
       }
+      pendingText = null;
+      blocks.push({ kind: "think", text: seg.text, done: seg.done });
+      started = true;
       continue;
     }
     // text while active: narration between calls — hold until the next step
@@ -1220,11 +1334,88 @@ function MessageBubbleInner({
     .join("")
     .trim();
 
-  // Fold the turn's entire tool activity (including thinking interludes and
-  // mid-run narration) into ONE ActivitySummary container. A trailing
-  // plain-text answer renders as normal markdown OUTSIDE the group — the core
-  // fix for the noisy per-call rows + interleaved-blocks layout.
+  // Group the turn into ordered render blocks (text / think / activity / diff).
   const blocks = isUser ? null : groupSegments(segments);
+
+  // Partition the assistant turn into [leading text] [process region]
+  // [trailing answer]. Process kinds (think / activity / diff) bracket the
+  // region; the run of text AFTER the last process block is the synthesized
+  // answer shown below the "Worked for Xs" row, and text BEFORE the first one
+  // is the model's intro shown above it.
+  let firstProcess = -1;
+  let lastProcess = -1;
+  if (blocks) {
+    for (let i = 0; i < blocks.length; i++) {
+      const k = blocks[i].kind;
+      if (k === "think" || k === "activity" || k === "diff") {
+        if (firstProcess === -1) firstProcess = i;
+        lastProcess = i;
+      }
+    }
+  }
+  const hasProcess = firstProcess !== -1;
+
+  // Aggregate process-level state: is anything still live, how many tool steps
+  // ran, what's the current action while streaming, and which files changed.
+  let processLive = false;
+  let processStepCount = 0;
+  let liveLabel = "Working…";
+  const processToolSteps: ActivityStep[] = [];
+  const fileChanges: { path: string; edit: EditPayload }[] = [];
+  if (hasProcess && blocks) {
+    for (let i = firstProcess; i <= lastProcess; i++) {
+      const b = blocks[i];
+      if (b.kind === "activity") {
+        for (const s of b.group.steps) {
+          processStepCount++;
+          processToolSteps.push(s);
+          if (!s.done) processLive = true;
+        }
+      } else if (b.kind === "diff") {
+        processStepCount++;
+        processToolSteps.push({ data: b.step.data, done: b.step.done });
+        if (!b.step.done) processLive = true;
+      } else if (b.kind === "think" && !b.done) {
+        processLive = true;
+      }
+    }
+    // Live label = the most recent in-flight action (Cursor-style).
+    for (let i = lastProcess; i >= firstProcess; i--) {
+      const b = blocks[i];
+      if (b.kind === "think" && !b.done) {
+        liveLabel = "Thinking…";
+        break;
+      }
+      if (b.kind === "diff" && !b.step.done) {
+        liveLabel = `${stepLabel(b.step.data)}…`;
+        break;
+      }
+      if (b.kind === "activity") {
+        const cur = [...b.group.steps].reverse().find((s) => !s.done);
+        if (cur) {
+          liveLabel = `${stepLabel(cur.data)}…`;
+          break;
+        }
+      }
+    }
+  }
+  // File changes span the whole turn (diff blocks are always in the region).
+  if (blocks) {
+    for (const b of blocks) {
+      if (b.kind === "diff" && b.step.data?.path && b.step.data?.edit) {
+        fileChanges.push({ path: b.step.data.path, edit: b.step.data.edit });
+      }
+    }
+  }
+  // The collapsed row's label: live action while streaming, "Worked for Xs"
+  // when we have a duration, else a legacy one-line summary of the tool steps.
+  const fallbackSummary =
+    processToolSteps.length > 0 ? summarizeGroup(processToolSteps) : "";
+  const processLabel = processLive
+    ? liveLabel
+    : message.durationSec != null
+      ? `Worked for ${formatDuration(message.durationSec)}`
+      : (fallbackSummary || "Worked");
 
   // Detect if this assistant message contains a plan section
   const planSection = !isUser ? detectPlan(message.content) : null;
@@ -1240,24 +1431,43 @@ function MessageBubbleInner({
           ? cleanContent.trim().length > 0 && (
               <Markdown content={cleanContent} onPreviewArtifact={onPreviewArtifact} />
             )
-          : blocks!.map((b, i) =>
-              b.kind === "activity" ? (
-                <ActivitySummary key={i} group={b.group} />
-              ) : b.kind === "diff" ? (
-                <Fragment key={i}>
-                  {b.step.before && b.step.before.trim().length > 0 && (
-                    <Markdown content={b.step.before} onPreviewArtifact={onPreviewArtifact} />
+          : hasProcess
+            ? (
+              <>
+                {/* Leading intro text renders above the process row. */}
+                {blocks!
+                  .slice(0, firstProcess)
+                  .map((b, i) =>
+                    b.kind === "text" && b.text.trim().length > 0 ? (
+                      <Markdown key={i} content={b.text} onPreviewArtifact={onPreviewArtifact} />
+                    ) : null,
                   )}
-                  <DiffCard path={b.step.data!.path!} edit={b.step.data!.edit!} done={b.step.done} />
-                </Fragment>
-              ) : b.kind === "think" ? (
-                b.text.length > 0 ? (
-                  <ThinkingBlock key={i} thinking={b.text} done={b.done} />
-                ) : null
-              ) : b.text.trim().length > 0 ? (
-                <Markdown key={i} content={b.text} onPreviewArtifact={onPreviewArtifact} />
-              ) : null,
-            )}
+                <ProcessSummary
+                  live={processLive}
+                  label={processLabel}
+                  stepCount={processStepCount}
+                >
+                  {blocks!
+                    .slice(firstProcess, lastProcess + 1)
+                    .map((b, i) => renderProcessBlock(b, i, onPreviewArtifact))}
+                </ProcessSummary>
+                {/* Trailing synthesized answer renders below the process row. */}
+                {blocks!
+                  .slice(lastProcess + 1)
+                  .map((b, i) =>
+                    b.kind === "text" && b.text.trim().length > 0 ? (
+                      <Markdown key={i} content={b.text} onPreviewArtifact={onPreviewArtifact} />
+                    ) : null,
+                  )}
+                {fileChanges.length > 0 && <FilesChangedSummary files={fileChanges} />}
+              </>
+            )
+            /* Pure-answer turn (no tool/think activity): just markdown. */
+            : blocks!.map((b, i) =>
+                b.kind === "text" && b.text.trim().length > 0 ? (
+                  <Markdown key={i} content={b.text} onPreviewArtifact={onPreviewArtifact} />
+                ) : null,
+              )}
         {!isUser && artifacts && artifacts.length > 0 && (
           <MessageArtifacts artifacts={artifacts} onPreviewArtifact={onPreviewArtifact} />
         )}

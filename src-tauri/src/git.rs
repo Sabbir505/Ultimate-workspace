@@ -6,8 +6,10 @@
 //! frontend re-calls `get_git_status` on an interval rather than us running a
 //! filesystem watcher.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -15,9 +17,26 @@ use crate::types::GitStatusInfo;
 
 const DIFF_CAP_BYTES: usize = 200 * 1024;
 
+/// Hard ceiling on any single git subprocess. Normal operations finish in well
+/// under a second; this bounds the rare slow case (large push, slow network) so
+/// a hung operation can never block the UI indefinitely. The credential-prompt
+/// case is handled separately (and fails in ~1s) via GIT_TERMINAL_PROMPT=0.
+const GIT_TIMEOUT: Duration = Duration::from_secs(90);
+
 fn git_command(cwd: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(cwd);
+    // This is a detached GUI process with no console. Without these env vars,
+    // a `git push` needing auth hangs forever on a stdin prompt that can never
+    // be answered. GIT_TERMINAL_PROMPT=0 makes git fail fast; GCM_INTERACTIVE=
+    // never tells the Git Credential Manager not to pop a UI dialog.
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GCM_INTERACTIVE", "never");
+    // Null stdin so git can't block waiting for interactive input, and piped
+    // outputs so we can drain them concurrently (see below).
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
     // Prevent console-window flashes when the GUI app shells out on Windows.
     #[cfg(windows)]
     {
@@ -25,7 +44,74 @@ fn git_command(cwd: &Path, args: &[&str]) -> std::io::Result<std::process::Outpu
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    cmd.output()
+
+    let mut child = cmd.spawn()?;
+
+    // Drain stdout/stderr on background threads. Without concurrent draining,
+    // git blocks once its 64KB pipe buffer fills and would never exit — a
+    // classic subprocess deadlock. Each thread reads its pipe to EOF.
+    let mut stdout = child
+        .stdout
+        .take()
+        .expect("piped stdout is present right after spawn");
+    let mut stderr = child
+        .stderr
+        .take()
+        .expect("piped stderr is present right after spawn");
+    let out_handle =
+        std::thread::spawn(move || {
+            let mut v = Vec::new();
+            let _ = stdout.read_to_end(&mut v);
+            v
+        });
+    let err_handle =
+        std::thread::spawn(move || {
+            let mut v = Vec::new();
+            let _ = stderr.read_to_end(&mut v);
+            v
+        });
+
+    // Poll for exit with a timeout. try_wait doesn't block, so we can check
+    // the deadline between polls and kill a hung child.
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None => {
+                if start.elapsed() >= GIT_TIMEOUT {
+                    // Kill + reap so we don't leak a zombie, then surface the
+                    // stderr captured so far (often the auth-failure message).
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let err_bytes = err_handle.join().unwrap_or_default();
+                    let stderr_text = String::from_utf8_lossy(&err_bytes);
+                    let tail = if stderr_text.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!("\nstderr: {}", stderr_text.trim())
+                    };
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "git {} timed out after {}s{tail}",
+                            args.join(" "),
+                            GIT_TIMEOUT.as_secs(),
+                        ),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
+
+    let stdout_bytes = out_handle.join().expect("stdout drain thread panicked");
+    let stderr_bytes = err_handle.join().expect("stderr drain thread panicked");
+
+    Ok(std::process::Output {
+        status,
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+    })
 }
 
 /// Ok(stdout trimmed) on success, Err(stderr trimmed or message) otherwise.

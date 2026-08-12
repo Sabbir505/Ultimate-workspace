@@ -1101,6 +1101,13 @@ pre,
   color: #ef4444;
 }
 
+.commit-modal-hint {
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+  margin-top: 6px;
+  font-style: italic;
+}
+
 .commit-modal-actions {
   display: flex;
   flex-direction: column;

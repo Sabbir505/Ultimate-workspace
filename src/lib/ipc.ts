@@ -230,6 +230,11 @@ export const gitPush = (path: string) =>
 export const getRemoteUrl = (path: string) =>
   safeInvoke<string | null>("get_remote_url", { path });
 
+/** Generate a Conventional-Commits message from the working-tree diff, using the
+ *  active chat session's configured model. Null when there's no diff or no model. */
+export const generateCommitMessage = (path: string, chatSessionId: string) =>
+  safeInvoke<string | null>("generate_commit_message", { path, chatSessionId });
+
 // --- Settings / skills / quick actions / secrets / cost ---
 export const getSetting = (key: string) => safeInvoke<string | null>("get_setting", { key });
 export const setSetting = (key: string, value: string) => safeInvoke<void>("set_setting", { key, value });
@@ -340,6 +345,11 @@ export interface ChatMessageRecord {
   outputTokens: number | null;
   costUsd: number | null;
   createdAt: number;
+  /** Wall-clock window of the assistant turn that produced this row (Unix
+   *  seconds). Both null for user/system rows and legacy rows predating the
+   *  columns; `durationSec` is derived from `completedAt - startedAt`. */
+  startedAt: number | null;
+  completedAt: number | null;
   /** Live attachment objects for the optimistic just-sent user message, so the
    *  bubble can show real image thumbnails before the backend persists. Not
    *  present on persisted messages (those carry attachment text markers in
@@ -361,6 +371,10 @@ export interface ChatConfigPayload {
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
+  /** How long the assistant turn took (seconds), from the persisted
+   *  `completedAt - startedAt`. Absent for the live streaming bubble, for
+   *  user/system rows, and for legacy rows with no recorded window. */
+  durationSec?: number;
   /** Live attachment objects (with image base64) for the optimistic just-sent
    *  message, so image cards get a real thumbnail before the backend persists.
    *  Persisted messages carry attachments as text markers inside `content`

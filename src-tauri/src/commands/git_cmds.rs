@@ -1,6 +1,6 @@
 //! Git commands (CONTRACT.md "Git").
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, Manager, State};
 
@@ -146,17 +146,32 @@ pub fn get_remote_url(path: String, db: State<DbState>) -> CmdResult<Option<Stri
 }
 
 /// Stage all changes and commit with the given message. Returns the short SHA.
+//
+// Async + spawn_blocking: git_commit spawns multiple subprocesses (git add .,
+// git commit, git rev-parse) which can take seconds on a large tree. As a
+// synchronous command this blocked the Tauri main thread and froze/crashed
+// WebView2. Offloading to a blocking thread keeps the UI responsive.
 #[tauri::command]
-pub fn git_commit(path: String, message: String, db: State<DbState>) -> CmdResult<String> {
+pub async fn git_commit(path: String, message: String, db: State<'_, DbState>) -> CmdResult<String> {
     verify_project_path(Path::new(&path), &db)?;
-    git::git_commit(Path::new(&path), &message)
+    let path = PathBuf::from(path);
+    tokio::task::spawn_blocking(move || git::git_commit(&path, &message))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Push the current branch to origin.
+//
+// Async + spawn_blocking: git_push is a network round-trip (often seconds,
+// longer during credential negotiation). As a synchronous command it froze
+// the main thread and crashed WebView2; offloading prevents that.
 #[tauri::command]
-pub fn git_push(path: String, db: State<DbState>) -> CmdResult<String> {
+pub async fn git_push(path: String, db: State<'_, DbState>) -> CmdResult<String> {
     verify_project_path(Path::new(&path), &db)?;
-    git::git_push(Path::new(&path))
+    let path = PathBuf::from(path);
+    tokio::task::spawn_blocking(move || git::git_push(&path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 // ---- Filesystem watcher (drives project:fs-changed) ----

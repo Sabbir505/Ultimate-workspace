@@ -410,6 +410,8 @@ pub async fn openai_oneshot(
 }
 
 /// One-shot (non-streaming) Anthropic-style completion returning the text.
+/// `max_tokens` is required by Anthropic's API; callers choose it (titles: 32,
+/// commit messages: 200 for subject + body).
 pub async fn anthropic_oneshot(
     client: &reqwest::Client,
     api_key: &str,
@@ -417,11 +419,12 @@ pub async fn anthropic_oneshot(
     model: &str,
     system: &str,
     user: &str,
+    max_tokens: u32,
 ) -> CmdResult<String> {
     let url = format!("{base}/v1/messages");
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": 32,
+        "max_tokens": max_tokens,
         "stream": false,
         "system": system,
         "messages": [{"role": "user", "content": user}],
@@ -535,13 +538,13 @@ pub async fn generate_chat_title(
         }
         "anthropic" => {
             let base = base_url.as_deref().unwrap_or(AnthropicProvider::DEFAULT_BASE);
-            anthropic_oneshot(&client, &api_key, base, &model, system, &user).await?
+            anthropic_oneshot(&client, &api_key, base, &model, system, &user, 32).await?
         }
         "anthropic_compatible" => {
             let Some(base) = base_url.as_deref() else {
                 return Ok(None);
             };
-            anthropic_oneshot(&client, &api_key, base, &model, system, &user).await?
+            anthropic_oneshot(&client, &api_key, base, &model, system, &user, 32).await?
         }
         _ => return Ok(None),
     };
@@ -555,6 +558,165 @@ pub async fn generate_chat_title(
         db::update_chat_session_title(&conn, &chat_session_id, &title).map_err(|e| e.to_string())?;
     }
     Ok(Some(title))
+}
+
+/// Generate a Conventional-Commits-style commit message from the working-tree
+/// diff, using the same provider/model/key resolution as `generate_chat_title`.
+/// Returns None when there's no diff, no model configured, or generation fails
+/// — callers fall back to an empty textarea the user fills in themselves.
+#[tauri::command]
+pub async fn generate_commit_message(
+    path: String,
+    chat_session_id: String,
+    db: State<'_, DbState>,
+) -> CmdResult<Option<String>> {
+    // Resolve provider + model. Prefer the dedicated commit-message settings
+    // (commitMessage.provider + commitMessage.model) when the user has picked
+    // a fast/utility model for this task; fall back to the active chat
+    // session's provider/model. The pair is required because API keys and base
+    // URLs are stored per-provider — a bare model string can't resolve them.
+    let (provider_str, model_str) = {
+        let conn = db.0.lock();
+        let cm_provider = db::get_setting(&conn, "commitMessage.provider")
+            .ok()
+            .flatten()
+            .filter(|p| !p.trim().is_empty());
+        let cm_model = db::get_setting(&conn, "commitMessage.model")
+            .ok()
+            .flatten()
+            .filter(|m| !m.trim().is_empty());
+        match (cm_provider, cm_model) {
+            (Some(p), Some(m)) => (p, m),
+            _ => {
+                // Fall back to the session's configured provider + model.
+                let cs = db::get_chat_session(&conn, &chat_session_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "chat session not found".to_string())?;
+                (cs.provider, cs.model)
+            }
+        }
+    };
+
+    let api_key = {
+        let conn = db.0.lock();
+        secrets::get_chat_api_key(&conn, &provider_str)
+    };
+    if api_key.is_none() && provider_str != "local_gguf" {
+        return Ok(None);
+    }
+    let api_key = api_key.unwrap_or_default();
+
+    let (base_url, model_override) = {
+        let conn = db.0.lock();
+        let base = db::get_setting(&conn, &format!("chat.{provider_str}.base_url"))
+            .map_err(|e| e.to_string())?;
+        let mo = db::get_setting(&conn, &format!("chat.{provider_str}.model"))
+            .map_err(|e| e.to_string())?;
+        (base, mo)
+    };
+    let model = if model_str.trim().is_empty() {
+        match model_override {
+            Some(m) if !m.trim().is_empty() => m,
+            _ => return Ok(None),
+        }
+    } else {
+        model_str
+    };
+
+    // Fetch the working-tree diff (git diff HEAD, capped at 200KB by
+    // get_git_diff). Truncate further to keep the prompt bounded.
+    let diff = crate::git::get_git_diff(Path::new(&path))?;
+    let diff: String = diff.chars().take(8000).collect();
+    if diff.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let system = "You write a ONE-LINE Conventional Commits commit message from a \
+        unified diff. Use imperative mood (e.g. 'add', 'fix', 'refactor'). The \
+        message must be a single subject line of at most 80 characters, \
+        prefixed with a type like feat:, fix:, refactor:, docs:, chore:, or \
+        test:. NO body, NO bullet points, NO blank line — just the subject. \
+        Reply with ONLY the subject line — no surrounding quotes, no \
+        'Commit message:' prefix, no explanation.";
+    let user = format!("Diff:\n{diff}\nCommit subject:");
+
+    let base_url = base_url.filter(|b| !b.trim().is_empty());
+    let client = reqwest::Client::new();
+    let raw = match provider_str.as_str() {
+        "openai" => {
+            let base = base_url.as_deref().unwrap_or(OpenAIProvider::DEFAULT_BASE);
+            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
+        }
+        "openrouter" => {
+            let base = base_url.as_deref().unwrap_or(OpenRouterProvider::DEFAULT_BASE);
+            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
+        }
+        "openai_compatible" | "local_gguf" => {
+            let Some(base) = base_url.as_deref() else {
+                return Ok(None);
+            };
+            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
+        }
+        "anthropic" => {
+            let base = base_url.as_deref().unwrap_or(AnthropicProvider::DEFAULT_BASE);
+            // 64 tokens is plenty for a single ≤80-char subject line and keeps
+            // generation fast (latency scales with output tokens).
+            anthropic_oneshot(&client, &api_key, base, &model, system, &user, 64).await?
+        }
+        "anthropic_compatible" => {
+            let Some(base) = base_url.as_deref() else {
+                return Ok(None);
+            };
+            anthropic_oneshot(&client, &api_key, base, &model, system, &user, 64).await?
+        }
+        _ => return Ok(None),
+    };
+
+    // Reasoning models (DeepSeek-R1, Qwen-QwQ, …) wrap chain-of-thought in
+    // <think>…</think> before the answer — strip it so only the subject remains.
+    let raw = strip_think_blocks(&raw);
+    let msg = clean_commit_message(&raw);
+    if msg.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(msg))
+    }
+}
+
+/// Tidy a model-generated commit subject: take the first non-empty line,
+/// strip stray quotes/labels, and cap at 80 chars (the subject-only budget).
+fn clean_commit_message(raw: &str) -> String {
+    // The prompt asks for one line; take the first non-empty one in case the
+    // model added a blank line or trailing commentary.
+    let mut t = raw
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    // Strip surrounding quotes the model sometimes adds.
+    t = t
+        .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+        .trim()
+        .to_string();
+    // Drop a leading "Commit message:" / "Subject:" label if present.
+    for prefix in [
+        "Commit message:",
+        "Commit Message:",
+        "Commit subject:",
+        "Subject:",
+        "Message:",
+    ] {
+        if let Some(stripped) = t.strip_prefix(prefix) {
+            t = stripped.trim().to_string();
+            break;
+        }
+    }
+    // Enforce the 80-char subject cap.
+    if t.chars().count() > 80 {
+        t = t.chars().take(80).collect::<String>().trim_end().to_string();
+    }
+    t.trim().to_string()
 }
 
 #[tauri::command]

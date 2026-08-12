@@ -107,6 +107,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_messages_superseded(conn)?;
     migrate_cost_v2(conn)?;
     migrate_chat_messages_v2(conn)?;
+    migrate_chat_messages_started_completed(conn)?;
     migrate_unc_paths(conn)
 }
 
@@ -327,6 +328,21 @@ pub fn migrate_chat_messages_v2(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Add the `started_at` / `completed_at` turn-window columns (assistant rows
+/// only) so the UI can show "Worked for Xs". Same duplicate-column-tolerant
+/// pattern as `migrate_chat_messages_v2`.
+pub fn migrate_chat_messages_started_completed(conn: &Connection) -> DbResult<()> {
+    for (col, def) in [("started_at", "INTEGER"), ("completed_at", "INTEGER")] {
+        let sql = format!("ALTER TABLE chat_messages ADD COLUMN {col} {def}");
+        if let Err(e) = conn.execute(&sql, []) {
+            if !e.to_string().contains("duplicate column name") {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Schema = PRD §6.3 verbatim + the `quick_actions` table from CONTRACT.md.
 pub fn init_schema(conn: &Connection) -> DbResult<()> {
     conn.execute_batch(
@@ -431,7 +447,9 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           reasoning_output_tokens INTEGER,
           provider TEXT,
           model_key TEXT,
-          pricing_estimated_usd REAL
+          pricing_estimated_usd REAL,
+          started_at INTEGER,
+          completed_at INTEGER
         );
 
         CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(chat_session_id, id);

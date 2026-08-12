@@ -822,6 +822,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       outputTokens: null,
       costUsd: null,
       createdAt: Date.now(),
+      startedAt: null,
+      completedAt: null,
     };
     set({
       messages: [...messages, userMsg],

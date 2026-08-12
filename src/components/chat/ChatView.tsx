@@ -623,6 +623,11 @@ export function ChatView() {
       role: m.role as "user" | "assistant" | "system",
       content: m.content,
       attachments: m.attachments,
+      // Assistant turns carry a worked-duration window; null/legacy rows omit it.
+      durationSec:
+        m.startedAt != null && m.completedAt != null
+          ? m.completedAt - m.startedAt
+          : undefined,
       key: `msg-${m.id}`,
       id: m.id,
       onDelete: () => handleDelete(m.id),

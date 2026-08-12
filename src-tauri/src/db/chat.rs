@@ -279,6 +279,8 @@ fn map_chat_message(row: &rusqlite::Row) -> rusqlite::Result<ChatMessageRecord> 
         provider: row.get("provider")?,
         model_key: row.get("model_key")?,
         pricing_estimated_usd: row.get("pricing_estimated_usd")?,
+        started_at: row.get("started_at")?,
+        completed_at: row.get("completed_at")?,
     })
 }
 
@@ -296,6 +298,8 @@ pub fn add_chat_message(
     provider: Option<&str>,
     model_key: Option<&str>,
     pricing_estimated_usd: Option<f64>,
+    started_at: Option<i64>,
+    completed_at: Option<i64>,
 ) -> DbResult<ChatMessageRecord> {
     let now = now_ts();
     conn.execute(
@@ -303,13 +307,15 @@ pub fn add_chat_message(
             chat_session_id, role, content,
             input_tokens, output_tokens, cost_usd, created_at,
             cache_creation_input_tokens, cache_read_input_tokens, reasoning_output_tokens,
-            provider, model_key, pricing_estimated_usd
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            provider, model_key, pricing_estimated_usd,
+            started_at, completed_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             chat_session_id, role, content,
             input_tokens, output_tokens, cost_usd, now,
             cache_creation_input_tokens, cache_read_input_tokens, reasoning_output_tokens,
             provider, model_key, pricing_estimated_usd,
+            started_at, completed_at,
         ],
     )?;
     let id = conn.last_insert_rowid();
@@ -329,6 +335,8 @@ pub fn add_chat_message(
         provider: provider.map(String::from),
         model_key: model_key.map(String::from),
         pricing_estimated_usd,
+        started_at,
+        completed_at,
     })
 }
 
@@ -425,12 +433,14 @@ mod tests {
         assert_eq!(cs2.title.as_deref(), Some("my chat"));
         assert!(cs2.last_active_at >= cs.last_active_at);
 
-        let m1 = add_chat_message(&conn, &cs.id, "user", "hello", None, None, None, None, None, None, None, None, None).unwrap();
+        let m1 = add_chat_message(&conn, &cs.id, "user", "hello", None, None, None, None, None, None, None, None, None, None, None).unwrap();
         assert_eq!(m1.role, "user");
-        let m2 = add_chat_message(&conn, &cs.id, "assistant", "hi there", Some(100), Some(50), Some(0.0015), None, None, None, None, None, None).unwrap();
+        let m2 = add_chat_message(&conn, &cs.id, "assistant", "hi there", Some(100), Some(50), Some(0.0015), None, None, None, None, None, None, Some(100), Some(130)).unwrap();
         assert_eq!(m2.input_tokens, Some(100));
         assert_eq!(m2.output_tokens, Some(50));
         assert!((m2.cost_usd.unwrap() - 0.0015).abs() < 1e-9);
+        assert_eq!(m2.started_at, Some(100));
+        assert_eq!(m2.completed_at, Some(130));
 
         let msgs = list_chat_messages(&conn, &cs.id).unwrap();
         assert_eq!(msgs.len(), 2);
@@ -455,7 +465,7 @@ mod tests {
         let empty_starred = create_chat_session(&conn, "openai", "gpt-4o", None).unwrap();
         set_chat_session_starred(&conn, &empty_starred.id, true).unwrap();
         let with_msgs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
-        add_chat_message(&conn, &with_msgs.id, "user", "hello", None, None, None, None, None, None, None, None, None).unwrap();
+        add_chat_message(&conn, &with_msgs.id, "user", "hello", None, None, None, None, None, None, None, None, None, None, None).unwrap();
 
         // Keep empty_a (the one being restored) — sweep the rest.
         let n = delete_empty_chat_sessions(&conn, Some(&empty_a.id)).unwrap();
@@ -536,9 +546,9 @@ mod tests {
     fn delete_chat_message_removes_row_and_detaches_artifacts() {
         let conn = super::super::mem();
         let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
-        let m1 = add_chat_message(&conn, &cs.id, "user", "hi", None, None, None, None, None, None, None, None, None).unwrap();
+        let m1 = add_chat_message(&conn, &cs.id, "user", "hi", None, None, None, None, None, None, None, None, None, None, None).unwrap();
         let m2 =
-            add_chat_message(&conn, &cs.id, "assistant", "hello", None, None, None, None, None, None, None, None, None).unwrap();
+            add_chat_message(&conn, &cs.id, "assistant", "hello", None, None, None, None, None, None, None, None, None, None, None).unwrap();
 
         // Attach an artifact to the assistant message we'll delete.
         let art = super::super::insert_artifact(

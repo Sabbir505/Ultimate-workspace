@@ -889,7 +889,7 @@ pub async fn send_chat_message(
     // 2. Persist the user message.
     {
         let conn = db.0.lock();
-        db::add_chat_message(&conn, &chat_session_id, "user", &content, None, None, None, None, None, None, None, None, None)
+        db::add_chat_message(&conn, &chat_session_id, "user", &content, None, None, None, None, None, None, None, None, None, None, None)
             .map_err(|e| e.to_string())?;
         db::touch_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())?;
     }
@@ -1280,6 +1280,7 @@ pub async fn send_chat_message(
                             Some(o.summary_output_tokens),
                             None,
                             None, None, None, None, None, None,
+                            None, None,
                         )
                         .map_err(|e| e.to_string())?;
                         if !o.superseded_ids.is_empty() {
@@ -1547,6 +1548,11 @@ pub fn persist_partial_chat_message(
         provider_val,
         model_key,
         None,
+        // The abort command doesn't know the turn's start instant, so leave
+        // started_at null (UI falls back to a generic label) but stamp
+        // completed_at so the row still reads as finished.
+        None,
+        Some(db::now_ts()),
     );
     let _ = db::touch_chat_session(&conn, &chat_session_id);
     Ok(())

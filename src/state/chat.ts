@@ -159,6 +159,43 @@ export interface QueuedChatMessage {
   forceResearch?: boolean;
 }
 
+/** A per-session goal-driven loop (/goal / /loop). The host auto-issues a
+ *  follow-up turn whenever the last reply said `LOOP_STATUS: continue`, up to
+ *  `max` iterations. `advanceLoop` inspects the sentinel to decide. */
+export interface LoopState {
+  /** The goal text after the /goal (or /loop) token. */
+  goal: string;
+  /** Replies/completions seen so far (0 = loop freshly armed, pre-first-turn). */
+  iteration: number;
+  /** Hard cap on loop turns — safety rail against runaway loops. */
+  max: number;
+  /** Whether the loop is still live. Set false when it completes, blocks,
+   *  errors, is stopped by the user, or the cap is reached. */
+  active: boolean;
+}
+
+/** What `advanceLoop` decided after one reply. */
+export type LoopDecision = "continue" | "complete" | "blocked" | "stop";
+
+/** Default cap on goal-loop iterations unless the composer overrides it. */
+export const GOAL_LOOP_MAX = 10;
+
+/** Parse the machine-readable sentinel out of a last assistant reply. Any
+ *  trailing `LOOP_STATUS: <value>` line wins; missing/malformed = "stop" so an
+ *  uncooperative model can never drive an infinite loop. */
+export function parseLoopStatus(reply: string): "continue" | "complete" | "blocked" | "stop" {
+  const lines = reply
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .map((l) => l.replace(/^>\s*/, "")); // tolerate a blockquote wrapping in markdown
+  // Walk from the end so the final sentinel wins even if it appears mid-text.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = /^LOOP_STATUS:\s*(continue|complete|blocked)\s*$/i.exec(lines[i]);
+    if (m) return m[1].toLowerCase() as "continue" | "complete" | "blocked";
+  }
+  return "stop";
+}
+
 /** Float starred chats to the top while preserving the existing (recency)
  *  order within the starred and unstarred groups. Stable so the optimistic
  *  "bump active chat to top" reordering still works. */
@@ -252,6 +289,10 @@ export interface ChatState {
    *  session is opened and after each turn completes (`chat:done`), used for
    *  the composer metrics row. */
   sessionMetrics: Record<string, ChatSessionMetricsPayload>;
+  /** Goal-driven loops (/goal / /loop) keyed by chat session id. Only the
+   *  active session's loop is advanced, and only while the session is active
+   *  (switching away pauses it). */
+  loopState: Record<string, LoopState>;
 
   // Actions
   loadSessions: () => Promise<void>;
@@ -310,6 +351,14 @@ export interface ChatState {
    *  is active and no stream is running (sendMessage targets the active
    *  session; queued items for background sessions wait for selectSession). */
   drainQueue: (chatSessionId: string) => void;
+  /** Arm a goal loop for the active session (called when the user sends a
+   *  /goal or /loop message). Iterations tick in `onDone`. */
+  startLoop: (goal: string) => void;
+  /** Disarm the active session's loop (Stop button, or when the loop ends). */
+  stopLoop: () => void;
+  /** Inspect the last assistant reply against the session's loop state and
+   *  return the next action. Pure-ish: mutates loopState to advance/close it. */
+  advanceLoop: (chatSessionId: string, lastReply: string) => LoopDecision;
   sendMessage: (
     content: string,
     attachments?: ChatAttachmentInput[],
@@ -409,6 +458,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   messageQueue: {},
   livePerf: {},
   sessionMetrics: {},
+  loopState: {},
 
   setCwdOverride: (chatSessionId, path) =>
     set((s) => {
@@ -452,6 +502,55 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!next) return;
     set((s) => ({ messageQueue: { ...s.messageQueue, [chatSessionId]: rest } }));
     void get().sendMessage(next.content, next.attachments, next.forceResearch);
+  },
+
+  startLoop: (goal) => {
+    const id = get().activeChatSessionId;
+    if (!id) return;
+    set((s) => ({
+      loopState: {
+        ...s.loopState,
+        [id]: { goal, iteration: 0, max: GOAL_LOOP_MAX, active: true },
+      },
+    }));
+  },
+
+  stopLoop: () => {
+    const id = get().activeChatSessionId;
+    if (!id) return;
+    set((s) => {
+      const cur = s.loopState[id];
+      if (!cur) return {};
+      return { loopState: { ...s.loopState, [id]: { ...cur, active: false } } };
+    });
+  },
+
+  advanceLoop: (chatSessionId, lastReply) => {
+    const cur = get().loopState[chatSessionId];
+    // No loop armed for this session — nothing to do.
+    if (!cur || !cur.active) return "stop";
+    const nextIter = cur.iteration + 1;
+    const status = parseLoopStatus(lastReply);
+    // Cap reached: stop regardless of what the model said, so a runaway can
+    // never drive past the safety rail. Mark complete so onDone's caller
+    // treats this as a final stop.
+    if (nextIter >= cur.max) {
+      set((s) => ({
+        loopState: { ...s.loopState, [chatSessionId]: { ...cur, iteration: nextIter, active: false } },
+      }));
+      return "stop";
+    }
+    if (status === "continue") {
+      set((s) => ({
+        loopState: { ...s.loopState, [chatSessionId]: { ...cur, iteration: nextIter } },
+      }));
+      return "continue";
+    }
+    // complete | blocked | stop: end the loop.
+    set((s) => ({
+      loopState: { ...s.loopState, [chatSessionId]: { ...cur, iteration: nextIter, active: false } },
+    }));
+    return status === "complete" ? "complete" : status === "blocked" ? "blocked" : "stop";
   },
 
   loadSessions: async () => {
@@ -664,6 +763,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       delete nextPendingArtifacts[chatSessionId];
       const nextSessionProjects = { ...s.sessionProjects };
       delete nextSessionProjects[chatSessionId];
+      const nextLoop = { ...s.loopState };
+      delete nextLoop[chatSessionId];
       return {
         sessions: s.sessions.filter((sess) => sess.id !== chatSessionId),
         activeChatSessionId: s.activeChatSessionId === chatSessionId ? null : s.activeChatSessionId,
@@ -674,6 +775,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         artifacts: nextArtifacts,
         pendingArtifacts: nextPendingArtifacts,
         sessionProjects: nextSessionProjects,
+        loopState: nextLoop,
       };
     });
   },
@@ -699,6 +801,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       cwdOverrides: {},
       sessionProjects: {},
       ownerSessionByChatId: {},
+      loopState: {},
     }));
     return count;
   },
@@ -1122,6 +1225,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ streamingChatSessionId: null });
       // A cancelled turn frees the queue too — send the next stacked message.
       get().drainQueue(streamingChatSessionId);
+      // User hit Stop: disarm any active goal loop so it doesn't resume on the
+      // next turn.
+      const loop = get().loopState[streamingChatSessionId];
+      if (loop && loop.active) {
+        set((s) => ({
+          loopState: {
+            ...s.loopState,
+            [streamingChatSessionId]: { ...loop, active: false },
+          },
+        }));
+      }
       // Refresh the message list so the persisted partial shows up inline.
       try {
         const messages = await getChatMessages(streamingChatSessionId);
@@ -1294,6 +1408,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
     // Turn finished — send the next queued message, if any (FIFO).
     get().drainQueue(chatSessionId);
+    // Goal-loop (/goal / /loop): if the loop is armed for this session and
+    // drainQueue didn't already start a new turn (no queued user messages),
+    // inspect the just-finished assistant reply and, on `continue`, auto-issue
+    // the next iteration. Pauses if the user switched away (active-session
+    // guard), and never fires while another stream is already running.
+    if (get().activeChatSessionId === chatSessionId && !get().streamingChatSessionId) {
+      const loop = get().loopState[chatSessionId];
+      if (loop && loop.active) {
+        const lastReply = [...(get().messages ?? [])]
+          .reverse()
+          .find((m) => m.role === "assistant")?.content ?? "";
+        const decision = get().advanceLoop(chatSessionId, lastReply);
+        if (decision === "continue") {
+          const next = loop.iteration + 1; // advanceLoop already ticked it
+          const body =
+            `[loop iteration ${next}/${loop.max}] Continue working toward the goal ` +
+            `"${loop.goal}". Do exactly the next work that remains (per your previous ` +
+            `STATUS line), then end with a single LOOP_STATUS: line as instructed.`;
+          // Defer one tick so any synchronous onDone cleanup (set calls above)
+          // commits before sendMessage re-enters the streaming path.
+          void Promise.resolve().then(() => get().sendMessage(body));
+        }
+      }
+    }
     // Refresh the session's aggregate metrics (turn added to the totals).
     void get().loadSessionMetrics(chatSessionId);
   },
@@ -1363,6 +1501,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
     // Turn ended (in error) — keep the queue moving rather than stranding it.
     get().drainQueue(chatSessionId);
+    // Disarm any active goal loop on this session so an errored iteration
+    // can never keep firing continuation turns.
+    const loop = get().loopState[chatSessionId];
+    if (loop && loop.active) {
+      set((s) => ({
+        loopState: { ...s.loopState, [chatSessionId]: { ...loop, active: false } },
+      }));
+    }
   },
 
   onPerf: (payload) => {

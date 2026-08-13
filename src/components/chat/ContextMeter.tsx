@@ -68,9 +68,6 @@ export function ContextMeter({ usedTokens, model, isLocal, localCtx, liveMaxToke
   const level = pct >= PCT_CRIT ? "crit" : pct >= PCT_WARN ? "warn" : "ok";
   // Dash the circle so the filled portion grows from the top clockwise.
   const dash = CIRC * pct;
-  const title = used > 0
-    ? `Context: ${formatTokens(used)} of ${formatTokens(max)} tokens (${Math.round(pct * 100)}%)`
-    : `Context window: ${formatTokens(max)} — updates after the first reply`;
 
   // Rich breakdown panel state — fetched lazily on hover so we don't pay the
   // tokenize round-trips on every render/poll. For local models we use real
@@ -126,7 +123,6 @@ export function ContextMeter({ usedTokens, model, isLocal, localCtx, liveMaxToke
   return (
     <div
       className={`context-meter-circle ${level}`}
-      title={title}
       role="img"
       aria-label={`Context ${Math.round(pct * 100)}% used`}
       onMouseEnter={onHover}
@@ -184,6 +180,8 @@ export function ContextMeter({ usedTokens, model, isLocal, localCtx, liveMaxToke
             <div className="context-meter-panel-rows">
               {rows.map((r) => {
                 const rowPct = panelMax > 0 ? Math.min(1, r.tokens / panelMax) : 0;
+                const pctStr = `${Math.round(rowPct * 100)}%`;
+                const tokStr = r.tokens > 0 ? `${formatTokens(r.tokens)} · ${pctStr}` : pctStr;
                 return (
                   <div className="context-meter-panel-row" key={r.label}>
                     <span className="context-meter-panel-row-label">{r.label}</span>
@@ -193,9 +191,7 @@ export function ContextMeter({ usedTokens, model, isLocal, localCtx, liveMaxToke
                         style={{ width: `${rowPct * 100}%` }}
                       />
                     </span>
-                    <span className="context-meter-panel-row-pct">
-                      {formatTokens(r.tokens)} · {Math.round(rowPct * 100)}%
-                    </span>
+                    <span className="context-meter-panel-row-pct">{tokStr}</span>
                   </div>
                 );
               })}

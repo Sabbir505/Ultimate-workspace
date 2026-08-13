@@ -9703,6 +9703,7 @@ table.kv th {
   width: 100%;
   box-sizing: border-box;
   resize: vertical;
+  max-height: 300px;
   font-family: var(--font-sans);
   font-size: 13px;
   line-height: 1.5;

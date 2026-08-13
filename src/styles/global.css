@@ -8414,6 +8414,7 @@ table.kv th {
   gap: 4px;
   padding: 10px 12px 8px;
   border: 1px solid var(--border);
+  border-bottom: none;
   /* Round only the top — the bottom is square so the notch bar below it
      (which carries the 0 0 16px 16px rounding) meets its full-width edge with
      no corner gap. */

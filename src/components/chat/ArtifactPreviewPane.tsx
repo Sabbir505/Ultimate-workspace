@@ -230,7 +230,6 @@ function HtmlPreview({ html, title }: { html: string; title: string }) {
           aria-label="Rendered preview"
         >
           <PreviewIcon />
-          <span>Preview</span>
         </button>
         <button
           type="button"
@@ -240,7 +239,6 @@ function HtmlPreview({ html, title }: { html: string; title: string }) {
           aria-label="Source code"
         >
           <CodeIcon />
-          <span>Code</span>
         </button>
       </div>
       <div className="artifact-html-body">
@@ -530,12 +528,58 @@ export function ArtifactPreviewPane({
   }, [artifact.path, inline]);
 
   if (inline) {
+    // Inline JSX/TSX: no extra header — the pane tabs above already show the
+    // filename + close, and JsxPreview brings its own Preview/Code toggle.
+    // Zoom controls are omitted for JSX (they don't apply to live React).
     return (
       <div className="artifact-preview-pane" ref={paneRef} style={paneStyle}>
         {resizer}
+        <div className="artifact-preview-content artifact-preview-content-jsx">
+          <JsxPreview code={inline.code} lang={inline.kind} variant="pane" />
+        </div>
+      </div>
+    );
+  }
+
+  // JSX/HTML: skip the full header (zoom/download/close) — the tab chip above
+  // already shows the filename + close, and the Preview/Code toggle lives inside
+  // the JsxPreview/HtmlPreview component. Only show the "open in default app" + a
+  // download button for non-JSX/HTML.
+  const isJsxOrHtml = preview?.kind === "jsx" || preview?.kind === "html";
+
+  return (
+    <div className="artifact-preview-pane" ref={paneRef} style={paneStyle}>
+      {resizer}
+      {!isJsxOrHtml && (
         <div className="artifact-preview-header">
           <div className="artifact-preview-header-actions">
-            <ZoomControls zoom={zoom} setZoom={setZoom} />
+            {preview && (preview.kind === "diagram" || preview.kind === "html" || preview.kind === "image") ? (
+              <ArtifactExportMenu
+                preview={preview}
+                path={artifact.path}
+                filename={artifact.filename}
+              />
+            ) : (
+              <button
+                type="button"
+                className="artifact-preview-download-btn"
+                title="Download"
+                aria-label="Download"
+                onClick={() => void downloadArtifact(artifact.path, artifact.filename)}
+              >
+                <DownloadIcon />
+                <span>Download</span>
+              </button>
+            )}
+            <button
+              type="button"
+              className="artifact-preview-header-btn"
+              title="Open in default app"
+              aria-label="Open in default app"
+              onClick={() => void openArtifact(artifact.path)}
+            >
+              ↗
+            </button>
             <button
               type="button"
               className="artifact-preview-header-btn"
@@ -547,58 +591,7 @@ export function ArtifactPreviewPane({
             </button>
           </div>
         </div>
-        <div className="artifact-preview-content">
-          <div className="artifact-preview-zoom" style={zoomStyle}>
-            <JsxPreview code={inline.code} lang={inline.kind} variant="pane" />
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="artifact-preview-pane" ref={paneRef} style={paneStyle}>
-      {resizer}
-      <div className="artifact-preview-header">
-        <div className="artifact-preview-header-actions">
-          {preview && (preview.kind === "diagram" || preview.kind === "html" || preview.kind === "image") ? (
-            <ArtifactExportMenu
-              preview={preview}
-              path={artifact.path}
-              filename={artifact.filename}
-            />
-          ) : (
-            <button
-              type="button"
-              className="artifact-preview-download-btn"
-              title="Download"
-              aria-label="Download"
-              onClick={() => void downloadArtifact(artifact.path, artifact.filename)}
-            >
-              <DownloadIcon />
-              <span>Download</span>
-            </button>
-          )}
-          <button
-            type="button"
-            className="artifact-preview-header-btn"
-            title="Open in default app"
-            aria-label="Open in default app"
-            onClick={() => void openArtifact(artifact.path)}
-          >
-            ↗
-          </button>
-          <button
-            type="button"
-            className="artifact-preview-header-btn"
-            title="Close preview"
-            aria-label="Close preview"
-            onClick={onClose}
-          >
-            ✕
-          </button>
-        </div>
-      </div>
+      )}
       <div
         className={`artifact-preview-content${pannable ? " pannable" : ""}`}
         ref={contentRef}

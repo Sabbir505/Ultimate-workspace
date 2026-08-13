@@ -14,7 +14,8 @@ export type ToolPanelTab =
   | "commit" // Commit/push panel
   | "plans" // Agent plan/step timeline
   | "progress" // Task progress panel
-  | "agents"; // Subagent view panel
+  | "agents" // Subagent view panel
+  | "artifact"; // A generated code artifact (tsx/jsx/html) rendered in-pane
 
 /** One open tab in the right tool panel. Multiple instances of the same
  *  `kind` can coexist — e.g. several terminals pointed at different panes,
@@ -27,6 +28,11 @@ export interface ToolPanelTabInstance {
   paneId?: string;
   /** For agents tabs: the subagent this tab shows. */
   subagentId?: string;
+  /** For artifact tabs: the on-disk artifact file to preview. */
+  artifactPath?: string;
+  artifactFilename?: string;
+  /** For inline (chat code-fence) artifacts: the live preview payload. */
+  artifactInline?: { kind: "jsx" | "tsx"; code: string };
 }
 
 /** Live progress of a model download from the Hugging Face model market.
@@ -153,6 +159,13 @@ export interface UiState {
   activeTabId: string | null;
   /** Add a tab (spawning a new instance of that kind) and activate it. */
   addTab: (kind: ToolPanelTab, target?: { paneId?: string; subagentId?: string }) => void;
+  /** Open a generated code artifact as its own main tab (auto-opens). Dedupes
+   *  by path: if a matching artifact tab is already open, just activates it. */
+  openArtifactTab: (artifact: {
+    path: string;
+    filename: string;
+    inline?: { kind: "jsx" | "tsx"; code: string };
+  }) => void;
   /** Close a specific open tab by instance id. Does nothing if unknown. */
   closeTab: (instanceId: string) => void;
   /** Activate (focus) an existing open tab instance. */
@@ -267,6 +280,37 @@ export const useUiStore = create<UiState>((set) => ({
         toolPanelTab: kind,
         // Opening an agent tab focuses that subagent in the panel.
         ...(kind === "agents" ? { activeSubagentId: target?.subagentId ?? s.activeSubagentId } : {}),
+      };
+    }),
+  // Open a generated code artifact (tsx/jsx/html) as its own tab. If one is
+  // already open for the same path, just activate/dedupe it — don't stack
+  // duplicate tabs for the same file.
+  openArtifactTab: (artifact) =>
+    set((s) => {
+      // Dedupe by path when it's an on-disk artifact.
+      if (artifact.path && !artifact.inline) {
+        const existing = s.openTabs.find(
+          (t) => t.kind === "artifact" && t.artifactPath === artifact.path,
+        );
+        if (existing) {
+          return { activeTabId: existing.instanceId, toolPanelTab: "artifact" };
+        }
+      }
+      const instanceId = `t${s.nextTabId}`;
+      const tab: ToolPanelTabInstance = {
+        instanceId,
+        kind: "artifact",
+        artifactPath: artifact.path,
+        artifactFilename: artifact.filename,
+        artifactInline: artifact.inline,
+      };
+      const openTabs = [...s.openTabs, tab];
+      if (openTabs.length > 8) openTabs.splice(0, openTabs.length - 8);
+      return {
+        openTabs,
+        nextTabId: s.nextTabId + 1,
+        activeTabId: instanceId,
+        toolPanelTab: "artifact",
       };
     }),
   // Close a tab by instance id.

@@ -214,9 +214,33 @@ export function JsxPreview({
 
   return (
     <div className={`chat-jsx-block${variant === "pane" ? " pane" : ""}`}>
-      <div className="chat-jsx-header">
-        <span className="chat-jsx-lang">{isTsx ? "tsx" : "jsx"}</span>
-        <div className="chat-jsx-tabs">
+      {variant === "inline" && (
+        <div className="chat-jsx-header">
+          <span className="chat-jsx-lang">{isTsx ? "tsx" : "jsx"}</span>
+          <div className="chat-jsx-tabs">
+            <button
+              type="button"
+              className={`chat-jsx-tab${tab === "preview" ? " active" : ""}`}
+              onClick={() => setTab("preview")}
+              title="Rendered preview"
+              aria-label="Rendered preview"
+            >
+              <PreviewIcon />
+            </button>
+            <button
+              type="button"
+              className={`chat-jsx-tab${tab === "code" ? " active" : ""}`}
+              onClick={() => setTab("code")}
+              title="Source code"
+              aria-label="Source code"
+            >
+              <CodeIcon />
+            </button>
+          </div>
+        </div>
+      )}
+      {variant === "pane" && (
+        <div className="chat-jsx-tabs-pane">
           <button
             type="button"
             className={`chat-jsx-tab${tab === "preview" ? " active" : ""}`}
@@ -225,7 +249,6 @@ export function JsxPreview({
             aria-label="Rendered preview"
           >
             <PreviewIcon />
-            <span>Preview</span>
           </button>
           <button
             type="button"
@@ -235,10 +258,9 @@ export function JsxPreview({
             aria-label="Source code"
           >
             <CodeIcon />
-            <span>Code</span>
           </button>
         </div>
-      </div>
+      )}
       <div className="chat-jsx-body">
         {showCode ? (
           <div className="chat-jsx-code">

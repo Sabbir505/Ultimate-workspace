@@ -7951,6 +7951,14 @@ table.kv th {
   display: flex;
   flex-direction: column;
 }
+.chat-jsx-tabs-pane {
+  display: flex;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  flex-shrink: 0;
+}
 .chat-jsx-block.pane .chat-jsx-body {
   flex: 1;
   min-height: 0;
@@ -7976,15 +7984,19 @@ table.kv th {
 .chat-jsx-block.pane .chat-jsx-code code {
   white-space: pre;
 }
-/* Preview/Code tab buttons: space between icon and label. */
+/* Preview/Code tab buttons — icon-only, square. */
+.chat-jsx-tab,
+.artifact-html-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  width: 26px;
+  height: 26px;
+}
 .chat-jsx-tab svg,
 .artifact-html-tab svg {
   flex-shrink: 0;
-  margin-right: 4px;
-}
-.chat-jsx-tab span,
-.artifact-html-tab span {
-  white-space: nowrap;
 }
 /* Artifact-pane HTML preview block (toggle between iframe and source). */
 .artifact-html-block {
@@ -9222,6 +9234,14 @@ table.kv th {
 .artifact-preview-content.pannable img {
   -webkit-user-drag: none;
   user-select: none;
+}
+/* JSX/HTML preview content: zero padding so the preview/tab-bar fills the pane,
+   no zoom wrapper needed (JsxPreview manages its own layout). */
+.artifact-preview-content-jsx {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 /* Transform-based canvas: translate = pan, scale = zoom, origin top-left so
    the anchor math (cursor point stays put) holds. */

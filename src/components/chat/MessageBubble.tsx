@@ -1146,6 +1146,35 @@ function JsxArtifactChip({
   );
 }
 
+/** Wraps an inline ```jsx/```tsx block. Auto-opens it as a main tab once the
+ *  block mounts (for non-live/persisted messages) so generated React code lands
+ *  in the right panel without requiring a click. Also renders the chip so a
+ *  user can still open / re-open it manually. */
+function JsxArtifactAutoTab({
+  code,
+  lang,
+  live,
+  onPreviewArtifact,
+}: {
+  code: string;
+  lang: "jsx" | "tsx";
+  live: boolean;
+  onPreviewArtifact?: (artifact: ChatArtifact) => void;
+}) {
+  useEffect(() => {
+    if (live) return;
+    const filename = `Component.${lang}`;
+    const path = `jsx:${lang}:${hashCode(code)}`;
+    useUiStore.getState().openArtifactTab({
+      path,
+      filename,
+      inline: { kind: lang, code },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return <JsxArtifactChip code={code} lang={lang} onPreviewArtifact={onPreviewArtifact} />;
+}
+
 function ReactIcon() {
   return (
     <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
@@ -1214,9 +1243,11 @@ function ChatImage({ src, alt }: { src: string; alt?: string }) {
 function Markdown({
   content,
   onPreviewArtifact,
+  live = false,
 }: {
   content: string;
   onPreviewArtifact?: (artifact: ChatArtifact) => void;
+  live?: boolean;
 }) {
   const inlineCodeStyle = useInlineCodeStyle();
   return (
@@ -1256,12 +1287,16 @@ function Markdown({
             }
 
             // React/JSX artifacts open as a live preview in the side pane
-            // (rendered by ArtifactPreviewPane), not inline in the chat.
+            // (rendered by ArtifactPreviewPane), not inline in the chat. They
+            // auto-open as their own main tab — same UX as file artifacts
+            // produced by the Write tool, just inline instead of on disk.
             if (match && (match[1] === "jsx" || match[1] === "tsx")) {
+              const lang = match[1] as "jsx" | "tsx";
               return (
-                <JsxArtifactChip
+                <JsxArtifactAutoTab
                   code={codeString}
-                  lang={match[1] as "jsx" | "tsx"}
+                  lang={lang}
+                  live={live}
                   onPreviewArtifact={onPreviewArtifact}
                 />
               );
@@ -1582,7 +1617,7 @@ function MessageBubbleInner({
         )}
         {isUser
           ? cleanContent.trim().length > 0 && (
-              <Markdown content={cleanContent} onPreviewArtifact={onPreviewArtifact} />
+              <Markdown content={cleanContent} onPreviewArtifact={onPreviewArtifact} live={live} />
             )
           : (
               <>

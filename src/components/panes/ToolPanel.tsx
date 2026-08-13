@@ -13,7 +13,7 @@
 import { lazy, useState, Suspense, useCallback, useEffect, useMemo, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Globe, Layout, Terminal, FileDiff, Bot } from "lucide-react";
+import { Globe, Layout, Terminal, FileDiff, Bot, FileCode } from "lucide-react";
 import { openBrowserPane, openShellTerminal, restoreMinimizedBrowser } from "../../lib/sessionLauncher";
 import { useChatStore } from "../../state/chat";
 import {
@@ -39,6 +39,9 @@ const TABS: { id: ToolPanelTab; label: string; Icon: React.ElementType }[] = [
   { id: "files", label: "Changes", Icon: FileDiff },
   { id: "canvas", label: "Canvas", Icon: Layout },
   { id: "agents", label: "Agents", Icon: Bot },
+  // Artifact tabs are spawned automatically by code generation — they don't
+  // appear in the "+" picker, but are listed here so their icon renders in chips.
+  { id: "artifact", label: "Artifact", Icon: FileCode },
 ];
 
 function terminalLabel(t: Pane): string {
@@ -49,8 +52,12 @@ function terminalLabel(t: Pane): string {
 
 /** Build a display label for a tab instance. For kinds that may have multiple
  *  instances open (terminal/browser/agents), append the instance's short id so
- *  the user can tell them apart. For singletons (files/canvas) just the kind. */
+ *  the user can tell them apart. For artifact tabs, show the filename
+ *  (e.g. "component.tsx"). For singletons (files/canvas) just the kind. */
 function tabLabel(inst: ToolPanelTabInstance, fallback: string): string {
+  if (inst.kind === "artifact") {
+    return inst.artifactFilename ?? "Preview";
+  }
   return fallback;
 }
 
@@ -324,7 +331,7 @@ export function ToolPanel() {
                 <>
                   <div className="tool-panel-picker-scrim" onClick={() => setTabPickerOpen(false)} />
                   <div className="tool-panel-picker-menu" role="menu">
-                    {TABS.map((t) => (
+                    {TABS.filter((t) => t.id !== "artifact").map((t) => (
                       <button
                         key={t.id}
                         className="tool-panel-picker-item"
@@ -503,6 +510,18 @@ export function ToolPanel() {
                 </>
               )}
               {activeInstance.kind === "agents" && <SubagentPanel />}
+              {activeInstance.kind === "artifact" && activeInstance.artifactPath && (
+                <Suspense fallback={<div className="artifact-preview-loading">Loading…</div>}>
+                  <ArtifactPreviewPane
+                    artifact={{
+                      path: activeInstance.artifactPath,
+                      filename: activeInstance.artifactFilename ?? "Preview",
+                      inline: activeInstance.artifactInline,
+                    }}
+                    onClose={() => closeTab(activeInstance.instanceId)}
+                  />
+                </Suspense>
+              )}
             </div>
           )}
           </div>

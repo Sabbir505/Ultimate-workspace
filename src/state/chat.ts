@@ -47,6 +47,7 @@ import { generateSessionTitle } from "../lib/sessionTitle";
 import { openArtifactInBrowserPane } from "../lib/sessionLauncher";
 import { useArtifactsStore } from "./artifacts";
 import { useProjectsStore } from "./projects";
+import { useUiStore } from "./ui";
 
 /** Sessions the user manually renamed — never auto-summarize their title.
  *  Capped at 1000 entries to prevent unbounded growth across long sessions.
@@ -1274,11 +1275,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // SVG renders inline in the chat bubble — no pane, no browser.
     if (ext === "svg") return;
 
-    // Route to the Canvas preview pane. .tsx/.jsx/.html are previewable source
-    // files (live React / HTML previews in the pane) so they open in the CANVAS
-    // preview — NOT the browser pane. Only the explicit `open_url` tool opens
-    // the browser. Everything else (images, code, markdown, json, etc.) also
-    // lands in the Canvas preview, where it renders its native preview body.
+    // Code artifacts (.tsx/.jsx/.html) open as their own top-level tab in the
+    // right-side tool panel — just like Terminal/Browser/Agents, with the
+    // filename as the tab label. They render a live React/HTML preview inside.
+    if (ext === "tsx" || ext === "jsx" || ext === "html" || ext === "htm") {
+      const ui = useUiStore.getState();
+      ui.openArtifactTab({ path, filename });
+      ui.setToolPanelCollapsed(false);
+      return;
+    }
+
+    // Other artifacts (images, markdown, diagrams, csv, pdf, office, code)
+    // open in the Canvas preview pane as before.
     set((s) =>
       s.activeChatSessionId === chatSessionId
         ? {

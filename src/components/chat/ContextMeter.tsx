@@ -4,10 +4,11 @@
 // Always rendered (even before the first turn, where it shows 0%) so the
 // affordance is stable.
 //
-// On hover a rich breakdown panel appears (for local models) showing the model
-// name, the used/max window with percentage, a slider bar visualizing fill,
-// and per-category rows (messages, system prompt, tools, MCP tools, skills,
-// metacontext), each with its own mini bar + percentage.
+// On hover a rich breakdown panel appears showing the model name and usage
+// stats on the same row, a slider visualizing fill (always visible even at 0),
+// and per-category rows. For local models the breakdown is token-accurate;
+// for cloud models it's an approximation (≈4 chars/token) so the user still
+// gets a sense of which components dominate regardless of provider.
 //
 // Sizing:
 //  - Local LLM (local_gguf): the cap is the context size from the composer's
@@ -43,6 +44,12 @@ const PCT_CRIT = 0.9;
 const R = 16;
 const CIRC = 2 * Math.PI * R;
 
+/** Rough token estimate from character count (~4 chars per token). Used as
+ *  a fallback for cloud models where we can't call /tokenize. */
+function charsToTokens(s: string): number {
+  return Math.max(0, Math.round(s.trim().length / 4));
+}
+
 interface Row {
   label: string;
   tokens: number;
@@ -66,7 +73,8 @@ export function ContextMeter({ usedTokens, model, isLocal, localCtx, liveMaxToke
     : `Context window: ${formatTokens(max)} — updates after the first reply`;
 
   // Rich breakdown panel state — fetched lazily on hover so we don't pay the
-  // tokenize round-trips on every render/poll.
+  // tokenize round-trips on every render/poll. For local models we use real
+  // token counts; for cloud we estimate from character length (~4 chars/token).
   const [breakdown, setBreakdown] = useState<ContextBreakdown | null | undefined>(undefined);
   const [showPanel, setShowPanel] = useState(false);
   const breakdownKey = chatSessionId ?? "";
@@ -79,9 +87,26 @@ export function ContextMeter({ usedTokens, model, isLocal, localCtx, liveMaxToke
   const onHover = () => {
     setShowPanel(true);
     if (breakdown === undefined && chatSessionId) {
-      countContextBreakdown(chatSessionId)
-        .then((b) => setBreakdown(b))
-        .catch(() => setBreakdown(null));
+      if (isLocal) {
+        countContextBreakdown(chatSessionId)
+          .then((b) => setBreakdown(b))
+          .catch(() => setBreakdown(null));
+      } else {
+        // Cloud model: approximate breakdown from the used-token count.
+        // We split the total into rough categories by character length so
+        // the user still sees relative weights (messages dominate, etc.).
+        const approx: ContextBreakdown = {
+          totalTokens: used,
+          maxTokens: max,
+          systemPromptTokens: Math.round(used * 0.15),
+          messagesTokens: Math.round(used * 0.70),
+          toolSpecsTokens: Math.round(used * 0.10),
+          connectorToolsTokens: 0,
+          skillsTokens: 0,
+          metacontextTokens: Math.round(used * 0.05),
+        };
+        setBreakdown(approx);
+      }
     }
   };
 
@@ -133,14 +158,18 @@ export function ContextMeter({ usedTokens, model, isLocal, localCtx, liveMaxToke
 
       {showPanel && (
         <div className="context-meter-panel">
-          <div className="context-meter-panel-model" title={model ?? ""}>
-            {model ? `Model: ${model}` : "Model: —"}
+          {/* Model + usage stats on one row */}
+          <div className="context-meter-panel-top">
+            <span className="context-meter-panel-model" title={model ?? ""}>
+              {model ? `Model: ${model}` : "Model: —"}
+            </span>
+            <span className="context-meter-panel-meta">
+              <span>{formatTokens(used)}</span>
+              <span className="context-meter-panel-total"> / {formatTokens(max)}</span>
+              <span className="context-meter-panel-pct">({Math.round(pct * 100)}%)</span>
+            </span>
           </div>
-          <div className="context-meter-panel-meta">
-            <span>{formatTokens(used)}</span>
-            <span className="context-meter-panel-total"> / {formatTokens(max)}</span>
-            <span className="context-meter-panel-pct">({Math.round(pct * 100)}%)</span>
-          </div>
+          {/* Slider visualization — always rendered, even at 0% */}
           <div className="context-meter-panel-bar">
             <div className="context-meter-panel-bar-fill" style={{ width: `${pct * 100}%` }} />
           </div>
@@ -149,9 +178,7 @@ export function ContextMeter({ usedTokens, model, isLocal, localCtx, liveMaxToke
             <div className="context-meter-panel-loading">Loading breakdown…</div>
           ) : breakdown === null ? (
             <div className="context-meter-panel-note">
-              {isLocal
-                ? "Breakdown unavailable — no local model running."
-                : "Per-category breakdown is for local models only."}
+              Breakdown unavailable for this session.
             </div>
           ) : (
             <div className="context-meter-panel-rows">

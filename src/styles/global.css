@@ -8508,13 +8508,14 @@ table.kv th {
   color: var(--text, #1a1a1a);
 }
 
-/* Rich hover panel — rendered inside the circle's wrapper, positioned to
-   anchor below-left so it doesn't escape the chat panel on the right edge.
-   Pointer-events disabled so the panel doesn't steal hover from the circle. */
+/* Rich hover panel — rendered inside the circle's wrapper. Positioned to
+   the right of the circle so it looks centered relative to the meter; the
+   right edge aligns with the circle's right side so the panel opens
+   leftward into the chat area. */
 .context-meter-panel {
   position: absolute;
   bottom: calc(100% + 6px);
-  right: 0;
+  right: -6px;
   width: 260px;
   padding: 10px 12px;
   border-radius: 8px;
@@ -8531,6 +8532,14 @@ table.kv th {
   background: var(--surface-1, #fff);
   border-color: var(--border-strong, #c8c8c8);
 }
+/* Top row: model name (left) + usage stats (right) — same line */
+.context-meter-panel-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
 .context-meter-panel-model {
   font-size: 10px;
   font-weight: 600;
@@ -8538,13 +8547,15 @@ table.kv th {
   text-overflow: ellipsis;
   overflow: hidden;
   white-space: nowrap;
-  margin-bottom: 6px;
+  flex: 1;
+  min-width: 0;
 }
 .context-meter-panel-meta {
   font-family: var(--mono, ui-monospace, monospace);
-  font-size: 11px;
+  font-size: 10px;
   color: var(--text-main);
-  margin-bottom: 6px;
+  white-space: nowrap;
+  flex: none;
 }
 .context-meter-panel-total {
   color: var(--text-dim);

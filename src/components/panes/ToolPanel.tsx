@@ -70,7 +70,11 @@ export function ToolPanel() {
   const setWidth = useUiStore((s) => s.setToolPanelWidth);
   // Dropdown picker state: opened by clicking the "+" button in the tab bar.
   const [tabPickerOpen, setTabPickerOpen] = useState(false);
-  // Drag-to-reorder state: the index of the chip being dragged.
+  // Drag-to-reorder state: the index of the chip being dragged. A ref is used
+  // for the actual drag tracking (so the value is always current during the
+  // DnD cycle regardless of React's re-render timing); the state pair is only
+  // for visual feedback (dragging/drag-over CSS).
+  const dragIndexRef = useRef<number | null>(null);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const reorderTab = useUiStore((s) => s.reorderTab);
@@ -188,33 +192,43 @@ export function ToolPanel() {
     }
   }, []);
 
-  // Drag-to-reorder handlers for the tab chips.
+  // Drag-to-reorder handlers for the tab chips. Uses an always-current ref for
+  // the dragged index (React state can be stale mid-drag), and the state pair
+  // purely for CSS visual feedback.
   const onChipDragStart = useCallback((index: number, e: React.DragEvent) => {
+    dragIndexRef.current = index;
     setDragIndex(index);
     setDragOverIndex(index);
     e.dataTransfer.effectAllowed = "move";
-    // Firefox requires setData for drag to start.
     e.dataTransfer.setData("text/plain", String(index));
+    // Needed so Firefox initiates the drag (setData alone may not suffice).
+    if (e.dataTransfer.setDragImage) {
+      e.dataTransfer.setDragImage(e.currentTarget as Element, 0, 0);
+    }
   }, []);
 
   const onChipDragOver = useCallback((index: number, e: React.DragEvent) => {
     e.preventDefault();
-    if (dragIndex !== null && index !== dragOverIndex) {
-      setDragOverIndex(index);
-    }
     e.dataTransfer.dropEffect = "move";
-  }, [dragIndex, dragOverIndex]);
+    setDragOverIndex(index);
+  }, []);
 
-  const onChipDrop = useCallback((index: number) => {
-    if (dragIndex !== null && dragIndex !== index) {
-      const inst = openTabs[dragIndex];
-      if (inst) reorderTab(inst.instanceId, index);
-    }
-    setDragIndex(null);
-    setDragOverIndex(null);
-  }, [dragIndex, openTabs, reorderTab]);
+  const onChipDrop = useCallback(
+    (index: number) => {
+      const from = dragIndexRef.current;
+      if (from !== null && from !== index) {
+        const inst = openTabs[from];
+        if (inst) reorderTab(inst.instanceId, index);
+      }
+      dragIndexRef.current = null;
+      setDragIndex(null);
+      setDragOverIndex(null);
+    },
+    [openTabs, reorderTab],
+  );
 
   const onChipDragEnd = useCallback(() => {
+    dragIndexRef.current = null;
     setDragIndex(null);
     setDragOverIndex(null);
   }, []);
@@ -238,11 +252,29 @@ export function ToolPanel() {
           role="separator"
           aria-orientation="vertical"
         />
-        {/* Tab bar — always visible (when not collapsed). Shows one chip per
-            open tab INSTANCE and a "+" that pops a small menu of panes to add.
-            The chips live in a scrollable strip (drag-to-reorder, wheel to
-            scroll); the "+" stays visible at the end. */}
-        {!collapsed && (
+        {/* When NO tabs are open, show the centered grid picker (the original
+            3+2 layout) so the user picks a pane to start. */}
+        {!collapsed && openTabs.length === 0 && (
+          <div className="tool-panel-picker">
+            <div className="tool-panel-picker-grid">
+              {TABS.map((t) => (
+                <button
+                  key={t.id}
+                  className="tool-panel-picker-btn"
+                  onClick={() => addTab(t.id)}
+                >
+                  <t.Icon size={20} className="tool-panel-picker-btn-icon" aria-hidden />
+                  <span>{t.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {/* When tabs ARE open, show the tab bar + pane body. */}
+        {!collapsed && openTabs.length > 0 && (
+          <>
+          {/* Tab bar — Shows one chip per open tab INSTANCE + a "+" that pops a
+              menu of panes to add. Chips are scrollable + drag-to-reorder. */}
           <div className="tool-panel-tabbar">
             <div className="tool-panel-tabbar-chips" ref={chipsRef} onWheel={onChipsWheel}>
               {openTabs.map((inst, index) => {
@@ -286,14 +318,8 @@ export function ToolPanel() {
               >
                 +
               </button>
-              {/* Dropdown menu — only visible when "+" is toggled. Picking a
-                  pane opens a NEW instance of that kind (multiple same-kind
-                  allowed). Anchored to the "+" button so it sits directly
-                  under it. */}
               {tabPickerOpen && (
                 <>
-                  {/* Click-away catcher — covers the screen so any click
-                      outside the menu closes it. */}
                   <div className="tool-panel-picker-scrim" onClick={() => setTabPickerOpen(false)} />
                   <div className="tool-panel-picker-menu" role="menu">
                     {TABS.map((t) => (
@@ -315,12 +341,8 @@ export function ToolPanel() {
               )}
             </div>
           </div>
-        )}
-        {/* Pane body — always rendered (panes stay mounted). Hidden when the
-            panel itself is collapsed via .tool-panel display:none above. */}
-        {!collapsed && (
+          {/* Pane body — renders the ACTIVE tab instance's content. */}
           <div className="tool-panel-body">
-          {/* Body — renders the ACTIVE tab instance's content. */}
           {activeInstance && (
             <div className="tool-panel-tab-content">
               {activeInstance.kind === "terminal" && (
@@ -481,13 +503,8 @@ export function ToolPanel() {
               {activeInstance.kind === "agents" && <SubagentPanel />}
             </div>
           )}
-          {!activeInstance && (
-            <div className="tool-panel-empty">
-              <div>No tab open</div>
-              <div>Click + to add a pane.</div>
-            </div>
-          )}
-        </div>
+          </div>
+          </>
         )}
       </div>
       {/* Minimized browser panes stay mounted here (webview kept alive,

@@ -11010,6 +11010,50 @@ table.kv th {
   background: var(--surface-2);
 }
 /* Center tab-picker grid: 3 across top, 2 bottom, vertically centered. */
+/* Empty-state picker: centered 3+2 grid shown when no tabs are open yet. */
+.tool-panel-picker {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.tool-panel-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  width: 100%;
+  max-width: 320px;
+}
+.tool-panel-picker-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 22px 8px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease), border-color 0.15s var(--ease), transform 0.1s var(--ease);
+}
+.tool-panel-picker-btn:hover {
+  color: var(--text);
+  background: var(--surface-3);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+.tool-panel-picker-btn-icon {
+  color: var(--text-dim);
+}
+.tool-panel-picker-btn:hover .tool-panel-picker-btn-icon {
+  color: var(--accent);
+}
 .tool-panel-picker-scrim {
   position: fixed;
   inset: 0;

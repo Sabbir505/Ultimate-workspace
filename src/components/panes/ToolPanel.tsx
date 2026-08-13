@@ -30,12 +30,14 @@ import { harnessShortName } from "../../types";
 const ArtifactPreviewPane = lazy(() => import("../chat/ArtifactPreviewPane").then((m) => ({ default: m.ArtifactPreviewPane })));
 import { DevDiffPanel } from "./DevDiffPanel";
 import { DormantBrowsers, PaneFrame } from "./PaneGrid";
+import { SubagentPanel } from "./SubagentPanel";
 
 const TABS: { id: ToolPanelTab; label: string }[] = [
   { id: "terminal", label: "Terminal" },
   { id: "browser", label: "Browser" },
   { id: "files", label: "Changes" },
   { id: "canvas", label: "Canvas" },
+  { id: "agents", label: "Agents" },
 ];
 
 function terminalLabel(t: Pane): string {
@@ -331,6 +333,10 @@ export function ToolPanel() {
                 )}
               </>
             )}
+          </div>
+          {/* AGENTS — subagent list + read-only chat view. */}
+          <div className="tool-panel-tab-content" style={show("agents")}>
+            <SubagentPanel />
           </div>
         </div>
       </div>

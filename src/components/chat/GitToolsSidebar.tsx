@@ -39,6 +39,9 @@ export function GitToolsSidebar() {
   const planSteps = useChatStore((s) =>
     s.activeChatSessionId ? s.planSteps[s.activeChatSessionId] ?? [] : [],
   );
+  const subagents = useChatStore((s) =>
+    s.activeChatSessionId ? s.subagents[s.activeChatSessionId] ?? {} : {},
+  );
 
   // Activate plan-step parsing and completion tracking
   usePlanTracker();
@@ -47,6 +50,7 @@ export function GitToolsSidebar() {
   const setToolPanelTab = useUiStore((s) => s.setToolPanelTab);
   const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
   const setPlanCanvas = useUiStore((s) => s.setPlanCanvas);
+  const setActiveSubagentId = useUiStore((s) => s.setActiveSubagentId);
   const gitSidebarCollapsed = useUiStore((s) => s.gitSidebarCollapsed);
   const toggleGitSidebar = useUiStore((s) => s.toggleGitSidebar);
   const setModalOpen = useUiStore((s) => s.setModalOpen);
@@ -379,6 +383,39 @@ export function GitToolsSidebar() {
               </div>
             ))}
           </>
+        )}
+      </div>
+
+      {/* Agents section — active subagents in this session */}
+      <div className="git-sidebar-section">
+        <div className="git-sidebar-section-header">
+          <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="19" cy="18" r="2" /><circle cx="5" cy="18" r="2" />
+            <path d="M7 7l3 3M17 7l-3 3M7 17l3-3M17 17l-3-3" />
+          </svg>
+          <span className="git-sidebar-section-title">Agents</span>
+          {Object.keys(subagents).length > 0 && (
+            <span className="git-sidebar-section-badge">{Object.keys(subagents).length}</span>
+          )}
+        </div>
+        {Object.keys(subagents).length === 0 ? (
+          <div className="git-sidebar-empty">No active agents.</div>
+        ) : (
+          Object.values(subagents).map((sub) => (
+            <button
+              key={sub.id}
+              className="git-sidebar-plan git-sidebar-agent"
+              onClick={() => {
+                setActiveSubagentId(sub.id);
+                setToolPanelTab("agents");
+              }}
+              title={sub.task}
+            >
+              <span className={`chat-subagent-dot ${sub.status}`} />
+              <span className="git-sidebar-plan-text">{sub.role}: {sub.task.length > 30 ? `${sub.task.slice(0, 30)}…` : sub.task}</span>
+            </button>
+          ))
         )}
       </div>
 

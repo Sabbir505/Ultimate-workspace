@@ -20,6 +20,7 @@ import type { ChatMessage } from "../../lib/ipc";
 import { readArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
+import { useChatStore } from "../../state/chat";
 import { useProjectsStore } from "../../state/projects";
 import { parseUnifiedDiff } from "../../lib/diff";
 import { openInBrowserPane } from "../../lib/openBrowserPane";
@@ -808,6 +809,48 @@ function ActivityStepRow({
   );
 }
 
+/** Standalone inline strip above the process collapsible — one row per active
+ *  subagent in the current session. Clicking a row opens the Agents tab with
+ *  that subagent selected. Shows a spinner while the subagent is running and
+ *  a checkmark when done. Also scans the message content for `<tool kind="subagent">`
+ *  markers so reloaded messages show the same strip (backfilled from store on load). */
+function SubagentStrip() {
+  const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
+  const subagents = useChatStore(
+    (s) => (activeChatSessionId ? s.subagents[activeChatSessionId] : undefined) ?? {},
+  );
+  const setActiveSubagentId = useUiStore((s) => s.setActiveSubagentId);
+  const setToolPanelTab = useUiStore((s) => s.setToolPanelTab);
+
+  if (Object.keys(subagents).length === 0) return null;
+
+  return (
+    <div className="chat-subagent-strip">
+      {Object.values(subagents).map((sub) => (
+        <button
+          key={sub.id}
+          className="chat-subagent-row"
+          onClick={() => {
+            setActiveSubagentId(sub.id);
+            setToolPanelTab("agents");
+          }}
+          title={sub.task}
+        >
+          <span className="chat-subagent-icon">⬡</span>
+          <span className="chat-subagent-role">{sub.role}</span>
+          <span className="chat-subagent-sep">→</span>
+          <span className="chat-subagent-task" title={sub.task}>{sub.task.length > 40 ? `${sub.task.slice(0, 40)}…` : sub.task}</span>
+          <span className={`chat-subagent-status ${sub.status}`}>
+            {sub.status === "running" && <span className="chat-subagent-spinner" />}
+            {sub.status === "completed" && <span className="chat-subagent-check">✓</span>}
+            {sub.status === "error" && <span className="chat-subagent-x">✕</span>}
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /** Pinned to the TOP of an assistant response: a non-collapsible row showing a
  *  counting "Working for Xs" while the turn streams and "Worked for Xs" once it
  *  finishes (from the persisted duration). This is the turn-level timer — it is
@@ -1551,6 +1594,7 @@ function MessageBubbleInner({
                   liveStartMs={liveStartRef.current}
                   durationSec={message.durationSec}
                 />
+                <SubagentStrip />
                 {hasProcess ? (
                   <>
                     {/* Process region (intro + thinking + tool calls + mid

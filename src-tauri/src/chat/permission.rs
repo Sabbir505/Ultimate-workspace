@@ -137,14 +137,19 @@ pub fn is_filesystem_tool(name: &str) -> bool {
 //     including `read_only`.
 
 use super::tools::{
-    CANCEL_TASK, DOWNLOAD_FILE, DOWNLOAD_PROGRESS, GET_TASK_STATUS, RUN_SHELL,
+    CANCEL_TASK, DOWNLOAD_FILE, DOWNLOAD_PROGRESS, GET_TASK_STATUS, RUN_SHELL, TASK,
 };
 
 /// Whether a tool belongs to the system-tool family (chat/tasks.rs).
 pub fn is_system_tool(name: &str) -> bool {
     matches!(
         name,
-        DOWNLOAD_FILE | DOWNLOAD_PROGRESS | RUN_SHELL | GET_TASK_STATUS | CANCEL_TASK
+        DOWNLOAD_FILE
+            | DOWNLOAD_PROGRESS
+            | RUN_SHELL
+            | GET_TASK_STATUS
+            | CANCEL_TASK
+            | TASK
     )
 }
 
@@ -154,6 +159,9 @@ pub fn check_system_permission(mode: PermissionMode, tool: &str) -> PermissionDe
     match tool {
         // Tracking/cancelling tools — benign, auto-run in every mode.
         DOWNLOAD_PROGRESS | GET_TASK_STATUS | CANCEL_TASK => PermissionDecision::AutoRun,
+        // Subagent delegation — auto-run; it's a model-level sub-turn, not a
+        // shell/filesystem action.
+        TASK => PermissionDecision::AutoRun,
         // Native shell execution: hard rule — always gated, every mode.
         RUN_SHELL => PermissionDecision::NeedsApproval,
         // Downloads write to disk; follow the connector-write posture.

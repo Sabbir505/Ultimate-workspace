@@ -818,6 +818,48 @@ export const listenChatTaskProgress = (handler: (payload: ChatTaskProgressPayloa
 export const listenPlanStepProgress = (handler: (payload: PlanStepProgressPayload) => void) =>
   safeListen<PlanStepProgressPayload>("chat:plan-step-progress", handler);
 
+// ---- Subagent events ----
+
+export interface SubagentInfo {
+  id: string;
+  role: string;
+  task: string;
+  prompt: string;
+  output: string;
+  status: "running" | "completed" | "error";
+  error?: string;
+}
+
+export interface SubagentSpawnPayload {
+  chatSessionId: string;
+  id: string;
+  role: string;
+  task: string;
+  prompt: string;
+}
+
+export interface SubagentTokenPayload {
+  chatSessionId: string;
+  subagentId: string;
+  chunk: string;
+}
+
+export interface SubagentDonePayload {
+  chatSessionId: string;
+  id: string;
+  output: string;
+  error?: string;
+}
+
+export const listenChatSubagentSpawn = (handler: (payload: SubagentSpawnPayload) => void) =>
+  safeListen<SubagentSpawnPayload>("chat:subagent-spawn", handler);
+
+export const listenChatSubagentTokens = (handler: (payload: SubagentTokenPayload) => void) =>
+  safeListen<SubagentTokenPayload>("chat:subagent-tokens", handler);
+
+export const listenChatSubagentDone = (handler: (payload: SubagentDonePayload) => void) =>
+  safeListen<SubagentDonePayload>("chat:subagent-done", handler);
+
 /** Re-broadcast a chat event to the mobile relay. Used from useChatEvents.ts to
  *  forward chat:token, chat:status, chat:done, chat:error,
  *  and chat:artifact events to the per-session mobile connection. */

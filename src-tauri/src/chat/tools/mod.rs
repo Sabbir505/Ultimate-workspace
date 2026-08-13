@@ -75,6 +75,9 @@ pub const DOWNLOAD_PROGRESS: &str = "download_progress";
 /// Run a native shell command on the host (cmd.exe / sh), streaming output
 /// as a background task. Unsandboxed by design — ALWAYS requires approval.
 pub const RUN_SHELL: &str = "run_shell";
+/// Spawn a focused subagent that does ONE thing with its own model turn and
+/// reports back. Streams its output to the Agents panel + git sidebar.
+pub const TASK: &str = "Task";
 /// Report any background task's status (downloads and shells). Read-only.
 pub const GET_TASK_STATUS: &str = "get_task_status";
 /// Cancel a background task (aborts the download, keeping its .part for
@@ -429,6 +432,15 @@ const RUN_SHELL_DESC: &str = "Run a native shell command on the user's machine \
     needs a native CLI tool that `download_file` (URL → file) or `run_code` \
     (sandboxed snippet) cannot express. Prefer `download_file` for plain URL \
     downloads, and `run_code` for small self-contained scripts.";
+
+const TASK_DESC: &str = "Spawn a focused subagent that runs ONE task with its \
+    own model turn and reports back. Use this to delegate a self-contained \
+    sub-task (explore a codebase, research a topic, draft a section) so the \
+    main turn stays lean. The subagent runs the SAME provider+model as this \
+    session, gets the `prompt` as its sole user message, and its output is \
+    streamed live to the Agents panel. The subagent's final text is returned \
+    to you as the tool result. Keep prompts self-contained — the subagent \
+    does NOT see this conversation's history.";
 
 const GET_TASK_STATUS_DESC: &str = "Report the status of any background task \
     (`download_file` or `run_shell`) by its task id: state (running/completed/\

@@ -633,3 +633,43 @@ pub struct WorkspaceRecord {
     pub created_at: i64,
     pub updated_at: i64,
 }
+
+/// Emitted when a harness CLI (claude/kimi/opencode) spawns a subagent
+/// (Task tool call). Sent once on spawn, then `subagent-tokens` events arrive
+/// as the subagent streams its output, and finally `subagent-done` with the
+/// complete result.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentSpawnPayload {
+    pub chat_session_id: String,
+    /// Unique id for this subagent within the session.
+    pub id: String,
+    /// e.g. "explore", "edit", "analyze" — the role requested.
+    pub role: String,
+    /// The task description the user/model provided.
+    pub task: String,
+    /// The prompt the subagent was started with.
+    pub prompt: String,
+}
+
+/// A single chunk of subagent output (token or line). Emitted repeatedly as
+/// the subagent produces output, allowing the frontend to render live streaming
+/// text that looks identical to the main chat token stream.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentTokenPayload {
+    pub chat_session_id: String,
+    pub subagent_id: String,
+    pub chunk: String,
+}
+
+/// Emitted when the subagent completes (or errors). Carries the final combined
+/// output so the frontend can close the panel cleanly.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentDonePayload {
+    pub chat_session_id: String,
+    pub id: String,
+    pub output: String,
+    pub error: Option<String>,
+}

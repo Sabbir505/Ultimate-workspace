@@ -408,7 +408,7 @@ fn system_tool_summary(name: &str, args: &Value) -> String {
 /// decided (or the user approved); these calls either start a task, or read/
 /// cancel an existing one, and return text for the model.
 async fn execute_system_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -> String {
-    use tools::{CANCEL_TASK, DOWNLOAD_FILE, DOWNLOAD_PROGRESS, GET_TASK_STATUS, RUN_SHELL};
+    use tools::{CANCEL_TASK, DOWNLOAD_FILE, DOWNLOAD_PROGRESS, GET_TASK_STATUS, RUN_SHELL, TASK};
     let tasks = app.state::<crate::TaskState>();
     let task_id = args.get("task_id").and_then(|v| v.as_str()).unwrap_or("").trim();
     match name {
@@ -455,11 +455,265 @@ async fn execute_system_tool(app: &AppHandle, sid: &str, name: &str, args: &Valu
             // persist). Long-running commands block the turn.
             crate::chat::tasks::run_shell_to_completion(command, workdir)
         }
+        TASK => {
+            // Spawn a streaming sub-turn using the SAME provider+model as this
+            // session. The subagent's prompt is its only input; its output is
+            // streamed token-by-token to the Agents panel via chat:subagent-tokens,
+            // and the full text is returned as the tool result.
+            run_task_subagent(app, sid, args, &tasks).await
+        }
         other => format!("Error: unknown system tool \"{other}\"."),
     }
 }
 
-/// Execute a system tool that the permission gate flagged for approval.
+/// Spawn a streaming sub-turn for the `Task` tool. Resolves the session's
+/// provider/model/api_key/base_url from the DB, makes a streaming SSE
+/// completion call with the subagent's prompt as the sole user message, and
+/// emits each token chunk as `chat:subagent-tokens`. Returns the full
+/// accumulated output as the tool result.
+async fn run_task_subagent(
+    app: &AppHandle,
+    sid: &str,
+    args: &Value,
+    _tasks: &crate::TaskState,
+) -> String {
+    use crate::chat::providers::{
+        AnthropicProvider, OpenAIProvider, OpenRouterProvider,
+    };
+    use crate::secrets;
+    use crate::types::{
+        SubagentDonePayload, SubagentSpawnPayload, SubagentTokenPayload,
+    };
+    use futures_util::StreamExt;
+
+    let description = args.get("description").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let role = args.get("subagent_type").and_then(|v| v.as_str()).unwrap_or("agent").to_string();
+    if prompt.is_empty() {
+        return "Error: Task requires a non-empty \"prompt\".".to_string();
+    }
+
+    // Resolve the session's provider + model + key + base_url.
+    let (provider_str, model_str) = {
+        let db_state = app.state::<crate::DbState>();
+        let conn = db_state.0.lock();
+        match db::get_chat_session(&conn, sid) {
+            Ok(Some(cs)) => (cs.provider, cs.model),
+            _ => return "Error: chat session not found.".to_string(),
+        }
+    };
+    let api_key = {
+        let db_state = app.state::<crate::DbState>();
+        let conn = db_state.0.lock();
+        secrets::get_chat_api_key(&conn, &provider_str)
+    };
+    if api_key.is_none() && provider_str != "local_gguf" {
+        return "Error: no API key configured for this provider.".to_string();
+    }
+    let api_key = api_key.unwrap_or_default();
+    let base_url = {
+        let db_state = app.state::<crate::DbState>();
+        let conn = db_state.0.lock();
+        db::get_setting(&conn, &format!("chat.{provider_str}.base_url"))
+            .ok()
+            .flatten()
+            .filter(|b| !b.trim().is_empty())
+    };
+    let model_override = {
+        let db_state = app.state::<crate::DbState>();
+        let conn = db_state.0.lock();
+        db::get_setting(&conn, &format!("chat.{provider_str}.model"))
+            .ok()
+            .flatten()
+    };
+    let model = if model_str.trim().is_empty() {
+        match model_override {
+            Some(m) if !m.trim().is_empty() => m,
+            _ => return "Error: no model configured.".to_string(),
+        }
+    } else if provider_str == "local_gguf" {
+        model_override
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or(model_str)
+    } else {
+        model_str
+    };
+
+    // Generate a subagent id and emit the spawn event.
+    let sub_id = format!("sub-{}", crate::db::now_ts());
+    let _ = app.emit(
+        "chat:subagent-spawn",
+        SubagentSpawnPayload {
+            chat_session_id: sid.to_string(),
+            id: sub_id.clone(),
+            role: role.clone(),
+            task: description.to_string(),
+            prompt: prompt.to_string(),
+        },
+    );
+
+    // Build the streaming request. OpenAI-style providers use /v1/chat/completions;
+    // Anthropic uses /v1/messages with a different body shape.
+    let is_anthropic = matches!(provider_str.as_str(), "anthropic" | "anthropic_compatible");
+    let client = reqwest::Client::new();
+
+    let result: Result<String, String> = if is_anthropic {
+        let base = base_url
+            .as_deref()
+            .unwrap_or(AnthropicProvider::DEFAULT_BASE);
+        let url = format!("{base}/v1/messages");
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": 4096,
+            "stream": true,
+            "system": "You are a focused subagent. Complete the task concisely.",
+            "messages": [{"role": "user", "content": prompt}],
+        });
+        stream_subagent_sse(
+            &client, &url, &api_key, &body, app, sid, &sub_id, true,
+        ).await
+    } else {
+        let base = base_url
+            .as_deref()
+            .unwrap_or(if provider_str == "openrouter" {
+                OpenRouterProvider::DEFAULT_BASE
+            } else {
+                OpenAIProvider::DEFAULT_BASE
+            });
+        let url = format!("{base}/v1/chat/completions");
+        let body = serde_json::json!({
+            "model": model,
+            "stream": true,
+            "stream_options": {"include_usage": true},
+            "messages": [
+                {"role": "system", "content": "You are a focused subagent. Complete the task concisely."},
+                {"role": "user", "content": prompt},
+            ],
+        });
+        stream_subagent_sse(
+            &client, &url, &api_key, &body, app, sid, &sub_id, false,
+        ).await
+    };
+
+    match result {
+        Ok(output) => {
+            let _ = app.emit(
+                "chat:subagent-done",
+                SubagentDonePayload {
+                    chat_session_id: sid.to_string(),
+                    id: sub_id,
+                    output: output.clone(),
+                    error: None,
+                },
+            );
+            output
+        }
+        Err(e) => {
+            let _ = app.emit(
+                "chat:subagent-done",
+                SubagentDonePayload {
+                    chat_session_id: sid.to_string(),
+                    id: sub_id,
+                    output: String::new(),
+                    error: Some(e.clone()),
+                },
+            );
+            format!("Error: subagent failed: {e}")
+        }
+    }
+}
+
+/// Stream an SSE completion call, emitting each content delta as
+/// `chat:subagent-tokens`. Handles both OpenAI-style (`choices/0/delta/content`)
+/// and Anthropic-style (`content_block_delta/text`) SSE formats.
+async fn stream_subagent_sse(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+    body: &Value,
+    app: &AppHandle,
+    sid: &str,
+    sub_id: &str,
+    is_anthropic: bool,
+) -> Result<String, String> {
+    use crate::types::SubagentTokenPayload;
+    use futures_util::StreamExt;
+
+    let mut req = client
+        .post(url)
+        .header("content-type", "application/json")
+        .json(body);
+    if is_anthropic {
+        req = req
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01");
+    } else {
+        req = req.header("Authorization", format!("Bearer {api_key}"));
+    }
+    let resp = req.send().await.map_err(|e| format!("request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let b = resp.text().await.unwrap_or_default();
+        return Err(format!("HTTP {status}: {}", &b[..b.len().min(500)]));
+    }
+
+    let mut stream = resp.bytes_stream();
+    let mut pending = String::new();
+    let mut output = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("stream read error: {e}"))?;
+        pending.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(nl) = pending.find('\n') {
+            let line: String = pending.drain(..=nl).collect();
+            let line = line.trim_end();
+            let data = match line.strip_prefix("data: ") {
+                Some(d) => d,
+                None => continue,
+            };
+            if data == "[DONE]" {
+                continue;
+            }
+            let v: serde_json::Value = match serde_json::from_str(data) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            // OpenAI-style: choices/0/delta/content
+            if let Some(c) = v.pointer("/choices/0/delta/content").and_then(|x| x.as_str()) {
+                if !c.is_empty() {
+                    output.push_str(c);
+                    let _ = app.emit(
+                        "chat:subagent-tokens",
+                        SubagentTokenPayload {
+                            chat_session_id: sid.to_string(),
+                            subagent_id: sub_id.to_string(),
+                            chunk: c.to_string(),
+                        },
+                    );
+                }
+            }
+            // Anthropic-style: content_block_delta/delta/text
+            if let Some(c) = v.pointer("/delta/text").and_then(|x| x.as_str()) {
+                if !c.is_empty() {
+                    output.push_str(c);
+                    let _ = app.emit(
+                        "chat:subagent-tokens",
+                        SubagentTokenPayload {
+                            chat_session_id: sid.to_string(),
+                            subagent_id: sub_id.to_string(),
+                            chunk: c.to_string(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    if output.trim().is_empty() {
+        return Err("subagent produced no output".to_string());
+    }
+    Ok(output)
+}
 /// Mirrors `run_gated_fs_tool`: register a pending approval, emit
 /// `chat:approval-request`, pause on the oneshot until the UI resolves, then
 /// execute. A denial returns a "denied" tool result.

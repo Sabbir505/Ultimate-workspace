@@ -58,6 +58,7 @@ pub fn openai_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -> V
     specs.push(openai_fn(DOWNLOAD_PROGRESS, DOWNLOAD_PROGRESS_DESC, task_id_parameters()));
     specs.push(openai_fn(GET_TASK_STATUS, GET_TASK_STATUS_DESC, task_id_parameters()));
     specs.push(openai_fn(CANCEL_TASK, CANCEL_TASK_DESC, task_id_parameters()));
+    specs.push(openai_fn(TASK, TASK_DESC, task_parameters()));
     if caps.code_exec {
         specs.push(openai_fn(RUN_CODE, RUN_CODE_DESC, run_code_parameters()));
     }
@@ -127,6 +128,7 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -
     specs.push(anthropic_fn(DOWNLOAD_PROGRESS, DOWNLOAD_PROGRESS_DESC, task_id_parameters()));
     specs.push(anthropic_fn(GET_TASK_STATUS, GET_TASK_STATUS_DESC, task_id_parameters()));
     specs.push(anthropic_fn(CANCEL_TASK, CANCEL_TASK_DESC, task_id_parameters()));
+    specs.push(anthropic_fn(TASK, TASK_DESC, task_parameters()));
     if caps.code_exec {
         specs.push(anthropic_fn(RUN_CODE, RUN_CODE_DESC, run_code_parameters()));
     }
@@ -422,6 +424,28 @@ fn run_shell_parameters() -> Value {
             }
         },
         "required": ["command"],
+    })
+}
+
+fn task_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "description": {
+                "type": "string",
+                "description": "Human-readable one-line summary of what the subagent should do.",
+            },
+            "prompt": {
+                "type": "string",
+                "description": "The full prompt the subagent will execute. It is the subagent's only input — no conversation history is injected.",
+            },
+            "subagent_type": {
+                "type": "string",
+                "description": "Role label for the panel. Use 'explore' for codebase browsing, 'edit' for generating code changes, or any other concise label.",
+                "enum": ["explore", "edit", "analyze", "research", "write", "test", "refactor"],
+            },
+        },
+        "required": ["description", "prompt", "subagent_type"],
     })
 }
 

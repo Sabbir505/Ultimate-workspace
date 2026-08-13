@@ -38,6 +38,10 @@ import {
   type ChatMessageRecord,
   type ChatSession,
   type ChatTaskProgressPayload,
+  type SubagentInfo,
+  type SubagentSpawnPayload,
+  type SubagentTokenPayload,
+  type SubagentDonePayload,
 } from "../lib/ipc";
 import { generateSessionTitle } from "../lib/sessionTitle";
 import { openArtifactInBrowserPane } from "../lib/sessionLauncher";
@@ -209,6 +213,9 @@ export interface ChatState {
   /** Plan checkpoints extracted from model-generated plans, keyed by
    *  chat session id → steps array. Displayed in Git sidebar Progress. */
   planSteps: Record<string, PlanStep[]>;
+  /** Active subagents per chat session, keyed by sessionId → subagent id → info.
+   *  Updated by chat:subagent-spawn / chat:subagent-tokens / chat:subagent-done. */
+  subagents: Record<string, Record<string, SubagentInfo>>;
   /** Per-turn owner session id (mobile app's session identifier) keyed by
    *  chatSessionId. Set by `sendMessage` when invoked from the mobile relay
    *  so the chat:token / chat:done / chat:error / chat:status / chat:artifact
@@ -326,6 +333,12 @@ export interface ChatState {
   setPlanSteps: (chatSessionId: string, steps: PlanStep[]) => void;
   /** Update a single plan step's status from a backend event or text match. */
   onPlanStepProgress: (chatSessionId: string, stepId: string, status: PlanStep["status"], detail?: string, toolCall?: string) => void;
+  /** Subagent spawn detected — add entry to the store. */
+  onSubagentSpawn: (payload: SubagentSpawnPayload) => void;
+  /** Subagent token chunk — append to active subagent output. */
+  onSubagentTokens: (payload: SubagentTokenPayload) => void;
+  /** Subagent completed or errored — finalize the entry. */
+  onSubagentDone: (payload: SubagentDonePayload) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -363,6 +376,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activePreviewPath: null,
   tasks: {},
   planSteps: {},
+  subagents: {},
   ownerSessionByChatId: {},
   cwdOverrides: {},
   sessionProjects: {},
@@ -1354,6 +1368,51 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       }
       return { planSteps: { ...s.planSteps, [chatSessionId]: updated } };
+    });
+  },
+
+  onSubagentSpawn: (payload) => {
+    set((s) => {
+      const sessionSubagents = { ...(s.subagents[payload.chatSessionId] ?? {}) };
+      sessionSubagents[payload.id] = {
+        id: payload.id,
+        role: payload.role,
+        task: payload.task,
+        prompt: payload.prompt,
+        output: "",
+        status: "running",
+      };
+      return { subagents: { ...s.subagents, [payload.chatSessionId]: sessionSubagents } };
+    });
+  },
+
+  onSubagentTokens: (payload) => {
+    set((s) => {
+      const sessionSubagents = s.subagents[payload.chatSessionId];
+      const sub = sessionSubagents?.[payload.subagentId];
+      if (!sessionSubagents || !sub) return {};
+      const updated = { ...sessionSubagents, [payload.subagentId]: { ...sub, output: sub.output + payload.chunk } };
+      return { subagents: { ...s.subagents, [payload.chatSessionId]: updated } };
+    });
+  },
+
+  onSubagentDone: (payload) => {
+    set((s) => {
+      const sessionSubagents = s.subagents[payload.chatSessionId];
+      if (!sessionSubagents) return {};
+      const existing = sessionSubagents[payload.id];
+      if (!existing) return {};
+      const status: SubagentInfo["status"] = payload.error ? "error" : "completed";
+      const updated = {
+        ...sessionSubagents,
+        [payload.id]: {
+          ...existing,
+          output: payload.output || existing.output,
+          status,
+          error: payload.error ?? existing.error,
+        },
+      };
+      return { subagents: { ...s.subagents, [payload.chatSessionId]: updated } };
     });
   },
 }));

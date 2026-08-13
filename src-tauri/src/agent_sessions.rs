@@ -827,9 +827,44 @@ fn read_claude_stream(
                         .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
                     {
                         if let Some((name, values)) = tool_meta_claude(b) {
-                            let marker = tools.tool_use(&name, values);
-                            full.push_str(&marker);
-                            emit_token(app, sid, &marker);
+                            if name.eq_ignore_ascii_case("Task")
+                                || name.eq_ignore_ascii_case("task")
+                            {
+                                // Subagent Task: extract role/task/prompt and
+                                // emit a spawn event so the frontend opens the
+                                // subagent panel + inline strip immediately.
+                                let input = b.get("input").cloned().unwrap_or(json!({}));
+                                let role = input
+                                    .get("subagent_type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("agent")
+                                    .to_string();
+                                let task = input
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let prompt = input
+                                    .get("prompt")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let marker = tools.subagent_use(
+                                    &name,
+                                    values.into_iter().next().unwrap_or(json!({})),
+                                    app,
+                                    sid,
+                                    &role,
+                                    &task,
+                                    &prompt,
+                                );
+                                full.push_str(&marker);
+                                emit_token(app, sid, &marker);
+                            } else {
+                                let marker = tools.tool_use(&name, values);
+                                full.push_str(&marker);
+                                emit_token(app, sid, &marker);
+                            }
                         }
                     }
                 }
@@ -848,7 +883,7 @@ fn read_claude_stream(
                             .and_then(|e| e.as_bool())
                             .unwrap_or(false);
                         let text = extract_result_text(r.get("content"));
-                        if let Some(marker) = tools.tool_result(&text, is_error) {
+                        if let Some(marker) = tools.tool_result(&text, is_error, app, sid) {
                             full.push_str(&marker);
                             emit_token(app, sid, &marker);
                         }
@@ -1150,9 +1185,34 @@ fn handle_kimi_event(
             if let Some(calls) = v.get("tool_calls").and_then(|t| t.as_array()) {
                 for c in calls.iter() {
                     if let Some((name, values)) = tool_meta_kimi(c) {
-                        let marker = tools.tool_use(&name, values);
-                        full.push_str(&marker);
-                        emit_token(app, sid, &marker);
+                        if name.eq_ignore_ascii_case("Task")
+                            || name.eq_ignore_ascii_case("task")
+                        {
+                            let input = c.get("function").and_then(|f| f.get("arguments"));
+                            let args = match input {
+                                Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(json!({})),
+                                Some(val) => val.clone(),
+                                None => json!({}),
+                            };
+                            let role = args.get("subagent_type").and_then(|v| v.as_str()).unwrap_or("agent").to_string();
+                            let task = args.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let marker = tools.subagent_use(
+                                &name,
+                                values.into_iter().next().unwrap_or(json!({})),
+                                app,
+                                sid,
+                                &role,
+                                &task,
+                                &prompt,
+                            );
+                            full.push_str(&marker);
+                            emit_token(app, sid, &marker);
+                        } else {
+                            let marker = tools.tool_use(&name, values);
+                            full.push_str(&marker);
+                            emit_token(app, sid, &marker);
+                        }
                     }
                 }
             }
@@ -1161,7 +1221,7 @@ fn handle_kimi_event(
         // output to its step; non-shell results are consumed for ordering only.
         "tool" => {
             let text = extract_result_text(v.get("content"));
-            if let Some(marker) = tools.tool_result(&text, false) {
+            if let Some(marker) = tools.tool_result(&text, false, app, sid) {
                 full.push_str(&marker);
                 emit_token(app, sid, &marker);
             }
@@ -1245,13 +1305,23 @@ fn handle_opencode_event(
                 }
             }
             let value = tool_meta_generic(name, &inp);
-            // OpenCode reports a tool's completed output inline on the same
-            // part (`state.output` / `state.error`); attach it for shell tools.
-            let out_text = part.pointer("/state/output").and_then(|o| o.as_str());
-            let err_text = part.pointer("/state/error").and_then(|e| e.as_str());
-            let marker = tools.tool_use_with_output(name, value, out_text, err_text);
-            full.push_str(&marker);
-            emit_token(app, sid, &marker);
+            if name.eq_ignore_ascii_case("Task") || name.eq_ignore_ascii_case("task") {
+                // Subagent Task: extract role/task/prompt and emit a spawn event.
+                let role = inp.get("subagent_type").and_then(|v| v.as_str()).unwrap_or("agent").to_string();
+                let task = inp.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let prompt = inp.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let marker = tools.subagent_use(name, value, app, sid, &role, &task, &prompt);
+                full.push_str(&marker);
+                emit_token(app, sid, &marker);
+            } else {
+                // OpenCode reports a tool's completed output inline on the same
+                // part (`state.output` / `state.error`); attach it for shell tools.
+                let out_text = part.pointer("/state/output").and_then(|o| o.as_str());
+                let err_text = part.pointer("/state/error").and_then(|e| e.as_str());
+                let marker = tools.tool_use_with_output(name, value, out_text, err_text);
+                full.push_str(&marker);
+                emit_token(app, sid, &marker);
+            }
         }
         // Session id / usage surfaces on step-finish.
         Some("step_finish") => {
@@ -1617,14 +1687,25 @@ fn extract_result_text(content: Option<&Value>) -> String {
 
 /// Tracks tool calls within a turn so each tool RESULT can be matched back to
 /// its call. CLI streams deliver calls and results IN ORDER but interleave
-/// non-shell tools with shell tools, so we keep a FIFO of (id, is_shell) per
-/// call and pop one slot per result. Only shell calls get a correlation id in
-/// their marker (and only shell results produce a result marker) — other tools
-/// are tracked solely to keep the order aligned.
+/// non-shell tools with shell tools, so we keep a FIFO per call and pop one slot
+/// per result. Each slot records whether the call was a shell command (its
+/// result renders as a terminal preview) or a subagent Task (its result feeds a
+/// subagent panel). Other tools are tracked solely to keep the order aligned.
+struct PendingTool {
+    id: u64,
+    shell: bool,
+    subagent: Option<SubagentMeta>,
+}
+struct SubagentMeta {
+    id: String,
+    task: String,
+}
+
 struct ToolTracker {
     seq: u64,
-    pending: VecDeque<(u64, bool)>,
+    pending: VecDeque<PendingTool>,
 }
+
 impl ToolTracker {
     fn new() -> Self {
         Self { seq: 0, pending: VecDeque::new() }
@@ -1644,17 +1725,71 @@ impl ToolTracker {
             }
             out.push_str(&format!("<tool>{v}</tool>"));
         }
-        self.pending.push_back((id, shell));
+        self.pending.push_back(PendingTool { id, shell, subagent: None });
         out
     }
+    /// Wrap a subagent Task tool call: emits a `chat:subagent-spawn` event,
+    /// injects an `id` into the marker, and records the slot as a subagent.
+    fn subagent_use(&mut self, name: &str, value: Value, app: Option<&AppHandle>, sid: &str, role: &str, task: &str, prompt: &str) -> String {
+        let id = self.seq;
+        self.seq += 1;
+        let sub_id = format!("sub-{id}");
+        let mut v = value;
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("id".to_string(), json!(id));
+        }
+        // Emit the spawn event so the frontend creates the subagent immediately.
+        if let Some(app) = app {
+            let _ = app.emit(
+                "chat:subagent-spawn",
+                crate::types::SubagentSpawnPayload {
+                    chat_session_id: sid.to_string(),
+                    id: sub_id.clone(),
+                    role: role.to_string(),
+                    task: task.to_string(),
+                    prompt: prompt.to_string(),
+                },
+            );
+        }
+        self.pending.push_back(PendingTool {
+            id,
+            shell: false,
+            subagent: Some(SubagentMeta { id: sub_id, task: task.to_string() }),
+        });
+        format!("<tool>{v}</tool>")
+    }
     /// Consume the next result slot (in call order). Returns a result marker
-    /// carrying the output text only when that call was a shell command.
-    fn tool_result(&mut self, text: &str, is_error: bool) -> Option<String> {
-        let (id, shell) = self.pending.pop_front()?;
-        if !shell {
+    /// carrying the output text only when that call was a shell command, and
+    /// emits `chat:subagent-tokens` + `chat:subagent-done` when it was a
+    /// subagent Task.
+    fn tool_result(&mut self, text: &str, is_error: bool, app: Option<&AppHandle>, sid: &str) -> Option<String> {
+        let slot = self.pending.pop_front()?;
+        if let Some(meta) = &slot.subagent {
+            if let Some(app) = app {
+                let _ = app.emit(
+                    "chat:subagent-tokens",
+                    crate::types::SubagentTokenPayload {
+                        chat_session_id: sid.to_string(),
+                        subagent_id: meta.id.clone(),
+                        chunk: text.to_string(),
+                    },
+                );
+                let _ = app.emit(
+                    "chat:subagent-done",
+                    crate::types::SubagentDonePayload {
+                        chat_session_id: sid.to_string(),
+                        id: meta.id.clone(),
+                        output: text.to_string(),
+                        error: is_error.then(|| "subagent exited with an error".to_string()),
+                    },
+                );
+            }
             return None;
         }
-        Some(result_marker_text(id, text, is_error))
+        if !slot.shell {
+            return None;
+        }
+        Some(result_marker_text(slot.id, text, is_error))
     }
     /// Self-contained variant for CLIs that report a tool's call AND its
     /// completed output in one event (opencode). Assigns an id, emits the
@@ -1748,7 +1883,13 @@ fn tool_meta_generic(name: &str, input: &Value) -> Value {
             "WebSearch" | "web_search" => json!({ "kind": "search", "title": "Searching the web", "detail": s("query") }),
             "WebFetch" | "web_fetch" | "fetch_url" => json!({ "kind": "web", "title": "Reading a web page", "detail": s("url") }),
             "TodoWrite" | "todowrite" => json!({ "kind": "tool", "title": "Updating task list" }),
-            "Task" | "task" => json!({ "kind": "tool", "title": "Running subagent", "detail": s("description") }),
+            "Task" | "task" => json!({
+                "kind": "subagent",
+                "title": "Running subagent",
+                "detail": s("description"),
+                "role": s("subagent_type"),
+                "prompt": sanitize(s("prompt")),
+            }),
             _ => json!({ "kind": "tool", "title": format!("Running tool {name}") }),
         }
     }

@@ -18,6 +18,9 @@ import {
   listenChatTaskProgress,
   listenChatToken,
   listenPlanStepProgress,
+  listenChatSubagentSpawn,
+  listenChatSubagentTokens,
+  listenChatSubagentDone,
 } from "../lib/ipc";
 import { matchPlanStep } from "../lib/planMatcher";
 import { openInBrowserPane } from "../lib/openBrowserPane";
@@ -111,6 +114,24 @@ export function useChatEvents(): void {
             toolCall ?? undefined,
           );
         }
+      }),
+    );
+
+    // Subagent lifecycle (Task tool): spawn adds an entry, tokens stream
+    // output live, done finalizes it. No mobile relay (desktop-only).
+    unlistens.push(
+      listenChatSubagentSpawn((payload) => {
+        useChatStore.getState().onSubagentSpawn(payload);
+      }),
+    );
+    unlistens.push(
+      listenChatSubagentTokens((payload) => {
+        useChatStore.getState().onSubagentTokens(payload);
+      }),
+    );
+    unlistens.push(
+      listenChatSubagentDone((payload) => {
+        useChatStore.getState().onSubagentDone(payload);
       }),
     );
 

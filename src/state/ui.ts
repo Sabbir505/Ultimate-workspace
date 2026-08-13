@@ -13,7 +13,8 @@ export type ToolPanelTab =
   | "branch" // Branch switcher + git graph
   | "commit" // Commit/push panel
   | "plans" // Agent plan/step timeline
-  | "progress"; // Task progress panel
+  | "progress" // Task progress panel
+  | "agents"; // Subagent view panel
 
 /** Live progress of a model download from the Hugging Face model market.
  *  Keyed by download id (repo::filename). Updated by local-model:download:progress
@@ -128,6 +129,9 @@ export interface UiState {
   setModalOpen: (id: string, open: boolean) => void;
   setPaneDiff: (diff: { paneId: string; filePath: string; cwd: string } | null) => void;
   setToolPanelTab: (tab: ToolPanelTab) => void;
+  /** Currently selected subagent id, or null for the "agents" tab. */
+  activeSubagentId: string | null;
+  setActiveSubagentId: (id: string | null) => void;
   setToolPanelCollapsed: (collapsed: boolean) => void;
   toggleToolPanel: () => void;
   toggleGitSidebar: () => void;
@@ -151,6 +155,7 @@ export const useUiStore = create<UiState>((set) => ({
   diffPanelWidth: 280,
   paneDiff: null,
   toolPanelTab: "terminal",
+  activeSubagentId: null,
   // Collapsed by default — the header split icon opens it on demand.
   toolPanelCollapsed: true,
   toolPanelWidth: 532,
@@ -204,6 +209,7 @@ export const useUiStore = create<UiState>((set) => ({
     }),
   setPaneDiff: (paneDiff) => set({ paneDiff }),
   setToolPanelTab: (toolPanelTab) => set({ toolPanelTab }),
+  setActiveSubagentId: (activeSubagentId) => set({ activeSubagentId }),
   setToolPanelCollapsed: (toolPanelCollapsed) => set({ toolPanelCollapsed }),
   toggleToolPanel: () => set((s) => ({ toolPanelCollapsed: !s.toolPanelCollapsed })),
   toggleGitSidebar: () => set((s) => ({ gitSidebarCollapsed: !s.gitSidebarCollapsed })),

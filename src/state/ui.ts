@@ -293,7 +293,11 @@ export const useUiStore = create<UiState>((set) => ({
           (t) => t.kind === "artifact" && t.artifactPath === artifact.path,
         );
         if (existing) {
-          return { activeTabId: existing.instanceId, toolPanelTab: "artifact" };
+          return {
+            activeTabId: existing.instanceId,
+            toolPanelTab: "artifact",
+            toolPanelCollapsed: false,
+          };
         }
       }
       const instanceId = `t${s.nextTabId}`;
@@ -311,6 +315,8 @@ export const useUiStore = create<UiState>((set) => ({
         nextTabId: s.nextTabId + 1,
         activeTabId: instanceId,
         toolPanelTab: "artifact",
+        // Auto-expand the panel so the user sees the preview immediately.
+        toolPanelCollapsed: false,
       };
     }),
   // Close a tab by instance id.

@@ -800,6 +800,21 @@ export interface ContextUsage {
 export const countContextTokens = (chatSessionId: string) =>
   safeInvoke<ContextUsage | null>("count_context_tokens", { chatSessionId });
 
+/** Per-category context-window breakdown for the rich context-meter tooltip. */
+export interface ContextBreakdown {
+  totalTokens: number;
+  maxTokens: number;
+  systemPromptTokens: number;
+  messagesTokens: number;
+  toolSpecsTokens: number;
+  connectorToolsTokens: number;
+  skillsTokens: number;
+  metacontextTokens: number;
+}
+
+export const countContextBreakdown = (chatSessionId: string) =>
+  safeInvoke<ContextBreakdown | null>("count_context_breakdown", { chatSessionId });
+
 export const listenChatToken = (handler: (payload: ChatTokenPayload) => void) =>
   safeListen<ChatTokenPayload>("chat:token", handler);
 export const listenChatStatus = (handler: (payload: ChatStatusPayload) => void) =>

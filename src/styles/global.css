@@ -8507,6 +8507,121 @@ table.kv th {
 :root[data-theme="light"] .context-meter-pct {
   color: var(--text, #1a1a1a);
 }
+
+/* Rich hover panel — rendered inside the circle's wrapper, positioned to
+   anchor below-left so it doesn't escape the chat panel on the right edge.
+   Pointer-events disabled so the panel doesn't steal hover from the circle. */
+.context-meter-panel {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  width: 260px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface-1, #1e1e1e);
+  border: 1px solid var(--surface-3, #333);
+  color: var(--text-main, #eee);
+  font-family: var(--sans, system-ui, sans-serif);
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  z-index: 10;
+  font-size: 11px;
+}
+:root[data-theme="light"] .context-meter-panel {
+  background: var(--surface-1, #fff);
+  border-color: var(--border-strong, #c8c8c8);
+}
+.context-meter-panel-model {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+  margin-bottom: 6px;
+}
+.context-meter-panel-meta {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--text-main);
+  margin-bottom: 6px;
+}
+.context-meter-panel-total {
+  color: var(--text-dim);
+}
+.context-meter-panel-pct {
+  color: var(--text-dim);
+  margin-left: 6px;
+}
+/* Slider visualization for the full used/max bar. */
+.context-meter-panel-bar {
+  width: 100%;
+  height: 4px;
+  background: var(--surface-2, #2a2a2a);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+:root[data-theme="light"] .context-meter-panel-bar {
+  background: var(--surface-2, #e6e6e6);
+}
+.context-meter-panel-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent, #5b9bd5);
+  transition: width 0.3s var(--ease, ease);
+}
+.context-meter-circle.warn .context-meter-panel-bar-fill {
+  background: var(--state-waiting, #f2c14e);
+}
+.context-meter-circle.crit .context-meter-panel-bar-fill {
+  background: var(--danger, #e5484d);
+}
+.context-meter-panel-loading,
+.context-meter-panel-note {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-style: italic;
+  text-align: center;
+  padding: 4px 0;
+}
+.context-meter-panel-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.context-meter-panel-row {
+  display: grid;
+  grid-template-columns: 70px 1fr 70px;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+}
+.context-meter-panel-row-label {
+  color: var(--text-dim);
+}
+.context-meter-panel-row-bar {
+  display: block;
+  height: 3px;
+  background: var(--surface-2, #2a2a2a);
+  border-radius: 1.5px;
+  overflow: hidden;
+}
+:root[data-theme="light"] .context-meter-panel-row-bar {
+  background: var(--surface-2, #e6e6e6);
+}
+.context-meter-panel-row-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--text-dim);
+}
+.context-meter-panel-row-pct {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--text-main);
+  text-align: right;
+  white-space: nowrap;
+}
 :root[data-theme="light"] .context-meter-circle.warn .context-meter-pct {
   color: var(--danger, #d64545);
 }

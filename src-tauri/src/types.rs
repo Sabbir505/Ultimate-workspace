@@ -622,6 +622,34 @@ pub struct ContextUsagePayload {
     pub max_tokens: u32,
 }
 
+/// Per-category context-window breakdown for the rich context-meter tooltip.
+/// Returned by `count_context_breakdown` (called lazily on hover). Each field
+/// is the token count of that component of what the model sees; the sum is NOT
+/// necessarily equal to `total_tokens` (the tokenizer counts each chunk in
+/// isolation and real request assembly interleaves them), so rows render each
+/// against `max_tokens` independently.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextBreakdownPayload {
+    /// The combined system + active-history total (what `count_context_tokens`
+    /// returns), for the slider/ring.
+    pub total_tokens: u32,
+    /// The model context window the sidecar was started with (`-c`).
+    pub max_tokens: u32,
+    /// Core system prompt + tool guidance text.
+    pub system_prompt_tokens: u32,
+    /// Active chat messages (history) after strip_think_blocks.
+    pub messages_tokens: u32,
+    /// Built-in tool specs JSON (openai_tool_specs).
+    pub tool_specs_tokens: u32,
+    /// Connector-originated (MCP) tool specs JSON.
+    pub connector_tools_tokens: u32,
+    /// Invoked-skills bodies concatenation.
+    pub skills_tokens: u32,
+    /// Compaction summary system row (the `[compacted context]` marker).
+    pub metacontext_tokens: u32,
+}
+
 /// Saved workspace (pane layout snapshot). See db/workspaces.rs.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

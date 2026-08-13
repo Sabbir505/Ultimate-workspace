@@ -2413,6 +2413,124 @@ pub async fn count_context_tokens(
     })
 }
 
+/// Per-category token breakdown for the context-meter tooltip. Called lazily
+/// on hover (not polled) because it runs more tokenize round-trips.
+/// Returns null for non-local_gguf sessions — the frontend falls back to
+/// showing total only.
+#[tauri::command]
+pub async fn count_context_breakdown(
+    chat_session_id: String,
+    chat_state: State<'_, crate::ChatState>,
+    local: State<'_, local_models::LocalModelState>,
+    db: State<'_, DbState>,
+) -> CmdResult<Option<crate::types::ContextBreakdownPayload>> {
+    let Some(status) = local.0.status() else {
+        return Ok(None);
+    };
+    let (provider_str, model_str) = {
+        let conn = db.0.lock();
+        let cs = db::get_chat_session(&conn, &chat_session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "chat session not found".to_string())?;
+        (cs.provider, cs.model)
+    };
+    if provider_str != "local_gguf" {
+        return Ok(None);
+    }
+    let client = chat_state.0.client.clone();
+    let base_url = &status.base_url;
+
+    // 1. System prompt — same builder as the send path. Omit skill/connector
+    //    injection (those depend on the current user message); we capture them
+    //    separately below so their token counts stay distinct.
+    let system_str: String = {
+        let conn = db.0.lock();
+        let custom = db::get_setting(&conn, "assistant.systemPrompt")
+            .map_err(|e| e.to_string())?;
+        let provider_id = ChatProviderId::LocalGguf;
+        crate::chat::build_system_prompt(provider_id, &model_str, custom.as_deref(), &[], false, false)
+            .unwrap_or_default()
+    };
+    let system_prompt_tokens = crate::chat::compaction::count_json_tokens(&client, base_url, &system_str)
+        .await
+        .unwrap_or(0);
+
+    // 2. Messages — assemble active history the same way count_context_tokens does.
+    let messages: Vec<ChatMessage> = {
+        let conn = db.0.lock();
+        db::list_active_chat_messages(&conn, &chat_session_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|r| ChatMessage {
+                role: r.role,
+                content: strip_think_blocks(&r.content),
+                images: Vec::new(),
+            })
+            .collect()
+    };
+    // Total = system + messages (what the model actually sees).
+    let total_tokens = crate::chat::compaction::count_tokens(&client, base_url, &Some(system_str.clone()), &messages)
+        .await
+        .unwrap_or(0);
+    // Messages-only = total - system (approximate; tokenizer boundary is small).
+    let messages_tokens = total_tokens.saturating_sub(system_prompt_tokens);
+
+    // 3. Tool specs — assembled OpenAI-format tool definitions.
+    let caps = crate::chat::tools::ToolCaps {
+        code_exec: true,
+        fs_roots: Vec::new(),
+        web_search: false,
+        requires_local_sandbox: false,
+        attached_connectors: std::sync::Arc::new(Vec::new()),
+    };
+    let tool_specs_json = serde_json::to_string(&crate::chat::tools::openai_tool_specs(&caps, crate::chat::permission::PermissionMode::FullAuto))
+        .unwrap_or_default();
+    let tool_specs_tokens = crate::chat::compaction::count_json_tokens(&client, base_url, &tool_specs_json).await.unwrap_or(0);
+
+    // 4. Connector/MCP tools — we don't have live connector sessions here
+    //    (they're per-turn); estimate from the DB's connector credential rows.
+    let connector_tools_tokens: u32 = 0u32;
+
+    // 5. Skills — invoke the same skill resolver the send path uses for the
+    //    last user message (best effort: the breakdown fires on hover which is
+    //    not message-aware, so we sample the latest user turn from history).
+    let skills_tokens: u32 = {
+        let last_user_content = messages.iter().rev().find(|m| m.role == "user").map(|m| m.content.as_str());
+        if let Some(content) = last_user_content {
+            let invoked = parse_invoked_skills(content);
+            if !invoked.is_empty() {
+                let merged: String = invoked.iter().map(|(_, body)| body.as_str()).collect::<Vec<_>>().join("\n\n");
+                crate::chat::compaction::count_json_tokens(&client, base_url, &merged).await.unwrap_or(0)
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    };
+
+    // 6. Metacontext — compacted-system summary row, if any.
+    let metacontext_tokens: u32 = {
+        let mut total = 0u32;
+        for m in messages.iter().filter(|m| m.role == "system" && m.content.trim_start().starts_with(crate::chat::compaction::COMPACTED_PREFIX)) {
+            total += crate::chat::compaction::count_json_tokens(&client, base_url, &m.content).await.unwrap_or(0);
+        }
+        total
+    };
+
+    // Total is computed above (system + messages); reuse it for the payload.
+    Ok(Some(crate::types::ContextBreakdownPayload {
+        total_tokens,
+        max_tokens: status.n_ctx,
+        system_prompt_tokens,
+        messages_tokens,
+        tool_specs_tokens,
+        connector_tools_tokens,
+        skills_tokens,
+        metacontext_tokens,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

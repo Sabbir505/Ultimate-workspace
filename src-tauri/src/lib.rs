@@ -347,6 +347,7 @@ pub fn run() {
             commands::chat_cmds::stop_local_model,
             commands::chat_cmds::local_model_status,
             commands::chat_cmds::count_context_tokens,
+            commands::chat_cmds::count_context_breakdown,
             // connectors (OAuth + remote MCP): Settings → Connectors + per-chat attach
             commands::connectors_cmds::list_connectors,
             commands::connectors_cmds::connector_connect,

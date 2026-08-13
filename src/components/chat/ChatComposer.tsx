@@ -913,6 +913,7 @@ export function ChatComposer({
           isLocal={provider === "local_gguf"}
           localCtx={localCtx}
           liveMaxTokens={liveMaxTokens}
+          chatSessionId={activeChatSessionId}
         />
       </div>
     </div>

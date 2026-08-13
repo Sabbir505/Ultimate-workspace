@@ -79,11 +79,13 @@ export function ComposerMetrics({ chatSessionId, streaming }: Props) {
 
   const chips: MetricChipProps[] = [];
 
-  if (streaming && live) {
-    // Live turn — show what's moving: tok/s, elapsed, TTFT. While the turn
-    // is just starting (TTFT not yet known, no tokens counted) fall through
-    // to the placeholder set below so the row layout stays stable instead
-    // of collapsing to nothing.
+  // Input/output tokens are always shown when available (even 0) to mirror
+  // the in-chat token display pattern. Note: the live per-turn payload doesn't
+  // carry input tokens (those come with usage at turn end), so "in" only shows
+  // in the idle/session-aggregate state.
+  if (live) {
+    const out = fmtTokens(live.outputTokens);
+    if (out) chips.push({ label: "out", value: out, live: true });
     const tokS = fmtTokPerSecond(live.tokensPerSecond ?? undefined);
     if (tokS) chips.push({ label: "speed", value: tokS, live: true });
     const llm = fmtMs(live.llmTimeMs);
@@ -100,6 +102,10 @@ export function ComposerMetrics({ chatSessionId, streaming }: Props) {
     if (elapsed) chips.push({ label: "elapsed", value: elapsed, live: true });
   } else if (agg) {
     // Idle — show session averages.
+    const inp = fmtTokens(agg.inputTokens);
+    if (inp) chips.push({ label: "in", value: inp });
+    const out = fmtTokens(agg.outputTokens);
+    if (out) chips.push({ label: "out", value: out });
     const llm = fmtMs(agg.llmTimeMs ?? undefined);
     if (llm) chips.push({ label: "llm total", value: llm });
     if ((agg.toolTimeMs ?? 0) > 0) {
@@ -110,16 +116,11 @@ export function ComposerMetrics({ chatSessionId, streaming }: Props) {
       const ttft = fmtMs(agg.ttftAvgMs ?? undefined);
       if (ttft) chips.push({ label: "ttft avg", value: ttft });
     }
-    // Aggregate tok/s, weighted by output tokens, is more stable than the live
-    // value — show with one decimal under 10 for granularity.
     const tokS = fmtTokPerSecond(agg.tokensPerSecond ?? undefined);
     if (tokS) chips.push({ label: "speed avg", value: tokS });
     const cache = fmtPct(agg.cacheHitRate ?? undefined);
     if (cache) chips.push({ label: "cache", value: cache });
-    if (agg.turnCount > 0) {
-      const out = fmtTokens(agg.outputTokens);
-      if (out) chips.push({ label: "out", value: out });
-    }
+    if (agg.turnCount > 0) chips.push({ label: "turns", value: `${agg.turnCount}` });
   }
 
   // Always render the row — even on a fresh chat or one with no data yet — so
@@ -129,6 +130,8 @@ export function ComposerMetrics({ chatSessionId, streaming }: Props) {
   if (chips.length === 0) {
     return (
       <div className="composer-metrics-row is-empty" role="status" aria-live="polite">
+        <MetricChip label="in" value="—" />
+        <MetricChip label="out" value="—" />
         <MetricChip label="llm" value="—" />
         <MetricChip label="tools" value="—" />
         <MetricChip label="ttft" value="—" />

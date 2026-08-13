@@ -41,6 +41,14 @@ pub fn delete_installed_skill(slug: String, kind: String) -> CmdResult<()> {
     installed_skills::delete_installed(&slug, &kind_key(&kind))
 }
 
+/// Make every installed skill/loop global — copy any entry that currently
+/// lives in only one harness dir into the other so its source becomes "both"
+/// and any harness can invoke it. Returns the number of entries mirrored.
+#[tauri::command]
+pub fn make_installed_global(kind: String) -> CmdResult<usize> {
+    installed_skills::make_installed_global(&kind_key(&kind))
+}
+
 /// Accepts both singular ("skill"/"loop") and plural forms from the frontend.
 fn kind_key(kind: &str) -> String {
     match kind.trim_end_matches('s') {

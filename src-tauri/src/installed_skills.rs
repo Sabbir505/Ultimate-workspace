@@ -463,6 +463,58 @@ pub fn delete_installed(slug: &str, kind: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Make every installed skill/loop global — i.e. readable by *any* harness.
+///
+/// "Global" here means the skill exists in BOTH harness user dirs (Claude's
+/// `~/.claude/<kind>/<slug>/` and Kimi/agents' `~/.agents/<kind>/<slug>/`),
+/// so its `source` becomes "both". A skill currently living in only one
+/// harness's dir is copied into the other, mirroring `create_installed`'s
+/// layout. Returns how many entries were mirrored to the missing harness.
+/// Entries already present in both (source "both") are left untouched.
+pub fn make_installed_global(kind: &str) -> Result<usize, String> {
+    let mut copied = 0usize;
+    for s in scan(kind) {
+        if s.source == "both" {
+            continue;
+        }
+        // Choose the file to mirror: prefer whichever copy already exists
+        // (claude first, matching `read_installed`'s preference).
+        let (source_doc, missing_harness) = match (&s.claude_path, &s.kimi_path) {
+            (Some(src), Some(_)) => (src.clone(), None), // defensive: already both
+            (Some(src), None) => (src.clone(), Some("kimi")),
+            (None, Some(src)) => (src.clone(), Some("claude")),
+            (None, None) => continue,
+        };
+        let Some(missing_harness) = missing_harness else { continue };
+        let Some(home) = crate::util::home_dir() else { continue };
+        // Resolve the missing harness's user root for this kind.
+        let missing_root = match missing_harness {
+            "kimi" => home.join(".agents").join(kind),
+            _ => home.join(".claude").join(kind),
+        };
+        let dest_dir = missing_root.join(&s.slug);
+        let doc_name = if kind == "loops" { "LOOP.md" } else { "SKILL.md" };
+        let dest_doc = dest_dir.join(doc_name);
+        if dest_doc.exists() {
+            continue;
+        }
+        let body = fs::read_to_string(&source_doc).map_err(|e| {
+            format!("read {}: {e}", source_doc)
+        })?;
+        fs::create_dir_all(&dest_dir).map_err(|e| {
+            format!("mkdir {}: {e}", dest_dir.display())
+        })?;
+        fs::write(&dest_doc, &body).map_err(|e| {
+            format!("write {}: {e}", dest_doc.display())
+        })?;
+        copied += 1;
+    }
+    if copied > 0 {
+        invalidate_skill_cache();
+    }
+    Ok(copied)
+}
+
 /// kebab-case slug from a display name; this becomes the slash-command name.
 pub fn slugify(name: &str) -> String {
     let mut out = String::new();

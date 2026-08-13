@@ -13,6 +13,7 @@ import {
   deleteInstalledSkill,
   listInstalledLoops,
   listInstalledSkills,
+  makeInstalledGlobal,
   readInstalledSkill,
   saveInstalledSkill,
 } from "../../lib/ipc";
@@ -134,6 +135,25 @@ function InstalledPanel({ kind }: { kind: "skill" | "loop" }) {
     void reload();
   };
 
+  // Mirror every currently single-source skill/loop into the other harness's
+  // dir so all of them become "both" — usable from any harness. No-op (and
+  // reads as such) when nothing is single-sourced.
+  const makeAllGlobal = async () => {
+    const count = await makeInstalledGlobal(kind);
+    if (count == null) return; // invoke failed — error already surfaced by safeInvoke
+    flash(
+      count === 0
+        ? `All ${kind}s already global`
+        : `Mirrored ${count} ${kind}${count === 1 ? "" : "s"} to all harnesses`,
+    );
+    void reload();
+  };
+
+  // Whether the "make all global" button is actionable: only useful when at
+  // least one installed entry isn't already "both". Recomputed on every render
+  // from the loaded list (cheap; the list is the same scan the backend does).
+  const hasSingleSource = items.some((i) => i.source !== "both");
+
   const filtered = items.filter(
     (i) =>
       i.name.toLowerCase().includes(query.toLowerCase()) ||
@@ -151,6 +171,15 @@ function InstalledPanel({ kind }: { kind: "skill" | "loop" }) {
             onChange={(e) => setQuery(e.target.value)}
             placeholder={`Search ${kind}s…`}
           />
+          <button
+            title="Copy every single-source skill into the other harness so any harness can use it"
+            disabled={!hasSingleSource}
+            onClick={() => void makeAllGlobal()}
+          >
+            {hasSingleSource
+              ? "Make all global"
+              : "All global"}
+          </button>
           <button
             className="primary"
             onClick={() => {

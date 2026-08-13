@@ -301,6 +301,7 @@ pub fn run() {
             commands::skills_cmds::save_installed_skill,
             commands::skills_cmds::create_installed_skill,
             commands::skills_cmds::delete_installed_skill,
+            commands::skills_cmds::make_installed_global,
             commands::skills_cmds::list_chat_skills,
             // chat mode
             commands::chat_cmds::list_chat_sessions,

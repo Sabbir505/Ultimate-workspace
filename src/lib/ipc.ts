@@ -294,6 +294,14 @@ export const createInstalledSkill = (name: string, kind: string, content: string
 export const deleteInstalledSkill = (slug: string, kind: string) =>
   safeInvoke<void>("delete_installed_skill", { slug, kind });
 
+/**
+ * Make every installed skill/loop global — i.e. readable by any harness.
+ * Copies each entry that currently lives in only one harness dir into the
+ * other so its source becomes "both". Returns the number of entries mirrored.
+ */
+export const makeInstalledGlobal = (kind: string) =>
+  safeInvoke<number>("make_installed_global", { kind });
+
 // --- Chat `/` menu: on-disk harness skills merged with the built-in
 // doc/pptx/pdf/diagram skills (on-disk wins on slug collision). ---
 export const listChatSkills = () =>

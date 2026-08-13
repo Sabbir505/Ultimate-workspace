@@ -101,7 +101,7 @@ export function InlineDiagram({
   const [containerW, setContainerW] = useState(0);
 
   const setPreviewArtifact = useChatStore((s) => s.setPreviewArtifact);
-  const setToolPanelTab = useUiStore((s) => s.setToolPanelTab);
+  const setToolPanelTab = useUiStore((s) => s.addTab);
   const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
 
   // Close kebab on outside click

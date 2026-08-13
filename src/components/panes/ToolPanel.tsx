@@ -10,9 +10,10 @@
 // always full-width in the center, and browsers live here. The panel's own
 // left-edge drag handle doubles as the chat|panel splitter (same pattern as
 // DevDiffPanel's resize handle), with the width persisted in the ui store.
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef } from "react";
+import { lazy, useState, Suspense, useCallback, useEffect, useMemo, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { Globe, Layout, Terminal, FileDiff, Bot } from "lucide-react";
 import { openBrowserPane, openShellTerminal, restoreMinimizedBrowser } from "../../lib/sessionLauncher";
 import { useChatStore } from "../../state/chat";
 import {
@@ -21,7 +22,7 @@ import {
   usePanesStore,
   type Pane,
 } from "../../state/panes";
-import { useUiStore, type ToolPanelTab } from "../../state/ui";
+import { useUiStore, type ToolPanelTab, type ToolPanelTabInstance } from "../../state/ui";
 import { harnessShortName } from "../../types";
 // ArtifactPreviewPane is the heaviest chat component (syntax highlighting,
 // markdown rendering, JSX live preview). Lazy-load so the right panel tab
@@ -32,12 +33,12 @@ import { DevDiffPanel } from "./DevDiffPanel";
 import { DormantBrowsers, PaneFrame } from "./PaneGrid";
 import { SubagentPanel } from "./SubagentPanel";
 
-const TABS: { id: ToolPanelTab; label: string }[] = [
-  { id: "terminal", label: "Terminal" },
-  { id: "browser", label: "Browser" },
-  { id: "files", label: "Changes" },
-  { id: "canvas", label: "Canvas" },
-  { id: "agents", label: "Agents" },
+const TABS: { id: ToolPanelTab; label: string; Icon: React.ElementType }[] = [
+  { id: "terminal", label: "Terminal", Icon: Terminal },
+  { id: "browser", label: "Browser", Icon: Globe },
+  { id: "files", label: "Changes", Icon: FileDiff },
+  { id: "canvas", label: "Canvas", Icon: Layout },
+  { id: "agents", label: "Agents", Icon: Bot },
 ];
 
 function terminalLabel(t: Pane): string {
@@ -46,16 +47,29 @@ function terminalLabel(t: Pane): string {
     : "Terminal";
 }
 
+/** Build a display label for a tab instance. For kinds that may have multiple
+ *  instances open (terminal/browser/agents), append the instance's short id so
+ *  the user can tell them apart. For singletons (files/canvas) just the kind. */
+function tabLabel(inst: ToolPanelTabInstance, fallback: string): string {
+  return fallback;
+}
+
 export function ToolPanel() {
   const panes = usePanesStore((s) => s.panes);
   const focusedPaneId = usePanesStore((s) => s.focusedPaneId);
   const spotlightOverride = usePanesStore((s) => s.spotlightOverride);
   const setSpotlight = usePanesStore((s) => s.setSpotlight);
-  const tab = useUiStore((s) => s.toolPanelTab);
-  const setTab = useUiStore((s) => s.setToolPanelTab);
+  const openTabs = useUiStore((s) => s.openTabs);
+  const activeTabId = useUiStore((s) => s.activeTabId);
+  const addTab = useUiStore((s) => s.addTab);
+  const closeTab = useUiStore((s) => s.closeTab);
+  const activateTab = useUiStore((s) => s.activateTab);
+  const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
   const collapsed = useUiStore((s) => s.toolPanelCollapsed);
   const width = useUiStore((s) => s.toolPanelWidth);
   const setWidth = useUiStore((s) => s.setToolPanelWidth);
+  // Dropdown picker state: opened by clicking the "+" button in the tab bar.
+  const [tabPickerOpen, setTabPickerOpen] = useState(false);
   const previewArtifacts = useChatStore((s) => s.previewArtifacts);
   const activePreviewPath = useChatStore((s) => s.activePreviewPath);
   const setPreviewArtifact = useChatStore((s) => s.setPreviewArtifact);
@@ -92,13 +106,23 @@ export function ToolPanel() {
       ? browsers.reduce((a, b) => (a.lastUsedAt > b.lastUsedAt ? a : b)).paneId
       : null;
 
+  // The active tab instance (the one whose body content is shown).
+  const activeInstance = openTabs.find((t) => t.instanceId === activeTabId) ?? null;
+  const activeKind: ToolPanelTab = activeInstance?.kind ?? "terminal";
+
   // Auto-open the Canvas tab when a new artifact preview becomes active
   // (e.g. the model just generated a file) — this preserves the old behavior
   // where the preview pane popped open on generation.
   useEffect(() => {
     if (!activePreviewPath) return;
     const ui = useUiStore.getState();
-    ui.setToolPanelTab("canvas");
+    // Find an existing canvas instance; otherwise add one.
+    const canvasInstance = ui.openTabs.find((t) => t.kind === "canvas");
+    if (canvasInstance) {
+      ui.activateTab(canvasInstance.instanceId);
+    } else {
+      ui.addTab("canvas");
+    }
     ui.setToolPanelCollapsed(false);
   }, [activePreviewPath]);
 
@@ -108,17 +132,17 @@ export function ToolPanel() {
   const spawningRef = useRef(false);
   useEffect(() => {
     if (collapsed || spawningRef.current) return;
-    if (tab === "terminal" && terminals.length === 0) {
+    if (activeKind === "terminal" && terminals.length === 0) {
       spawningRef.current = true;
       void openShellTerminal().finally(() => {
         spawningRef.current = false;
       });
-    } else if (tab === "browser" && browsers.length === 0 && minimizedBrowsers.length === 0) {
+    } else if (activeKind === "browser" && browsers.length === 0 && minimizedBrowsers.length === 0) {
       spawningRef.current = true;
       openBrowserPane();
       spawningRef.current = false;
     }
-  }, [tab, collapsed, terminals.length, browsers.length, minimizedBrowsers.length]);
+  }, [activeKind, collapsed, terminals.length, browsers.length, minimizedBrowsers.length]);
 
   // Drag-to-resize: left-edge grab zone. The panel is docked right, so the
   // width grows as the pointer moves left. Doubles as the chat|panel splitter.
@@ -142,9 +166,6 @@ export function ToolPanel() {
     [setWidth],
   );
 
-  const show = (id: ToolPanelTab) =>
-    tab === id && !collapsed ? undefined : { display: "none" as const };
-
   return (
     <>
       {/* When collapsed the panel is fully hidden — the toolbar's split icon
@@ -164,181 +185,245 @@ export function ToolPanel() {
           role="separator"
           aria-orientation="vertical"
         />
-        <div className="tool-panel-tabs" role="tablist">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              role="tab"
-              aria-selected={tab === t.id}
-              className={`tool-panel-tab${tab === t.id ? " active" : ""}`}
-              onClick={() => setTab(t.id)}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
-        <div className="tool-panel-body">
-          {/* TERMINAL — only shows active (running) background terminals. */}
-          <div className="tool-panel-tab-content" style={show("terminal")}>
-            {terminals.length === 0 ? (
-              <div className="tool-panel-empty">
-                <div>{terminalPanes(panes).length > 0 ? "No running terminals" : "Starting terminal…"}</div>
-                <div>{terminalPanes(panes).length > 0 ? "All terminals have exited." : ""}</div>
-              </div>
-            ) : (
-              <>
-                {terminals.length > 1 && (
-                  <div className="spotlight-bar tool-panel-switcher">
-                    <select
-                      value={activeTerminalId ?? ""}
-                      onChange={(e) => setSpotlight(e.target.value)}
-                      title="Visible terminal"
+        {/* Tab bar — always visible (when not collapsed). Shows one chip per
+            open tab INSTANCE and a "+" that pops a small menu of panes to add.
+            The chips live in a scrollable strip; the "+" stays visible at the
+            end, right after the last chip. */}
+        {!collapsed && (
+          <div className="tool-panel-tabbar">
+            <div className="tool-panel-tabbar-chips">
+              {openTabs.map((inst) => {
+                const tabDef = TABS.find((tb) => tb.id === inst.kind);
+                const label = tabLabel(inst, tabDef?.label ?? inst.kind);
+                const TabIcon = tabDef?.Icon;
+                const isActive = activeTabId === inst.instanceId;
+                return (
+                  <div
+                    key={inst.instanceId}
+                    className={`tool-panel-tabchip${isActive ? " active" : ""}`}
+                    onClick={() => activateTab(inst.instanceId)}
+                    title={`${inst.kind}${inst.paneId ? ` — ${inst.paneId}` : ""}`}
+                  >
+                    {TabIcon && <TabIcon size={12} className="tool-panel-tabchip-icon" aria-hidden />}
+                    <span className="tool-panel-tabchip-label">{label}</span>
+                    <button
+                      className="ghost tool-panel-tabchip-close"
+                      onClick={(e) => { e.stopPropagation(); closeTab(inst.instanceId); }}
+                      title="Close tab"
                     >
-                      {terminals.map((t) => (
-                        <option key={t.paneId} value={t.paneId}>
-                          {terminalLabel(t)}
-                        </option>
-                      ))}
-                    </select>
+                      ✕
+                    </button>
                   </div>
-                )}
-                <div className="tool-panel-pane-slot">
-                  {terminals.map((t) => (
-                    <PaneFrame
-                      key={t.paneId}
-                      pane={t}
-                      index={panes.indexOf(t)}
-                      focused={t.paneId === focusedPaneId}
-                      hidden={t.paneId !== activeTerminalId}
-                      visible={tab === "terminal" && !collapsed && t.paneId === activeTerminalId}
-                    />
-                  ))}
-                </div>
-              </>
-            )}
+                );
+              })}
+            </div>
+            <div className="tool-panel-add-wrap">
+              <button
+                className="ghost tool-panel-add-btn"
+                onClick={() => setTabPickerOpen((v) => !v)}
+                title="Add a pane"
+                aria-label="Add a pane"
+              >
+                +
+              </button>
+              {/* Dropdown menu — only visible when "+" is toggled. Picking a
+                  pane opens a NEW instance of that kind (multiple same-kind
+                  allowed). Anchored to the "+" button so it sits directly
+                  under it. */}
+              {tabPickerOpen && (
+                <>
+                  {/* Click-away catcher — covers the screen so any click
+                      outside the menu closes it. */}
+                  <div className="tool-panel-picker-scrim" onClick={() => setTabPickerOpen(false)} />
+                  <div className="tool-panel-picker-menu" role="menu">
+                    {TABS.map((t) => (
+                      <button
+                        key={t.id}
+                        className="tool-panel-picker-item"
+                        onClick={() => { addTab(t.id); setTabPickerOpen(false); }}
+                        role="menuitem"
+                      >
+                        <t.Icon size={13} className="tool-panel-picker-item-icon" aria-hidden />
+                        <span className="tool-panel-picker-item-label">{t.label}</span>
+                        {openTabs.some((o) => o.kind === t.id) && (
+                          <span className="tool-panel-picker-item-tag">+{openTabs.filter((o) => o.kind === t.id).length}</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
           </div>
-          {/* BROWSER */}
-          <div className="tool-panel-tab-content" style={show("browser")}>
-            {minimizedBrowsers.length > 0 && (
-              <div className="tool-panel-switcher">
-                <button
-                  className="ghost"
-                  onClick={restoreMinimizedBrowser}
-                  title="Restore the minimized browser pane"
-                >
-                  ▣ Restore minimized browser ({minimizedBrowsers.length})
-                </button>
-              </div>
-            )}
-            {browsers.length === 0 ? (
-              <div className="tool-panel-empty">
-                <div>Opening browser…</div>
-              </div>
-            ) : (
-              <div className="tool-panel-pane-slot">
-                {browsers.map((b) => (
-                  <PaneFrame
-                    key={b.paneId}
-                    pane={b}
-                    index={panes.indexOf(b)}
-                    focused={b.paneId === focusedPaneId}
-                    hidden={b.paneId !== activeBrowserId}
-                    visible={tab === "browser" && !collapsed && b.paneId === activeBrowserId}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-          {/* FILES (Changes) — the Dev-tab changed-files panel, embedded. */}
-          <div className="tool-panel-tab-content" style={show("files")}>
-            <DevDiffPanel embedded />
-          </div>
-          {/* CANVAS — artifact previews as browser-style tabs + plan markdown
-              from the Git tools sidebar. Every open artifact stays MOUNTED
-              (display:none when its tab is inactive) so zoom/pan state and
-              loaded previews survive tab switches. */}
-          <div className="tool-panel-tab-content" style={show("canvas")}>
-            {previewArtifacts.length === 0 && !planCanvasContent ? (
-              <div className="tool-panel-empty">
-                <div>No canvas yet</div>
-                <div>Artifacts from chat will appear here.</div>
-              </div>
-            ) : (
-              <>
-                {/* Plan markdown content — shown above the artifact tabs
-                    when a plan was opened from the Git tools sidebar. */}
-                {planCanvasContent && (
-                  <div className="canvas-plan-view">
-                    <div className="canvas-plan-header">
-                      <span className="canvas-plan-title">
-                        {planCanvasTitle || "Plan"}
-                      </span>
+        )}
+        {/* Pane body — always rendered (panes stay mounted). Hidden when the
+            panel itself is collapsed via .tool-panel display:none above. */}
+        {!collapsed && (
+          <div className="tool-panel-body">
+          {/* Body — renders the ACTIVE tab instance's content. */}
+          {activeInstance && (
+            <div className="tool-panel-tab-content">
+              {activeInstance.kind === "terminal" && (
+                <>
+                  {terminals.length === 0 ? (
+                    <div className="tool-panel-empty">
+                      <div>{terminalPanes(panes).length > 0 ? "No running terminals" : "Starting terminal…"}</div>
+                      <div>{terminalPanes(panes).length > 0 ? "All terminals have exited." : ""}</div>
+                    </div>
+                  ) : (
+                    <>
+                      {terminals.length > 1 && (
+                        <div className="spotlight-bar tool-panel-switcher">
+                          <select
+                            value={activeTerminalId ?? ""}
+                            onChange={(e) => setSpotlight(e.target.value)}
+                            title="Visible terminal"
+                          >
+                            {terminals.map((t) => (
+                              <option key={t.paneId} value={t.paneId}>
+                                {terminalLabel(t)}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                      <div className="tool-panel-pane-slot">
+                        {terminals.map((t) => (
+                          <PaneFrame
+                            key={t.paneId}
+                            pane={t}
+                            index={panes.indexOf(t)}
+                            focused={t.paneId === focusedPaneId}
+                            hidden={t.paneId !== activeTerminalId}
+                            visible={!collapsed && t.paneId === activeTerminalId}
+                          />
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+              {activeInstance.kind === "browser" && (
+                <>
+                  {minimizedBrowsers.length > 0 && (
+                    <div className="tool-panel-switcher">
                       <button
                         className="ghost"
-                        onClick={() => setPlanCanvas(null, null)}
-                        title="Close plan"
+                        onClick={restoreMinimizedBrowser}
+                        title="Restore the minimized browser pane"
                       >
-                        ✕
+                        ▣ Restore minimized browser ({minimizedBrowsers.length})
                       </button>
                     </div>
-                    <div className="canvas-plan-body">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {planCanvasContent}
-                      </ReactMarkdown>
+                  )}
+                  {browsers.length === 0 ? (
+                    <div className="tool-panel-empty">
+                      <div>Opening browser…</div>
                     </div>
-                  </div>
-                )}
-                {previewArtifacts.length > 0 && (
-                  <>
-                    {/* Tab strip — same markup/styles as the browser tab bar. */}
-                    <div className="browser-tabbar">
-                      {previewArtifacts.map((a) => (
-                        <div
-                          key={a.path}
-                          className={`browser-tab${a.path === activePreviewPath ? " active" : ""}`}
-                          onClick={() => setPreviewArtifact(a)}
-                          title={a.path}
-                        >
-                          <span className="tab-title">{a.filename}</span>
-                          <button
-                            className="ghost tab-close"
-                            title="Close tab"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              closePreviewArtifact(a.path);
-                            }}
-                          >
-                            ✕
-                          </button>
-                        </div>
+                  ) : (
+                    <div className="tool-panel-pane-slot">
+                      {browsers.map((b) => (
+                        <PaneFrame
+                          key={b.paneId}
+                          pane={b}
+                          index={panes.indexOf(b)}
+                          focused={b.paneId === focusedPaneId}
+                          hidden={b.paneId !== activeBrowserId}
+                          visible={!collapsed && b.paneId === activeBrowserId}
+                        />
                       ))}
                     </div>
-                    <div className="tool-panel-canvas-slot">
-                      {previewArtifacts.map((a) => (
-                        <div
-                          key={a.path}
-                          className="tool-panel-canvas-item"
-                          style={a.path === activePreviewPath ? undefined : { display: "none" }}
-                        >
-                          <Suspense fallback={<div className="artifact-preview-loading">Loading…</div>}>
-                            <ArtifactPreviewPane
-                              artifact={a}
-                              onClose={() => closePreviewArtifact(a.path)}
-                            />
-                          </Suspense>
-                        </div>
-                      ))}
+                  )}
+                </>
+              )}
+              {activeInstance.kind === "files" && <DevDiffPanel embedded />}
+              {activeInstance.kind === "canvas" && (
+                <>
+                  {previewArtifacts.length === 0 && !planCanvasContent ? (
+                    <div className="tool-panel-empty">
+                      <div>No canvas yet</div>
+                      <div>Artifacts from chat will appear here.</div>
                     </div>
-                  </>
-                )}
-              </>
-            )}
-          </div>
-          {/* AGENTS — subagent list + read-only chat view. */}
-          <div className="tool-panel-tab-content" style={show("agents")}>
-            <SubagentPanel />
-          </div>
+                  ) : (
+                    <>
+                      {planCanvasContent && (
+                        <div className="canvas-plan-view">
+                          <div className="canvas-plan-header">
+                            <span className="canvas-plan-title">
+                              {planCanvasTitle || "Plan"}
+                            </span>
+                            <button
+                              className="ghost"
+                              onClick={() => setPlanCanvas(null, null)}
+                              title="Close plan"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                          <div className="canvas-plan-body">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {planCanvasContent}
+                            </ReactMarkdown>
+                          </div>
+                        </div>
+                      )}
+                      {previewArtifacts.length > 0 && (
+                        <>
+                          <div className="browser-tabbar">
+                            {previewArtifacts.map((a) => (
+                              <div
+                                key={a.path}
+                                className={`browser-tab${a.path === activePreviewPath ? " active" : ""}`}
+                                onClick={() => setPreviewArtifact(a)}
+                                title={a.path}
+                              >
+                                <span className="tab-title">{a.filename}</span>
+                                <button
+                                  className="ghost tab-close"
+                                  title="Close tab"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    closePreviewArtifact(a.path);
+                                  }}
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="tool-panel-canvas-slot">
+                            {previewArtifacts.map((a) => (
+                              <div
+                                key={a.path}
+                                className="tool-panel-canvas-item"
+                                style={a.path === activePreviewPath ? undefined : { display: "none" }}
+                              >
+                                <Suspense fallback={<div className="artifact-preview-loading">Loading…</div>}>
+                                  <ArtifactPreviewPane
+                                    artifact={a}
+                                    onClose={() => closePreviewArtifact(a.path)}
+                                  />
+                                </Suspense>
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </>
+                  )}
+                </>
+              )}
+              {activeInstance.kind === "agents" && <SubagentPanel />}
+            </div>
+          )}
+          {!activeInstance && (
+            <div className="tool-panel-empty">
+              <div>No tab open</div>
+              <div>Click + to add a pane.</div>
+            </div>
+          )}
         </div>
+        )}
       </div>
       {/* Minimized browser panes stay mounted here (webview kept alive,
           hidden via visible=false) and are restored from the Browser tab. */}

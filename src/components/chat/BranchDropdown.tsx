@@ -340,13 +340,13 @@ export function BranchDropdown({ onClose }: { onClose?: () => void }) {
 
 /** A small eye/peek icon that opens the diff panel in the ToolPanel. */
 function PeekButton({ filePath, projectPath, onPeek }: { filePath: string; projectPath: string; projectId?: string; onPeek?: () => void }) {
-  const setToolPanelTab = useUiStore((s) => s.setToolPanelTab);
   const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
   const setDiffPanelFile = useUiStore((s) => s.setDiffPanelFile);
+  const addTab = useUiStore((s) => s.addTab);
 
   const handlePeek = () => {
     setDiffPanelFile(filePath, projectPath);
-    setToolPanelTab("files");
+    addTab("files");
     setToolPanelCollapsed(false);
     onPeek?.();
   };

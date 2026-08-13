@@ -820,7 +820,7 @@ function SubagentStrip() {
     (s) => (activeChatSessionId ? s.subagents[activeChatSessionId] : undefined) ?? {},
   );
   const setActiveSubagentId = useUiStore((s) => s.setActiveSubagentId);
-  const setToolPanelTab = useUiStore((s) => s.setToolPanelTab);
+  const setToolPanelTab = useUiStore((s) => s.addTab);
 
   if (Object.keys(subagents).length === 0) return null;
 
@@ -992,7 +992,7 @@ function formatDuration(sec: number): string {
 function FilesChangedSummary({ files }: { files: { path: string; edit: EditPayload }[] }) {
   const [open, setOpen] = useState(false);
   const setDiffPanelFile = useUiStore((s) => s.setDiffPanelFile);
-  const setToolPanelTab = useUiStore((s) => s.setToolPanelTab);
+  const setToolPanelTab = useUiStore((s) => s.addTab);
   const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
   const projects = useProjectsStore((s) => s.projects);
   const selectedProjectId = useProjectsStore((s) => s.selectedProjectId);
@@ -1671,7 +1671,7 @@ function detectPlan(content: string): PlanInfo | null {
 function PlanBanner({ title, summary, full }: PlanInfo) {
   const [open, setOpen] = useState(false);
   const setPlanCanvas = useUiStore((s) => s.setPlanCanvas);
-  const setToolPanelTab = useUiStore((s) => s.setToolPanelTab);
+  const setToolPanelTab = useUiStore((s) => s.addTab);
   const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
 
   const openInCanvas = () => {

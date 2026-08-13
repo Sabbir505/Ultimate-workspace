@@ -14,7 +14,7 @@ export function openInBrowserPane(url: string): void {
   // Surface the Browser tab — every caller of this helper is a "show the user
   // a web page" path, so the panel must actually become visible (mirrors the
   // canvas auto-open for generated artifacts).
-  ui.setToolPanelTab("browser");
+  ui.addTab("browser");
   ui.setToolPanelCollapsed(false);
   const existing = panes.panes.find(
     (p) => p.data.kind === "browser" && !p.data.collapsed,

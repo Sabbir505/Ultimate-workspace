@@ -6968,11 +6968,27 @@ table.kv th {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
+  min-width: 0;
 }
 .chat-session-meta {
   font-size: 10px;
   color: var(--text-dim);
   display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: none;
+  white-space: nowrap;
+}
+/* Title + timer on one row; preview below */
+.chat-session-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.chat-session-title-row {
+  display: flex;
+  align-items: baseline;
   gap: 6px;
 }
 .chat-session-preview {
@@ -10992,6 +11008,174 @@ table.kv th {
 .tool-panel-collapse:hover {
   color: var(--text);
   background: var(--surface-2);
+}
+/* Center tab-picker grid: 3 across top, 2 bottom, vertically centered. */
+.tool-panel-picker-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 9;
+}
+.tool-panel-picker-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 10;
+  min-width: 160px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg, 0 8px 24px rgba(0, 0, 0, 0.4));
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.tool-panel-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+.tool-panel-picker-item:hover:not(:disabled) {
+  background: var(--surface-3);
+}
+.tool-panel-picker-item:disabled {
+  color: var(--text-dim);
+  opacity: 0.6;
+  cursor: default;
+}
+.tool-panel-picker-item-icon {
+  color: var(--text-dim);
+  flex: none;
+}
+.tool-panel-picker-item:not(:disabled):hover .tool-panel-picker-item-icon {
+  color: var(--accent);
+}
+.tool-panel-picker-item-label {
+  white-space: nowrap;
+  flex: 1;
+}
+.tool-panel-picker-item-tag {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  opacity: 0.8;
+  padding: 1px 5px;
+  border-radius: 99px;
+  background: var(--accent-soft);
+}
+/* Multi-tab bar — one chip per open tab + a "+" add button. */
+.tool-panel-tabbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  position: relative;
+  flex: none;
+}
+.tool-panel-tabbar-chips {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+.tool-panel-tabbar-chips::-webkit-scrollbar {
+  height: 4px;
+}
+.tool-panel-tabbar-chips::-webkit-scrollbar-thumb {
+  background: var(--surface-3);
+  border-radius: 2px;
+}
+.tool-panel-tabchip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 7px 5px 9px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.tool-panel-tabchip:hover {
+  color: var(--text);
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+}
+.tool-panel-tabchip.active {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.tool-panel-tabchip-icon {
+  color: var(--text-dim);
+  flex: none;
+}
+.tool-panel-tabchip.active .tool-panel-tabchip-icon {
+  color: var(--accent);
+}
+.tool-panel-tabchip-label {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tool-panel-tabchip-close {
+  font-size: 11px;
+  line-height: 1;
+  padding: 1px 3px;
+  border-radius: 4px;
+  color: var(--text-dim);
+  opacity: 0.6;
+  transition: color 0.12s var(--ease), background 0.12s var(--ease), opacity 0.12s var(--ease);
+}
+.tool-panel-tabchip-close:hover {
+  color: var(--text);
+  background: var(--danger-soft);
+  opacity: 1;
+}
+.tool-panel-add-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.tool-panel-add-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  font-size: 17px;
+  line-height: 1;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  flex: none;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.tool-panel-add-btn:hover {
+  color: var(--text);
+  background: var(--surface-3);
 }
 .tool-panel-body {
   flex: 1;

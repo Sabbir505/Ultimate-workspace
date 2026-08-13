@@ -836,7 +836,7 @@ function PlanPreview({
   onSend: (content: string, attachments: import("./ChatComposer").ChatAttachment[], forceResearch?: boolean) => void;
 }) {
   const setPlanCanvas = useUiStore((s) => s.setPlanCanvas);
-  const setToolPanelTab = useUiStore((s) => s.setToolPanelTab);
+  const addTab = useUiStore((s) => s.addTab);
   const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
 
   // Only show plan preview when NOT streaming and we have messages
@@ -861,7 +861,7 @@ function PlanPreview({
     // Strip the plan's own heading from the body so Canvas doesn't double-display
     const bodyWithoutHeader = plan.full.replace(/^#{1,3}\s+[^\n]+\n*/, "").trim();
     setPlanCanvas(bodyWithoutHeader || plan.full, plan.title);
-    setToolPanelTab("canvas");
+    addTab("canvas");
     setToolPanelCollapsed(false);
   };
 

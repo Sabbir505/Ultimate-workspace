@@ -47,7 +47,7 @@ export function GitToolsSidebar() {
   usePlanTracker();
 
   // Tool panel / UI store hooks — select individually to avoid churn.
-  const setToolPanelTab = useUiStore((s) => s.setToolPanelTab);
+  const addTab = useUiStore((s) => s.addTab);
   const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
   const setPlanCanvas = useUiStore((s) => s.setPlanCanvas);
   const setActiveSubagentId = useUiStore((s) => s.setActiveSubagentId);
@@ -189,7 +189,7 @@ export function GitToolsSidebar() {
 
   // Open the ToolPanel Changes tab when the "changes" row is clicked.
   const openChanges = () => {
-    setToolPanelTab("files");
+    addTab("files");
     setToolPanelCollapsed(false);
   };
 
@@ -197,7 +197,7 @@ export function GitToolsSidebar() {
   const openPlan = (plan: { raw: string; label: string }) => {
     const body = plan.raw.replace(/^#{1,3}\s+[^\n]+\n*/, "").trim();
     setPlanCanvas(body || plan.raw, plan.label);
-    setToolPanelTab("canvas");
+    addTab("canvas");
     setToolPanelCollapsed(false);
   };
 
@@ -408,7 +408,7 @@ export function GitToolsSidebar() {
               className="git-sidebar-plan git-sidebar-agent"
               onClick={() => {
                 setActiveSubagentId(sub.id);
-                setToolPanelTab("agents");
+                addTab("agents");
               }}
               title={sub.task}
             >

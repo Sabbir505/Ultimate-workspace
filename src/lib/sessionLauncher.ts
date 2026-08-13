@@ -192,7 +192,7 @@ export function openBrowserPane(): void {
   // Browsers live in the right tool panel — surface it so the new pane is
   // immediately visible.
   const ui = useUiStore.getState();
-  ui.setToolPanelTab("browser");
+  ui.addTab("browser");
   ui.setToolPanelCollapsed(false);
 }
 
@@ -228,7 +228,7 @@ export function openArtifactInBrowserPane(path: string): void {
     return; // grid full — silently skip
   }
   const ui = useUiStore.getState();
-  ui.setToolPanelTab("browser");
+  ui.addTab("browser");
   ui.setToolPanelCollapsed(false);
 }
 
@@ -243,7 +243,7 @@ export function restoreMinimizedBrowser(): void {
   const target = minimized.reduce((a, b) => (a.lastUsedAt > b.lastUsedAt ? a : b));
   store.toggleBrowserCollapsed(target.paneId);
   const ui = useUiStore.getState();
-  ui.setToolPanelTab("browser");
+  ui.addTab("browser");
   ui.setToolPanelCollapsed(false);
 }
 
@@ -262,6 +262,6 @@ export async function openShellTerminal(): Promise<void> {
   const paneId = panesStore.addPane(terminalDescriptor(spec, "Terminal", null, null));
   await spawnForPane(paneId, spec);
   const ui = useUiStore.getState();
-  ui.setToolPanelTab("terminal");
+  ui.addTab("terminal");
   ui.setToolPanelCollapsed(false);
 }

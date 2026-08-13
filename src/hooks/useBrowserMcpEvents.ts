@@ -22,7 +22,7 @@ import { useUiStore } from "../state/ui";
  *  focused so its webview gets the visible slot. */
 function surfaceBrowserPanel(paneId?: string | null): void {
   const ui = useUiStore.getState();
-  ui.setToolPanelTab("browser");
+  ui.addTab("browser");
   ui.setToolPanelCollapsed(false);
   if (paneId) {
     const panes = usePanesStore.getState();

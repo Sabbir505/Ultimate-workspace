@@ -16,6 +16,19 @@ export type ToolPanelTab =
   | "progress" // Task progress panel
   | "agents"; // Subagent view panel
 
+/** One open tab in the right tool panel. Multiple instances of the same
+ *  `kind` can coexist — e.g. several terminals pointed at different panes,
+ *  several agents each showing a different subagent, etc. */
+export interface ToolPanelTabInstance {
+  /** Unique id within this app session (e.g. "t3"). */
+  instanceId: string;
+  kind: ToolPanelTab;
+  /** For terminal/browser tabs: the paneId this tab points at. */
+  paneId?: string;
+  /** For agents tabs: the subagent this tab shows. */
+  subagentId?: string;
+}
+
 /** Live progress of a model download from the Hugging Face model market.
  *  Keyed by download id (repo::filename). Updated by local-model:download:progress
  *  events; persisted globally so the user sees progress even after navigating
@@ -129,6 +142,21 @@ export interface UiState {
   setModalOpen: (id: string, open: boolean) => void;
   setPaneDiff: (diff: { paneId: string; filePath: string; cwd: string } | null) => void;
   setToolPanelTab: (tab: ToolPanelTab) => void;
+  /** Open tabs in the right-side tool panel — supports MULTIPLE instances of
+   *  the same kind (several terminals, several browsers, several agents, …).
+   *  Each instance carries its own kind and optional target (paneId for
+   *  terminal/browser, subagentId for agents) so they stay distinct. */
+  openTabs: ToolPanelTabInstance[];
+  /** Monotonic id counter for new tab instances. */
+  nextTabId: number;
+  /** Active tab instance id. */
+  activeTabId: string | null;
+  /** Add a tab (spawning a new instance of that kind) and activate it. */
+  addTab: (kind: ToolPanelTab, target?: { paneId?: string; subagentId?: string }) => void;
+  /** Close a specific open tab by instance id. Does nothing if unknown. */
+  closeTab: (instanceId: string) => void;
+  /** Activate (focus) an existing open tab instance. */
+  activateTab: (instanceId: string) => void;
   /** Currently selected subagent id, or null for the "agents" tab. */
   activeSubagentId: string | null;
   setActiveSubagentId: (id: string | null) => void;
@@ -155,6 +183,12 @@ export const useUiStore = create<UiState>((set) => ({
   diffPanelWidth: 280,
   paneDiff: null,
   toolPanelTab: "terminal",
+  // Open tabs in the right tool panel. Multi-instance — you can have several
+  // terminals, several browsers, several agents, etc. Each tab instance has
+  // its own kind + optional paneId/subagentId.
+  openTabs: [],
+  nextTabId: 1,
+  activeTabId: null,
   activeSubagentId: null,
   // Collapsed by default — the header split icon opens it on demand.
   toolPanelCollapsed: true,
@@ -209,6 +243,54 @@ export const useUiStore = create<UiState>((set) => ({
     }),
   setPaneDiff: (paneDiff) => set({ paneDiff }),
   setToolPanelTab: (toolPanelTab) => set({ toolPanelTab }),
+  // Add a new tab INSTANCE of the given kind (multiple same-kind tabs allowed).
+  addTab: (kind, target) =>
+    set((s) => {
+      const instanceId = `t${s.nextTabId}`;
+      const tab: ToolPanelTabInstance = {
+        instanceId,
+        kind,
+        paneId: target?.paneId,
+        subagentId: target?.subagentId,
+      };
+      const openTabs = [...s.openTabs, tab];
+      // Bounded strip — drop the oldest (front) instances. This is lenient:
+      // closing old tabs, not erroring. Case of the user opening a lot of
+      // same-kind panes.
+      if (openTabs.length > 8) openTabs.splice(0, openTabs.length - 8);
+      return {
+        openTabs,
+        nextTabId: s.nextTabId + 1,
+        activeTabId: instanceId,
+        toolPanelTab: kind,
+        // Opening an agent tab focuses that subagent in the panel.
+        ...(kind === "agents" ? { activeSubagentId: target?.subagentId ?? s.activeSubagentId } : {}),
+      };
+    }),
+  // Close a tab by instance id.
+  closeTab: (instanceId) =>
+    set((s) => {
+      const idx = s.openTabs.findIndex((t) => t.instanceId === instanceId);
+      if (idx === -1) return {};
+      const openTabs = [...s.openTabs];
+      openTabs.splice(idx, 1);
+      // If we closed the active tab, switch to an adjacent one.
+      let activeTabId = s.activeTabId;
+      let toolPanelTab = s.toolPanelTab;
+      if (s.activeTabId === instanceId) {
+        const next = openTabs[Math.min(idx, openTabs.length - 1)];
+        activeTabId = next?.instanceId ?? null;
+        toolPanelTab = next?.kind ?? "terminal";
+      }
+      return { openTabs, activeTabId, toolPanelTab };
+    }),
+  // Activate (focus) an existing tab instance.
+  activateTab: (instanceId) =>
+    set((s) => {
+      const tab = s.openTabs.find((t) => t.instanceId === instanceId);
+      if (!tab) return {};
+      return { activeTabId: instanceId, toolPanelTab: tab.kind };
+    }),
   setActiveSubagentId: (activeSubagentId) => set({ activeSubagentId }),
   setToolPanelCollapsed: (toolPanelCollapsed) => set({ toolPanelCollapsed }),
   toggleToolPanel: () => set((s) => ({ toolPanelCollapsed: !s.toolPanelCollapsed })),

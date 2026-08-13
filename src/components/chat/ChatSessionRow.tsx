@@ -148,26 +148,29 @@ export function ChatSessionRow({
         <span className="chat-session-unread-dot" aria-label="Unread" />
       )}
       <div className="chat-session-info">
-        {editing ? (
-          <input
-            ref={inputRef}
-            className="chat-session-rename-input"
-            value={draftTitle}
-            onChange={(e) => setDraftTitle(e.target.value)}
-            onClick={(e) => e.stopPropagation()}
-            onBlur={commitRename}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") commitRename();
-              else if (e.key === "Escape") setEditing(false);
-            }}
-          />
-        ) : (
-          <div className="chat-session-title">{session.title}</div>
-        )}
-        <div className="chat-session-meta">
-          <span>{relativeTime(session.lastActiveAt)}</span>
-          {truncated && <span className="chat-session-preview">{truncated}</span>}
+        {/* Title + timer on the same row */}
+        <div className="chat-session-title-row">
+          {editing ? (
+            <input
+              ref={inputRef}
+              className="chat-session-rename-input"
+              value={draftTitle}
+              onChange={(e) => setDraftTitle(e.target.value)}
+              onClick={(e) => e.stopPropagation()}
+              onBlur={commitRename}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitRename();
+                else if (e.key === "Escape") setEditing(false);
+              }}
+            />
+          ) : (
+            <div className="chat-session-title">{session.title}</div>
+          )}
+          <div className="chat-session-meta">
+            <span>{relativeTime(session.lastActiveAt)}</span>
+          </div>
         </div>
+        {truncated && <span className="chat-session-preview">{truncated}</span>}
       </div>
 
       <button

@@ -51,7 +51,7 @@ export function SubagentPanel() {
   );
   const activeSubagentId = useUiStore((s) => s.activeSubagentId);
   const setActiveSubagentId = useUiStore((s) => s.setActiveSubagentId);
-  const setToolPanelTab = useUiStore((s) => s.setToolPanelTab);
+  const setToolPanelTab = useUiStore((s) => s.addTab);
   const panelRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 

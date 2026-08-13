@@ -860,7 +860,8 @@ function AssistantPanel() {
   const [loaded, setLoaded] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   // false = row view, true = system prompt editor open.
-  const [detailOpen, setDetailOpen] = useState(false);
+  // Since the Assistant section now only has the system prompt, start expanded.
+  const [detailOpen, setDetailOpen] = useState(true);
 
   useEffect(() => {
     let stale = false;
@@ -894,41 +895,11 @@ function AssistantPanel() {
       </div>
 
       <div className="skills-section">
-        {detailOpen ? (
-          <SystemPromptDetail
-            content={systemPrompt}
-            onChange={setSystemPrompt}
-            onBack={() => setDetailOpen(false)}
-          />
-        ) : (
-          <div className="skills-table">
-            <div className="skills-table-head">
-              <span className="skills-col-name">Prompt</span>
-              <span className="skills-col-date">Last updated</span>
-              <span className="skills-col-author">Author</span>
-            </div>
-            <div className="skills-table-body">
-              <button
-                type="button"
-                className="skills-table-row system-prompt-row"
-                onClick={() => setDetailOpen(true)}
-              >
-                <span className="skills-col-name">
-                  <span className="skills-row-icon">⚙</span>
-                  Custom system prompt
-                </span>
-                <span className="skills-col-date">—</span>
-                <span className="skills-col-author">
-                  <span className="skills-author-badge">You</span>
-                </span>
-              </button>
-            </div>
-            <p className="skills-section-hint">
-              Skills are managed in the Skills Library and invoked in chat with{" "}
-              <code>/slug</code> — type <code>/</code> in the composer to browse them.
-            </p>
-          </div>
-        )}
+        <SystemPromptDetail
+          content={systemPrompt}
+          onChange={setSystemPrompt}
+          onBack={() => setDetailOpen(false)}
+        />
       </div>
     </>
   );

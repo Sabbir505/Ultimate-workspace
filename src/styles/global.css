@@ -8812,7 +8812,7 @@ table.kv th {
   gap: 8px;
   padding: 4px 10px;
   position: relative;
-  margin-top: 6px;
+  margin-top: 2px;
   /* Unify agent / folder / github / context-meter into a single notch bar
      that visually hangs off the bottom of the composer card. */
   background: var(--surface-glass);

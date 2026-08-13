@@ -8508,14 +8508,14 @@ table.kv th {
   color: var(--text, #1a1a1a);
 }
 
-/* Rich hover panel — rendered inside the circle's wrapper. Positioned to
-   the right of the circle so it looks centered relative to the meter; the
-   right edge aligns with the circle's right side so the panel opens
-   leftward into the chat area. */
+/* Rich hover panel — rendered inside the circle's wrapper. Centered
+   horizontally on the meter (left 50% + translateX -50%) so it appears
+   directly above and centered on the circular ring. */
 .context-meter-panel {
   position: absolute;
   bottom: calc(100% + 6px);
-  right: -6px;
+  left: 50%;
+  transform: translateX(-50%);
   width: 260px;
   padding: 10px 12px;
   border-radius: 8px;

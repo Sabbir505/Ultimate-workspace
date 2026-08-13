@@ -836,7 +836,9 @@ pub fn get_chat_session_metrics(
         chat_session_id,
         llm_time_ms: (llm_ms > 0).then_some(llm_ms),
         tool_time_ms: (tool_ms > 0).then_some(tool_ms),
-        ttft_avg_ms: (ttft_n > 0).then_some(ttft_sum / ttft_n),
+        // `then_some` evaluates eagerly — use `then` so the division only
+        // happens when `ttft_n > 0` (avoids divide-by-zero on empty sessions).
+        ttft_avg_ms: (ttft_n > 0).then(|| ttft_sum / ttft_n),
         tokens_per_second,
         cache_hit_rate: cache_hit.filter(|v| v.is_finite()),
         input_tokens: input_sum,

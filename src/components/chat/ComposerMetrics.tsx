@@ -80,7 +80,10 @@ export function ComposerMetrics({ chatSessionId, streaming }: Props) {
   const chips: MetricChipProps[] = [];
 
   if (streaming && live) {
-    // Live turn — show what's moving: tok/s, elapsed, TTFT.
+    // Live turn — show what's moving: tok/s, elapsed, TTFT. While the turn
+    // is just starting (TTFT not yet known, no tokens counted) fall through
+    // to the placeholder set below so the row layout stays stable instead
+    // of collapsing to nothing.
     const tokS = fmtTokPerSecond(live.tokensPerSecond ?? undefined);
     if (tokS) chips.push({ label: "speed", value: tokS, live: true });
     const llm = fmtMs(live.llmTimeMs);
@@ -119,7 +122,21 @@ export function ComposerMetrics({ chatSessionId, streaming }: Props) {
     }
   }
 
-  if (chips.length === 0) return null;
+  // Always render the row — even on a fresh chat or one with no data yet — so
+  // the composer's footer height doesn't jump when the first turn starts. The
+  // placeholders keep the same chip silhouette (dot + uppercase label + value
+  // slot), just dimmed with an em-dash where the number would go.
+  if (chips.length === 0) {
+    return (
+      <div className="composer-metrics-row is-empty" role="status" aria-live="polite">
+        <MetricChip label="llm" value="—" />
+        <MetricChip label="tools" value="—" />
+        <MetricChip label="ttft" value="—" />
+        <MetricChip label="speed" value="—" />
+        <MetricChip label="cache" value="—" />
+      </div>
+    );
+  }
 
   return (
     <div className="composer-metrics-row" role="status" aria-live="polite">

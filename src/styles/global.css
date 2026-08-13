@@ -8884,6 +8884,18 @@ table.kv th {
   color: var(--text);
   font-weight: 500;
 }
+/* The always-present placeholder set (no data yet). Same silhouette, dimmed
+   so it reads as inert rather than as a broken live readout. */
+.composer-metrics-row.is-empty .composer-metrics-chip-value {
+  color: var(--text-dim);
+  opacity: 0.5;
+}
+.composer-metrics-row.is-empty .composer-metrics-chip-dot {
+  background: var(--border-strong, var(--border));
+}
+.composer-metrics-row.is-empty .composer-metrics-chip-label {
+  opacity: 0.7;
+}
 
 /* The inner notch chips no longer carry their own notch surface — they sit
    directly on the unified bar background, so surface/border are removed. */

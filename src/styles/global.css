@@ -6628,6 +6628,41 @@ table.kv th {
   border-color: var(--accent, #5b9bd5);
   box-shadow: 0 0 0 1px var(--accent, #5b9bd5) inset;
 }
+.saved-provider-name-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.saved-provider-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.saved-provider-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs, 4px);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.saved-provider-icon:hover {
+  color: var(--accent, #5b9bd5);
+  border-color: var(--border);
+  background: var(--surface-1, rgba(255, 255, 255, 0.06));
+}
+.saved-provider-icon.danger:hover {
+  color: #e5484d;
+  border-color: rgba(229, 72, 77, 0.4);
+  background: rgba(229, 72, 77, 0.08);
+}
 .saved-provider-name {
   font-size: 13px;
   font-weight: 600;

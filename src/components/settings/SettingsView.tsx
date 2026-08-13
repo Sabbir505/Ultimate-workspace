@@ -28,6 +28,8 @@ import {
   Coins,
   TerminalSquare,
   GitBranch,
+  Pencil,
+  Trash2,
 } from "lucide-react";
 
 type Category =
@@ -1083,10 +1085,14 @@ function SavedProvidersGrid({
   saved,
   activeProvider,
   onPick,
+  onEdit,
+  onDelete,
 }: {
   saved: Record<string, ChatConfigPayload> | null;
   activeProvider: ChatProvider;
   onPick: (p: ChatProvider) => void;
+  onEdit: (p: ChatProvider) => void;
+  onDelete: (p: ChatProvider) => void;
 }) {
   const LABELS: Record<string, string> = {
     anthropic: "Anthropic",
@@ -1111,7 +1117,6 @@ function SavedProvidersGrid({
         const isActive = id === activeProvider;
         const isCompatible =
           id === "anthropic_compatible" || id === "openai_compatible";
-        const formatLabel = isCompatible ? "OpenAI-compatible" : "Native";
         return (
           <button
             key={id}
@@ -1119,9 +1124,36 @@ function SavedProvidersGrid({
             className={`saved-provider-card ${isActive ? "active" : ""}`}
             onClick={() => onPick(id as ChatProvider)}
           >
-            <div className="saved-provider-name">{LABELS[id]}</div>
+            <div className="saved-provider-name-row">
+              <span className="saved-provider-name">{LABELS[id]}</span>
+              <span className="saved-provider-actions">
+                <button
+                  type="button"
+                  className="saved-provider-icon"
+                  title="Edit"
+                  aria-label={`Edit ${LABELS[id]}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onEdit(id as ChatProvider);
+                  }}
+                >
+                  <Pencil size={13} />
+                </button>
+                <button
+                  type="button"
+                  className="saved-provider-icon danger"
+                  title="Delete"
+                  aria-label={`Delete ${LABELS[id]}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDelete(id as ChatProvider);
+                  }}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </span>
+            </div>
             <div className="saved-provider-meta">
-              <span className="saved-provider-tag">{formatLabel}</span>
               {isCompatible && cfg.baseUrl && (
                 <span
                   className="saved-provider-url"
@@ -1313,6 +1345,22 @@ function ApiKeysPanel() {
         saved={savedProviders}
         activeProvider={provider}
         onPick={(p) => onProviderChange(p)}
+        onEdit={(p) => onProviderChange(p)}
+        onDelete={async (p) => {
+          // Delete = same as clear (removes the key from the keychain +
+          // clears stored base URL/model). If we're deleting the currently
+          // selected provider, also reset the form fields.
+          await clearApiKeyFn(p);
+          if (p === provider) {
+            setApiKey("");
+            setBaseUrl("");
+            setModel("");
+            setFetchedModels([]);
+            setFetchError(null);
+            await loadConfigFn(p);
+          }
+          await refreshSavedProviders();
+        }}
       />
       <div className="form-row">
         <label>Provider</label>

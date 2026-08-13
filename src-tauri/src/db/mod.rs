@@ -108,6 +108,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_cost_v2(conn)?;
     migrate_chat_messages_v2(conn)?;
     migrate_chat_messages_started_completed(conn)?;
+    migrate_chat_messages_perf(conn)?;
     migrate_unc_paths(conn)
 }
 
@@ -333,6 +334,27 @@ pub fn migrate_chat_messages_v2(conn: &Connection) -> DbResult<()> {
 /// pattern as `migrate_chat_messages_v2`.
 pub fn migrate_chat_messages_started_completed(conn: &Connection) -> DbResult<()> {
     for (col, def) in [("started_at", "INTEGER"), ("completed_at", "INTEGER")] {
+        let sql = format!("ALTER TABLE chat_messages ADD COLUMN {col} {def}");
+        if let Err(e) = conn.execute(&sql, []) {
+            if !e.to_string().contains("duplicate column name") {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Perf metrics per assistant turn — LLM/tool time (ms), TTFT (ms), and
+/// generation speed (tokens/second). Populated by the streaming paths in
+/// `chat/mod.rs` and `agent_sessions.rs`; legacy rows stay NULL. Mirrors
+/// the fields added to `ChatDonePayload`/`ChatMessageRecord`.
+pub fn migrate_chat_messages_perf(conn: &Connection) -> DbResult<()> {
+    for (col, def) in [
+        ("llm_time_ms", "INTEGER"),
+        ("tool_time_ms", "INTEGER"),
+        ("ttft_ms", "INTEGER"),
+        ("tokens_per_second", "REAL"),
+    ] {
         let sql = format!("ALTER TABLE chat_messages ADD COLUMN {col} {def}");
         if let Err(e) = conn.execute(&sql, []) {
             if !e.to_string().contains("duplicate column name") {

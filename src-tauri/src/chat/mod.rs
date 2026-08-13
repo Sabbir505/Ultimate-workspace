@@ -20,6 +20,7 @@ pub mod stream_events;
 pub mod streaming;
 pub mod tasks;
 pub mod tools;
+pub mod turn_perf;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -223,6 +224,12 @@ impl ChatManager {
         let handle = tokio::spawn(async move {
             // Capture the turn's start instant for the "Worked for Xs" label.
             let started_at = db::now_ts();
+            // Perf accumulator — threads through all streaming/tool-loop paths
+            // so the composer metrics row gets real LLM/tool time / TTFT.
+            // Registered globally per-session so the token hot path
+            // (`emit_token`) can auto-record without threading references
+            // through every stream helper.
+            let perf = turn_perf::register(&sid, turn_perf::TurnPerf::new(app.clone(), &sid));
             // When tools are enabled and the session has connectors attached,
             // connect to each vendor's remote MCP server now (refreshing the
             // OAuth token, listing + classifying its tools). This is per-turn
@@ -238,12 +245,12 @@ impl ChatManager {
             }
             let result = if tools_enabled && is_openai {
                 run_openai_tool_loop(
-                    &client, &tool_base, &api_key, &chat_req, &caps, permission_mode, &mgr, &sid, &app, research_mode,
+                    &client, &tool_base, &api_key, &chat_req, &caps, permission_mode, &mgr, &sid, &app, research_mode, perf.clone(),
                 )
                 .await
             } else if tools_enabled && is_anthropic {
                 run_anthropic_tool_loop(
-                    &client, &tool_base, &api_key, &chat_req, &caps, permission_mode, &mgr, &sid, &app, research_mode,
+                    &client, &tool_base, &api_key, &chat_req, &caps, permission_mode, &mgr, &sid, &app, research_mode, perf.clone(),
                 )
                 .await
             } else {
@@ -255,6 +262,7 @@ impl ChatManager {
                     &api_key,
                     base_url.as_deref(),
                     &app,
+                    &perf,
                 )
                 .await
             };
@@ -302,6 +310,12 @@ impl ChatManager {
                             None,
                             Some(started_at),
                             Some(db::now_ts()),
+                            perf.llm_time_ms(),
+                            perf.tool_time_ms(),
+                            perf.ttft_ms(),
+                            perf.tokens_per_second(
+                                usage.as_ref().map(|u| u.output_tokens).unwrap_or(0),
+                            ),
                         );
                         // Attribute this turn's artifacts to the assistant
                         // message so they reappear on its bubble when the chat
@@ -336,6 +350,21 @@ impl ChatManager {
                                     None
                                 }
                             }),
+                            // Populated by the TurnPerf accumulator captured in
+                            // the tool loops / stream below.
+                            llm_time_ms: perf.llm_time_ms(),
+                            tool_time_ms: perf.tool_time_ms(),
+                            ttft_ms: perf.ttft_ms(),
+                            tokens_per_second: perf.tokens_per_second(
+                                usage.as_ref().map(|u| u.output_tokens).unwrap_or(0),
+                            ),
+                            cache_hit_rate: usage.as_ref().and_then(|u| {
+                                crate::chat::turn_perf::cache_hit_rate(
+                                    u.cache_read_input_tokens,
+                                    u.cache_creation_input_tokens,
+                                    u.input_tokens,
+                                )
+                            }),
                         },
                     );
                 }
@@ -363,6 +392,9 @@ impl ChatManager {
             // removing unconditionally would clobber the newer stream's
             // handle and leave it uncancellable.
             mgr.remove_stream_if_current(&sid, tokio::task::id());
+            // Clear the active per-turn perf accumulator so a later turn
+            // starts fresh (and so `emit_token` stops recording to it).
+            crate::chat::turn_perf::unregister(&sid);
         });
 
         self.streams
@@ -416,6 +448,7 @@ pub(crate) async fn run_chat_stream(
     api_key: &str,
     base_url: Option<&str>,
     app: &AppHandle,
+    perf: &turn_perf::TurnPerf,
 ) -> Result<(String, Option<ChatUsage>), String> {
     let request = provider
         .build_request(client, req, api_key, base_url)
@@ -444,6 +477,9 @@ pub(crate) async fn run_chat_stream(
     let mut pending = String::new();
     let mut full_text = String::new();
     let mut in_think = false;
+    // Open the generation window: all tokens flowing from this SSE read are
+    // model-generation time (not tool time or approval waits).
+    perf.begin_gen();
 
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result.map_err(|e| format!("stream read error: {e}"))?;
@@ -483,6 +519,8 @@ pub(crate) async fn run_chat_stream(
                     if !crate::chat::stream_events::try_send(chat_session_id, &payload) {
                         let _ = app.emit("chat:token", payload);
                     }
+                    perf.record_token();
+                    perf.maybe_emit_perf();
                 }
                 (_, true) => {
                     // Stream done — usage will be parsed from buffer below.
@@ -523,6 +561,8 @@ pub(crate) async fn run_chat_stream(
             if !crate::chat::stream_events::try_send(chat_session_id, &payload) {
                 let _ = app.emit("chat:token", payload);
             }
+            perf.record_token();
+            perf.maybe_emit_perf();
         }
     }
 
@@ -535,9 +575,14 @@ pub(crate) async fn run_chat_stream(
             if !crate::chat::stream_events::try_send(chat_session_id, &payload) {
                 let _ = app.emit("chat:token", payload);
             }
+            perf.record_token();
+            perf.maybe_emit_perf();
     }
 
     let usage = provider.parse_usage(&buf);
+    // Close the generation window — all subsequent time (tool exec, next
+    // round's prompt build) falls outside LLM time.
+    perf.end_gen();
     Ok((full_text, usage))
 }
 
@@ -572,6 +617,7 @@ pub fn run_one_shot_chat(
         crate::db::add_chat_message(
             &conn, chat_session_id, "user",
             prompt, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None,
         ).map_err(|e| e.to_string())?;
         crate::db::touch_chat_session(&conn, chat_session_id).map_err(|e| e.to_string())?;
     }
@@ -655,6 +701,7 @@ pub fn run_one_shot_chat(
             &response_text,
             None, None, None, None, None, None, None, None, None,
             Some(started_at), Some(crate::db::now_ts()),
+            None, None, None, None,
         ).map_err(|e| e.to_string())?;
         crate::db::touch_chat_session(&conn, chat_session_id).map_err(|e| e.to_string())?;
     }

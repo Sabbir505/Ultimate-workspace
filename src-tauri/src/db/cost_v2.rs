@@ -416,6 +416,7 @@ mod tests {
         super::super::add_chat_message(
             &conn, &cs.id, "assistant", "hi", Some(1_000_000), Some(500_000), Some(0.0),
             None, None, None, Some("anthropic"), None, None, None, None,
+            None, None, None, None,
         ).unwrap();
         let r = get_cost_rollups_v2(&conn, 7).unwrap();
         // claude-sonnet-4-5: $3 input, $15 output → 1M*3/1M + 0.5M*15/1M = 10.5
@@ -441,6 +442,7 @@ mod tests {
         super::super::add_chat_message(
             &conn, &cs.id, "assistant", "hi", Some(1_000_000), Some(500_000), Some(0.0),
             None, None, None, Some("local_gguf"), None, None, None, None,
+            None, None, None, None,
         ).unwrap();
         let r = get_cost_rollups_v2(&conn, 7).unwrap();
         // Local models appear in the per-model breakdown under their basename
@@ -464,7 +466,7 @@ mod tests {
         super::super::add_chat_message(
             &conn, &cs.id, "assistant", "hi", Some(100_000), Some(50_000), Some(0.0),
             None, None, None, None, None, None, // provider = NULL, model_key = NULL
-            None, None,
+            None, None, None, None, None, None,
         ).unwrap();
         let r = get_cost_rollups_v2(&conn, 7).unwrap();
         assert!(

@@ -350,6 +350,12 @@ export interface ChatMessageRecord {
    *  columns; `durationSec` is derived from `completedAt - startedAt`. */
   startedAt: number | null;
   completedAt: number | null;
+  /** Perf metrics persisted per assistant turn (ms / tok/s). Null for legacy
+   *  rows and rows that predated the instrumentation. */
+  llmTimeMs?: number | null;
+  toolTimeMs?: number | null;
+  ttftMs?: number | null;
+  tokensPerSecond?: number | null;
   /** Live attachment objects for the optimistic just-sent user message, so the
    *  bubble can show real image thumbnails before the backend persists. Not
    *  present on persisted messages (those carry attachment text markers in
@@ -400,6 +406,35 @@ export interface ChatDonePayload {
   inputTokens: number | null;
   outputTokens: number | null;
   costUsd: number | null;
+  /** Cumulative wall-clock the model spent actively generating text (ms). */
+  llmTimeMs: number | null;
+  /** Cumulative wall-clock spent executing tools (ms), excluding approval waits. */
+  toolTimeMs: number | null;
+  /** Time from turn start to the first emitted token (ms). */
+  ttftMs: number | null;
+  /** Generation speed = outputTokens / llmTimeMs (tokens per second). */
+  tokensPerSecond: number | null;
+  /** Prompt/KV-cache hit rate (0.0–1.0), computed from usage cache fields. */
+  cacheHitRate: number | null;
+}
+
+/** Live per-session perf snapshot, emitted (throttled) while a turn is streaming
+ *  as `chat:perf`. The frontend uses this to update the composer metrics row
+ *  without waiting for `chat:done`. */
+export interface ChatPerfPayload {
+  chatSessionId: string;
+  /** Cumulative model-generation time so far (ms). */
+  llmTimeMs: number;
+  /** Cumulative tool-execution time so far (ms). */
+  toolTimeMs: number;
+  /** Time from turn start to the first emitted token (ms), if known yet. */
+  ttftMs: number | null;
+  /** Running generation speed = outputTokens / llmTimeMs. */
+  tokensPerSecond: number | null;
+  /** Output tokens generated so far in this turn. */
+  outputTokens: number;
+  /** Wall-clock elapsed since turn start (ms). */
+  elapsedMs: number;
 }
 export interface ChatArtifactPayload {
   chatSessionId: string;
@@ -448,6 +483,29 @@ export interface ArtifactRecord {
   kind: string;
   createdAt: number;
   expiresAt: number;
+}
+
+/** Session-level aggregate perf metrics returned by `get_chat_session_metrics`
+ *  for the composer metrics row. All fields are cumulative across the session's
+ *  assistant turns. */
+export interface ChatSessionMetricsPayload {
+  chatSessionId: string;
+  /** Sum of per-turn LLM time (ms). */
+  llmTimeMs: number | null;
+  /** Sum of per-turn tool-execution time (ms). */
+  toolTimeMs: number | null;
+  /** Average TTFT across turns that recorded one (ms). */
+  ttftAvgMs: number | null;
+  /** Weighted-average generation speed (tok/s), weighted by output tokens. */
+  tokensPerSecond: number | null;
+  /** Session cache-hit rate (0.0–1.0), null when no cache data. */
+  cacheHitRate: number | null;
+  /** Cumulative input tokens across all turns. */
+  inputTokens: number;
+  /** Cumulative output tokens across all turns. */
+  outputTokens: number;
+  /** Number of assistant turns that contributed. */
+  turnCount: number;
 }
 
 /** All persisted artifacts, most recent first. */
@@ -534,6 +592,8 @@ export const setChatSessionUnread = (chatSessionId: string, unread: boolean) =>
   safeInvoke<void>("set_chat_session_unread", { chatSessionId, unread });
 export const getChatMessages = (chatSessionId: string) =>
   safeInvoke<ChatMessageRecord[] | null>("get_chat_messages", { chatSessionId });
+export const getChatSessionMetrics = (chatSessionId: string) =>
+  safeInvoke<ChatSessionMetricsPayload | null>("get_chat_session_metrics", { chatSessionId });
 export const touchChatSession = (chatSessionId: string) =>
   safeInvoke<void>("touch_chat_session", { chatSessionId });
 export interface ChatAttachmentInput {
@@ -821,6 +881,11 @@ export const listenChatStatus = (handler: (payload: ChatStatusPayload) => void) 
   safeListen<ChatStatusPayload>("chat:status", handler);
 export const listenChatDone = (handler: (payload: ChatDonePayload) => void) =>
   safeListen<ChatDonePayload>("chat:done", handler);
+/** Throttled (~1 Hz) live perf snapshot while a turn is streaming. The
+ *  composer metrics row subscribes here so it can update without waiting
+ *  for the next chat:done event. */
+export const listenChatPerf = (handler: (payload: ChatPerfPayload) => void) =>
+  safeListen<ChatPerfPayload>("chat:perf", handler);
 export const listenChatError = (handler: (payload: ChatErrorPayload) => void) =>
   safeListen<ChatErrorPayload>("chat:error", handler);
 export const listenChatArtifact = (handler: (payload: ChatArtifactPayload) => void) =>

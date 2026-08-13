@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ModelEffortMenu } from "./ModelEffortMenu";
 import { AgentMenu } from "./AgentMenu";
 import { ContextMeter } from "./ContextMeter";
+import { ComposerMetrics } from "./ComposerMetrics";
 import { BranchDropdown } from "./BranchDropdown";
 import { useUiStore } from "../../state/ui";
 import { useChatStore } from "../../state/chat";
@@ -916,6 +917,7 @@ export function ChatComposer({
           chatSessionId={activeChatSessionId}
         />
       </div>
+      <ComposerMetrics chatSessionId={activeChatSessionId} streaming={streaming} />
     </div>
   );
 }

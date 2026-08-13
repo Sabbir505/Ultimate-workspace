@@ -18,6 +18,7 @@ import {
   generateChatTitle,
   getChatConfig,
   getChatMessages,
+  getChatSessionMetrics,
   listChatArtifacts,
   listChatSessions,
   readArtifactPreview,
@@ -36,7 +37,9 @@ import {
   type ChatArtifactPayload,
   type ChatConfigPayload,
   type ChatMessageRecord,
+  type ChatPerfPayload,
   type ChatSession,
+  type ChatSessionMetricsPayload,
   type ChatTaskProgressPayload,
   type SubagentInfo,
   type SubagentSpawnPayload,
@@ -240,11 +243,21 @@ export interface ChatState {
   /** Messages queued while a turn is running, per chat session, FIFO. Sent
    *  one-by-one by `drainQueue` when the session's stream finishes. */
   messageQueue: Record<string, QueuedChatMessage[]>;
+  /** Live per-turn perf snapshot for the composer metrics row, keyed by chat
+   *  session id. Updated on throttled `chat:perf` events while a turn streams,
+   *  cleared on `chat:done`. Mirrors the `ChatPerfPayload` from the backend. */
+  livePerf: Record<string, ChatPerfPayload>;
+  /** Session-level aggregate metrics (sums / weighted averages across the
+   *  session's assistant turns), keyed by chat session id. Fetched when a
+   *  session is opened and after each turn completes (`chat:done`), used for
+   *  the composer metrics row. */
+  sessionMetrics: Record<string, ChatSessionMetricsPayload>;
 
   // Actions
   loadSessions: () => Promise<void>;
   loadMessages: (chatSessionId: string) => Promise<void>;
   loadConfig: (provider?: string) => Promise<void>;
+  loadSessionMetrics: (chatSessionId: string) => Promise<void>;
   selectSession: (chatSessionId: string) => Promise<void>;
   newChat: (provider: string, model: string, projectId?: string | null) => Promise<ChatSession | null>;
   deleteChat: (chatSessionId: string) => Promise<void>;
@@ -325,7 +338,19 @@ export interface ChatState {
   // Called by the event hook (useChatEvents) — not meant for direct component use.
   onToken: (chatSessionId: string, token: string) => void;
   onStatus: (chatSessionId: string, reason: string, message: string) => void;
-  onDone: (chatSessionId: string, inputTokens: number | null, outputTokens: number | null, costUsd: number | null) => void;
+  onDone: (
+    chatSessionId: string,
+    inputTokens: number | null,
+    outputTokens: number | null,
+    costUsd: number | null,
+    llmTimeMs?: number | null,
+    toolTimeMs?: number | null,
+    ttftMs?: number | null,
+    tokensPerSecond?: number | null,
+    cacheHitRate?: number | null,
+  ) => void;
+  /** Update the live per-turn perf snapshot for a session (from `chat:perf`). */
+  onPerf: (payload: ChatPerfPayload) => void;
   onError: (chatSessionId: string, message: string, code: string | null) => void;
   onArtifact: (payload: ChatArtifactPayload) => void;
   /** Track a background chat task's progress (downloads / shell runs). */
@@ -382,6 +407,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   cwdOverrides: {},
   sessionProjects: {},
   messageQueue: {},
+  livePerf: {},
+  sessionMetrics: {},
 
   setCwdOverride: (chatSessionId, path) =>
     set((s) => {
@@ -447,6 +474,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   loadConfig: async (provider?: string) => {
     const config = await getChatConfig(provider);
     set({ config });
+  },
+
+  loadSessionMetrics: async (chatSessionId) => {
+    const metrics = await getChatSessionMetrics(chatSessionId);
+    set((s) => {
+      if (!metrics) {
+        const next = { ...s.sessionMetrics };
+        delete next[chatSessionId];
+        return { sessionMetrics: next };
+      }
+      return { sessionMetrics: { ...s.sessionMetrics, [chatSessionId]: metrics } };
+    });
   },
 
   selectSession: async (chatSessionId) => {
@@ -529,6 +568,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Opening a session that has messages stacked in its queue (queued while
     // it was in the background) starts draining them now that it's active.
     get().drainQueue(chatSessionId);
+    // Load this session's aggregate perf metrics for the composer row.
+    void get().loadSessionMetrics(chatSessionId);
   },
 
   newChat: async (provider, model, projectId) => {
@@ -1161,21 +1202,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 
-  onDone: async (chatSessionId, inputTokens, outputTokens, costUsd) => {
+  onDone: async (chatSessionId, inputTokens, outputTokens, costUsd, llmTimeMs, toolTimeMs, ttftMs, tokensPerSecond, cacheHitRate) => {
     // A reply that lands while the user is viewing a different chat marks the
     // finished one unread, so it surfaces in the sidebar.
     if (get().activeChatSessionId !== chatSessionId) {
       await setChatSessionUnread(chatSessionId, true);
     }
-    // Clear streaming state for this session.
+    // Clear streaming + live-perf state for this session.
     set((s) => {
       const nextStreaming = { ...s.streaming };
       delete nextStreaming[chatSessionId];
       const nextStatus = { ...s.chatStatus };
       delete nextStatus[chatSessionId];
+      const livePerf = { ...s.livePerf };
+      delete livePerf[chatSessionId];
       return {
         streaming: nextStreaming,
         chatStatus: nextStatus,
+        livePerf,
         streamingChatSessionId:
           s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
       };
@@ -1250,6 +1294,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
     // Turn finished — send the next queued message, if any (FIFO).
     get().drainQueue(chatSessionId);
+    // Refresh the session's aggregate metrics (turn added to the totals).
+    void get().loadSessionMetrics(chatSessionId);
   },
 
   onArtifact: ({ chatSessionId, path, filename }) => {
@@ -1317,6 +1363,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
     // Turn ended (in error) — keep the queue moving rather than stranding it.
     get().drainQueue(chatSessionId);
+  },
+
+  onPerf: (payload) => {
+    set((s) => ({
+      livePerf: { ...s.livePerf, [payload.chatSessionId]: payload },
+    }));
   },
 
   onTaskProgress: ({ chatSessionId, taskId, kind, state, message, downloaded, total, speedBps, destPath }) => {

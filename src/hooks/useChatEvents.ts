@@ -18,6 +18,7 @@ import {
   listenChatTaskProgress,
   listenChatToken,
   listenPlanStepProgress,
+  listenChatPerf,
   listenChatSubagentSpawn,
   listenChatSubagentTokens,
   listenChatSubagentDone,
@@ -51,12 +52,34 @@ export function useChatEvents(): void {
     );
 
     unlistens.push(
-      listenChatDone(({ chatSessionId, inputTokens, outputTokens, costUsd }) => {
-        void useChatStore.getState().onDone(chatSessionId, inputTokens, outputTokens, costUsd);
+      listenChatDone((payload) => {
+        const { chatSessionId, inputTokens, outputTokens, costUsd } = payload;
+        void useChatStore
+          .getState()
+          .onDone(
+            chatSessionId,
+            inputTokens,
+            outputTokens,
+            costUsd,
+            payload.llmTimeMs ?? null,
+            payload.toolTimeMs ?? null,
+            payload.ttftMs ?? null,
+            payload.tokensPerSecond ?? null,
+            payload.cacheHitRate ?? null,
+          );
         const ownerSessionId = useChatStore.getState().getOwnerSessionId(chatSessionId);
         if (ownerSessionId) {
-          void emitMobileSessionChatEvent(ownerSessionId, "done", { chatSessionId, inputTokens, outputTokens, costUsd });
+          void emitMobileSessionChatEvent(ownerSessionId, "done", payload);
         }
+      }),
+    );
+
+    // Throttled live perf snapshot during a turn (~1 Hz). Drives the composer
+    // metrics row so the user sees speed/time updating while tokens stream.
+    // No mobile relay (desktop-only UI element).
+    unlistens.push(
+      listenChatPerf((payload) => {
+        useChatStore.getState().onPerf(payload);
       }),
     );
 

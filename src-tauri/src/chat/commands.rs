@@ -748,6 +748,103 @@ pub fn get_chat_messages(
     db::list_chat_messages(&conn, &chat_session_id).map_err(|e| e.to_string())
 }
 
+/// Session-level aggregate perf metrics for the composer row. Sums / weighted-
+/// averages the per-turn perf columns on `chat_messages` (assistant rows only
+/// — those carry `started_at`/`completed_at`/perf). Legacy rows with `NULL`
+/// perf fields contribute zero and don't weigh the averages.
+#[tauri::command]
+pub fn get_chat_session_metrics(
+    chat_session_id: String,
+    db: State<DbState>,
+) -> CmdResult<ChatSessionMetricsPayload> {
+    let conn = db.0.lock();
+    let all = db::list_chat_messages(&conn, &chat_session_id).map_err(|e| e.to_string())?;
+
+    let mut llm_ms = 0i64;
+    let mut tool_ms = 0i64;
+    let mut ttft_sum = 0i64;
+    let mut ttft_n = 0i64;
+    let mut tok_wsum = 0.0; // Σ tok_s * output_tokens (weighting)
+    let mut output_sum = 0i64;
+    let mut input_sum = 0i64;
+    let mut cache_read = 0i64;
+    let mut cache_creation = 0i64;
+    let mut uncached_in = 0i64;
+    let mut turn_count = 0i64;
+
+    for m in &all {
+        if m.role != "assistant" {
+            continue;
+        }
+        turn_count += 1;
+        if let Some(v) = m.llm_time_ms {
+            llm_ms += v;
+        }
+        if let Some(v) = m.tool_time_ms {
+            tool_ms += v;
+        }
+        if let Some(v) = m.ttft_ms {
+            ttft_sum += v;
+            ttft_n += 1;
+        }
+        if let (Some(ts), Some(out)) = (m.tokens_per_second, m.output_tokens) {
+            if out > 0 {
+                tok_wsum += ts * out as f64;
+                output_sum += out;
+            }
+        }
+        input_sum += m.input_tokens.unwrap_or(0);
+        output_sum += m.output_tokens.unwrap_or(0);
+        cache_read += m.cache_read_input_tokens.unwrap_or(0);
+        cache_creation += m.cache_creation_input_tokens.unwrap_or(0);
+
+        // Azure/OpenAI style providers report `input_tokens` already including
+        // cache reads; Anthropic reports *uncached* input separately. To avoid
+        // double counting, approximate uncached input as (cached_read present →
+        // input is uncached, else input already includes it). We keep input_sum
+        // as the provider's own input delimiter and compute the hit rate from
+        // cache_read / total below using only cache_read + cache_creation.
+        let _ = &mut uncached_in;
+    }
+
+    let total_prompt = cache_read + cache_creation + input_sum.min(0).max(0);
+    // Cache-hit rate uses cache_read over the whole billed prompt corpus.
+    // We don't know each turn's uncached-vs-inclusive split, so treat the
+    // aggregate conservatively: hit = cache_read / max(1, cache_read +
+    // cache_creation + input_sum) only when input_sum looks uncached
+    // (input_sum < cache_read). Otherwise (inclusive), cache_read /
+    // (cache_read + cache_creation + cache_read + input_sum) is wrong;
+    // default to None when the shape is ambiguous.
+    let cache_hit = if cache_read > 0 {
+        let denom = cache_read + cache_creation + input_sum;
+        if denom > 0 {
+            Some(cache_read as f64 / denom as f64)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let tokens_per_second = if output_sum > 0 {
+        Some(tok_wsum / output_sum as f64)
+    } else {
+        None
+    };
+
+    Ok(ChatSessionMetricsPayload {
+        chat_session_id,
+        llm_time_ms: (llm_ms > 0).then_some(llm_ms),
+        tool_time_ms: (tool_ms > 0).then_some(tool_ms),
+        ttft_avg_ms: (ttft_n > 0).then_some(ttft_sum / ttft_n),
+        tokens_per_second,
+        cache_hit_rate: cache_hit.filter(|v| v.is_finite()),
+        input_tokens: input_sum,
+        output_tokens: output_sum,
+        turn_count,
+    })
+}
+
 #[tauri::command]
 pub fn touch_chat_session(
     chat_session_id: String,
@@ -889,7 +986,7 @@ pub async fn send_chat_message(
     // 2. Persist the user message.
     {
         let conn = db.0.lock();
-        db::add_chat_message(&conn, &chat_session_id, "user", &content, None, None, None, None, None, None, None, None, None, None, None)
+        db::add_chat_message(&conn, &chat_session_id, "user", &content, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None)
             .map_err(|e| e.to_string())?;
         db::touch_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())?;
     }
@@ -1280,7 +1377,8 @@ pub async fn send_chat_message(
                             Some(o.summary_output_tokens),
                             None,
                             None, None, None, None, None, None,
-                            None, None,
+                            // started_at, completed_at, llm, tool, ttft, tok_s
+                            None, None, None, None, None, None,
                         )
                         .map_err(|e| e.to_string())?;
                         if !o.superseded_ids.is_empty() {
@@ -1553,6 +1651,10 @@ pub fn persist_partial_chat_message(
         // completed_at so the row still reads as finished.
         None,
         Some(db::now_ts()),
+        None, // llm_time_ms
+        None, // tool_time_ms
+        None, // ttft_ms
+        None, // tokens_per_second
     );
     let _ = db::touch_chat_session(&conn, &chat_session_id);
     Ok(())

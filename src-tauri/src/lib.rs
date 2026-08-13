@@ -320,6 +320,7 @@ pub fn run() {
             commands::chat_cmds::update_chat_session_agent,
             commands::chat_cmds::set_chat_session_project,
             commands::chat_cmds::get_chat_messages,
+            commands::chat_cmds::get_chat_session_metrics,
             commands::chat_cmds::touch_chat_session,
             commands::chat_cmds::send_chat_message,
             commands::chat_cmds::cancel_chat_message,

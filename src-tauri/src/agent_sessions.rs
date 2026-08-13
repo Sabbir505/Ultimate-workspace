@@ -155,7 +155,7 @@ impl AgentSessionManager {
         // check so a rejected turn can't orphan a user message.
         {
             let conn = db.0.lock();
-            crate::db::add_chat_message(&conn, chat_session_id, "user", content, None, None, None, None, None, None, None, None, None, None, None)
+            crate::db::add_chat_message(&conn, chat_session_id, "user", content, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None)
                 .map_err(|e| e.to_string())?;
         }
 
@@ -746,6 +746,11 @@ fn read_claude_stream(
     // to the originating step. Lives across the loop; the pending queue drains
     // within each turn (every call gets its result before the turn's `result`).
     let mut tools = ToolTracker::new();
+    // Register a per-turn perf accumulator so `emit_token` can drive live
+    // TTFT / tok/s in the composer row. Cleared in `finish_turn`. The split
+    // between LLM and tool time isn't available for the harness CLI (it's a
+    // black-box mixed stream), so those stay — like legacy rows.
+    let _perf = crate::chat::turn_perf::register(sid, crate::chat::turn_perf::TurnPerf::new_headless(sid));
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
@@ -1372,7 +1377,7 @@ pub fn run_one_shot(
 ) -> Result<(), String> {
     {
         let conn = db.lock();
-        crate::db::add_chat_message(&conn, chat_session_id, "user", prompt, None, None, None, None, None, None, None, None, None, None, None)
+        crate::db::add_chat_message(&conn, chat_session_id, "user", prompt, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None)
             .map_err(|e| e.to_string())?;
     }
 
@@ -1932,13 +1937,24 @@ fn finish_turn(
             .as_deref()
             .and_then(|a| a.strip_prefix("harness:"))
             .unwrap_or("unknown");
-        crate::db::add_chat_message(&conn, sid, "assistant", full, input, output, cost, None, None, None, Some(provider), None, None, Some(started_at), Some(crate::db::now_ts()))
+        // Pull the harness turn's live perf from the active accumulator
+        // (TTFT and tok/s only — the harness CLI's mixed stream doesn't
+        // admit a clean LLM/tool split, so those stay —).
+        let (ttft, tok_s) = crate::chat::turn_perf::active_snapshot(sid)
+            .map(|p| (p.ttft_ms, p.tokens_per_second))
+            .unwrap_or((None, None));
+        crate::db::add_chat_message(&conn, sid, "assistant", full, input, output, cost, None, None, None, Some(provider), None, None, Some(started_at), Some(crate::db::now_ts()), None, None, ttft, tok_s)
             .ok()
             .map(|m| m.id)
     } else {
         None
     };
     full.clear();
+
+    // Clear the active per-turn perf accumulator registered by the turn reader
+    // (see the `register` call in the stream loops) so a later turn starts
+    // fresh and `emit_token` stops recording to it.
+    crate::chat::turn_perf::unregister(sid);
 
     // Diff every watch dir (spawn dir + artifacts dir). `emitted` dedups the
     // (rare) case of overlapping dirs reporting the same file twice.
@@ -1997,6 +2013,9 @@ fn emit_token(app: Option<&AppHandle>, sid: &str, token: &str) {
             let _ = app.emit("chat:token", payload);
         }
     }
+    // Record into the active per-turn perf accumulator (if one is registered
+    // by the harness turn loop) so the live composer row shows TTFT + tok/s.
+    crate::chat::turn_perf::record_active_token(sid);
 }
 
 fn emit_done(app: Option<&AppHandle>, sid: &str, input: Option<i64>, output: Option<i64>, cost: Option<f64>) {

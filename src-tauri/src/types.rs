@@ -368,6 +368,20 @@ pub struct ChatMessageRecord {
     pub started_at: Option<i64>,
     #[serde(default)]
     pub completed_at: Option<i64>,
+    /// Perf metrics persisted per assistant turn. `llm_time_ms`/`tool_time_ms`
+    /// are cumulative generation/execution windows; `ttft_ms` is time-to-first-
+    /// token; `tokens_per_second` is generation speed. All `None` for legacy
+    /// rows and for turns that predated the instrumentation. Cache hit rate is
+    /// derived from usage in `ChatDonePayload`, not persisted here (raw cache
+    /// token counts already are).
+    #[serde(default)]
+    pub llm_time_ms: Option<i64>,
+    #[serde(default)]
+    pub tool_time_ms: Option<i64>,
+    #[serde(default)]
+    pub ttft_ms: Option<i64>,
+    #[serde(default)]
+    pub tokens_per_second: Option<f64>,
 }
 
 /// One recorded fact/claim a research turn extracted from a single source page.
@@ -423,6 +437,42 @@ pub struct ChatDonePayload {
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub cost_usd: Option<f64>,
+    /// Cumulative wall-clock the model spent actively generating text (ms).
+    #[serde(default)]
+    pub llm_time_ms: Option<i64>,
+    /// Cumulative wall-clock spent executing tools (ms), excluding approval waits.
+    #[serde(default)]
+    pub tool_time_ms: Option<i64>,
+    /// Time from turn start to the first emitted token (ms).
+    #[serde(default)]
+    pub ttft_ms: Option<i64>,
+    /// Generation speed = output_tokens / llm_time_ms (tokens per second).
+    #[serde(default)]
+    pub tokens_per_second: Option<f64>,
+    /// Prompt/KV-cache hit rate (0.0–1.0), computed from usage cache fields.
+    #[serde(default)]
+    pub cache_hit_rate: Option<f64>,
+}
+
+/// Per-session cumulative perf snapshot, emitted (throttled) while a turn is
+/// streaming so the composer metrics row can update live. Not persisted
+/// directly — the final values ride on `ChatDonePayload`/the DB row.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatPerfPayload {
+    pub chat_session_id: String,
+    /// Cumulative model-generation time so far (ms).
+    pub llm_time_ms: i64,
+    /// Cumulative tool-execution time so far (ms).
+    pub tool_time_ms: i64,
+    /// Time from turn start to the first emitted token (ms), if known yet.
+    pub ttft_ms: Option<i64>,
+    /// Running generation speed = output_tokens_generated / llm_time_ms.
+    pub tokens_per_second: Option<f64>,
+    /// Output tokens generated so far in this turn.
+    pub output_tokens: i64,
+    /// Wall-clock elapsed since turn start (ms).
+    pub elapsed_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -431,6 +481,32 @@ pub struct ChatArtifactPayload {
     pub chat_session_id: String,
     pub path: String,
     pub filename: String,
+}
+
+/// Per-session aggregate perf metrics, returned by the
+/// `get_chat_session_metrics` IPC command for the composer metrics row. All
+/// fields are cumulative across the session's assistant turns (sums / weighted
+/// averages), `None` when no turns have recorded the metric yet.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSessionMetricsPayload {
+    pub chat_session_id: String,
+    /// Sum of per-turn LLM time (ms).
+    pub llm_time_ms: Option<i64>,
+    /// Sum of per-turn tool-execution time (ms).
+    pub tool_time_ms: Option<i64>,
+    /// Average TTFT across turns that recorded one (ms).
+    pub ttft_avg_ms: Option<i64>,
+    /// Weighted-average generation speed (tok/s), weighted by output tokens.
+    pub tokens_per_second: Option<f64>,
+    /// Session cache-hit rate (0.0–1.0), `None` when no cache data.
+    pub cache_hit_rate: Option<f64>,
+    /// Cumulative input tokens across all turns.
+    pub input_tokens: i64,
+    /// Cumulative output tokens across all turns.
+    pub output_tokens: i64,
+    /// Number of assistant turns that contributed to these aggregates.
+    pub turn_count: i64,
 }
 
 /// Emitted when the `open_url` tool asks the UI to show a page in the

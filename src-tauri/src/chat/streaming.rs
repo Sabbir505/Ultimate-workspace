@@ -516,6 +516,7 @@ pub(crate) async fn run_openai_tool_loop(
     sid: &str,
     app: &AppHandle,
     research_mode: bool,
+    perf: crate::chat::turn_perf::TurnPerf,
 ) -> Result<(String, Option<ChatUsage>), String> {
     let url = format!("{base}/v1/chat/completions");
     let tool_specs = tools::openai_tool_specs(caps, mode);
@@ -561,8 +562,10 @@ pub(crate) async fn run_openai_tool_loop(
             body["chat_template_kwargs"] = json!({ "enable_thinking": on });
         }
 
+        perf.begin_gen();
         let (message, in_tok, out_tok, have) =
             openai_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?;
+        perf.end_gen();
         total_in += in_tok;
         total_out += out_tok;
         have_usage = have_usage || have;
@@ -666,7 +669,9 @@ pub(crate) async fn run_openai_tool_loop(
                 let args = parse_tool_args(args_str);
 
                 emit_token(app, sid, &tool_block(&name, &args), &mut full);
+                perf.begin_tool();
                 let result = run_tool(client, &art_dir, caps, mode, mgr, app, sid, &name, &args).await;
+                perf.end_tool();
                 // Attach the captured terminal output to the shell step so the
                 // UI shows a collapsible preview under the command.
                 if name == tools::RUN_SHELL && !result.trim().is_empty() {
@@ -712,6 +717,7 @@ pub(crate) async fn run_anthropic_tool_loop(
     sid: &str,
     app: &AppHandle,
     research_mode: bool,
+    perf: crate::chat::turn_perf::TurnPerf,
 ) -> Result<(String, Option<ChatUsage>), String> {
     let url = format!("{base}/v1/messages");
     let tool_specs = tools::anthropic_tool_specs(caps, mode);
@@ -758,8 +764,10 @@ pub(crate) async fn run_anthropic_tool_loop(
             });
         }
 
+        perf.begin_gen();
         let (content, in_tok, out_tok, have) =
             anthropic_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?;
+        perf.end_gen();
         total_in += in_tok;
         total_out += out_tok;
         have_usage = have_usage || have;
@@ -780,7 +788,9 @@ pub(crate) async fn run_anthropic_tool_loop(
                 let args = tu.get("input").cloned().unwrap_or_else(|| json!({}));
 
                 emit_token(app, sid, &tool_block(&name, &args), &mut full);
+                perf.begin_tool();
                 let result = run_tool(client, &art_dir, caps, mode, mgr, app, sid, &name, &args).await;
+                perf.end_tool();
                 if name == tools::RUN_SHELL && !result.trim().is_empty() {
                     let result_marker = json!({
                         "kind": "result",

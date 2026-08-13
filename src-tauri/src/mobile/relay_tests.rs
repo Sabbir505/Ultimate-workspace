@@ -29,7 +29,7 @@ fn pairing_accepts_only_matching_nonempty_tokens() {
 fn temp_chat_session_cleanup_deletes_session_and_messages() {
     let conn = db::mem();
     let cs = db::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
-    db::add_chat_message(&conn, &cs.id, "user", "hi", None, None, None, None, None, None, None, None, None, None, None).unwrap();
+    db::add_chat_message(&conn, &cs.id, "user", "hi", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
     let db = Arc::new(Mutex::new(conn));
 
     {

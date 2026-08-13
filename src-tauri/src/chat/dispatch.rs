@@ -44,6 +44,7 @@ pub(crate) fn emit_token(app: &AppHandle, sid: &str, token: &str, full: &mut Str
     if !stream_events::try_send(sid, &payload) {
         let _ = app.emit("chat:token", payload);
     }
+    crate::chat::turn_perf::record_active_token(sid);
 }
 
 /// Setting key for the user-configured artifacts directory (Settings →

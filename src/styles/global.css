@@ -8835,6 +8835,56 @@ table.kv th {
   box-shadow: 0 6px 24px -12px rgba(0, 0, 0, 0.45);
 }
 
+/* Perf metrics row directly below the context-meter notch: a plain-text strip
+   (no background/border of its own — matches the user's "no background color,
+   just the text" request). Tight, dim, evenly spaced. */
+.composer-metrics-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  padding: 4px 2px 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.composer-metrics-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.composer-metrics-chip-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  flex-shrink: 0;
+}
+.composer-metrics-chip.is-live .composer-metrics-chip-dot {
+  background: var(--accent, #5b9bd5);
+  animation: metrics-dot-pulse 1.2s ease-in-out infinite;
+}
+@keyframes metrics-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.composer-metrics-chip.is-live {
+  color: var(--text);
+}
+.composer-metrics-chip-label {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.composer-metrics-chip-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  font-weight: 500;
+}
+
 /* The inner notch chips no longer carry their own notch surface — they sit
    directly on the unified bar background, so surface/border are removed. */
 .composer-notch-agent,

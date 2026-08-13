@@ -364,17 +364,21 @@ interface ToolData {
   detail?: string;
   lang?: string;
   code?: string;
+  /** Correlation id shared between a shell command marker and its result
+   *  marker, so parseSegments can attach the terminal output to the step. */
+  id?: number | string;
   /** File-edit payloads (write_file / edit_file) carry the target path and
    *  the old/new content so the UI can render an inline diff review card
    *  (mockup 01 callout 5). See `tool_block` in src-tauri/src/chat/proto.rs. */
   path?: string;
   edit?: EditPayload;
-  /** Optional result text rendered once the call completes. The backend
-   *  doesn't populate this today (tool output is summarized by the model in
-   *  the following narration), but the expandable step detail shows args/code
-   *  regardless — `result` is reserved so a future backend field flows
-   *  straight into the same disclosure. */
+  /** Optional result text rendered once the call completes. For shell commands
+   *  this is the captured terminal output, attached by parseSegments from a
+   *  separate `kind:"result"` marker the backend emits when the command
+   *  finishes. */
   result?: string;
+  /** True when the shell command exited non-zero (stderr / error output). */
+  resultError?: boolean;
 }
 
 type Segment =
@@ -420,7 +424,55 @@ function parseSegments(content: string): Segment[] {
     if (ci === -1) break;
     rest = afterOpen.slice(ci + close.length);
   }
-  return segs;
+  return mergeToolResults(segs);
+}
+
+/** Fold `<tool>{"kind":"result",...}</tool>` markers into the tool step they
+ *  refer to. The backend emits a shell command marker carrying an `id`, then a
+ *  matching result marker once the command finishes; here we attach the
+ *  `result` to the originating step (matched by id, falling back to the most
+ *  recent step that still lacks a result) and drop the result marker so it
+ *  never renders as its own step. */
+function mergeToolResults(segs: Segment[]): Segment[] {
+  const merged: Segment[] = [];
+  for (const seg of segs) {
+    if (seg.type !== "tool" || seg.data?.kind !== "result") {
+      merged.push(seg);
+      continue;
+    }
+    const id = seg.data?.id;
+    const result = seg.data?.result;
+    if (result == null) continue;
+    let target = -1;
+    if (id !== undefined) {
+      for (let j = merged.length - 1; j >= 0; j--) {
+        const t = merged[j];
+        if (t.type === "tool" && t.data?.id === id && t.data?.kind !== "result") {
+          target = j;
+          break;
+        }
+      }
+    }
+    if (target === -1) {
+      for (let j = merged.length - 1; j >= 0; j--) {
+        const t = merged[j];
+        if (t.type === "tool" && t.data?.kind !== "result" && t.data?.result == null) {
+          target = j;
+          break;
+        }
+      }
+    }
+    if (target !== -1) {
+      const t = merged[target];
+      if (t.type === "tool") {
+        t.data = t.data
+          ? { ...t.data, result, resultError: seg.data?.resultError }
+          : t.data;
+      }
+    }
+    // drop the result marker itself
+  }
+  return merged;
 }
 
 function ThinkingBlock({ thinking, done }: { thinking: string; done: boolean }) {
@@ -509,12 +561,11 @@ function StepStatusIcon({ done }: { done: boolean }) {
   );
 }
 
-/** A short, *specific* label for one tool step — rendered in monospace like a
- *  terminal log entry. The backend emits a generic `title` ("Reading a web page",
- *  "Searching the web") but also a `detail` carrying the actual target (url /
- *  query / filename). We prefer the detail so each step reads as what it
- *  actually touched, falling back to the title only when no detail is available.
- *  Format: `command  target` (two-space separation, log-style). */
+/** A short, specific, HUMAN-READABLE label for one tool step. The backend emits
+ *  a gerund `title` ("Reading a web page", "Searching the web", "Writing file")
+ *  plus a `detail` carrying the actual target (url / query / filename). We pair
+ *  them as "Searching the web — <query>" so each step reads as what it touched,
+ *  dropping the detail when the title already names the target. */
 function stepLabel(data: ToolData | null): string {
   if (!data) return "working…";
   const title = data.title?.trim() || "working…";
@@ -528,9 +579,10 @@ function stepLabel(data: ToolData | null): string {
   // For code-producing tools the "detail" is sometimes the full code body —
   // too long for a row label; in that case keep the title.
   if (data.code && detail.length > 80) return title;
-  // Log-style: "write_file  src/main.rs" rather than "Writing file — src/main.rs"
-  const cmd = title.toLowerCase().replace(/\s+/g, "_").replace(/ing$/, "");
-  return `${cmd}  ${detail}`;
+  // If the title already embeds the target (e.g. 'Writing file "src/main.rs"'),
+  // the detail is redundant — just use the title.
+  if (title.includes(detail)) return title;
+  return `${title} — ${detail}`;
 }
 
 /** A one-line synthesized summary of what a whole tool-call group accomplished.
@@ -679,9 +731,12 @@ function ActivityStepRow({
   done: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const hasBody = Boolean(
-    step.data?.code || step.data?.detail || step.data?.result,
-  );
+  // Shell steps show the command in their label already, so their body is just
+  // the captured terminal output — expandable only once output exists.
+  const isShell = step.data?.kind === "code";
+  const hasBody = isShell
+    ? Boolean(step.data?.result)
+    : Boolean(step.data?.code || step.data?.detail || step.data?.result);
   return (
     <div className={`chat-step${done ? "" : " live"}`}>
       <button
@@ -709,25 +764,40 @@ function ActivityStepRow({
           {step.data?.detail && (
             <div className="chat-step-detail">{step.data.detail}</div>
           )}
-          {step.data?.code && (
-            looksLikeDiff(step.data.code) ? (
-              <InlineDiff diffText={step.data.code} />
-            ) : (
-              <div className="chat-code-block">
-                <div className="chat-code-header">
-                  <span className="chat-code-lang">{step.data.lang || "text"}</span>
-                  <CopyButton code={step.data.code} />
+          {isShell ? (
+            // Shell command: terminal-styled output preview.
+            step.data?.result && (
+              <div className={`chat-step-output${step.data.resultError ? " error" : ""}`}>
+                <div className="chat-step-output-header">
+                  <span>{step.data.resultError ? "output (error)" : "output"}</span>
+                  <CopyButton code={step.data.result} />
                 </div>
-                <StepCodeHighlighter code={step.data.code} language={step.data.lang || "text"} />
+                <pre className="chat-step-output-pre">{step.data.result}</pre>
               </div>
             )
-          )}
-          {step.data?.result && (
-            looksLikeDiff(step.data.result) ? (
-              <InlineDiff diffText={step.data.result} />
-            ) : (
-              <div className="chat-step-result">{step.data.result}</div>
-            )
+          ) : (
+            <>
+              {step.data?.code && (
+                looksLikeDiff(step.data.code) ? (
+                  <InlineDiff diffText={step.data.code} />
+                ) : (
+                  <div className="chat-code-block">
+                    <div className="chat-code-header">
+                      <span className="chat-code-lang">{step.data.lang || "text"}</span>
+                      <CopyButton code={step.data.code} />
+                    </div>
+                    <StepCodeHighlighter code={step.data.code} language={step.data.lang || "text"} />
+                  </div>
+                )
+              )}
+              {step.data?.result && (
+                looksLikeDiff(step.data.result) ? (
+                  <InlineDiff diffText={step.data.result} />
+                ) : (
+                  <div className="chat-step-result">{step.data.result}</div>
+                )
+              )}
+            </>
           )}
         </div>
       )}
@@ -738,59 +808,98 @@ function ActivityStepRow({
   );
 }
 
-/** The single collapsed row that wraps an assistant turn's ENTIRE process —
- *  thinking, tool calls, and file edits — into one line ("Worked for Xs" once
- *  done; a live action label while streaming). Expanding reveals what the turn
- *  actually did, in source order: ThinkingBlock disclosures, ActivityStepRow
- *  tool rows, and inline DiffCards. The model's synthesized answer and the
- *  files-changed summary render OUTSIDE this row, after it.
- *
- *  The label is computed by the caller (MessageBubbleInner) so this component
- *  stays presentational: `live` drives the spinner/check icon and `label` is
- *  either the live action, "Worked for Xs" (when a duration is known), or a
- *  legacy one-line summary fallback. */
-function ProcessSummary({
+/** Pinned to the TOP of an assistant response: a non-collapsible row showing a
+ *  counting "Working for Xs" while the turn streams and "Worked for Xs" once it
+ *  finishes (from the persisted duration). This is the turn-level timer — it is
+ *  deliberately NOT the tool-calls toggle, so it stays visible above all content
+ *  (thinking, text, tool calls) for the whole turn. Hidden for legacy persisted
+ *  rows that have no recorded timing window. */
+function TurnTimer({
+  live,
+  liveStartMs,
+  durationSec,
+}: {
+  live: boolean;
+  liveStartMs?: number;
+  durationSec?: number;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!live) return;
+    setNow(Date.now());
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [live]);
+  if (!live && durationSec == null) return null;
+  const sec = live
+    ? liveStartMs
+      ? Math.max(0, Math.floor((now - liveStartMs) / 1000))
+      : 0
+    : durationSec!;
+  const label = live
+    ? `Working for ${formatDuration(sec)}`
+    : `Worked for ${formatDuration(sec)}`;
+  return (
+    <div className={`chat-turn-timer${live ? " live" : ""}`}>
+      <span className="chat-turn-timer-icon" aria-hidden="true">
+        <StepStatusIcon done={!live} />
+      </span>
+      <span className="chat-turn-timer-label">{label}</span>
+    </div>
+  );
+}
+
+/** Collapsible wrapping an assistant turn's whole process region — leading
+ *  intro text, thinking, tool calls, intermediate narration, and inline diffs.
+ *  It AUTO-EXPANDS while the turn streams so the user can watch everything
+ *  happen, then COLLAPSES to one row when the turn completes ("when the summary
+ *  lands"). The "Worked for Xs" timer is a SEPARATE row above this (never inside
+ *  it), and the model's final answer renders below it. */
+function ProcessCollapsible({
   live,
   label,
-  stepCount,
   children,
 }: {
   live: boolean;
   label: string;
-  stepCount: number;
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  // Open while streaming, collapse when done. Re-applies only on live↔done, so
+  // a manual toggle mid-turn is respected until the turn finishes.
+  useEffect(() => {
+    setOpen(live);
+  }, [live]);
   return (
     <div className={`chat-process${live ? " live" : ""}`}>
-      <button
-        className="chat-process-toggle"
-        onClick={() => setOpen((o) => !o)}
-        title={open ? "Hide process" : "Show what was done"}
-      >
-        <span className="chat-process-icon" aria-hidden="true">
-          <StepStatusIcon done={!live} />
-        </span>
-        <span className="chat-process-label">{label}</span>
-        {stepCount > 0 && (
-          <span className="chat-process-meta">
-            {stepCount} {stepCount === 1 ? "step" : "steps"}
+      {/* While streaming, the top-of-response "Working for Xs" timer is the
+          sole progress indicator — hide this toggle (and its redundant
+          "Working/Thinking" label) until the turn finishes. The body stays
+          open so the user watches the steps happen. */}
+      {!live && (
+        <button
+          className="chat-process-toggle"
+          onClick={() => setOpen((o) => !o)}
+          title={open ? "Hide process" : "Show what was done"}
+        >
+          <span className="chat-process-icon" aria-hidden="true">
+            <StepStatusIcon done={!live} />
           </span>
-        )}
-        <span className={`chat-thinking-chevron${open ? " open" : ""}`} aria-hidden="true">
-          ›
-        </span>
-      </button>
+          <span className="chat-process-label">{label}</span>
+          <span className={`chat-thinking-chevron${open ? " open" : ""}`} aria-hidden="true">
+            ›
+          </span>
+        </button>
+      )}
       {open && <div className="chat-process-body">{children}</div>}
     </div>
   );
 }
 
-/** One render block of an assistant turn's process region. `activity` flattens
- *  to its step rows (the outer ProcessSummary is the single collapse; nested
- *  collapsibles would be confusing). `diff` keeps its inline DiffCard. `think`
- *  is its own disclosure. `text` is mid-run narration as markdown. */
-function renderProcessBlock(
+/** One render block inside the process region. `activity` flattens to its
+ *  ActivityStepRow tool rows. `diff` keeps its inline DiffCard. `think` is its
+ *  own disclosure. `text` is markdown narration. */
+function renderBlock(
   b: Block,
   i: number,
   onPreviewArtifact?: (artifact: ChatArtifact) => void,
@@ -1303,6 +1412,17 @@ function MessageBubbleInner({
 }: Props) {
   const isUser = message.role === "user";
 
+  // For the live streaming bubble, capture the wall-clock instant we first
+  // mounted so ProcessSummary can show a counting "Working for Xs" timer. The
+  // live bubble (key="streaming") is a fresh instance per turn, so this ref
+  // resets naturally each turn.
+  const liveStartRef = useRef(0);
+  if (live) {
+    if (liveStartRef.current === 0) liveStartRef.current = Date.now();
+  } else {
+    liveStartRef.current = 0;
+  }
+
   // A persisted compaction-summary row renders as a low-weight "earlier context
   // compacted" marker (not a real bubble) so the user understands why
   // scrolling back shows condensed rather than verbatim detail. Tapping
@@ -1337,69 +1457,23 @@ function MessageBubbleInner({
   // Group the turn into ordered render blocks (text / think / activity / diff).
   const blocks = isUser ? null : groupSegments(segments);
 
-  // Partition the assistant turn into [leading text] [process region]
-  // [trailing answer]. Process kinds (think / activity / diff) bracket the
-  // region; the run of text AFTER the last process block is the synthesized
-  // answer shown below the "Worked for Xs" row, and text BEFORE the first one
-  // is the model's intro shown above it.
-  let firstProcess = -1;
-  let lastProcess = -1;
-  if (blocks) {
-    for (let i = 0; i < blocks.length; i++) {
-      const k = blocks[i].kind;
-      if (k === "think" || k === "activity" || k === "diff") {
-        if (firstProcess === -1) firstProcess = i;
-        lastProcess = i;
-      }
-    }
-  }
-  const hasProcess = firstProcess !== -1;
-
-  // Aggregate process-level state: is anything still live, how many tool steps
-  // ran, what's the current action while streaming, and which files changed.
-  let processLive = false;
-  let processStepCount = 0;
-  let liveLabel = "Working…";
-  const processToolSteps: ActivityStep[] = [];
+  // The turn is "working" while the bubble streams OR any step/think is still
+  // in flight. Drives the top-of-response timer row. `live` is the reliable
+  // signal — segment done-states can flicker to all-complete between steps.
+  const isWorking =
+    live ||
+    (blocks?.some(
+      (b) =>
+        b.kind === "activity"
+          ? b.group.steps.some((s) => !s.done)
+          : b.kind === "diff"
+            ? !b.step.done
+            : b.kind === "think"
+              ? !b.done
+              : false,
+    ) ?? false);
+  // File edits across the whole turn feed the end-of-turn files-changed summary.
   const fileChanges: { path: string; edit: EditPayload }[] = [];
-  if (hasProcess && blocks) {
-    for (let i = firstProcess; i <= lastProcess; i++) {
-      const b = blocks[i];
-      if (b.kind === "activity") {
-        for (const s of b.group.steps) {
-          processStepCount++;
-          processToolSteps.push(s);
-          if (!s.done) processLive = true;
-        }
-      } else if (b.kind === "diff") {
-        processStepCount++;
-        processToolSteps.push({ data: b.step.data, done: b.step.done });
-        if (!b.step.done) processLive = true;
-      } else if (b.kind === "think" && !b.done) {
-        processLive = true;
-      }
-    }
-    // Live label = the most recent in-flight action (Cursor-style).
-    for (let i = lastProcess; i >= firstProcess; i--) {
-      const b = blocks[i];
-      if (b.kind === "think" && !b.done) {
-        liveLabel = "Thinking…";
-        break;
-      }
-      if (b.kind === "diff" && !b.step.done) {
-        liveLabel = `${stepLabel(b.step.data)}…`;
-        break;
-      }
-      if (b.kind === "activity") {
-        const cur = [...b.group.steps].reverse().find((s) => !s.done);
-        if (cur) {
-          liveLabel = `${stepLabel(cur.data)}…`;
-          break;
-        }
-      }
-    }
-  }
-  // File changes span the whole turn (diff blocks are always in the region).
   if (blocks) {
     for (const b of blocks) {
       if (b.kind === "diff" && b.step.data?.path && b.step.data?.edit) {
@@ -1407,15 +1481,51 @@ function MessageBubbleInner({
       }
     }
   }
-  // The collapsed row's label: live action while streaming, "Worked for Xs"
-  // when we have a duration, else a legacy one-line summary of the tool steps.
-  const fallbackSummary =
-    processToolSteps.length > 0 ? summarizeGroup(processToolSteps) : "";
-  const processLabel = processLive
-    ? liveLabel
-    : message.durationSec != null
-      ? `Worked for ${formatDuration(message.durationSec)}`
-      : (fallbackSummary || "Worked");
+  // Process region = everything up to & including the LAST tool/think/diff
+  // block. It collapses into one row when the turn finishes; the trailing text
+  // (the model's final answer) after it stays visible. -1 ⇒ pure-text answer.
+  let lastProcess = -1;
+  if (blocks) {
+    for (let i = 0; i < blocks.length; i++) {
+      const k = blocks[i].kind;
+      if (k === "think" || k === "activity" || k === "diff") lastProcess = i;
+    }
+  }
+  const hasProcess = lastProcess !== -1;
+  // The collapsed process row's label: current action while streaming, a
+  // synthesized summary of the tool steps once done.
+  let processLabel = "Working…";
+  if (blocks && hasProcess) {
+    const region = blocks.slice(0, lastProcess + 1);
+    const toolSteps: ActivityStep[] = [];
+    for (const b of region) {
+      if (b.kind === "activity") for (const s of b.group.steps) toolSteps.push(s);
+      else if (b.kind === "diff") toolSteps.push({ data: b.step.data, done: b.step.done });
+    }
+    if (isWorking) {
+      processLabel = "Working…";
+      for (let i = region.length - 1; i >= 0; i--) {
+        const b = region[i];
+        if (b.kind === "think" && !b.done) {
+          processLabel = "Thinking…";
+          break;
+        }
+        if (b.kind === "diff" && !b.step.done) {
+          processLabel = `${stepLabel(b.step.data)}…`;
+          break;
+        }
+        if (b.kind === "activity") {
+          const cur = [...b.group.steps].reverse().find((s) => !s.done);
+          if (cur) {
+            processLabel = `${stepLabel(cur.data)}…`;
+            break;
+          }
+        }
+      }
+    } else {
+      processLabel = toolSteps.length > 0 ? summarizeGroup(toolSteps) : "Done";
+    }
+  }
 
   // Detect if this assistant message contains a plan section
   const planSection = !isUser ? detectPlan(message.content) : null;
@@ -1431,43 +1541,38 @@ function MessageBubbleInner({
           ? cleanContent.trim().length > 0 && (
               <Markdown content={cleanContent} onPreviewArtifact={onPreviewArtifact} />
             )
-          : hasProcess
-            ? (
+          : (
               <>
-                {/* Leading intro text renders above the process row. */}
-                {blocks!
-                  .slice(0, firstProcess)
-                  .map((b, i) =>
-                    b.kind === "text" && b.text.trim().length > 0 ? (
-                      <Markdown key={i} content={b.text} onPreviewArtifact={onPreviewArtifact} />
-                    ) : null,
-                  )}
-                <ProcessSummary
-                  live={processLive}
-                  label={processLabel}
-                  stepCount={processStepCount}
-                >
-                  {blocks!
-                    .slice(firstProcess, lastProcess + 1)
-                    .map((b, i) => renderProcessBlock(b, i, onPreviewArtifact))}
-                </ProcessSummary>
-                {/* Trailing synthesized answer renders below the process row. */}
-                {blocks!
-                  .slice(lastProcess + 1)
-                  .map((b, i) =>
-                    b.kind === "text" && b.text.trim().length > 0 ? (
-                      <Markdown key={i} content={b.text} onPreviewArtifact={onPreviewArtifact} />
-                    ) : null,
-                  )}
+                {/* Turn timer pinned to the top of the response: "Working for
+                    Xs" while streaming, "Worked for Xs" once done. Stays
+                    outside the process collapsible. */}
+                <TurnTimer
+                  live={isWorking}
+                  liveStartMs={liveStartRef.current}
+                  durationSec={message.durationSec}
+                />
+                {hasProcess ? (
+                  <>
+                    {/* Process region (intro + thinking + tool calls + mid
+                        narration): OPEN while streaming so it's all visible,
+                        collapses to one row when the turn finishes. */}
+                    <ProcessCollapsible live={isWorking} label={processLabel}>
+                      {blocks!
+                        .slice(0, lastProcess + 1)
+                        .map((b, i) => renderBlock(b, i, onPreviewArtifact))}
+                    </ProcessCollapsible>
+                    {/* Trailing synthesized answer renders below, visible. */}
+                    {blocks!
+                      .slice(lastProcess + 1)
+                      .map((b, i) => renderBlock(b, i, onPreviewArtifact))}
+                  </>
+                ) : (
+                  /* Pure-answer turn (no tool/think activity): just markdown. */
+                  blocks!.map((b, i) => renderBlock(b, i, onPreviewArtifact))
+                )}
                 {fileChanges.length > 0 && <FilesChangedSummary files={fileChanges} />}
               </>
-            )
-            /* Pure-answer turn (no tool/think activity): just markdown. */
-            : blocks!.map((b, i) =>
-                b.kind === "text" && b.text.trim().length > 0 ? (
-                  <Markdown key={i} content={b.text} onPreviewArtifact={onPreviewArtifact} />
-                ) : null,
-              )}
+            )}
         {!isUser && artifacts && artifacts.length > 0 && (
           <MessageArtifacts artifacts={artifacts} onPreviewArtifact={onPreviewArtifact} />
         )}

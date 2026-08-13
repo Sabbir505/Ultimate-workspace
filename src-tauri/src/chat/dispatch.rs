@@ -449,12 +449,11 @@ async fn execute_system_tool(app: &AppHandle, sid: &str, name: &str, args: &Valu
                 return "Error: run_shell requires a non-empty \"command\".".to_string();
             }
             let workdir = args.get("workdir").and_then(|v| v.as_str());
-            let id = tasks.0.start_shell(Some(app), sid, command, workdir);
-            format!(
-                "Shell task {id} started — running natively in the background. \
-                 Poll get_task_status with task_id=\"{id}\" for the output, and report \
-                 the result to the user when it finishes."
-            )
+            // Run synchronously so the output flows into the turn buffer and
+            // persists in the stored message (the async start_shell path sends
+            // output to a separate chat:task-progress channel that doesn't
+            // persist). Long-running commands block the turn.
+            crate::chat::tasks::run_shell_to_completion(command, workdir)
         }
         other => format!("Error: unknown system tool \"{other}\"."),
     }

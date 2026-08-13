@@ -282,6 +282,13 @@ pub(crate) fn tool_block(name: &str, args: &Value) -> String {
             "lang": lang,
             "code": sanitize(s("code")),
         })
+    } else if name == tools::RUN_SHELL {
+        json!({
+            "kind": "code",
+            "title": "Running shell command",
+            "lang": "bash",
+            "code": sanitize(s("command")),
+        })
     } else if name == tools::BROWSER_READ {
         json!({ "kind": "browser", "title": "Reading the browser page" })
     } else if name == tools::BROWSER_CLICK {

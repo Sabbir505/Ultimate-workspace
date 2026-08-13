@@ -667,6 +667,16 @@ pub(crate) async fn run_openai_tool_loop(
 
                 emit_token(app, sid, &tool_block(&name, &args), &mut full);
                 let result = run_tool(client, &art_dir, caps, mode, mgr, app, sid, &name, &args).await;
+                // Attach the captured terminal output to the shell step so the
+                // UI shows a collapsible preview under the command.
+                if name == tools::RUN_SHELL && !result.trim().is_empty() {
+                    let result_marker = json!({
+                        "kind": "result",
+                        "result": result.replace("</tool>", "<\\/tool>"),
+                    });
+                    let rm = format!("<tool>{result_marker}</tool>");
+                    emit_token(app, sid, &rm, &mut full);
+                }
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": id,
@@ -771,6 +781,14 @@ pub(crate) async fn run_anthropic_tool_loop(
 
                 emit_token(app, sid, &tool_block(&name, &args), &mut full);
                 let result = run_tool(client, &art_dir, caps, mode, mgr, app, sid, &name, &args).await;
+                if name == tools::RUN_SHELL && !result.trim().is_empty() {
+                    let result_marker = json!({
+                        "kind": "result",
+                        "result": result.replace("</tool>", "<\\/tool>"),
+                    });
+                    let rm = format!("<tool>{result_marker}</tool>");
+                    emit_token(app, sid, &rm, &mut full);
+                }
                 results.push(json!({
                     "type": "tool_result",
                     "tool_use_id": id,

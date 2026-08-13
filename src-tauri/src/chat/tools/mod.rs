@@ -421,13 +421,14 @@ const RUN_SHELL_DESC: &str = "Run a native shell command on the user's machine \
     working tool — it executes unsandboxed with the user's privileges and can \
     access any local working directory, so CLI tools like `huggingface-cli \
     download`, git, pip, ffmpeg, etc. work exactly as they do in a terminal. \
-    Long-running commands run as a background task that streams output as it \
-    goes; poll `get_task_status` with the returned task id for the output, and \
-    `cancel_task` to abort. ALWAYS gated on an approval card before it runs. \
-    Use this when a task needs a native CLI tool that `download_file` (URL \
-    → file) or `run_code` (sandboxed snippet) cannot express. Prefer \
-    `download_file` for plain URL downloads, and `run_code` for small \
-    self-contained scripts.";
+    The command runs to completion and its combined stdout/stderr is returned \
+    directly (the output is also shown in the chat). Don't use this for \
+    long-running commands that never exit on their own (e.g. a dev server) — \
+    they will block the turn; prefer a one-shot invocation that finishes. \
+    ALWAYS gated on an approval card before it runs. Use this when a task \
+    needs a native CLI tool that `download_file` (URL → file) or `run_code` \
+    (sandboxed snippet) cannot express. Prefer `download_file` for plain URL \
+    downloads, and `run_code` for small self-contained scripts.";
 
 const GET_TASK_STATUS_DESC: &str = "Report the status of any background task \
     (`download_file` or `run_shell`) by its task id: state (running/completed/\

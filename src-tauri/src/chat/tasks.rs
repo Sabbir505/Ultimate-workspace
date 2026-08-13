@@ -304,6 +304,67 @@ impl TaskManager {
     }
 }
 
+/// Synchronous shell execution: runs the command to completion and returns
+/// its combined stdout+stderr as a string. Used by the built-in provider path
+/// so the tool result (and therefore the captured output) flows into the turn
+/// buffer and persists in the stored message. Long-running commands will block
+/// the turn — callers should prefer `start_shell` for persistent background
+/// work.
+pub fn run_shell_to_completion(command: &str, workdir: Option<&str>) -> String {
+    let mut cmd = if cfg!(windows) {
+        let mut c = std::process::Command::new("cmd.exe");
+        c.arg("/C").arg(command);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            c.creation_flags(CREATE_NO_WINDOW);
+        }
+        c
+    } else {
+        let mut c = std::process::Command::new("sh");
+        c.arg("-c").arg(command);
+        c
+    };
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if let Some(wd) = workdir {
+        if std::path::Path::new(wd).is_dir() {
+            cmd.current_dir(wd);
+        }
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return format!("could not start shell: {e}"),
+    };
+    // Run to completion and capture combined stdout+stderr.
+    let output = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => return format!("could not wait for shell: {e}"),
+    };
+    let mut out = String::from_utf8_lossy(&output.stdout).to_string();
+    let err = String::from_utf8_lossy(&output.stderr);
+    if !err.is_empty() {
+        out.push('\n');
+        out.push_str(&err);
+    }
+    // Tail-cap: keep last 60 lines / 8 KB.
+    const MAX_LINES: usize = 60;
+    const MAX_BYTES: usize = 8_000;
+    let lines: Vec<&str> = out.lines().collect();
+    let mut t = if lines.len() > MAX_LINES {
+        let dropped = lines.len() - MAX_LINES;
+        format!("… [{} earlier lines truncated]\n{}", dropped, lines[lines.len()-MAX_LINES..].join("\n"))
+    } else {
+        out
+    };
+    if t.len() > MAX_BYTES {
+        let start = t.len() - MAX_BYTES;
+        t = format!("…\n{}", &t[start..]);
+    }
+    t
+}
+
 /// Emit a `chat:plan-step-progress` event for the frontend to match against
 /// parsed PlanStep items. Separate from the TaskManager emit (which is for
 /// download/shell progress) — this is a lightweight signal, no throttling.

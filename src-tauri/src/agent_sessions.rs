@@ -31,7 +31,7 @@
 //! without a Tauri AppHandle — it backs scheduled automations, both from the
 //! in-app scheduler and from the standalone `conduit-automation` binary.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -733,11 +733,19 @@ fn read_claude_stream(
     mut watches: Vec<DirWatch>,
 ) {
     let mut full = String::new();
+    // Capture the turn's start instant for the "Worked for Xs" label. The
+    // reader is invoked right after the prompt is sent to the persistent CLI,
+    // so this is a close lower bound on the turn's wall-clock window.
+    let started_at = crate::db::now_ts();
     // Whether a thinking block is currently streaming: thinking deltas are
     // wrapped in `<think>…</think>` markers (the frontend renders them as a
     // collapsible block), mirroring anthropic_stream_round in
     // chat/streaming.rs.
     let mut in_think = false;
+    // Matches each tool RESULT back to its call so shell output can be attached
+    // to the originating step. Lives across the loop; the pending queue drains
+    // within each turn (every call gets its result before the turn's `result`).
+    let mut tools = ToolTracker::new();
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
@@ -814,13 +822,36 @@ fn read_claude_stream(
                 if let Some(blocks) = v.pointer("/message/content").and_then(|c| c.as_array()) {
                     // No safety-net relay — CLI is in full-auto mode (no stdin
                     // approval). Just extract tool markers for the UI.
-                    for marker in blocks
+                    for b in blocks
                         .iter()
                         .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
-                        .filter_map(tool_marker_claude)
                     {
-                        full.push_str(&marker);
-                        emit_token(app, sid, &marker);
+                        if let Some((name, values)) = tool_meta_claude(b) {
+                            let marker = tools.tool_use(&name, values);
+                            full.push_str(&marker);
+                            emit_token(app, sid, &marker);
+                        }
+                    }
+                }
+            }
+            // Tool results come back as user-role messages whose content is an
+            // array of tool_result blocks (in tool_use order). Attach shell
+            // output to its step; other tools are tracked only for ordering.
+            Some("user") => {
+                if let Some(blocks) = v.pointer("/message/content").and_then(|c| c.as_array()) {
+                    for r in blocks
+                        .iter()
+                        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                    {
+                        let is_error = r
+                            .get("is_error")
+                            .and_then(|e| e.as_bool())
+                            .unwrap_or(false);
+                        let text = extract_result_text(r.get("content"));
+                        if let Some(marker) = tools.tool_result(&text, is_error) {
+                            full.push_str(&marker);
+                            emit_token(app, sid, &marker);
+                        }
                     }
                 }
             }
@@ -851,7 +882,7 @@ fn read_claude_stream(
                     let input = usage.and_then(|u| u.get("input_tokens")).and_then(|t| t.as_i64());
                     let output = usage.and_then(|u| u.get("output_tokens")).and_then(|t| t.as_i64());
                     let cost = v.get("total_cost_usd").and_then(|c| c.as_f64());
-                    finish_turn(app, db, sid, &mut full, input, output, cost, &mut watches);
+                    finish_turn(app, db, sid, &mut full, input, output, cost, &mut watches, started_at);
                 } else {
                     let msg = v
                         .get("error")
@@ -1058,6 +1089,8 @@ fn read_per_turn_stream(
     mut watches: Vec<DirWatch>,
 ) {
     let mut full = String::new();
+    // Capture the turn's start instant for the "Worked for Xs" label.
+    let started_at = crate::db::now_ts();
     // OpenCode buffers deltas internally in `run` mode: each "text" event
     // carries the FULL snapshot of its part so far, not a delta. Track the
     // last snapshot so only the new suffix is emitted/persisted.
@@ -1065,6 +1098,7 @@ fn read_per_turn_stream(
     let mut input: Option<i64> = None;
     let mut output: Option<i64> = None;
     let mut cost: Option<f64> = None;
+    let mut tools = ToolTracker::new();
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
@@ -1074,9 +1108,9 @@ fn read_per_turn_stream(
             continue;
         };
         if is_kimi {
-            handle_kimi_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output);
+            handle_kimi_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut tools);
         } else {
-            handle_opencode_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut cost, &mut last_text);
+            handle_opencode_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut cost, &mut last_text, &mut tools);
         }
     }
     // Process exit closes the turn. Persist any captured CLI session id so
@@ -1088,7 +1122,7 @@ fn read_per_turn_stream(
     if cancelled.load(Ordering::SeqCst) {
         full.clear();
     } else {
-        finish_turn(app, db, sid, &mut full, input, output, cost, &mut watches);
+        finish_turn(app, db, sid, &mut full, input, output, cost, &mut watches, started_at);
     }
 }
 
@@ -1103,6 +1137,7 @@ fn handle_kimi_event(
     session_cell: &Arc<Mutex<Option<String>>>,
     input: &mut Option<i64>,
     output: &mut Option<i64>,
+    tools: &mut ToolTracker,
 ) {
     let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("");
     match role {
@@ -1112,16 +1147,24 @@ fn handle_kimi_event(
                 emit_token(app, sid, text);
             }
             // Tool calls ride along as structured blocks when present.
-            if let Some(tools) = v.get("tool_calls").and_then(|t| t.as_array()) {
-                for marker in tools.iter().filter_map(tool_marker_kimi) {
-                    full.push_str(&marker);
-                    emit_token(app, sid, &marker);
+            if let Some(calls) = v.get("tool_calls").and_then(|t| t.as_array()) {
+                for c in calls.iter() {
+                    if let Some((name, values)) = tool_meta_kimi(c) {
+                        let marker = tools.tool_use(&name, values);
+                        full.push_str(&marker);
+                        emit_token(app, sid, &marker);
+                    }
                 }
             }
         }
+        // Tool results: kimi delivers one per call, in call order. Attach shell
+        // output to its step; non-shell results are consumed for ordering only.
         "tool" => {
-            // Tool results carry no name field and the assistant narrates
-            // the outcome anyway — rendering them would be noise. Skipped.
+            let text = extract_result_text(v.get("content"));
+            if let Some(marker) = tools.tool_result(&text, false) {
+                full.push_str(&marker);
+                emit_token(app, sid, &marker);
+            }
         }
         "meta" => {
             if v.get("type").and_then(|t| t.as_str()) == Some("session.resume_hint") {
@@ -1153,6 +1196,7 @@ fn handle_opencode_event(
     output: &mut Option<i64>,
     cost: &mut Option<f64>,
     last_text: &mut String,
+    tools: &mut ToolTracker,
 ) {
     match v.get("type").and_then(|t| t.as_str()) {
         // {"type":"text","part":{"text":…}} — assistant text chunk. In `run`
@@ -1200,7 +1244,12 @@ fn handle_opencode_event(
                     }
                 }
             }
-            let marker = format!("<tool>{}</tool>", tool_meta_generic(name, &inp));
+            let value = tool_meta_generic(name, &inp);
+            // OpenCode reports a tool's completed output inline on the same
+            // part (`state.output` / `state.error`); attach it for shell tools.
+            let out_text = part.pointer("/state/output").and_then(|o| o.as_str());
+            let err_text = part.pointer("/state/error").and_then(|e| e.as_str());
+            let marker = tools.tool_use_with_output(name, value, out_text, err_text);
             full.push_str(&marker);
             emit_token(app, sid, &marker);
         }
@@ -1464,41 +1513,44 @@ fn sanitize(v: String) -> String {
 
 /// Claude Code tool_use block → `<tool>{json}</tool>` marker (same shapes as
 /// chat/proto.rs `tool_block` so DiffCard/activity groups just work).
-fn tool_marker_claude(block: &Value) -> Option<String> {
-    let name = block.get("name").and_then(|n| n.as_str())?;
+///
+/// Returns the tool NAME plus the marker Value(s) (MultiEdit yields one per
+/// hunk). The caller wraps them via `ToolTracker::tool_use`, which injects a
+/// correlation id into shell markers and records the call so its later result
+/// can be attached.
+fn tool_meta_claude(block: &Value) -> Option<(String, Vec<Value>)> {
+    let name = block.get("name").and_then(|n| n.as_str())?.to_string();
     let input = block.get("input").cloned().unwrap_or(json!({}));
     // One marker per MultiEdit hunk so each gets its own DiffCard.
     if name == "MultiEdit" {
-        let path = input.get("file_path").and_then(|p| p.as_str()).unwrap_or("");
+        let path = input.get("file_path").and_then(|p| p.as_str()).unwrap_or("").to_string();
         let edits = input.get("edits").and_then(|e| e.as_array()).cloned().unwrap_or_default();
-        return Some(
-            edits
-                .iter()
-                .map(|e| {
-                    json!({
-                        "kind": "edit",
-                        "title": format!("Editing file \"{path}\""),
-                        "detail": path,
-                        "path": path,
-                        "edit": {
-                            "mode": "replace",
-                            "find": sanitize(e.get("old_string").and_then(|v| v.as_str()).unwrap_or("").to_string()),
-                            "replace": sanitize(e.get("new_string").and_then(|v| v.as_str()).unwrap_or("").to_string()),
-                        },
-                    })
+        let vals = edits
+            .iter()
+            .map(|e| {
+                json!({
+                    "kind": "edit",
+                    "title": format!("Editing file \"{path}\""),
+                    "detail": path,
+                    "path": path,
+                    "edit": {
+                        "mode": "replace",
+                        "find": sanitize(e.get("old_string").and_then(|v| v.as_str()).unwrap_or("").to_string()),
+                        "replace": sanitize(e.get("new_string").and_then(|v| v.as_str()).unwrap_or("").to_string()),
+                    },
                 })
-                .map(|m| format!("<tool>{m}</tool>"))
-                .collect::<Vec<_>>()
-                .join(""),
-        );
+            })
+            .collect();
+        return Some((name, vals));
     }
-    Some(format!("<tool>{}</tool>", tool_meta_generic(name, &input)))
+    let vals = vec![tool_meta_generic(&name, &input)];
+    Some((name, vals))
 }
 
-/// Kimi tool_call object → marker. Kimi names tools close to Claude's
-/// (Edit/Write/Read/Bash/Grep/Glob…) with args under `function.arguments`
-/// (JSON string) or directly as input — both handled.
-fn tool_marker_kimi(call: &Value) -> Option<String> {
+/// Kimi tool_call object → (name, marker values). Kimi names tools close to
+/// Claude's (Edit/Write/Read/Bash/Grep/Glob…) with args under
+/// `function.arguments` (JSON string) or directly as input — both handled.
+fn tool_meta_kimi(call: &Value) -> Option<(String, Vec<Value>)> {
     let func = call.get("function").cloned().unwrap_or(call.clone());
     let name = func.get("name").and_then(|n| n.as_str())?.to_string();
     let args = match func.get("arguments") {
@@ -1506,7 +1558,146 @@ fn tool_marker_kimi(call: &Value) -> Option<String> {
         Some(v) => v.clone(),
         None => json!({}),
     };
-    Some(format!("<tool>{}</tool>", tool_meta_generic(&name, &args)))
+    let vals = vec![tool_meta_generic(&name, &args)];
+    Some((name, vals))
+}
+
+/// True for the shell/command tool names used across the harness CLIs.
+fn is_shell_name(name: &str) -> bool {
+    matches!(
+        name.to_lowercase().as_str(),
+        "bash" | "shell" | "run_shell" | "run_command"
+    )
+}
+
+/// Cap captured shell output so a huge dump can't bloat the stored message.
+/// Shell output is usually most useful at the tail, so keep the last lines.
+fn truncate_output(s: &str) -> String {
+    const MAX_LINES: usize = 60;
+    const MAX_BYTES: usize = 8_000;
+    let lines: Vec<&str> = s.lines().collect();
+    let mut out = if lines.len() > MAX_LINES {
+        let dropped = lines.len() - MAX_LINES;
+        format!(
+            "… [{} earlier lines truncated]\n{}",
+            dropped,
+            lines[lines.len() - MAX_LINES..].join("\n")
+        )
+    } else {
+        s.to_string()
+    };
+    if out.len() > MAX_BYTES {
+        let start = out.len() - MAX_BYTES;
+        out = format!("…\n{}", &out[start..]);
+    }
+    out
+}
+
+/// Pull the text out of a tool_result `content` field, which may be a plain
+/// string or an array of content blocks (text/image). Only text is useful for
+/// the shell preview; other blocks are ignored.
+fn extract_result_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|b| {
+                if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    b.get("text").and_then(|t| t.as_str()).map(String::from)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Some(v) if !v.is_null() => v.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Tracks tool calls within a turn so each tool RESULT can be matched back to
+/// its call. CLI streams deliver calls and results IN ORDER but interleave
+/// non-shell tools with shell tools, so we keep a FIFO of (id, is_shell) per
+/// call and pop one slot per result. Only shell calls get a correlation id in
+/// their marker (and only shell results produce a result marker) — other tools
+/// are tracked solely to keep the order aligned.
+struct ToolTracker {
+    seq: u64,
+    pending: VecDeque<(u64, bool)>,
+}
+impl ToolTracker {
+    fn new() -> Self {
+        Self { seq: 0, pending: VecDeque::new() }
+    }
+    /// Wrap one tool call's marker Value(s) as `<tool>…</tool>`, injecting an
+    /// `id` when the call is a shell command, and record the call's slot.
+    fn tool_use(&mut self, name: &str, values: Vec<Value>) -> String {
+        let id = self.seq;
+        self.seq += 1;
+        let shell = is_shell_name(name);
+        let mut out = String::new();
+        for mut v in values {
+            if shell {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("id".to_string(), json!(id));
+                }
+            }
+            out.push_str(&format!("<tool>{v}</tool>"));
+        }
+        self.pending.push_back((id, shell));
+        out
+    }
+    /// Consume the next result slot (in call order). Returns a result marker
+    /// carrying the output text only when that call was a shell command.
+    fn tool_result(&mut self, text: &str, is_error: bool) -> Option<String> {
+        let (id, shell) = self.pending.pop_front()?;
+        if !shell {
+            return None;
+        }
+        Some(result_marker_text(id, text, is_error))
+    }
+    /// Self-contained variant for CLIs that report a tool's call AND its
+    /// completed output in one event (opencode). Assigns an id, emits the
+    /// command marker, and — for shell tools whose output/error is present —
+    /// appends a matching result marker. No pending slot (nothing to match
+    /// later), so it can't desync a queue.
+    fn tool_use_with_output(
+        &mut self,
+        name: &str,
+        value: Value,
+        output: Option<&str>,
+        error: Option<&str>,
+    ) -> String {
+        let id = self.seq;
+        self.seq += 1;
+        let shell = is_shell_name(name);
+        let mut out = String::new();
+        let mut v = value;
+        if shell {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("id".to_string(), json!(id));
+            }
+            out.push_str(&format!("<tool>{v}</tool>"));
+            if let Some(text) = output.or(error) {
+                out.push_str(&result_marker_text(id, text, error.is_some()));
+            }
+        } else {
+            out.push_str(&format!("<tool>{v}</tool>"));
+        }
+        out
+    }
+}
+
+/// Build a `<tool>{"kind":"result",…}</tool>` marker that the frontend merges
+/// onto the shell step with the matching `id`.
+fn result_marker_text(id: u64, text: &str, is_error: bool) -> String {
+    let body = json!({
+        "kind": "result",
+        "id": id,
+        "result": sanitize(truncate_output(text)),
+        "resultError": is_error,
+    });
+    format!("<tool>{body}</tool>")
 }
 
 /// Shared tool-name → marker-meta mapping across CLIs. Claude, Kimi and
@@ -1579,6 +1770,9 @@ fn finish_turn(
     output: Option<i64>,
     cost: Option<f64>,
     watches: &mut Vec<DirWatch>,
+    // Unix-second instant the turn started (captured when the reader began),
+    // persisted as `started_at` so the UI can show "Worked for Xs".
+    started_at: i64,
 ) {
     // Persist the assistant message FIRST so we can attribute artifacts to it.
     let message_id: Option<i64> = if !full.is_empty() {
@@ -1597,7 +1791,7 @@ fn finish_turn(
             .as_deref()
             .and_then(|a| a.strip_prefix("harness:"))
             .unwrap_or("unknown");
-        crate::db::add_chat_message(&conn, sid, "assistant", full, input, output, cost, None, None, None, Some(provider), None, None, None, Some(crate::db::now_ts()))
+        crate::db::add_chat_message(&conn, sid, "assistant", full, input, output, cost, None, None, None, Some(provider), None, None, Some(started_at), Some(crate::db::now_ts()))
             .ok()
             .map(|m| m.id)
     } else {
@@ -1737,9 +1931,10 @@ mod tests {
         let mut full = String::new();
         let mut last = String::new();
         let (mut input, mut output, mut cost) = (None, None, None);
+        let mut tools = ToolTracker::new();
         let ev = |t: &str| json!({ "type": "text", "part": { "text": t } });
         let mut feed = |v: &Value, full: &mut String, last: &mut String| {
-            handle_opencode_event(None, "s", v, full, &cell, &mut input, &mut output, &mut cost, last);
+            handle_opencode_event(None, "s", v, full, &cell, &mut input, &mut output, &mut cost, last, &mut tools);
         };
         feed(&ev("Hello"), &mut full, &mut last);
         feed(&ev("Hello, world"), &mut full, &mut last);

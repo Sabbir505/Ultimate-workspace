@@ -38,14 +38,19 @@ function ProviderRow({ p, total }: { p: ProviderCostRollup; total: number }) {
 }
 
 function labelFor(p: string): string {
-  // Harness agent ids: "harness:claude_code" → "Claude Code"
+  // Harness agent ids: "harness:claude_code" / "claude_code" → "Claude Code".
+  // Handle the known set explicitly, then fall back to a generic
+  // underscore→space transform so any future harness id stays legible.
   if (p === "harness:claude_code" || p === "claude_code") return "Claude Code";
   if (p === "harness:kimi_code" || p === "kimi_code") return "Kimi Code";
   if (p === "harness:opencode" || p === "opencode") return "OpenCode";
   // API providers: "chat:anthropic" → "Anthropic"
   if (p.startsWith("chat:")) return p.slice(5);
-  // Other harness-prefixed ids
-  if (p.startsWith("harness:")) return p.slice(8).replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  // Other harness-prefixed / bare snake_case ids: strip prefix, underscores→spaces.
+  if (p.startsWith("harness:")) p = p.slice(8);
+  if (p.includes("_")) {
+    return p.replace(/_/g, " ");
+  }
   return p;
 }
 

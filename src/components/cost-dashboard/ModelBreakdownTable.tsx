@@ -2,11 +2,14 @@ import type { ModelCostRollup } from "../../types";
 
 /** Human-readable label for a model key in the breakdown table. */
 function modelLabel(key: string): string {
-  // Strip "harness:" prefix and capitalize
-  if (key.startsWith("harness:")) {
-    return key.slice(8).replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  // Strip "harness:" prefix, convert snake_case to spaces, and title-case.
+  // Handles both "harness:claude_code" and a bare "claude_code" (which can
+  // appear when a harness row's model key falls back to the harness id).
+  const cleaned = key.replace(/^harness:/, "").replace(/_/g, " ").trim();
+  if (cleaned !== key) {
+    return cleaned.replace(/\b\w/g, (c) => c.toUpperCase());
   }
-  // API models: just show the model id
+  // API models: just show the model id (e.g. "claude-sonnet-4-5").
   return key;
 }
 

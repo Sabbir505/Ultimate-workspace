@@ -26,8 +26,12 @@ function seriesLabel(p: string): string {
     case "chat:openai": return "OpenAI";
     case "chat:openrouter": return "OpenRouter";
     case "chat:local_gguf": return "Local GGUF";
-    default: return p === "other" ? "Other" : p.startsWith("chat:") ? p.slice(5) : p;
   }
+  // Generic fallback: strip grouping prefixes + convert snake_case to spaces
+  // so any harness id reads "claude code" instead of "claude_code".
+  let out = p === "other" ? "Other" : p.startsWith("chat:") ? p.slice(5) : p;
+  if (out.startsWith("harness:")) out = out.slice(8);
+  return out.replace(/_/g, " ");
 }
 
 function dayValue(d: DailyCost, mode: Mode, p: string): number {

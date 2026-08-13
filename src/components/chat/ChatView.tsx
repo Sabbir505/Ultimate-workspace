@@ -28,6 +28,7 @@ import { harnessModelCatalog } from "../../lib/harnessModels";
 import { setChatScrollToMessage } from "../../lib/chatScroll";
 import { TurnNavigator } from "./TurnNavigator";
 import { useContextMeter } from "../../hooks/useContextMeter";
+import { GitToolsSidebar } from "./GitToolsSidebar";
 
 /** Format a backend error message for display. Strips raw JSON blobs,
  *  extracts the human-readable message, and keeps it to one line. */
@@ -649,6 +650,7 @@ export function ChatView() {
     <div className="chat-view-wrap">
     <TurnNavigator />
     <div className={`chat-view${artifacts && artifacts.length > 0 ? " has-artifacts" : ""}`}>
+      <GitToolsSidebar />
       {!activeChatSessionId || hasItems ? (
         <div className="chat-messages" ref={messagesContainerRef} onScroll={handleScroll}>
           {items.map((item) => (

@@ -794,7 +794,7 @@ pre,
 /* ---- Git tools sidebar (floating panel overlaying the chat view) ---- */
 .git-sidebar {
   position: absolute;
-  top: 70px;
+  top: 0;
   right: 12px;
   width: 260px;
   max-height: 600px;
@@ -808,6 +808,7 @@ pre,
   overflow-y: auto;
   overflow-x: hidden;
   animation: git-sidebar-slide 0.2s var(--ease);
+  margin-top: 6px;
 }
 @keyframes git-sidebar-slide {
   from { opacity: 0; transform: translateX(12px); }

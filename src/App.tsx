@@ -140,7 +140,6 @@ export default function App() {
           <div className="grid-wrap chat-grid-wrap">
             <ChatView />
             <ToolPanel />
-            <GitToolsSidebar />
           </div>
         ) : activeView === "automations" ? (
           <Suspense fallback={null}>

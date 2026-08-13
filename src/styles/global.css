@@ -4304,6 +4304,19 @@ table.kv th {
   align-items: flex-start;
   gap: 16px;
 }
+/* Two fields (e.g. Provider + Model) side by side on one row. */
+.settings-form-row-pair {
+  display: flex;
+  gap: 16px;
+}
+.settings-form-row-pair .settings-form-field {
+  flex: 1;
+  min-width: 0;
+}
+.settings-form-field .settings-form-label {
+  display: block;
+  margin-bottom: 4px;
+}
 .settings-form-label {
   width: 140px;
   flex-shrink: 0;

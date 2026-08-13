@@ -214,9 +214,11 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
 }
 
 /** HTML artifact preview: toggle between a sandboxed live iframe and the
- *  raw source. Useful when an HTML file contains inline scripts (the
- *  sanitizer strips them, so the iframe shows static output — the code
- *  view still shows what the model wrote). */
+ *  raw source. The iframe uses sandbox="allow-scripts" (no allow-same-origin)
+ *  so inline <script> tags execute but the iframe is isolated from the parent
+ *  window, cookies, and Tauri APIs. External resources (CDN fonts, images via
+ *  https) load normally since the sandbox doesn't block network — the iframe
+ *  just can't access the parent. */
 function HtmlPreview({ html, title }: { html: string; title: string }) {
   const [tab, setTab] = useState<"preview" | "code">("preview");
   return (
@@ -246,8 +248,8 @@ function HtmlPreview({ html, title }: { html: string; title: string }) {
           <iframe
             className="artifact-preview-html"
             title={title}
-            sandbox=""
-            srcDoc={sanitizeHtml(html)}
+            sandbox="allow-scripts"
+            srcDoc={html}
           />
         ) : (
           <ArtifactCodeBlock code={html} language="html" />

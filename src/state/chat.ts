@@ -1274,40 +1274,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // SVG renders inline in the chat bubble — no pane, no browser.
     if (ext === "svg") return;
 
-    // Route to the browser pane or the Canvas preview. JSX opens in the
-    // browser; HTML is classified by the backend — a diagram (kind "diagram")
-    // stays in the Canvas where pan/zoom + PNG/SVG export work, a plain
-    // webpage goes to the browser so its scripts can run; everything else
-    // opens in the Canvas preview.
-    void (async () => {
-      let openInBrowser: boolean;
-      if (ext === "jsx") {
-        openInBrowser = true;
-      } else if (ext === "html" || ext === "htm") {
-        try {
-          const preview = await readArtifactPreview(path);
-          openInBrowser = preview != null && preview.kind !== "diagram";
-        } catch {
-          openInBrowser = false; // unknown → Canvas (safe default)
-        }
-      } else {
-        openInBrowser = false;
-      }
-      if (openInBrowser) {
-        setTimeout(() => void openArtifactInBrowserPane(path), 0);
-      } else {
-        set((s) =>
-          s.activeChatSessionId === chatSessionId
-            ? {
-                previewArtifacts: s.previewArtifacts.some((a) => a.path === path)
-                  ? s.previewArtifacts
-                  : [...s.previewArtifacts, artifact],
-                activePreviewPath: artifact.path,
-              }
-            : {},
-        );
-      }
-    })();
+    // Route to the Canvas preview pane. .tsx/.jsx/.html are previewable source
+    // files (live React / HTML previews in the pane) so they open in the CANVAS
+    // preview — NOT the browser pane. Only the explicit `open_url` tool opens
+    // the browser. Everything else (images, code, markdown, json, etc.) also
+    // lands in the Canvas preview, where it renders its native preview body.
+    set((s) =>
+      s.activeChatSessionId === chatSessionId
+        ? {
+            previewArtifacts: s.previewArtifacts.some((a) => a.path === path)
+              ? s.previewArtifacts
+              : [...s.previewArtifacts, artifact],
+            activePreviewPath: artifact.path,
+          }
+        : {},
+    );
   },
 
   onError: (chatSessionId, message, code) => {

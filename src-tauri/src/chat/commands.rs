@@ -1647,7 +1647,8 @@ pub async fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
         "json" => Some("json"),
         "html" | "htm" => Some("html"),
         "txt" | "log" | "text" => Some("text"),
-        "js" | "ts" | "tsx" | "jsx" | "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "hpp"
+        "tsx" | "jsx" => Some("jsx"),
+        "js" | "ts" | "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "hpp"
         | "sh" | "bash" | "yaml" | "yml" | "toml" | "xml" | "sql" | "rb" | "php" | "css" => {
             Some("code")
         }

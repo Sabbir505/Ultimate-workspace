@@ -168,18 +168,19 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
       />
     );
   }
-  if ((kind === "html" || kind === "diagram") && text != null) {
-    if (kind === "diagram") {
-      return <DiagramFrame html={text} title={preview.filename} />;
-    }
-    return (
-      <iframe
-        className="artifact-preview-html"
-        title={preview.filename}
-        sandbox=""
-        srcDoc={sanitizeHtml(text)}
-      />
-    );
+  // JSX/TSX files: render a live React preview with the same Preview/Code
+  // toggle the inline chip uses. JsxPreview handles its own toolbar.
+  if (kind === "jsx" && text != null) {
+    const lang = ext === "tsx" ? "tsx" : "jsx";
+    return <JsxPreview code={text} lang={lang} variant="pane" />;
+  }
+  // Plain HTML (non-diagram): iframe preview by default, with a toggle to view
+  // the raw source. Diagrams get the dedicated DiagramFrame wrapper below.
+  if (kind === "html" && text != null) {
+    return <HtmlPreview html={text} title={preview.filename} />;
+  }
+  if (kind === "diagram" && text != null) {
+    return <DiagramFrame html={text} title={preview.filename} />;
   }
   if (kind === "csv" && text != null) {
     return <CsvTable text={text} />;
@@ -209,6 +210,70 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
         Open file
       </button>
     </div>
+  );
+}
+
+/** HTML artifact preview: toggle between a sandboxed live iframe and the
+ *  raw source. Useful when an HTML file contains inline scripts (the
+ *  sanitizer strips them, so the iframe shows static output — the code
+ *  view still shows what the model wrote). */
+function HtmlPreview({ html, title }: { html: string; title: string }) {
+  const [tab, setTab] = useState<"preview" | "code">("preview");
+  return (
+    <div className="artifact-html-block">
+      <div className="artifact-html-tabs">
+        <button
+          type="button"
+          className={`artifact-html-tab${tab === "preview" ? " active" : ""}`}
+          onClick={() => setTab("preview")}
+          title="Rendered preview"
+          aria-label="Rendered preview"
+        >
+          <PreviewIcon />
+          <span>Preview</span>
+        </button>
+        <button
+          type="button"
+          className={`artifact-html-tab${tab === "code" ? " active" : ""}`}
+          onClick={() => setTab("code")}
+          title="Source code"
+          aria-label="Source code"
+        >
+          <CodeIcon />
+          <span>Code</span>
+        </button>
+      </div>
+      <div className="artifact-html-body">
+        {tab === "preview" ? (
+          <iframe
+            className="artifact-preview-html"
+            title={title}
+            sandbox=""
+            srcDoc={sanitizeHtml(html)}
+          />
+        ) : (
+          <ArtifactCodeBlock code={html} language="html" />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PreviewIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function CodeIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <polyline points="16 18 22 12 16 6" />
+      <polyline points="8 6 2 12 8 18" />
+    </svg>
   );
 }
 

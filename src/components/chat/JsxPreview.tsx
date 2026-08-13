@@ -221,15 +221,21 @@ export function JsxPreview({
             type="button"
             className={`chat-jsx-tab${tab === "preview" ? " active" : ""}`}
             onClick={() => setTab("preview")}
+            title="Rendered preview"
+            aria-label="Rendered preview"
           >
-            Preview
+            <PreviewIcon />
+            <span>Preview</span>
           </button>
           <button
             type="button"
             className={`chat-jsx-tab${tab === "code" ? " active" : ""}`}
             onClick={() => setTab("code")}
+            title="Source code"
+            aria-label="Source code"
           >
-            Code
+            <CodeIcon />
+            <span>Code</span>
           </button>
         </div>
       </div>
@@ -254,5 +260,23 @@ export function JsxPreview({
         )}
       </div>
     </div>
+  );
+}
+
+function PreviewIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function CodeIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <polyline points="16 18 22 12 16 6" />
+      <polyline points="8 6 2 12 8 18" />
+    </svg>
   );
 }

@@ -486,6 +486,7 @@ export interface ArtifactPreview {
     | "html"
     | "diagram"
     | "code"
+    | "jsx"
     | "image"
     | "pdf"
     | "office"

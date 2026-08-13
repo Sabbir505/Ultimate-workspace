@@ -127,13 +127,17 @@ export function ToolPanel() {
   const activeInstance = openTabs.find((t) => t.instanceId === activeTabId) ?? null;
   const activeKind: ToolPanelTab = activeInstance?.kind ?? "terminal";
 
-  // Auto-open the Canvas tab when a new artifact preview becomes active
-  // (e.g. the model just generated a file) — this preserves the old behavior
-  // where the preview pane popped open on generation.
+  // Auto-open the Canvas tab when a non-code artifact preview becomes active
+  // (images, markdown, diagrams — NOT .tsx/.jsx/.html which now open as their
+  // own artifact tabs). Skip if the active tab is already an artifact tab (a
+  // code artifact just opened and we don't want to steal focus to Canvas).
   useEffect(() => {
     if (!activePreviewPath) return;
+    // Don't steal focus from an artifact tab that was just auto-opened.
     const ui = useUiStore.getState();
-    // Find an existing canvas instance; otherwise add one.
+    if (ui.activeTabId && ui.openTabs.some((t) => t.instanceId === ui.activeTabId && t.kind === "artifact")) {
+      return;
+    }
     const canvasInstance = ui.openTabs.find((t) => t.kind === "canvas");
     if (canvasInstance) {
       ui.activateTab(canvasInstance.instanceId);

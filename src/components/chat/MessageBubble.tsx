@@ -1133,7 +1133,8 @@ function JsxArtifactChip({
       title="Open live React preview"
       onClick={(e) => {
         e.currentTarget.blur();
-        onPreviewArtifact?.({
+        // Open (or focus) it as a main tab — same as the auto-open path.
+        useUiStore.getState().openArtifactTab({
           path: `jsx:${lang}:${hashCode(code)}`,
           filename,
           inline: { kind: lang, code },

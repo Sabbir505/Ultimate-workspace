@@ -8430,6 +8430,13 @@ table.kv th {
   border-color: var(--accent);
   box-shadow: var(--glass-rim), 0 0 0 3px var(--accent-soft);
 }
+/* When the textarea is focused, the notch bar below the composer should share
+   the same accent border + accent-soft ring so the whole composer reads as a
+   single focused unit (not just the card). */
+.chat-composer:has(.chat-composer-textarea:focus) .composer-context-meter-wrap {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft), 0 6px 24px -12px rgba(0, 0, 0, 0.45);
+}
 .chat-composer-textarea,
 .chat-composer-textarea:focus {
   border: none;

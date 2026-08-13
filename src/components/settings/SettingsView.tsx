@@ -6,7 +6,7 @@
 // categories — or an empty harness list — does not reflow the modal.
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel, getDataPaths, setChatDbDir, type DataPaths } from "../../lib/ipc";
+import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel, getDataPaths, setChatDbDir, type DataPaths, getChatConfig, type ChatConfigPayload } from "../../lib/ipc";
 import { runLoginFlow } from "../../lib/sessionLauncher";
 import { shortModelName } from "../../lib/modelLabel";
 import { useProjectsStore } from "../../state/projects";
@@ -1105,6 +1105,74 @@ function SystemPromptDetail({
   );
 }
 
+/** Compact summary grid of all providers that have a saved key, shown at
+ *  the top of the API Keys panel. Clicking a card selects that provider in
+ *  the form below. */
+function SavedProvidersGrid({
+  saved,
+  activeProvider,
+  onPick,
+}: {
+  saved: Record<string, ChatConfigPayload> | null;
+  activeProvider: ChatProvider;
+  onPick: (p: ChatProvider) => void;
+}) {
+  const LABELS: Record<string, string> = {
+    anthropic: "Anthropic",
+    openai: "OpenAI",
+    openrouter: "OpenRouter",
+    anthropic_compatible: "Anthropic Compatible",
+    openai_compatible: "OpenAI Compatible",
+  };
+  if (!saved) return <div className="hint">Loading providers…</div>;
+  const entries = Object.entries(saved).filter(
+    ([, cfg]) => cfg.hasKey,
+  );
+  if (entries.length === 0)
+    return (
+      <div className="hint" style={{ marginBottom: 12 }}>
+        No API keys saved yet — pick a provider and enter a key above.
+      </div>
+    );
+  return (
+    <div className="saved-providers-grid" style={{ marginBottom: 12 }}>
+      {entries.map(([id, cfg]) => {
+        const isActive = id === activeProvider;
+        const isCompatible =
+          id === "anthropic_compatible" || id === "openai_compatible";
+        const formatLabel = isCompatible ? "OpenAI-compatible" : "Native";
+        return (
+          <button
+            key={id}
+            type="button"
+            className={`saved-provider-card ${isActive ? "active" : ""}`}
+            onClick={() => onPick(id as ChatProvider)}
+          >
+            <div className="saved-provider-name">{LABELS[id]}</div>
+            <div className="saved-provider-meta">
+              <span className="saved-provider-tag">{formatLabel}</span>
+              {isCompatible && cfg.baseUrl && (
+                <span
+                  className="saved-provider-url"
+                  title={cfg.baseUrl}
+                >
+                  {cfg.baseUrl.length > 36
+                    ? cfg.baseUrl.slice(0, 33) + "…"
+                    : cfg.baseUrl}
+                </span>
+              )}
+            </div>
+            <div className="saved-provider-key">
+              <span className="key-dot" aria-label="API key present" />
+              Key saved
+            </div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 /** API Keys panel: provider selector, key input with show/hide, base URL
  *  (for compatible providers), model input, Save + Clear buttons.
  *
@@ -1129,6 +1197,26 @@ function ApiKeysPanel() {
   const [fetchedModels, setFetchedModels] = useState<Array<{ id: string; object: string; created: number; ownedBy: string }>>([]);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
+  // Saved-providers summary: fetched once on mount, refreshed after save/clear.
+  const [savedProviders, setSavedProviders] = useState<
+    Record<string, ChatConfigPayload> | null
+  >(null);
+  const refreshSavedProviders = async () => {
+    const ids: ChatProvider[] = [
+      "anthropic",
+      "openai",
+      "openrouter",
+      "anthropic_compatible",
+      "openai_compatible",
+    ];
+    const results = await Promise.all(ids.map((id) => getChatConfig(id)));
+    const out: Record<string, ChatConfigPayload> = {};
+    ids.forEach((id, i) => {
+      if (results[i]) out[id] = results[i]!;
+    });
+    setSavedProviders(out);
+  };
+
   const isCompatible = provider === "anthropic_compatible" || provider === "openai_compatible";
   // OpenRouter uses a fixed endpoint (no base-URL field) but still supports
   // fetching its model catalogue from `/v1/models`.
@@ -1140,6 +1228,12 @@ function ApiKeysPanel() {
   useEffect(() => {
     void loadConfigFn(provider);
   }, [loadConfigFn, provider]);
+
+  // Load the saved-providers summary once on mount.
+  useEffect(() => {
+    void refreshSavedProviders();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Auto-fetch the model list once a base URL is set and a key is available
   // (typed in or already stored), debounced so we don't fire per keystroke.
@@ -1210,6 +1304,7 @@ function ApiKeysPanel() {
       setApiKey("");
       setFetchError("Saved successfully!");
       setTimeout(() => setFetchError(null), 3000);
+      await refreshSavedProviders();
     } catch (e: any) {
       setFetchError(e?.message || String(e));
     }
@@ -1224,6 +1319,7 @@ function ApiKeysPanel() {
     setFetchedModels([]);
     setFetchError(null);
     await loadConfigFn(provider);
+    await refreshSavedProviders();
   };
 
   // Save is valid when:
@@ -1242,19 +1338,11 @@ function ApiKeysPanel() {
       <div className="panel-head">
         <h3>Chat API Keys</h3>
       </div>
-      <div className="api-config-summary">
-        <strong>Current configuration</strong>
-        {config?.provider === provider ? (
-          <div className="hint">
-            API key: {config.hasKey ? "saved ✓" : "not set"}
-            {isCompatible && <> · Base URL: {config.baseUrl || "not set"}</>}
-            {" · Model: "}
-            {config.model || "not set"}
-          </div>
-        ) : (
-          <div className="hint">Loading…</div>
-        )}
-      </div>
+      <SavedProvidersGrid
+        saved={savedProviders}
+        activeProvider={provider}
+        onPick={(p) => onProviderChange(p)}
+      />
       <div className="form-row">
         <label>Provider</label>
         <GlassSelect<ChatProvider>

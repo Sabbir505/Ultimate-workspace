@@ -11013,13 +11013,13 @@ table.kv th {
 .tool-panel-picker-scrim {
   position: fixed;
   inset: 0;
-  z-index: 9;
+  z-index: 9998;
 }
 .tool-panel-picker-menu {
   position: absolute;
   top: calc(100% + 6px);
-  left: 0;
-  z-index: 10;
+  right: 0;
+  z-index: 9999;
   min-width: 160px;
   background: var(--surface-2);
   border: 1px solid var(--border);
@@ -11089,18 +11089,20 @@ table.kv th {
   display: flex;
   align-items: center;
   gap: 4px;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-width: thin;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  /* Soft fade at the right edge hints there's more to scroll. */
+  mask-image: linear-gradient(to right, black calc(100% - 16px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 16px), transparent 100%);
 }
 .tool-panel-tabbar-chips::-webkit-scrollbar {
-  height: 4px;
-}
-.tool-panel-tabbar-chips::-webkit-scrollbar-thumb {
-  background: var(--surface-3);
-  border-radius: 2px;
+  display: none;
+  width: 0;
+  height: 0;
 }
 .tool-panel-tabchip {
   display: flex;
@@ -11116,6 +11118,7 @@ table.kv th {
   border-radius: var(--radius-sm);
   cursor: pointer;
   white-space: nowrap;
+  flex: none;
   transition: background 0.15s var(--ease), color 0.15s var(--ease), border-color 0.15s var(--ease);
 }
 .tool-panel-tabchip:hover {
@@ -11127,6 +11130,17 @@ table.kv th {
   color: var(--text);
   border-color: var(--accent);
   background: var(--accent-soft);
+}
+.tool-panel-tabchip.dragging {
+  opacity: 0.5;
+  cursor: grabbing;
+}
+.tool-panel-tabchip.drag-over {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.tool-panel-tabchip[draggable] {
+  cursor: grab;
 }
 .tool-panel-tabchip-icon {
   color: var(--text-dim);

@@ -70,6 +70,12 @@ export function ToolPanel() {
   const setWidth = useUiStore((s) => s.setToolPanelWidth);
   // Dropdown picker state: opened by clicking the "+" button in the tab bar.
   const [tabPickerOpen, setTabPickerOpen] = useState(false);
+  // Drag-to-reorder state: the index of the chip being dragged.
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const reorderTab = useUiStore((s) => s.reorderTab);
+  // Ref to the chips scroll container — needed for the wheel handler.
+  const chipsRef = useRef<HTMLDivElement>(null);
   const previewArtifacts = useChatStore((s) => s.previewArtifacts);
   const activePreviewPath = useChatStore((s) => s.activePreviewPath);
   const setPreviewArtifact = useChatStore((s) => s.setPreviewArtifact);
@@ -166,6 +172,53 @@ export function ToolPanel() {
     [setWidth],
   );
 
+  // Horizontal wheel handler: vertical scroll wheel (and trackpad) horizontal
+  // scrolls the chip strip. Horizontal scroll containers don't respond to
+  // vertical wheel by default, so translate deltaY → scrollLeft.
+  const onChipsWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    const el = chipsRef.current;
+    if (!el) return;
+    // If the user scrolled horizontally, apply directly; else map vertical.
+    const dx = e.deltaX !== 0 ? e.deltaX : e.deltaY;
+    if (dx === 0) return;
+    el.scrollLeft += dx;
+    // Prevent the page from also scrolling when the strip has overflow.
+    if (el.scrollLeft > 0 || el.scrollLeft + el.clientWidth < el.scrollWidth) {
+      e.preventDefault();
+    }
+  }, []);
+
+  // Drag-to-reorder handlers for the tab chips.
+  const onChipDragStart = useCallback((index: number, e: React.DragEvent) => {
+    setDragIndex(index);
+    setDragOverIndex(index);
+    e.dataTransfer.effectAllowed = "move";
+    // Firefox requires setData for drag to start.
+    e.dataTransfer.setData("text/plain", String(index));
+  }, []);
+
+  const onChipDragOver = useCallback((index: number, e: React.DragEvent) => {
+    e.preventDefault();
+    if (dragIndex !== null && index !== dragOverIndex) {
+      setDragOverIndex(index);
+    }
+    e.dataTransfer.dropEffect = "move";
+  }, [dragIndex, dragOverIndex]);
+
+  const onChipDrop = useCallback((index: number) => {
+    if (dragIndex !== null && dragIndex !== index) {
+      const inst = openTabs[dragIndex];
+      if (inst) reorderTab(inst.instanceId, index);
+    }
+    setDragIndex(null);
+    setDragOverIndex(null);
+  }, [dragIndex, openTabs, reorderTab]);
+
+  const onChipDragEnd = useCallback(() => {
+    setDragIndex(null);
+    setDragOverIndex(null);
+  }, []);
+
   return (
     <>
       {/* When collapsed the panel is fully hidden — the toolbar's split icon
@@ -187,22 +240,29 @@ export function ToolPanel() {
         />
         {/* Tab bar — always visible (when not collapsed). Shows one chip per
             open tab INSTANCE and a "+" that pops a small menu of panes to add.
-            The chips live in a scrollable strip; the "+" stays visible at the
-            end, right after the last chip. */}
+            The chips live in a scrollable strip (drag-to-reorder, wheel to
+            scroll); the "+" stays visible at the end. */}
         {!collapsed && (
           <div className="tool-panel-tabbar">
-            <div className="tool-panel-tabbar-chips">
-              {openTabs.map((inst) => {
+            <div className="tool-panel-tabbar-chips" ref={chipsRef} onWheel={onChipsWheel}>
+              {openTabs.map((inst, index) => {
                 const tabDef = TABS.find((tb) => tb.id === inst.kind);
                 const label = tabLabel(inst, tabDef?.label ?? inst.kind);
                 const TabIcon = tabDef?.Icon;
                 const isActive = activeTabId === inst.instanceId;
+                const isDragging = index === dragIndex;
+                const isDragOver = index === dragOverIndex;
                 return (
                   <div
                     key={inst.instanceId}
-                    className={`tool-panel-tabchip${isActive ? " active" : ""}`}
+                    className={`tool-panel-tabchip${isActive ? " active" : ""}${isDragging ? " dragging" : ""}${isDragOver && dragIndex !== index ? " drag-over" : ""}`}
                     onClick={() => activateTab(inst.instanceId)}
                     title={`${inst.kind}${inst.paneId ? ` — ${inst.paneId}` : ""}`}
+                    draggable
+                    onDragStart={(e) => onChipDragStart(index, e)}
+                    onDragOver={(e) => onChipDragOver(index, e)}
+                    onDrop={(e) => { e.preventDefault(); onChipDrop(index); }}
+                    onDragEnd={onChipDragEnd}
                   >
                     {TabIcon && <TabIcon size={12} className="tool-panel-tabchip-icon" aria-hidden />}
                     <span className="tool-panel-tabchip-label">{label}</span>
@@ -329,7 +389,12 @@ export function ToolPanel() {
                           index={panes.indexOf(b)}
                           focused={b.paneId === focusedPaneId}
                           hidden={b.paneId !== activeBrowserId}
-                          visible={!collapsed && b.paneId === activeBrowserId}
+                          /* Hide the native webview while the pane picker is
+                              open, otherwise the OS-level webview floats on
+                              top of the dropdown (HTML z-index can't cover a
+                              native window). The webview is brought back the
+                              moment the picker closes. */
+                          visible={!collapsed && !tabPickerOpen && b.paneId === activeBrowserId}
                         />
                       ))}
                     </div>

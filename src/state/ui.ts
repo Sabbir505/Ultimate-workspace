@@ -157,6 +157,8 @@ export interface UiState {
   closeTab: (instanceId: string) => void;
   /** Activate (focus) an existing open tab instance. */
   activateTab: (instanceId: string) => void;
+  /** Move a tab instance to a new index (drag-to-reorder). */
+  reorderTab: (instanceId: string, toIndex: number) => void;
   /** Currently selected subagent id, or null for the "agents" tab. */
   activeSubagentId: string | null;
   setActiveSubagentId: (id: string | null) => void;
@@ -290,6 +292,17 @@ export const useUiStore = create<UiState>((set) => ({
       const tab = s.openTabs.find((t) => t.instanceId === instanceId);
       if (!tab) return {};
       return { activeTabId: instanceId, toolPanelTab: tab.kind };
+    }),
+  // Move a tab instance to a new index (clamped). Used for drag-to-reorder.
+  reorderTab: (instanceId, toIndex) =>
+    set((s) => {
+      const fromIndex = s.openTabs.findIndex((t) => t.instanceId === instanceId);
+      if (fromIndex === -1) return {};
+      const openTabs = [...s.openTabs];
+      const [tab] = openTabs.splice(fromIndex, 1);
+      const clamped = Math.max(0, Math.min(openTabs.length, toIndex));
+      openTabs.splice(clamped, 0, tab);
+      return { openTabs };
     }),
   setActiveSubagentId: (activeSubagentId) => set({ activeSubagentId }),
   setToolPanelCollapsed: (toolPanelCollapsed) => set({ toolPanelCollapsed }),

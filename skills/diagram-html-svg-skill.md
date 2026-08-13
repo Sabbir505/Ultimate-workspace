@@ -1,13 +1,19 @@
 ---
 name: diagram-html-svg
-description: "Use this skill for EVERY diagram in Conduit — architecture, flowchart, sequence, feature breakdown, mind-map, anything visual. Conduit does not use Mermaid; all diagrams go through the `generate_diagram` tool as hand-authored SVG/HTML. Triggers: any request for a diagram, schematic, flow, breakdown, or visual representation."
+description: "Use this skill when the user wants a STANDALONE, exportable diagram artifact (a downloadable SVG/PNG file, a large canvas, or a layout Mermaid can't model). For a normal in-chat diagram, you do NOT need this skill — just emit a ` ```mermaid ` fenced block in your reply and it renders inline. Triggers for this skill: explicit ask for an exportable diagram file, a large standalone schematic, or a node layout that doesn't fit a Mermaid lexer."
 ---
 
 # HTML/SVG Diagram Generation (full manual control)
 
-Use this for every diagram — Mermaid is not used in Conduit (the core prompt explicitly forbids ` ```mermaid ` blocks), so every visual goes through `generate_diagram` as hand-authored markup. A clean hand-authored SVG reads better than auto-layout output at any complexity level — even a simple flowchart benefits from deliberate spacing, a title that sits outside the flow, and color-coding by meaning. Reach for HTML/CSS boxes (instead of pure SVG) only when a node genuinely needs multi-line text reflow.
+This skill produces a **standalone, exportable diagram artifact** via the `generate_diagram` tool. For a normal diagram that should appear inline in your reply, use a fenced ` ```mermaid ` block instead — the frontend renders it inline as a live vector diagram inside the message (no tool call, no artifact). Reach for this path (`generate_diagram` with hand-authored markup) only when Mermaid genuinely can't model the layout, the user wants a downloadable SVG/PNG file, or the diagram needs hand-placed visual structure that an auto-layout can't deliver.
 
-## Output format
+A clean hand-authored SVG reads better than auto-layout output at any complexity level — even a simple flowchart benefits from deliberate spacing, a title that sits outside the flow, and color-coding by meaning. Reach for HTML/CSS boxes (instead of pure SVG) only when a node genuinely needs multi-line text reflow.
+
+## Default: inline diagrams use ```mermaid
+
+Before reading further: if the user just asks "show me a diagram of X", "draw the flow", "what does the architecture look like" — emit a fenced ` ```mermaid ` block in your reply. The frontend renders it inline in the message markdown via the Mermaid integration (`graph TD`/`flowchart LR`, `sequenceDiagram`, `erDiagram`, `gantt`, `mindmap`, `stateDiagram-v2`, `classDiagram`). One diagram per block. The rest of this skill is only for the case where that won't work or the user wants an exportable artifact.
+
+## Output format (for `generate_diagram`)
 
 **Prefer pure inline SVG.** Author the diagram as ONE root `<svg>` element with an explicit `xmlns="http://www.w3.org/2000/svg"`, a `viewBox`, and `width`/`height` — nodes as `<rect rx="10">`, labels as `<text>`, connectors as `<path>`/`<line>` with an arrowhead `<marker>`, and the title as a `<text>` near the top (outside the flow). A pure-SVG diagram is true vector, so the artifact panel exports it crisply to **both SVG and PNG** (the panel extracts the root `<svg>` for the SVG download; if the diagram is HTML/CSS instead, SVG export falls back to wrapping the DOM in a `<foreignObject>`, which is lower fidelity). Only fall back to HTML/CSS boxes (flexbox/grid, positioned divs) when a node genuinely needs multi-line text reflow that hand-placed `<text>` can't handle.
 
@@ -46,6 +52,6 @@ After you call `generate_diagram`, the tool runs a lightweight structural check 
 
 ## What to avoid
 
-- Don't use a JS diagramming library (Mermaid, D3, GoJS) for this path — if the structure fits a library's model, use Mermaid directly instead; this skill exists specifically for the cases that don't.
+- Don't reach for a JS diagramming library (D3, GoJS) inside `generate_diagram`'s `html` argument — that path is for hand-authored markup only. Inline diagrams in the chat reply have a different, Mermaid-rendered path: emit a fenced ` ```mermaid ` block there if a Mermaid lexer fits the structure.
 - Don't default to rounded pill shapes for everything — vary shape subtly by role only if it aids clarity (e.g. a data-store node as a slightly different shape), not decoratively.
 - Don't add drop shadows, gradients, or glow effects unless the diagram is explicitly meant to match Conduit's own Liquid Glass brand identity — plain flat fills read cleanest for informational diagrams.

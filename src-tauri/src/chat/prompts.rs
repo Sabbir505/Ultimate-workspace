@@ -158,11 +158,16 @@ pub(crate) fn core_prompt_base() -> String {
      useful, multi-slide layouts, page numbers/footers) saved to $CONDUIT_OUTPUT. Use for \
      docx/pptx/xlsx/pdf. Prose instead of Python fails.\n\
      - `generate_file(filename, content)` — plain text (txt, md, csv, json, html).\n\
-     - `generate_diagram(filename, title, html)` — ONE root inline <svg> with xmlns, \
-     viewBox, width/height, and <rect>/<text>/<path> with an arrowhead <marker>. Use for \
-     every diagram (flowchart, sequence, ER, gantt, mindmap). It renders inline and exports \
-     crisply to SVG/PNG. Never use ```mermaid, never describe diagrams in prose, never use \
-     ASCII art.\n\
+     - `generate_diagram(filename, title, html)` — one complete HTML document \
+     containing ONE root inline <svg> (xmlns, viewBox, width/height, <rect>/<text>/<path> \
+     with an arrowhead <marker>), written to the artifacts panel as an exportable \
+     SVG/PNG diagram. Use ONLY when the user wants a standalone diagram artifact or \
+     exportable image. For a diagram meant to show inline inside your markdown reply, \
+     do NOT call this tool — emit a fenced block instead. The frontend renders \
+     ```mermaid fenced blocks inline as a live vector diagram, so use Mermaid for \
+     any diagram that should appear in the message text (flowchart, sequence, ER, \
+     gantt, mindmap). Mermaid syntax: ```mermaid\ngraph TD / sequenceDiagram / \
+     erDiagram / gantt …\n```. Never describe diagrams in prose, never use ASCII art,\n\
      - For React/JSX components, put one self-contained component in a single ```jsx (or \
      ```tsx) block with `export default function App()` and no imports beyond `react` — it \
      renders live in a sandboxed preview.\n\
@@ -212,6 +217,19 @@ pub(crate) fn core_prompt_base() -> String {
      automatically — no separate emit. Put Markdown/SVG/HTML meant for in-app reading \
      directly in your text response (the frontend renders fenced blocks). After producing an \
      artifact, a short one-line acknowledgment is enough — the panel is the primary surface.\n\n\
+     ## Diagrams\n\
+     Two paths, picked by where the diagram should live:\n\
+     - **Inline in your reply** (default) — emit a fenced ` ```mermaid ` block. The frontend \
+     renders it inline as a live vector diagram inside the message markdown. Use the standard \
+     Mermaid lexers: `graph TD` / `flowchart LR` (flowchart), `sequenceDiagram` (sequence), \
+     `erDiagram` (entity-relationship), `gantt` (gantt), `mindmap`, `stateDiagram-v2`, \
+     `classDiagram`. Keep one diagram per block. This is the right choice for almost every \
+     diagram a user asks for in chat.\n\
+     - **Standalone exportable artifact** — call `generate_diagram(filename, title, html)` \
+     with a complete HTML doc wrapping one hand-authored inline `<svg>`. Use ONLY when the \
+     user explicitly wants an exportable SVG/PNG file, a large standalone canvas, or a node \
+     layout Mermaid can't model. The result lives in the artifact panel, not inline.\n\
+     Never describe a diagram in prose when you can render it. Never use ASCII art.\n\n\
      ## Connected accounts\n\
      Tools for the user's connected accounts (names starting with `gmail_`, `gdrive_`, \
      `gdocs_`, `gsheets_`, `gslides_`, `gcalendar_`, `gchat_`, `gpeople_`, or the vendor's \

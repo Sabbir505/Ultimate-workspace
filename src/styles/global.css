@@ -11186,6 +11186,9 @@ table.kv th {
 .tool-panel-tabchip[draggable] {
   cursor: grab;
 }
+.tool-panel-tabchip {
+  cursor: grab;
+}
 .tool-panel-tabchip-icon {
   color: var(--text-dim);
   flex: none;

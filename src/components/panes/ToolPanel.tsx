@@ -192,46 +192,51 @@ export function ToolPanel() {
     }
   }, []);
 
-  // Drag-to-reorder handlers for the tab chips. Uses an always-current ref for
-  // the dragged index (React state can be stale mid-drag), and the state pair
-  // purely for CSS visual feedback.
-  const onChipDragStart = useCallback((index: number, e: React.DragEvent) => {
-    dragIndexRef.current = index;
-    setDragIndex(index);
-    setDragOverIndex(index);
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", String(index));
-    // Needed so Firefox initiates the drag (setData alone may not suffice).
-    if (e.dataTransfer.setDragImage) {
-      e.dataTransfer.setDragImage(e.currentTarget as Element, 0, 0);
-    }
-  }, []);
+  // Drag-to-reorder via MOUSE pointer events (WebView2 has unreliable HTML5
+  // drag-and-drop). A ref tracks the source index; the state pair powers the
+  // visual feedback. onChipMouseDown starts the drag; the document-level
+  // mousemove/mouseup (registered on drag start) drive it.
+  const dragOverIndexRef = useRef<number | null>(null);
 
-  const onChipDragOver = useCallback((index: number, e: React.DragEvent) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    setDragOverIndex(index);
-  }, []);
+  const onChipMouseDown = useCallback(
+    (index: number, e: React.MouseEvent) => {
+      // Don't start a drag from the close button.
+      if ((e.target as HTMLElement).closest(".tool-panel-tabchip-close")) return;
+      e.preventDefault();
+      dragIndexRef.current = index;
+      setDragIndex(index);
+      setDragOverIndex(index);
 
-  const onChipDrop = useCallback(
-    (index: number) => {
-      const from = dragIndexRef.current;
-      if (from !== null && from !== index) {
-        const inst = openTabs[from];
-        if (inst) reorderTab(inst.instanceId, index);
-      }
-      dragIndexRef.current = null;
-      setDragIndex(null);
-      setDragOverIndex(null);
+      const handleMove = (ev: MouseEvent) => {
+        // Find the chip under the cursor by hit-testing.
+        const el = document.elementFromPoint(ev.clientX, ev.clientY);
+        const chip = el?.closest(".tool-panel-tabchip") as HTMLElement | null;
+        if (!chip) return;
+        const newIndex = Number(chip.dataset.index);
+        if (!Number.isNaN(newIndex) && newIndex !== dragOverIndexRef.current) {
+          dragOverIndexRef.current = newIndex;
+          setDragOverIndex(newIndex);
+        }
+      };
+      const handleUp = () => {
+        const from = dragIndexRef.current;
+        const to = dragOverIndexRef.current;
+        if (from !== null && to !== null && from !== to) {
+          const inst = openTabs[from];
+          if (inst) reorderTab(inst.instanceId, to);
+        }
+        dragIndexRef.current = null;
+        dragOverIndexRef.current = null;
+        setDragIndex(null);
+        setDragOverIndex(null);
+        window.removeEventListener("mousemove", handleMove);
+        window.removeEventListener("mouseup", handleUp);
+      };
+      window.addEventListener("mousemove", handleMove);
+      window.addEventListener("mouseup", handleUp);
     },
     [openTabs, reorderTab],
   );
-
-  const onChipDragEnd = useCallback(() => {
-    dragIndexRef.current = null;
-    setDragIndex(null);
-    setDragOverIndex(null);
-  }, []);
 
   return (
     <>
@@ -289,12 +294,9 @@ export function ToolPanel() {
                     key={inst.instanceId}
                     className={`tool-panel-tabchip${isActive ? " active" : ""}${isDragging ? " dragging" : ""}${isDragOver && dragIndex !== index ? " drag-over" : ""}`}
                     onClick={() => activateTab(inst.instanceId)}
+                    onMouseDown={(e) => onChipMouseDown(index, e)}
                     title={`${inst.kind}${inst.paneId ? ` — ${inst.paneId}` : ""}`}
-                    draggable
-                    onDragStart={(e) => onChipDragStart(index, e)}
-                    onDragOver={(e) => onChipDragOver(index, e)}
-                    onDrop={(e) => { e.preventDefault(); onChipDrop(index); }}
-                    onDragEnd={onChipDragEnd}
+                    data-index={index}
                   >
                     {TabIcon && <TabIcon size={12} className="tool-panel-tabchip-icon" aria-hidden />}
                     <span className="tool-panel-tabchip-label">{label}</span>

@@ -27,6 +27,7 @@ import {
   setChatApiKey,
   setChatSessionStarred,
   setChatSessionUnread,
+  toastError,
   touchChatSession,
   updateChatSessionAgent,
   updateChatSessionModel,
@@ -1194,7 +1195,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Rollback: the backend rejected the delete (e.g. DB error, or the row
       // was already gone via another path). Re-fetch so the local list
       // matches persisted state instead of staying out of sync.
-      console.warn("deleteMessage failed", err);
+      toastError("Couldn't delete the message", err);
       const activeChatSessionId = get().activeChatSessionId;
       if (activeChatSessionId) {
         try {

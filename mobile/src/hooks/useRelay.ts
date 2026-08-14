@@ -1,6 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
-export const DEFAULT_RELAY_URL = 'ws://192.168.1.7:52506';
+/** The desktop relay binds loopback ONLY (127.0.0.1) on a persisted-but-random
+ *  port, so there is no universal default URL: physical devices connect via a
+ *  USB bridge (`adb reverse tcp:<port> tcp:<port>` → ws://localhost:<port>) or
+ *  an explicit URL entered in Settings. Explicit URLs are persisted to
+ *  AsyncStorage on connect so the user never re-enters them. */
+const RELAY_URL_STORAGE_KEY = 'conduit.relayUrl';
 
 export interface ProviderInfo {
   id: string; display_name: string; models: string[];
@@ -129,7 +135,12 @@ export interface SessionChatAttachment {
 }
 
 let _ws: WebSocket | null = null;
-let _url = DEFAULT_RELAY_URL;
+let _url: string | null = null;
+// Loaded once from AsyncStorage; connect() awaits this so a persisted URL
+// wins over the loopback default on cold start.
+const _storedUrlReady: Promise<string | null> = AsyncStorage.getItem(RELAY_URL_STORAGE_KEY)
+  .then((stored) => { if (stored) _url = stored; return stored; })
+  .catch(() => null);
 let _connecting = false;
 let _reconnectTimer: any = null;
 let _pollTimer: any = null;
@@ -214,11 +225,27 @@ function _doConnect(target: string) {
         }
       } catch (e) { console.error('parse error', e); }
     };
-    ws.onclose = () => { _connecting = false; stopPolling(); nc(false); _ws = null; if (_reconnectTimer === null) { _reconnectTimer = setTimeout(() => { _reconnectTimer = null; _doConnect(_url); }, 3000); } };
+    ws.onclose = () => { _connecting = false; stopPolling(); nc(false); _ws = null; if (_reconnectTimer === null) { _reconnectTimer = setTimeout(() => { _reconnectTimer = null; _doConnect(target); }, 3000); } };
     ws.onerror = () => { _connecting = false; nc(false); };
   } catch (e) { _connecting = false; nc(false); }
 }
-function globalConnect(url?: string) { _doConnect(url ?? _url ?? DEFAULT_RELAY_URL); }
+function globalConnect(url?: string) {
+  if (url) {
+    // Explicit URL from the Settings field: use it and persist it so the
+    // next cold start reconnects without re-entry.
+    _url = url;
+    void AsyncStorage.setItem(RELAY_URL_STORAGE_KEY, url).catch(() => {});
+    _doConnect(url);
+    return;
+  }
+  // No explicit URL: use the persisted one once loaded. If none exists yet
+  // (fresh install), stay disconnected — the Settings screen shows the URL
+  // input whenever `connected` is false.
+  void _storedUrlReady.then(() => { if (_url) _doConnect(_url); });
+}
+/** The URL the relay is currently connected/connecting to (null before any
+ *  successful or attempted connect). Used to prefill the Settings field. */
+export function getRelayUrl(): string | null { return _url; }
 function globalDisconnect() { stopPolling(); if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; } if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; } nc(false); }
 
 // Stable sender identities (module-level) so screens can safely put them in

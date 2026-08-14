@@ -847,3 +847,62 @@
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* ---------- Toasts (global error/notification surface) ---------- */
+.toast-host {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(380px, 90vw);
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: var(--surface-glass);
+  backdrop-filter: blur(32px) saturate(150%);
+  -webkit-backdrop-filter: blur(32px) saturate(150%);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--glass-rim), var(--glass-shadow);
+  padding: 10px 12px;
+  animation: modal-in 0.22s var(--ease);
+}
+.toast-icon {
+  flex-shrink: 0;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.toast-error .toast-icon { color: var(--danger); }
+.toast-success .toast-icon { color: var(--state-working); }
+.toast-info .toast-icon { color: var(--text-dim); }
+.toast-body {
+  flex: 1;
+  min-width: 0;
+}
+.toast-message {
+  font-size: 12.5px;
+  color: var(--text);
+  line-height: 1.4;
+}
+.toast-detail {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+  /* Long backend error strings (full OS error text) wrap instead of
+     overflowing the toast. */
+  overflow-wrap: anywhere;
+}
+.toast-close {
+  flex-shrink: 0;
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 1.4;
+}

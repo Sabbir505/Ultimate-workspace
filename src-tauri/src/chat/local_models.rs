@@ -820,22 +820,6 @@ fn resolve_llama_server_binary() -> Result<ResolvedBinary, String> {
         }
     }
 
-    // 0.5. CUDA build at D:\llama-cuda\ (preferred over Vulkan for
-    //      NVIDIA GPUs). The user installed this build to enable proper
-    //      GPU offload on the GTX 1660 Ti — Vulkan offloads the layer
-    //      plan but allocates a 0-byte buffer, leaving the model on CPU
-    //      while claiming GPU utilization. CUDA actually moves the data.
-    if cfg!(windows) {
-        let cuda_path = PathBuf::from(r"D:\llama-cuda\llama-server.exe");
-        if cuda_path.is_file() {
-            let dir = cuda_path.parent().map(|d| d.to_path_buf()).unwrap();
-            return Ok(ResolvedBinary {
-                path: cuda_path.to_string_lossy().to_string(),
-                dir,
-            });
-        }
-    }
-
     // 1. LLAMA_SERVER_PATH env var: a file, or a directory containing the binary.
     if let Ok(path) = std::env::var("LLAMA_SERVER_PATH") {
         let p = Path::new(&path);
@@ -878,36 +862,14 @@ fn resolve_llama_server_binary() -> Result<ResolvedBinary, String> {
         }
     }
 
-    // 3. Common install locations. On Windows this includes source-build trees
-    // (which carry sibling DLLs) on all drives — llama.cpp is frequently built
-    // under D:\, E:\, etc. rather than C:\.
+    // 3. Common install locations. On Windows this covers the conventional
+    // source-build tree under C:\llama.cpp; anything else (custom drives,
+    // CUDA builds, release-zip layouts) should be pointed at explicitly via
+    // LLAMA_SERVER_PATH rather than guessed by scanning drives.
     let mut candidates: Vec<PathBuf> = Vec::new();
     if cfg!(windows) {
         candidates.push(PathBuf::from(r"C:\llama.cpp\build\bin\Release\llama-server.exe"));
         candidates.push(PathBuf::from(r"C:\llama.cpp\build\bin\llama-server.exe"));
-        // Source builds on any drive: D:\LLMACPP\llama.cpp\build\bin\llama-server.exe
-        // and the bare llama.cpp layout under the drive root.
-        for drive in ['D', 'E', 'F', 'G'] {
-            candidates.push(PathBuf::from(format!("{drive}:\\LLMACPP\\llama.cpp\\build\\bin\\llama-server.exe")));
-            candidates.push(PathBuf::from(format!("{drive}:\\llama.cpp\\build\\bin\\llama-server.exe")));
-            candidates.push(PathBuf::from(format!("{drive}:\\llama.cpp\\build\\bin\\Release\\llama-server.exe")));
-        }
-        // Prebuilt release zips from the llama.cpp GitHub release page are
-        // typically extracted to a single folder (often spelled "Llma.cpp",
-        // "llama.cpp-bin", etc.) with the binary at the root rather than under
-        // `build/bin/`. Check a few common spellings on every drive before
-        // giving up — without this, the user has to set LLAMA_SERVER_PATH
-        // manually even though the binary is right there on the filesystem.
-        for drive in ['D', 'E', 'F', 'G'] {
-            for dir in [
-                "Llma.cpp",
-                "llama.cpp-bin",
-                "llama.cpp_release",
-                "llama-bin",
-            ] {
-                candidates.push(PathBuf::from(format!("{drive}:\\{dir}\\llama-server.exe")));
-            }
-        }
     } else {
         candidates.push(PathBuf::from("/usr/local/bin/llama-server"));
         candidates.push(PathBuf::from("/opt/llama.cpp/build/bin/llama-server"));

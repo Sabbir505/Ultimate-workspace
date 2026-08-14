@@ -5,7 +5,7 @@
 // newly-focused terminal's xterm helper-textarea.
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
-import { PaneGrid } from "../components/panes/PaneGrid";
+import { PaneFrame } from "../components/panes/PaneFrame";
 import { useKeybindings } from "../hooks/useKeybindings";
 import { usePanesStore, type PaneDescriptor } from "../state/panes";
 import { useSettingsStore } from "../state/settings";
@@ -45,9 +45,24 @@ function terminalDesc(sessionId: string): PaneDescriptor {
   };
 }
 
+// Minimal stand-in for the old PaneGrid (deleted with the Dev/Chat tab
+// merge): the app now renders panes exclusively through the ToolPanel tabs,
+// but these tests only need every terminal pane mounted + focusable.
+function TestPaneHost() {
+  const panes = usePanesStore((s) => s.panes);
+  const focusedPaneId = usePanesStore((s) => s.focusedPaneId);
+  return (
+    <div className="pane-grid">
+      {panes.map((pane, i) => (
+        <PaneFrame key={pane.paneId} pane={pane} index={i} focused={pane.paneId === focusedPaneId} />
+      ))}
+    </div>
+  );
+}
+
 function HarnessWithShortcuts() {
   useKeybindings();
-  return <PaneGrid />;
+  return <TestPaneHost />;
 }
 
 describe("pane focus moves DOM focus to the terminal", () => {
@@ -62,7 +77,7 @@ describe("pane focus moves DOM focus to the terminal", () => {
     const a = usePanesStore.getState().addPane(terminalDesc("s1"));
     const b = usePanesStore.getState().addPane(terminalDesc("s2"));
     // addPane focuses the newest (b). Confirm DOM focus is on b's textarea.
-    const { container } = render(<PaneGrid />);
+    const { container } = render(<TestPaneHost />);
 
     // TerminalPane is lazy-loaded (xterm stays out of the initial bundle), so
     // the chunk resolves asynchronously — wait for both xterm instances to

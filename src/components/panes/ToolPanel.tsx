@@ -6,8 +6,8 @@
 // `visible` prop → browserOcclusion when their tab (or the whole panel) is
 // not showing — display:none alone doesn't hide a floating native webview.
 //
-// This replaces the browser half of the old ChatBrowserSplit: the chat is
-// always full-width in the center, and browsers live here. The panel's own
+// This is the only home panes have: the chat is always full-width in the
+// center, and terminals/browsers live here as tabs. The panel's own
 // left-edge drag handle doubles as the chat|panel splitter (same pattern as
 // DevDiffPanel's resize handle), with the width persisted in the ui store.
 import { lazy, useState, Suspense, useCallback, useEffect, useMemo, useRef } from "react";
@@ -30,7 +30,7 @@ import { harnessShortName } from "../../types";
 // and browser tabs don't need it.
 const ArtifactPreviewPane = lazy(() => import("../chat/ArtifactPreviewPane").then((m) => ({ default: m.ArtifactPreviewPane })));
 import { DevDiffPanel } from "./DevDiffPanel";
-import { DormantBrowsers, PaneFrame } from "./PaneGrid";
+import { DormantBrowsers, PaneFrame } from "./PaneFrame";
 import { SubagentPanel } from "./SubagentPanel";
 
 const TABS: { id: ToolPanelTab; label: string; Icon: React.ElementType }[] = [

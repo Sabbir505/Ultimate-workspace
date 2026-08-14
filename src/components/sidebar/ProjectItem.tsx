@@ -2,7 +2,7 @@
 // history, New Session control with harness picker (§4.2), and the project
 // context menu (New Worktree §7.10, Project Settings §7.7/§7.16, etc.).
 import { useEffect, useRef, useState } from "react";
-import { createWorktree, listQuickActions } from "../../lib/ipc";
+import { createWorktree, listQuickActions, toastError } from "../../lib/ipc";
 import { newSessionFlow, runQuickAction } from "../../lib/sessionLauncher";
 import { useProjectsStore } from "../../state/projects";
 import { useUiStore } from "../../state/ui";
@@ -63,7 +63,15 @@ export function ProjectItem({ project }: Props) {
     if (!branch) return;
     setWorktreeOpen(false);
     setBranchName("");
-    const path = await createWorktree(project.id, branch);
+    let path: string | null = null;
+    try {
+      path = await createWorktree(project.id, branch);
+    } catch (e) {
+      // git rejected the worktree (invalid ref, branch already checked out,
+      // flag injection, …) — surface it instead of silently doing nothing.
+      toastError(`Couldn't create worktree for "${branch}"`, e);
+      return;
+    }
     if (!path) return;
     // §7.10: run quick actions flagged "run on worktree creation".
     const actions = (await listQuickActions(project.id)) ?? [];

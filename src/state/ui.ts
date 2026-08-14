@@ -55,8 +55,8 @@ export interface PeekState {
   projectId: string | null;
   filePath: string | null;
   /** Optional working directory to run git against when this peek was
-   *  opened from a per-pane entry point (e.g. the Dev-tab diff side
-   *  panel for a worktree-scoped session). When set, the diff is computed
+   *  opened from a per-pane entry point (e.g. the Changes panel for a
+   *  worktree-scoped session). When set, the diff is computed
    *  against THIS path (a worktree) rather than the project root.
    *  null/undefined falls back to `project.path` (the project root). */
   cwd: string | null;
@@ -79,12 +79,11 @@ export interface UiState {
    *  (e.g. "connectors" from the sidebar's Connectors row). SettingsView
    *  consumes and clears it. */
   settingsCategory: string | null;
-  /** When true, the Dev-tab diff side panel is hidden and replaced with a
+  /** When true, the Changes (diff) panel is hidden and replaced with a
    *  thin restore strip (matches the browser pane's minimize UX). */
   diffPanelCollapsed: boolean;
   /** User-resized width of the diff side panel, in pixels. Persists across
-   *  rerenders so a manual resize sticks (same as PaneGrid's gridFracs but
-   *  scoped to a single side panel). */
+   *  rerenders so a manual resize sticks (scoped to a single side panel). */
   diffPanelWidth: number;
   /** True when ANY modal is open (artifacts library, etc.) so native webviews
    *  know to hide themselves. DERIVED from `openModalIds` — writers register
@@ -95,12 +94,6 @@ export interface UiState {
   modalOpen: boolean;
   /** Ids of the currently open modals — `modalOpen` is true while non-empty. */
   openModalIds: string[];
-  /** Per-pane inline diff overlay. When `paneId` is set, the file at
-   *  `filePath` is rendered as a unified diff over the focused pane (NOT in
-   *  the global PeekPanel) — this is what the user asked for: clicking a
-   *  file row in the right-side Files panel shows the diff in the pane the
-   *  click came from, with the pane still visible/usable underneath. */
-  paneDiff: { paneId: string; filePath: string; cwd: string } | null;
   /** Active tab in the right-side tool panel. */
   toolPanelTab: ToolPanelTab;
   /** When true, the tool panel is hidden and replaced with a thin restore
@@ -146,7 +139,6 @@ export interface UiState {
    *  Idempotent — re-passing the current state returns the same store slice
    *  so effect loops don't churn. */
   setModalOpen: (id: string, open: boolean) => void;
-  setPaneDiff: (diff: { paneId: string; filePath: string; cwd: string } | null) => void;
   setToolPanelTab: (tab: ToolPanelTab) => void;
   /** Open tabs in the right-side tool panel — supports MULTIPLE instances of
    *  the same kind (several terminals, several browsers, several agents, …).
@@ -181,7 +173,26 @@ export interface UiState {
   setPlanCanvas: (content: string | null, title: string | null) => void;
   setDiffPanelFile: (file: string | null, cwd: string | null) => void;
   setToolPanelWidth: (width: number) => void;
+  /** Transient toast notifications (bottom-right stack). Errors from IPC
+   *  calls that used to die in console.warn land here instead. */
+  toasts: Toast[];
+  pushToast: (kind: ToastKind, message: string, detail?: string) => void;
+  dismissToast: (id: number) => void;
 }
+
+export type ToastKind = "error" | "info" | "success";
+
+export interface Toast {
+  id: number;
+  kind: ToastKind;
+  message: string;
+  detail?: string;
+}
+
+let nextToastId = 1;
+/** Errors stay up longer than info/success — the user needs time to read
+ *  what failed; successes are just confirmations. */
+const TOAST_TTL_MS: Record<ToastKind, number> = { error: 9000, info: 5000, success: 4000 };
 
 export const useUiStore = create<UiState>((set) => ({
   activeView: "chat",
@@ -196,7 +207,7 @@ export const useUiStore = create<UiState>((set) => ({
   openModalIds: [],
   diffPanelCollapsed: false,
   diffPanelWidth: 280,
-  paneDiff: null,
+  toasts: [],
   toolPanelTab: "terminal",
   // Open tabs in the right tool panel. Multi-instance — you can have several
   // terminals, several browsers, several agents, etc. Each tab instance has
@@ -266,7 +277,6 @@ export const useUiStore = create<UiState>((set) => ({
         : s.openModalIds.filter((x) => x !== id);
       return { openModalIds, modalOpen: openModalIds.length > 0 };
     }),
-  setPaneDiff: (paneDiff) => set({ paneDiff }),
   setToolPanelTab: (toolPanelTab) => set({ toolPanelTab }),
   // Add a new tab INSTANCE of the given kind (multiple same-kind tabs allowed).
   addTab: (kind, target) =>
@@ -372,4 +382,13 @@ export const useUiStore = create<UiState>((set) => ({
   setDiffPanelFile: (diffPanelFile, diffPanelCwd) => set({ diffPanelFile, diffPanelCwd }),
   setToolPanelWidth: (toolPanelWidth) =>
     set({ toolPanelWidth: Math.max(280, Math.min(900, toolPanelWidth)) }),
+  pushToast: (kind, message, detail) => {
+    const id = nextToastId++;
+    // Cap the stack so a failing poll loop can't accumulate hundreds.
+    set((s) => ({ toasts: [...s.toasts.slice(-4), { id, kind, message, detail }] }));
+    setTimeout(() => {
+      useUiStore.setState((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
+    }, TOAST_TTL_MS[kind]);
+  },
+  dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 }));

@@ -28,7 +28,7 @@ export function PeekPanel() {
     if (peek.mode === "file" && peek.filePath) {
       void readFileText(peek.filePath).then((t) => setFileText(t ?? "(unable to read file)"));
     } else if (peek.mode === "diff" && project) {
-      // Per-pane entry points (Dev-tab diff side panel) carry an explicit
+      // Per-pane entry points (the Changes panel) carry an explicit
       // `cwd` so a worktree-scoped session can show its own diff, not the
       // project root's. Fall back to the project root otherwise.
       const target = peek.cwd ?? project.path;

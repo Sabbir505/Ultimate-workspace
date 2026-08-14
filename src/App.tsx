@@ -12,6 +12,7 @@
 // eager because it's the first thing visible on every page.
 import { lazy, Suspense, useEffect, useRef } from "react";
 import { Modal } from "./components/common/Modal";
+import { ToastHost } from "./components/common/ToastHost";
 import { OnboardingBanner } from "./components/onboarding/OnboardingBanner";
 // ToolPanel (right-side tool/agents/artifact panel) statically imports
 // react-markdown via SubagentPanel — lazy so it leaves the entry chunk
@@ -108,6 +109,7 @@ export default function App() {
 
   return (
     <div className="app">
+      <ToastHost />
       {!sidebarCollapsed && <div className="sidebar"><Sidebar /></div>}
 
       <div className="main">

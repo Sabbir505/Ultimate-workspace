@@ -60,7 +60,7 @@ async function openSessionFromMobile(sessionId: string): Promise<void> {
   try {
     // The session row may have been created seconds ago on the phone — pull a
     // fresh list before looking it up, then open it through the normal
-    // launcher path (pane in the dev-tab grid + PTY spawn).
+    // launcher path (terminal tab in the ToolPanel + PTY spawn).
     await useProjectsStore.getState().refreshSessions();
     const session = useProjectsStore.getState().sessions.find((s) => s.id === sessionId);
     if (session) await openSession(session);
@@ -119,7 +119,7 @@ export function usePtyEvents(): void {
     );
 
     // Phone-started sessions: the mobile relay asks the desktop to open the
-    // session in a dev-tab pane (create + spawn both funnel through here).
+    // session in a ToolPanel terminal tab (create + spawn both funnel through here).
     unlistens.push(
       safeListen<{ sessionId: string }>("mobile:session-open-requested", ({ sessionId }) => {
         void openSessionFromMobile(sessionId);

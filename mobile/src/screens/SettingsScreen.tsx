@@ -20,7 +20,7 @@ const Wifi = ({ size, color }: { size?: number; color?: string }) => <Ionicons n
 const Monitor = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="desktop" size={size} color={color} />;
 const ChevronRight = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="chevron-forward" size={size} color={color} />;
 const Cpu = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="hardware-chip" size={size} color={color} />;
-import { useRelay, type CostDetails, type DailyCostEntry, type ProjectCostEntry, type LocalModelUsageEntry } from '../hooks/useRelay';
+import { useRelay, getRelayUrl, type CostDetails, type DailyCostEntry, type ProjectCostEntry, type LocalModelUsageEntry } from '../hooks/useRelay';
 import { theme, useTheme } from '../theme';
 import { useUseChatSession, setUseChatSession } from '../lib/featureFlags';
 import ConnectionIndicator from '../components/ConnectionIndicator';
@@ -244,8 +244,12 @@ export default function SettingsScreen() {
     if (connected) refreshCostDetails();
   }, [connected, refreshCostDetails]);
 
-  // Relay URL override — the phone needs the desktop's LAN IP, not 127.0.0.1.
-  const [relayUrl, setRelayUrl] = useState('');
+  // Relay URL override. The desktop relay binds loopback only, so a physical
+  // phone reaches it via `adb reverse tcp:<port> tcp:<port>` and
+  // ws://localhost:<port> — or an explicit tunnel/LAN URL if the user runs
+  // their own bridge. Entered URLs are persisted by useRelay on connect;
+  // prefill the field with the current one.
+  const [relayUrl, setRelayUrl] = useState(() => getRelayUrl() ?? '');
 
   // 5-tap easter egg on the version row to reveal the developer toggle.
   const [tapCount, setTapCount] = useState(0);
@@ -298,7 +302,7 @@ export default function SettingsScreen() {
             {!connected && (
               <TextInput
                 style={[styles.urlInput, { backgroundColor: c.background, borderColor: c.border, color: c.text }]}
-                placeholder="ws://192.168.1.100:64499"
+                placeholder="ws://localhost:<desktop relay port>"
                 placeholderTextColor={c.textSecondary}
                 value={relayUrl}
                 onChangeText={setRelayUrl}

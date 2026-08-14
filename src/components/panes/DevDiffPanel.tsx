@@ -1,9 +1,10 @@
-// Dev-tab right-side panel: per-pane live list of changed files in the
+// Changes panel: per-pane live list of changed files in the
 // focused pane's working directory, click-to-view-diff (delegated to the
 // existing PeekPanel), and a "Send PR" button that forwards a prompt into
 // the pane's own pty — Conduit does NOT run git/PR logic itself; the
 // already-running harness has full context on the changes and the git/gh
-// CLI toolchain (§7.10/§7.11).
+// CLI toolchain (§7.10/§7.11). Rendered embedded as the ToolPanel's
+// "Changes" tab.
 //
 // State model: the panel is bound to the currently-focused terminal pane.
 // When focus moves to another pane, the panel swaps to that pane's
@@ -57,9 +58,9 @@ const FILE_ROW_CAP = 300;
  * or what the message should be — the agent that produced the diff is
  * best positioned to write a meaningful message.
  *
- * Note: a trailing \r is appended when sent, mimicking the BroadcastBar
- * pattern (writePty + "\r") so the harness actually submits the prompt
- * rather than just rendering it in the input box.
+ * Note: a trailing \r is appended when sent (writePty + "\r") so the
+ * harness actually submits the prompt rather than just rendering it in
+ * the input box.
  */
 const SEND_PR_PROMPT =
   "commit these changes with a clear message and open a pull request";
@@ -296,7 +297,7 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   }, [panes, projects]);
 
   // Drag-to-resize: a left-edge grab zone. Dragging the splitter widens /
-  // narrows the panel — the same UX as PaneGrid's column splitter.
+  // narrows the panel — the same UX as the ToolPanel's own splitter.
   // MUST be declared before any early return below, otherwise the hook count
   // differs between the collapsed and expanded render paths and React throws
   // "Rendered more hooks than during the previous render."

@@ -75,7 +75,7 @@ export function SessionRow({ session, projectName }: Props) {
               e.stopPropagation();
               // §6.5: closing the live pane is the only path that kills the
               // pty. If we only drop the session row, the pane (and process)
-              // would linger on the dev tab pointing at a deleted session.
+              // would linger in the ToolPanel pointing at a deleted session.
               for (const p of usePanesStore.getState().panes) {
                 if (p.data.kind === "terminal" && p.data.sessionId === session.id) {
                   closePane(p.paneId);

@@ -10,6 +10,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useUiStore } from "../state/ui";
 import type {
   AvailableSkill,
   ChangedFile,
@@ -56,6 +57,31 @@ export async function safeListen<T>(
     console.warn(`[conduit] listen("${event}") failed`, err);
     return () => {};
   }
+}
+
+// --- Global toast helpers (the app's error surface) ---
+// Use these at IPC call sites instead of bare console.warn/console.error so
+// failures (git push, downloads, connector calls, …) are visible to the user
+// in the bottom-right toast stack, not just in devtools.
+
+function errorDetail(err: unknown): string | undefined {
+  if (err == null) return undefined;
+  if (err instanceof Error) return err.message;
+  return typeof err === "string" ? err : String(err);
+}
+
+export function toastError(message: string, err?: unknown): void {
+  const detail = errorDetail(err);
+  if (detail) console.warn(`[conduit] ${message}:`, detail);
+  useUiStore.getState().pushToast("error", message, detail);
+}
+
+export function toastInfo(message: string): void {
+  useUiStore.getState().pushToast("info", message);
+}
+
+export function toastSuccess(message: string): void {
+  useUiStore.getState().pushToast("success", message);
 }
 
 // --- Projects / sessions ---
@@ -184,13 +210,13 @@ export const getGitStatus = (path: string) => safeInvoke<GitStatusInfo | null>("
 export const createWorktree = (projectId: string, branchName: string) =>
   safeInvoke<string | null>("create_worktree", { projectId, branchName });
 export const getGitDiff = (path: string) => safeInvoke<string | null>("get_git_diff", { path });
-/** Per-file diff for the Dev-tab side panel. Returns the unified diff for a
+/** Per-file diff for the Changes panel. Returns the unified diff for a
  *  single file in the working tree (or an empty string when the file has no
  *  changes / isn't a git repo). Used when the user clicks a file row in the
- *  right-side Files panel — we want THAT file's diff, not the whole tree. */
+ *  ToolPanel's Changes tab — we want THAT file's diff, not the whole tree. */
 export const getGitFileDiff = (path: string, filePath: string) =>
   safeInvoke<string | null>("get_git_file_diff", { path, filePath });
-/** Per-pane change list for the Dev-tab side panel. The argument is the
+/** Per-pane change list for the Changes panel. The argument is the
  *  pane's actual working directory (project root or worktree path), not the
  *  project root alone — worktree-scoped sessions (PRD §7.10) must see the
  *  worktree's own diff, not the parent repo's. */

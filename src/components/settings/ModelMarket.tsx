@@ -25,6 +25,7 @@ import {
   setHuggingFaceToken,
   setModelsDirectory,
   startModelDownload,
+  toastError,
   type CatalogEntry,
   type DownloadProgress,
   type GpuVramInfo,
@@ -171,7 +172,7 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
             if (card?.vision) {
               // Idempotent: backend short-circuits if already in-flight.
               void downloadMmproj(card.repoId).catch((e) =>
-                console.warn("mmproj auto-download failed", e),
+                toastError(`Vision companion (mmproj) download failed for ${card.filename}`, e),
               );
             }
           }
@@ -253,6 +254,9 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
   };
 
   const doDownload = (e: CatalogEntry) => {
+    // Surface a failed START (gated repo, disk error, invalid dest) — the
+    // download row only appears once the backend accepts the job, so without
+    // this a rejected invoke left the user staring at an unchanged card.
     void startModelDownload({
       id: e.id,
       repoId: e.repoId,
@@ -260,7 +264,7 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
       downloadUrl: e.downloadUrl,
       expectedSha256: e.sha256,
       destDir: settings?.modelsDir ?? undefined,
-    });
+    }).catch((err) => toastError(`Couldn't start download: ${e.filename}`, err));
   };
 
   const onStartDownload = (e: CatalogEntry) => {

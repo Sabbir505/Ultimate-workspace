@@ -311,6 +311,10 @@ async fn dispatch(
         "scroll" => op_scroll(req, browser, app).await,
         "wait_for" => op_wait_for(req, browser, app).await,
         "screenshot" => op_screenshot(req, browser, app).await,
+        "history" => op_history(req, browser, app).await,
+        "hover" => op_hover(req, browser, app).await,
+        "evaluate" => op_evaluate(req, browser, app).await,
+        "click_and_wait" => op_click_and_wait(req, browser, app).await,
         op if crate::mcp_tools_bridge::tool_from_op(op).is_some() => {
             let tool = crate::mcp_tools_bridge::tool_from_op(op).unwrap();
             let args = req.args.clone();
@@ -659,7 +663,253 @@ async fn op_wait_for(
     }))
 }
 
-// ---- helpers ---------------------------------------------------------------
+/// `history` — drive the webview's real history stack back/forward via
+/// `history.go(-1)|go(1)` and report the resulting URL. Unlike
+/// `BrowserManager::go_back` (fire-and-forget eval), this uses the awaited
+/// bridge so the agent learns whether the navigation actually occurred.
+async fn op_history(
+    req: &Request,
+    browser: &BrowserManager,
+    app: &AppHandle,
+) -> Result<Value, McpError> {
+    let label = resolve_or_open(req, browser, app).await?;
+    let direction = req
+        .args
+        .get("direction")
+        .and_then(|v| v.as_str())
+        .unwrap_or("back");
+    if direction != "back" && direction != "forward" {
+        return Err(McpError::invalid_args(format!(
+            "history direction must be 'back' or 'forward', got {direction}"
+        )));
+    }
+    let (pane_id, _tab_id) = parse_label(&label)
+        .ok_or_else(|| McpError { code: "invalid_args", message: format!("bad label: {label}") })?;
+    let _opts = resolve_action_opts(app, Some(&pane_id));
+    let result = browser
+        .history_for_pane(&label, direction)
+        .await
+        .map_err(McpError::from_action_err)?;
+    Ok(serde_json::json!({ "direction": direction, "result": result, "pane_id": pane_id }))
+}
+
+/// `hover` — resolve a selector/description to an element and dispatch real
+/// mouseover/mouseenter/mousemove events on it. Needed for CSS-`:hover` menus
+/// and dropdowns that only reveal on hover before a click is possible. Uses the
+/// same resolve path as click/type (returns not_found + suggestions on miss).
+async fn op_hover(
+    req: &Request,
+    browser: &BrowserManager,
+    app: &AppHandle,
+) -> Result<Value, McpError> {
+    let label = resolve_or_open(req, browser, app).await?;
+    let desc = req
+        .args
+        .get("selector_or_description")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| McpError::invalid_args("hover requires 'selector_or_description' (string)"))?;
+    let (pane_id, _tab_id) = parse_label(&label)
+        .ok_or_else(|| McpError { code: "invalid_args", message: format!("bad label: {label}") })?;
+    let opts = resolve_action_opts(app, Some(&pane_id));
+    let result = browser
+        .resolve_and_hover_opts(&label, desc, &opts)
+        .await
+        .map_err(McpError::from_action_err)?;
+    interpret_resolve_result(result)
+}
+
+/// `evaluate` — run arbitrary JS in the pane's own origin and return a
+/// JSON-serialized result. Lets the agent read form state, page JS variables,
+/// run custom extraction, and assert on page invariants — capability unlocks
+/// the existing read/click tools can't reach. The expression is wrapped in
+/// `new Function('return (<expr>);')`, so a bare expression (e.g.
+/// `document.title`, `Array.from(document.querySelectorAll('.row')).length`)
+/// works directly. Functions/undefined/circular values become readable
+/// markers (`[Function]`, `[undefined]`, `[circular]`).
+async fn op_evaluate(
+    req: &Request,
+    browser: &BrowserManager,
+    app: &AppHandle,
+) -> Result<Value, McpError> {
+    let label = resolve_or_open(req, browser, app).await?;
+    let expression = req
+        .args
+        .get("expression")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| McpError::invalid_args("evaluate requires 'expression' (string)"))?;
+    // Cap the expression body so an over-long payload can't wedge a
+    // single-threaded eval path; 64 KiB is far above any reasonable page-side
+    // read but well below pathological LLM output.
+    const MAX_EXPR_LEN: usize = 65_536;
+    if expression.len() > MAX_EXPR_LEN {
+        return Err(McpError::invalid_args(format!(
+            "evaluate expression too long: {} bytes (max {MAX_EXPR_LEN})",
+            expression.len()
+        )));
+    }
+    let (pane_id, _tab_id) = parse_label(&label)
+        .ok_or_else(|| McpError { code: "invalid_args", message: format!("bad label: {label}") })?;
+    let _opts = resolve_action_opts(app, Some(&pane_id));
+    let result = browser
+        .evaluate_for_pane(&label, expression)
+        .await
+        .map_err(McpError::from_action_err)?;
+    // The bridge returns either a JSON string (the evaluated value serialized
+    // with our replacer) or an 'ERROR: <msg>' marker (compile/throw). Surface
+    // both as the `result` text payload so the agent parses accordingly.
+    Ok(serde_json::json!({ "result": result, "pane_id": pane_id }))
+}
+
+/// `click_and_wait` — click a selector/description, then immediately poll for
+/// a condition (navigation change | CSS selector appears | network_idle) in
+/// the SAME round-trip. Removes the fragile two-call dance (click, then
+/// wait_for) where a fast navigation can finish before wait_for's poll starts
+/// and the wait times out. Shares the `wait_for` polling + clamped timeout
+/// logic; the click happens first and its JSON is folded into the response.
+async fn op_click_and_wait(
+    req: &Request,
+    browser: &BrowserManager,
+    app: &AppHandle,
+) -> Result<Value, McpError> {
+    let label = resolve_or_open(req, browser, app).await?;
+    let desc = req
+        .args
+        .get("selector_or_description")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| McpError::invalid_args("click_and_wait requires 'selector_or_description' (string)"))?;
+    let condition = req
+        .args
+        .get("condition")
+        .and_then(|v| v.as_str())
+        .unwrap_or("navigation");
+    if !matches!(condition, "navigation" | "selector" | "network_idle") {
+        return Err(McpError::invalid_args(format!(
+            "click_and_wait condition must be navigation|selector|network_idle, got {condition}"
+        )));
+    }
+    let target = req.args.get("target").and_then(|v| v.as_str());
+    let timeout_ms = wait_for_timeout_ms(&req.args);
+
+    let (pane_id, _tab_id) = parse_label(&label)
+        .ok_or_else(|| McpError { code: "invalid_args", message: format!("bad label: {label}") })?;
+    let opts = resolve_action_opts(app, Some(&pane_id));
+
+    // Snapshot the URL (for navigation-change detection) BEFORE the click so a
+    // same-URL SPA route change can't be missed — we compare against this.
+    let prev_url = match condition {
+        "navigation" => browser
+            .run_action_for_pane_opts(&label, "return location.href;", opts.clone())
+            .await
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+
+    let click_result = browser
+        .resolve_and_click_opts(&label, desc, &opts)
+        .await
+        .map_err(McpError::from_action_err)?;
+    let click_v: Value = serde_json::from_str(&click_result)
+        .map_err(|e| McpError {
+            code: "action_failed",
+            message: format!("bad click result: {e}: {click_result}"),
+        })?;
+    if !click_v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
+        // Click failed to resolve — skip the wait and surface the not_found
+        // result (with suggestions) so the agent can retry.
+        return interpret_resolve_result(click_result);
+    }
+
+    // Poll for the condition. Mirrors op_wait_for's polling logic but shares
+    // the `target` semantics (CSS selector for selector, prev URL for
+    // navigation when target absent).
+    let started = std::time::Instant::now();
+    let deadline = started
+        .checked_add(std::time::Duration::from_millis(timeout_ms))
+        .unwrap_or_else(|| started + std::time::Duration::from_millis(MAX_WAIT_FOR_MS));
+    let mut resolved = false;
+    let mut detail = String::new();
+
+    while std::time::Instant::now() < deadline {
+        let check_js = match condition {
+            "navigation" => {
+                let cmp = target.unwrap_or(&prev_url);
+                format!(
+                    "return JSON.stringify({{ url: location.href, changed: location.href !== {} }});",
+                    serde_json::to_string(cmp).unwrap_or_else(|_| "\"\"".into())
+                )
+            }
+            "selector" => {
+                let sel = target.unwrap_or("");
+                format!(
+                    "return JSON.stringify({{ found: !!document.querySelector({}) }});",
+                    serde_json::to_string(sel).unwrap_or_else(|_| "\"\"".into())
+                )
+            }
+            "network_idle" => {
+                "return JSON.stringify({ idle: document.readyState === 'complete' });".to_string()
+            }
+            _ => unreachable!(), // validated above
+        };
+        match browser.run_action_for_pane_opts(&label, &check_js, opts.clone()).await {
+            Ok(s) => {
+                if let Ok(v) = serde_json::from_str::<Value>(&s) {
+                    match condition {
+                        "navigation" => {
+                            if v.get("changed").and_then(|x| x.as_bool()).unwrap_or(false) {
+                                resolved = true;
+                                detail = v.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                                break;
+                            }
+                        }
+                        "selector" => {
+                            if v.get("found").and_then(|x| x.as_bool()).unwrap_or(false) {
+                                resolved = true;
+                                break;
+                            }
+                        }
+                        "network_idle" => {
+                            if v.get("idle").and_then(|x| x.as_bool()).unwrap_or(false) {
+                                // 500ms quiet period, mirroring op_wait_for.
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                if let Ok(s2) = browser
+                                    .run_action_for_pane_opts(&label, &check_js, opts.clone())
+                                    .await
+                                {
+                                    if let Ok(v2) = serde_json::from_str::<Value>(&s2) {
+                                        if v2.get("idle").and_then(|x| x.as_bool()).unwrap_or(false) {
+                                            resolved = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(e) => {
+                // A mid-navigation eval may fail transiently; keep polling.
+                eprintln!("[conduit:browser-mcp] click_and_wait poll error: {e}");
+            }
+        }
+        let step = if condition == "selector" { 200 } else { 300 };
+        tokio::time::sleep(std::time::Duration::from_millis(step)).await;
+    }
+
+    Ok(serde_json::json!({
+        "click": click_v,
+        "wait": {
+            "resolved": resolved,
+            "condition": condition,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+            "detail": detail,
+        },
+        "pane_id": pane_id,
+    }))
+}
+
+
 
 /// Parse `browser-{pane}-tab-{tab}` back into (pane_id, tab_id). Returns None
 /// if the shape doesn't match (defensive — labels are always built by

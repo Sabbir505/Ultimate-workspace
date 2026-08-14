@@ -1396,6 +1396,42 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
         self.run_action(&scroll_js(dy)).await
     }
 
+    /// Hover the element tagged with `data-conduit-ref="{r}"` in the active
+    /// pane. Dispatches real mouseover/mouseenter events so React/Vue hover
+    /// handlers and CSS `:hover` activate. Backs the new `hover` MCP tool.
+    pub async fn hover_ref(&self, r: i64) -> Result<String, String> {
+        self.run_action(&hover_js(r)).await
+    }
+
+    /// Same as `hover_ref` but targets an explicit pane label.
+    pub async fn hover_ref_for_pane(&self, label: &str, r: i64) -> Result<String, String> {
+        self.run_action_for_pane(label, &hover_js(r)).await
+    }
+
+    /// Drive the webview's real history back/forward. Unlike the existing
+    /// `go_back`/`go_forward` (fire-and-forget `eval`), this uses the awaited
+    /// `run_action_for_pane` bridge so the tool result carries whether the
+    /// navigation occurred and the post-nav URL. `direction` is "back" |
+    /// "forward". Backs the new `back`/`forward` MCP tools.
+    pub async fn history_for_pane(
+        &self,
+        label: &str,
+        direction: &str,
+    ) -> Result<String, String> {
+        let dir = if direction == "forward" { "forward" } else { "back" };
+        self.run_action_for_pane(label, &history_js(dir)).await
+    }
+
+    /// Evaluate arbitrary JS in the pane and return a JSON-serialized result.
+    /// Used by the new `evaluate` MCP tool. Runs in the pane's own origin.
+    pub async fn evaluate_for_pane(
+        &self,
+        label: &str,
+        expression: &str,
+    ) -> Result<String, String> {
+        self.run_action_for_pane(label, &evaluate_js(expression)).await
+    }
+
     fn get(&self, label: &str) -> Result<BrowserPane, String> {
         self.webviews
             .lock()
@@ -1464,6 +1500,37 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
                 serde_json::to_string(v.get("tag").and_then(|x| x.as_str()).unwrap_or("")).unwrap_or_default(),
                 serde_json::to_string(v.get("label").and_then(|x| x.as_str()).unwrap_or("")).unwrap_or_default(),
                 serde_json::to_string(&type_result).unwrap_or_default()
+            ))
+        } else {
+            Ok(resolved)
+        }
+    }
+
+    /// Resolve + hover with pacing opts. Same shape as resolve_and_click but
+    /// dispatches a hover sequence instead of a click — backs the `hover` MCP
+    /// tool when the agent passes a description rather than a bare ref.
+    pub async fn resolve_and_hover_opts(
+        &self,
+        label: &str,
+        desc: &str,
+        opts: &ActionOpts,
+    ) -> Result<String, String> {
+        // ACTION="click" is fine for resolution scoring — hover targets the
+        // same interactive set and we don't penalize non-inputs the way type
+        // does. We just swap the action body to hover_js.
+        let resolved = self.resolve_element(label, desc, "click").await?;
+        let v: serde_json::Value = serde_json::from_str(&resolved)
+            .map_err(|e| format!("resolve_and_hover: bad resolution json: {e}"))?;
+        if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
+            let r = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(-1);
+            let hover_result = self
+                .run_action_for_pane_opts(label, &hover_js(r), opts.clone())
+                .await?;
+            Ok(format!(
+                r#"{{"ok":true,"hovered":{{"ref":{r},"tag":{},"label":{}}},"result":{}}}"#,
+                serde_json::to_string(v.get("tag").and_then(|x| x.as_str()).unwrap_or("")).unwrap_or_default(),
+                serde_json::to_string(v.get("label").and_then(|x| x.as_str()).unwrap_or("")).unwrap_or_default(),
+                serde_json::to_string(&hover_result).unwrap_or_default()
             ))
         } else {
             Ok(resolved)
@@ -1681,6 +1748,90 @@ return 'Scrolled by {dy}px. scrollY=' + Math.round(window.scrollY) +
     )
 }
 
+/// Hover (dispatch true mouseover/mouseenter/mousemove) over the element tagged
+/// with `data-conduit-ref="{r}"`. Needed for CSS-`:hover` menus and dropdowns
+/// that reveal on hover before a click is possible. Real MouseEvents with
+/// `bubbles:true` are required so React/Vue `onMouseEnter` handlers fire the
+/// same way they do for a real cursor. Returns a Promise like click_js (cursor
+/// tween → hover events), degrading gracefully without the overlay.
+fn hover_js(r: i64) -> String {
+    format!(
+        r#"
+var el = document.querySelector('[data-conduit-ref="{r}"]');
+if (!el) return 'ERROR: no element with ref {r}. Call browser_read first to refresh the element map.';
+var rect = el.getBoundingClientRect();
+var cx = Math.max(rect.left + Math.max(rect.width / 2, 1), 1);
+var cy = Math.max(rect.top + Math.max(rect.height / 2, 1), 1);
+function doHover() {{
+    var opts = {{ bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window }};
+    // Real user hover emits mouseover (bubbles, target=el) then mouseenter
+    // (non-bubbling, listens on ancestor) for each ancestor in the chain that
+    // has a listener, plus a leading mousemove so CSS :hover (:hover applies
+    // on any pointing-device movement over the element) activates.
+    el.dispatchEvent(new MouseEvent('mousemove', opts));
+    el.dispatchEvent(new MouseEvent('mouseover', opts));
+    try {{ el.dispatchEvent(new MouseEvent('mouseenter', opts)); }} catch(e) {{}}
+    return 'Hovered ref {r}. Menus toggled by :hover should now be visible.';
+}}
+if (typeof __conduit_tweenCursor !== 'function') {{ return doHover(); }}
+__conduit_highlight(rect);
+return __conduit_tweenCursor(cx, cy, 150).then(function() {{
+    var msg = doHover();
+    setTimeout(function() {{ __conduit_fadeHighlight(); }}, 250);
+    return msg;
+}});
+"#
+    )
+}
+
+/// Drive the webview's real history stack and report the resulting URL. Unlike
+/// `self.eval(...)` (fire-and-forget), this uses the awaited `run_action` bridge
+/// so the tool result carries whether navigation actually left the page and the
+/// new URL. `direction` is "back" | "forward". history.go(-1)/go(1) fire the
+/// same `popstate`/`browser:navigated` bookkeeping as a real browser button.
+fn history_js(direction: &str) -> String {
+    let go = if direction == "forward" { "history.go(1)" } else { "history.go(-1)" };
+    format!(
+        r#"
+var before = location.href;
+{go};
+return 'Navigating {direction} from ' + before + '. New URL (after settle): ' + location.href + '.';
+"#
+    )
+}
+
+/// Evaluate arbitrary JS in the page and return a JSON-serialized result. The
+/// expression may reference the live DOM; `new Function('return (<expr>);')`
+/// lets a bare expression (e.g. `document.title`) or a statement block both
+/// work, and JSON.stringify preserves the value's real shape (numbers, strings,
+/// arrays, plain objects) instead of string-coercing it. Functions, undefined,
+/// and circular structures are turned into readable markers. Cross-origin and
+/// untrusted-page caveats apply: this runs in the pane's own origin.
+fn evaluate_js(expression: &str) -> String {
+    let expr_js = serde_json::to_string(expression).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        r#"
+var __expr = {expr_js};
+var __replacer = function(k, v) {{
+    if (typeof v === 'function') return '[Function]';
+    if (typeof v === 'undefined') return '[undefined]';
+    if (v && typeof v === 'object') {{
+        try {{ JSON.stringify(v); return v; }} catch (e) {{ return '[circular]'; }}
+    }}
+    return v;
+}};
+try {{
+    var __fn = new Function('return (' + __expr + ');');
+    var __value = __fn.call(window);
+    if (typeof __value === 'undefined') return '[undefined]';
+    return JSON.stringify(__value, __replacer);
+}} catch (e) {{
+    return 'ERROR: ' + e.message;
+}}
+"#
+    )
+}
+
 // ---- Page capture (browser_screenshot) ------------------------------------
 
 /// WebView2 `CapturePreview` → PNG bytes. MUST run on the UI thread (the
@@ -1817,6 +1968,45 @@ mod tests {
     #[test]
     fn scroll_js_uses_amount() {
         assert!(scroll_js(-250).contains("window.scrollBy(0, -250)"));
+    }
+
+    #[test]
+    fn hover_js_targets_ref_and_dispatches_mouse_events() {
+        let js = hover_js(4);
+        assert!(js.contains(r#"data-conduit-ref="4""#));
+        assert!(js.contains("MouseEvent"));
+        assert!(js.contains("mouseover"));
+        assert!(js.contains("mouseenter"));
+        assert!(js.contains("ERROR: no element with ref 4"));
+    }
+
+    #[test]
+    fn history_js_drives_real_history_stack() {
+        assert!(history_js("back").contains("history.go(-1)"));
+        assert!(history_js("forward").contains("history.go(1)"));
+        // Both directions report the before/after URL.
+        assert!(history_js("back").contains("before = location.href"));
+    }
+
+    #[test]
+    fn evaluate_js_json_serializes_expression_value() {
+        let js = evaluate_js("document.title");
+        // The expression is injected as a JS string literal wrapped in new Function.
+        assert!(js.contains("new Function('return (' + __expr + ');')"));
+        // Function/undefined/circular tolerance markers present.
+        assert!(js.contains("[Function]"));
+        assert!(js.contains("[undefined]"));
+        assert!(js.contains("[circular]"));
+        // Result path is JSON.stringify, not string coercion.
+        assert!(js.contains("JSON.stringify(__value"));
+    }
+
+    #[test]
+    fn evaluate_js_escapes_expression_literal() {
+        // Quotes/backslashes in the expression must be JSON-escaped so they
+        // can't break out of the injected string literal.
+        let js = evaluate_js(r#"document.querySelector(".a\"b")"#);
+        assert!(js.contains(r#"document.querySelector(\".a\\\"b\")"#));
     }
 
     #[test]

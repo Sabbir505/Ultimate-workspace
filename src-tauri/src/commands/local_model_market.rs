@@ -1336,9 +1336,11 @@ mod tests {
     fn normalizer_skips_non_gguf_and_extracts_license() {
         let m = HfModel {
             id: "TheBloke/Llama-2-7B-Chat-GGUF".to_string(),
+            author: Some("TheBloke".to_string()),
             downloads: 12345,
             likes: 67,
             last_modified: Some("2024-01-15T10:00:00Z".to_string()),
+            created_at: None,
             description: Some("Llama 2 chat model in GGUF format.".to_string()),
             tags: vec![
                 "gguf".to_string(),
@@ -1348,6 +1350,8 @@ mod tests {
                 // false unless detected from filename (Q4_K_M has no
                 // mmproj in its name).
             ],
+            pipeline_tag: None,
+            library_name: None,
             siblings: vec![
                 HfSibling {
                     rfilename: "llama-2-7b-chat.Q4_K_M.gguf".to_string(),
@@ -1394,11 +1398,15 @@ mod tests {
     fn normalizer_detects_mmproj_filename() {
         let m = HfModel {
             id: "org/vision-gguf".to_string(),
+            author: None,
             downloads: 0,
             likes: 0,
             last_modified: None,
+            created_at: None,
             description: None,
             tags: vec!["gguf".to_string()],
+            pipeline_tag: None,
+            library_name: None,
             siblings: vec![HfSibling {
                 rfilename: "llava-v1.5-7b-mmproj-f16.gguf".to_string(),
                 size: Some(100_000_000),

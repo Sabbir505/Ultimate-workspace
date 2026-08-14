@@ -217,7 +217,8 @@ async fn handle_line(
 /// chat::tools::execute_tool (which receives the name back).
 fn tool_op(tool: &str) -> Result<String, &'static str> {
     match tool {
-        "navigate" | "read_page" | "click" | "type_text" | "scroll" | "wait_for" => Ok(tool.to_string()),
+        "navigate" | "read_page" | "click" | "type_text" | "scroll" | "wait_for"
+        | "history" | "hover" | "evaluate" | "click_and_wait" => Ok(tool.to_string()),
         "generate_document" | "generate_diagram" | "generate_file"
         | "get_skill" | "list_skills" => Ok(format!("conduit_tools:{tool}")),
         _ => Err("unknown tool"),
@@ -378,6 +379,56 @@ fn tool_schemas() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "history",
+            "description": "Drive the browser pane's real history stack back or forward (the same as clicking the browser's back/forward button). Use 'back' to return to the previous page (e.g. after a redirect that landed you somewhere unexpected), 'forward' to undo a back. The tool reports the resulting URL after the navigation settles — call read_page afterwards to see what's on the page.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "direction": { "type": "string", "enum": ["back", "forward"], "default": "back" },
+                    "pane_id": { "type": "string" }
+                }
+            }
+        }),
+        json!({
+            "name": "hover",
+            "description": "Hover an element on the browser page — dispatches real mouseover/mouseenter/mousemove events so CSS :hover styles apply and React/Vue hover handlers fire. Use this BEFORE click when a menu or submenu only appears on hover (e.g. dropdown menus, mega-menu navigation, tooltip reveals). After hovering, call read_page to see the newly-revealed elements, then click the now-visible target.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "selector_or_description": { "type": "string", "description": "CSS selector (e.g. '#menu', 'nav li.products') or a natural-language description (e.g. 'the Products menu', 'the user avatar')." },
+                    "pane_id": { "type": "string" }
+                },
+                "required": ["selector_or_description"]
+            }
+        }),
+        json!({
+            "name": "evaluate",
+            "description": "Run arbitrary JavaScript in the browser pane (in the page's own origin) and return the result as JSON. The expression is wrapped so a bare expression works directly — e.g. `document.title`, `Array.from(document.querySelectorAll('.row')).length`, `JSON.stringify({url: location.href, ready: document.readyState})`. Use to read form state, page JS variables, or run custom extraction/assertion the read_page/click tools can't reach. Functions/undefined/circular values become markers ([Function], [undefined], [circular]). Avoid side effects — prefer click/type_text for interaction.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "expression": { "type": "string", "description": "A JS expression to evaluate. May reference the live document and window. The returned value is JSON-stringified and reported back." },
+                    "pane_id": { "type": "string" }
+                },
+                "required": ["expression"]
+            }
+        }),
+        json!({
+            "name": "click_and_wait",
+            "description": "Click an element AND wait for a resulting condition in one round-trip — stronger than separate click + wait_for because the click and the polling happen in the same atomic sequence (a fast navigation can finish before a separate wait_for's first poll, causing a spurious timeout). Use after navigating to a page with a form whose submit triggers a navigation or async content load. Conditions: 'navigation' (URL changes — pass the pre-click URL as target, or omit to auto-snapshot), 'selector' (an element matching a CSS selector appears — pass the selector as target), 'network_idle' (page settles). If the click can't resolve the element, the not_found result with suggestions is returned and no wait is performed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "selector_or_description": { "type": "string", "description": "CSS selector or natural-language description of the element to click." },
+                    "condition": { "type": "string", "enum": ["navigation", "selector", "network_idle"], "default": "navigation" },
+                    "target": { "type": "string", "description": "For navigation: the previous URL to compare against (auto-snapshotted if omitted). For selector: the CSS selector to wait for." },
+                    "timeout_ms": { "type": "integer", "default": 10000 },
+                    "pane_id": { "type": "string" }
+                },
+                "required": ["selector_or_description"]
+            }
+        }),
+        json!({
             "name": "generate_document",
             "description": "Create a REAL, professionally formatted docx/pptx/xlsx/pdf file in the artifacts dir. Use this instead of hand-building office files with python. Args: format ('docx'|'pptx'|'xlsx'|'pdf'), filename, code (a complete runnable Python program that saves the built document to os.environ['CONDUIT_OUTPUT']).",
             "inputSchema": {
@@ -448,7 +499,8 @@ mod tests {
             .filter_map(|t| t["name"].as_str())
             .collect();
         for tool in ["navigate", "read_page", "generate_document", "generate_diagram",
-                     "generate_file", "get_skill", "list_skills"] {
+                     "generate_file", "get_skill", "list_skills",
+                     "history", "hover", "evaluate", "click_and_wait"] {
             assert!(names.contains(&tool), "missing tool schema: {tool}");
         }
     }
@@ -457,7 +509,25 @@ mod tests {
     fn conduit_tool_routing_uses_tools_namespace() {
         assert_eq!(tool_op("generate_document").unwrap(), "conduit_tools:generate_document");
         assert_eq!(tool_op("navigate").unwrap(), "navigate"); // browser tools unchanged
+        // New browser tools keep their bare op names (dispatched in
+        // browser_mcp::dispatch) — never the conduit_tools namespace.
+        for tool in ["history", "hover", "evaluate", "click_and_wait"] {
+            assert_eq!(tool_op(tool).unwrap(), tool, "expected bare op for {tool}");
+        }
         assert!(tool_op("bogus").is_err()); // unknown tools error, not misroute
+    }
+
+    #[test]
+    fn new_browser_tool_schemas_require_correct_args() {
+        let schemas = tool_schemas();
+        let by_name = |n: &str| schemas.iter().find(|t| t["name"] == n).unwrap();
+        // hover / evaluate / click_and_wait require their primary arg.
+        assert_eq!(by_name("hover")["inputSchema"]["required"][0], "selector_or_description");
+        assert_eq!(by_name("evaluate")["inputSchema"]["required"][0], "expression");
+        assert_eq!(by_name("click_and_wait")["inputSchema"]["required"][0], "selector_or_description");
+        // history defaults to 'back'.
+        let props = &by_name("history")["inputSchema"]["properties"];
+        assert_eq!(props["direction"]["default"], "back");
     }
 
     #[test]

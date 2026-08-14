@@ -58,7 +58,8 @@ pub struct SkillSnapshot {
 
 /// Built-in skill embedded at compile time. Slugs match the old
 /// `assistant.skills` `command` fields so existing `/docx`, `/pptx`, `/pdf`,
-/// `/diagram` invocations keep working.
+/// `/diagram`, `/goal`, `/loop` invocations keep working. (`/loop` is an alias
+/// of `/goal` that shares the same `goal-loop-skill.md` body.)
 #[derive(Debug, Clone)]
 struct BuiltinSkill {
     slug: &'static str,
@@ -258,8 +259,11 @@ pub fn read_installed(slug: &str, kind: &str) -> Option<String> {
     fs::read_to_string(path).ok()
 }
 
-/// The four built-in skills, embedded at compile time. Bodies are the raw
+/// The built-in skills, embedded at compile time. Bodies are the raw
 /// markdown (frontmatter stripped at read time by `strip_frontmatter`).
+/// Six today: docx / pptx / pdf / diagram (document generation skills) plus
+/// goal and loop (the autonomous goal-driven loop; `/loop` is an alias of
+/// `/goal` and shares the same `goal-loop-skill.md` body).
 fn builtins() -> Vec<BuiltinSkill> {
     vec![
         BuiltinSkill {

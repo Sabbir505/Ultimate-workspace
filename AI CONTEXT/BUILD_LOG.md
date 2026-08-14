@@ -4,6 +4,112 @@ Running log per PRD §13.3: what was built, what was tested and how, assumptions
 
 ---
 
+## 2026-08-14 — Merge feat/goal-loop + feat/browser-agent-tools + feat/commit-msg-and-thinking-work; doc pass
+
+Three feature branches merged onto `master` back-to-back, plus a follow-up
+doc pass to keep `AI CONTEXT/`, `CONTRACT.md`, and `PROJECT_OVERVIEW.md`
+honest about the resulting tool/skill counts and the perf-metrics schema.
+
+**What was built (merges):**
+- **`/goal` + `/loop` autonomous goal-driven loop** (`feat/goal-loop`):
+  two new built-in skills, both backed by `skills/goal-loop-skill.md`
+  (`/loop` is an alias of `/goal`), registered in
+  `installed_skills.rs::builtins()`. The body teaches a `LOOP_STATUS:
+  continue|complete|blocked` sentinel protocol; the host reads the trailing
+  line to decide whether to issue another continuation turn. Frontend
+  chip + `LoopState` machine in `state/chat.ts`.
+- **Browser MCP tool expansion** (`feat/browser-agent-tools`): the
+  `conduit-browser-mcp` binary previously advertised the original six
+  browser ops (navigate / read_page / click / type_text / scroll /
+  wait_for); it now advertises **10 browser ops** — the six plus
+  `screenshot`, `history` (back|forward), `hover`, `evaluate`,
+  `click_and_wait` — plus **5 conduit tools** (`generate_document` /
+  `generate_diagram` / `generate_file` / `get_skill` / `list_skills`).
+  `click_and_wait` snaps the pre-click URL and polls for nav/selector/
+  network_idle in one round-trip; `evaluate` runs page JS and returns a
+  JSON-serialized value; `hover` dispatches real mouseover/mouseenter for
+  `:hover` menus (visual feedback included).
+- **Process row + thinking block + commit-message generation + fast-model
+  picker** (`feat/commit-msg-and-thinking-work`): `MessageBubble.tsx`
+  redesigned around `ProcessSummary` + `ActivityStepRow` +
+  `ThinkingBlock` + `renderProcessBlock` + `FilesChangedSummary`
+  (self-contained — replaced master's `SubagentStrip`/`TurnTimer`/
+  `ProcessCollapsible` pipeline; perf-metrics display, which lives in
+  `ComposerMetrics.tsx`, was untouched). Settings got a fast-model and
+  commit-message model picker (`cmProvider`/`cmModel`/`cmModels` state +
+  `listChatModels` effect); "Assistant section starts expanded" default
+  kept from master.
+
+**Merge-conflict resolution:**
+11 mechanical conflicts (perf-metrics fields / extra `add_chat_message`
+args) resolved `--ours` (master); `MessageBubble.tsx`, `SettingsView.tsx`,
+`global.css` hand-merged (keeping both sides' classes / sections where
+independent). Merge commits: `42721577`, `e02127fe`, `5dc5affd`.
+
+**Test fallout fixed (`e92b63ac`):** the merge left 10 lib tests red —
+8 because `db::mem()` (the in-memory test schema) only ran `init_schema`
+without the post-schema migrations, so it lacked the `llm_time_ms` /
+`tool_time_ms` / `ttft_ms` / `tokens_per_second` columns that
+`add_chat_message` now writes (its signature gained the perf fields via
+master's side of the merge). `mem()` now runs the full
+`configure()` migration sequence so the in-memory schema matches
+production. Plus the goal-loop builtin test asserted the parsed skill's
+*name* equaled the slug (`"goal"`/`"loop"`), but
+`parse_invoked_skills` returns the human-facing label
+(`"Run a goal-driven loop"`); fixed the assertion to check the body
+content (`LOOP_STATUS` sentinel) and the match count instead.
+
+**Normalizer fix (`a1ae7420`):** `normalizer_detects_mmproj_filename`
+was the one pre-existing red test on master before any of these merges
+(authored in `7ba3e554`/`13a50a41`, long before the three branches).
+`normalize_hf_model` previously computed `vision` once at the repo level
+from the HF tags (`multimodal`/`vision`) and applied it to every GGUF
+sibling — so LLava-style repos that ship a separate `*-mmproj-*.gguf`
+projector file but don't tag the repo as multimodal had their projector
+files flagged non-vision. `vision` is now derived per file: a filename
+containing `mmproj` is always vision, OR'd with the repo-level signal
+(tags OR repo-id cues like `llava`/`qwen-vl`/`internvl`/`minicpm-v`/
+`-vl`/`vision`) so a bare base-quant file in a vision repo still gets
+flagged. All 379 lib tests now pass.
+
+**Doc pass (`a1ae7420` follow-up):**
+- `CONTRACT.md` — `ChatMessageRecord` gained `llmTimeMs`/`toolTimeMs`/
+  `ttftMs`/`tokensPerSecond`; `Chat tools (29)` → `(32)` with
+  `list_skills`/`browser_screenshot`/`Task` added to the enumeration;
+  `browser_action_result` resolves `browser_read`/`browser_click`/
+  `browser_type`/`browser_scroll`/`browser_screenshot`.
+- `AI_CONTEXT.md` — `Last verified: 2026-08-07` → `2026-08-14`; the
+  "Tools (32)" line got `browser_screenshot`/`Task`; the
+  `conduit-browser-mcp` section now lists all 10 browser ops + 5 conduit
+  tools (was "Six tools: navigate / read_page / click / type_text /
+  scroll / wait_for"); built-in skills file-map row gained `goal-loop-
+  skill.md` and the 6-skill slug list; `chat_messages` schema row gained
+  the perf columns + `started_at`/`completed_at`; migrations paragraph
+  gained `migrate_chat_session_project_id`, `migrate_cost_v2`,
+  `migrate_chat_messages_v2`, `migrate_chat_messages_started_completed`,
+  `migrate_chat_messages_perf`; removed the dead
+  `lib/defaultSkills.ts` row from the utilities list (the file is gone —
+  built-in skills are served from the Rust backend now).
+- `PROJECT_OVERVIEW.md` — `29 tools` → `32 tools` (SVG header, narrative,
+  file-map row); `browser_mcp.rs` row clarified to enumerate the 10
+  browser ops + 5 conduit tools (was "relay tool whitelist"); added
+  built-in skill list (`docx`/`pptx`/`pdf`/`diagram` + `goal`/`loop`) to
+  the `installed_skills.rs` row.
+- `installed_skills.rs` doc comments — "The four built-in skills" →
+  "Six today" with the goal/loop note; the slash-command enumeration
+  gained `/goal`, `/loop`.
+- `task-conduit-browser-mcp.md` — the original task proposal enumerated
+  only six tools and used `type` (shipped as `type_text`) plus a
+  two-value `read_page` mode (`interactive|content`); left as a
+  historical document, but see this entry for the current surface.
+
+**Verification:** `npx tsc --noEmit` clean; `cargo build --lib` +
+`cargo build --bin conduit-browser-mcp` clean; `cargo test --lib` →
+**379 passed, 0 failed**; `npx vitest run src/test/goalLoop.test.ts` →
+19 passed.
+
+---
+
 ## 2026-08-09 — `--jinja` fallback for Clang 20.1.8 llama-server + artifact routing (SVG→Canvas, HTML/JSX→browser)
 
 Two fixes finished from a half-landed changeset: the local-model sidecar

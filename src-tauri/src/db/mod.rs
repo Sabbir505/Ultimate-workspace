@@ -659,6 +659,25 @@ pub(crate) fn mem() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
     conn.pragma_update(None, "foreign_keys", "ON").unwrap();
     init_schema(&conn).unwrap();
+    // Run the post-schema migrations so the in-memory test DB matches the
+    // production schema shape — in particular `migrate_chat_messages_perf`
+    // adds the llm_time_ms / tool_time_ms / ttft_ms / tokens_per_second columns
+    // that `add_chat_message` (and the perf-metrics UI) expect, and that the
+    // streaming/code paths in chat/mod.rs and agent_sessions.rs persist into.
+    // Without this, tests calling `add_chat_message` (whose signature now
+    // carries the perf fields) hit "table chat_messages has no column named
+    // llm_time_ms" — see db::chat::* and db::cost_v2::* tests.
+    migrate_chat_session_flags(&conn).unwrap();
+    migrate_chat_session_watch_mode(&conn).unwrap();
+    migrate_chat_session_agent(&conn).unwrap();
+    migrate_chat_session_project_id(&conn).unwrap();
+    migrate_artifacts_message_id(&conn).unwrap();
+    migrate_chat_messages_superseded(&conn).unwrap();
+    migrate_cost_v2(&conn).unwrap();
+    migrate_chat_messages_v2(&conn).unwrap();
+    migrate_chat_messages_started_completed(&conn).unwrap();
+    migrate_chat_messages_perf(&conn).unwrap();
+    migrate_unc_paths(&conn).unwrap();
     conn
 }
 

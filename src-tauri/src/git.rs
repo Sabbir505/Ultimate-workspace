@@ -237,11 +237,40 @@ pub fn get_git_diff(path: &Path) -> Result<String, String> {
 ///   - **Renames**: the panel passes the new path; `git diff HEAD` will show
 ///     the rename detection automatically.
 ///
+/// Validate that a renderer-supplied "repo-relative" file path really is one.
+///
+/// SECURITY: `get_git_file_diff` passes `file_path` into `git diff --` and
+/// joins it onto the repo root. `Path::join` silently DISCARDS the base when
+/// handed an absolute path, and a `..` component walks out of the repo — either
+/// lets a compromised renderer read arbitrary files on disk. Reject both, then
+/// verify the lexically-normalized joined path still sits under the repo root
+/// (belt-and-suspenders against component forms we didn't enumerate).
+fn validate_repo_relative(repo: &Path, file_path: &str) -> Result<(), String> {
+    let rel = Path::new(file_path);
+    if rel.is_absolute() {
+        return Err("file_path must be relative to the repository root".to_string());
+    }
+    if rel
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err("file_path must not contain '..'".to_string());
+    }
+    // components() also drops interior "." segments, so collecting them is our
+    // cheap lexical normalization (no fs access — the path may not exist yet).
+    let normalized: PathBuf = repo.join(rel).components().collect();
+    if !crate::util::path_starts_with_ci(&normalized, repo) {
+        return Err("file_path escapes the repository root".to_string());
+    }
+    Ok(())
+}
+
 /// Returns an empty string when there's no diff to show (clean file).
 pub fn get_git_file_diff(path: &Path, file_path: &str) -> Result<String, String> {
     if !path.is_dir() || !is_git_repo(path) {
         return Ok(String::new());
     }
+    validate_repo_relative(path, file_path)?;
     // First, is the file tracked? `git ls-files --error-unmatch` exits non-zero
     // for untracked paths — that's how we detect them without parsing status.
     let tracked = git_command(
@@ -600,8 +629,18 @@ pub fn checkout_branch(path: &Path, name: &str) -> Result<(), String> {
         return Err("invalid branch name".to_string());
     }
     // For remote branches, strip the remote prefix so checkout creates a local
-    // tracking branch automatically.
-    let local_name = name.strip_prefix("origin/").unwrap_or(name);
+    // tracking branch automatically (git's DWIM). Only strip when the prefix
+    // before the first '/' is a KNOWN remote — plain `checkout <stripped>`
+    // would otherwise silently check out the wrong local branch for a local
+    // branch name that itself contains a '/' (e.g. `feature/x`).
+    let local_name = match name.split_once('/') {
+        Some((prefix, rest)) if !rest.is_empty() => {
+            let remotes = run_git(path, &["remote"]).unwrap_or_default();
+            let is_remote = remotes.lines().map(str::trim).any(|r| r == prefix);
+            if is_remote { rest } else { name }
+        }
+        _ => name,
+    };
     run_git(path, &["checkout", local_name]).map(|_| ())
 }
 
@@ -713,6 +752,28 @@ mod tests {
     fn worktree_path_plain_branch() {
         let p = worktree_path_for(Path::new("/home/u/myproj"), "main");
         assert_eq!(p, PathBuf::from("/home/u/myproj-main"));
+    }
+
+    /// A2: `get_git_file_diff` must reject renderer-supplied paths that would
+    /// escape the repo (`Path::join` discards the base for absolute inputs,
+    /// `..` walks out of the tree) — otherwise `git diff --no-index` becomes
+    /// an arbitrary-file read.
+    #[test]
+    fn repo_relative_validation_rejects_escapes() {
+        let repo = Path::new("/home/u/myproj");
+        // Plain relative paths (the normal case) pass.
+        assert!(validate_repo_relative(repo, "src/main.rs").is_ok());
+        assert!(validate_repo_relative(repo, "deep/nested/file.txt").is_ok());
+        // Interior "." is harmless after normalization.
+        assert!(validate_repo_relative(repo, "./src/main.rs").is_ok());
+        // Absolute paths: POSIX and Windows drive/UNC forms.
+        assert!(validate_repo_relative(repo, "/etc/passwd").is_err());
+        assert!(validate_repo_relative(repo, "C:/Windows/system32/config").is_err());
+        assert!(validate_repo_relative(repo, "\\\\server\\share\\secret").is_err());
+        // Parent traversal in any position.
+        assert!(validate_repo_relative(repo, "../outside.txt").is_err());
+        assert!(validate_repo_relative(repo, "src/../../outside.txt").is_err());
+        assert!(validate_repo_relative(repo, "src/../..").is_err());
     }
 
     #[test]

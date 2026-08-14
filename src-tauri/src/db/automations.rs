@@ -251,14 +251,35 @@ pub fn finish_run(
 
 /// Newest runs first, capped so a long-running automation doesn't paginate
 /// forever. 100 is enough for the UI's "Past runs" pane.
-pub fn list_runs_for(conn: &Connection, automation_id: &str, limit: i64) -> DbResult<Vec<AutomationRun>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {RUN_COLUMNS} FROM automation_runs
-           WHERE automation_id = ?1
-           ORDER BY started_at DESC
-           LIMIT ?2"
-    ))?;
-    let rows = stmt.query_map(params![automation_id, limit], map_run)?;
+pub fn list_runs_for(
+    conn: &Connection,
+    automation_id: &str,
+    limit: i64,
+    // Keyset pagination (mi23): only runs started before this run's
+    // started_at. The runs table is started_at-ordered DESC for display, so
+    // `before_started_at` gives a stable cursor without OFFSET scans.
+    before_started_at: Option<i64>,
+) -> DbResult<Vec<AutomationRun>> {
+    let sql = match before_started_at {
+        Some(_) => format!(
+            "SELECT {RUN_COLUMNS} FROM automation_runs
+               WHERE automation_id = ?1 AND started_at < ?3
+               ORDER BY started_at DESC
+               LIMIT ?2"
+        ),
+        None => format!(
+            "SELECT {RUN_COLUMNS} FROM automation_runs
+               WHERE automation_id = ?1
+               ORDER BY started_at DESC
+               LIMIT ?2"
+        ),
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = if let Some(b) = before_started_at {
+        stmt.query_map(params![automation_id, limit, b], map_run)?
+    } else {
+        stmt.query_map(params![automation_id, limit], map_run)?
+    };
     rows.collect()
 }
 

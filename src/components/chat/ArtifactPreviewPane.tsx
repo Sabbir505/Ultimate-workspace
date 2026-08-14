@@ -401,6 +401,12 @@ export function ArtifactPreviewPane({
 
   // Scroll-wheel zoom, anchored at the cursor: the content point under the
   // pointer stays put. Attached non-passively so preventDefault works.
+  //
+  // NOTE (PERFORMANCE_AUDIT.md F4): unlike TerminalPane (where wheel only
+  // acts while Ctrl is held, so the listener can stay passive until then),
+  // here wheel IS the zoom gesture — every wheel event must be cancelable
+  // to suppress native scroll while zooming. The cost is contained: the
+  // listener only attaches while `pannable` (diagram/image previews).
   useEffect(() => {
     const el = contentRef.current;
     if (!el || !pannable) return;

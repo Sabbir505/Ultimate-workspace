@@ -18,6 +18,8 @@ vi.mock("../lib/ipc", () => ({
     { id: 1, chatSessionId: "x", role: "user", content: "hi" },
   ]),
   listChatArtifacts: vi.fn().mockResolvedValue([]),
+  // selectSession → loadSessionMetrics fetches these on every chat open.
+  getChatSessionMetrics: vi.fn().mockResolvedValue(null),
   touchChatSession: vi.fn().mockResolvedValue(undefined),
   createChatSession: vi.fn(),
   generateChatTitle: vi.fn(),

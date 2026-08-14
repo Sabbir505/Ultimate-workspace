@@ -253,8 +253,15 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
     termRef.current = term;
     fitRef.current = fit;
 
-    // Ctrl+scroll font zoom (standard terminal behavior). Wheel events need a
-    // non-passive listener to be cancelable.
+    // Ctrl+scroll font zoom (standard terminal behavior).
+    //
+    // PERF (PERFORMANCE_AUDIT.md F4): wheel events need a NON-passive
+    // listener to be cancelable, but a permanently non-passive listener
+    // opts the container out of the compositor's scroll fast-path on every
+    // scroll. Since zoom only applies while Ctrl is held, the listener is
+    // passive by default and only flips to non-passive between Ctrl
+    // keydown and keyup.
+    let ctrlHeld = false;
     const onWheel = (e: WheelEvent) => {
       if (!e.ctrlKey) return;
       e.preventDefault();
@@ -267,7 +274,34 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
         refit(term, fit, paneId);
       }
     };
-    container.addEventListener("wheel", onWheel, { passive: false });
+    const applyWheelListener = () => {
+      container.removeEventListener("wheel", onWheel);
+      container.addEventListener("wheel", onWheel, { passive: !ctrlHeld });
+    };
+    const onCtrlDown = (e: KeyboardEvent) => {
+      if (e.key === "Control" && !ctrlHeld) {
+        ctrlHeld = true;
+        applyWheelListener();
+      }
+    };
+    const onCtrlUp = (e: KeyboardEvent) => {
+      if (e.key === "Control" && ctrlHeld) {
+        ctrlHeld = false;
+        applyWheelListener();
+      }
+    };
+    // Window blur while Ctrl is held would otherwise latch the non-passive
+    // listener on until the next Ctrl press.
+    const onBlurReset = () => {
+      if (ctrlHeld) {
+        ctrlHeld = false;
+        applyWheelListener();
+      }
+    };
+    applyWheelListener();
+    window.addEventListener("keydown", onCtrlDown);
+    window.addEventListener("keyup", onCtrlUp);
+    window.addEventListener("blur", onBlurReset);
     // Initial fit after layout settles.
     requestAnimationFrame(() => {
       refit(term, fit, paneId);
@@ -284,7 +318,21 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
     // re-attached automatically if the Channel path is unavailable.
     let channelUnsub: (() => void) | null = null;
     let subscribedChannel: { onmessage: ((frame: number[]) => void) | null } | null = null;
+    // The channel subscription is async: if this effect's cleanup runs before
+    // ptyChannel resolves (pane replaced, StrictMode remount), the `.then`
+    // below must NOT attach the handler to the disposed terminal — it would
+    // throw inside the channel callback on every frame and leak the
+    // subscription for the pane's lifetime.
+    let disposed = false;
     void ptyChannel(paneId).then((ch) => {
+      if (disposed) {
+        // Effect already cleaned up — detach immediately so the backend
+        // channel doesn't hold a stale subscriber. (The declared channel
+        // type doesn't allow null, but clearing onmessage is the supported
+        // detach path the unsub closure below also relies on.)
+        (ch as { onmessage: ((frame: number[]) => void) | null }).onmessage = null;
+        return;
+      }
       const handler = (frame: number[]) => {
         if (term) term.write(new Uint8Array(frame));
       };
@@ -405,10 +453,16 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
     observer.observe(container);
 
     return () => {
+      // Signal the in-flight ptyChannel subscription BEFORE disposing the
+      // terminal (see the `disposed` flag above).
+      disposed = true;
       observer.disconnect();
       if (resizeTimer !== null) window.clearTimeout(resizeTimer);
       container.removeEventListener("contextmenu", onCtxMenu);
       container.removeEventListener("wheel", onWheel);
+      window.removeEventListener("keydown", onCtrlDown);
+      window.removeEventListener("keyup", onCtrlUp);
+      window.removeEventListener("blur", onBlurReset);
       dataSub.dispose();
       if (channelUnsub) channelUnsub();
       void unlistenOutput.then((fn) => fn());

@@ -10,7 +10,11 @@
  */
 import React, { useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, Animated } from 'react-native';
-import { Loader } from 'lucide-react-native';
+import Ionicons from '@expo/vector-icons/Ionicons';
+// M4: lucide-react-native cannot be tree-shaken by Metro (one giant JS
+// bundle of every icon); Ionicons is a glyph font already bundled with the
+// app. These wrappers preserve the lucide call-sites' (size, color) props.
+const Loader = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="sync" size={size} color={color} />;
 import { theme } from '../theme';
 
 export interface StatusBannerProps {

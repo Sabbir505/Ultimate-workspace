@@ -21,7 +21,7 @@
  * to the top on new content (cursor-style — newest at the top, you read
  * downward as the conversation grows).
  */
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -37,7 +37,14 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, useRoute } from '@react-navigation/native';
-import { ArrowLeft, Edit3, MoreVertical, RefreshCcw } from 'lucide-react-native';
+import Ionicons from '@expo/vector-icons/Ionicons';
+// M4: lucide-react-native cannot be tree-shaken by Metro (one giant JS
+// bundle of every icon); Ionicons is a glyph font already bundled with the
+// app. These wrappers preserve the lucide call-sites' (size, color) props.
+const ArrowLeft = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="arrow-back" size={size} color={color} />;
+const Edit3 = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="create-outline" size={size} color={color} />;
+const MoreVertical = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="ellipsis-vertical" size={size} color={color} />;
+const RefreshCcw = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="refresh" size={size} color={color} />;
 import { useTheme, theme as themeMod } from '../theme';
 import { useRelay, type Session } from '../hooks/useRelay';
 import { useSessionChat } from '../hooks/useSessionChat';
@@ -63,14 +70,71 @@ export default function SessionChat() {
   const [renameValue, setRenameValue] = useState(session?.title ?? '');
 
   const listRef = useRef<FlatList>(null);
+  const lastAutoScrollRef = useRef(0);
 
   // Auto-scroll to top on new content (newest-first).
+  // M5 (PERFORMANCE_AUDIT.md): throttled to one scroll per 100 ms — streaming
+  // tokens previously re-ran scrollToOffset on EVERY length change, fighting
+  // the layout engine for the whole turn.
   useEffect(() => {
-    if (chat.messages.length > 0) {
+    if (chat.messages.length === 0 && chat.streamingContent.length === 0) return;
+    const scroll = () => {
+      lastAutoScrollRef.current = Date.now();
       // Defer to next frame so the new row is mounted first.
       requestAnimationFrame(() => listRef.current?.scrollToOffset({ offset: 0, animated: true }));
+    };
+    const elapsed = Date.now() - lastAutoScrollRef.current;
+    if (elapsed >= 100) {
+      scroll();
+      return;
     }
-  }, [chat.messages.length, chat.streamingContent.length]);
+    const t = setTimeout(scroll, 100 - elapsed);
+    return () => clearTimeout(t);
+  }, [chat.messages.length, chat.streamingContent]);
+
+  // M5: memoize the header — it used to be a fresh inline JSX tree on every
+  // render, forcing FlatList to diff/re-render the streaming bubble,
+  // approvals and artifact chip on each streaming token.
+  const listHeader = useMemo(() => (
+    <>
+      {/* Live streaming bubble — appears above the persisted messages. */}
+      {chat.streaming ? (
+        <MessageBubble
+          role="assistant"
+          content={chat.streamingContent}
+          streaming
+          createdAt={Math.floor(Date.now() / 1000)}
+        />
+      ) : null}
+
+      {/* Pending approvals at the very top of the stream. */}
+      {chat.pendingApprovals.map((a) => (
+        <ApprovalCard
+          key={a.pendingId}
+          tool={a.tool}
+          summary={a.summary}
+          args={a.args}
+          onApprove={() => chat.approve(a.pendingId)}
+          onDeny={() => chat.deny(a.pendingId)}
+        />
+      ))}
+
+      {/* Latest artifact chip (only when not streaming). */}
+      {chat.lastArtifact && !chat.streaming ? (
+        <View style={styles.artifactRow}>
+          <ArtifactChip artifact={chat.lastArtifact} />
+        </View>
+      ) : null}
+
+      {/* Initial loading state. */}
+      {chat.loading && chat.messages.length === 0 ? (
+        <View style={styles.loadingRow}>
+          <ActivityIndicator size="small" color={c.textSecondary} />
+        </View>
+      ) : null}
+    </>
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [chat.streaming, chat.streamingContent, chat.pendingApprovals, chat.lastArtifact, chat.loading, chat.messages.length, chat.approve, chat.deny, c.textSecondary]);
 
   const handleRename = useCallback(() => {
     if (renameValue.trim().length === 0) return;
@@ -163,45 +227,15 @@ export default function SessionChat() {
           keyExtractor={(item) => String(item.id)}
           inverted={false}
           contentContainerStyle={styles.listContent}
-          ListHeaderComponent={
-            <>
-              {/* Live streaming bubble — appears above the persisted messages. */}
-              {chat.streaming ? (
-                <MessageBubble
-                  role="assistant"
-                  content={chat.streamingContent}
-                  streaming
-                  createdAt={Math.floor(Date.now() / 1000)}
-                />
-              ) : null}
-
-              {/* Pending approvals at the very top of the stream. */}
-              {chat.pendingApprovals.map((a) => (
-                <ApprovalCard
-                  key={a.pendingId}
-                  tool={a.tool}
-                  summary={a.summary}
-                  args={a.args}
-                  onApprove={() => chat.approve(a.pendingId)}
-                  onDeny={() => chat.deny(a.pendingId)}
-                />
-              ))}
-
-              {/* Latest artifact chip (only when not streaming). */}
-              {chat.lastArtifact && !chat.streaming ? (
-                <View style={styles.artifactRow}>
-                  <ArtifactChip artifact={chat.lastArtifact} />
-                </View>
-              ) : null}
-
-              {/* Initial loading state. */}
-              {chat.loading && chat.messages.length === 0 ? (
-                <View style={styles.loadingRow}>
-                  <ActivityIndicator size="small" color={c.textSecondary} />
-                </View>
-              ) : null}
-            </>
-          }
+          // M3 (PERFORMANCE_AUDIT.md): window the list. No getItemLayout —
+          // message heights are variable (markdown/code blocks), so a fixed
+          // layout would misplace rows; the batching props below are the
+          // safe subset for variable-height lists.
+          initialNumToRender={12}
+          maxToRenderPerBatch={5}
+          windowSize={7}
+          removeClippedSubviews={true}
+          ListHeaderComponent={listHeader}
           renderItem={({ item }) => (
             <View>
               <MessageBubble
@@ -233,19 +267,9 @@ export default function SessionChat() {
               </TouchableOpacity>
             ) : null
           }
-          // Refresh = re-fetch the first page from the top.
+          // Refresh = re-fetch the first page from the top (M10).
           refreshing={chat.loading && chat.messages.length > 0}
-          onRefresh={() => {
-            // Reset the list to the first page; the hook will handle merging.
-            if (sessionId) {
-              // Clear local state via reload: simplest is to set sessionId in the
-              // hook's ref to a sentinel, then back. We don't expose that, so
-              // we approximate by calling getSessionMessages with no before_id
-              // and a smaller limit; the hook appends/prepends correctly when
-              // IDs are older. For a "refresh" UX, we re-send a fresh query —
-              // this is best-effort.
-            }
-          }}
+          onRefresh={chat.refresh}
         />
 
         {/* Transient status banner. */}

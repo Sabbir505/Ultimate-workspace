@@ -105,9 +105,13 @@ pub fn list_automation_runs(
     db: State<'_, DbState>,
     automation_id: String,
     limit: Option<i64>,
+    // mi23: keyset pagination — return runs with id < before_id (runs are
+    // id-ordered, newest last). None = latest page.
+    before_id: Option<i64>,
 ) -> Result<Vec<AutomationRun>, String> {
     let conn = db.0.lock();
-    db::list_runs_for(&conn, &automation_id, limit.unwrap_or(100)).map_err(|e| e.to_string())
+    db::list_runs_for(&conn, &automation_id, limit.unwrap_or(100), before_id)
+        .map_err(|e| e.to_string())
 }
 
 /// How many runs an automation has on file (sidebar list badge).

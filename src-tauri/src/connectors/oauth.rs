@@ -465,7 +465,9 @@ impl OAuthFlows {
                     if e.kind() != std::io::ErrorKind::AddrInUse {
                         break;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    // mi14: tokio sleep — std::thread::sleep blocks the
+                    // runtime worker thread for 250 ms per retry.
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 }
             }
         }
@@ -559,7 +561,7 @@ impl OAuthFlows {
                 // until app exit, holding the port so every later Connect
                 // fails with AddrInUse (M15). Poke it so it wakes, fails
                 // state validation, and drops the listener.
-                unblock_acceptor(port);
+                unblock_acceptor_async(port).await;
                 let msg = "Authorization timed out — no callback received within 5 minutes. Please try Connect again.".to_string();
                 let _ = app.emit("oauth:callback", OAuthCallbackEvent {
                     flow_id,
@@ -667,10 +669,25 @@ impl OAuthFlows {
 /// its 400 and returns — dropping the listener and freeing the port. Without
 /// this a timed-out flow leaks the bound port until app restart because
 /// `spawn_blocking` cannot be cancelled.
+// Sync variant retained for the test at the bottom of this file (which has no
+// runtime); production call sites use unblock_acceptor_async.
+#[allow(dead_code)]
 fn unblock_acceptor(port: u16) {
     if let Ok(mut s) = std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)) {
         let _ = s.write_all(b"GET /conduit-timeout HTTP/1.0\r\n\r\n");
         let _ = s.flush();
+    }
+}
+
+/// Async variant for async call sites (PERFORMANCE_AUDIT.md B5): the sync
+/// `std::net::TcpStream::connect` above blocks the calling runtime thread for
+/// the duration of the TCP handshake. Usually ~1 ms to localhost, but a
+/// stuck loopback stack (VPN/filter driver) can stall it much longer.
+async fn unblock_acceptor_async(port: u16) {
+    use tokio::io::AsyncWriteExt;
+    if let Ok(mut s) = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await {
+        let _ = s.write_all(b"GET /conduit-timeout HTTP/1.0\r\n\r\n").await;
+        let _ = s.flush().await;
     }
 }
 

@@ -9,7 +9,15 @@ import {
   Pressable,
   TextInput,
 } from 'react-native';
-import { ChevronDown, Check, Search, X, Cpu } from 'lucide-react-native';
+import Ionicons from '@expo/vector-icons/Ionicons';
+// M4: lucide-react-native cannot be tree-shaken by Metro (one giant JS
+// bundle of every icon); Ionicons is a glyph font already bundled with the
+// app. These wrappers preserve the lucide call-sites' (size, color) props.
+const ChevronDown = ({ size, color }: { size?: number; color?: string; style?: object }) => <Ionicons name="chevron-down" size={size} color={color} />;
+const Check = ({ size, color }: { size?: number; color?: string; style?: object }) => <Ionicons name="checkmark" size={size} color={color} />;
+const Search = ({ size, color }: { size?: number; color?: string; style?: object }) => <Ionicons name="search" size={size} color={color} />;
+const X = ({ size, color }: { size?: number; color?: string; style?: object }) => <Ionicons name="close" size={size} color={color} />;
+const Cpu = ({ size, color }: { size?: number; color?: string; style?: object }) => <Ionicons name="hardware-chip" size={size} color={color} />;
 import { theme } from '../theme';
 import { ProviderInfo } from '../hooks/useRelay';
 

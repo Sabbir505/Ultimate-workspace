@@ -12,7 +12,13 @@
  */
 import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
-import { ShieldAlert, Check, X } from 'lucide-react-native';
+import Ionicons from '@expo/vector-icons/Ionicons';
+// M4: lucide-react-native cannot be tree-shaken by Metro (one giant JS
+// bundle of every icon); Ionicons is a glyph font already bundled with the
+// app. These wrappers preserve the lucide call-sites' (size, color) props.
+const ShieldAlert = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="shield" size={size} color={color} />;
+const Check = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="checkmark" size={size} color={color} />;
+const X = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="close" size={size} color={color} />;
 import { theme } from '../theme';
 
 export interface ApprovalCardProps {

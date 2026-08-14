@@ -1,0 +1,499 @@
+/* sidebar — Sidebar shell, project tree with nested chats, artifact-library entry, connector grid, plan preview notch.
+   Split out of the old monolithic global.css (2026-08-15). Import order in
+   global.css preserves the original cascade — do not reorder imports. */
+/* ---------- Sidebar ---------- */
+.sidebar {
+  width: var(--sidebar-width);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 85%, rgba(255,255,255,0.08) 15%),
+    color-mix(in srgb, var(--surface-glass) 90%, rgba(255,255,255,0.04) 10%)
+  );
+  backdrop-filter: blur(32px) saturate(160%);
+  -webkit-backdrop-filter: blur(32px) saturate(160%);
+  box-shadow:
+    var(--glass-rim),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  position: relative;
+  z-index: 3;
+  overflow: hidden;
+}
+/* Liquid glass sheen — subtle animated shimmer across the sidebar surface */
+.sidebar::before {
+  content: "";
+  position: absolute;
+  inset: -50% -50%;
+  width: 200%;
+  height: 200%;
+  background:
+    radial-gradient(ellipse 80% 50% at 20% 40%, rgba(255,255,255,0.07) 0%, transparent 50%),
+    radial-gradient(ellipse 60% 40% at 80% 60%, rgba(255,255,255,0.04) 0%, transparent 50%);
+  pointer-events: none;
+  animation: liquid-shimmer 8s ease-in-out infinite;
+  z-index: 0;
+}
+@keyframes liquid-shimmer {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  25% { transform: translate(2%, -1%) rotate(0.5deg); }
+  50% { transform: translate(-1%, 2%) rotate(-0.3deg); }
+  75% { transform: translate(1%, 1%) rotate(0.2deg); }
+}
+/* Ensure sidebar children sit above the shimmer layer */
+.sidebar > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Thin scrollbar used inside the sidebar's scroll regions (chat history,
+   connector row, projects list). Overrides the global webkit-scrollbar with a
+   narrower, more translucent thumb suited to a narrow glass panel. */
+.sidebar-thin-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+.sidebar-thin-scroll::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+.sidebar-thin-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sidebar-thin-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+.sidebar-thin-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+/* Projects list: cap height and scroll internally so a long project list
+   can't push CHAT HISTORY off-screen. */
+.sidebar-projects-scroll {
+  /* Room for the projects tree AND its expanded chat dropdowns. The whole
+     projects section scrolls when it outgrows this cap. */
+  max-height: 320px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+.sidebar-projects-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+.sidebar-projects-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+.sidebar-projects-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* ── Project tree: expandable rows with nested chats + hover actions ────
+ * Each project is a row whose body click selects+toggles expand. The "+"
+ * (new chat for project) and "x" (remove project) buttons are hidden until
+ * the row is hovered — same reveal pattern as .chat-session-menu-btn.
+ * Visual language matches .chat-session-row so projects + nested chats read
+ * as one cohesive list. */
+.sidebar-project-node {
+  display: flex;
+  flex-direction: column;
+  /* Each node fills the sidebar column width so its row's flex children
+     (name vs. +/x actions) share one line instead of wrapping. */
+  width: 100%;
+  min-width: 0;
+}
+.sidebar-project-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s var(--ease);
+}
+/* All lucide SVGs in the row keep their intrinsic size and never shrink to a
+   dot (flex items collapse without this — the classic "icon renders as a dot"
+   bug). */
+.sidebar-project-row > svg,
+.sidebar-project-row span > svg,
+.sidebar-project-action-btn svg {
+  flex: none;
+  flex-shrink: 0;
+  stroke: currentColor;
+}
+.sidebar-project-row:hover {
+  background: var(--surface-2);
+}
+/* No active/selected background on the project row itself — the active chat's
+   background (on the nested chat row) is enough to indicate the open chat. */
+.sidebar-project-row.is-selected {
+  background: transparent;
+  box-shadow: none;
+}
+.sidebar-project-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.sidebar-project-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 12px;
+  color: var(--text-dim);
+  transition: transform 0.15s var(--ease);
+}
+.sidebar-project-folder {
+  /* Breathing room between the folder icon and the project name. */
+  flex: none;
+  margin-right: 6px;
+  color: var(--text-dim);
+}
+.sidebar-project-row.is-selected .sidebar-project-folder {
+  color: var(--text);
+}
+.sidebar-project-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-project-count {
+  flex: none;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  margin-right: 2px;
+}
+.sidebar-project-actions {
+  /* Revealed on row hover/focus — hidden at rest to keep the row clean. */
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  flex: none;
+  opacity: 0;
+  transition: opacity 0.15s var(--ease);
+}
+.sidebar-project-row:hover .sidebar-project-actions,
+.sidebar-project-row:focus-within .sidebar-project-actions {
+  opacity: 1;
+}
+.sidebar-project-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+/* Crisp +/× glyph. Keep flex-shrink:0 (inherited from the row svg rule) so the
+   icon never collapses to a dot when the actions are revealed. */
+.sidebar-project-action-btn svg {
+  width: 13px;
+  height: 13px;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  fill: none;
+}
+/* The remove (×) button is red so it reads as destructive. */
+.sidebar-project-action-danger {
+  color: #ef4444;
+}
+.sidebar-project-action-btn:hover {
+  background: var(--surface-3, var(--surface-2));
+}
+.sidebar-project-action-danger:hover {
+  background: #ef4444;
+  color: #fff;
+}
+
+/* Indented chat list under an expanded project. The left guide line + indent
+ * give it a tree feel; rows share the .chat-session-row visual language. */
+.sidebar-project-chats {
+  margin: 1px 0 2px 0;
+  padding-left: 18px;
+  border-left: 1px solid var(--border);
+  margin-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.sidebar-project-chat-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s var(--ease);
+}
+.sidebar-project-chat-row:hover {
+  background: var(--surface-2);
+}
+.sidebar-project-chat-row.is-active {
+  background: var(--accent-soft);
+  box-shadow: var(--glass-rim-soft);
+}
+.sidebar-project-chat-row.is-unread .sidebar-project-chat-title {
+  font-weight: 700;
+}
+.sidebar-project-chat-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.sidebar-project-chat-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 13px;
+  color: var(--text-dim);
+}
+.sidebar-project-chat-icon {
+  flex: none;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+.sidebar-project-chat-row.is-active .sidebar-project-chat-icon {
+  opacity: 1;
+  color: var(--text);
+}
+.sidebar-project-chat-working {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  border-top-color: transparent;
+  animation: sidebar-chat-spin 0.7s linear infinite;
+}
+@keyframes sidebar-chat-spin {
+  to { transform: rotate(360deg); }
+}
+.sidebar-project-chat-star {
+  color: #f59e0b;
+  font-size: 11px;
+  line-height: 1;
+}
+.sidebar-project-chat-unread-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.sidebar-project-chat-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-project-chat-time {
+  flex: none;
+  font-size: 10px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+/* "Show sidebar" button â€” rendered inline at the start of the toolbar while
+ * the sidebar is collapsed (App.tsx), so it never overlaps the title. */
+.sidebar-restore {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+}
+.sidebar-restore:hover {
+  color: var(--text);
+}
+
+
+
+/* Collapse-sidebar icon button (top of the sidebar) */
+.sidebar-collapse-btn {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+}
+.sidebar-collapse-btn:hover {
+  color: var(--text);
+}
+
+/* Pinned upper block: New Chat / ARTIFACTS / CONNECTORS / AUTOMATIONS /
+   PROJECTS stay put; only the chat history below scrolls. */
+
+/* Chat history: the ONLY scrolling region in the sidebar. */
+
+
+
+/* Connector icon grid (sidebar): 4 columns, at most 3 rows, then a "more"
+   tile that opens the full list in a modal. */
+.connector-grid-wrap {
+  padding: 0 8px 4px;
+}
+.connector-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+.connector-tile {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.connector-tile:hover {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
+.connector-tile-more {
+  font-size: 13px;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+}
+.connector-modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 320px;
+  overflow-y: auto;
+  min-width: 280px;
+}
+.connector-modal-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+.connector-modal-row:hover {
+  background: var(--surface-2, rgba(0, 0, 0, 0.04));
+}
+.connector-modal-name {
+  flex: 1;
+  font-size: 13px;
+}
+.connector-modal-status {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.connector-modal-status.on {
+  color: #4caf7d;
+}
+
+/* Plan preview — notched card that blends into the composer below */
+.plan-preview {
+  padding: 2px max(14px, calc((100% - 780px) / 2)) 0;
+  flex-shrink: 0;
+  margin-bottom: -1px;
+  position: relative;
+  z-index: 1;
+}
+.plan-preview-card {
+  border: 1px solid var(--border);
+  border-radius: 12px 12px 0 0;
+  border-bottom: none;
+  background: var(--surface);
+  overflow: hidden;
+  box-shadow: 0 -1px 0 var(--surface);
+}
+.plan-preview-title {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 10px 14px 6px;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.plan-preview-icon {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+.plan-preview-lines {
+  padding: 0 14px 10px;
+}
+.plan-preview-line {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.plan-preview-blur {
+  position: relative;
+  mask-image: linear-gradient(to bottom, black 30%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, black 30%, transparent 100%);
+}
+.plan-preview-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px 14px;
+  gap: 10px;
+}
+.plan-preview-btn {
+  padding: 6px 14px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+.plan-preview-btn.expand {
+  flex: 0;
+}
+.plan-preview-btn.expand:hover {
+  background: var(--bg-elevated);
+}
+.plan-preview-btn.agree {
+  flex: 1;
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.plan-preview-btn.agree:hover {
+  filter: brightness(1.1);
+}

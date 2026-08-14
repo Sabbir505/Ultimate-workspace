@@ -3,7 +3,7 @@
 // collapsed activity group into its own DiffCard with filename, +/− stats and
 // red/green preview lines, while non-edit tools still fold into the group.
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, fireEvent, render } from "@testing-library/react";
 import { MessageBubble } from "../components/chat/MessageBubble";
 import type { ChatMessage } from "../lib/ipc";
 
@@ -37,6 +37,13 @@ function webTool(detail: string): string {
 
 afterEach(() => cleanup());
 
+/** The redesign nests DiffCards inside the collapsed ProcessSummary body —
+ *  expand the single process toggle before asserting on nested content. */
+function expandProcess(container: HTMLElement) {
+  const toggle = container.querySelector(".chat-process-toggle") as HTMLElement;
+  fireEvent.click(toggle);
+}
+
 describe("MessageBubble inline diff cards", () => {
   it("renders an edit tool call as a diff card with stats and preview lines", () => {
     const content = [
@@ -46,14 +53,16 @@ describe("MessageBubble inline diff cards", () => {
     const { container, queryByText } = render(
       <MessageBubble message={assistantMsg(content)} />,
     );
+    expandProcess(container);
 
     const card = container.querySelector(".diff-card");
     expect(card).not.toBeNull();
-    // Header: filename and +/− stats (1 del, 2 adds, one hunk).
-    expect(queryByText("src/lib/auth.ts")).not.toBeNull();
-    expect(queryByText("+2")).not.toBeNull();
-    expect(queryByText("−1")).not.toBeNull();
-    expect(queryByText(/· 1 hunk/)).not.toBeNull();
+    // Header: filename and +/− stats (1 del, 2 adds, one hunk). Scoped to the
+    // card — the turn's trailing FilesChangedSummary repeats the same stats.
+    expect(card!.querySelector(".diff-card-filename")?.textContent).toBe("src/lib/auth.ts");
+    expect(card!.querySelector(".diff-card-adds")?.textContent).toBe("+2");
+    expect(card!.querySelector(".diff-card-dels")?.textContent).toBe("−1");
+    expect(card!.textContent).toMatch(/· 1 hunk/);
     // Preview lines: red del + green adds.
     expect(container.querySelectorAll(".diff-card .diff-line.del").length).toBe(1);
     expect(container.querySelectorAll(".diff-card .diff-line.add").length).toBe(2);
@@ -65,7 +74,7 @@ describe("MessageBubble inline diff cards", () => {
     expect(queryByText(/Done\./)).not.toBeNull();
   });
 
-  it("keeps non-edit tools in the collapsed group while the edit breaks out", () => {
+  it("keeps non-edit tools in the collapsed activity groups while the edit renders its own card", () => {
     const content = [
       webTool("rust-lang.org/learn"),
       editTool("src/main.rs", "fn old() {}", "fn new() {}"),
@@ -73,11 +82,14 @@ describe("MessageBubble inline diff cards", () => {
       "\n\nSummary.",
     ].join("");
     const { container } = render(<MessageBubble message={assistantMsg(content)} />);
+    expandProcess(container);
 
     // One diff card for the edit, and the two web reads fold into collapsed
-    // activity groups (the edit splits the run in two).
+    // activity groups around it (the edit splits the run in two) — all inside
+    // the turn's single ProcessSummary.
     expect(container.querySelectorAll(".diff-card").length).toBe(1);
-    expect(container.querySelectorAll(".chat-activity-toggle").length).toBe(2);
+    expect(container.querySelectorAll(".chat-process-toggle").length).toBe(1);
+    expect(container.querySelectorAll(".chat-activity-steps").length).toBe(2);
   });
 
   it("caps the preview at 5 lines with a more-lines footer", () => {
@@ -92,6 +104,7 @@ describe("MessageBubble inline diff cards", () => {
     const { container, queryByText } = render(
       <MessageBubble message={assistantMsg(content)} />,
     );
+    expandProcess(container);
 
     expect(container.querySelectorAll(".diff-card .diff-line.add").length).toBe(5);
     expect(queryByText(/3 more lines/)).not.toBeNull();

@@ -864,12 +864,6 @@ function AssistantPanel() {
   // false = row view, true = system prompt editor open.
   // Since the Assistant section now only has the system prompt, start expanded.
   const [detailOpen, setDetailOpen] = useState(true);
-  // Commit-message model (a fast/utility model for the commit-modal generator).
-  // Stored as a provider+model pair because API keys resolve per-provider.
-  const [cmProvider, setCmProvider] = useState<ChatProvider | "">("");
-  const [cmModel, setCmModel] = useState("");
-  const [cmModels, setCmModels] = useState<string[]>([]);
-  const [cmModelsLoading, setCmModelsLoading] = useState(false);
 
   useEffect(() => {
     let stale = false;
@@ -878,38 +872,10 @@ function AssistantPanel() {
       setSystemPrompt(sp ?? "");
       setLoaded(true);
     });
-    void getSetting(K_COMMIT_PROVIDER).then((p) => {
-      if (!stale && p) setCmProvider(p as ChatProvider);
-    });
-    void getSetting(K_COMMIT_MODEL).then((m) => {
-      if (!stale && m) setCmModel(m);
-    });
     return () => {
       stale = true;
     };
   }, []);
-
-  // Fetch the selected provider's available models (uses the stored API key +
-  // base URL server-side). Native anthropic/openai don't expose /v1/models, so
-  // the list stays empty and we fall back to a free-text input below.
-  useEffect(() => {
-    setCmModels([]);
-    if (!cmProvider) return;
-    let stale = false;
-    setCmModelsLoading(true);
-    void listChatModels(cmProvider).then((list) => {
-      if (stale) return;
-      if (list) {
-        // Dedupe + sort model ids for a clean dropdown.
-        const ids = Array.from(new Set(list.map((m) => m.id))).sort();
-        setCmModels(ids);
-      }
-      setCmModelsLoading(false);
-    });
-    return () => {
-      stale = true;
-    };
-  }, [cmProvider]);
 
   // Debounce-persist the system prompt.
   useEffect(() => {
@@ -1020,6 +986,15 @@ function GitPanel() {
                     setCmModel("");
                   } else {
                     void setSetting(K_COMMIT_PROVIDER, v);
+                    // Clear the OLD provider's model id: keeping it would send
+                    // e.g. Anthropic + gpt-4o-mini → HTTP 400, and the commit
+                    // modal silently never pre-fills. The user picks a fresh
+                    // model (or the blank input defaults to "use active chat
+                    // model") from the new provider's list.
+                    if (cmProvider !== "") {
+                      void setSetting(K_COMMIT_MODEL, "");
+                    }
+                    setCmModel("");
                   }
                 }}
               />
@@ -1057,72 +1032,6 @@ function GitPanel() {
             </div>
           )}
         </div>
-      </div>
-
-      <div className="settings-section">
-        <div className="settings-section-title">Commit message model</div>
-        <p className="settings-section-hint">
-          The model used to auto-generate commit messages in the commit modal. Pick a
-          small/fast model (e.g. <code>gpt-4o-mini</code>, <code>claude-haiku</code>) for
-          near-instant suggestions. Leave blank to use the active chat model.
-        </p>
-        <div className="settings-form-row">
-          <label className="settings-form-label">Provider</label>
-          <div className="settings-form-control">
-            <GlassSelect<ChatProvider | "">
-              value={cmProvider}
-              options={[
-                { value: "", label: "Use active chat model" },
-                { value: "anthropic", label: "Anthropic" },
-                { value: "openai", label: "OpenAI" },
-                { value: "openrouter", label: "OpenRouter" },
-                { value: "anthropic_compatible", label: "Anthropic Compatible" },
-                { value: "openai_compatible", label: "OpenAI Compatible" },
-              ]}
-              onChange={(v) => {
-                setCmProvider(v);
-                if (v === "") {
-                  void setSetting(K_COMMIT_PROVIDER, "");
-                  void setSetting(K_COMMIT_MODEL, "");
-                  setCmModel("");
-                } else {
-                  void setSetting(K_COMMIT_PROVIDER, v);
-                }
-              }}
-            />
-          </div>
-        </div>
-        {cmProvider !== "" && (
-          <div className="settings-form-row">
-            <label className="settings-form-label">Model</label>
-            <div className="settings-form-control">
-              {cmModels.length > 0 ? (
-                <GlassSelect<string>
-                  value={cmModel}
-                  options={cmModels.map((m) => ({ value: m, label: m }))}
-                  onChange={(v) => {
-                    setCmModel(v);
-                    void setSetting(K_COMMIT_MODEL, v);
-                  }}
-                />
-              ) : (
-                <input
-                  type="text"
-                  className="settings-text-input"
-                  value={cmModel}
-                  onChange={(e) => setCmModel(e.target.value)}
-                  onBlur={() => void setSetting(K_COMMIT_MODEL, cmModel)}
-                  placeholder={
-                    cmModelsLoading
-                      ? "Loading models…"
-                      : "e.g. gpt-4o-mini (type a model id)"
-                  }
-                  disabled={cmModelsLoading}
-                />
-              )}
-            </div>
-          </div>
-        )}
       </div>
     </>
   );

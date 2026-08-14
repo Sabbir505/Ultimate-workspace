@@ -62,21 +62,35 @@ pub fn update_cost_event_model_key(conn: &Connection, cost_event_id: i64, model_
     Ok(())
 }
 
-pub fn get_cost_events(conn: &Connection, session_id: Option<&str>) -> DbResult<Vec<CostEvent>> {
-    match session_id {
-        Some(sid) => {
-            let mut stmt = conn.prepare(
-                "SELECT * FROM cost_events WHERE session_id = ?1 ORDER BY timestamp",
-            )?;
-            let rows = stmt.query_map(params![sid], map_cost_event)?;
-            rows.collect()
-        }
-        None => {
-            let mut stmt = conn.prepare("SELECT * FROM cost_events ORDER BY timestamp")?;
-            let rows = stmt.query_map([], map_cost_event)?;
-            rows.collect()
-        }
+pub fn get_cost_events(
+    conn: &Connection,
+    session_id: Option<&str>,
+    limit: Option<i64>,
+    before_ts: Option<i64>,
+) -> DbResult<Vec<CostEvent>> {
+    // M6: bounded by default — the unbounded form returned every event ever
+    // recorded (months of rows) to the UI in one shot. Callers pass None for
+    // backward compat, but the command layer always sets a cap.
+    let lim = limit.unwrap_or(500);
+    let mut sql = String::from("SELECT * FROM cost_events WHERE 1=1");
+    if session_id.is_some() {
+        sql.push_str(" AND session_id = ?1");
     }
+    if before_ts.is_some() {
+        sql.push_str(" AND timestamp < ?2");
+    }
+    sql.push_str(" ORDER BY timestamp DESC LIMIT ?3");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = match (session_id, before_ts) {
+        (Some(sid), Some(b)) => stmt.query_map(params![sid, b, lim], map_cost_event)?,
+        (Some(sid), None) => stmt.query_map(params![sid, i64::MAX, lim], map_cost_event)?,
+        (None, Some(b)) => stmt.query_map(params!["", b, lim], map_cost_event)?,
+        (None, None) => stmt.query_map(params!["", i64::MAX, lim], map_cost_event)?,
+    };
+    // Reverse so callers keep chronological order.
+    let mut out: Vec<CostEvent> = rows.collect::<Result<_, _>>()?;
+    out.reverse();
+    Ok(out)
 }
 
 // NOTE: the rollup lives in cost_v2.rs (get_cost_rollups_v2) — read-time
@@ -154,12 +168,12 @@ mod tests {
         insert_cost_event(&conn, &s1.id, &UsageInfo { input_tokens: Some(200), output_tokens: None, cost_usd: Some(0.20), ..Default::default() }, "claude_code", "pty", Some(0.20)).unwrap();
         insert_cost_event(&conn, &s2.id, &UsageInfo { input_tokens: None, output_tokens: Some(5), cost_usd: None, ..Default::default() }, "kimi_code", "pty", Some(0.0)).unwrap();
 
-        assert_eq!(get_cost_events(&conn, Some(&s1.id)).unwrap().len(), 2);
-        assert_eq!(get_cost_events(&conn, None).unwrap().len(), 3);
+        assert_eq!(get_cost_events(&conn, Some(&s1.id), None, None).unwrap().len(), 2);
+        assert_eq!(get_cost_events(&conn, None, None, None).unwrap().len(), 3);
 
         // Rollup invariants are covered by get_cost_rollups_v2 in cost_v2.rs
         // (read-time priced). Here we just assert the events round-trip.
-        let events = get_cost_events(&conn, None).unwrap();
+        let events = get_cost_events(&conn, None, None, None).unwrap();
         assert_eq!(events.iter().filter(|e| e.session_id == s1.id).count(), 2);
         assert_eq!(events.iter().filter(|e| e.session_id == s2.id).count(), 1);
     }

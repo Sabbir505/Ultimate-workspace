@@ -13,6 +13,7 @@
 // [data-theme="dark"] so a single source of truth covers both themes.
 import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 
 import {
   DollarSign,
@@ -217,6 +218,18 @@ export function Sidebar() {
     }
     return map;
   }, [chatSessions]);
+
+  // PERF (PERFORMANCE_AUDIT.md mi27/F5): virtualize the flat chat-history
+  // list — 100+ sessions used to mount 100+ ChatSessionRow subtrees (each
+  // with hover action buttons + context menu wiring), making sidebar scroll
+  // stutter. Rows self-measure via measureElement.
+  const chatListRef = useRef<HTMLDivElement>(null);
+  const chatListVirtualizer = useVirtualizer({
+    count: chatRowData.length,
+    getScrollElement: () => chatListRef.current,
+    estimateSize: () => 60,
+    overscan: 8,
+  });
 
   return (
     <aside className="flex flex-col h-full bg-white/95 dark:bg-[#141414] backdrop-blur-xl border-r border-gray-200 dark:border-white/20 overflow-hidden select-none">
@@ -447,26 +460,48 @@ export function Sidebar() {
         </div>
       </div>
       {/* ── Scrolling chat list ─────────────────────────────────────────── */}
-      <div className="flex-1 overflow-y-auto sidebar-thin-scroll min-h-0">
+      <div className="flex-1 overflow-y-auto sidebar-thin-scroll min-h-0" ref={chatListRef}>
         {chatRowData.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-6 px-3">
             <MessageSquare size={20} className="text-gray-300 dark:text-slate-400" strokeWidth={1.5} />
             <span className="text-xs text-gray-500 dark:text-slate-300">No chats yet</span>
           </div>
         ) : (
-          chatRowData.map((s) => (
-            <ChatSessionRow
-              key={s.id}
-              session={s}
-              active={s.id === activeChatSessionId}
-              working={s.id in chatStreaming}
-              onSelect={handleSelectChat}
-              onDelete={handleDeleteChat}
-              onRename={handleRenameChat}
-              onToggleStar={handleToggleStar}
-              onSetUnread={handleSetUnread}
-            />
-          ))
+          <div
+            style={{
+              height: chatListVirtualizer.getTotalSize(),
+              position: "relative",
+            }}
+          >
+            {chatListVirtualizer.getVirtualItems().map((vi) => {
+              const s = chatRowData[vi.index];
+              return (
+                <div
+                  key={s.id}
+                  data-index={vi.index}
+                  ref={chatListVirtualizer.measureElement}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    transform: `translateY(${vi.start}px)`,
+                  }}
+                >
+                  <ChatSessionRow
+                    session={s}
+                    active={s.id === activeChatSessionId}
+                    working={s.id in chatStreaming}
+                    onSelect={handleSelectChat}
+                    onDelete={handleDeleteChat}
+                    onRename={handleRenameChat}
+                    onToggleStar={handleToggleStar}
+                    onSetUnread={handleSetUnread}
+                  />
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
 

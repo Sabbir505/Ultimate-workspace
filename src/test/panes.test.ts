@@ -219,6 +219,18 @@ describe("focus and close", () => {
     usePanesStore.getState().closePane(b); // b was focused
     expect(usePanesStore.getState().focusedPaneId).toBe(a);
   });
+
+  it("closing the focused pane never focuses a minimized (invisible) browser pane", () => {
+    const store = usePanesStore.getState();
+    const t = store.addPane(terminalDesc("s1"));
+    const b = store.addPane(browserDesc());
+    // Minimize the browser — it stays last in the raw panes array, so the
+    // pre-fix code (panes[panes.length - 1]) would focus the invisible pane.
+    usePanesStore.getState().toggleBrowserCollapsed(b);
+    usePanesStore.getState().focusPane(b);
+    usePanesStore.getState().closePane(b);
+    expect(usePanesStore.getState().focusedPaneId).toBe(t);
+  });
 });
 
 describe("minimized browsers don't occupy a slot", () => {

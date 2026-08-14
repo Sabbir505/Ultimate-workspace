@@ -26,7 +26,7 @@ use std::time::{Duration, Instant, SystemTime};
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use rusqlite::{params, Connection};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::db;
 use crate::harness_adapters::{CommandSpec, HarnessAdapter, UsageInfo};
@@ -92,6 +92,85 @@ const CLAUDE_PROBE_WINDOW: Duration = Duration::from_secs(120);
 
 type SharedDb = Arc<Mutex<Connection>>;
 
+/// mi8: chunked ring buffer for the rolling transcript. The previous
+/// single-String + `drain(..start)` memmoved ~¾ of the 1 MB cap on every
+/// overflow; chunks let us drop whole front segments instead — appends are
+/// pure pushes and overflow trimming is memmove-free in the common case.
+struct RingText {
+    chunks: std::collections::VecDeque<String>,
+    len: usize,
+    cap: usize,
+}
+
+impl RingText {
+    /// Back-chunk fill target before a fresh chunk is started. Bounded so
+    /// the rare partial front-trim memmoves at most this many bytes.
+    const CHUNK_TARGET: usize = 64 * 1024;
+
+    fn new(cap: usize) -> Self {
+        Self {
+            chunks: std::collections::VecDeque::new(),
+            len: 0,
+            cap,
+        }
+    }
+
+    fn push_str(&mut self, s: &str) {
+        if s.is_empty() {
+            return;
+        }
+        if s.len() >= self.cap {
+            // Single append ≥ cap: keep only its trailing cap bytes.
+            let mut start = s.len() - self.cap;
+            while !s.is_char_boundary(start) {
+                start += 1;
+            }
+            self.chunks.clear();
+            self.chunks.push_back(s[start..].to_string());
+            self.len = s.len() - start;
+            return;
+        }
+        self.len += s.len();
+        match self.chunks.back_mut() {
+            Some(back) if back.len() < Self::CHUNK_TARGET => back.push_str(s),
+            _ => self.chunks.push_back(s.to_string()),
+        }
+        while self.len > self.cap {
+            let front_len = self.chunks.front().map_or(0, |c| c.len());
+            // Prefer dropping WHOLE front chunks (no memmove) while we'd
+            // still retain ≥¾ of the cap — mirrors the old quarter-drop
+            // batching.
+            if self.chunks.len() > 1 && self.len - front_len >= self.cap * 3 / 4 {
+                self.chunks.pop_front();
+                self.len -= front_len;
+                continue;
+            }
+            let excess = self.len - self.cap;
+            let Some(front) = self.chunks.front_mut() else { break };
+            if excess >= front.len() {
+                self.len -= front.len();
+                self.chunks.pop_front();
+                continue;
+            }
+            // Partial trim within one ≤CHUNK_TARGET chunk — small, rare.
+            let mut start = excess;
+            while !front.is_char_boundary(start) {
+                start += 1;
+            }
+            front.drain(..start);
+            self.len -= start;
+        }
+    }
+
+    fn to_string(&self) -> String {
+        let mut out = String::with_capacity(self.len);
+        for c in &self.chunks {
+            out.push_str(c);
+        }
+        out
+    }
+}
+
 pub struct Pane {
     id: String,
     /// Conduit session id (None for shell/quick-action/login panes).
@@ -104,27 +183,24 @@ pub struct Pane {
     child: Mutex<Box<dyn Child + Send + Sync>>,
     /// ANSI-stripped rolling transcript for export. Raw output (with escape
     /// codes) goes to the frontend; this stripped copy is for parsing/export.
-    transcript: Mutex<String>,
+    /// mi8: chunked ring (RingText) instead of one big String.
+    transcript: Mutex<RingText>,
     /// Virtual terminal screen fed the raw output stream. The phone app polls
     /// a rendered snapshot of this (TUI apps redraw via cursor-movement
     /// sequences, which are unreadable when the raw stream is concatenated).
     screen: Mutex<vt100::Parser>,
     /// Last ~4KB of stripped output for pattern matching.
     tail: Mutex<String>,
-    state: Mutex<&'static str>,
-    last_output_at: Mutex<Instant>,
+    /// The fields the monitor thread polls every 200 ms, consolidated behind
+    /// ONE mutex (PERFORMANCE_AUDIT.md B15) — previously 6+ short locks per
+    /// pane per tick, each a contention point with the reader thread and IPC
+    /// handlers. Lock order (never reversed): `live` before `tail`.
+    live: Mutex<PaneLive>,
     spawned_at: Instant,
     spawned_at_system: SystemTime,
     exited: AtomicBool,
     killed: AtomicBool,
     harness_id_reported: AtomicBool,
-    /// The harness's own session id once known (from output scraping, the
-    /// fs probe, or the session record when a pane is a resume). Drives the
-    /// on-disk usage sync for the cost dashboard.
-    harness_session_id: Mutex<Option<String>>,
-    last_claude_probe: Mutex<Instant>,
-    /// Last time we synced usage from the harness's on-disk session log.
-    last_usage_sync: Mutex<Instant>,
     /// Deduplication guard: harness TUIs redraw usage lines constantly, and
     /// re-writing identical cost events would flood cost_events. We only
     /// insert when the parsed usage actually changes.
@@ -143,6 +219,20 @@ pub struct Pane {
     output_channel: Mutex<Option<tauri::ipc::Channel<Vec<u8>>>>,
 }
 
+/// Per-pane live state polled by the single monitor thread. See `Pane.live`
+/// (PERFORMANCE_AUDIT.md B15).
+struct PaneLive {
+    state: &'static str,
+    last_output_at: Instant,
+    /// The harness's own session id once known (from output scraping, the
+    /// fs probe, or the session record when a pane is a resume). Drives the
+    /// on-disk usage sync for the cost dashboard.
+    harness_session_id: Option<String>,
+    last_claude_probe: Instant,
+    /// Last time we synced usage from the harness's on-disk session log.
+    last_usage_sync: Instant,
+}
+
 impl Pane {
     /// The spawned child's OS process id, if still resolvable. Used by the
     /// dev-mode memory counter (`pane_memory`) to look up the process's RSS
@@ -152,18 +242,7 @@ impl Pane {
     }
 
     fn append_stripped(&self, text: &str) {
-        {
-            let mut t = self.transcript.lock();
-            t.push_str(text);
-            if t.len() > TRANSCRIPT_CAP {
-                // Drop the oldest quarter on a char boundary.
-                let mut start = t.len() - (TRANSCRIPT_CAP * 3 / 4);
-                while !t.is_char_boundary(start) {
-                    start += 1;
-                }
-                t.drain(..start);
-            }
-        }
+        self.transcript.lock().push_str(text);
         let mut tail = self.tail.lock();
         tail.push_str(text);
         if tail.len() > TAIL_LEN {
@@ -210,11 +289,11 @@ impl Pane {
 
     fn set_state(&self, app: &AppHandle, new_state: &'static str) {
         let changed = {
-            let mut s = self.state.lock();
-            if *s == new_state {
+            let mut live = self.live.lock();
+            if live.state == new_state {
                 false
             } else {
-                *s = new_state;
+                live.state = new_state;
                 true
             }
         };
@@ -231,7 +310,7 @@ impl Pane {
 
     /// Called from the reader thread for every output chunk.
     fn on_output(&self, app: &AppHandle, db: &SharedDb, stripped: &str) {
-        *self.last_output_at.lock() = Instant::now();
+        self.live.lock().last_output_at = Instant::now();
         self.append_stripped(stripped);
         // Any output means the agent (or shell) is doing something. This also
         // flips a diff_ready pane back to working once the user answers.
@@ -441,7 +520,7 @@ impl Pane {
         if self.harness_id_reported.swap(true, Ordering::Relaxed) {
             return; // already reported by a racing path (regex vs fs probe)
         }
-        *self.harness_session_id.lock() = Some(harness_id.to_string());
+        self.live.lock().harness_session_id = Some(harness_id.to_string());
         if let Some(session_id) = &self.session_id {
             {
                 let conn = db.lock();
@@ -538,10 +617,16 @@ impl PtyManager {
         for arg in &resolved.args {
             cmd.arg(arg);
         }
-        // Inherit the full parent environment so tools like Claude Code receive
+        // Inherit the parent environment so tools like Claude Code receive
         // their config (e.g. CLAUDE_CODE_CHILD_SESSION, API keys, PATH tweaks).
+        // mi10: snapshot the vars ONCE process-wide — std::env::vars()
+        // re-copied the whole environment block (~200 entries, both Strings)
+        // on every pane spawn. Conduit never mutates its own env after boot,
+        // so the snapshot can't go stale.
+        static PARENT_ENV: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+        let parent_env = PARENT_ENV.get_or_init(|| std::env::vars().collect());
         cmd.env_clear();
-        for (k, v) in std::env::vars() {
+        for (k, v) in parent_env {
             cmd.env(k, v);
         }
         // Legacy DB rows may hold \\?\ extended-length paths; cmd.exe rejects
@@ -594,19 +679,21 @@ impl PtyManager {
             writer_tx: Mutex::new(None),
             master: Mutex::new(pair.master),
             child: Mutex::new(child),
-            transcript: Mutex::new(String::new()),
+            transcript: Mutex::new(RingText::new(TRANSCRIPT_CAP)),
             screen: Mutex::new(vt100::Parser::new(24, 80, SCREEN_SCROLLBACK)),
             tail: Mutex::new(String::new()),
-            state: Mutex::new("idle"),
-            last_output_at: Mutex::new(Instant::now()),
+            live: Mutex::new(PaneLive {
+                state: "idle",
+                last_output_at: Instant::now(),
+                harness_session_id: None,
+                last_claude_probe: Instant::now(),
+                last_usage_sync: Instant::now() - Duration::from_secs(60),
+            }),
             spawned_at: Instant::now(),
             spawned_at_system: SystemTime::now(),
             exited: AtomicBool::new(false),
             killed: AtomicBool::new(false),
             harness_id_reported: AtomicBool::new(false),
-            harness_session_id: Mutex::new(None),
-            last_claude_probe: Mutex::new(Instant::now()),
-            last_usage_sync: Mutex::new(Instant::now() - Duration::from_secs(60)),
             last_usage: Mutex::new(None),
             last_usage_on_disk: Mutex::new(None),
             output_channel: Mutex::new(None),
@@ -687,15 +774,43 @@ impl PtyManager {
                                     },
                                 );
                             }
-                            // Feed the virtual terminal screen (phone display).
-                            pane.screen.lock().process(&frame);
+                            // Feed the virtual terminal screen (phone
+                            // display) — but only while a phone is actually
+                            // connected (PERFORMANCE_AUDIT.md B10). The vt100
+                            // parse + lock is per-frame work whose ONLY
+                            // consumer is `screen_for_session` (relay
+                            // transcript); on desktop-only sessions it's pure
+                            // waste and a contention point with transcript
+                            // requests.
+                            let phone_connected = app
+                                .try_state::<crate::MobileRelayState>()
+                                .map(|s| {
+                                    s.0.active_connections
+                                        .load(std::sync::atomic::Ordering::Relaxed)
+                                        > 0
+                                })
+                                .unwrap_or(false);
+                            if phone_connected {
+                                pane.screen.lock().process(&frame);
+                            }
                             let stripped = String::from_utf8_lossy(
                                 &strip_ansi_escapes::strip(&frame),
                             )
                             .into_owned();
                             // Scan for URLs and emit browser:url_detected.
-                            let scan = tail.clone() + &stripped;
-                            tail.clear();
+                            // mi9: build the scan buffer ONCE per frame from
+                            // (previous tail + stripped chunk) and only when
+                            // the frame could contain a URL start — a quick
+                            // byte check skips the String concat + regex for
+                            // the (majority) frames with no "http" at all.
+                            // Split URLs still resolve via the 128-char tail.
+                            let has_url_hint = memchr::memchr(b'h', &frame).is_some();
+                            if has_url_hint {
+                                let scan = {
+                                    let mut b = std::mem::take(&mut tail);
+                                    b.push_str(&stripped);
+                                    b
+                                };
                             if let Some(ref re) = url_re {
                                 for m in re.find_iter(&scan) {
                                     let url = m.as_str().to_string();
@@ -748,6 +863,7 @@ impl PtyManager {
                                     .unwrap_or(0);
                                 tail.push_str(&scan[keep..]);
                             }
+                            } // has_url_hint
                             pane.on_output(&app, &db, &stripped);
                             frame.clear();
                             frame_started = None;
@@ -942,7 +1058,7 @@ impl PtyManager {
         self.panes
             .lock()
             .get(pane_id)
-            .map(|p| p.transcript.lock().clone())
+            .map(|p| p.transcript.lock().to_string())
     }
 
     fn get_pane(&self, pane_id: &str) -> Result<Arc<Pane>, String> {
@@ -958,7 +1074,7 @@ impl PtyManager {
     /// usage sync can start immediately without waiting for the probe).
     pub fn set_harness_session_id(&self, pane_id: &str, harness_session_id: &str) {
         if let Ok(pane) = self.get_pane(pane_id) {
-            *pane.harness_session_id.lock() = Some(harness_session_id.to_string());
+            pane.live.lock().harness_session_id = Some(harness_session_id.to_string());
             // Mark as reported so the monitor-thread probe doesn't
             // redundantly fire report_harness_id for a resume pane.
             pane.harness_id_reported.store(true, Ordering::Relaxed);
@@ -999,7 +1115,7 @@ impl PtyManager {
 
     /// Get the current state of a pane by its pane_id.
     pub fn pane_state(&self, pane_id: &str) -> Option<String> {
-        self.panes.lock().get(pane_id).map(|p| p.state.lock().to_string())
+        self.panes.lock().get(pane_id).map(|p| p.live.lock().state.to_string())
     }
 
     /// Get the spawned child's PID for a pane (dev-mode memory counter).
@@ -1009,6 +1125,12 @@ impl PtyManager {
 
     /// One monitor thread for all panes: drives the silence heuristic and the
     /// Claude session-file fallback probe.
+    ///
+    /// PERF (PERFORMANCE_AUDIT.md B15): each pane's tick takes ONE lock on the
+    /// consolidated `live` struct (previously 6+ short locks: state,
+    /// last_output_at, tail, last_claude_probe, last_usage_sync,
+    /// harness_session_id). The tick snapshots decisions under the lock, then
+    /// acts (emit/probe/sync) after releasing it.
     fn spawn_monitor(mgr: Arc<PtyManager>) {
         thread::spawn(move || loop {
             thread::sleep(Duration::from_millis(200));
@@ -1018,34 +1140,61 @@ impl PtyManager {
                     continue;
                 }
 
-                // working -> (diff_ready | waiting) after ~1.5s of silence.
-                let is_working = *pane.state.lock() == "working";
-                if is_working && pane.last_output_at.lock().elapsed() >= SILENCE_BEFORE_WAITING {
-                    let new_state = match &pane.adapter {
-                        Some(adapter) => {
-                            let tail = pane.tail.lock();
-                            if adapter.diff_prompt_patterns().iter().any(|re| re.is_match(&tail)) {
-                                "diff_ready"
-                            } else {
-                                "waiting"
-                            }
-                        }
-                        None => "waiting",
-                    };
-                    pane.set_state(&mgr.app, new_state);
-                }
+                let (new_state, do_probe, do_sync, hid) = {
+                    let mut live = pane.live.lock();
 
-                // Session-id filesystem fallback (any adapter): neither
-                // harness reliably prints its id in the TUI, so we poll the
-                // harness's on-disk session store for a short window after
-                // spawn (see find_session_id_on_disk impls for details).
-                let needs_probe = pane.session_id.is_some()
-                    && pane.adapter.is_some()
-                    && !pane.harness_id_reported.load(Ordering::Relaxed)
-                    && pane.spawned_at.elapsed() < CLAUDE_PROBE_WINDOW
-                    && pane.last_claude_probe.lock().elapsed() >= Duration::from_secs(1);
-                if needs_probe {
-                    *pane.last_claude_probe.lock() = Instant::now();
+                    // working -> (diff_ready | waiting) after ~1.5s of silence.
+                    let new_state = if live.state == "working"
+                        && live.last_output_at.elapsed() >= SILENCE_BEFORE_WAITING
+                    {
+                        Some(match &pane.adapter {
+                            Some(adapter) => {
+                                // Lock order: live → tail (never reversed).
+                                let tail = pane.tail.lock();
+                                if adapter.diff_prompt_patterns().iter().any(|re| re.is_match(&tail)) {
+                                    "diff_ready"
+                                } else {
+                                    "waiting"
+                                }
+                            }
+                            None => "waiting",
+                        })
+                    } else {
+                        None
+                    };
+
+                    // Session-id filesystem fallback (any adapter): neither
+                    // harness reliably prints its id in the TUI, so we poll
+                    // the harness's on-disk session store for a short window
+                    // after spawn (see find_session_id_on_disk impls).
+                    let do_probe = pane.session_id.is_some()
+                        && pane.adapter.is_some()
+                        && !pane.harness_id_reported.load(Ordering::Relaxed)
+                        && pane.spawned_at.elapsed() < CLAUDE_PROBE_WINDOW
+                        && live.last_claude_probe.elapsed() >= Duration::from_secs(1);
+                    if do_probe {
+                        live.last_claude_probe = Instant::now();
+                    }
+
+                    // On-disk usage sync for the cost dashboard (PRD §7.12
+                    // prefers harness session logs over pty scraping). Cheap
+                    // cadence; each adapter no-ops when its log has no usage
+                    // yet. Source is 'on_disk' (vs 'pty' from the scrape path)
+                    // so the cost-quality panel can distinguish.
+                    let do_sync = live.last_usage_sync.elapsed() >= Duration::from_secs(5);
+                    let hid = if do_sync {
+                        live.last_usage_sync = Instant::now();
+                        live.harness_session_id.clone()
+                    } else {
+                        None
+                    };
+                    (new_state, do_probe, do_sync, hid)
+                };
+
+                if let Some(s) = new_state {
+                    pane.set_state(&mgr.app, s);
+                }
+                if do_probe {
                     let adapter = pane.adapter.as_ref().unwrap();
                     if let Some(hid) =
                         adapter.find_session_id_on_disk(&pane.cwd, pane.spawned_at_system)
@@ -1053,15 +1202,7 @@ impl PtyManager {
                         pane.report_harness_id(&mgr.app, &mgr.db, &hid);
                     }
                 }
-
-                // On-disk usage sync for the cost dashboard (PRD §7.12 prefers
-                // harness session logs over pty scraping). Cheap cadence; each
-                // adapter no-ops when its log has no usage yet. Source is
-                // 'on_disk' (vs 'pty' from the scrape path) so the cost-quality
-                // panel can distinguish.
-                if pane.last_usage_sync.lock().elapsed() >= Duration::from_secs(5) {
-                    *pane.last_usage_sync.lock() = Instant::now();
-                    let hid = pane.harness_session_id.lock().clone();
+                if do_sync {
                     if let (Some(adapter), Some(hid)) = (&pane.adapter, hid) {
                         if let Some(su) = adapter.usage_from_disk(&pane.cwd, &hid) {
                             pane.record_usage_on_disk(&mgr.app, &mgr.db, su.usage, su.model.as_deref());

@@ -351,9 +351,14 @@ export const usePanesStore = create<PanesState>((set, get) => ({
       const panes = state.panes.filter((p) => p.paneId !== paneId);
       const paneMemory = { ...state.paneMemory };
       delete paneMemory[paneId];
+      // Focus hand-off targets the last VISIBLE pane (same helper
+      // focusPaneByIndex indexes with): the raw array still contains
+      // minimized browser panes, which are parked out of the layout —
+      // focusing one would strand focus on a pane the user can't see.
+      const visible = visiblePanes(panes);
       const focusedPaneId =
         state.focusedPaneId === paneId
-          ? (panes[panes.length - 1]?.paneId ?? null)
+          ? (visible[visible.length - 1]?.paneId ?? null)
           : state.focusedPaneId;
       return {
         panes,

@@ -221,9 +221,19 @@ export const useUiStore = create<UiState>((set) => ({
       const next = { ...s.modelDownloads, [p.id]: p };
       // Remove terminal downloads after a short visible window (3s) so the
       // user sees the "done" / "error" / "cancelled" state before it vanishes.
+      // Only delete when STILL terminal: if the user restarted the same file
+      // (ids are repo::filename) within the window, the fresh entry is
+      // downloading again and must survive the stale timer.
       if (p.state === "done" || p.state === "error" || p.state === "cancelled") {
         window.setTimeout(() => {
           useUiStore.setState((s2) => {
+            const current = s2.modelDownloads[p.id];
+            const stillTerminal =
+              current != null &&
+              (current.state === "done" ||
+                current.state === "error" ||
+                current.state === "cancelled");
+            if (!stillTerminal) return s2; // no-op slice — zustand skips notify
             const cleaned = { ...s2.modelDownloads };
             delete cleaned[p.id];
             return { modelDownloads: cleaned };

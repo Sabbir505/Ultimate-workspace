@@ -321,9 +321,14 @@ pub fn list_secret_keys(project_id: String, db: State<DbState>) -> CmdResult<Vec
 // ---- cost ----
 
 #[tauri::command]
-pub fn get_cost_events(session_id: Option<String>, db: State<DbState>) -> CmdResult<Vec<CostEvent>> {
+pub fn get_cost_events(
+    session_id: Option<String>,
+    limit: Option<i64>,
+    before_ts: Option<i64>,
+    db: State<DbState>,
+) -> CmdResult<Vec<CostEvent>> {
     let conn = db.0.lock();
-    db::get_cost_events(&conn, session_id.as_deref()).map_err(|e| e.to_string())
+    db::get_cost_events(&conn, session_id.as_deref(), limit, before_ts).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

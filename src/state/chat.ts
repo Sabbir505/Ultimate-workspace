@@ -47,6 +47,7 @@ import {
   type SubagentDonePayload,
 } from "../lib/ipc";
 import { generateSessionTitle } from "../lib/sessionTitle";
+import { tailCodePoints } from "../lib/safeSlice";
 import { openArtifactInBrowserPane } from "../lib/sessionLauncher";
 import { useArtifactsStore } from "./artifacts";
 import { useProjectsStore } from "./projects";
@@ -297,6 +298,12 @@ export interface ChatState {
   // Actions
   loadSessions: () => Promise<void>;
   loadMessages: (chatSessionId: string) => Promise<void>;
+  /** M7: prepend the next older page (id-keyset) when the user scrolls to
+   *  the top of a long session. */
+  loadOlderMessages: (chatSessionId: string) => Promise<number>;
+  /** True when the backend may still hold messages older than the buffer's
+   *  first row (false after a short page or when nothing is loaded). */
+  hasMoreHistory: boolean;
   loadConfig: (provider?: string) => Promise<void>;
   loadSessionMetrics: (chatSessionId: string) => Promise<void>;
   selectSession: (chatSessionId: string) => Promise<void>;
@@ -421,6 +428,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   activeChatSessionId: null,
   messages: [],
+  hasMoreHistory: false,
   streaming: {},
   streamingChatSessionId: null,
   chatStatus: {},
@@ -497,7 +505,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // sendMessage targets the ACTIVE session, so a background session's queue
     // waits until the user opens it (selectSession calls drainQueue too).
     if (get().activeChatSessionId !== chatSessionId) return;
-    if (get().streamingChatSessionId) return;
+    // Per-session check (not the shared streamingChatSessionId scalar):
+    // sessions A and B can stream concurrently, and A's queued messages must
+    // not strand just because B owns the scalar when A finishes.
+    if (chatSessionId in get().streaming) return;
     const [next, ...rest] = get().messageQueue[chatSessionId] ?? [];
     if (!next) return;
     set((s) => ({ messageQueue: { ...s.messageQueue, [chatSessionId]: rest } }));
@@ -564,10 +575,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   loadMessages: async (chatSessionId) => {
-    const messages = await getChatMessages(chatSessionId);
+    // M7: latest page only — long sessions no longer deserialize their full
+    // history on open. Older pages prepend via loadOlderMessages.
+    const messages = await getChatMessages(chatSessionId, undefined, 200);
     set((s) => ({
       messages: s.activeChatSessionId === chatSessionId ? (messages ?? []) : s.messages,
+      hasMoreHistory: s.activeChatSessionId === chatSessionId ? (messages?.length ?? 0) >= 200 : s.hasMoreHistory,
     }));
+  },
+
+  loadOlderMessages: async (chatSessionId) => {
+    const first = get().messages[0];
+    if (!first || first.id <= 0 || !get().hasMoreHistory) return 0;
+    const older = await getChatMessages(chatSessionId, first.id, 200);
+    if (!older || older.length === 0) {
+      set({ hasMoreHistory: false });
+      return 0;
+    }
+    set((s) => {
+      if (s.activeChatSessionId !== chatSessionId) return s;
+      // Dedupe by id (the page boundary row may overlap).
+      const known = new Set(s.messages.map((m) => m.id));
+      const fresh = older.filter((m) => !known.has(m.id));
+      return {
+        messages: [...fresh, ...s.messages],
+        hasMoreHistory: older.length >= 200,
+      };
+    });
+    return older.length;
   },
 
   loadConfig: async (provider?: string) => {
@@ -623,13 +658,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     }
     const [messages, records] = await Promise.all([
-      getChatMessages(chatSessionId),
+      getChatMessages(chatSessionId, undefined, 200),
       listChatArtifacts(chatSessionId),
     ]);
     // Only update messages if the user hasn't clicked away to another session
     // while the fetch was in-flight.
     if (get().activeChatSessionId === chatSessionId) {
-      set({ messages: messages ?? [], activeChatSessionId: chatSessionId });
+      set({
+        messages: messages ?? [],
+        activeChatSessionId: chatSessionId,
+        hasMoreHistory: (messages?.length ?? 0) >= 200,
+      });
       // Restore this chat's generated artifacts (inline diagrams / file chips)
       // so they reappear when the session is reopened. Skip sessions that are
       // mid-stream — their live buffers are the source of truth.
@@ -738,13 +777,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   deleteChat: async (chatSessionId) => {
-    // Kill any running harness CLI process for this session before removing
-    // the DB row. Without this the persistent claude process (or a mid-turn
-    // kimi/opencode child) keeps running and emitting chat:token events for
-    // a session that no longer exists.
+    // Kill any running agent for this session before removing the DB row.
+    // Without this a persistent harness CLI (or a mid-turn builtin SSE/tool
+    // loop) keeps running and emitting chat:token events for a session that
+    // no longer exists — and onToken would re-create the streaming state
+    // deleteChat just removed.
     const session = get().sessions.find((s) => s.id === chatSessionId);
     if (session?.agent?.startsWith("harness:")) {
       try { await cancelAgentChatMessage(chatSessionId); } catch { /* best-effort */ }
+    } else if (chatSessionId in get().streaming) {
+      // Builtin-provider turn in flight: the backend delete only kills
+      // harness processes, not ChatManager streams — cancel explicitly.
+      try { await cancelChatMessage(chatSessionId); } catch { /* best-effort */ }
     }
     await deleteChatSession(chatSessionId);
     // Tombstone this session for the rest of the app run so background
@@ -781,6 +825,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   deleteAllChats: async () => {
+    // Cancel every in-flight stream first (both kinds) — deleting the rows
+    // alone doesn't stop backend ChatManager streams or harness children, and
+    // their events would recreate state for sessions that no longer exist.
+    const state = get();
+    const harnessIds = state.sessions
+      .filter((s) => s.agent?.startsWith("harness:"))
+      .map((s) => s.id);
+    const builtinIds = Object.keys(state.streaming).filter((id) => !harnessIds.includes(id));
+    await Promise.allSettled([
+      ...harnessIds.map((id) => cancelAgentChatMessage(id)),
+      ...builtinIds.map((id) => cancelChatMessage(id)),
+    ]);
     const count = await deleteAllChatSessions();
     // Tombstone every id that existed so background session-list refreshes
     // can't resurrect any of them (same guard as single deleteChat).
@@ -1107,7 +1163,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (streamingChatSessionId) return; // don't regenerate mid-stream
     const lastUser = [...messages].reverse().find((m) => m.role === "user");
     if (!lastUser) return;
-    const clean = lastUser.content.replace(/\n\n\[Attached (?:image|file)[^\]]*\]/g, "");
+    const clean = lastUser.content.replace(/\n\n\[Attached (?:image|file):[^\n]*\]/g, "");
     await get().sendMessage(clean);
   },
 
@@ -1220,9 +1276,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
       } else {
         await cancelChatMessage(streamingChatSessionId);
       }
-      // The backend may still fire chat:error or chat:done; our event handler
-      // will clear streaming state. But we clear optimistically here too.
-      set({ streamingChatSessionId: null });
+      // The backend's builtin-stream cancel is `handle.abort()` — the
+      // chat:done / chat:error emits live INSIDE the aborted task, so no
+      // terminal event ever arrives for this session. Clear the per-session
+      // streaming state here (not just the scalar), or the sidebar "working"
+      // dot sticks forever. (Harness cancels DO emit terminal events, but
+      // clearing early is harmless: onDone tolerates a missing key.)
+      set((s) => {
+        const nextStreaming = { ...s.streaming };
+        delete nextStreaming[streamingChatSessionId];
+        const nextStatus = { ...s.chatStatus };
+        delete nextStatus[streamingChatSessionId];
+        return {
+          streamingChatSessionId: null,
+          streaming: nextStreaming,
+          chatStatus: nextStatus,
+        };
+      });
       // A cancelled turn frees the queue too — send the next stacked message.
       get().drainQueue(streamingChatSessionId);
       // User hit Stop: disarm any active goal loop so it doesn't resume on the
@@ -1272,8 +1342,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Cap the streaming buffer to 200KB per session to avoid OOM on
       // extremely long streaming turns (hundreds of thousands of tokens).
       // The tail is what matters for rendering; anything beyond ~50K chars
-      // is scrolled out of view already.
-      const next = (prev + token).slice(-200_000);
+      // is scrolled out of view already. Code-point-safe: a raw slice can
+      // split an emoji surrogate pair at the cap boundary.
+      const next = tailCodePoints(prev + token, 200_000);
       return {
         streaming: {
           ...s.streaming,
@@ -1318,9 +1389,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   onDone: async (chatSessionId, inputTokens, outputTokens, costUsd, llmTimeMs, toolTimeMs, ttftMs, tokensPerSecond, cacheHitRate) => {
     // A reply that lands while the user is viewing a different chat marks the
-    // finished one unread, so it surfaces in the sidebar.
+    // finished one unread, so it surfaces in the sidebar. Best-effort: this
+    // handler must ALWAYS reach the streaming-state cleanup below — an
+    // awaited IPC rejection here would wedge the session in "working" state.
     if (get().activeChatSessionId !== chatSessionId) {
-      await setChatSessionUnread(chatSessionId, true);
+      void setChatSessionUnread(chatSessionId, true).catch(() => {});
     }
     // Clear streaming + live-perf state for this session.
     set((s) => {
@@ -1340,8 +1413,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
 
     // Refetch messages from the backend to get the final persisted
-    // ChatMessageRecord with usage data.
-    const messages = await getChatMessages(chatSessionId);
+    // ChatMessageRecord with usage data. Best-effort: a transient IPC/DB
+    // failure must not skip the title refresh + relist below.
+    let messages: ChatMessageRecord[] | null = null;
+    try {
+      messages = await getChatMessages(chatSessionId);
+    } catch {
+      /* keep null; downstream guards handle it */
+    }
 
     // Auto-summarize the chat title after the 1st completed turn (a quick
     // first guess) and refine it after the 3rd, unless the user renamed it.

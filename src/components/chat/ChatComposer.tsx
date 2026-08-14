@@ -24,6 +24,9 @@ const MAX_DOC_BYTES = 10 * 1024 * 1024;
 // model as vision input, docs are text-extracted server-side, text is inlined.
 export interface ChatAttachment {
   name: string;
+  /** Byte size — distinguishes two DIFFERENT files that share a name
+   *  (e.g. `Screenshot.png` from two folders) for dedupe/keys/removal. */
+  size?: number;
   kind: "text" | "image" | "doc";
   /** Decoded text for `kind === "text"`. */
   text?: string;
@@ -566,6 +569,7 @@ export function ChatComposer({
         if (isImage) {
           attachment = {
             name: file.name,
+            size: file.size,
             kind: "image",
             data: await readAsBase64(file),
             mediaType: file.type || `image/${ext === "jpg" ? "jpeg" : ext}`,
@@ -573,15 +577,21 @@ export function ChatComposer({
         } else if (isDoc) {
           attachment = {
             name: file.name,
+            size: file.size,
             kind: "doc",
             data: await readAsBase64(file),
             format: ext,
           };
         } else {
-          attachment = { name: file.name, kind: "text", text: await file.text() };
+          attachment = { name: file.name, size: file.size, kind: "text", text: await file.text() };
         }
         setAttachments((prev) =>
-          prev.some((a) => a.name === file.name) ? prev : [...prev, attachment],
+          // Dedupe on name AND size: two different files can share a name
+          // (`Screenshot.png` from two folders) — only an exact name+size
+          // match is the same file re-selected.
+          prev.some((a) => a.name === file.name && (a.size ?? -1) === file.size)
+            ? prev
+            : [...prev, attachment],
         );
       } catch {
         setAttachError(`Could not read ${file.name}`);
@@ -700,10 +710,13 @@ export function ChatComposer({
           <div className="composer-attachments">
             {attachments.map((a) => (
               <AttachmentCard
-                key={a.name}
+                // name+size: two different files can share a name.
+                key={`${a.name}:${a.size ?? 0}`}
                 attachment={a}
                 onRemove={() =>
-                  setAttachments((prev) => prev.filter((p) => p.name !== a.name))
+                  setAttachments((prev) =>
+                    prev.filter((p) => !(p.name === a.name && (p.size ?? -1) === (a.size ?? -1))),
+                  )
                 }
               />
             ))}

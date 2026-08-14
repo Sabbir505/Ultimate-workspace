@@ -319,18 +319,10 @@ function MessageActions({
 
 /** Codex-style pre-token indicator: a single quiet monospace pulse — no
  *  bouncing dots, just a subtle "working…" line that recedes visually. */
-export function TypingIndicator() {
-  return (
-    <div className="chat-bubble assistant">
-      <div className="chat-bubble-inner">
-        <div className="chat-typing" aria-label="Assistant is responding" role="status">
-          <span className="chat-typing-prompt">›</span>
-          <span className="chat-typing-cursor" />
-        </div>
-      </div>
-    </div>
-  );
-}
+// TypingIndicator moved to ./TypingIndicator (PERF item 12) — re-exported
+// here so existing imports keep working without dragging react-markdown into
+// the entry chunk via ChatView.
+export { TypingIndicator } from "./TypingIndicator";
 
 /** Low-weight, tappable marker shown in the timeline where older context was
  *  condensed by the local-model compaction framework. Expands to reveal the
@@ -790,6 +782,11 @@ function ProcessSummary({
  *  to its step rows (the outer ProcessSummary is the single collapse; nested
  *  collapsibles would be confusing). `diff` keeps its inline DiffCard. `think`
  *  is its own disclosure. `text` is mid-run narration as markdown. */
+/** Render one process block inside the ProcessSummary region. Keys carry the
+ *  block KIND plus the loop index (PERFORMANCE_AUDIT.md F6): a bare `key={i}`
+ *  remounts a block whenever the block at that index changes kind (e.g. a
+ *  think block that gains a tool run below it mid-stream), losing collapse
+ *  state. Diff blocks key on their file path, which is unique per turn. */
 function renderProcessBlock(
   b: Block,
   i: number,
@@ -798,15 +795,19 @@ function renderProcessBlock(
   switch (b.kind) {
     case "activity":
       return (
-        <div className="chat-activity-steps" key={i}>
+        <div className="chat-activity-steps" key={`activity:${i}`}>
           {b.group.steps.map((step, j) => (
-            <ActivityStepRow key={j} step={step} done={step.done} />
+            <ActivityStepRow
+              key={`${step.data?.kind ?? "step"}:${step.data?.path ?? step.data?.title ?? j}`}
+              step={step}
+              done={step.done}
+            />
           ))}
         </div>
       );
     case "diff":
       return (
-        <Fragment key={i}>
+        <Fragment key={`diff:${b.step.data?.path ?? i}`}>
           {b.step.before && b.step.before.trim().length > 0 && (
             <Markdown content={b.step.before} onPreviewArtifact={onPreviewArtifact} />
           )}
@@ -815,11 +816,11 @@ function renderProcessBlock(
       );
     case "think":
       return b.text.length > 0 ? (
-        <ThinkingBlock key={i} thinking={b.text} done={b.done} />
+        <ThinkingBlock key={`think:${i}`} thinking={b.text} done={b.done} />
       ) : null;
     case "text":
       return b.text.trim().length > 0 ? (
-        <Markdown key={i} content={b.text} onPreviewArtifact={onPreviewArtifact} />
+        <Markdown key={`text:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
       ) : null;
   }
 }
@@ -882,13 +883,13 @@ function FilesChangedSummary({ files }: { files: { path: string; edit: EditPaylo
       </button>
       {open && (
         <ul className="chat-files-list">
-          {files.map((f, i) => {
+          {files.map((f) => {
             const { adds, dels } = editLineStats(f.edit);
             const sep = Math.max(f.path.lastIndexOf("/"), f.path.lastIndexOf("\\"));
             const basename = sep >= 0 ? f.path.slice(sep + 1) : f.path;
             const dirname = sep >= 0 ? f.path.slice(0, sep) : "";
             return (
-              <li className="chat-files-row" key={i} title={f.path}>
+              <li className="chat-files-row" key={f.path} title={f.path}>
                 <span className="chat-files-name">{basename}</span>
                 {dirname && <span className="chat-files-path">→ {dirname}</span>}
                 <span className="chat-files-stats">
@@ -1303,17 +1304,6 @@ function MessageBubbleInner({
 }: Props) {
   const isUser = message.role === "user";
 
-  // A persisted compaction-summary row renders as a low-weight "earlier context
-  // compacted" marker (not a real bubble) so the user understands why
-  // scrolling back shows condensed rather than verbatim detail. Tapping
-  // reveals the actual summary text that replaced the original turns.
-  // Sentinel must match the `COMPACTED_PREFIX` constant in
-  // src-tauri/src/chat/compaction.rs.
-  const COMPACTED_PREFIX = "[compacted context]";
-  if (message.role === "system" && message.content.trimStart().startsWith(COMPACTED_PREFIX)) {
-    const summary = message.content.trimStart().slice(COMPACTED_PREFIX.length).replace(/^[\s:\n]+/, "");
-    return <CompactedContextMarker summary={summary} />;
-  }
   // Parse attachment markers (e.g. "[Attached image: x]") out of the content
   // so they render as visual cards above the text instead of inline strings.
   // Live attachments (optimistic message) carry image base64 for thumbnails.
@@ -1321,39 +1311,66 @@ function MessageBubbleInner({
     message.content,
     message.attachments,
   );
+
+  // PERF (PERFORMANCE_AUDIT.md F8): memoize the parse → group chain by
+  // content. Previously a `streaming` flip (or any parent re-render) re-ran
+  // parseSegments + groupSegments even with identical content. During active
+  // streaming content changes per flush anyway, so the memo costs nothing.
   // User messages are rendered verbatim; assistant messages are split into
   // reasoning / tool-call / answer segments (Claude-style process view).
-  const segments: Segment[] = isUser
-    ? [{ type: "text", text: cleanContent }]
-    : parseSegments(cleanContent);
+  const segments: Segment[] = useMemo<Segment[]>(
+    () => (isUser ? [{ type: "text", text: cleanContent }] : parseSegments(cleanContent)),
+    [isUser, cleanContent],
+  );
 
   // Copy action yields the visible answer text only (no process markup).
-  const plainText = segments
-    .filter((s): s is Extract<Segment, { type: "text" }> => s.type === "text")
-    .map((s) => s.text)
-    .join("")
-    .trim();
+  const plainText = useMemo(
+    () =>
+      segments
+        .filter((s): s is Extract<Segment, { type: "text" }> => s.type === "text")
+        .map((s) => s.text)
+        .join("")
+        .trim(),
+    [segments],
+  );
 
   // Group the turn into ordered render blocks (text / think / activity / diff).
-  const blocks = isUser ? null : groupSegments(segments);
+  const blocks = useMemo(() => (isUser ? null : groupSegments(segments)), [isUser, segments]);
+
+  // A persisted compaction-summary row renders as a low-weight "earlier context
+  // compacted" marker (not a real bubble) so the user understands why
+  // scrolling back shows condensed rather than verbatim detail. Tapping
+  // reveals the actual summary text that replaced the original turns.
+  // Sentinel must match the `COMPACTED_PREFIX` constant in
+  // src-tauri/src/chat/compaction.rs. NOTE: this early return must stay BELOW
+  // the hooks above (rules of hooks).
+  const COMPACTED_PREFIX = "[compacted context]";
+  if (message.role === "system" && message.content.trimStart().startsWith(COMPACTED_PREFIX)) {
+    const summary = message.content.trimStart().slice(COMPACTED_PREFIX.length).replace(/^[\s:\n]+/, "");
+    return <CompactedContextMarker summary={summary} />;
+  }
 
   // Partition the assistant turn into [leading text] [process region]
   // [trailing answer]. Process kinds (think / activity / diff) bracket the
   // region; the run of text AFTER the last process block is the synthesized
   // answer shown below the "Worked for Xs" row, and text BEFORE the first one
-  // is the model's intro shown above it.
+  // is the model's intro shown above it. A think-only turn (no tool/diff
+  // blocks) keeps the old flat layout — standalone ThinkingBlock disclosures,
+  // no "Worked" summary row (documented in groupSegments).
   let firstProcess = -1;
   let lastProcess = -1;
+  let hasToolBlocks = false;
   if (blocks) {
     for (let i = 0; i < blocks.length; i++) {
       const k = blocks[i].kind;
+      if (k === "activity" || k === "diff") hasToolBlocks = true;
       if (k === "think" || k === "activity" || k === "diff") {
         if (firstProcess === -1) firstProcess = i;
         lastProcess = i;
       }
     }
   }
-  const hasProcess = firstProcess !== -1;
+  const hasProcess = firstProcess !== -1 && hasToolBlocks;
 
   // Aggregate process-level state: is anything still live, how many tool steps
   // ran, what's the current action while streaming, and which files changed.
@@ -1439,7 +1456,7 @@ function MessageBubbleInner({
                   .slice(0, firstProcess)
                   .map((b, i) =>
                     b.kind === "text" && b.text.trim().length > 0 ? (
-                      <Markdown key={i} content={b.text} onPreviewArtifact={onPreviewArtifact} />
+                      <Markdown key={`lead:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
                     ) : null,
                   )}
                 <ProcessSummary
@@ -1456,17 +1473,18 @@ function MessageBubbleInner({
                   .slice(lastProcess + 1)
                   .map((b, i) =>
                     b.kind === "text" && b.text.trim().length > 0 ? (
-                      <Markdown key={i} content={b.text} onPreviewArtifact={onPreviewArtifact} />
+                      <Markdown key={`trail:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
                     ) : null,
                   )}
                 {fileChanges.length > 0 && <FilesChangedSummary files={fileChanges} />}
               </>
             )
-            /* Pure-answer turn (no tool/think activity): just markdown. */
+            /* No tool/diff activity (pure answer or think-only turn): flat
+             * layout — markdown text and standalone thinking disclosures. */
             : blocks!.map((b, i) =>
-                b.kind === "text" && b.text.trim().length > 0 ? (
-                  <Markdown key={i} content={b.text} onPreviewArtifact={onPreviewArtifact} />
-                ) : null,
+                b.kind === "text" && b.text.trim().length > 0
+                  ? <Markdown key={`flat:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
+                  : renderProcessBlock(b, i, onPreviewArtifact),
               )}
         {!isUser && artifacts && artifacts.length > 0 && (
           <MessageArtifacts artifacts={artifacts} onPreviewArtifact={onPreviewArtifact} />

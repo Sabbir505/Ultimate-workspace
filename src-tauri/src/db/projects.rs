@@ -230,7 +230,7 @@ mod tests {
         remove_project(&conn, &p.id).unwrap();
         assert!(list_projects(&conn).unwrap().is_empty());
         assert!(list_sessions(&conn, None).unwrap().is_empty());
-        assert!(super::super::get_cost_events(&conn, None).unwrap().is_empty());
+        assert!(super::super::get_cost_events(&conn, None, None, None).unwrap().is_empty());
         assert!(super::super::list_quick_actions(&conn, &p.id).unwrap().is_empty());
         assert!(super::super::list_secret_keys(&conn, &p.id).unwrap().is_empty());
     }

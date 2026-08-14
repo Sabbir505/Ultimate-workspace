@@ -28,7 +28,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
@@ -114,7 +115,7 @@ impl TaskEntry {
     /// Whether the task is still in flight. Terminal tasks are swept away
     /// after `TERMINAL_TASK_TTL`.
     fn is_running(&self) -> bool {
-        matches!(self.snapshot.lock().unwrap().state, TaskState::Running)
+        matches!(self.snapshot.lock().state, TaskState::Running)
     }
 }
 
@@ -143,7 +144,7 @@ impl TaskManager {
     /// Allocate a unique task id and register a running task entry.
     fn register(&self, kind: &str) -> (String, Arc<TaskEntry>) {
         let id = {
-            let mut n = self.next_id.lock().unwrap();
+            let mut n = self.next_id.lock();
             let id = format!("task-{}", *n);
             *n += 1;
             id
@@ -164,7 +165,7 @@ impl TaskManager {
             created: Instant::now(),
         });
         {
-            let mut tasks = self.tasks.lock().unwrap();
+            let mut tasks = self.tasks.lock();
             // Sweep stale terminal tasks so the map can't grow unbounded.
             let now = Instant::now();
             tasks.retain(|_, e| e.is_running() || now.duration_since(e.created) < TERMINAL_TASK_TTL);
@@ -177,7 +178,7 @@ impl TaskManager {
     /// event to the UI. Callers must NOT hold the snapshot lock across this
     /// call (it re-locks). `None` app (tests / headless) skips the emit.
     fn emit<R: tauri::Runtime>(app: Option<&AppHandle<R>>, sid: &str, entry: &TaskEntry) {
-        let snap = entry.snapshot.lock().unwrap().clone();
+        let snap = entry.snapshot.lock().clone();
         if let Some(app) = app {
             let _ = app.emit(
                 "chat:task-progress",
@@ -205,7 +206,7 @@ impl TaskManager {
         message: String,
     ) {
         {
-            let mut snap = entry.snapshot.lock().unwrap();
+            let mut snap = entry.snapshot.lock();
             snap.state = state;
             snap.message = message;
             snap.speed_bps = 0;
@@ -215,9 +216,9 @@ impl TaskManager {
 
     /// Current snapshot JSON for the model, or an error text if unknown.
     pub fn status_json(&self, task_id: &str) -> String {
-        let tasks = self.tasks.lock().unwrap();
+        let tasks = self.tasks.lock();
         match tasks.get(task_id) {
-            Some(e) => serde_json::to_string(&*e.snapshot.lock().unwrap())
+            Some(e) => serde_json::to_string(&*e.snapshot.lock())
                 .unwrap_or_else(|_| "{\"error\":\"serialize failed\"}".to_string()),
             None => format!(
                 "No task \"{task_id}\". Tasks are only kept for an hour after they finish."
@@ -228,14 +229,14 @@ impl TaskManager {
     /// Abort a running task (download: keeps the .part for resume; shell:
     /// kills the process). Returns a message for the model.
     pub fn cancel(&self, task_id: &str) -> String {
-        let tasks = self.tasks.lock().unwrap();
+        let tasks = self.tasks.lock();
         match tasks.get(task_id) {
             Some(entry) => {
-                if let Some(tx) = entry.cancel.lock().unwrap().take() {
+                if let Some(tx) = entry.cancel.lock().take() {
                     let _ = tx.send(());
                     format!("Cancelling task {task_id}â€¦")
                 } else {
-                    let state = entry.snapshot.lock().unwrap().state;
+                    let state = entry.snapshot.lock().state;
                     match state {
                         TaskState::Running => {
                             format!("Task {task_id} is already being cancelled.")
@@ -262,7 +263,7 @@ impl TaskManager {
     ) -> String {
         let (id, entry) = self.register("download");
         let (tx, rx) = oneshot::channel();
-        *entry.cancel.lock().unwrap() = Some(tx);
+        *entry.cancel.lock() = Some(tx);
         let app = app.cloned();
         let sid = sid.to_string();
         let url = url.to_string();
@@ -271,7 +272,7 @@ impl TaskManager {
         tauri::async_runtime::spawn(async move {
             let result = download_task(app.as_ref(), &sid, &entry_for_task, rx, &url, &dest).await;
             if let Err(msg) = result {
-                let state = entry_for_task.snapshot.lock().unwrap().state;
+                let state = entry_for_task.snapshot.lock().state;
                 if state == TaskState::Running {
                     TaskManager::finish(app.as_ref(), &sid, &entry_for_task, TaskState::Failed, msg);
                 }
@@ -291,7 +292,7 @@ impl TaskManager {
     ) -> String {
         let (id, entry) = self.register("shell");
         let (tx, rx) = oneshot::channel();
-        *entry.cancel.lock().unwrap() = Some(tx);
+        *entry.cancel.lock() = Some(tx);
         let app = app.cloned();
         let sid = sid.to_string();
         let command = command.to_string();
@@ -307,10 +308,16 @@ impl TaskManager {
 /// Synchronous shell execution: runs the command to completion and returns
 /// its combined stdout+stderr as a string. Used by the built-in provider path
 /// so the tool result (and therefore the captured output) flows into the turn
-/// buffer and persists in the stored message. Long-running commands will block
-/// the turn — callers should prefer `start_shell` for persistent background
-/// work.
+/// buffer and persists in the stored message. Bounded by `SHELL_TIMEOUT`
+/// (a command that never exits is killed — the model is told to use
+/// start_shell for persistent background work).
 pub fn run_shell_to_completion(command: &str, workdir: Option<&str>) -> String {
+    /// Ceiling on a synchronous run_shell. `ping -t` / `npm run dev` style
+    /// commands would otherwise wedge the turn (and a blocking-pool thread)
+    /// forever; on expiry the child tree is killed and the partial output
+    /// is returned with a timeout notice.
+    const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
     let mut cmd = if cfg!(windows) {
         let mut c = std::process::Command::new("cmd.exe");
         c.arg("/C").arg(command);
@@ -337,16 +344,58 @@ pub fn run_shell_to_completion(command: &str, workdir: Option<&str>) -> String {
         Ok(c) => c,
         Err(e) => return format!("could not start shell: {e}"),
     };
-    // Run to completion and capture combined stdout+stderr.
-    let output = match child.wait_with_output() {
-        Ok(o) => o,
-        Err(e) => return format!("could not wait for shell: {e}"),
-    };
-    let mut out = String::from_utf8_lossy(&output.stdout).to_string();
-    let err = String::from_utf8_lossy(&output.stderr);
+    // Drain both pipes on threads BEFORE waiting: reading only after exit
+    // deadlocks once output exceeds the OS pipe buffer (~64 KB), and a
+    // deadline-based wait makes the old wait_with_output unusable anyway.
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let out_thread = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(p) = stdout_pipe.as_mut() {
+            use std::io::Read;
+            let _ = p.read_to_string(&mut buf);
+        }
+        buf
+    });
+    let err_thread = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(p) = stderr_pipe.as_mut() {
+            use std::io::Read;
+            let _ = p.read_to_string(&mut buf);
+        }
+        buf
+    });
+    // Bounded wait: poll try_wait until the child exits or the ceiling hits.
+    let deadline = std::time::Instant::now() + SHELL_TIMEOUT;
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    timed_out = true;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => return format!("could not wait for shell: {e}"),
+        }
+    }
+    let mut out = out_thread.join().unwrap_or_default();
+    let err = err_thread.join().unwrap_or_default();
     if !err.is_empty() {
         out.push('\n');
         out.push_str(&err);
+    }
+    if timed_out {
+        // Say WHY the output ends here so the model doesn't treat a killed
+        // command's partial output as success.
+        out.push_str(&format!(
+            "\n[run_shell timed out after {}s and was killed — use start_shell for long-running commands]",
+            SHELL_TIMEOUT.as_secs()
+        ));
     }
     // Tail-cap: keep last 60 lines / 8 KB.
     const MAX_LINES: usize = 60;
@@ -359,8 +408,9 @@ pub fn run_shell_to_completion(command: &str, workdir: Option<&str>) -> String {
         out
     };
     if t.len() > MAX_BYTES {
-        let start = t.len() - MAX_BYTES;
-        t = format!("…\n{}", &t[start..]);
+        // Char-safe tail cap: shell output is routinely non-ASCII (git author
+        // names, localized tools) — a byte slice here panics mid-turn.
+        t = format!("…\n{}", crate::util::tail_chars(&t, MAX_BYTES));
     }
     t
 }
@@ -459,7 +509,7 @@ async fn download_task<R: tauri::Runtime>(
     // If the destination already exists, consider it done.
     if tokio::fs::metadata(&dest_path).await.is_ok() {
         {
-            let mut snap = entry.snapshot.lock().unwrap();
+            let mut snap = entry.snapshot.lock();
             snap.downloaded = 0;
             snap.total = None;
             snap.dest_path = Some(dest.to_string());
@@ -488,7 +538,7 @@ async fn download_task<R: tauri::Runtime>(
             if cancel_rx.try_recv().is_ok() {
                 let _ = cancel_rx; // consume the channel
                 {
-                    let mut snap = entry.snapshot.lock().unwrap();
+                    let mut snap = entry.snapshot.lock();
                     snap.state = TaskState::Cancelled;
                     snap.speed_bps = 0;
                     snap.message = format!(
@@ -556,7 +606,7 @@ async fn download_task<R: tauri::Runtime>(
             resp.content_length()
         };
         {
-            let mut snap = entry.snapshot.lock().unwrap();
+            let mut snap = entry.snapshot.lock();
             snap.downloaded = start;
             snap.total = total;
             snap.dest_path = Some(dest.to_string());
@@ -583,7 +633,7 @@ async fn download_task<R: tauri::Runtime>(
                     // mark the task cancelled, and stop.
                     drop(file);
                     {
-                        let mut snap = entry.snapshot.lock().unwrap();
+                        let mut snap = entry.snapshot.lock();
                         snap.state = TaskState::Cancelled;
                         snap.speed_bps = 0;
                         snap.message = format!(
@@ -618,7 +668,7 @@ async fn download_task<R: tauri::Runtime>(
                                 last_downloaded = downloaded;
                                 last_emit = Instant::now();
                                 {
-                                    let mut snap = entry.snapshot.lock().unwrap();
+                                    let mut snap = entry.snapshot.lock();
                                     snap.downloaded = downloaded;
                                     snap.speed_bps = speed;
                                     snap.total = total;
@@ -650,7 +700,7 @@ async fn download_task<R: tauri::Runtime>(
             .await
             .map_err(|e| format!("rename to final path failed: {e}"))?;
         {
-            let mut snap = entry.snapshot.lock().unwrap();
+            let mut snap = entry.snapshot.lock();
             snap.downloaded = total.unwrap_or(downloaded);
             snap.total = total;
             snap.speed_bps = 0;
@@ -727,7 +777,9 @@ async fn shell_task<R: tauri::Runtime>(
     let stderr = child.stderr.take().expect("stderr piped");
     let mut stdout_lines = BufReader::new(stdout).lines();
     let mut stderr_lines = BufReader::new(stderr).lines();
-    let mut output: Vec<String> = Vec::new();
+    // mi6: VecDeque — the 40-line cap previously did Vec::remove(0) (O(n)
+    // memmove) per line past the cap.
+    let mut output: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     let mut last_emit = Instant::now() - SHELL_EMIT_MIN;
 
     let mut consume_line =
@@ -737,13 +789,14 @@ async fn shell_task<R: tauri::Runtime>(
          sid: &str,
          entry: &TaskEntry| {
             if output.len() >= 40 {
-                output.remove(0);
+                output.pop_front();
             }
-            output.push(line);
+            output.push_back(line);
             if last_emit.elapsed() >= SHELL_EMIT_MIN {
                 {
-                    let mut snap = entry.snapshot.lock().unwrap();
-                    snap.message = output.join("\n").chars().take(SHELL_OUTPUT_CAP).collect();
+                    let mut snap = entry.snapshot.lock();
+                    let joined = output.iter().cloned().collect::<Vec<_>>().join("\n");
+                    snap.message = joined.chars().take(SHELL_OUTPUT_CAP).collect();
                 }
                 TaskManager::emit(app, sid, entry);
                 *last_emit = Instant::now();
@@ -758,7 +811,7 @@ async fn shell_task<R: tauri::Runtime>(
             _ = &mut cancel_rx => {
                 let _ = child.kill().await;
                 {
-                    let mut snap = entry.snapshot.lock().unwrap();
+                    let mut snap = entry.snapshot.lock();
                     snap.state = TaskState::Cancelled;
                     snap.speed_bps = 0;
                     snap.message = "Cancelled â€” process killed.".to_string();
@@ -781,8 +834,9 @@ async fn shell_task<R: tauri::Runtime>(
             status = child.wait() => {
                 let code = status.map(|s| s.code()).unwrap_or(None);
                 let msg = {
-                    let mut snap = entry.snapshot.lock().unwrap();
-                    snap.message = output.join("\n").chars().take(SHELL_OUTPUT_CAP).collect();
+                    let mut snap = entry.snapshot.lock();
+                    let joined = output.iter().cloned().collect::<Vec<_>>().join("\n");
+                    snap.message = joined.chars().take(SHELL_OUTPUT_CAP).collect();
                     match code {
                         Some(0) => format!("Command finished (exit 0).\n\n{}", snap.message),
                         Some(c) => format!("Command finished with exit code {c}.\n\n{}", snap.message),
@@ -850,8 +904,8 @@ mod tests {
         let (id1, e1) = tm.register("download");
         let (id2, _) = tm.register("shell");
         assert_ne!(id1, id2);
-        assert_eq!(e1.snapshot.lock().unwrap().kind, "download");
-        assert_eq!(e1.snapshot.lock().unwrap().state, TaskState::Running);
+        assert_eq!(e1.snapshot.lock().kind, "download");
+        assert_eq!(e1.snapshot.lock().state, TaskState::Running);
     }
 
     #[test]

@@ -256,18 +256,13 @@ fn openai_request(
             enable_thinking: t,
         }),
     };
-    eprintln!("[openai_request] → POST {url} thinking={:?} model={:?}", req.thinking, req.model);
-    let json_body = serde_json::to_string(&body).unwrap_or_default();
-    eprintln!(
-        "[openai_request] body_len={} has_template_kwargs={}",
-        json_body.len(),
-        json_body.contains("chat_template_kwargs"),
-    );
+    // `.json(&body)` (B12): lets reqwest serialize + set content-type itself;
+    // the previous `.body(to_string(&body))` eagerly stringified the payload
+    // even when the request never fired, and duplicated the header.
     client
         .post(&url)
         .header("Authorization", format!("Bearer {api_key}"))
-        .header("content-type", "application/json")
-        .body(json_body)
+        .json(&body)
 }
 
 // ---- Anthropic ----
@@ -307,8 +302,13 @@ impl ChatProvider for AnthropicProvider {
         line: &str,
         buf: &mut String,
     ) -> Result<(Option<String>, bool), String> {
-        buf.push_str(line);
-        buf.push('\n');
+        // mi24: retain ONLY usage-bearing lines — pushing every streamed
+        // line into `buf` grew it unboundedly (multi-MB on long
+        // generations) while `parse_usage` only ever scans for usage JSON.
+        if line.contains("\"usage\"") {
+            buf.push_str(line);
+            buf.push('\n');
+        }
 
         // Anthropic SSE: lines prefixed with "event:" and "data:"
         if line.starts_with("data: ") {
@@ -336,11 +336,13 @@ impl ChatProvider for AnthropicProvider {
 
             match payload.event_type.as_str() {
                 "content_block_delta" => {
-                    if let Some(ref delta) = payload.delta {
-                        if let Some(ref text) = delta.text {
-                            return Ok((Some(text.clone()), false));
+                    // mi24: move the delta text out instead of cloning —
+                    // `payload` is dropped right after this match.
+                    if let Some(delta) = payload.delta {
+                        if let Some(text) = delta.text {
+                            return Ok((Some(text), false));
                         }
-                        if let Some(ref thinking) = delta.thinking {
+                        if let Some(thinking) = delta.thinking {
                             if !thinking.is_empty() {
                                 return Ok((
                                     Some(format!("{REASONING_PREFIX}{thinking}")),
@@ -446,8 +448,11 @@ impl ChatProvider for OpenAIProvider {
         line: &str,
         buf: &mut String,
     ) -> Result<(Option<String>, bool), String> {
-        buf.push_str(line);
-        buf.push('\n');
+        // mi24: retain ONLY usage-bearing lines (see Anthropic impl above).
+        if line.contains("\"usage\"") {
+            buf.push_str(line);
+            buf.push('\n');
+        }
 
         if line.starts_with("data: ") {
             let data = &line[6..];
@@ -482,21 +487,21 @@ impl ChatProvider for OpenAIProvider {
 
             // Check for final chunk (may have usage, may have finish_reason).
             let mut is_done = false;
-            if let Some(ref choices) = payload.choices {
+            // mi24: move deltas out instead of cloning — `payload` is
+            // dropped at the end of this branch.
+            if let Some(choices) = payload.choices {
                 for choice in choices {
                     if choice.finish_reason.as_deref() == Some("stop") {
                         is_done = true;
                     }
-                    if let Some(ref delta) = choice.delta {
-                        if let Some(ref content) = delta.content {
+                    if let Some(delta) = choice.delta {
+                        if let Some(content) = delta.content {
                             if !content.is_empty() {
-                                return Ok((Some(content.clone()), false));
+                                return Ok((Some(content), false));
                             }
                         }
-                        if let Some(reasoning) = delta
-                            .reasoning_content
-                            .as_ref()
-                            .or(delta.reasoning.as_ref())
+                        if let Some(reasoning) =
+                            delta.reasoning_content.or(delta.reasoning)
                         {
                             if !reasoning.is_empty() {
                                 return Ok((

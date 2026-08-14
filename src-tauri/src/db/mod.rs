@@ -475,6 +475,9 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(chat_session_id, id);
+        -- mi26: get_cost_rollups_v2 range-scans chat_messages by created_at
+        -- every poll — previously a full-table scan + join per rollup call.
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at);
         CREATE INDEX IF NOT EXISTS idx_chat_sessions_active ON chat_sessions(last_active_at DESC);
 
         CREATE TABLE IF NOT EXISTS artifacts (
@@ -616,7 +619,8 @@ pub use cost_v2::{get_cost_rollups_v2, read_rate_overrides};
 pub use chat::{
     add_chat_message, create_chat_session, delete_chat_message, delete_chat_session,
     delete_chat_sessions_for_project, delete_empty_chat_sessions,
-    get_chat_session, list_active_chat_messages, list_chat_messages, list_chat_sessions,
+    get_chat_session, list_active_chat_messages, list_chat_messages, list_chat_messages_page,
+    list_chat_sessions,
     list_chat_session_connectors, mark_superseded, set_chat_session_connectors,
     set_chat_session_project, set_chat_session_starred, set_chat_session_unread,
     touch_chat_session, update_chat_session_agent, update_chat_session_model,

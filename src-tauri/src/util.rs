@@ -1,5 +1,24 @@
 //! Small cross-cutting utilities.
 
+/// Char-safe prefix truncation: take at most `max` CHARACTERS. Never slices on
+/// a byte boundary, so a multibyte UTF-8 sequence (CJK, emoji) straddling the
+/// cut can't panic — the failure mode of `&s[..n]` on provider/model-controlled
+/// text (error bodies, shell output, bridge returns).
+pub fn truncate_chars(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
+
+/// Char-safe suffix truncation: keep the LAST `max` characters (used for
+/// tail-capping long shell output). Same panic-safety rationale as
+/// `truncate_chars`.
+pub fn tail_chars(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        return s.to_string();
+    }
+    s.chars().skip(count - max).collect()
+}
+
 /// Strip the Windows extended-length path prefix (`\\?\`) that
 /// `std::fs::canonicalize` produces. cmd.exe — and therefore any pty spawned
 /// through our `.cmd`-shim wrapper (see `harness_adapters::resolve_for_spawn`)
@@ -105,5 +124,32 @@ mod tests {
             Path::new(r"D:\proj\apple\x"),
             Path::new(r"D:\proj\app"),
         ));
+    }
+
+    #[test]
+    fn truncate_chars_never_splits_multibyte() {
+        // 3-byte chars: byte 500 would land mid-codepoint.
+        let cjk = "日".repeat(400);
+        let out = truncate_chars(&cjk, 200);
+        assert_eq!(out.chars().count(), 200);
+        assert_eq!(out, "日".repeat(200));
+        // Short strings pass through whole.
+        assert_eq!(truncate_chars("héllo", 10), "héllo");
+        // Emoji (4 bytes) at the cut: take lands exactly on the boundary.
+        let emoji = "a".repeat(498) + &"🎉".repeat(10);
+        let out = truncate_chars(&emoji, 499);
+        assert_eq!(out.chars().count(), 499);
+        assert_eq!(out.chars().last(), Some('🎉'));
+    }
+
+    #[test]
+    fn tail_chars_keeps_suffix_on_char_boundary() {
+        let s = "x".repeat(900) + &"語".repeat(50);
+        let out = tail_chars(&s, 60);
+        assert_eq!(out.chars().count(), 60);
+        assert!(out.starts_with('x'));
+        assert!(out.ends_with('語'));
+        // At/below the cap: verbatim.
+        assert_eq!(tail_chars("short", 10), "short");
     }
 }

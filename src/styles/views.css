@@ -1,0 +1,849 @@
+/* views — Modals, per-pane diff overlay, peek panel, inline message diffs, diff review card, cost dashboard v1 + v2.
+   Split out of the old monolithic global.css (2026-08-15). Import order in
+   global.css preserves the original cascade — do not reorder imports. */
+/* ---------- Modal ---------- */
+.modal-overlay {
+  align-items: center;
+  z-index: 60;
+}
+.modal {
+  width: min(440px, 90vw);
+  background: var(--surface-glass);
+  backdrop-filter: blur(32px) saturate(150%);
+  -webkit-backdrop-filter: blur(32px) saturate(150%);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: modal-in 0.22s var(--ease);
+}
+.modal h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.modal p {
+  margin: 0;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+.modal .actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+/* Wide, solid variant used by the Artifacts library so the card grid is
+   readable (the default glass fill washes cards out over the dimmed app). */
+.modal.modal-artifacts {
+  width: min(860px, 92vw);
+  background: var(--surface-solid);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* ---------- Per-pane inline diff overlay ---------- */
+/* Scrim that covers the FOCUSED pane (not the whole window) and dims the
+   underlying terminal without hiding it. The pane's grid frame is the
+   containing block (position:relative via `.pane`), so `position:absolute;
+   inset:0` matches the pane's body, not the whole window. */
+.pane-diff-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  z-index: 10;
+  animation: overlay-in 0.16s var(--ease);
+}
+.pane-diff-panel {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-glass);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+  margin: 8px;
+  min-height: 0;
+  overflow: hidden;
+}
+.pane-diff-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.pane-diff-title {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.pane-diff-close {
+  flex: 0 0 auto;
+}
+.pane-diff-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 8px 12px;
+  user-select: text;
+}
+
+/* ---------- Peek panel (Â§7.9) ---------- */
+.peek-panel {
+  width: min(560px, 90vw);
+  background: var(--surface-glass);
+  backdrop-filter: blur(32px) saturate(150%);
+  -webkit-backdrop-filter: blur(32px) saturate(150%);
+  border-left: 1px solid var(--border-strong);
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+}
+.peek-content {
+  flex: 1;
+  overflow: auto;
+  padding: 12px 16px;
+  user-select: text;
+}
+.peek-content pre {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diff-file {
+  margin-bottom: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  box-shadow: var(--glass-rim-soft);
+}
+.diff-file .diff-file-header {
+  padding: 6px 11px;
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.05) inset;
+}
+.diff-line {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 0 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  display: flex;
+  align-items: flex-start;
+}
+/* Two-column gutter: old/new line numbers, then content. The gutter is
+   right-aligned monospace so digits line up; empty slots (added lines have
+   no old number, deleted have no new) collapse to blank so the +/- sign and
+   text still align with the context lines around them. */
+.diff-line-gutter {
+  flex: 0 0 auto;
+  min-width: 7ch;
+  margin-right: 10px;
+  text-align: right;
+  color: var(--text-dim);
+  opacity: 0.7;
+  user-select: none;
+  white-space: pre;
+}
+.diff-line-content { flex: 1 1 auto; min-width: 0; }
+.diff-line.add { background: var(--diff-add-bg); }
+.diff-line.add {
+  background: var(--diff-add-bg);
+  border-left: 3px solid #4ec98a;
+  padding-left: 7px;
+  margin-left: -10px;
+}
+.diff-line.del {
+  background: var(--diff-del-bg);
+  border-left: 3px solid #ff7b72;
+  padding-left: 7px;
+  margin-left: -10px;
+}
+.diff-line.hunk { background: var(--diff-hunk-bg); color: var(--accent); }
+.diff-line.meta { color: var(--text-dim); }
+
+/* â”€â”€ Inline diff inside chat messages (Codex-style) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+   Unified diff rendered directly in the message stream. File path as a
+   small monospace header, then red/green +/- lines. Compact, no border
+   card â€” just the raw diff with color-coded backgrounds. */
+.chat-diff-inline {
+  margin: 4px 0 8px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.chat-diff-inline .diff-file-header {
+  padding: 2px 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 2px;
+  opacity: 0.8;
+}
+.chat-diff-inline .diff-line {
+  padding: 0 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+.chat-diff-inline .diff-line.add {
+  background: var(--diff-add-bg);
+  color: #34d17b;
+}
+.chat-diff-inline .diff-line.del {
+  background: var(--diff-del-bg);
+  color: #ff7b72;
+}
+.chat-diff-inline .diff-line.hunk {
+  background: var(--diff-hunk-bg);
+  color: var(--accent);
+  font-weight: 600;
+}
+.chat-diff-inline .diff-line.context {
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+
+/* --- Inline diff review card (mockup 01 callout 5) ---
+   A file edit by the chat agent renders as its own card in the message
+   stream: header (filename, +/− stats, Applied + Peek), a short red/green
+   hunk preview, and a "more lines" footer that opens the full diff in
+   PeekPanel. Reuses the shared .diff-line color classes. */
+.diff-card {
+  margin: 10px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-glass);
+  box-shadow: var(--glass-rim-soft);
+  overflow: hidden;
+  /* Accept button matches the mockup's green (default falls back to accent). */
+  --approval-accent: #3fb96b;
+  --approval-accent-contrast: #fff;
+}
+.diff-card.live {
+  opacity: 0.85;
+}
+.diff-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+.diff-card-icon {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+.diff-card-filename {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  /* It's a button now (click opens the file, like Cursor's filename rows). */
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.diff-card-filename:hover {
+  text-decoration: underline;
+}
+.diff-card-stat {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.diff-card-adds { color: #34d17b; }
+.diff-card-dels { color: #ff7b72; }
+.diff-card-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+}
+.diff-card-applied {
+  font-size: 11px;
+  color: #34d17b;
+}
+.diff-card-peek {
+  padding: 3px 11px;
+  font-size: 11px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+}
+.diff-card-peek:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.diff-card-body .diff-line {
+  padding: 1px 12px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.diff-card-body .diff-line.add {
+  color: #34d17b;
+  border-left: none;
+  padding-left: 12px;
+  margin-left: 0;
+}
+.diff-card-body .diff-line.del {
+  color: #ff7b72;
+  border-left: none;
+  padding-left: 12px;
+  margin-left: 0;
+}
+.diff-card-more {
+  display: block;
+  width: 100%;
+  padding: 5px 12px;
+  font-size: 10.5px;
+  text-align: left;
+  color: var(--text-dim);
+  background: none;
+  border: none;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+}
+.diff-card-more:hover:not(:disabled) {
+  color: var(--accent);
+}
+.diff-card-more:disabled {
+  cursor: default;
+}
+/* Expanded state: filename gets a subtle accent underline so the user knows
+   the click target now means "collapse" rather than "expand". */
+.diff-card.expanded .diff-card-filename {
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-underline-offset: 2px;
+}
+
+/* ---------- Cost dashboard ---------- */
+.chart {
+  width: 100%;
+}
+.chart .bar {
+  fill: var(--accent);
+}
+/* Daily chart (cost/tokens toggle): warm terracotta bars that read clearly on
+   the dark glass surface (the neutral --accent gray is nearly invisible). */
+.daily-chart .bar {
+  fill: #c15f3c;
+  opacity: 0.9;
+}
+.daily-chart .bar:hover {
+  opacity: 1;
+  filter: brightness(1.15);
+}
+.chart .bar-label {
+  fill: var(--text-dim);
+  font-size: 10px;
+  font-family: var(--font-ui);
+}
+.chart .bar-value {
+  fill: var(--text);
+  font-size: 10px;
+  font-family: var(--font-mono);
+}
+.estimate-note {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+/* Cost dashboard: each section reserves a fixed height so the chart and table
+   areas stay stable when empty (no data yet) or while loading â€” switching
+   between populated and unpopulated states does not reflow the modal. */
+
+
+.cost-chart-frame .chart {
+  min-width: 100%;
+}
+/* Model chart â€” shorter frame since no labels under bars */
+
+
+/* Model color legend below the bar chart */
+
+
+
+
+
+/* Screen-reader-only content (chart fallback data tables, etc.) — visually
+   hidden but still in the accessibility tree. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------- Cost dashboard v2 (T3 Code layout) ---------- */
+.view-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.range-toggle {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-glass);
+}
+.range-toggle button.ghost {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: var(--radius-xs);
+}
+.range-toggle button.ghost.active {
+  background: var(--accent-soft);
+  color: var(--text);
+  box-shadow: var(--glass-rim-soft);
+}
+
+/* T3 Code reference: the left column stacks the big "Raw Token Cost" number
+   ABOVE the per-tool breakdown rows (number on top, rows below). */
+.cost-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  box-shadow: var(--glass-rim);
+}
+.cost-hero-headline {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+.cost-hero-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+.cost-hero-value {
+  font-family: var(--font-mono);
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+.cost-hero-range {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.cost-hero-breakdown {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+}
+.cost-hero-row-empty {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+.cost-hero-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto;
+  gap: 12px;
+  align-items: baseline;
+  font-size: 13px;
+}
+.cost-hero-row-label {
+  font-weight: 500;
+  color: var(--text);
+}
+.cost-hero-row-cost {
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+.cost-hero-row-share,
+.cost-hero-row-tokens {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.cost-chart {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  box-shadow: var(--glass-rim);
+}
+.chart-toggle {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  margin-bottom: 12px;
+  width: fit-content;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.chart-toggle button.ghost {
+  padding: 4px 14px;
+  font-size: 12px;
+  border-radius: var(--radius-xs);
+  border: 1px solid transparent;
+}
+.chart-toggle button.ghost.active {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--text);
+  box-shadow: var(--glass-rim-soft);
+}
+.cost-chart .chart-frame {
+  overflow-x: auto;
+  padding-bottom: 4px;
+  position: relative;
+}
+/* Stacked area chart (dataviz skill): validated categorical palette, fixed
+   hue order by provider identity. Light values default; dark under the app's
+   data-theme + OS dark (same ramps stepped for the dark surface). */
+.cost-chart {
+  --series-1: #2a78d6;   /* claude_code */
+  --series-2: #eb6834;   /* kimi_code */
+  --series-3: #1baf7a;   /* opencode */
+  --series-4: #eda100;   /* chat:anthropic */
+  --series-5: #e87ba4;   /* chat:openai */
+  --series-6: #008300;   /* chat:openrouter */
+  --series-7: #4a3aa7;   /* chat:local_gguf */
+  --series-other: #8b8b8b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .cost-chart {
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+    --series-7: #9085e9;
+    --series-other: #6e706f;
+  }
+}
+:root[data-theme="dark"] .cost-chart {
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-other: #6e706f;
+}
+.daily-chart {
+  display: block;
+  min-width: 100%;
+}
+.daily-chart .gridline {
+  stroke: var(--border);
+  stroke-width: 1;
+  stroke-dasharray: 2 4;
+}
+.daily-chart .area {
+  fill: var(--series, var(--series-other));
+  fill-opacity: 0.82;
+  stroke: var(--series, var(--series-other));
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  transition: fill-opacity 0.15s ease;
+}
+.daily-chart .area:hover {
+  fill-opacity: 0.95;
+}
+.daily-chart .crosshair {
+  stroke: var(--text-dim);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  pointer-events: none;
+}
+.daily-chart .hit-target {
+  fill: transparent;
+  cursor: crosshair;
+}
+.chart-tooltip {
+  position: absolute;
+  top: 8px;
+  z-index: 5;
+  min-width: 150px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-solid);
+  box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.5);
+  font-size: 11px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.chart-tooltip-day {
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+.chart-tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 0;
+}
+.chart-tooltip-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.chart-tooltip-name {
+  color: var(--text-dim);
+  flex: 1;
+}
+.chart-tooltip-value {
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+.chart-tooltip-total {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding-top: 10px;
+}
+.chart-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.chart-legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+/* T3 Code layout: hero + per-tool breakdown on the LEFT, daily cost chart on
+   the RIGHT, side by side. */
+.cost-top-grid {
+  display: grid;
+  grid-template-columns: 0.95fr 1.05fr;
+  gap: 16px;
+  align-items: stretch;
+}
+.cost-top-grid .cost-hero {
+  height: 100%;
+  box-sizing: border-box;
+}
+.cost-top-grid .cost-chart {
+  height: 100%;
+  box-sizing: border-box;
+}
+@media (max-width: 1100px) {
+  .cost-top-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 10px;
+}
+.stat {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 84px;
+}
+.stat-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.stat-value {
+  font-family: var(--font-mono);
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text);
+}
+.stat-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.stat-accent {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent-soft) 60%, var(--surface-glass)), var(--surface-glass));
+}
+.stat-accent .stat-value {
+  color: var(--accent);
+}
+
+.cost-quality {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.cost-quality h3 {
+  margin: 0;
+}
+.cost-quality-bar {
+  display: grid;
+  grid-template-columns: 1fr minmax(80px, 140px) 44px;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+}
+.cost-quality-bar-label {
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cost-quality-bar-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.cost-quality-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+}
+.cost-quality-bar-pct {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text);
+  text-align: right;
+}
+.cost-quality-savings {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.cost-quality-savings-label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.cost-quality-savings-value {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.cost-error {
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--danger) 50%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface-glass));
+  color: var(--danger);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.cost-loading {
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 24px 0;
+  text-align: center;
+}
+
+/* T3 Code layout: model breakdown table LEFT, cost quality panel RIGHT. */
+.cost-bottom-grid {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+.cost-bottom-grid .model-breakdown {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  box-shadow: var(--glass-rim);
+  padding: 14px;
+  overflow-x: auto;
+}
+.cost-bottom-grid .model-breakdown h3 {
+  margin: 0 0 10px;
+}
+.cost-bottom-grid .model-breakdown table.kv {
+  margin: 0;
+}
+.cost-bottom-grid .cost-quality {
+  height: 100%;
+}
+@media (max-width: 1100px) {
+  .cost-bottom-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .stats-row {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

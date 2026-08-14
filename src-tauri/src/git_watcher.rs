@@ -45,6 +45,11 @@ const DEBOUNCE_WINDOW: Duration = Duration::from_millis(300);
 /// subscription, dropped filesystem handle on Windows, etc.). 60 s is
 /// cheap because the inner work is just a `recv_timeout` — no git call.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+/// Ceiling on a single debounce burst: sustained FS activity (build loops,
+/// chatty logs) would otherwise keep extending the quiet window forever and
+/// starve the `project:fs-changed` emit. 2 s guarantees progress while still
+/// collapsing the typical burst to one event.
+const MAX_BURST: Duration = Duration::from_secs(2);
 
 /// Per-process state stored in Tauri's `State<WatcherState>`. We use
 /// `parking_lot::Mutex` (not std) because the watcher's own background
@@ -144,8 +149,15 @@ pub fn install(app: &AppHandle, db_state: &DbState, path: &Path) {
                         // Drain any pending events that arrived during the
                         // burst. The inner recv_timeout of `DEBOUNCE_WINDOW`
                         // is the actual debounce: we keep draining until
-                        // DEBOUNCE_WINDOW of quiet, then emit once.
-                        while rx.recv_timeout(DEBOUNCE_WINDOW).is_ok() {
+                        // DEBOUNCE_WINDOW of quiet, then emit once. A
+                        // MAX_BURST ceiling bounds the drain: sustained
+                        // activity (a build loop, a chatty log inside the
+                        // project) would otherwise keep resetting the quiet
+                        // window and starve the emit indefinitely.
+                        let burst_deadline = Instant::now() + MAX_BURST;
+                        while Instant::now() < burst_deadline
+                            && rx.recv_timeout(DEBOUNCE_WINDOW).is_ok()
+                        {
                             *last_event_for_thread.lock() = Instant::now();
                         }
                         emit_fs_changed(&app_for_thread, &canon_for_thread);
@@ -177,8 +189,18 @@ pub fn install(app: &AppHandle, db_state: &DbState, path: &Path) {
 
 /// Drop a watcher (e.g. on project remove). No-op if the path isn't watched.
 pub fn uninstall(state: &WatcherState, path: &Path) {
+    // Try BOTH key forms: install keys the map by the CANONICALIZED path
+    // (verbatim `\\?\C:\…` on Windows). When the watched directory itself
+    // was deleted, canonicalize fails and falls back to the raw path —
+    // which then doesn't match the map key, and the watcher (kernel handle
+    // + debounce thread + heartbeat emitter) would leak forever. Removing
+    // under both forms covers that case; the second remove is a cheap no-op.
     let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    state.watchers.lock().remove(&canon);
+    let mut watchers = state.watchers.lock();
+    watchers.remove(&canon);
+    if canon != path {
+        watchers.remove(path);
+    }
 }
 
 /// Install watchers for every registered project + every worktree path.

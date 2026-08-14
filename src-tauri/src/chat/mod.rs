@@ -72,6 +72,15 @@ pub struct ChatManager {
     /// tool call that `check_permission` flags as `NeedsApproval` registers
     /// here and pauses its loop on the oneshot receiver until the UI resolves.
     pending: Mutex<HashMap<String, PendingApproval>>,
+    /// PERF (PERFORMANCE_AUDIT.md B11): memoized context-meter token counts.
+    /// The frontend polls `count_context_tokens` every 2 s while a local
+    /// session is idle, and each call used to re-send the ENTIRE active
+    /// history to llama-server's /tokenize even when nothing had changed.
+    /// Keyed by chat_session_id → (fingerprint, used_tokens); the
+    /// fingerprint covers (last active message id, active message count,
+    /// system prompt, model) so any transcript / prompt / model change
+    /// invalidates. Entries are removed on session delete.
+    context_token_cache: Mutex<HashMap<String, (String, u32)>>,
 }
 
 impl ChatManager {
@@ -80,7 +89,29 @@ impl ChatManager {
             client: reqwest::Client::new(),
             streams: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
+            context_token_cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Look up a memoized token count for the given fingerprint.
+    pub(crate) fn cached_context_tokens(&self, chat_session_id: &str, fingerprint: &str) -> Option<u32> {
+        self.context_token_cache
+            .lock()
+            .get(chat_session_id)
+            .and_then(|(fp, tokens)| if fp == fingerprint { Some(*tokens) } else { None })
+    }
+
+    /// Store a token count under the given fingerprint (replaces any stale
+    /// entry for the session).
+    pub(crate) fn store_context_tokens(&self, chat_session_id: &str, fingerprint: String, tokens: u32) {
+        self.context_token_cache
+            .lock()
+            .insert(chat_session_id.to_string(), (fingerprint, tokens));
+    }
+
+    /// Drop the memoized count for a session (called on session delete).
+    pub(crate) fn invalidate_context_tokens(&self, chat_session_id: &str) {
+        self.context_token_cache.lock().remove(chat_session_id);
     }
 
     /// Register a pending approval and return its synthetic id + the receiver

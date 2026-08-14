@@ -50,8 +50,8 @@ describe("MessageBubble activity grouping", () => {
     // The trailing synthesized answer renders outside the collapsed group.
     expect(queryByText(/systems language/)).not.toBeNull();
 
-    // Exactly one activity toggle in the bubble.
-    const toggles = document.body.querySelectorAll(".chat-activity-toggle");
+    // Exactly one process summary toggle in the bubble.
+    const toggles = document.body.querySelectorAll(".chat-process-toggle");
     expect(toggles.length).toBe(1);
   });
 
@@ -69,8 +69,8 @@ describe("MessageBubble activity grouping", () => {
     expect(queryByText(/rust-lang\.org\/learn/)).toBeNull();
     expect(queryByText(/async runtime/)).toBeNull();
 
-    // Expand the group: click the activity toggle (the synthesized summary).
-    const toggle = container.querySelector(".chat-activity-toggle") as HTMLElement;
+    // Expand the group: click the process toggle (the synthesized summary).
+    const toggle = container.querySelector(".chat-process-toggle") as HTMLElement;
     fireEvent.click(toggle);
 
     // After expand: both specific step labels now visible.
@@ -87,7 +87,7 @@ describe("MessageBubble activity grouping", () => {
     expect(queryByText(/solana validators/)).toBeNull();
   });
 
-  it("folds thinking between tool calls into the SAME group, not separate blocks", () => {
+  it("renders thinking between tool calls as its own disclosure inside the process region", () => {
     const content = [
       tool("Searching the web", "rust async runtime"),
       "<think>I should verify this on the official site.</think>",
@@ -98,21 +98,22 @@ describe("MessageBubble activity grouping", () => {
       <MessageBubble message={assistantMsg(content)} />,
     );
 
-    // Exactly ONE outer container for the whole turn — no standalone
-    // ThinkingBlock, no second activity block.
-    expect(container.querySelectorAll(".chat-activity-toggle").length).toBe(1);
-    expect(container.querySelectorAll(".chat-thinking-toggle").length).toBe(0);
+    // Exactly ONE process summary for the whole turn — thinking never creates
+    // a second outer container.
+    expect(container.querySelectorAll(".chat-process-toggle").length).toBe(1);
     // Trailing answer still renders outside the group.
     expect(queryByText(/Final answer/)).not.toBeNull();
 
-    // Expanding the outer row reveals the nested thinking block inside.
-    const toggle = container.querySelector(".chat-activity-toggle") as HTMLElement;
+    // Expanding the process row reveals the thinking disclosure and BOTH tool
+    // steps (the think splits the run into two activity groups).
+    const toggle = container.querySelector(".chat-process-toggle") as HTMLElement;
     fireEvent.click(toggle);
-    const nested = container.querySelectorAll(".chat-activity-steps .chat-thinking-toggle");
-    expect(nested.length).toBe(1);
+    expect(container.querySelectorAll(".chat-thinking-toggle").length).toBe(1);
+    expect(container.querySelectorAll(".chat-activity-steps").length).toBe(2);
+    expect(container.querySelectorAll(".chat-step").length).toBe(2);
   });
 
-  it("folds a leading think before the first tool into the group", () => {
+  it("renders a leading think inside the process region as its own disclosure", () => {
     const content = [
       "<think>Let me plan this search.</think>",
       tool("Searching the web", "tokio tutorial"),
@@ -121,8 +122,12 @@ describe("MessageBubble activity grouping", () => {
     const { container } = render(
       <MessageBubble message={assistantMsg(content)} />,
     );
-    expect(container.querySelectorAll(".chat-activity-toggle").length).toBe(1);
-    expect(container.querySelectorAll(".chat-thinking-toggle").length).toBe(0);
+    expect(container.querySelectorAll(".chat-process-toggle").length).toBe(1);
+    // Collapsed by default — the thinking disclosure only renders once the
+    // process row is expanded.
+    fireEvent.click(container.querySelector(".chat-process-toggle") as HTMLElement);
+    expect(container.querySelectorAll(".chat-thinking-toggle").length).toBe(1);
+    expect(container.querySelectorAll(".chat-activity-steps").length).toBe(1);
   });
 
   it("keeps a think-only turn as a standalone ThinkingBlock (no group)", () => {
@@ -130,7 +135,7 @@ describe("MessageBubble activity grouping", () => {
     const { container } = render(
       <MessageBubble message={assistantMsg(content)} />,
     );
-    expect(container.querySelectorAll(".chat-activity-toggle").length).toBe(0);
+    expect(container.querySelectorAll(".chat-process-toggle").length).toBe(0);
     expect(container.querySelectorAll(".chat-thinking-toggle").length).toBe(1);
   });
 });

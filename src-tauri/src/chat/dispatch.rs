@@ -360,8 +360,13 @@ fn tool_step_description(name: &str, args: &Value) -> String {
         "run_shell" | "shell" | "RunShell" => {
             let cmd = args.get("command").or_else(|| args.get("cmd"))
                 .and_then(|v| v.as_str()).unwrap_or("command");
-            // Truncate long commands
-            let short = if cmd.len() > 60 { &cmd[..57] } else { cmd };
+            // Truncate long commands (char-safe: the command is model text and
+            // may be multibyte — a byte slice here panics mid-turn).
+            let short = if cmd.chars().count() > 60 {
+                crate::util::truncate_chars(cmd, 57)
+            } else {
+                cmd.to_string()
+            };
             format!("Run {}", short)
         }
         "download_file" | "download" => {
@@ -450,11 +455,19 @@ async fn execute_system_tool(app: &AppHandle, sid: &str, name: &str, args: &Valu
                 return "Error: run_shell requires a non-empty \"command\".".to_string();
             }
             let workdir = args.get("workdir").and_then(|v| v.as_str());
-            // Run synchronously so the output flows into the turn buffer and
+            // Run to completion so the output flows into the turn buffer and
             // persists in the stored message (the async start_shell path sends
             // output to a separate chat:task-progress channel that doesn't
-            // persist). Long-running commands block the turn.
-            crate::chat::tasks::run_shell_to_completion(command, workdir)
+            // persist). The sync runner parks on the child, so it must run on
+            // the blocking pool — inline it would pin a tokio worker for the
+            // whole command (up to the runner's 120 s ceiling).
+            let cmd_owned = command.to_string();
+            let wd_owned = workdir.map(str::to_string);
+            tokio::task::spawn_blocking(move || {
+                crate::chat::tasks::run_shell_to_completion(&cmd_owned, wd_owned.as_deref())
+            })
+            .await
+            .unwrap_or_else(|e| format!("shell task failed: {e}"))
         }
         TASK => {
             // Spawn a streaming sub-turn using the SAME provider+model as this
@@ -655,7 +668,7 @@ async fn stream_subagent_sse(
     let status = resp.status();
     if !status.is_success() {
         let b = resp.text().await.unwrap_or_default();
-        return Err(format!("HTTP {status}: {}", &b[..b.len().min(500)]));
+        return Err(format!("HTTP {status}: {}", crate::util::truncate_chars(&b, 500)));
     }
 
     let mut stream = resp.bytes_stream();
@@ -829,10 +842,13 @@ pub(crate) async fn run_tool(
         // enforce the same `fs_roots` containment as the mutating FS tools.
         // Without this gate, a prompt-injected model in AutoEdit/FullAuto
         // could write to startup folders, overwriting trusted binaries on PATH,
-        // etc. The check is skipped when fs_roots is empty (already blocks
-        // mutating FS tools) so behavior for users who never grant roots is
-        // unchanged.
+        // etc. The check is skipped when fs_roots is empty — the mutating FS
+        // tools are already blocked outright with no roots granted, and
+        // enforcing containment here would hard-block Manual-mode users from
+        // ever seeing the approval card (`path_within_scope` is always false
+        // against an empty root list).
         if name == tools::DOWNLOAD_FILE
+            && !caps.fs_roots.is_empty()
             && !permission::path_within_scope(
                 &fs_target_path(name, args),
                 &caps.fs_roots,
@@ -1086,10 +1102,17 @@ async fn run_ledger_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -
                     Err(e) => Err(format!("add_source_note failed: {e}")),
                 }
             }
-            GET_SOURCE_LEDGER => match db::list_source_notes(&conn, sid) {
-                Ok(notes) => Ok(serde_json::to_string(&notes).unwrap_or_else(|_| "[]".to_string())),
-                Err(e) => Err(format!("get_source_ledger failed: {e}")),
-            },
+            // mi5: fetch rows under the lock, serialize AFTER releasing it —
+            // serde of the full notes vector under the DB mutex stalled every
+            // other DB reader for the duration.
+            GET_SOURCE_LEDGER => {
+                let notes = match db::list_source_notes(&conn, sid) {
+                    Ok(n) => n,
+                    Err(e) => return Some(format!("get_source_ledger failed: {e}")),
+                };
+                drop(conn);
+                return Some(serde_json::to_string(&notes).unwrap_or_else(|_| "[]".to_string()));
+            }
             RESET_SOURCE_LEDGER => match db::clear_source_notes(&conn, sid) {
                 Ok(_) => Ok("Source ledger cleared.".to_string()),
                 Err(e) => Err(format!("reset_source_ledger failed: {e}")),

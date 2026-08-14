@@ -100,12 +100,18 @@ pub(super) fn fs_search_files(args: &Value) -> ToolOutcome {
                 break;
             }
             let name = entry.file_name().to_string_lossy().to_string();
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                // Same skip list as search_content: without it a name search
+                // still descends into node_modules/.git/target — thousands of
+                // junk hits and a walk that can take minutes on big trees.
+                if !super::search_content::is_skipped_dir(&name) {
+                    stack.push(entry.path());
+                }
+                continue;
+            }
             if name.to_ascii_lowercase().contains(&needle) {
                 let p = entry.path().display().to_string();
                 matches.push(p);
-            }
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                stack.push(entry.path());
             }
         }
     }

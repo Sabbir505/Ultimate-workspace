@@ -275,7 +275,12 @@ export const deleteSecret = (projectId: string, key: string) =>
 export const listSecretKeys = (projectId: string) =>
   safeInvoke<string[] | null>("list_secret_keys", { projectId });
 export const getCostEvents = (sessionId?: string) =>
-  safeInvoke<CostEvent[] | null>("get_cost_events", sessionId ? { sessionId } : {});
+  safeInvoke<CostEvent[] | null>("get_cost_events", {
+    sessionId: sessionId ?? null,
+    // M6: bounded by default (backend also caps at 500 when null).
+    limit: 500,
+    beforeTs: null,
+  });
 export const getCostRollups = (rangeDays?: 7 | 30 | 90) =>
   safeInvoke<CostRollups | null>("get_cost_rollups", rangeDays ? { rangeDays } : {});
 export const exportSessionMarkdown = (paneId: string) =>
@@ -598,8 +603,12 @@ export const setChatSessionStarred = (chatSessionId: string, starred: boolean) =
   safeInvoke<void>("set_chat_session_starred", { chatSessionId, starred });
 export const setChatSessionUnread = (chatSessionId: string, unread: boolean) =>
   safeInvoke<void>("set_chat_session_unread", { chatSessionId, unread });
-export const getChatMessages = (chatSessionId: string) =>
-  safeInvoke<ChatMessageRecord[] | null>("get_chat_messages", { chatSessionId });
+export const getChatMessages = (chatSessionId: string, beforeId?: number, limit?: number) =>
+  safeInvoke<ChatMessageRecord[] | null>("get_chat_messages", {
+    chatSessionId,
+    beforeId: beforeId ?? null,
+    limit: limit ?? null,
+  });
 export const getChatSessionMetrics = (chatSessionId: string) =>
   safeInvoke<ChatSessionMetricsPayload | null>("get_chat_session_metrics", { chatSessionId });
 export const touchChatSession = (chatSessionId: string) =>
@@ -736,8 +745,8 @@ export interface AutomationRun {
   /** "scheduled" (cron tick) | "manual" (run-now button). */
   source: string;
 }
-export const listAutomationRuns = (automationId: string, limit = 100) =>
-  safeInvoke<AutomationRun[]>("list_automation_runs", { automationId, limit });
+export const listAutomationRuns = (automationId: string, limit = 100, beforeStartedAt?: number) =>
+  safeInvoke<AutomationRun[]>("list_automation_runs", { automationId, limit, beforeId: beforeStartedAt ?? null });
 export const countAutomationRuns = (automationId: string) =>
   safeInvoke<number>("count_automation_runs", { automationId });
 

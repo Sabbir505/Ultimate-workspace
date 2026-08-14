@@ -487,15 +487,137 @@ fn turn_watch_dirs(
 /// the reader thread. `finish_turn` diffs the directory against the snapshot
 /// to surface files the CLI created or modified as artifacts (the built-in
 /// chat gets the same via tool outcomes in chat/dispatch.rs).
+///
+/// PERF (PERFORMANCE_AUDIT.md B6): a `notify` watcher records which paths
+/// were touched DURING the turn, so `changed()` stats only those paths
+/// instead of re-walking the whole tree (depth 4, up to 2000 stats) after
+/// every turn. Falls back to the full walk when the watcher couldn't be
+/// created (dir missing) or reported an error/overflow.
 struct DirWatch {
     dir: PathBuf,
     before: HashMap<String, (SystemTime, u64)>,
+    /// Touched relative paths ('/'-normalized) since the last `changed()`.
+    /// `None` = poisoned (watcher failed/overflowed) → full-walk fallback.
+    touched: Arc<Mutex<Option<std::collections::HashSet<String>>>>,
+    /// Kept alive for the watch's lifetime; dropping stops notifications.
+    _watcher: Option<notify::RecommendedWatcher>,
+}
+
+/// Depth/filter rules shared by `snapshot_dir` and the watcher callback so
+/// both modes see the same file set.
+fn watch_path_allowed(rel: &str) -> bool {
+    // Depth ≤ 4, no hidden dirs, no node_modules/target (same filter as
+    // snapshot_dir's filter_entry).
+    let mut depth = 0usize;
+    for seg in rel.split('/') {
+        depth += 1;
+        if seg.starts_with('.') || seg == "node_modules" || seg == "target" {
+            return false;
+        }
+    }
+    // rel includes the file itself; snapshot_dir's max_depth(4) counts the
+    // root as 0, so a file at walker depth 4 has 4 segments.
+    depth <= 4
 }
 
 impl DirWatch {
     fn new(dir: PathBuf) -> Self {
+        use notify::{RecursiveMode, Watcher};
         let before = snapshot_dir(&dir);
-        Self { dir, before }
+        let touched: Arc<Mutex<Option<std::collections::HashSet<String>>>> =
+            Arc::new(Mutex::new(Some(std::collections::HashSet::new())));
+        let dir_for_cb = dir.clone();
+        let touched_for_cb = Arc::clone(&touched);
+        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            let mut guard = touched_for_cb.lock().unwrap();
+            match res {
+                Ok(event) => {
+                    let Some(set) = guard.as_mut() else { return };
+                    for path in &event.paths {
+                        let rel = path
+                            .strip_prefix(&dir_for_cb)
+                            .unwrap_or_else(|_| path)
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        if watch_path_allowed(&rel) {
+                            set.insert(rel);
+                        }
+                    }
+                    // Pathological churn (or a flood of events): give up on
+                    // incremental mode for this turn rather than ballooning.
+                    if set.len() > 4000 {
+                        *guard = None;
+                    }
+                }
+                // Overflow / backend error: poison → finish_turn full-walks.
+                Err(_) => *guard = None,
+            }
+        })
+        .ok()
+        .and_then(|mut w| {
+            w.watch(&dir, RecursiveMode::Recursive).ok()?;
+            Some(w)
+        });
+        if watcher.is_none() {
+            // No watcher (dir doesn't exist yet, backend init failed):
+            // poisoned from the start → every turn full-walks, exactly the
+            // pre-B6 behavior.
+            *touched.lock().unwrap() = None;
+        }
+        Self { dir, before, touched, _watcher: watcher }
+    }
+
+    /// Files created/modified since the last call; refreshes the baseline.
+    /// Watcher-healthy: stats only the touched paths. Otherwise: full walk.
+    fn changed(&mut self) -> Vec<String> {
+        let touched = {
+            let mut guard = self.touched.lock().unwrap();
+            let t = guard.take();
+            // Rearm for the next turn when the watcher is still alive.
+            *guard = if self._watcher.is_some() {
+                Some(std::collections::HashSet::new())
+            } else {
+                None
+            };
+            t
+        };
+        match touched {
+            Some(paths) if !paths.is_empty() => {
+                let mut changed = Vec::new();
+                for rel in paths {
+                    let full = self.dir.join(&rel);
+                    match std::fs::metadata(&full) {
+                        Ok(md) if md.is_file() => {
+                            let cur = (md.modified().unwrap_or(SystemTime::UNIX_EPOCH), md.len());
+                            match self.before.get(&rel) {
+                                Some(&prev) if prev == cur => {} // touched but unchanged
+                                _ => {
+                                    self.before.insert(rel.clone(), cur);
+                                    changed.push(rel);
+                                }
+                            }
+                        }
+                        // Deleted or not a file: drop from the baseline.
+                        _ => {
+                            self.before.remove(&rel);
+                        }
+                    }
+                }
+                // Same previewable-extension filter the full-walk path
+                // applies via changed_previewable_files.
+                let mut filtered: Vec<String> =
+                    changed.into_iter().filter(|rel| previewable_ext(rel)).collect();
+                filtered.sort();
+                filtered
+            }
+            Some(_) => Vec::new(), // watcher healthy, nothing touched
+            None => {
+                let after = snapshot_dir(&self.dir);
+                let changed = changed_previewable_files(&self.before, &after);
+                self.before = after;
+                changed
+            }
+        }
     }
 }
 
@@ -751,8 +873,19 @@ fn read_claude_stream(
     // between LLM and tool time isn't available for the harness CLI (it's a
     // black-box mixed stream), so those stay — like legacy rows.
     let _perf = crate::chat::turn_perf::register(sid, crate::chat::turn_perf::TurnPerf::new_headless(sid));
-    for line in BufReader::new(stdout).lines() {
-        let Ok(line) = line else { break };
+    // mi18: read_line into ONE reused String — BufReader::lines() allocated a
+    // fresh String per line on streams that run thousands of lines per turn.
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        let line = line.trim_end_matches(&[char::from(10), char::from(13)][..]);
+        let line: &str = line;
         if line.trim().is_empty() {
             continue;
         }
@@ -1139,8 +1272,19 @@ fn read_per_turn_stream(
     let mut output: Option<i64> = None;
     let mut cost: Option<f64> = None;
     let mut tools = ToolTracker::new();
-    for line in BufReader::new(stdout).lines() {
-        let Ok(line) = line else { break };
+    // mi18: read_line into ONE reused String — BufReader::lines() allocated a
+    // fresh String per line on streams that run thousands of lines per turn.
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        let line = line.trim_end_matches(&[char::from(10), char::from(13)][..]);
+        let line: &str = line;
         if line.trim().is_empty() {
             continue;
         }
@@ -1960,11 +2104,11 @@ fn finish_turn(
     // (rare) case of overlapping dirs reporting the same file twice.
     let mut emitted = std::collections::HashSet::new();
     for w in watches.iter_mut() {
-        let after = snapshot_dir(&w.dir);
-        let changed = changed_previewable_files(&w.before, &after);
-        // Refresh the baseline so the next turn (claude's persistent process
-        // runs many turns against one reader) reports only its own files.
-        w.before = after;
+        // B6: stats only watcher-touched paths when the notify watcher is
+        // healthy; full-walks only as a fallback. The baseline refresh
+        // happens inside changed() either way, so the next turn reports only
+        // its own files.
+        let changed = w.changed();
         for rel in changed {
             let path = w.dir.join(&rel).to_string_lossy().to_string();
             if !emitted.insert(path.clone()) {

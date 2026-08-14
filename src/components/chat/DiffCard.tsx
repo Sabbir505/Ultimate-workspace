@@ -10,7 +10,7 @@
 // permission (claude --dangerously-skip-permissions, kimi --yolo, opencode
 // --auto), so every edit auto-applies. The card renders an "Applied" state
 // with an "Open in Peek" action.
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useProjectsStore } from "../../state/projects";
 import { useUiStore } from "../../state/ui";
 
@@ -121,6 +121,11 @@ export function DiffCard({
   // drops the full diff DOWN inline, beneath the preview. No Peek navigation.
   // `done` reset (e.g. new streaming `<tool>` for the same path) collapses.
   const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    // A new streaming block for the same path flips done false→true — the
+    // inline expansion from the previous version no longer applies.
+    setExpanded(false);
+  }, [done]);
   const visible = expanded ? lines : lines.slice(0, PREVIEW_LINE_CAP);
   const hiddenCount = expanded ? 0 : lines.length - visible.length;
 

@@ -1,0 +1,167 @@
+/* skills — Global scrollbars, skills & loops library containers.
+   Split out of the old monolithic global.css (2026-08-15). Import order in
+   global.css preserves the original cascade — do not reorder imports. */
+/* Scrollbars â€” use the dedicated --scrollbar-* tokens so the thumb can be
+   tuned per-theme (darker in light, lighter in dark) without affecting
+   other surfaces that share --border-strong. */
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 99px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------- Skills & Loops library ---------- */
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 10px;
+}
+.tab-bar .tab {
+  padding: 5px 13px;
+  border-radius: 99px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: none;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+.tab-bar .tab:hover {
+  color: var(--text);
+}
+.tab-bar .tab.active {
+  background: var(--accent-soft);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  box-shadow: var(--glass-rim-soft);
+}
+.installed-panel {
+  display: flex;
+  gap: 14px;
+  min-height: 0;
+  flex: 1;
+  /* Fills the shared .library-panel container (fixed height, below) so every
+     tab â€” Skills, Loops, Prompt templates â€” occupies identical space and
+     switching tabs never resizes the modal. */
+  height: 100%;
+}
+/* The single fixed-height box that every library tab renders into. This â€” not
+   the per-tab panels â€” is what keeps the modal a constant size across tabs;
+   each tab fills it and scrolls internally if its content overflows. */
+.library-panel {
+  height: 500px;
+  min-height: 500px;
+  max-height: 500px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* Templates tab: same container, internal scroll. */
+
+.installed-list {
+  width: 42%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.installed-items {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.installed-item {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  background: var(--surface-glass);
+  box-shadow: var(--glass-rim-soft);
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.installed-item:hover {
+  background: var(--surface-glass-2);
+}
+.installed-item.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: var(--glass-rim-soft), 0 0 16px -8px var(--accent-glow);
+}
+.installed-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+.installed-item-desc {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 3px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.installed-editor {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.installed-editor textarea {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--surface-solid);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  resize: none;
+}
+.source-badge {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  background: var(--surface-2);
+  box-shadow: var(--glass-rim-soft);
+}
+.source-badge.claude {
+  color: #e08a4c;
+  border-color: #e08a4c66;
+}
+.source-badge.kimi {
+  color: #5b9bd5;
+  border-color: #5b9bd566;
+}
+.source-badge.both {
+  color: #7fba6e;
+  border-color: #7fba6e66;
+}

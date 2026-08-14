@@ -13,7 +13,10 @@
 import { lazy, Suspense, useEffect, useRef } from "react";
 import { Modal } from "./components/common/Modal";
 import { OnboardingBanner } from "./components/onboarding/OnboardingBanner";
-import { ToolPanel } from "./components/panes/ToolPanel";
+// ToolPanel (right-side tool/agents/artifact panel) statically imports
+// react-markdown via SubagentPanel — lazy so it leaves the entry chunk
+// (PERFORMANCE_AUDIT.md item 12).
+const ToolPanel = lazy(() => import("./components/panes/ToolPanel").then((m) => ({ default: m.ToolPanel })));
 import { PeekPanel } from "./components/peek/PeekPanel";
 import { ProjectSettingsPanel } from "./components/sidebar/ProjectSettingsPanel";
 import { Sidebar } from "./components/sidebar/Sidebar";
@@ -139,7 +142,9 @@ export default function App() {
         {activeView === "chat" ? (
           <div className="grid-wrap chat-grid-wrap">
             <ChatView />
-            <ToolPanel />
+            <Suspense fallback={null}>
+              <ToolPanel />
+            </Suspense>
           </div>
         ) : activeView === "automations" ? (
           <Suspense fallback={null}>

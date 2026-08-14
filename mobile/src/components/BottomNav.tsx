@@ -1,6 +1,13 @@
 import React, { useMemo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from 'react-native';
-import { Home, MessageSquare, Bell, Settings } from 'lucide-react-native';
+import Ionicons from '@expo/vector-icons/Ionicons';
+// M4: lucide-react-native cannot be tree-shaken by Metro (one giant JS
+// bundle of every icon); Ionicons is a glyph font already bundled with the
+// app. These wrappers preserve the lucide call-sites' (size, color) props.
+const Home = ({ size, color }: { size?: number; color?: string; strokeWidth?: number; }) => <Ionicons name="home" size={size} color={color} />;
+const MessageSquare = ({ size, color }: { size?: number; color?: string; strokeWidth?: number; }) => <Ionicons name="chatbubble" size={size} color={color} />;
+const Bell = ({ size, color }: { size?: number; color?: string; strokeWidth?: number; }) => <Ionicons name="notifications" size={size} color={color} />;
+const Settings = ({ size, color }: { size?: number; color?: string; strokeWidth?: number; }) => <Ionicons name="settings" size={size} color={color} />;
 import { theme, useTheme } from '../theme';
 
 interface BottomNavProps {

@@ -158,21 +158,25 @@ pub fn assemble_for_tokenization(system: &Option<String>, messages: &[ChatMessag
         }
     }
     for m in messages {
-        s.push_str(&format!("<|{}|>\n{}\n", m.role, m.content));
+        // mi15: push_str instead of format!-per-message (format! allocates a
+        // temp String for the whole line).
+        s.push_str("<|");
+        s.push_str(&m.role);
+        s.push_str("|>\n");
+        s.push_str(&m.content);
+        s.push('\n');
     }
     s
 }
 
-/// Count tokens for the assembled system+messages via `POST {base}/tokenize`.
-/// llama-server returns `{ "tokens": [...] }`; the count is the array length.
-/// Errors propagate to the caller, which treats them as a compaction fallback.
-pub async fn count_tokens(
+/// Shared HTTP body for all /tokenize callers: POST the assembled content,
+/// return the token-array length. Errors propagate to the caller, which
+/// treats them as a compaction fallback.
+async fn tokenize_content(
     client: &reqwest::Client,
     base_url: &str,
-    system: &Option<String>,
-    messages: &[ChatMessage],
+    content: String,
 ) -> Result<u32, String> {
-    let content = assemble_for_tokenization(system, messages);
     let url = format!("{base_url}/tokenize");
     let resp = client
         .post(&url)
@@ -196,6 +200,54 @@ pub async fn count_tokens(
     Ok(n)
 }
 
+/// Assemble entries by REFERENCE (role + content only). Images never feed the
+/// tokenizer, so counting via this path avoids cloning `ChatMessage`s — and
+/// their multi-MB base64 image payloads — purely to count (PERFORMANCE_AUDIT.md
+/// B7).
+fn assemble_entries_for_tokenization<T: std::borrow::Borrow<CompactionEntry>>(
+    system: &Option<String>,
+    entries: &[T],
+) -> String {
+    let mut s = String::new();
+    if let Some(sys) = system {
+        s.push_str("<|system|>\n");
+        s.push_str(sys);
+        s.push('\n');
+    }
+    for e in entries {
+        let m = &e.borrow().message;
+        s.push_str("<|");
+        s.push_str(&m.role);
+        s.push_str("|>\n");
+        s.push_str(&m.content);
+        s.push('\n');
+    }
+    s
+}
+
+/// Count tokens for the assembled system+entries without cloning any
+/// ChatMessage. Equivalent to `count_tokens` over the entries' messages.
+pub async fn count_entries_tokens<T: std::borrow::Borrow<CompactionEntry>>(
+    client: &reqwest::Client,
+    base_url: &str,
+    system: &Option<String>,
+    entries: &[T],
+) -> Result<u32, String> {
+    tokenize_content(client, base_url, assemble_entries_for_tokenization(system, entries)).await
+}
+
+/// Count tokens for the assembled system+messages via `POST {base}/tokenize`.
+/// llama-server returns `{ "tokens": [...] }`; the count is the array length.
+/// Errors propagate to the caller, which treats them as a compaction fallback.
+pub async fn count_tokens(
+    client: &reqwest::Client,
+    base_url: &str,
+    system: &Option<String>,
+    messages: &[ChatMessage],
+) -> Result<u32, String> {
+    tokenize_content(client, base_url, assemble_for_tokenization(system, messages)).await
+}
+
 /// Count tokens for arbitrary raw text via `POST {base}/tokenize` — used for
 /// the tool-schema overhead, which the send path adds on top of the assembled
 /// system+history and which therefore must be reserved out of the compaction
@@ -207,26 +259,42 @@ pub async fn count_json_tokens(
     base_url: &str,
     text: &str,
 ) -> Result<u32, String> {
-    let url = format!("{base_url}/tokenize");
-    let resp = client
-        .post(&url)
-        .header("content-type", "application/json")
-        .json(&json!({ "content": text }))
-        .send()
-        .await
-        .map_err(|e| format!("/tokenize request failed: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("/tokenize returned {}", resp.status()));
+    tokenize_content(client, base_url, text.to_string()).await
+}
+
+/// PERF (PERFORMANCE_AUDIT.md B1): process-wide memo for `count_json_tokens`.
+/// The send path re-tokenizes the tool-schema JSON on EVERY local-model turn,
+/// but the schema is constant until tool flags change. Keyed by a 64-bit hash
+/// of (base_url, text); turns 2..N hit the cache instead of the network.
+static JSON_TOKEN_CACHE: std::sync::OnceLock<
+    parking_lot::Mutex<std::collections::HashMap<u64, u32>>,
+> = std::sync::OnceLock::new();
+
+/// Cached variant of `count_json_tokens`. Cache failures (sidecar down) are
+/// NOT memoized — a later turn retries the round-trip.
+pub async fn count_json_tokens_cached(
+    client: &reqwest::Client,
+    base_url: &str,
+    text: &str,
+) -> Result<u32, String> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    base_url.hash(&mut h);
+    text.hash(&mut h);
+    let key = h.finish();
+    let cache = JSON_TOKEN_CACHE.get_or_init(|| {
+        parking_lot::Mutex::new(std::collections::HashMap::new())
+    });
+    if let Some(&n) = cache.lock().get(&key) {
+        return Ok(n);
     }
-    let body: Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("/tokenize body parse failed: {e}"))?;
-    let n = body
-        .get("tokens")
-        .and_then(|t| t.as_array())
-        .map(|a| a.len() as u32)
-        .ok_or_else(|| "/tokenize response missing \"tokens\" array".to_string())?;
+    let n = count_json_tokens(client, base_url, text).await?;
+    let mut guard = cache.lock();
+    // Tool-flag combinations are few; a full clear at 64 entries is plenty.
+    if guard.len() >= 64 {
+        guard.clear();
+    }
+    guard.insert(key, n);
     Ok(n)
 }
 
@@ -356,7 +424,7 @@ async fn summarize(
     // doesn't carry it, so we thread a separate field. The call sites in
     // maybe_compact already know n_ctx — pass it through.
     let url = format!("{base_url}/v1/chat/completions");
-    let mut body = json!({
+    let body = json!({
         "model": model,
         "stream": false,
         "max_tokens": 1024,
@@ -365,15 +433,10 @@ async fn summarize(
             { "role": "user", "content": summarization_user_content(to_compact, prior_summary) },
         ],
     });
-    let json_body = serde_json::to_string(&body).unwrap_or_default();
-    eprintln!(
-        "[local-compaction] summarize → POST {url} body_len={}",
-        json_body.len()
-    );
     let resp = client
         .post(&url)
-        .header("content-type", "application/json")
-        .body(json_body)
+        // mi16: .json() instead of a pre-serialized .body() (same as B12).
+        .json(&body)
         .send()
         .await
         .map_err(|e| format!("summarize request failed: {e}"))?;
@@ -426,6 +489,10 @@ async fn summarize(
 ///
 /// `messages` carry their DB `id` (0 for the not-yet-persisted live user
 /// message, which is always pinned and never compacted).
+///
+/// `pre_counted` (PERF B1): when the caller has already tokenized this exact
+/// system+history assembly (the send path does, for the "Compacted X → Y"
+/// notice), pass the count here so it isn't repeated. `None` re-counts.
 pub async fn maybe_compact(
     client: &reqwest::Client,
     base_url: &str,
@@ -435,9 +502,14 @@ pub async fn maybe_compact(
     messages: &[CompactionEntry],
     cfg: &CompactionConfig,
     reserved_tokens: u32,
+    pre_counted: Option<u32>,
 ) -> Result<CompactionOutcome, String> {
+    // Lazy materialization of the owned passthrough Vec: the entries are only
+    // cloned (image payloads included) on paths that actually RETURN them
+    // (PERF B7). The token counts read role+content by reference.
+    let wire_messages = || messages.iter().map(|e| e.message.clone()).collect::<Vec<_>>();
     if n_ctx == 0 {
-        return Ok(CompactionOutcome::passthrough(messages.iter().map(|e| e.message.clone()).collect()));
+        return Ok(CompactionOutcome::passthrough(wire_messages()));
     }
     // Effective window: what the request has left after the tool schema (and
     // other send-time overhead) the caller reserved. If the overhead alone
@@ -449,43 +521,45 @@ pub async fn maybe_compact(
             "[local-compaction] reserved overhead ({reserved_tokens} tokens) fills the \
             {n_ctx}-token window; skipping compaction (context-shifting will degrade)"
         );
-        return Ok(CompactionOutcome::passthrough(messages.iter().map(|e| e.message.clone()).collect()));
+        return Ok(CompactionOutcome::passthrough(wire_messages()));
     }
 
-    let wire_messages: Vec<ChatMessage> = messages.iter().map(|e| e.message.clone()).collect();
-    let tokens = match count_tokens(client, base_url, system, &wire_messages).await {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!(
-                "[local-compaction] /tokenize failed ({e}); passing history through \
-                unchanged (llama-server context-shifting will degrade if needed)"
-            );
-            return Ok(CompactionOutcome::passthrough(wire_messages));
-        }
+    let tokens = match pre_counted {
+        Some(n) => n,
+        None => match count_entries_tokens(client, base_url, system, messages).await {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!(
+                    "[local-compaction] /tokenize failed ({e}); passing history through \
+                    unchanged (llama-server context-shifting will degrade if needed)"
+                );
+                return Ok(CompactionOutcome::passthrough(wire_messages()));
+            }
+        },
     };
 
     let trigger = ((effective_ctx as f64) * cfg.threshold) as u32;
     if tokens.saturating_add(RESPONSE_HEADROOM) < trigger {
-        return Ok(CompactionOutcome::passthrough(wire_messages));
+        return Ok(CompactionOutcome::passthrough(wire_messages()));
     }
 
     let (prior, to_compact, pinned) = match split_for_compaction(&messages, cfg.pin_exchanges) {
         Some(s) => s,
-        None => return Ok(CompactionOutcome::passthrough(wire_messages)),
+        None => return Ok(CompactionOutcome::passthrough(wire_messages())),
     };
 
     // If even the pinned tail + system would overflow, summarizing won't help
     // (the window is too small for the pinned turns alone). Fall back and let
     // context-shifting handle it — log so it's visible during testing.
     if let Ok(pinned_tokens) =
-        count_tokens(client, base_url, system, &pinned.iter().map(|e| e.message.clone()).collect::<Vec<_>>()).await
+        count_entries_tokens(client, base_url, system, &pinned).await
     {
         if pinned_tokens.saturating_add(RESPONSE_HEADROOM) >= effective_ctx {
             eprintln!(
                 "[local-compaction] pinned tail ({pinned_tokens} tokens) already fills \
                 the {effective_ctx}-token window; skipping compaction (context-shifting will degrade)"
             );
-            return Ok(CompactionOutcome::passthrough(wire_messages));
+            return Ok(CompactionOutcome::passthrough(wire_messages()));
         }
     }
 
@@ -532,7 +606,7 @@ pub async fn maybe_compact(
                 "[local-compaction] summarize failed ({e}); passing history through \
                 unchanged (context-shifting will degrade if needed)"
             );
-            return Ok(CompactionOutcome::passthrough(wire_messages));
+            return Ok(CompactionOutcome::passthrough(wire_messages()));
         }
     };
 

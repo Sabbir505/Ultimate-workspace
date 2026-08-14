@@ -1,0 +1,510 @@
+/* pickers — Model/effort/agent selectors, local-model context slider, API keys panel, saved providers.
+   Split out of the old monolithic global.css (2026-08-15). Import order in
+   global.css preserves the original cascade — do not reorder imports. */
+/* Model + effort selector (chat composer) */
+.model-effort-menu {
+  position: relative;
+}
+.model-effort-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.model-effort-trigger:hover {
+  background: var(--surface);
+}
+.model-effort-effort {
+  color: var(--text-dim);
+}
+.model-effort-chevron {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+.model-effort-popup {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  min-width: 240px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: var(--glass-rim), 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+  z-index: 60;
+}
+.model-effort-search {
+  padding: 4px 4px 6px;
+}
+.model-effort-search input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 9px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  outline: none;
+}
+.model-effort-search input:focus {
+  border-color: var(--accent, var(--text-dim));
+}
+.model-effort-search input::placeholder {
+  color: var(--text-dim);
+}
+.model-effort-match {
+  background: var(--accent, var(--surface-2));
+  color: var(--bg-tint);
+  border-radius: 2px;
+  font-weight: 600;
+}
+.model-effort-section {
+  max-height: 240px;
+  overflow-y: auto;
+}
+/* Group label inside the model list (e.g. "Local models"). */
+.model-effort-section-label {
+  padding: 4px 10px 2px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+/* Custom-endpoint footnote in the model dropdown (CLI agent relay setups). */
+.model-effort-endpoint {
+  padding: 5px 10px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  border-top: 1px solid var(--glass-rim-soft, rgba(255, 255, 255, 0.08));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.model-effort-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12px;
+  text-align: left;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.model-effort-item:hover,
+.model-effort-item.active {
+  background: var(--surface-2);
+}
+.model-effort-item.selected {
+  font-weight: 600;
+}
+.model-effort-check {
+  color: var(--accent, var(--text));
+}
+.model-effort-current {
+  color: var(--text-dim);
+}
+.model-effort-divider {
+  height: 1px;
+  margin: 5px 4px;
+  background: var(--border);
+}
+/* Local-model context slider (shown only for local_gguf providers). */
+.model-effort-ctx {
+  padding: 6px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.model-effort-ctx-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12.5px;
+}
+.model-effort-ctx-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.model-effort-ctx-controls input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent);
+  height: 4px;
+}
+/* Manual context-size entry â€” sits below the slider, full width, no spinner. */
+.model-effort-ctx input[type="number"].model-effort-ctx-number {
+  width: 100%;
+  margin-top: 6px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  padding: 3px 8px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.model-effort-ctx input[type="number"].model-effort-ctx-number::-webkit-inner-spin-button,
+.model-effort-ctx input[type="number"].model-effort-ctx-number::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.model-effort-ctx input[type="number"].model-effort-ctx-number {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.model-effort-ctx-auto {
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.model-effort-ctx-auto.selected {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.model-effort-ctx-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+.model-effort-effort-row {
+  position: relative;
+}
+.model-effort-submenu {
+  position: absolute;
+  bottom: 0;
+  right: calc(100% + 8px);
+  min-width: 220px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: var(--glass-rim), 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+}
+.model-effort-submenu-hint {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+.model-effort-badge {
+  margin-left: 8px;
+  padding: 1px 6px;
+  font-size: 10px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  color: var(--text-dim);
+}
+.model-effort-local-badge {
+  margin-left: 6px;
+  padding: 1px 5px;
+  font-size: 9px;
+  font-weight: 600;
+  border-radius: var(--radius-xs);
+  background: var(--accent);
+  color: #fff;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Eject button on the local-model pill. Sits next to the "Local" badge and
+   stops the running llama-server sidecar to free its VRAM. Inline SVG icon
+   (triangle + bar) so it stays consistent with the rest of the icon set. */
+.model-effort-eject {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 4px;
+  padding: 2px;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.model-effort-eject:hover {
+  background: rgba(220, 80, 80, 0.18);
+  border-color: rgba(220, 80, 80, 0.55);
+  color: #f4a3a3;
+}
+.model-effort-eject:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.model-effort-eject:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Agent selector chip + locked model chip (composer, mockup 02). Reuses the
+   model-effort popup/item styles; these are only the agent-specific bits. */
+.agent-menu {
+  position: relative;
+}
+.agent-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* Match the project-folder notch beside it: same height and text color. */
+  padding: 2px 10px;
+  font-size: 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.agent-chip:hover {
+  background: var(--surface);
+}
+.agent-chip.selected {
+  color: var(--text-dim);
+}
+
+/* Agent notch — sits below the composer card with a notch/tab style
+   that visually connects to the card's left edge */
+.composer-notch-agent {
+  position: relative;
+  margin-left: 9px;
+  margin-top: 0;
+  padding: 2px 10px 2px 6px;
+  border: 1px solid var(--border);
+  border-top: none;
+  border-right: none;
+  border-radius: 0 0 8px 8px;
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+}
+.agent-menu-popup {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  min-width: 262px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: var(--glass-rim), 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+  z-index: 60;
+}
+.agent-item-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.agent-item.disabled {
+  color: var(--text-dim);
+  cursor: default;
+  opacity: 0.6;
+}
+.agent-item.disabled:hover {
+  background: transparent;
+}
+.agent-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--state-working);
+  flex-shrink: 0;
+}
+.agent-dot.off {
+  background: var(--state-idle);
+}
+/* Spinner shown on the agent chip while a harness's config/models load. */
+.agent-chip-spinner {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.5px solid var(--text-dim);
+  border-top-color: transparent;
+  animation: agent-chip-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes agent-chip-spin {
+  to { transform: rotate(360deg); }
+}
+.agent-status {
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.agent-status.on {
+  color: var(--state-working);
+}
+/* Locked model chip — shown until an agent is picked (mockup 02, state A). */
+.model-chip-locked {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  cursor: default;
+  user-select: none;
+}
+/* Small inline spinner used while a local model is loading onto the GPU. */
+.local-spinner {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--text-dim);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: local-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes local-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Subtle pre-token status line shown while waiting for the first token when
+   the backend sent a chat:status notice (e.g. a local model is cold-starting
+   after an app restart). Replaces the generic thinking dots with a one-line
+   reason + spinner so the user knows the wait is a model load, not a hang. */
+.chat-status-notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 2px 2px;
+  padding: 5px 10px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  max-width: max-content;
+}
+.model-effort-empty {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* API Keys panel: current configuration summary */
+/* Saved-providers grid at the top of the API Keys panel. Each card is a
+   clickable button that selects that provider in the form below. */
+.saved-providers-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px;
+}
+.saved-provider-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+  color: var(--text);
+}
+.saved-provider-card:hover {
+  border-color: var(--accent, #5b9bd5);
+  background: var(--surface-3, var(--surface-2));
+}
+.saved-provider-card.active {
+  border-color: var(--accent, #5b9bd5);
+  box-shadow: 0 0 0 1px var(--accent, #5b9bd5) inset;
+}
+.saved-provider-name-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.saved-provider-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.saved-provider-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs, 4px);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.saved-provider-icon:hover {
+  color: var(--accent, #5b9bd5);
+  border-color: var(--border);
+  background: var(--surface-1, rgba(255, 255, 255, 0.06));
+}
+.saved-provider-icon.danger:hover {
+  color: #e5484d;
+  border-color: rgba(229, 72, 77, 0.4);
+  background: rgba(229, 72, 77, 0.08);
+}
+.saved-provider-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.saved-provider-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.saved-provider-url {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: var(--mono, ui-monospace, monospace);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.saved-provider-key {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.saved-provider-key .key-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #4ade80;
+  box-shadow: 0 0 0 2px rgba(74, 222, 128, 0.18);
+  flex-shrink: 0;
+}

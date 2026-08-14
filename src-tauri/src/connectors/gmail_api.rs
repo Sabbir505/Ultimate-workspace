@@ -187,7 +187,11 @@ pub async fn call_tool(
                 .and_then(|v| v.as_str())
                 .unwrap_or("full");
             let resp = http
-                .get(format!("{base}/threads/{thread_id}"))
+                // Encode the id: thread/message ids come from tool args (model-editable)
+                // and may contain `/`, `?`, `#` or spaces that would silently
+                // reinterpret parts of the path as query/fragment (parity with
+                // google_rest.rs).
+                .get(format!("{base}/threads/{}", urlencoding::encode(thread_id)))
                 .bearer_auth(&token)
                 .query(&[("format", fmt)])
                 .timeout(std::time::Duration::from_secs(30))
@@ -211,7 +215,7 @@ pub async fn call_tool(
                 .and_then(|v| v.as_str())
                 .unwrap_or("full");
             let resp = http
-                .get(format!("{base}/messages/{message_id}"))
+                .get(format!("{base}/messages/{}", urlencoding::encode(message_id)))
                 .bearer_auth(&token)
                 .query(&[("format", fmt)])
                 .timeout(std::time::Duration::from_secs(30))
@@ -335,7 +339,7 @@ pub async fn call_tool(
                 );
             }
             let resp = http
-                .post(format!("{base}/threads/{thread_id}/modify"))
+                .post(format!("{base}/threads/{}/modify", urlencoding::encode(thread_id)))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({
                     "addLabelIds": add,

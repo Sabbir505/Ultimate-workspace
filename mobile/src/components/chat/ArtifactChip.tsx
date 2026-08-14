@@ -17,7 +17,13 @@ import {
   TouchableWithoutFeedback,
   Alert,
 } from 'react-native';
-import { FileCode2, FileText, X } from 'lucide-react-native';
+import Ionicons from '@expo/vector-icons/Ionicons';
+// M4: lucide-react-native cannot be tree-shaken by Metro (one giant JS
+// bundle of every icon); Ionicons is a glyph font already bundled with the
+// app. These wrappers preserve the lucide call-sites' (size, color) props.
+const FileCode2 = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="code-slash" size={size} color={color} />;
+const FileText = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="document-text" size={size} color={color} />;
+const X = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="close" size={size} color={color} />;
 import { theme } from '../theme';
 import type { SessionArtifact } from '../hooks/useRelay';
 

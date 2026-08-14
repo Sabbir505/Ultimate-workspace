@@ -1,0 +1,886 @@
+/* composer — Composer card + notches, context meter, perf metrics, message queue, attachment cards, typing indicator, GFM markdown.
+   Split out of the old monolithic global.css (2026-08-15). Import order in
+   global.css preserves the original cascade — do not reorder imports. */
+/* Composer (bottom bar) â€” Claude-style rounded card */
+.chat-composer {
+  position: relative;
+  flex-shrink: 0;
+  /* Aligned with the centered conversation column. Extra bottom padding
+     leaves room for the circular context meter that sits below the send
+     button, inside the composer bounds. */
+  padding: 10px max(14px, calc((100% - 780px) / 2)) 30px;
+}
+.composer-slash-wrap {
+  position: relative;
+}
+.composer-slash-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.5);
+}
+.composer-slash-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-xs);
+  text-align: left;
+  cursor: pointer;
+}
+.composer-slash-item.active {
+  background: var(--surface-2);
+}
+.composer-slash-cmd {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.composer-slash-name {
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-composer-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px 8px;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  /* Round only the top — the bottom is square so the notch bar below it
+     (which carries the 0 0 16px 16px rounding) meets its full-width edge with
+     no corner gap. */
+  border-radius: 16px 16px 0 0;
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: var(--glass-rim), 0 6px 24px -12px rgba(0, 0, 0, 0.45);
+  position: relative;
+  overflow: visible;
+  transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
+}
+.chat-composer-card:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--glass-rim), 0 0 0 3px var(--accent-soft);
+}
+/* When the textarea is focused, the notch bar below the composer should share
+   the same accent border + accent-soft ring so the whole composer reads as a
+   single focused unit (not just the card). */
+.chat-composer:has(.chat-composer-textarea:focus) .composer-context-meter-wrap {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft), 0 6px 24px -12px rgba(0, 0, 0, 0.45);
+}
+.chat-composer-textarea,
+.chat-composer-textarea:focus {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+}
+.chat-composer-textarea {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 24px;
+  max-height: 200px;
+  resize: none;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 2px 2px 4px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  outline: none;
+  overflow-y: auto;
+}
+/* Draft mention chips: the "@<id>" text the user picked from the "@" popup
+   renders as an italic pill followed by a single space (the row gap), e.g.
+   "@notion  <typed text>". Chips are composer-only — click to remove. */
+
+
+
+
+.chat-composer-textarea::placeholder {
+  color: var(--text-dim);
+  opacity: 0.7;
+  /* Keep the hint on a single line so it doesn't wrap mid-phrase on
+     narrow composer widths (the "type / for skills" tail must stay put). */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-composer-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.composer-footer-spacer {
+  flex: 1;
+}
+
+.composer-send-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Context-window meter: a small circular ring positioned below the send
+   button (right-aligned under it). An SVG ring fills clockwise; the fill
+   percentage shows in the center, and the full "used / max" appears on hover
+   (title). Always rendered â€” 0% until the first turn's input_tokens are known.
+   Green normally, amber past 70%, red past 90% so the user sees when they're
+   about to overflow the context window. */
+.context-meter-circle {
+  position: relative;
+  margin-top: 4px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  z-index: 2;
+}
+
+/* Styled tooltip that appears on hover */
+
+
+/* Little arrow pointing down to the circle */
+
+
+.context-meter-circle:hover .context-meter-tooltip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) scale(1);
+}
+.context-meter-ring {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.context-meter-track {
+  stroke: var(--surface-3, var(--surface-2));
+  opacity: 0.7;
+}
+:root[data-theme="light"] .context-meter-track {
+  stroke: var(--border-strong, #c8c8c8);
+  opacity: 1;
+}
+.context-meter-progress {
+  stroke: var(--text-dim);
+  transition: stroke-dasharray 0.3s var(--ease, ease), stroke 0.2s var(--ease, ease);
+}
+:root[data-theme="light"] .context-meter-progress {
+  stroke: var(--text, #1a1a1a);
+}
+.context-meter-circle.warn .context-meter-progress {
+  stroke: var(--state-waiting, #f2c14e);
+}
+.context-meter-circle.crit .context-meter-progress {
+  stroke: var(--danger, #e5484d);
+}
+.context-meter-pct {
+  position: absolute;
+  font-size: 7px;
+  font-weight: 600;
+  font-family: var(--mono, ui-monospace, monospace);
+  color: var(--text-dim);
+  line-height: 1;
+  pointer-events: none;
+}
+.context-meter-circle.warn .context-meter-pct {
+  color: var(--state-waiting, #f2c14e);
+}
+.context-meter-circle.crit .context-meter-pct {
+  color: var(--danger, #e5484d);
+}
+:root[data-theme="light"] .context-meter-pct {
+  color: var(--text, #1a1a1a);
+}
+
+/* Rich hover panel — rendered inside the circle's wrapper. Centered
+   horizontally on the meter (left 50% + translateX -50%) so it appears
+   directly above and centered on the circular ring. */
+.context-meter-panel {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 260px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface-1, #1e1e1e);
+  border: 1px solid var(--surface-3, #333);
+  color: var(--text-main, #eee);
+  font-family: var(--sans, system-ui, sans-serif);
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  z-index: 10;
+  font-size: 11px;
+}
+:root[data-theme="light"] .context-meter-panel {
+  background: var(--surface-1, #fff);
+  border-color: var(--border-strong, #c8c8c8);
+}
+/* Top row: model name (left) + usage stats (right) — same line */
+.context-meter-panel-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.context-meter-panel-model {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.context-meter-panel-meta {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--text-main);
+  white-space: nowrap;
+  flex: none;
+}
+.context-meter-panel-total {
+  color: var(--text-dim);
+}
+.context-meter-panel-pct {
+  color: var(--text-dim);
+  margin-left: 6px;
+}
+/* Slider visualization for the full used/max bar. */
+.context-meter-panel-bar {
+  width: 100%;
+  height: 4px;
+  background: var(--surface-2, #2a2a2a);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+:root[data-theme="light"] .context-meter-panel-bar {
+  background: var(--surface-2, #e6e6e6);
+}
+.context-meter-panel-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent, #5b9bd5);
+  transition: width 0.3s var(--ease, ease);
+}
+.context-meter-circle.warn .context-meter-panel-bar-fill {
+  background: var(--state-waiting, #f2c14e);
+}
+.context-meter-circle.crit .context-meter-panel-bar-fill {
+  background: var(--danger, #e5484d);
+}
+.context-meter-panel-loading,
+.context-meter-panel-note {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-style: italic;
+  text-align: center;
+  padding: 4px 0;
+}
+.context-meter-panel-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.context-meter-panel-row {
+  display: grid;
+  grid-template-columns: 70px 1fr 70px;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+}
+.context-meter-panel-row-label {
+  color: var(--text-dim);
+}
+.context-meter-panel-row-bar {
+  display: block;
+  height: 3px;
+  background: var(--surface-2, #2a2a2a);
+  border-radius: 1.5px;
+  overflow: hidden;
+}
+:root[data-theme="light"] .context-meter-panel-row-bar {
+  background: var(--surface-2, #e6e6e6);
+}
+.context-meter-panel-row-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--text-dim);
+}
+.context-meter-panel-row-pct {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--text-main);
+  text-align: right;
+  white-space: nowrap;
+}
+:root[data-theme="light"] .context-meter-circle.warn .context-meter-pct {
+  color: var(--danger, #d64545);
+}
+:root[data-theme="light"] .context-meter-circle.crit .context-meter-pct {
+  color: var(--danger, #d64545);
+}
+.composer-attach-btn {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 1;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.composer-attach-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.composer-attach-wrap {
+  position: relative;
+}
+.composer-attach-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 20;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+.composer-attach-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  font-size: 13px;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+}
+.composer-attach-menu-item:hover {
+  background: var(--surface-2);
+}
+.composer-attach-menu-item[aria-pressed="true"] {
+  color: var(--accent);
+}
+
+.composer-attach-menu-item .connector-toggle {
+  margin-left: auto;
+  color: var(--accent, #C15F3C);
+  font-weight: 600;
+}
+.composer-attach-menu-item .connector-toggle:not(.on) {
+  display: none;
+}
+.composer-context-meter-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  position: relative;
+  margin-top: 0;
+  /* Unify agent / folder / github / context-meter into a single notch bar
+     that visually hangs off the bottom of the composer card. */
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 16px 16px;
+  box-shadow: 0 6px 24px -12px rgba(0, 0, 0, 0.45);
+}
+
+/* Perf metrics row directly below the context-meter notch: a plain-text strip
+   (no background/border of its own — matches the user's "no background color,
+   just the text" request). Tight, dim, evenly spaced. */
+.composer-metrics-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  padding: 4px 2px 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.composer-metrics-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.composer-metrics-chip-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  flex-shrink: 0;
+}
+.composer-metrics-chip.is-live .composer-metrics-chip-dot {
+  background: var(--accent, #5b9bd5);
+  animation: metrics-dot-pulse 1.2s ease-in-out infinite;
+}
+@keyframes metrics-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.composer-metrics-chip.is-live {
+  color: var(--text);
+}
+.composer-metrics-chip-label {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.composer-metrics-chip-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  font-weight: 500;
+}
+/* The always-present placeholder set (no data yet). Same silhouette, dimmed
+   so it reads as inert rather than as a broken live readout. */
+.composer-metrics-row.is-empty .composer-metrics-chip-value {
+  color: var(--text-dim);
+  opacity: 0.5;
+}
+.composer-metrics-row.is-empty .composer-metrics-chip-dot {
+  background: var(--border-strong, var(--border));
+}
+.composer-metrics-row.is-empty .composer-metrics-chip-label {
+  opacity: 0.7;
+}
+
+/* The inner notch chips no longer carry their own notch surface — they sit
+   directly on the unified bar background, so surface/border are removed. */
+.composer-notch-agent,
+.composer-notch-folder {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  margin-left: 0;
+  margin-top: 0;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* Folder notch — sits beside the agent notch below the composer card, showing
+   the chat's working directory (custom folder or selected project). */
+.composer-notch-folder-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.composer-notch-folder-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  /* The × appears on hover so the notch reads as a passive chip at rest. */
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.composer-notch-folder:hover .composer-notch-folder-clear,
+.composer-notch-folder-clear:focus-visible {
+  opacity: 1;
+}
+.composer-notch-folder-clear:hover {
+  background: var(--surface-2);
+  color: var(--text);
+  opacity: 1;
+}
+
+/* Message queue — messages stacked while a turn is running, shown above the
+   composer card, oldest on top (FIFO). */
+.composer-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.composer-queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+.composer-queue-index {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+.composer-queue-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.composer-queue-remove {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.composer-queue-remove:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.composer-queue-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+.composer-queue-header:hover {
+  color: var(--text);
+}
+.composer-queue-chevron {
+  font-size: 10px;
+  width: 10px;
+}
+.composer-context-meter-spacer {
+  flex: 1;
+}
+.composer-research-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.composer-research-chip:hover {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+
+.composer-tools-btn.active {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
+}
+
+.chat-artifact-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  height: 28px;
+  padding: 0 12px;
+  font-size: 12px;
+  line-height: 1;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--text);
+  cursor: pointer;
+  transition:
+    background 0.15s var(--ease),
+    border-color 0.15s var(--ease);
+}
+.chat-artifact-chip:hover {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.chat-artifact-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-artifact-chip svg {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+.composer-attach-error {
+  font-size: 11px;
+  color: var(--danger);
+}
+.composer-model-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-bottom: 4px;
+}
+/* Compact file attachment card (Claude-style): thumbnail/icon, name + type
+   badge, and a hover-revealed remove button. */
+.composer-attachment-card {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  max-width: 240px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+.composer-attachment-thumb {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: var(--surface-1, rgba(255, 255, 255, 0.06));
+  color: var(--text-dim);
+  overflow: hidden;
+}
+.composer-attachment-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.composer-attachment-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.composer-attachment-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.composer-attachment-badge {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.composer-attachment-remove {
+  flex: none;
+  margin-left: 2px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.composer-attachment-remove:hover {
+  color: var(--text);
+  background: var(--surface-1, rgba(255, 255, 255, 0.08));
+}
+.composer-send-btn {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  line-height: 1;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-contrast, #fff);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.composer-send-btn:hover:not(:disabled) {
+  filter: brightness(0.9);
+}
+.composer-send-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.composer-send-btn.stop {
+  background: var(--surface-2);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  font-size: 11px;
+}
+
+/* --- Message action icons --- */
+.chat-msg-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 26px;
+}
+.chat-msg-action svg {
+  display: block;
+}
+
+/* â”€â”€ Codex-style pre-token typing indicator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+   A single quiet monospace line with a blinking cursor â€” no bouncing dots.
+   Looks like a terminal prompt waiting for output. */
+.chat-typing {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.chat-typing-prompt {
+  opacity: 0.5;
+  user-select: none;
+}
+.chat-typing-cursor {
+  display: inline-block;
+  width: 6px;
+  height: 13px;
+  background: var(--text-dim);
+  opacity: 0.6;
+  animation: cursor-blink 1s step-end infinite;
+}
+@keyframes cursor-blink {
+  0%, 100% { opacity: 0; }
+  50% { opacity: 0.6; }
+}
+
+/* --- GFM markdown: tables, task lists, strikethrough --- */
+.chat-markdown table,
+.artifact-preview-table {
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: 12.5px;
+  width: 100%;
+  display: block;
+  overflow-x: auto;
+}
+.chat-markdown th,
+.chat-markdown td,
+.artifact-preview-table th,
+.artifact-preview-table td {
+  border: 1px solid var(--border);
+  padding: 5px 10px;
+  text-align: left;
+}
+.chat-markdown th,
+.artifact-preview-table th {
+  background: var(--surface-2);
+  font-weight: 600;
+}
+.chat-markdown tr:nth-child(even) td,
+.artifact-preview-table tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--surface-2) 45%, transparent);
+}
+.chat-markdown del {
+  opacity: 0.7;
+}
+.chat-markdown input[type="checkbox"] {
+  margin-right: 6px;
+}
+.chat-markdown li.task-list-item {
+  list-style: none;
+}
+.chat-markdown ul.contains-task-list {
+  padding-left: 4px;
+}
+.chat-markdown hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 12px 0;
+}

@@ -612,9 +612,25 @@ impl BrowserManager {
                     let pid = event_pane_id.clone();
                     let tid = event_tab_id.clone();
                     std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(1500));
-                        if let Some(w) = app_ref.get_webview(&lbl) {
-                            let _ = w.eval(&pushstate_injection_js(&pid, &tid));
+                        // B9: no more blind 1.5 s sleep. The injection is
+                        // idempotent (guarded by
+                        // `window.__conduit_pushstate_patched`), so inject on
+                        // an escalating schedule: fast pages get the hook
+                        // immediately, slow pages still get it within ~5 s,
+                        // and each later eval no-ops once installed.
+                        let mut waited = 0u64;
+                        for target in [0u64, 150, 400, 900, 1800, 3500, 5000] {
+                            if target > waited {
+                                std::thread::sleep(std::time::Duration::from_millis(target - waited));
+                                waited = target;
+                            }
+                            match app_ref.get_webview(&lbl) {
+                                Some(w) => {
+                                    let _ = w.eval(&pushstate_injection_js(&pid, &tid));
+                                }
+                                // Webview gone (tab closed mid-load) — stop.
+                                None => break,
+                            }
                         }
                     });
                     true
@@ -1116,11 +1132,8 @@ impl BrowserManager {
         let mut content: ExtractedContent = serde_json::from_str(&first_json).map_err(|e| {
             // Surface the raw bridge output (truncated) so a JS-side throw or
             // a non-JSON return is diagnosable instead of an opaque parse error.
-            let raw = if first_json.len() > 400 {
-                format!("{}…", &first_json[..400])
-            } else {
-                first_json.clone()
-            };
+            // Char-safe: page content is almost always non-ASCII.
+            let raw = crate::util::truncate_chars(&first_json, 400);
             format!("browser_read: failed to parse extraction result: {e} (raw: {raw:?})")
         })?;
 
@@ -1471,12 +1484,17 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
         if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
             let r = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(-1);
             let click_result = self.run_action_for_pane_opts(label, &click_js(r), opts.clone()).await?;
-            Ok(format!(
-                r#"{{"ok":true,"clicked":{{"ref":{r},"tag":{},"label":{}}},"result":{}}}"#,
-                serde_json::to_string(v.get("tag").and_then(|x| x.as_str()).unwrap_or("")).unwrap_or_default(),
-                serde_json::to_string(v.get("label").and_then(|x| x.as_str()).unwrap_or("")).unwrap_or_default(),
-                serde_json::to_string(&click_result).unwrap_or_default()
-            ))
+            // mi13: build with json! — one serializer pass instead of three
+            // format!-embedded to_string calls.
+            Ok(serde_json::json!({
+                "ok": true,
+                "clicked": {
+                    "ref": r,
+                    "tag": v.get("tag").and_then(|x| x.as_str()).unwrap_or(""),
+                    "label": v.get("label").and_then(|x| x.as_str()).unwrap_or(""),
+                },
+                "result": click_result,
+            }).to_string())
         } else {
             Ok(resolved)
         }
@@ -1495,12 +1513,15 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
         if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
             let r = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(-1);
             let type_result = self.run_action_for_pane_opts(label, &type_js(r, text), opts.clone()).await?;
-            Ok(format!(
-                r#"{{"ok":true,"typed":{{"ref":{r},"tag":{},"label":{}}},"result":{}}}"#,
-                serde_json::to_string(v.get("tag").and_then(|x| x.as_str()).unwrap_or("")).unwrap_or_default(),
-                serde_json::to_string(v.get("label").and_then(|x| x.as_str()).unwrap_or("")).unwrap_or_default(),
-                serde_json::to_string(&type_result).unwrap_or_default()
-            ))
+            Ok(serde_json::json!({
+                "ok": true,
+                "typed": {
+                    "ref": r,
+                    "tag": v.get("tag").and_then(|x| x.as_str()).unwrap_or(""),
+                    "label": v.get("label").and_then(|x| x.as_str()).unwrap_or(""),
+                },
+                "result": type_result,
+            }).to_string())
         } else {
             Ok(resolved)
         }
@@ -1526,12 +1547,15 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
             let hover_result = self
                 .run_action_for_pane_opts(label, &hover_js(r), opts.clone())
                 .await?;
-            Ok(format!(
-                r#"{{"ok":true,"hovered":{{"ref":{r},"tag":{},"label":{}}},"result":{}}}"#,
-                serde_json::to_string(v.get("tag").and_then(|x| x.as_str()).unwrap_or("")).unwrap_or_default(),
-                serde_json::to_string(v.get("label").and_then(|x| x.as_str()).unwrap_or("")).unwrap_or_default(),
-                serde_json::to_string(&hover_result).unwrap_or_default()
-            ))
+            Ok(serde_json::json!({
+                "ok": true,
+                "hovered": {
+                    "ref": r,
+                    "tag": v.get("tag").and_then(|x| x.as_str()).unwrap_or(""),
+                    "label": v.get("label").and_then(|x| x.as_str()).unwrap_or(""),
+                },
+                "result": hover_result,
+            }).to_string())
         } else {
             Ok(resolved)
         }

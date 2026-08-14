@@ -1,0 +1,390 @@
+/* settings — Assistant panel, skills manager table + detail, connectors, background task cards, full-auto modal notes.
+   Split out of the old monolithic global.css (2026-08-15). Import order in
+   global.css preserves the original cascade — do not reorder imports. */
+/* ---- Settings: Assistant panel (system prompt + skills) ---- */
+
+.assistant-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  max-height: 300px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  border-radius: var(--radius-xs);
+}
+
+/* ---- Skills manager (Claude-style table + detail view) ---- */
+.skills-section {
+  margin-top: 16px;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+/* Skills table */
+
+
+
+
+
+
+
+
+
+
+.skills-author-badge.built-in {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* Skill detail view */
+.skill-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: skill-detail-in 0.18s var(--ease);
+}
+@keyframes skill-detail-in {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.skill-detail-head {
+  display: flex;
+  align-items: center;
+}
+.skill-detail-back {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.skill-detail-back:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.skill-detail-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.skill-detail-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+
+.skill-detail-sub {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 0 8px;
+}
+
+/* Toggle switch */
+
+
+
+
+
+
+
+
+
+
+.skill-detail-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.skill-detail-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+
+
+
+
+
+/* System prompt row in the skills table */
+
+
+
+
+
+/* Assistant panel: small hint under the system-prompt row pointing users at
+   the Skills Library (skills are no longer configured here). */
+
+
+
+/* ---- Connectors (Settings â†’ Connectors) ---- */
+.skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.connector-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-glass);
+  box-shadow: var(--glass-rim-soft);
+}
+.connector-card-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.connector-card-icon {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+}
+.connector-card-icon svg {
+  display: block;
+}
+.connector-fallback-icon {
+  font-size: 20px;
+  line-height: 1;
+}
+.connector-card-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.connector-card-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.connector-card-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.connector-family-card .connector-family-head {
+  align-items: center;
+  cursor: pointer;
+}
+.connector-family-card .connector-family-head:focus-visible {
+  outline: 1px solid var(--accent, #C15F3C);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+.connector-family-count {
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.connector-family-side {
+  flex-shrink: 0;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.connector-family-side .primary {
+  white-space: nowrap;
+}
+.connector-member-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+.connector-member-chip {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.connector-member-chip.off {
+  opacity: 0.35;
+}
+.connector-member-chip .connector-fallback-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+.connector-more {
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.connector-family-note {
+  margin-top: 0;
+}
+.connector-modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.connector-sub-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-xs);
+}
+.connector-sub-row:hover {
+  background: var(--surface-2);
+}
+.connector-sub-icon {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+}
+.connector-sub-icon .connector-fallback-icon {
+  font-size: 16px;
+  line-height: 1;
+}
+.connector-sub-action {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.connector-status {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.connector-status.ok {
+  color: var(--accent, #C15F3C);
+}
+.connector-status.expired {
+  color: #c0392b;
+}
+
+.connector-scopes .muted {
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+.connector-note {
+  font-size: 12px;
+  color: #c0392b;
+  background: rgba(192, 57, 43, 0.08);
+  padding: 6px 8px;
+  border-radius: var(--radius-xs);
+}
+
+
+
+
+
+
+
+/* --- Background task progress cards (download_file / run_shell) ---
+   Same visual language as the approval card: one compact row with a kind
+   badge + a progress bar for downloads / status line for terminals. */
+.chat-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px max(14px, calc((100% - 780px) / 2)) 8px;
+}
+.task-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  box-shadow: var(--glass-rim), 0 8px 24px -14px rgba(0, 0, 0, 0.5);
+}
+.task-card-download { --task-accent: #5aa7f0; }
+.task-card-shell    { --task-accent: #e3b341; }
+.task-card-badge {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--task-accent, var(--text));
+  background: color-mix(in srgb, var(--task-accent, var(--accent)) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--task-accent, var(--accent)) 35%, transparent);
+}
+.task-card-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.task-card-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-card-bar {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.task-card-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--task-accent, var(--accent));
+  transition: width 200ms ease;
+}
+.task-card-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- Full-auto confirmation modal notes --- */
+.modal-note {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 4px;
+}

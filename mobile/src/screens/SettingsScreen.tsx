@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -9,7 +9,17 @@ import {
   TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Settings, Moon, DollarSign, Wifi, Monitor, ChevronRight, Cpu } from 'lucide-react-native';
+import Ionicons from '@expo/vector-icons/Ionicons';
+// M4: lucide-react-native cannot be tree-shaken by Metro (one giant JS
+// bundle of every icon); Ionicons is a glyph font already bundled with the
+// app. These wrappers preserve the lucide call-sites' (size, color) props.
+const Settings = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="settings" size={size} color={color} />;
+const Moon = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="moon" size={size} color={color} />;
+const DollarSign = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="cash" size={size} color={color} />;
+const Wifi = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="wifi" size={size} color={color} />;
+const Monitor = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="desktop" size={size} color={color} />;
+const ChevronRight = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="chevron-forward" size={size} color={color} />;
+const Cpu = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="hardware-chip" size={size} color={color} />;
 import { useRelay, type CostDetails, type DailyCostEntry, type ProjectCostEntry, type LocalModelUsageEntry } from '../hooks/useRelay';
 import { theme, useTheme } from '../theme';
 import { useUseChatSession, setUseChatSession } from '../lib/featureFlags';
@@ -222,10 +232,17 @@ function LocalModelList({ data }: { data: LocalModelUsageEntry[] }) {
 // ---------------------------------------------------------------------------
 
 export default function SettingsScreen() {
-  const { connected, costSummary, costDetails, connect, disconnect } = useRelay();
+  const { connected, costSummary, costDetails, connect, disconnect, refreshCostDetails } = useRelay();
   const { isDark, toggle: toggleDarkMode } = useTheme();
   const chatSession = useUseChatSession();
   const c = theme.colors;
+
+  // GetCostDetails is no longer part of the 5s relay poll (it's three SQL
+  // aggregations under the desktop DB mutex). Refresh it when this screen
+  // opens and whenever the connection (re)establishes.
+  useEffect(() => {
+    if (connected) refreshCostDetails();
+  }, [connected, refreshCostDetails]);
 
   // Relay URL override — the phone needs the desktop's LAN IP, not 127.0.0.1.
   const [relayUrl, setRelayUrl] = useState('');

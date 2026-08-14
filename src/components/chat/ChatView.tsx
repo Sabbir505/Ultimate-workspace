@@ -10,10 +10,13 @@
 // initial chat page only fetches the bubble code when the first message
 // arrives. TypingIndicator stays eager (it's a 3-line spinner).
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { ChatComposer, type ChatAttachment } from "./ChatComposer";
-import { TypingIndicator } from "./MessageBubble";
+// TypingIndicator is tiny and eager — imported from its own module so the
+// entry chunk doesn't statically pull in MessageBubble (react-markdown).
+import { TypingIndicator } from "./TypingIndicator";
 const MessageBubble = lazy(() => import("./MessageBubble").then((m) => ({ default: m.MessageBubble })));
 // Heavy chat features (artifact previews with syntax-highlighting + markdown,
 // inline mermaid diagrams, file diff cards) are split into separate chunks so
@@ -478,6 +481,11 @@ export function ChatView() {
   // scroll back down while they're reading history; flipped on again when
   // they scroll back to the bottom.
   const stickToBottomRef = useRef(true);
+  // Mirrors of the derived render items + the list virtualizer, so the
+  // scroll-to-message helper (registered once, above their definitions) can
+  // reach the current values without stale closures.
+  const itemsRef = useRef<Array<{ key: string; id?: number }>>([]);
+  const virtualizerRef = useRef<{ scrollToIndex: (index: number, options?: { align?: "start" | "center" | "end" | "auto"; behavior?: "auto" | "smooth" }) => void } | null>(null);
 
   // Draft handed to the composer: bumping `nonce` re-prefills the textarea
   // (used by the per-message "Edit" action to load a message for resend).
@@ -519,9 +527,15 @@ export function ChatView() {
     void newChat(provider, config.model ?? "");
   }, [loaded, activeChatSessionId, config, newChat, loadSessions]);
 
+  const loadOlderMessages = useChatStore((s) => s.loadOlderMessages);
+  const hasMoreHistory = useChatStore((s) => s.hasMoreHistory);
+  const loadingOlderRef = useRef(false);
+
   // Track whether the user is pinned near the bottom. Runs on every scroll
   // (user- or programmatic). Once they scroll up past the threshold, auto
-  // follow is paused until they return to the bottom.
+  // follow is paused until they return to the bottom. Also: M7 — scrolling to
+  // the very top of a paged session prepends the next older page while
+  // holding the visual position steady.
   const handleScroll = useCallback(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
@@ -529,7 +543,26 @@ export function ChatView() {
     const distanceFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
     stickToBottomRef.current = distanceFromBottom < threshold;
-  }, []);
+
+    if (
+      container.scrollTop < 120 &&
+      hasMoreHistory &&
+      !loadingOlderRef.current &&
+      activeChatSessionId
+    ) {
+      loadingOlderRef.current = true;
+      const prevHeight = container.scrollHeight;
+      const prevTop = container.scrollTop;
+      void loadOlderMessages(activeChatSessionId).finally(() => {
+        loadingOlderRef.current = false;
+        // Restore the visual anchor: prepended rows pushed everything down.
+        requestAnimationFrame(() => {
+          const el = messagesContainerRef.current;
+          if (el) el.scrollTop = prevTop + (el.scrollHeight - prevHeight);
+        });
+      });
+    }
+  }, [hasMoreHistory, activeChatSessionId, loadOlderMessages]);
 
   // Follow new messages / streaming tokens only while pinned to the bottom.
   // Uses an instant jump (no smooth animation) so rapid streaming updates
@@ -551,10 +584,16 @@ export function ChatView() {
   useEffect(() => {
     setChatScrollToMessage((msgId: number) => {
       stickToBottomRef.current = false;
-      const el = messagesContainerRef.current?.querySelector(
-        `[data-msg-id="${msgId}"]`,
-      );
-      el?.scrollIntoView({ behavior: "smooth", block: "start" });
+      // PERF (F5): with the message list virtualized, off-screen bubbles
+      // aren't in the DOM — scroll the virtualizer to the message's index
+      // instead of querySelector'ing a possibly-unmounted element.
+      const idx = itemsRef.current.findIndex((i) => i.id === msgId);
+      if (idx >= 0) {
+        virtualizerRef.current?.scrollToIndex(idx, {
+          align: "start",
+          behavior: "smooth",
+        });
+      }
     });
     return () => setChatScrollToMessage(null);
   }, []);
@@ -652,6 +691,22 @@ export function ChatView() {
     return list;
   }, [messages, isStreaming, activeStream, handleDelete]);
 
+  // PERF (PERFORMANCE_AUDIT.md F5): virtualize the message list — long
+  // conversations used to mount EVERY MessageBubble (each re-parsing markdown
+  // + katex), which made scroll janky and session-switch slow past a few
+  // hundred messages. Rows self-measure (ResizeObserver inside the
+  // virtualizer) so the growing live-stream bubble stays sized correctly.
+  // getItemKey keeps the measurement cache stable across history prepends.
+  const virtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => messagesContainerRef.current,
+    estimateSize: () => 160,
+    overscan: 5,
+    getItemKey: (i) => items[i].key,
+  });
+  itemsRef.current = items;
+  virtualizerRef.current = virtualizer;
+
   const hasItems = items.length > 0;
   // Regenerate applies to the most recent assistant message only.
   const lastAssistantKey = [...items]
@@ -665,24 +720,52 @@ export function ChatView() {
       <GitToolsSidebar />
       {!activeChatSessionId || hasItems ? (
         <div className="chat-messages" ref={messagesContainerRef} onScroll={handleScroll}>
-          {items.map((item) => (
-            <Suspense key={item.key} fallback={null}>
-              <MessageBubble
-                message={item}
-                live={item.live}
-                msgId={item.id}
-                onEdit={item.role === "user" ? handleEdit : undefined}
-                onRepeat={
-                  item.role === "assistant" && item.key === lastAssistantKey
-                    ? handleRepeat
-                    : undefined
-                }
-                onDelete={!item.live ? item.onDelete : undefined}
-                artifacts={item.id != null ? artifactsByMessage[item.id] : undefined}
-                onPreviewArtifact={setPreviewArtifact}
-              />
-            </Suspense>
-          ))}
+          <div
+            style={{
+              height: virtualizer.getTotalSize(),
+              position: "relative",
+              width: "100%",
+            }}
+          >
+            {virtualizer.getVirtualItems().map((vi) => {
+              const item = items[vi.index];
+              return (
+                <div
+                  key={vi.key}
+                  data-index={vi.index}
+                  ref={virtualizer.measureElement}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    transform: `translateY(${vi.start}px)`,
+                    // Reproduce the .chat-messages flex `gap: 18px` between
+                    // bubbles — virtual rows are siblings of a spacer, not of
+                    // each other, so the gap must live on the row wrapper.
+                    paddingBottom: 18,
+                  }}
+                >
+                  <Suspense fallback={null}>
+                    <MessageBubble
+                      message={item}
+                      live={item.live}
+                      msgId={item.id}
+                      onEdit={item.role === "user" ? handleEdit : undefined}
+                      onRepeat={
+                        item.role === "assistant" && item.key === lastAssistantKey
+                          ? handleRepeat
+                          : undefined
+                      }
+                      onDelete={!item.live ? item.onDelete : undefined}
+                      artifacts={item.id != null ? artifactsByMessage[item.id] : undefined}
+                      onPreviewArtifact={setPreviewArtifact}
+                    />
+                  </Suspense>
+                </div>
+              );
+            })}
+          </div>
           {waitingForFirstToken &&
             (statusNotice && statusNotice.message ? (
               <div className="chat-status-notice" role="status">

@@ -89,6 +89,34 @@ export function useSessionChat(sessionId: string | null) {
   // from a previous session (delivered after a navigation) don't leak in.
   const currentSessionId = useRef<string | null>(null);
 
+  // PERF (PERFORMANCE_AUDIT.md C6): token batching. A local model can emit
+  // 30-80 tokens/sec and each token used to trigger a full setState +
+  // re-render of the message list. Tokens accumulate in `tokenBuf` and are
+  // flushed into state at most every 50ms (the same debounce cadence the
+  // desktop uses for partial messages). The buffer MUST be flushed
+  // synchronously before the Done handler promotes `streamingContent` into
+  // a finalized message, otherwise the unflushed tail would be lost.
+  const tokenBuf = useRef<string>('');
+  const flushTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const streamActive = useRef(false);
+
+  const stopFlushTimer = useCallback(() => {
+    if (flushTimer.current) { clearInterval(flushTimer.current); flushTimer.current = null; }
+  }, []);
+
+  const flushTokens = useCallback(() => {
+    const pending = tokenBuf.current;
+    if (!pending) return;
+    tokenBuf.current = '';
+    setState((s) => ({ ...s, streamingContent: s.streamingContent + pending }));
+  }, []);
+
+  const endStream = useCallback(() => {
+    flushTokens();
+    stopFlushTimer();
+    streamActive.current = false;
+  }, [flushTokens, stopFlushTimer]);
+
   const {
     getSessionMessages,
     sendSessionChat,
@@ -112,16 +140,19 @@ export function useSessionChat(sessionId: string | null) {
     });
     const offToken = onSessionChatToken.on(({ sessionId: sid, token }) => {
       if (sid !== currentSessionId.current) return;
-      setState((s) => ({
-        ...s,
-        streaming: true,
-        streamingContent: s.streamingContent + token,
-        status: null, // First token clears any status banner.
-        error: null,
-      }));
+      tokenBuf.current += token;
+      if (!streamActive.current) {
+        // First token of a stream: flip streaming on, clear any status
+        // banner / stale error immediately, and start the 50ms flush.
+        streamActive.current = true;
+        setState((s) => ({ ...s, streaming: true, status: null, error: null }));
+        flushTimer.current = setInterval(flushTokens, 50);
+      }
     });
     const offDone = onSessionChatDone.on(({ sessionId: sid, usage }) => {
       if (sid !== currentSessionId.current) return;
+      // Flush BEFORE promoting so the unflushed tail isn't dropped.
+      endStream();
       setState((s) => {
         if (!s.streaming) return s;
         // Promote the streaming buffer to a real assistant message.
@@ -147,6 +178,7 @@ export function useSessionChat(sessionId: string | null) {
     });
     const offError = onSessionChatError.on(({ sessionId: sid, error }) => {
       if (sid !== currentSessionId.current) return;
+      endStream();
       setState((s) => ({ ...s, streaming: false, error, status: null }));
     });
     const offStatus = onSessionChatStatus.on(({ sessionId: sid, message }) => {
@@ -172,11 +204,16 @@ export function useSessionChat(sessionId: string | null) {
       offStatus();
       offApproval();
       offArtifact();
+      stopFlushTimer();
     };
-  }, []);
+  }, [flushTokens, endStream, stopFlushTimer]);
 
   // Switch session: reset state and fetch the first page of the new session.
   useEffect(() => {
+    // Any in-flight stream belongs to the OLD session — drop its buffer.
+    tokenBuf.current = '';
+    stopFlushTimer();
+    streamActive.current = false;
     currentSessionId.current = sessionId;
     if (!sessionId) {
       setState(INITIAL);
@@ -184,7 +221,7 @@ export function useSessionChat(sessionId: string | null) {
     }
     setState((s) => ({ ...INITIAL, loading: true }));
     getSessionMessages(sessionId, undefined, 50);
-  }, [sessionId, getSessionMessages]);
+  }, [sessionId, getSessionMessages, stopFlushTimer]);
 
   // --- actions ---
 
@@ -208,8 +245,12 @@ export function useSessionChat(sessionId: string | null) {
   const cancel = useCallback(() => {
     if (!sessionId) return;
     cancelSessionStream(sessionId);
+    // Drop the unflushed tail too — a cancelled stream's tokens are moot.
+    tokenBuf.current = '';
+    stopFlushTimer();
+    streamActive.current = false;
     setState((s) => ({ ...s, streaming: false, streamingContent: '' }));
-  }, [sessionId, cancelSessionStream]);
+  }, [sessionId, cancelSessionStream, stopFlushTimer]);
 
   const approve = useCallback(
     (pendingId: string) => {
@@ -250,6 +291,15 @@ export function useSessionChat(sessionId: string | null) {
     [sessionId, renameSession],
   );
 
+  // M10: pull-to-refresh — re-fetch the FIRST page (no before_id); the
+  // onSessionMessages handler replaces (not merges) the list for first-page
+  // responses, so this is a true refresh.
+  const refresh = useCallback(() => {
+    if (!sessionId) return;
+    setState((s) => ({ ...s, loading: true }));
+    getSessionMessages(sessionId, undefined, 50);
+  }, [sessionId, getSessionMessages]);
+
   const clearError = useCallback(() => {
     setState((s) => ({ ...s, error: null }));
   }, []);
@@ -261,6 +311,7 @@ export function useSessionChat(sessionId: string | null) {
     approve,
     deny,
     loadMore,
+    refresh,
     rename,
     clearError,
   };

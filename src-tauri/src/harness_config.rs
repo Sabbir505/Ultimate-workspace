@@ -273,16 +273,27 @@ fn opencode_live_models() -> Vec<String> {
         Ok(c) => c,
         Err(_) => return vec![],
     };
+    // Drain stdout on a background thread BEFORE waiting. Reading only after
+    // exit deadlocks once the model registry exceeds the OS pipe buffer
+    // (~64KB): the child blocks on a full pipe and never exits, so the wait
+    // loop times out and the whole list is dropped. Same pattern as git.rs's
+    // run_git drain threads.
+    use std::io::Read;
+    let mut stdout_pipe = child
+        .stdout
+        .take()
+        .expect("piped stdout is present right after spawn");
+    let drain = std::thread::spawn(move || {
+        let mut out = String::new();
+        let _ = stdout_pipe.read_to_string(&mut out);
+        out
+    });
     // 8s is generous for a local registry dump; a hung shim must not wedge
     // the model dropdown.
     for _ in 0..80 {
         match child.try_wait() {
             Ok(Some(_)) => {
-                let mut out = String::new();
-                if let Some(mut stdout) = child.stdout.take() {
-                    use std::io::Read;
-                    let _ = stdout.read_to_string(&mut out);
-                }
+                let out = drain.join().unwrap_or_default();
                 return out
                     .lines()
                     .map(|l| l.trim().to_string())
@@ -290,11 +301,16 @@ fn opencode_live_models() -> Vec<String> {
                     .collect();
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-            Err(_) => return vec![],
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return vec![];
+            }
         }
     }
     let _ = child.kill();
     let _ = child.wait();
+    let _ = drain.join();
     vec![]
 }
 

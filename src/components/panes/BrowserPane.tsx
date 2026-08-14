@@ -392,8 +392,11 @@ export function BrowserPane({ pane, visible = true }: Props) {
   // --- Native navigation events: keep the address bar + history truthful
   // for in-page navigations (link clicks, redirects). ---
   useEffect(() => {
-    let unlisten: () => void = () => {};
-    void listenBrowserNavigatedTab((payload: BrowserNavigatedPayload) => {
+    // Hold the listen() promise: cleanup may run before it resolves (pane
+    // closed quickly, StrictMode double-mount), and dropping the real
+    // unlisten would leak this handler — and its paneId closure — for the
+    // app's lifetime. Resolve the promise in cleanup and unsubscribe late.
+    const listenReady = listenBrowserNavigatedTab((payload: BrowserNavigatedPayload) => {
       if (payload.paneId !== paneId) return;
       const tabId = payload.tabId;
       const url = payload.url;
@@ -421,10 +424,10 @@ export function BrowserPane({ pane, visible = true }: Props) {
 
       // Persist per-project URL.
       useSettingsStore.getState().rememberBrowserUrl(projectId, url);
-    }).then((u) => {
-      unlisten = u;
     });
-    return () => unlisten();
+    return () => {
+      void listenReady.then((u) => u());
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paneId, projectId]);
 

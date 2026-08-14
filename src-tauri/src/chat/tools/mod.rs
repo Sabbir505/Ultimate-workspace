@@ -474,6 +474,20 @@ const RESET_SOURCE_LEDGER_DESC: &str = "Clear every source note recorded for thi
     question begins from a clean ledger (notes from a previous, unrelated question \
     are discarded).";
 
+/// Run a blocking (sync, unbounded-walk) tool implementation on the dedicated
+/// blocking pool instead of the async runtime. A JoinHandle panic surfaces as
+/// an error string rather than killing the dispatching task.
+async fn run_blocking_tool(
+    args: &Value,
+    f: fn(&Value) -> ToolOutcome,
+) -> ToolOutcome {
+    let a = args.clone();
+    match tokio::task::spawn_blocking(move || f(&a)).await {
+        Ok(out) => out,
+        Err(e) => ToolOutcome::text(format!("Error: tool task failed: {e}")),
+    }
+}
+
 /// Dispatch a tool call to its implementation. `args` is the JSON object of
 /// arguments the model produced. Returns the tool result as a string that is
 /// fed back to the model as a `tool` / `tool_result` message.
@@ -581,8 +595,12 @@ pub async fn execute_tool(
         // from the schema so the model can't even call them.
         LIST_DIRECTORY => fs_list_directory(args),
         READ_FILE => fs_read_file(args),
-        SEARCH_FILES => fs_search_files(args),
-        SEARCH_CONTENT => fs_search_content(args),
+        // The two recursive scans walk unbounded trees (search_content reads
+        // up to 5 MiB per file) — running them inline on the async runtime
+        // stalls the tokio worker and delays every other task (chat streams,
+        // PTY, IPC). Push the blocking walk to the dedicated pool.
+        SEARCH_FILES => run_blocking_tool(args, fs_search_files).await,
+        SEARCH_CONTENT => run_blocking_tool(args, fs_search_content).await,
         WRITE_FILE => fs_write_file(args),
         EDIT_FILE => fs_edit_file(args),
         DELETE_FILE => fs_delete_file(args),

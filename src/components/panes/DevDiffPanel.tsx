@@ -194,9 +194,10 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
       const needsProjectFetch = projectPath && projectPath !== cwd;
       const primary = getChangedFiles(cwd);
       const secondary = needsProjectFetch ? getChangedFiles(projectPath) : Promise.resolve(null);
-      void Promise.all([primary, secondary]).then(([paneFiles, projectFiles]) => {
-        inFlight = false;
-        if (cancelled) return;
+      void Promise.all([primary, secondary])
+        .then(([paneFiles, projectFiles]) => {
+          inFlight = false;
+          if (cancelled) return;
         // Dedup by path; pane entries win on conflict so the focused
         // worktree's context is preserved (its Added/Deleted counts reflect
         // the worktree state, not the project root's).
@@ -237,6 +238,14 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
           return same ? prev : { ...prev, [bindKey]: finalOrder };
         });
         setLoading(false);
+      })
+      .catch(() => {
+        // A failed sweep (deleted worktree/project, transient IPC error)
+        // must release the latch and the loading flag — otherwise every
+        // later tick returns early and the panel freezes on "Scanning…"
+        // forever. The stale list stays rendered.
+        inFlight = false;
+        setLoading(false);
       });
     };
     // Initial fetch (covers the boot/mount case before the watcher fires).
@@ -247,8 +256,11 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     // by path to only re-tick for the relevant scope (pane cwd OR
     // project root) — worktree changes that don't touch this pane
     // are no-ops.
-    let unlisten: (() => void) | null = null;
-    void safeListen<string>("project:fs-changed", (changedPath) => {
+    // Hold the listen() promise: if the component unmounts before it
+    // resolves, the real unlisten arrives AFTER cleanup ran — dropping it
+    // would leak the handler for the app's lifetime (StrictMode makes this
+    // fire on every mount in dev). Resolve it here and unsubscribe late.
+    const listenReady = safeListen<string>("project:fs-changed", (changedPath) => {
       if (
         changedPath === cwd ||
         (projectPath && changedPath === projectPath) ||
@@ -259,12 +271,10 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
       ) {
         tick();
       }
-    }).then((u) => {
-      unlisten = u;
     });
     return () => {
       cancelled = true;
-      if (unlisten) unlisten();
+      void listenReady.then((u) => u());
     };
   }, [bindKey, cwd, projectPath]);
 
@@ -402,8 +412,9 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     // Subscribe to FS changes for the relevant cwd. The backend
     // debounces, so this fires once per logical change, not per
     // intermediate file write. 2 s polling removed — see git_watcher.rs.
-    let unlisten: (() => void) | null = null;
-    void safeListen<string>("project:fs-changed", (changedPath) => {
+    // Promise-holding pattern — see the file-list effect above: call the
+    // unlisten even if it resolves after this component already unmounted.
+    const listenReady = safeListen<string>("project:fs-changed", (changedPath) => {
       if (
         changedPath === cwd ||
         changedPath.startsWith(cwd + "\\") ||
@@ -411,12 +422,10 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
       ) {
         tick();
       }
-    }).then((u) => {
-      unlisten = u;
     });
     return () => {
       cancelled = true;
-      if (unlisten) unlisten();
+      void listenReady.then((u) => u());
     };
   }, [selectedFile, diffCwd]);
   // Memoized: parseUnifiedDiff on a large diff is expensive, and this used

@@ -95,6 +95,58 @@ fn elements<'a>(xml: &'a str, name: &str) -> Vec<&'a str> {
     out
 }
 
+/// The FIRST full `<name …>…</name>` (or self-closing `<name …/>`) element
+/// slice, honouring nested elements of the same name.
+///
+/// PERF (PERFORMANCE_AUDIT.md B13): call sites that did
+/// `elements(xml, name).into_iter().next()` forced `elements()` to scan the
+/// ENTIRE remaining string even after the first match closed — and in
+/// `body_blocks` that scan restarted from each table, making table-heavy
+/// documents quadratic. This early-exit variant stops at the first match.
+fn first_element<'a>(xml: &'a str, name: &str) -> Option<&'a str> {
+    let open_prefix = format!("<{name}");
+    let close = format!("</{name}>");
+    let mut i = 0;
+    while let Some(rel) = xml[i..].find(&open_prefix) {
+        let start = i + rel;
+        let after = &xml[start + open_prefix.len()..];
+        if !is_real_start(after) {
+            i = start + open_prefix.len();
+            continue;
+        }
+        let open_end = match xml[start..].find('>') {
+            Some(r) => start + r,
+            None => return None,
+        };
+        if xml.as_bytes()[open_end - 1] == b'/' {
+            return Some(&xml[start..open_end + 1]);
+        }
+        let mut depth = 1usize;
+        let mut j = open_end + 1;
+        loop {
+            let next_open = xml[j..].find(&open_prefix).map(|r| j + r);
+            let next_close = xml[j..].find(&close).map(|r| j + r);
+            match (next_open, next_close) {
+                (Some(o), Some(c)) if o < c => {
+                    if is_real_start(&xml[o + open_prefix.len()..]) {
+                        depth += 1;
+                    }
+                    j = o + open_prefix.len();
+                }
+                (_, Some(c)) => {
+                    depth -= 1;
+                    j = c + close.len();
+                    if depth == 0 {
+                        return Some(&xml[start..j]);
+                    }
+                }
+                _ => return None,
+            }
+        }
+    }
+    None
+}
+
 /// The opening tag slice (`<name …>`) of the first real occurrence of `name`.
 fn opening_tag<'a>(xml: &'a str, name: &str) -> Option<&'a str> {
     let prefix = format!("<{name}");
@@ -187,7 +239,7 @@ fn body_blocks(body: &str) -> Vec<Block<'_>> {
                 for para in paragraphs_in(&body[i..t]) {
                     out.push(Block::Para(para));
                 }
-                match elements(&body[t..], "w:tbl").into_iter().next() {
+                match first_element(&body[t..], "w:tbl") {
                     Some(tbl) => {
                         let len = tbl.len();
                         out.push(Block::Table(tbl));
@@ -243,7 +295,7 @@ fn docx_run_html(run: &str) -> String {
         }
         return String::new();
     }
-    let rpr = elements(run, "w:rPr").into_iter().next().unwrap_or("");
+    let rpr = first_element(run, "w:rPr").unwrap_or("");
     let mut style = String::new();
     if toggle_on(rpr, "w:b") {
         style.push_str("font-weight:600;");
@@ -295,7 +347,7 @@ fn font_stack(name: &str) -> String {
 }
 
 fn docx_para_html(para: &str) -> String {
-    let ppr = elements(para, "w:pPr").into_iter().next().unwrap_or("");
+    let ppr = first_element(para, "w:pPr").unwrap_or("");
     let style_val = opening_tag(ppr, "w:pStyle")
         .and_then(|t| attr(t, "w:val"))
         .unwrap_or("");
@@ -350,8 +402,8 @@ fn edge_css(borders: &str, edge: &str) -> String {
 }
 
 fn docx_table_html(tbl: &str) -> String {
-    let tblpr = elements(tbl, "w:tblPr").into_iter().next().unwrap_or("");
-    let tb = elements(tblpr, "w:tblBorders").into_iter().next().unwrap_or("");
+    let tblpr = first_element(tbl, "w:tblPr").unwrap_or("");
+    let tb = first_element(tblpr, "w:tblBorders").unwrap_or("");
     let (top, bottom, left, right, ih, iv) = (
         edge_css(tb, "top"),
         edge_css(tb, "bottom"),
@@ -368,13 +420,13 @@ fn docx_table_html(tbl: &str) -> String {
         let ncols = tcs.len();
         let mut cells = String::new();
         for (ci, tc) in tcs.iter().enumerate() {
-            let tcpr = elements(tc, "w:tcPr").into_iter().next().unwrap_or("");
+            let tcpr = first_element(tc, "w:tcPr").unwrap_or("");
             let bt = if ri == 0 { &top } else { &ih };
             let mut bb = if ri + 1 == nrows { bottom.clone() } else { ih.clone() };
             let bl = if ci == 0 { &left } else { &iv };
             let br = if ci + 1 == ncols { &right } else { &iv };
             // A cell-level bottom border (e.g. a strong header rule) wins.
-            let tcb = elements(tcpr, "w:tcBorders").into_iter().next().unwrap_or("");
+            let tcb = first_element(tcpr, "w:tcBorders").unwrap_or("");
             let cell_bottom = edge_css(tcb, "bottom");
             if cell_bottom != "none" {
                 bb = cell_bottom;
@@ -405,7 +457,7 @@ pub fn docx_to_html(bytes: &[u8]) -> Option<String> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
     let mut xml = String::new();
     zip.by_name("word/document.xml").ok()?.read_to_string(&mut xml).ok()?;
-    let body = elements(&xml, "w:body").into_iter().next().unwrap_or(&xml);
+    let body = first_element(&xml, "w:body").unwrap_or(&xml);
 
     let mut inner = String::from("<div class=\"page\">");
     for block in body_blocks(body) {
@@ -478,7 +530,7 @@ fn xfrm_of(sppr: &str) -> Option<Xfrm> {
 fn pptx_text_html(txbody: &str, default_color: &str) -> String {
     let mut out = String::new();
     for p in elements(txbody, "a:p") {
-        let ppr_el = elements(p, "a:pPr").into_iter().next().unwrap_or("");
+        let ppr_el = first_element(p, "a:pPr").unwrap_or("");
         let ppr = opening_tag(p, "a:pPr");
         let align = ppr.and_then(|t| attr(t, "algn")).unwrap_or("l");
         // Bullet marker: <a:buChar char="•"/> (unless <a:buNone/>).
@@ -492,7 +544,7 @@ fn pptx_text_html(txbody: &str, default_color: &str) -> String {
             None
         };
         let bullet_color = {
-            let buclr = elements(ppr_el, "a:buClr").into_iter().next().unwrap_or("");
+            let buclr = first_element(ppr_el, "a:buClr").unwrap_or("");
             first_srgb(buclr)
         };
         let css_align = match align {
@@ -507,7 +559,7 @@ fn pptx_text_html(txbody: &str, default_color: &str) -> String {
             if text.is_empty() {
                 continue;
             }
-            let rpr = elements(r, "a:rPr").into_iter().next().unwrap_or("");
+            let rpr = first_element(r, "a:rPr").unwrap_or("");
             let mut style = format!("color:#{default_color};");
             if let Some(sz) = attr(rpr, "sz") {
                 if let Ok(hundredths) = sz.parse::<f64>() {
@@ -552,7 +604,7 @@ fn pct(v: f64, total: f64) -> f64 {
 }
 
 fn pptx_shape_html(sp: &str, sw: f64, sh: f64, theme_text: &str) -> Option<String> {
-    let sppr = elements(sp, "p:spPr").into_iter().next().unwrap_or("");
+    let sppr = first_element(sp, "p:spPr").unwrap_or("");
     let xf = xfrm_of(sppr)?;
     // Fill colour lives in spPr before any <a:ln> line section.
     let fill_region = sppr.split("<a:ln").next().unwrap_or(sppr);
@@ -579,7 +631,7 @@ overflow:hidden;display:flex;flex-direction:column;justify-content:{justify};",
         style.push_str(&format!("background:#{f};"));
     }
     // Text boxes get a little inset padding.
-    let txbody = elements(sp, "p:txBody").into_iter().next().unwrap_or("");
+    let txbody = first_element(sp, "p:txBody").unwrap_or("");
     let inner = if txbody.is_empty() {
         String::new()
     } else {
@@ -591,17 +643,17 @@ overflow:hidden;display:flex;flex-direction:column;justify-content:{justify};",
 
 fn pptx_table_html(gf: &str, sw: f64, sh: f64, theme_text: &str) -> Option<String> {
     let xf = xfrm_of(gf)?;
-    let tbl = elements(gf, "a:tbl").into_iter().next()?;
+    let tbl = first_element(gf, "a:tbl")?;
     let mut rows = String::new();
     for tr in elements(tbl, "a:tr") {
         let mut cells = String::new();
         for tc in elements(tr, "a:tc") {
-            let tcpr = elements(tc, "a:tcPr").into_iter().next().unwrap_or("");
+            let tcpr = first_element(tc, "a:tcPr").unwrap_or("");
             let fill = first_srgb(tcpr);
             let txbody = elements(tc, "p:txBody")
                 .into_iter()
                 .next()
-                .or_else(|| elements(tc, "a:txBody").into_iter().next())
+                .or_else(|| first_element(tc, "a:txBody"))
                 .unwrap_or("");
             let mut cs = String::from(
                 "border:1px solid rgba(148,163,184,.35);padding:0.5cqw 0.7cqw;vertical-align:middle;",
@@ -626,7 +678,7 @@ border-collapse:collapse;",
 /// Iterate the direct children of a spTree in document order, classifying each
 /// as a shape (`p:sp`) or table/graphic frame (`p:graphicFrame`).
 fn pptx_slide_html(xml: &str, sw: f64, sh: f64, theme_text: &str) -> String {
-    let tree = elements(xml, "p:spTree").into_iter().next().unwrap_or(xml);
+    let tree = first_element(xml, "p:spTree").unwrap_or(xml);
     // Collect shapes and frames with their positions in the string to preserve
     // z-order (later elements paint on top).
     let mut items: Vec<(usize, String)> = Vec::new();

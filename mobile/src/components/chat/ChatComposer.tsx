@@ -16,7 +16,12 @@ import {
   StyleSheet,
   Keyboard,
 } from 'react-native';
-import { Send, Square } from 'lucide-react-native';
+import Ionicons from '@expo/vector-icons/Ionicons';
+// M4: lucide-react-native cannot be tree-shaken by Metro (one giant JS
+// bundle of every icon); Ionicons is a glyph font already bundled with the
+// app. These wrappers preserve the lucide call-sites' (size, color) props.
+const Send = ({ size, color }: { size?: number; color?: string; fill?: string; }) => <Ionicons name="send" size={size} color={color} />;
+const Square = ({ size, color }: { size?: number; color?: string; fill?: string; }) => <Ionicons name="stop" size={size} color={color} />;
 import { theme } from '../theme';
 
 interface ChatComposerProps {

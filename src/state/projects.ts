@@ -143,11 +143,17 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
   refreshGitStatus: async () => {
     // Poll git status for every project visible in the sidebar (§7.11).
     const projects = get().projects;
-    const entries = await Promise.all(
+    // allSettled: one failing project (deleted dir, transient IPC error) must
+    // not kill the whole sweep — the others still deserve fresh badges.
+    const results = await Promise.allSettled(
       projects.map(async (p) => [p.id, await getGitStatus(p.path)] as const),
     );
     const gitStatuses: Record<string, GitStatusInfo> = {};
-    for (const [id, status] of entries) if (status) gitStatuses[id] = status;
+    for (const r of results) {
+      if (r.status !== "fulfilled") continue;
+      const [id, status] = r.value;
+      if (status) gitStatuses[id] = status;
+    }
     set({ gitStatuses });
   },
 
@@ -157,9 +163,24 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     // when the watcher fires for one project out of many.
     const project = get().projects.find((p) => p.id === projectId);
     if (!project) return;
-    const status = await getGitStatus(project.path);
-    if (!status) return;
-    set((s) => ({ gitStatuses: { ...s.gitStatuses, [projectId]: status } }));
+    let status: GitStatusInfo | null = null;
+    try {
+      status = await getGitStatus(project.path);
+    } catch {
+      /* fall through — a failed refresh clears the stale badge below */
+    }
+    if (status) {
+      set((s) => ({ gitStatuses: { ...s.gitStatuses, [projectId]: status } }));
+    } else {
+      // No status (repo deleted/un-initialized) or the fetch failed: DROP the
+      // stale entry instead of keeping the last-known badge forever.
+      set((s) => {
+        if (!(projectId in s.gitStatuses)) return s;
+        const next = { ...s.gitStatuses };
+        delete next[projectId];
+        return { gitStatuses: next };
+      });
+    }
   },
 
   toggleExpanded: (projectId) =>

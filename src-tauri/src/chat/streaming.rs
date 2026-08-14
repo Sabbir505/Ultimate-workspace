@@ -50,6 +50,46 @@ const MAX_PARSE_FAILURES: u32 = 50;
 /// rounds use a handful of blocks; 64 is generous.
 const MAX_STREAM_BLOCK_INDEX: usize = 64;
 
+/// Token usage parsed from one streaming round, including the v2 detail
+/// fields (cache + reasoning) the cost model bills on. The tool loops sum
+/// these across rounds into a single `ChatUsage` via [`build_usage`],
+/// mirroring what the non-tool path (`providers.rs::parse_usage`) reports.
+#[derive(Default)]
+struct RoundUsage {
+    input: i64,
+    output: i64,
+    cache_creation: i64,
+    cache_read: i64,
+    reasoning: i64,
+    have: bool,
+}
+
+impl RoundUsage {
+    /// Fold a round's usage into the running totals. OpenAI reports each
+    /// round's usage as absolute totals and Anthropic as per-event deltas
+    /// already summed inside the round, so a plain sum across rounds is
+    /// correct for both.
+    fn add(&mut self, r: RoundUsage) {
+        self.input += r.input;
+        self.output += r.output;
+        self.cache_creation += r.cache_creation;
+        self.cache_read += r.cache_read;
+        self.reasoning += r.reasoning;
+        self.have = self.have || r.have;
+    }
+}
+
+/// Neutralize the display-layer's structural tags inside tool RESULTS so a
+/// literal `</tool>`/`<tool>`/`<think>` in shell output can't corrupt the
+/// frontend's segment parser (a closing tag truncates the marker block; an
+/// opener prematurely starts a new segment). Mirrors `tool_block`'s arg-side
+/// sanitize in proto.rs.
+fn neutralize_markers(v: &str) -> String {
+    v.replace("</tool>", "<\\/tool>")
+        .replace("<tool>", "<\\tool>")
+        .replace("<think>", "<\\think>")
+}
+
 async fn openai_stream_round(
     client: &reqwest::Client,
     url: &str,
@@ -58,7 +98,7 @@ async fn openai_stream_round(
     app: &AppHandle,
     sid: &str,
     full: &mut String,
-) -> Result<(Value, i64, i64, bool), String> {
+) -> Result<(Value, RoundUsage), String> {
     use futures_util::StreamExt;
 
     let resp = client
@@ -77,11 +117,7 @@ async fn openai_stream_round(
         // surface it in the dev log, not just the UI banner.
         eprintln!(
             "[chat:stream] HTTP {status} from {url} body={}",
-            if b.len() > 2000 {
-                format!("{}…", &b[..2000])
-            } else {
-                b.clone()
-            }
+            crate::util::truncate_chars(&b, 2000)
         );
         return Err(format!("HTTP {status}: {b}"));
     }
@@ -102,7 +138,8 @@ async fn openai_stream_round(
     // controls) that have no business in user-visible text and that some
     // React/HTML renderers handle in surprising ways. Newlines and tabs are
     // preserved (the bubble uses them for layout).
-    let sanitize = |s: &str| -> String {
+    // Hoisted to a free fn (mi1) — the closure captured nothing anyway.
+    fn sanitize_model_text(s: &str) -> String {
         let mut out = String::with_capacity(s.len());
         for c in s.chars() {
             match c {
@@ -114,13 +151,16 @@ async fn openai_stream_round(
             }
         }
         out
-    };
+    }
+    let sanitize = sanitize_model_text;
     // Per-index accumulation of (id, name, arguments).
     let mut calls: Vec<(String, String, String)> = Vec::new();
-    let mut input = 0i64;
-    let mut output = 0i64;
-    let mut have_usage = false;
+    let mut usage = RoundUsage::default();
     let mut parse_failures: u32 = 0;
+    // Held-back tail of the previous chunk that could be the START of a
+    // `<tool_call` opener split across SSE chunks — emitted with the next
+    // chunk once it proves not to be one (classic incremental-scan carry).
+    let mut carry = String::new();
 
     'outer: while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("stream read error: {e}"))?;
@@ -151,12 +191,22 @@ async fn openai_stream_round(
                 }
             };
             if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
-                input = u.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(input);
-                output = u
+                usage.input = u.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(usage.input);
+                usage.output = u
                     .get("completion_tokens")
                     .and_then(|x| x.as_i64())
-                    .unwrap_or(output);
-                have_usage = true;
+                    .unwrap_or(usage.output);
+                // v2 detail fields (OpenAI-compatible: cached prompt tokens,
+                // reasoning tokens) — same fields the cost model v2 reads.
+                usage.cache_read = u
+                    .pointer("/prompt_tokens_details/cached_tokens")
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(usage.cache_read);
+                usage.reasoning = u
+                    .pointer("/completion_tokens_details/reasoning_tokens")
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(usage.reasoning);
+                usage.have = true;
             }
             let delta = match v.pointer("/choices/0/delta") {
                 Some(d) => d,
@@ -171,20 +221,41 @@ async fn openai_stream_round(
                     let clean = sanitize(c);
                     content.push_str(&clean);
                     if !suppress {
-                        if let Some(pos) = content.find("<tool_call") {
+                        // The emit candidate is carry + chunk: a `<tool_call`
+                        // opener that straddled the chunk boundary must be
+                        // detected BEFORE its leading fragment reaches the UI
+                        // and `full` (a leaked `<tool` fragment used to
+                        // persist in the message when the marker completed
+                        // in the next chunk).
+                        let mut piece = std::mem::take(&mut carry);
+                        piece.push_str(&clean);
+                        if let Some(pos) = piece.find("<tool_call") {
                             suppress = true;
-                            suppressed_from = pos;
-                            // Emit any prose that preceded the markup inside
-                            // this chunk — only the markup itself is suspect.
-                            let chunk_start = content.len() - clean.len();
-                            if pos > chunk_start {
-                                let prefix = content[chunk_start..pos].to_string();
+                            suppressed_from = content.len() - piece.len() + pos;
+                            // Emit any prose that preceded the markup — only
+                            // the markup itself is suppressed.
+                            if pos > 0 {
+                                let prefix = piece[..pos].to_string();
                                 emit_token(app, sid, &prefix, full);
                             }
+                        } else {
+                            // Hold back a trailing partial-opener tail (a
+                            // proper prefix of `<tool_call`) until the next
+                            // chunk resolves it either way.
+                            const MARKER: &str = "<tool_call";
+                            let mut split = piece.len();
+                            for n in (1..MARKER.len().min(piece.len())).rev() {
+                                if MARKER.starts_with(&piece[piece.len() - n..]) {
+                                    split = piece.len() - n;
+                                    break;
+                                }
+                            }
+                            if split > 0 {
+                                let head = piece[..split].to_string();
+                                emit_token(app, sid, &head, full);
+                            }
+                            carry = piece[split..].to_string();
                         }
-                    }
-                    if !suppress {
-                        emit_token(app, sid, &clean, full);
                     }
                 }
             }
@@ -234,6 +305,11 @@ async fn openai_stream_round(
     if in_think {
         emit_token(app, sid, "</think>", full);
     }
+    // A held-back partial-opener tail that never resolved into a marker is
+    // ordinary prose — flush it so the UI and the persisted message keep it.
+    if !suppress && !carry.is_empty() {
+        emit_token(app, sid, &carry, full);
+    }
 
     // Suppression latched on a suspected `<tool_call` opener. Flush the
     // held-back tail so the UI and the persisted message don't lose it:
@@ -272,9 +348,7 @@ async fn openai_stream_round(
 
     Ok((
         json!({ "role": "assistant", "content": content, "tool_calls": tool_calls }),
-        input,
-        output,
-        have_usage,
+        usage,
     ))
 }
 
@@ -282,8 +356,7 @@ async fn openai_stream_round(
 ///
 /// Emits assistant text (and `thinking`, wrapped in `<think>…</think>`) live as
 /// it streams, accumulates `tool_use` blocks (id/name/input), and returns the
-/// reconstructed `content` block array plus `(input_tokens, output_tokens,
-/// have_usage)`.
+/// reconstructed `content` block array plus the round's [`RoundUsage`].
 async fn anthropic_stream_round(
     client: &reqwest::Client,
     url: &str,
@@ -292,7 +365,7 @@ async fn anthropic_stream_round(
     app: &AppHandle,
     sid: &str,
     full: &mut String,
-) -> Result<(Vec<Value>, i64, i64, bool), String> {
+) -> Result<(Vec<Value>, RoundUsage), String> {
     use futures_util::StreamExt;
 
     let resp = client
@@ -324,9 +397,7 @@ async fn anthropic_stream_round(
     }
     let mut blocks: Vec<Blk> = Vec::new();
     let mut in_think = false;
-    let mut input = 0i64;
-    let mut output = 0i64;
-    let mut have_usage = false;
+    let mut usage = RoundUsage::default();
     let mut parse_failures: u32 = 0;
 
     let mut stream = resp.bytes_stream();
@@ -360,8 +431,19 @@ async fn anthropic_stream_round(
             match p.get("type").and_then(|t| t.as_str()).unwrap_or("") {
                 "message_start" => {
                     if let Some(u) = p.pointer("/message/usage") {
-                        input += u.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-                        have_usage = true;
+                        usage.input += u.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+                        // v2 cache fields — billed differently from plain
+                        // input, so the cost model needs them split out
+                        // (same field names the non-tool path parses).
+                        usage.cache_creation += u
+                            .get("cache_creation_input_tokens")
+                            .and_then(|x| x.as_i64())
+                            .unwrap_or(0);
+                        usage.cache_read += u
+                            .get("cache_read_input_tokens")
+                            .and_then(|x| x.as_i64())
+                            .unwrap_or(0);
+                        usage.have = true;
                     }
                 }
                 "content_block_start" => {
@@ -461,9 +543,32 @@ async fn anthropic_stream_round(
                     }
                 }
                 "message_delta" => {
-                    if let Some(o) = p.pointer("/usage/output_tokens").and_then(|x| x.as_i64()) {
-                        output = o;
-                        have_usage = true;
+                    if let Some(u) = p.get("usage") {
+                        if let Some(o) = u.get("output_tokens").and_then(|x| x.as_i64()) {
+                            usage.output = o;
+                            usage.have = true;
+                        }
+                        // Extended-thinking rounds report reasoning tokens
+                        // separately on message_delta (when reported at all).
+                        if let Some(r) = u.get("reasoning_output_tokens").and_then(|x| x.as_i64()) {
+                            usage.reasoning += r;
+                            usage.have = true;
+                        }
+                        // Cache fields normally arrive on message_start; some
+                        // Anthropic-compatible backends only report them here.
+                        // Take them only while unset so we never double-count.
+                        if usage.cache_creation == 0 {
+                            usage.cache_creation = u
+                                .get("cache_creation_input_tokens")
+                                .and_then(|x| x.as_i64())
+                                .unwrap_or(0);
+                        }
+                        if usage.cache_read == 0 {
+                            usage.cache_read = u
+                                .get("cache_read_input_tokens")
+                                .and_then(|x| x.as_i64())
+                                .unwrap_or(0);
+                        }
                     }
                 }
                 "message_stop" => break 'outer,
@@ -494,7 +599,7 @@ async fn anthropic_stream_round(
         })
         .collect();
 
-    Ok((content, input, output, have_usage))
+    Ok((content, usage))
 }
 
 /// Agentic tool loop for OpenAI-style providers (native + compatible).
@@ -538,9 +643,7 @@ pub(crate) async fn run_openai_tool_loop(
     }
 
     let mut full = String::new();
-    let mut total_in = 0i64;
-    let mut total_out = 0i64;
-    let mut have_usage = false;
+    let mut total = RoundUsage::default();
 
     for _ in 0..cap {
         let mut body = json!({
@@ -563,12 +666,10 @@ pub(crate) async fn run_openai_tool_loop(
         }
 
         perf.begin_gen();
-        let (message, in_tok, out_tok, have) =
+        let (message, round_usage) =
             openai_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?;
         perf.end_gen();
-        total_in += in_tok;
-        total_out += out_tok;
-        have_usage = have_usage || have;
+        total.add(round_usage);
 
         let tool_calls = message
             .get("tool_calls")
@@ -668,16 +769,32 @@ pub(crate) async fn run_openai_tool_loop(
                     .unwrap_or("{}");
                 let args = parse_tool_args(args_str);
 
-                emit_token(app, sid, &tool_block(&name, &args), &mut full);
+                // Two-part emission: open the block BEFORE running the tool so
+                // the frontend sees the step as live (spinner + live action
+                // label) while it executes — the closing tag after completion
+                // flips it to done. `full` accumulates the same bytes either
+                // way, so the persisted message is identical.
+                let block = tool_block(&name, &args);
+                let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
+                emit_token(app, sid, &open, &mut full);
                 perf.begin_tool();
                 let result = run_tool(client, &art_dir, caps, mode, mgr, app, sid, &name, &args).await;
                 perf.end_tool();
+                if block.ends_with("</tool>") {
+                    emit_token(app, sid, "</tool>", &mut full);
+                }
                 // Attach the captured terminal output to the shell step so the
-                // UI shows a collapsible preview under the command.
+                // UI shows a collapsible preview under the command. The title
+                // is required: the frontend's stepLabel renders a titleless
+                // marker as a phantom "working…" step row.
                 if name == tools::RUN_SHELL && !result.trim().is_empty() {
                     let result_marker = json!({
                         "kind": "result",
-                        "result": result.replace("</tool>", "<\\/tool>"),
+                        "title": "Output",
+                        // Neutralize the structural openers too: a literal
+                        // <tool>/<think> in shell output would prematurely open
+                        // a new frontend segment (see proto.rs tool_block).
+                        "result": neutralize_markers(&result),
                     });
                     let rm = format!("<tool>{result_marker}</tool>");
                     emit_token(app, sid, &rm, &mut full);
@@ -693,7 +810,7 @@ pub(crate) async fn run_openai_tool_loop(
 
         // No tool calls → final answer. The text was already streamed live in
         // `openai_stream_round` (Hermes markup, if any, was suppressed there).
-        return Ok((full, build_usage(true, total_in, total_out, have_usage)));
+        return Ok((full, build_usage(true, total)));
     }
 
     emit_token(
@@ -702,7 +819,7 @@ pub(crate) async fn run_openai_tool_loop(
         "\n\n_Stopped after reaching the tool-call limit._",
         &mut full,
     );
-    Ok((full, build_usage(true, total_in, total_out, have_usage)))
+    Ok((full, build_usage(true, total)))
 }
 
 /// Agentic tool loop for Anthropic-style providers (native + compatible).
@@ -735,9 +852,7 @@ pub(crate) async fn run_anthropic_tool_loop(
         .collect();
 
     let mut full = String::new();
-    let mut total_in = 0i64;
-    let mut total_out = 0i64;
-    let mut have_usage = false;
+    let mut total = RoundUsage::default();
 
     for _ in 0..cap {
         let mut body = json!({
@@ -765,12 +880,10 @@ pub(crate) async fn run_anthropic_tool_loop(
         }
 
         perf.begin_gen();
-        let (content, in_tok, out_tok, have) =
+        let (content, round_usage) =
             anthropic_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?;
         perf.end_gen();
-        total_in += in_tok;
-        total_out += out_tok;
-        have_usage = have_usage || have;
+        total.add(round_usage);
 
         let tool_uses: Vec<&Value> = content
             .iter()
@@ -787,14 +900,22 @@ pub(crate) async fn run_anthropic_tool_loop(
                 let name = tu.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
                 let args = tu.get("input").cloned().unwrap_or_else(|| json!({}));
 
-                emit_token(app, sid, &tool_block(&name, &args), &mut full);
+                // Two-part emission — see the OpenAI loop's marker.
+                let block = tool_block(&name, &args);
+                let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
+                emit_token(app, sid, &open, &mut full);
                 perf.begin_tool();
                 let result = run_tool(client, &art_dir, caps, mode, mgr, app, sid, &name, &args).await;
                 perf.end_tool();
+                if block.ends_with("</tool>") {
+                    emit_token(app, sid, "</tool>", &mut full);
+                }
                 if name == tools::RUN_SHELL && !result.trim().is_empty() {
                     let result_marker = json!({
                         "kind": "result",
-                        "result": result.replace("</tool>", "<\\/tool>"),
+                        // Title required — see the OpenAI loop's marker.
+                        "title": "Output",
+                        "result": neutralize_markers(&result),
                     });
                     let rm = format!("<tool>{result_marker}</tool>");
                     emit_token(app, sid, &rm, &mut full);
@@ -811,7 +932,7 @@ pub(crate) async fn run_anthropic_tool_loop(
 
         // No tool use → final answer. Text blocks were already streamed live in
         // `anthropic_stream_round`.
-        return Ok((full, build_usage(false, total_in, total_out, have_usage)));
+        return Ok((full, build_usage(false, total)));
     }
 
     emit_token(
@@ -820,25 +941,28 @@ pub(crate) async fn run_anthropic_tool_loop(
         "\n\n_Stopped after reaching the tool-call limit._",
         &mut full,
     );
-    Ok((full, build_usage(false, total_in, total_out, have_usage)))
+    Ok((full, build_usage(false, total)))
 }
 
 /// Build a `ChatUsage` summing across all tool-loop round-trips, picking the
-/// provider's cost model.
-fn build_usage(openai: bool, input: i64, output: i64, have: bool) -> Option<ChatUsage> {
-    if !have {
+/// provider's cost model. Carries the v2 detail fields (cache + reasoning)
+/// so the cost model bills tool-mode turns the same as the non-tool path.
+fn build_usage(openai: bool, u: RoundUsage) -> Option<ChatUsage> {
+    if !u.have {
         return None;
     }
     let cost = if openai {
-        calculate_openai_cost(input, output)
+        calculate_openai_cost(u.input, u.output)
     } else {
-        calculate_anthropic_cost(input, output)
+        calculate_anthropic_cost(u.input, u.output)
     };
     Some(ChatUsage {
-        input_tokens: input,
-        output_tokens: output,
+        input_tokens: u.input,
+        output_tokens: u.output,
         cost_usd: cost,
-        ..Default::default()
+        cache_creation_input_tokens: u.cache_creation,
+        cache_read_input_tokens: u.cache_read,
+        reasoning_tokens: u.reasoning,
     })
 }
 

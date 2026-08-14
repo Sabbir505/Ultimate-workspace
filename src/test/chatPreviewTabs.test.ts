@@ -27,6 +27,10 @@ vi.mock("../lib/ipc", () => ({
   updateChatSessionTitle: vi.fn().mockResolvedValue(undefined),
   updateChatSessionWatchMode: vi.fn(),
   cancelChatMessage: vi.fn(),
+  // onDone's trailing loadSessionMetrics refresh touches this on every turn.
+  getChatSessionMetrics: vi.fn().mockResolvedValue(null),
+  persistPartialChatMessage: vi.fn().mockResolvedValue(undefined),
+  readArtifactPreview: vi.fn(),
 }));
 
 import { generateChatTitle, getChatMessages, updateChatSessionTitle } from "../lib/ipc";

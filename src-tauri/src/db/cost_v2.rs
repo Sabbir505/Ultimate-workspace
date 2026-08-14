@@ -75,6 +75,76 @@ pub fn get_cost_rollups_v2(conn: &Connection, range_days: u32) -> DbResult<CostR
     // Any positive range is valid here — the 7|30|90 whitelist lives at the
     // IPC boundary (commands/data.rs) so the mobile relay can ask for 14 days.
     let days = range_days.max(1);
+
+    // mi26: the mobile relay + cost dashboard poll this whole aggregation on
+    // a timer. Cache per `days`, validated by a cheap freshness marker —
+    // MAX(timestamp) of both source tables + the rate overrides + a 10-min
+    // time bucket (the bucket bounds staleness from rows AGING OUT of the
+    // sliding window when no new rows arrive; new rows invalidate instantly
+    // via the MAX markers). A poll with no new cost data now costs two
+    // indexed MAX() lookups instead of two range scans + pricing.
+    let marker = rollup_freshness_marker(conn)?;
+    let cache = ROLLUP_CACHE.get_or_init(|| parking_lot::Mutex::new(HashMap::new()));
+    {
+        let guard = cache.lock();
+        if let Some((m, cached)) = guard.get(&days) {
+            if *m == marker {
+                return Ok(cached.clone());
+            }
+        }
+    }
+    let fresh = compute_cost_rollups_v2(conn, days)?;
+    {
+        let mut guard = cache.lock();
+        if guard.len() >= 8 {
+            guard.clear();
+        }
+        guard.insert(days, (marker, fresh.clone()));
+    }
+    Ok(fresh)
+}
+
+/// mi26: process-wide rollup cache — see get_cost_rollups_v2.
+static ROLLUP_CACHE: std::sync::OnceLock<parking_lot::Mutex<HashMap<u32, (String, CostRollups)>>> =
+    std::sync::OnceLock::new();
+
+/// Cheap O(indexed MAX) staleness marker for the rollup cache. Covers both
+/// source tables (cost_events, assistant chat_messages), the rate overrides
+/// (pricing inputs), and a 10-minute time bucket so rows aging out of the
+/// sliding window refresh at most 10 min late.
+fn rollup_freshness_marker(conn: &Connection) -> DbResult<String> {
+    let max_ev: Option<i64> =
+        conn.query_row("SELECT MAX(timestamp) FROM cost_events", [], |r| r.get(0))?;
+    let max_msg: Option<i64> = conn.query_row(
+        "SELECT MAX(created_at) FROM chat_messages WHERE role = 'assistant'",
+        [],
+        |r| r.get(0),
+    )?;
+    let overrides = read_rate_overrides(conn);
+    // Hash the overrides map (tiny) — order-independent via BTreeMap fold.
+    let overrides_hash = {
+        use std::hash::{BuildHasher, Hasher};
+        let sorted: BTreeMap<_, _> = overrides.iter().collect();
+        let mut h = std::hash::RandomState::new().build_hasher();
+        for (k, v) in sorted {
+            h.write(k.as_bytes());
+            h.write_u64(v.input_per_mtok.to_bits());
+            h.write_u64(v.cache_read_per_mtok.to_bits());
+            h.write_u64(v.output_per_mtok.to_bits());
+        }
+        h.finish()
+    };
+    let bucket = crate::db::now_ts() / 600;
+    Ok(format!(
+        "{}:{}:{:x}:{}",
+        max_ev.unwrap_or(0),
+        max_msg.unwrap_or(0),
+        overrides_hash,
+        bucket
+    ))
+}
+
+fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups> {
     let now = crate::db::now_ts();
     let since = now - (days as i64) * 86_400;
     let overrides = read_rate_overrides(conn);

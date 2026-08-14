@@ -49,6 +49,10 @@ pub struct MobileRelayState {
     /// Used to route `mobile:session_chat_event` Tauri events back to the
     /// right phone.
     pub owner_map: OwnerMap,
+    /// Live WebSocket connection count (B10): the pty reader skips its
+    /// per-frame vt100 screen parse when this is zero — the screen model's
+    /// only consumer is the phone transcript path.
+    pub active_connections: std::sync::atomic::AtomicUsize,
 }
 
 impl MobileRelayState {
@@ -58,6 +62,7 @@ impl MobileRelayState {
             abort: Mutex::new(None),
             pairing_token: Mutex::new(None),
             owner_map: OwnerMap::default(),
+            active_connections: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -160,10 +165,14 @@ pub async fn start_relay(
                             let db = Arc::clone(&db);
                             let chat_mgr = Arc::clone(&chat_mgr);
                             let owner_map = relay_state.owner_map.clone();
+                            let conns = Arc::clone(&relay_state);
                             tokio::spawn(async move {
+                                use std::sync::atomic::Ordering as AOrd;
+                                conns.active_connections.fetch_add(1, AOrd::Relaxed);
                                 if let Err(e) = handle_connection(stream, peer, app, db, chat_mgr, owner_map).await {
                                     eprintln!("[mobile-relay] connection error: {e}");
                                 }
+                                conns.active_connections.fetch_sub(1, AOrd::Relaxed);
                             });
                         }
                         Err(e) => {
@@ -248,7 +257,13 @@ impl Drop for TempChatSessionCleanup {
 /// into an empty expected token, so presenting an empty token paired
 /// successfully.
 pub(crate) fn pairing_token_accepted(expected: &str, presented: &str) -> bool {
-    !expected.is_empty() && !presented.is_empty() && presented == expected
+    use subtle::ConstantTimeEq;
+    // mi22: constant-time compare — the token gates full remote control of
+    // the desktop, so don't leak match prefixes via timing.
+    !expected.is_empty()
+        && !presented.is_empty()
+        && expected.len() == presented.len()
+        && expected.as_bytes().ct_eq(presented.as_bytes()).into()
 }
 
 /// How long a fresh connection may take to present its Pair frame.
@@ -392,6 +407,12 @@ async fn handle_connection(
         }))
     };
 
+    // M11: last-sent transcript hash per session for THIS connection — a
+    // GetTranscript poll whose screen hasn't changed gets a tiny
+    // `unchanged` marker instead of another full SGR snapshot.
+    let mut transcript_hashes: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
+
     loop {
         let msg = match tokio::time::timeout(IDLE_TIMEOUT, read.next()).await {
             Ok(Some(msg)) => msg.map_err(|e| format!("ws read failed: {e}"))?,
@@ -498,7 +519,26 @@ async fn handle_connection(
                     .try_state::<crate::PtyState>()
                     .and_then(|p| p.0.screen_for_session(&session_id))
                     .unwrap_or_default();
-                let resp = DesktopMessage::Transcript { session_id, text, cols, rows };
+                // M11: skip re-sending a byte-identical screen — the phone
+                // polls this on a timer and terminal screens are static far
+                // more often than not.
+                let hash = {
+                    use std::hash::{BuildHasher, Hasher};
+                    let mut h = std::hash::RandomState::new().build_hasher();
+                    h.write(text.as_bytes());
+                    h.finish()
+                };
+                let unchanged = transcript_hashes.get(&session_id) == Some(&hash);
+                if !unchanged {
+                    transcript_hashes.insert(session_id.clone(), hash);
+                }
+                let resp = DesktopMessage::Transcript {
+                    session_id,
+                    text: if unchanged { String::new() } else { text },
+                    cols,
+                    rows,
+                    unchanged,
+                };
                 let _ = send_msg(&write, &resp).await;
             }
             MobileMessage::GetCostSummary => {

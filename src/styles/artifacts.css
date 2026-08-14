@@ -1,0 +1,519 @@
+/* artifacts — Artifact library modal, doc-card grid, harness picker row, context menu, command palette.
+   Split out of the old monolithic global.css (2026-08-15). Import order in
+   global.css preserves the original cascade — do not reorder imports. */
+/* Artifact library (chat sidebar) */
+/* "Artifacts" entry â€” as prominent as the "New Chat" button (same full-width
+   rounded button, padding, font size/weight) but in a DIFFERENT accent color
+   (a warm desaturated orange-terracotta) so it reads as a sibling, not a clone. */
+:root {
+  --accent-2: #3a3d3e;
+  --accent-2-soft: rgba(58, 61, 62, 0.16);
+  --accent-2-glow: rgba(58, 61, 62, 0.35);
+}
+:root[data-theme="light"] {
+  --accent-2: #6e706f;
+  --accent-2-soft: rgba(110, 112, 111, 0.12);
+  --accent-2-glow: rgba(110, 112, 111, 0.28);
+}
+.artifact-lib-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  /* Inset comes from the .chat-new-btn-row wrapper (same as the New Chat
+     button), so no horizontal margin here â€” keeps the width identical. */
+  margin: 0;
+  padding: 6px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: none;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease), transform 0.08s var(--ease), color 0.15s var(--ease);
+}
+.artifact-lib-title:hover {
+  background: var(--glass-hover);
+  border-color: transparent;
+}
+.artifact-lib-title:active {
+  transform: translateY(0.5px);
+}
+.artifact-lib-title.is-active {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+:root[data-theme="dark"] .artifact-lib-title.is-active {
+  background: var(--surface-glass-2);
+  border-color: var(--border-strong);
+}
+.artifact-lib-title-label {
+  flex: 1;
+  min-width: 0;
+}
+.artifact-lib-title-icon {
+  flex: none;
+}
+.artifact-lib-title-count {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+}
+.artifact-lib-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  max-height: 66vh;
+  overflow-y: auto;
+  margin: 4px 0 2px;
+}
+
+/* Search box at the top of the artifacts modal. */
+
+
+
+
+/* ---------- Document-card grid (folded "dog-eared" page cards) ----------
+   Every artifact renders as one uniform document card in a 3-column grid.
+   The card has a cut/folded top-right corner (clip-path + a lighter fold
+   triangle), a top thumbnail area (~60% â€” faint text snippet or outline
+   icon), and a lower body with a bold title, a divider, and a muted
+   "Edited â€¦ ago" footer. Theme-aware: surfaces follow the app palette. */
+.doc-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  padding: 2px;
+}
+@media (max-width: 720px) {
+  .doc-card-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (max-width: 480px) {
+  .doc-card-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.doc-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  /* Cut the top-right corner for the "folded page" silhouette. The fold
+     triangle (::after) sits inside this cut and is a shade lighter. */
+  clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%);
+  border-radius: 0 0 10px 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 0.15s var(--ease), transform 0.12s var(--ease),
+    box-shadow 0.15s var(--ease);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+.doc-card:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 22px -10px rgba(0, 0, 0, 0.45);
+}
+.doc-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* The folded corner â€” a lighter triangle that reads as the page turned down.
+   In the dark theme the fold needs enough luminance lift over the card body
+   to stay visible (the card surface and surface-glass-2 are otherwise <10%
+   apart); in light the natural contrast already reads. The --doc-fold-*
+   tokens are defined in the theme blocks at the top of this file. */
+.doc-card::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 16px;
+  height: 16px;
+  background: linear-gradient(225deg, var(--doc-fold-light) 50%, var(--doc-fold-dark) 50%);
+  box-shadow: -1px 1px 2px rgba(0, 0, 0, 0.25);
+}
+/* Delete button â€” top-left, hover-revealed. */
+.doc-card-del {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 99px;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s var(--ease), background 0.12s var(--ease);
+}
+.doc-card:hover .doc-card-del {
+  opacity: 0.85;
+}
+.doc-card-del:hover {
+  opacity: 1;
+  background: var(--danger);
+}
+
+/* Upper thumbnail area â€” ~60% of the card, dark gray backdrop. */
+.doc-card-thumb {
+  position: relative;
+  flex: 0 0 60%;
+  min-height: 110px;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  background: var(--surface-solid);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+/* Faint formatted text snippet for text/markdown/code/json/csv. */
+.doc-card-snippet {
+  width: 100%;
+  padding: 12px 14px;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+.doc-card-snippet pre {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: 0.8;
+}
+/* Centered minimalist outline icon for non-text artifacts. */
+.doc-card-icon {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+.doc-card-icon svg {
+  width: 30px;
+  height: 30px;
+}
+
+/* Lower body â€” title + divider + muted footer. */
+.doc-card-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px 12px;
+  background: var(--surface);
+}
+.doc-card-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.3;
+  /* Lower-middle emphasis: allow up to 2 lines, ellipsis on overflow. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+.doc-card-divider {
+  height: 1px;
+  margin: 2px 0 4px;
+  background: var(--border);
+}
+.doc-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.doc-card-meta svg {
+  width: 12px;
+  height: 12px;
+  opacity: 0.8;
+  flex: none;
+}
+.doc-card-meta span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+
+
+.artifact-lib-empty {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 2px 8px 8px;
+  line-height: 1.4;
+  opacity: 0.8;
+}
+
+
+
+
+
+
+
+
+
+
+.sidebar-footer button.active {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.project-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s var(--ease);
+}
+.project-row:hover {
+  background: var(--surface-2);
+}
+.project-row.selected {
+  background: var(--accent-soft);
+  box-shadow: var(--glass-rim-soft);
+}
+.project-row .name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.project-row .caret {
+  width: 14px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.git-badge {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.git-badge .dirty-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.git-badge .dirty-dot.dirty { background: var(--state-waiting); }
+.git-badge .dirty-dot.clean { background: var(--state-working); }
+
+.session-list {
+  margin-left: 16px;
+  border-left: 1px solid var(--border);
+  padding-left: 8px;
+}
+.session-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s var(--ease);
+}
+.session-row:hover {
+  background: var(--surface-2);
+}
+.session-row .info {
+  flex: 1;
+  min-width: 0;
+}
+.session-row .title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+.session-row .meta {
+  font-size: 10px;
+  color: var(--text-dim);
+  display: flex;
+  gap: 6px;
+}
+.session-row .harness-tag {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.session-row input.title-edit {
+  width: 100%;
+  font-size: 12.5px;
+  padding: 2px 5px;
+}
+
+.new-session-row {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  align-items: center;
+}
+/* The harness picker fills the row so the "+ New Session" button sits flush
+   against a full-width dropdown. */
+.new-session-row .glass-select {
+  flex: 1;
+  min-width: 0;
+}
+.new-session-row .glass-select-trigger {
+  width: 100%;
+  font-size: 11.5px;
+  padding: 5px 8px 5px 10px;
+}
+.new-session-row button {
+  flex: none;
+  white-space: nowrap;
+}
+
+.empty-state {
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--text-dim);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+}
+
+/* Context menu */
+.context-menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 180px;
+  background: var(--surface-glass);
+  backdrop-filter: blur(28px) saturate(150%);
+  -webkit-backdrop-filter: blur(28px) saturate(150%);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+  padding: 5px;
+}
+.context-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 6px 10px;
+  border-radius: var(--radius-xs);
+  box-shadow: none;
+}
+.context-menu button:hover {
+  background: var(--surface-2);
+}
+.context-menu hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 4px 0;
+}
+
+/* ---------- Command palette (Â§12.3) ---------- */
+.palette-overlay,
+.modal-overlay,
+.view-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  z-index: 50;
+  animation: overlay-in 0.18s var(--ease);
+}
+@keyframes overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.palette {
+  margin-top: 12vh;
+  width: min(560px, 90vw);
+  background: var(--surface-glass);
+  backdrop-filter: blur(32px) saturate(150%);
+  -webkit-backdrop-filter: blur(32px) saturate(150%);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+  overflow: hidden;
+  animation: palette-in 0.22s var(--ease);
+}
+@keyframes palette-in {
+  from { opacity: 0; transform: translateY(-8px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.palette input {
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 15px 18px;
+  font-size: 15px;
+}
+.palette .results {
+  max-height: 50vh;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  padding: 6px;
+}
+.palette .section {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+  padding: 8px 10px 4px;
+}
+.palette .item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: background 0.12s var(--ease);
+}
+.palette .item.active {
+  background: var(--accent-soft);
+  box-shadow: var(--glass-rim-soft);
+}
+.palette .item .label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.palette .item .hint {
+  font-size: 11px;
+  color: var(--text-dim);
+}

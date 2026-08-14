@@ -55,6 +55,10 @@ pub struct TaskState(pub Arc<chat::tasks::TaskManager>);
 /// Mobile relay server state (see mobile/relay.rs).
 pub struct MobileRelayState(pub Arc<mobile::relay::MobileRelayState>);
 
+/// Tracked JoinHandle for the browser MCP stdio/socket server (mi20) so the
+/// exit handler can abort it instead of orphaning the accept loop.
+pub struct BrowserMcpHandle(pub Mutex<Option<tauri::async_runtime::JoinHandle<()>>>);
+
 /// In-flight OAuth flows for the Connectors feature (see connectors/oauth.rs).
 /// Registered as Tauri state so the auth webview's `on_navigation` hook can
 /// look up a pending flow by id and resolve it.
@@ -171,9 +175,14 @@ pub fn run() {
                     .0
                     .clone();
                 let app_handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
+                // mi20: track the JoinHandle so app exit can abort the accept
+                // loop — previously the task was orphaned and its listener
+                // (plus any in-flight eval bridge connections) only died when
+                // the runtime tore down.
+                let handle = tauri::async_runtime::spawn(async move {
                     browser_mcp::serve(browser_mgr, app_handle).await;
                 });
+                app.manage(BrowserMcpHandle(Mutex::new(Some(handle))));
             }
 
             // Automations scheduler: 30s tick, fires due cron schedules as
@@ -412,11 +421,33 @@ pub fn run() {
             agent_sessions::kill_one_shot_children();
             // Stop any running local-model sidecars (llama-server processes).
             if let Some(state) = handle.try_state::<chat::local_models::LocalModelState>() {
-                tauri::async_runtime::block_on(state.0.stop_all());
+                // B8: bound the block_on — stop_all awaits child.wait(), and
+                // an unresponsive llama-server (stuck driver, zombie pipe)
+                // would otherwise hang app shutdown indefinitely. kill() is
+                // issued inside stop_all before the wait, so on timeout the
+                // termination request was already delivered; we just stop
+                // waiting for the confirmation.
+                tauri::async_runtime::block_on(async {
+                    if tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        state.0.stop_all(),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        eprintln!("[conduit] llama-server stop_all timed out after 3s; exiting anyway (kill already delivered)");
+                    }
+                });
             }
             // Stop the mobile relay server.
             if let Some(state) = handle.try_state::<MobileRelayState>() {
                 mobile::relay::stop_relay(&state.0);
+            }
+            // Abort the browser MCP server task (mi20).
+            if let Some(state) = handle.try_state::<BrowserMcpHandle>() {
+                if let Some(h) = state.0.lock().take() {
+                    h.abort();
+                }
             }
         }
     });

@@ -114,7 +114,19 @@ pub enum DesktopMessage {
     /// rows) plus the terminal size, so the phone can fit the font to the
     /// terminal's column count instead of sideways-scrolling a desktop-width
     /// layout.
-    Transcript { session_id: String, text: String, cols: u16, rows: u16 },
+    Transcript {
+        session_id: String,
+        text: String,
+        cols: u16,
+        rows: u16,
+        /// M11: true when the screen is byte-identical to the last snapshot
+        /// sent on this connection — `text` is empty and the client should
+        /// keep rendering the previous snapshot. Full-screen SGR snapshots
+        /// are the relay's largest messages; deduping them kills the
+        /// per-poll bandwidth while the terminal is static.
+        #[serde(default)]
+        unchanged: bool,
+    },
     /// A new session was successfully created.
     SessionCreated { session: SessionInfo },
     /// Aggregate spend response (today + rolling 7 days).

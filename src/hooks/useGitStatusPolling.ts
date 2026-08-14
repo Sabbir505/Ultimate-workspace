@@ -21,7 +21,6 @@ export function useGitStatusPolling(): void {
   useEffect(() => {
     if (projectCount === 0) return;
     let cancelled = false;
-    let unlisten: (() => void) | null = null;
     // Per-project debounce timers: bursts of FS events for the same project
     // (e.g. Vite HMR writes) only trigger one refresh every 3 seconds.
     const projectDebouncers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -49,25 +48,25 @@ export function useGitStatusPolling(): void {
       }, 3000);
     };
 
-    const setup = async () => {
-      const u = await safeListen<string>("project:fs-changed", (changedPath) => {
-        if (cancelled) return;
-        const ps = useProjectsStore.getState();
-        const project = ps.projects.find(
-          (p) =>
-            p.path === changedPath ||
-            changedPath.startsWith(p.path + "\\") ||
-            changedPath.startsWith(p.path + "/"),
-        );
-        if (project) {
-          debouncedRefreshFor(project.id);
-        } else {
-          debouncedFullRefresh();
-        }
-      });
-      if (!cancelled) unlisten = u;
-    };
-    void setup();
+    // Hold the listen() promise so cleanup can unsubscribe even when the
+    // effect unmounts before it resolves — assigning `unlisten` only when
+    // `!cancelled` (the old pattern) DROPPED the real unlisten on early
+    // cleanup and leaked the handler for the app's lifetime.
+    const listenReady = safeListen<string>("project:fs-changed", (changedPath) => {
+      if (cancelled) return;
+      const ps = useProjectsStore.getState();
+      const project = ps.projects.find(
+        (p) =>
+          p.path === changedPath ||
+          changedPath.startsWith(p.path + "\\") ||
+          changedPath.startsWith(p.path + "/"),
+      );
+      if (project) {
+        debouncedRefreshFor(project.id);
+      } else {
+        debouncedFullRefresh();
+      }
+    });
 
     const heartbeat = window.setInterval(() => {
       void useProjectsStore.getState().refreshGitStatus();
@@ -75,7 +74,7 @@ export function useGitStatusPolling(): void {
 
     return () => {
       cancelled = true;
-      if (unlisten) unlisten();
+      if (listenReady) void listenReady.then((u) => u());
       for (const t of projectDebouncers.values()) clearTimeout(t);
       if (fullDebounce) clearTimeout(fullDebounce);
       window.clearInterval(heartbeat);

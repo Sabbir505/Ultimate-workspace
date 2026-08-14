@@ -566,6 +566,13 @@ async fn op_wait_for(
         .ok_or_else(|| McpError::invalid_args("wait_for requires 'condition'"))?;
     let target = req.args.get("target").and_then(|v| v.as_str());
     let timeout_ms = wait_for_timeout_ms(&req.args);
+    // An empty/missing selector would poll `querySelector("")` (always false)
+    // for the whole timeout — fail fast so the agent can fix its args.
+    if condition == "selector" && target.map(str::is_empty).unwrap_or(true) {
+        return Err(McpError::invalid_args(
+            "wait_for with condition 'selector' requires a non-empty 'target' selector",
+        ));
+    }
 
     let (pane_id, _tab_id) = parse_label(&label)
         .ok_or_else(|| McpError { code: "invalid_args", message: format!("bad label: {label}") })?;
@@ -789,6 +796,13 @@ async fn op_click_and_wait(
     }
     let target = req.args.get("target").and_then(|v| v.as_str());
     let timeout_ms = wait_for_timeout_ms(&req.args);
+    // Same fail-fast as wait_for: an empty selector can never match, so
+    // polling would just burn the whole timeout.
+    if condition == "selector" && target.map(str::is_empty).unwrap_or(true) {
+        return Err(McpError::invalid_args(
+            "click_and_wait with condition 'selector' requires a non-empty 'target' selector",
+        ));
+    }
 
     let (pane_id, _tab_id) = parse_label(&label)
         .ok_or_else(|| McpError { code: "invalid_args", message: format!("bad label: {label}") })?;
@@ -796,12 +810,23 @@ async fn op_click_and_wait(
 
     // Snapshot the URL (for navigation-change detection) BEFORE the click so a
     // same-URL SPA route change can't be missed — we compare against this.
-    let prev_url = match condition {
-        "navigation" => browser
+    // On snapshot failure keep `None`: swallowing the error into "" made the
+    // poll compare `location.href !== ""`, which is ALWAYS true → instant
+    // false-positive "navigation happened". Instead we fall back to the
+    // readyState check (same as wait_for's no-target path).
+    let prev_url: Option<String> = match condition {
+        "navigation" => match browser
             .run_action_for_pane_opts(&label, "return location.href;", opts.clone())
             .await
-            .unwrap_or_default(),
-        _ => String::new(),
+        {
+            Ok(u) if !u.trim().is_empty() => Some(u),
+            Ok(_) => None, // empty eval result — treat as a failed snapshot
+            Err(e) => {
+                eprintln!("[conduit:browser-mcp] click_and_wait URL snapshot failed: {e}");
+                None
+            }
+        },
+        _ => None,
     };
 
     let click_result = browser
@@ -832,11 +857,15 @@ async fn op_click_and_wait(
     while std::time::Instant::now() < deadline {
         let check_js = match condition {
             "navigation" => {
-                let cmp = target.unwrap_or(&prev_url);
-                format!(
-                    "return JSON.stringify({{ url: location.href, changed: location.href !== {} }});",
-                    serde_json::to_string(cmp).unwrap_or_else(|_| "\"\"".into())
-                )
+                match target.or(prev_url.as_deref()) {
+                    Some(cmp) => format!(
+                        "return JSON.stringify({{ url: location.href, changed: location.href !== {} }});",
+                        serde_json::to_string(cmp).unwrap_or_else(|_| "\"\"".into())
+                    ),
+                    // No usable pre-click URL — mirror wait_for's no-target
+                    // fallback and treat a completed load as the change.
+                    None => "return JSON.stringify({ url: location.href, changed: document.readyState === 'complete' });".to_string(),
+                }
             }
             "selector" => {
                 let sel = target.unwrap_or("");

@@ -129,6 +129,8 @@ cron = "0.12"
 # chrono types are named directly in the scheduler's due-time math (cron's
 # API is generic over them); clock only, no formatting/serde.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+subtle = "2.6.1"
+memchr = "2.8.3"
 
 [dev-dependencies]
 tempfile = "3"

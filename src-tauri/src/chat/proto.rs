@@ -213,9 +213,17 @@ fn coerce_param_value(raw: &str) -> Value {
 /// like `<think>` blocks.
 pub(crate) fn tool_block(name: &str, args: &Value) -> String {
     let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-    // A tool's own output must never contain the closing tag or it would
-    // truncate the block on the client; neutralize it defensively.
-    let sanitize = |v: String| v.replace("</tool>", "<\\/tool>");
+    // A tool's own output must never contain the structural tags or it would
+    // corrupt the block on the client: a literal `</tool>` truncates it, and
+    // a literal `<tool>`/`<think>` opener prematurely starts a new segment
+    // in the frontend's parser (e.g. a write_file of an HTML file that uses
+    // a custom `<tool>` element). Neutralize both directions defensively.
+    let sanitize = |mut v: String| {
+        v = v.replace("</tool>", "<\\/tool>");
+        v = v.replace("<tool>", "<\\tool>");
+        v = v.replace("<think>", "<\\think>");
+        v
+    };
 
     let meta: Value = if name == tools::WEB_SEARCH {
         json!({ "kind": "search", "title": "Searching the web", "detail": s("query") })

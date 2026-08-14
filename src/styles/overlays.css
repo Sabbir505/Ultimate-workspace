@@ -1,0 +1,724 @@
+/* overlays — Overlay/centered views, settings nav + form panels, local models panel, pricing rate grid.
+   Split out of the old monolithic global.css (2026-08-15). Import order in
+   global.css preserves the original cascade — do not reorder imports. */
+/* ---------- Overlay views (settings / skills / cost) ---------- */
+.view-overlay {
+  align-items: stretch;
+  justify-content: flex-end;
+  z-index: 40;
+}
+/* Centered-modal variant (settings / skills library / cost dashboard). */
+.view-overlay.modal-centered {
+  align-items: center;
+  justify-content: center;
+}
+.view-overlay.modal-centered .view-panel {
+  width: min(1120px, 95vw);
+  max-height: 88vh;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+  animation: modal-in 0.22s var(--ease);
+  overflow: hidden;
+}
+@keyframes modal-in {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
+}
+.view-panel {
+  width: min(640px, 92vw);
+  background: var(--surface-glass);
+  backdrop-filter: blur(32px) saturate(150%);
+  -webkit-backdrop-filter: blur(32px) saturate(150%);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+}
+/* Centered modals (settings, skills library, cost dashboard) need full
+   border-radius â€” the side-panel border-left would create a sharp edge on
+   the left while the right rounds. Override to a uniform border. */
+.view-overlay.modal-centered .view-panel {
+  border: 1px solid var(--border-strong);
+  border-left: 1px solid var(--border-strong);
+}
+.view-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--surface-glass-2), transparent);
+}
+.view-header h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  flex: 1;
+}
+.view-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 0;
+}
+.view-body h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.form-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.form-row label {
+  color: var(--text-dim);
+  min-width: 120px;
+}
+.form-row input,
+.form-row textarea,
+.form-row select {
+  flex: 1;
+  min-width: 0;
+}
+table.kv {
+  width: 100%;
+  border-collapse: collapse;
+}
+table.kv td,
+table.kv th {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+table.kv th {
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+.kbd-chip.recording {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---------- Settings: sectioned nav + fixed-height panels ----------
+   The settings split has a fixed pixel height based on the tallest tab
+   (Shortcuts: 15 keybinding rows + header + note + defaults line ~500px).
+   Every tab â€” Appearance (2 rows), Pricing (12-card grid), Harnesses,
+   Shortcuts â€” renders into this identical, locked box. The .settings-panel
+   scrolls internally when its content overflows (e.g. Pricing grid) so the
+   modal never reflows on tab switch. */
+.settings-split {
+  display: flex;
+  gap: 22px;
+  height: 560px;
+  min-height: 560px;
+  max-height: 560px;
+  flex-shrink: 0;
+}
+.settings-nav {
+  width: 196px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  border-right: 1px solid var(--border);
+  padding-right: 16px;
+  overflow-y: auto;
+}
+.settings-nav-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-nav-section-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--text-dim);
+  opacity: 0.75;
+  padding: 0 6px 4px;
+}
+.settings-nav .nav-item {
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  color: var(--text-dim);
+  padding: 7px 10px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: none;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+.settings-nav .nav-item:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.settings-nav .nav-item.active {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  box-shadow: var(--glass-rim-soft);
+}
+.settings-nav .nav-item .nav-item-label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.settings-nav .nav-item .nav-item-label svg {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.settings-nav .nav-item.active .nav-item-label svg {
+  color: var(--accent);
+}
+.settings-nav .nav-item .nav-sub {
+  display: block;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-weight: 400;
+  margin-top: 2px;
+  padding-left: 20px;
+}
+.settings-panel {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.settings-panel .panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 4px;
+}
+.settings-panel .panel-head h3 {
+  margin: 0;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.settings-panel .panel-head .panel-count {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.settings-panel h3.section {
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+/* Settings header: title + the active category's one-line description. */
+.settings-modal .view-header > div {
+  flex: 1;
+  min-width: 0;
+}
+.settings-header-sub {
+  display: block;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 1px;
+}
+.settings-modal .view-panel {
+  width: min(1080px, 95vw);
+}
+
+/* Settings form â€” clean two-column layout for Appearance and similar panels */
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.settings-note {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  word-break: break-all;
+}
+.settings-form-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+/* Two fields (e.g. Provider + Model) side by side on one row. */
+.settings-form-row-pair {
+  display: flex;
+  gap: 16px;
+}
+.settings-form-row-pair .settings-form-field {
+  flex: 1;
+  min-width: 0;
+}
+.settings-form-field .settings-form-label {
+  display: block;
+  margin-bottom: 4px;
+}
+.settings-form-label {
+  width: 140px;
+  flex-shrink: 0;
+  padding-top: 6px;
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 500;
+}
+.settings-form-control {
+  flex: 1;
+  min-width: 0;
+}
+.settings-checkbox-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.settings-checkbox-row input[type="checkbox"] {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+.settings-checkbox-row span {
+  flex: 1;
+}
+
+/* â”€â”€ Local Models panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+   Clean card-based list with status indicators, folder chips, and an
+   active-server banner. Uses the app's theme variables throughout. */
+.local-models-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--surface);
+  border-radius: var(--radius-xs);
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+.local-models-banner .status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--state-working);
+  flex-shrink: 0;
+}
+.local-models-folder-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.local-models-folder-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 11px;
+  background: var(--surface);
+  color: var(--text-dim);
+  max-width: 100%;
+}
+.local-models-folder-chip .chip-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.local-models-folder-chip .chip-remove {
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.local-models-folder-chip .chip-remove:hover {
+  color: var(--text);
+}
+
+/* Local model card (My Models tab) */
+.local-model-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 16px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  min-height: 140px;
+  position: relative;
+}
+.local-model-card .model-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.local-model-card .model-info {
+  flex: 1;
+  min-width: 0;
+}
+.local-model-card .model-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.3;
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.local-model-card .model-meta {
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.local-model-card .model-meta span {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.local-model-card .model-tag {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.local-model-card .model-tag.memory-status {
+  font-weight: 600;
+}
+.local-model-card .model-tag.vision {
+  background: rgba(108,92,231,0.1);
+  color: #a78bfa;
+  border-color: transparent;
+}
+.local-model-card .model-actions,
+.local-model-card .model-card-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.local-model-card .model-actions button,
+.local-model-card .model-card-actions button {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 12px;
+  border-radius: 8px;
+  width: 100%;
+}
+
+.model-card-delete {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  background: var(--surface-glass);
+  color: var(--text-dim);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+  z-index: 1;
+}
+
+.model-card-delete:hover {
+  color: var(--state-error);
+  background: var(--state-error-10);
+  border-color: var(--state-error);
+}
+
+.model-card-delete svg {
+  display: block;
+}
+
+.model-card.running {
+  border-left: 3px solid var(--state-working);
+}
+
+.model-card.running .model-card-status.done {
+  background: var(--state-working-10);
+  color: var(--state-working);
+}
+
+.model-card.running .model-card-title::before {
+  content: "â—";
+  margin-right: 6px;
+  color: var(--state-working);
+  font-size: 10px;
+}
+.local-model-card .model-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.local-model-card .model-card-head .model-info {
+  flex: 1;
+  min-width: 0;
+}
+.local-model-card .model-card-head .model-card-actions {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 120px;
+}
+.local-model-card .model-card-head .model-card-actions .primary-action {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+  text-align: center;
+}
+.local-model-card .model-card-head .model-card-actions .primary-action:hover {
+  background: var(--accent);
+  color: var(--surface-solid);
+}
+.local-model-card .model-card-head .model-card-actions .primary-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.local-model-card .model-card-head .model-card-actions .model-card-actions-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.local-model-card .model-card-head .model-card-actions .model-card-actions-row .danger {
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.local-model-card .model-card-head .model-card-actions .model-card-actions-row .danger:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.local-model-card .model-card-head .model-card-actions .model-card-actions-row .model-memory-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 2px var(--surface-glass), 0 0 0 3px var(--border);
+}
+.local-model-card .model-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+.local-model-card .model-info {
+  flex: 1;
+  min-width: 0;
+}
+.local-model-card .model-name {
+  font-weight: 600;
+  font-size: 13px;
+  word-break: break-all;
+  color: var(--text);
+}
+.local-model-card .model-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+.local-model-card .model-tag {
+  font-size: 11px;
+  margin-top: 2px;
+}
+.local-model-card .model-tag.memory-status {
+  font-size: 10px;
+  margin-top: 0;
+  opacity: 0.85;
+}
+.model-card-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.model-card-actions .model-card-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.local-model-card .model-tag.vision {
+  color: var(--accent);
+}
+.local-model-card .model-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+.local-model-card .model-loading-note {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.local-model-card .model-error {
+  font-size: 11px;
+  color: var(--danger);
+  margin-top: 6px;
+}
+.local-model-card .model-advanced {
+  margin-top: 6px;
+  font-size: 12px;
+}
+.local-model-card .model-advanced summary {
+  cursor: pointer;
+  color: var(--text-dim);
+}
+.local-model-card .model-advanced-fields {
+  display: flex;
+  gap: 12px;
+  margin-top: 6px;
+}
+.local-model-card .model-advanced-fields label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.local-model-card .model-advanced-fields input {
+  width: 60px;
+  padding: 2px 4px;
+}
+/* Hide number input spinners (up/down arrows) â€” they clutter the compact
+   advanced fields and the user can type values directly. */
+.local-model-card .model-advanced-fields input::-webkit-outer-spin-button,
+.local-model-card .model-advanced-fields input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.local-model-card .model-advanced-fields input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* Reserved-height empty / loading state. Keeps the surrounding layout fixed
+   whether the region is empty, loading, or full. */
+.empty-reserved {
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  color: var(--text-dim);
+}
+.empty-reserved .empty-icon {
+  font-size: 22px;
+  opacity: 0.6;
+}
+.empty-reserved .empty-text {
+  font-size: 12px;
+  line-height: 1.5;
+  max-width: 340px;
+}
+.empty-reserved.small {
+  min-height: 120px;
+}
+
+/* Two-column rate grid for the pricing panel â€” denser than form-rows so 12
+   models fit without scrolling, with input/output grouped per model. */
+.rate-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+.rate-grid .rate-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--surface-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: var(--glass-rim-soft);
+}
+.rate-grid .rate-card .rate-name {
+  font-size: 12px;
+  font-weight: 500;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.rate-grid .rate-card .rate-name .rate-id {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.rate-grid .rate-card .rate-fields {
+  display: flex;
+  gap: 6px;
+}
+.rate-grid .rate-card .rate-fields .field {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.rate-grid .rate-card .rate-fields label {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.rate-grid .rate-card .rate-fields input {
+  width: 100%;
+  font-size: 12px;
+  padding: 3px 6px;
+  font-family: var(--font-mono);
+}

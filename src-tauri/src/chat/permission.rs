@@ -381,12 +381,34 @@ pub fn path_within_granted_roots(path: &str, granted_roots: &[String]) -> bool {
         })
 }
 
+/// Resolve a path through the FILESYSTEM (junctions/symlinks included).
+/// Falls back to resolving only the existing parent chain and reattaching
+/// the leaf — write_file targets often don't exist yet, but their parent
+/// directory does, and the parent's links are what matter for containment.
+/// Returns None when neither the path nor its parent resolves (nothing on
+/// disk to consult — caller falls back to the lexical result).
+fn fs_resolved(p: &std::path::Path) -> Option<std::path::PathBuf> {
+    if let Ok(c) = std::fs::canonicalize(p) {
+        return Some(c);
+    }
+    let parent = p.parent()?;
+    let leaf = p.file_name()?;
+    let cp = std::fs::canonicalize(parent).ok()?;
+    Some(cp.join(leaf))
+}
+
 /// Hard scope check: a mutating tool call is only allowed when its target
 /// `path` lies within a granted root. Used in addition to the approval gate
 /// so that a single approval cannot be re-used (intentionally or by mistake)
 /// to write to an arbitrary absolute path. This is the wire that the
 /// filesystem task's "granted roots" model needs: without it, `check_permission`
 /// only changed approval *defaults*, not what's reachable.
+///
+/// The authoritative comparison resolves the FILESYSTEM: a junction or
+/// symlink inside a granted root (pnpm `node_modules`, OneDrive placeholders,
+/// temp-dir junctions) that points OUTSIDE it must not let a write escape —
+/// the FS tools operate on the original path, so the lexical check alone
+/// would pass while the bytes land outside every root.
 ///
 /// Reads (list_directory / read_file / search_files / search_content) remain
 /// unscoped — a user explicitly opening a file is a deliberate act and reading
@@ -400,7 +422,20 @@ pub fn path_within_scope(path: &str, granted_roots: &[String]) -> bool {
         // rejected at the gate.)
         return false;
     }
-    path_within_granted_roots(path, granted_roots)
+    let lexical = path_within_granted_roots(path, granted_roots);
+    let Some(needle) = fs_resolved(std::path::Path::new(path)) else {
+        // Neither the path nor its parent exists on disk — there are no
+        // links to resolve, so the lexicographic result is authoritative.
+        return lexical;
+    };
+    // The write's REAL target must sit inside a granted root whose own
+    // filesystem form is used for the comparison (both sides come back from
+    // canonicalize in the same `\\?\` verbatim form on Windows).
+    granted_roots.iter().any(|r| {
+        let root = fs_resolved(std::path::Path::new(r))
+            .unwrap_or_else(|| std::path::PathBuf::from(r));
+        crate::util::path_starts_with_ci(&needle, &root)
+    })
 }
 
 /// Normalize a path for comparison: lowercase, strip the Windows drive `\\?\`
@@ -495,6 +530,48 @@ mod tests {
         assert!(path_within_granted_roots("C:/projects/alpha", &roots()));
         assert!(path_within_granted_roots("C:/projects/alpha/sub/file.txt", &roots()));
         assert!(path_within_granted_roots("C:/projects/beta/src/main.rs", &roots()));
+    }
+
+    /// B1 (round 2): a junction/symlink INSIDE a granted root that points
+    /// OUTSIDE it must not let a mutating tool escape the sandbox — the
+    /// lexical check passes but the write's real target is elsewhere.
+    #[test]
+    fn junction_inside_root_pointing_outside_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let outside = tmp.path().join("outside");
+        let link = root.join("link");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        // Junction on Windows (`mklink /J` needs no privileges), symlink on
+        // Unix. If the platform refuses link creation, skip the test rather
+        // than fail — the code path is still covered by the sibling test.
+        #[cfg(windows)]
+        let linked = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        #[cfg(not(windows))]
+        let linked = std::os::unix::fs::symlink(&outside, &link).is_ok();
+        if !linked {
+            eprintln!("skipping: could not create link in {}", tmp.path().display());
+            return;
+        }
+        let roots = vec![root.to_string_lossy().to_string()];
+        // A file under the junction resolves to `outside/…` — outside the root.
+        assert!(!path_within_scope(
+            &link.join("escape.txt").to_string_lossy(),
+            &roots
+        ));
+        // A plain nested path still passes, and the root itself still passes.
+        assert!(path_within_scope(
+            &root.join("normal.txt").to_string_lossy(),
+            &roots
+        ));
+        assert!(path_within_scope(&root.to_string_lossy(), &roots));
     }
 
     #[test]

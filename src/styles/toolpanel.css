@@ -1,0 +1,453 @@
+/* toolpanel — Right tool panel, tab picker/bar, pane slots, subagent strip + panel, git sidebar agent section.
+   Split out of the old monolithic global.css (2026-08-15). Import order in
+   global.css preserves the original cascade — do not reorder imports. */
+/* ---------- Right tool panel (unified layout, mockups 01/03) ----------
+   One collapsible right column hosting Terminal | Browser | Files | Canvas
+   as tabs. Sibling of .chat-view-wrap inside .grid-wrap.chat-grid-wrap
+   (padding 0), so it sits flush: flat surface + left border, no glass card.
+   Inactive tabs stay mounted with display:none (terminals/webviews keep
+   running); the panel itself also stays mounted while collapsed. */
+.tool-panel {
+  width: 532px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  position: relative;
+}
+/* Hide pane headers inside the tool panel — the tab bar replaces them. */
+.tool-panel .pane-header {
+  display: none;
+}
+
+.tool-panel-tab {
+  flex: 1;
+  padding: 9px 0;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+.tool-panel-tab:hover {
+  color: var(--text);
+}
+.tool-panel-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  background: var(--surface);
+}
+
+
+/* Center tab-picker grid: 3 across top, 2 bottom, vertically centered. */
+/* Empty-state picker: centered 3+2 grid shown when no tabs are open yet. */
+.tool-panel-picker {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.tool-panel-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  width: 100%;
+  max-width: 320px;
+}
+.tool-panel-picker-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 22px 8px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease), border-color 0.15s var(--ease), transform 0.1s var(--ease);
+}
+.tool-panel-picker-btn:hover {
+  color: var(--text);
+  background: var(--surface-3);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+.tool-panel-picker-btn-icon {
+  color: var(--text-dim);
+}
+.tool-panel-picker-btn:hover .tool-panel-picker-btn-icon {
+  color: var(--accent);
+}
+.tool-panel-picker-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+}
+.tool-panel-picker-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 9999;
+  min-width: 160px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg, 0 8px 24px rgba(0, 0, 0, 0.4));
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.tool-panel-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+.tool-panel-picker-item:hover:not(:disabled) {
+  background: var(--surface-3);
+}
+.tool-panel-picker-item:disabled {
+  color: var(--text-dim);
+  opacity: 0.6;
+  cursor: default;
+}
+.tool-panel-picker-item-icon {
+  color: var(--text-dim);
+  flex: none;
+}
+.tool-panel-picker-item:not(:disabled):hover .tool-panel-picker-item-icon {
+  color: var(--accent);
+}
+.tool-panel-picker-item-label {
+  white-space: nowrap;
+  flex: 1;
+}
+.tool-panel-picker-item-tag {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  opacity: 0.8;
+  padding: 1px 5px;
+  border-radius: 99px;
+  background: var(--accent-soft);
+}
+/* Multi-tab bar — one chip per open tab + a "+" add button. */
+.tool-panel-tabbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  position: relative;
+  flex: none;
+}
+.tool-panel-tabbar-chips {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 0;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  /* Soft fade at the right edge hints there's more to scroll. */
+  mask-image: linear-gradient(to right, black calc(100% - 16px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 16px), transparent 100%);
+}
+.tool-panel-tabbar-chips::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+.tool-panel-tabchip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 7px 5px 9px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  flex: none;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.tool-panel-tabchip:hover {
+  color: var(--text);
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+}
+.tool-panel-tabchip.active {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.tool-panel-tabchip.dragging {
+  opacity: 0.5;
+  cursor: grabbing;
+}
+.tool-panel-tabchip.drag-over {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.tool-panel-tabchip[draggable] {
+  cursor: grab;
+}
+.tool-panel-tabchip {
+  cursor: grab;
+}
+.tool-panel-tabchip-icon {
+  color: var(--text-dim);
+  flex: none;
+}
+.tool-panel-tabchip.active .tool-panel-tabchip-icon {
+  color: var(--accent);
+}
+.tool-panel-tabchip-label {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tool-panel-tabchip-close {
+  font-size: 11px;
+  line-height: 1;
+  padding: 1px 3px;
+  border-radius: 4px;
+  color: var(--text-dim);
+  opacity: 0.6;
+  transition: color 0.12s var(--ease), background 0.12s var(--ease), opacity 0.12s var(--ease);
+}
+.tool-panel-tabchip-close:hover {
+  color: var(--text);
+  background: var(--danger-soft);
+  opacity: 1;
+}
+.tool-panel-add-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.tool-panel-add-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  font-size: 17px;
+  line-height: 1;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  flex: none;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.tool-panel-add-btn:hover {
+  color: var(--text);
+  background: var(--surface-3);
+}
+.tool-panel-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.tool-panel-tab-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* Pane slot: terminals/browsers render through PaneFrame, which brings its
+   own glass card — give it breathing room like the old pane grid. */
+.tool-panel-pane-slot {
+  flex: 1;
+  min-height: 0;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+}
+.tool-panel-pane-slot .pane {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+/* Canvas slot: one ArtifactPreviewPane per open artifact tab; inactive tabs
+   stay mounted with display:none (set inline) so preview/zoom state survives
+   tab switches. */
+.tool-panel-canvas-slot {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.tool-panel-canvas-item {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.tool-panel-switcher {
+  padding: 8px 10px 0;
+}
+.tool-panel-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 20px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+/* Collapsed strip — same UX as the diff panel / browser pane minimize. */
+
+
+
+
+/* Embedded tab contents: strip the standalone chrome (fixed width, glass
+   card, own resizer) so they fill the tab body. */
+.tool-panel .dev-diff-panel-embedded {
+  width: auto;
+  flex: 1;
+  min-height: 0;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.tool-panel .artifact-preview-pane {
+  flex: 1;
+  min-width: 0;
+  border-left: none;
+  background: transparent;
+}
+.tool-panel .artifact-preview-resizer {
+  display: none;
+}
+
+/* ---- Subagent inline strip (chat view) ---- */
+
+
+
+
+
+
+
+
+
+
+
+.chat-subagent-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: none; }
+.chat-subagent-dot.running { background: var(--text-dim); animation: tool-spin 0.7s linear infinite; }
+.chat-subagent-dot.done { background: #22c55e; }
+.chat-subagent-dot.error { background: #ef4444; }
+
+/* ---- Subagent panel (Agents tab in ToolPanel) ---- */
+.subagent-panel-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  height: 100%; padding: 40px 16px; text-align: center; color: var(--text-dim); font-size: 13px; gap: 4px;
+}
+.subagent-empty-icon { font-size: 32px; opacity: 0.4; }
+.subagent-empty-hint { font-size: 11px; opacity: 0.6; }
+
+.subagent-panel-list, .subagent-panel-view {
+  display: flex; flex-direction: column; height: 100%;
+}
+.subagent-panel-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; border-bottom: 1px solid var(--border);
+  font-size: 12px; color: var(--text-dim);
+}
+.subagent-panel-title { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+.subagent-panel-role { color: #60a5fa; font-weight: 600; }
+.subagent-panel-task-truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.7; }
+.subagent-panel-status { font-size: 11px; display: flex; align-items: center; gap: 4px; }
+.subagent-panel-status.running { color: var(--text-dim); }
+.subagent-panel-status.done { color: #22c55e; }
+.subagent-panel-status.error { color: #ef4444; }
+.subagent-panel-spinner {
+  width: 8px; height: 8px; border-radius: 50%;
+  border: 1.5px solid var(--border); border-top-color: var(--text);
+  animation: tool-spin 0.7s linear infinite;
+}
+.subagent-count-badge {
+  font-size: 10px; padding: 1px 6px; border-radius: 99px;
+  background: var(--surface-2); color: var(--text-dim);
+}
+.subagent-back-btn {
+  background: none; border: none; color: var(--text-dim); font-size: 16px;
+  cursor: pointer; padding: 2px 6px; border-radius: var(--radius-xs);
+}
+.subagent-back-btn:hover { color: var(--text); background: var(--surface-2); }
+
+.subagent-list { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; flex: 1; padding: 4px; }
+.subagent-list-item {
+  display: flex; align-items: center; gap: 6px; padding: 4px 8px;
+  border-radius: var(--radius-xs); background: var(--surface-2);
+  border: 1px solid transparent; cursor: pointer; font-size: 12px;
+  transition: background 0.15s, border-color 0.15s;
+}
+.subagent-list-item:hover { background: var(--surface-3); border-color: var(--border); }
+.subagent-list-item.selected { border-color: var(--text-dim); }
+.subagent-list-role { color: #60a5fa; font-weight: 600; min-width: 50px; }
+.subagent-list-task { color: var(--text-dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-list-spinner {
+  width: 6px; height: 6px; border-radius: 50%;
+  border: 1.5px solid var(--border); border-top-color: var(--text);
+  animation: tool-spin 0.7s linear infinite;
+}
+.subagent-check { color: #22c55e; font-size: 12px; font-weight: 700; }
+.subagent-x { color: #ef4444; font-size: 12px; font-weight: 700; }
+
+.subagent-panel-body {
+  flex: 1; overflow-y: auto; padding: 8px 12px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.subagent-bubble { display: flex; flex-direction: column; gap: 2px; }
+.subagent-bubble-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;
+  color: #60a5fa; padding: 0 2px;
+}
+.subagent-bubble-content { color: var(--text); font-size: 13px; line-height: 1.6; }
+.subagent-bubble-streaming { position: relative; }
+
+/* Git sidebar agent section */
+.git-sidebar-agent {
+  display: flex; align-items: center; gap: 6px;
+}
+.git-sidebar-section-badge {
+  font-size: 10px; padding: 1px 6px; border-radius: 99px;
+  background: var(--surface-2); color: var(--text-dim);
+}

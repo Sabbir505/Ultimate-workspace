@@ -165,7 +165,10 @@ impl<'a> Sink for HitSink<'a> {
 
 // ---- Walk filter ----
 
-fn is_skipped_dir(name: &str) -> bool {
+/// `pub(super)`: shared with `fs_search_files`, which walks the same trees
+/// and needs the same skip list so a name search doesn't drown in
+/// node_modules/.git the same way a content search would.
+pub(super) fn is_skipped_dir(name: &str) -> bool {
     SKIP_DIRS.iter().any(|s| *s == name)
 }
 

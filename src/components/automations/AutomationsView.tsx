@@ -539,12 +539,22 @@ function AutomationForm({
   const [cwd, setCwd] = useState(automation?.cwd ?? "");
   const [availableModels, setAvailableModels] = useState<{ id: string; label: string }[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
+  const parsedCustom = automation ? parseSimpleCron(automation.schedule) : null;
+  // Is the stored cron representable by the preset list or the custom
+  // (freq/weekday/time) builder? If NOT (e.g. `*/10 * * * *` or `0 9 * * 2-6`),
+  // keep the original cron as its own selectable option — falling back to
+  // "custom" would silently rewrite the schedule to the DEFAULT (weekdays
+  // 09:00) on save, and unattended runs would fire at the wrong time.
+  const keepOriginalCron =
+    automation != null &&
+    !SCHEDULE_PRESETS.some((p) => p.cron === automation.schedule) &&
+    parsedCustom == null;
   const [scheduleChoice, setScheduleChoice] = useState<string>(
     automation
-      ? (SCHEDULE_PRESETS.find((p) => p.cron === automation.schedule)?.cron ?? "custom")
+      ? (SCHEDULE_PRESETS.find((p) => p.cron === automation.schedule)?.cron ??
+        (keepOriginalCron ? automation.schedule : "custom"))
       : SCHEDULE_PRESETS[3].cron,
   );
-  const parsedCustom = automation ? parseSimpleCron(automation.schedule) : null;
   const [freq, setFreq] = useState<Freq>(parsedCustom?.freq ?? "weekdays");
   const [weekday, setWeekday] = useState(parsedCustom?.weekday ?? "1");
   const [time, setTime] = useState(parsedCustom?.time ?? "09:00");
@@ -727,6 +737,9 @@ function AutomationForm({
             {SCHEDULE_PRESETS.map((p) => (
               <option key={p.cron} value={p.cron}>{p.label}</option>
             ))}
+            {keepOriginalCron && (
+              <option value={automation!.schedule}>Current: {automation!.schedule}</option>
+            )}
             <option value="custom">Custom…</option>
           </select>
         </div>

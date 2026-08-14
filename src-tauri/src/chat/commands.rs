@@ -87,8 +87,12 @@ pub fn delete_artifact(id: String, db: State<DbState>) -> CmdResult<()> {
 /// sweep any leftover files inside the resolved artifacts dir that have no
 /// row. Never touches anything outside the resolved artifacts dir. Returns
 /// the number of files removed.
+///
+/// PERF (PERFORMANCE_AUDIT.md B4): the walkdir sweep + per-file deletes run
+/// in `spawn_blocking` — for a large artifacts dir the inline version held
+/// the IPC worker for 10–30 s.
 #[tauri::command]
-pub fn delete_all_artifacts(app: AppHandle, db: State<DbState>) -> CmdResult<usize> {
+pub async fn delete_all_artifacts(app: AppHandle, db: State<'_, DbState>) -> CmdResult<usize> {
     let paths = {
         let conn = db.0.lock();
         let artifacts = db::list_artifacts(&conn).map_err(|e| e.to_string())?;
@@ -100,27 +104,31 @@ pub fn delete_all_artifacts(app: AppHandle, db: State<DbState>) -> CmdResult<usi
         }
         paths
     };
-    let mut removed = 0usize;
-    for p in &paths {
-        if std::fs::remove_file(p).is_ok() {
-            removed += 1;
-        }
-    }
-    // Sweep leftover files (no DB row) — strictly inside the resolved
-    // artifacts dir (the walk never escapes it).
     let dir = crate::chat::dispatch::artifacts_dir(&app);
-    if let Ok(canon_dir) = dir.canonicalize() {
-        for entry in walkdir::WalkDir::new(&canon_dir)
-            .min_depth(1)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if entry.file_type().is_file() && std::fs::remove_file(entry.path()).is_ok() {
+    tokio::task::spawn_blocking(move || {
+        let mut removed = 0usize;
+        for p in &paths {
+            if std::fs::remove_file(p).is_ok() {
                 removed += 1;
             }
         }
-    }
-    Ok(removed)
+        // Sweep leftover files (no DB row) — strictly inside the resolved
+        // artifacts dir (the walk never escapes it).
+        if let Ok(canon_dir) = dir.canonicalize() {
+            for entry in walkdir::WalkDir::new(&canon_dir)
+                .min_depth(1)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                if entry.file_type().is_file() && std::fs::remove_file(entry.path()).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+        removed
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Sweep artifacts past their 30-day expiry, removing both rows and files.
@@ -153,10 +161,16 @@ pub fn delete_chat_session(
     chat_session_id: String,
     db: State<DbState>,
     agent_state: State<crate::agent_sessions::AgentSessionState>,
+    chat_state: State<'_, crate::ChatState>,
 ) -> CmdResult<()> {
     // Kill any harness process still backing this chat and drop its state,
     // including the persisted CLI session ids used for cross-turn resume.
     agent_state.0.remove_session(&chat_session_id);
+    // Also abort an in-flight builtin-provider stream (SSE/tool loop): without
+    // this, a chat deleted mid-turn keeps streaming tokens/cost for a session
+    // whose rows no longer exist.
+    chat_state.0.cancel(&chat_session_id);
+    chat_state.0.invalidate_context_tokens(&chat_session_id);
     let conn = db.0.lock();
     for harness in ["claude_code", "kimi_code", "opencode"] {
         let _ = db::delete_setting(
@@ -202,6 +216,7 @@ pub fn delete_empty_chat_sessions(
 pub fn delete_all_chat_sessions(
     db: State<DbState>,
     agent_state: State<crate::agent_sessions::AgentSessionState>,
+    chat_state: State<'_, crate::ChatState>,
 ) -> CmdResult<usize> {
     let ids = {
         let conn = db.0.lock();
@@ -212,12 +227,20 @@ pub fn delete_all_chat_sessions(
             .collect::<Vec<_>>()
     };
     let count = ids.len();
+    // Phase 1 (no DB lock): kill harness processes, abort in-flight streams,
+    // and drop memoized context-meter counts. These touch in-memory state
+    // only, so they stay out of the DB critical section.
     for id in &ids {
-        // Same cleanup as delete_chat_session: kill any harness process still
-        // backing this chat and drop its state, including the persisted CLI
-        // session ids used for cross-turn resume.
         agent_state.0.remove_session(id);
-        let conn = db.0.lock();
+        chat_state.0.cancel(id);
+        chat_state.0.invalidate_context_tokens(id);
+    }
+    // Phase 2 (ONE lock for the whole batch — PERFORMANCE_AUDIT.md B14):
+    // previously this loop re-acquired the DB mutex once per session to
+    // delete 3 settings + the session row, serializing against every other
+    // query in the app for O(sessions) lock cycles.
+    let conn = db.0.lock();
+    for id in &ids {
         for harness in ["claude_code", "kimi_code", "opencode"] {
             let _ = db::delete_setting(
                 &conn,
@@ -235,7 +258,7 @@ pub fn delete_all_chat_sessions(
 /// unknown (the UI tolerates a stale id and removes the bubble locally
 /// either way).
 #[tauri::command]
-pub fn delete_chat_message(message_id: i64, db: State<DbState>) -> CmdResult<()> {
+pub async fn delete_chat_message(message_id: i64, db: State<'_, DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     db::delete_chat_message(&conn, message_id).map_err(|e| e.to_string())?;
     Ok(())
@@ -451,18 +474,23 @@ pub async fn generate_chat_title(
     chat_session_id: String,
     db: State<'_, DbState>,
 ) -> CmdResult<Option<String>> {
-    let (provider_str, model_str) = {
+    // mi4: one lock acquisition for the whole read phase — session row, API
+    // key, provider settings. Four separate locks serialized against every
+    // other DB reader three extra times for no reason (all reads are
+    // independent point lookups).
+    let (provider_str, model_str, api_key, base_url, model_override) = {
         let conn = db.0.lock();
         let cs = db::get_chat_session(&conn, &chat_session_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "chat session not found".to_string())?;
-        (cs.provider, cs.model)
+        let key = secrets::get_chat_api_key(&conn, &cs.provider);
+        let base = db::get_setting(&conn, &format!("chat.{}.base_url", cs.provider))
+            .map_err(|e| e.to_string())?;
+        let mo = db::get_setting(&conn, &format!("chat.{}.model", cs.provider))
+            .map_err(|e| e.to_string())?;
+        (cs.provider, cs.model, key, base, mo)
     };
 
-    let api_key = {
-        let conn = db.0.lock();
-        secrets::get_chat_api_key(&conn, &provider_str)
-    };
     // local_gguf is keyless (runs locally); skip the key check and pass
     // an empty string as the key (the sidecar ignores the auth header).
     if api_key.is_none() && provider_str != "local_gguf" {
@@ -470,14 +498,6 @@ pub async fn generate_chat_title(
     }
     let api_key = api_key.unwrap_or_default();
 
-    let (base_url, model_override) = {
-        let conn = db.0.lock();
-        let base = db::get_setting(&conn, &format!("chat.{provider_str}.base_url"))
-            .map_err(|e| e.to_string())?;
-        let mo = db::get_setting(&conn, &format!("chat.{provider_str}.model"))
-            .map_err(|e| e.to_string())?;
-        (base, mo)
-    };
     let model = if model_str.trim().is_empty() {
         match model_override {
             Some(m) if !m.trim().is_empty() => m,
@@ -487,10 +507,14 @@ pub async fn generate_chat_title(
         model_str
     };
 
-    // Build a compact transcript from history (length-capped).
+    // Build a compact transcript from history (length-capped). Fetch rows
+    // under the lock, format AFTER releasing it (strip + truncate are pure
+    // CPU work — no reason to hold the DB mutex through them).
     let transcript = {
-        let conn = db.0.lock();
-        let records = db::list_chat_messages(&conn, &chat_session_id).map_err(|e| e.to_string())?;
+        let records = {
+            let conn = db.0.lock();
+            db::list_chat_messages(&conn, &chat_session_id).map_err(|e| e.to_string())?
+        };
         let mut t = String::new();
         for r in &records {
             let text = strip_think_blocks(&r.content);
@@ -742,10 +766,19 @@ pub fn set_chat_session_unread(
 #[tauri::command]
 pub fn get_chat_messages(
     chat_session_id: String,
+    // M7: keyset pagination. `None`/`None` keeps the legacy behavior of the
+    // full history (some callers — e.g. export — need it all), but the chat
+    // view now pages 200 at a time.
+    before_id: Option<i64>,
+    limit: Option<i64>,
     db: State<DbState>,
 ) -> CmdResult<Vec<ChatMessageRecord>> {
     let conn = db.0.lock();
-    db::list_chat_messages(&conn, &chat_session_id).map_err(|e| e.to_string())
+    match (before_id, limit) {
+        (None, None) => db::list_chat_messages(&conn, &chat_session_id).map_err(|e| e.to_string()),
+        (b, l) => db::list_chat_messages_page(&conn, &chat_session_id, b, l.unwrap_or(200))
+            .map_err(|e| e.to_string()),
+    }
 }
 
 /// Session-level aggregate perf metrics for the composer row. Sums / weighted-
@@ -1309,7 +1342,9 @@ pub async fn send_chat_message(
                 };
                 let specs = crate::chat::tools::openai_tool_specs(&caps, crate::chat::permission::PermissionMode::FullAuto);
                 let json = serde_json::to_string(&specs).unwrap_or_default();
-                let n = crate::chat::compaction::count_json_tokens(
+                // Cached (B1): the schema JSON is constant until tool flags
+                // change, so turns 2..N skip this /tokenize round-trip.
+                let n = crate::chat::compaction::count_json_tokens_cached(
                     &chat_mgr.client,
                     &status.base_url,
                     &json,
@@ -1329,14 +1364,18 @@ pub async fn send_chat_message(
             // pre-compaction token count here so the post-compaction notice
             // can show "Compacted 8.2k → 1.1k tokens" instead of a generic
             // "earlier context compacted".
-            let pre_compact_tokens: u32 = crate::chat::compaction::count_tokens(
+            //
+            // PERF (B1/B7): entry-based count (no ChatMessage/image clones),
+            // and the successful count is handed to maybe_compact via
+            // `pre_counted` so it isn't repeated there.
+            let pre_count_result = crate::chat::compaction::count_entries_tokens(
                 &chat_mgr.client,
                 &status.base_url,
                 &system,
-                &messages.iter().map(|e| e.message.clone()).collect::<Vec<_>>(),
+                &messages,
             )
-            .await
-            .unwrap_or(0);
+            .await;
+            let pre_compact_tokens: u32 = pre_count_result.as_ref().copied().unwrap_or(0);
             let _ = app.emit(
                 "chat:status",
                 crate::types::ChatStatusPayload {
@@ -1355,6 +1394,10 @@ pub async fn send_chat_message(
                 &messages,
                 &cfg,
                 reserved_tokens,
+                // Reuse the count above — identical assembly. On tokenize
+                // failure, pass None so maybe_compact's own fallback path
+                // (passthrough with a log) still runs.
+                pre_count_result.ok(),
             )
             .await;
             match outcome {
@@ -1768,7 +1811,13 @@ pub async fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
     const MAX_MEDIA: u64 = 25 * 1024 * 1024; // 25 MB
 
     if let Some(kind) = text_kind {
-        let bytes = std::fs::read(p).map_err(|e| format!("cannot read file: {e}"))?;
+        // spawn_blocking (B2): a 400 KB read on the async IPC context stalls
+        // every other in-flight command on this runtime thread.
+        let path_for_read = path.clone();
+        let bytes = tokio::task::spawn_blocking(move || std::fs::read(Path::new(&path_for_read)))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("cannot read file: {e}"))?;
         let mut text = String::from_utf8_lossy(&bytes).into_owned();
         let truncated = text.len() > MAX_TEXT;
         if truncated {
@@ -1801,7 +1850,12 @@ pub async fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
     }
 
     if (is_image || is_pdf) && size <= MAX_MEDIA {
-        let bytes = std::fs::read(p).map_err(|e| format!("cannot read file: {e}"))?;
+        // spawn_blocking (B2): up to 25 MB read + base64 on the hot path.
+        let path_for_read = path.clone();
+        let bytes = tokio::task::spawn_blocking(move || std::fs::read(Path::new(&path_for_read)))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("cannot read file: {e}"))?;
         let mime = match ext.as_str() {
             "png" => "image/png",
             "jpg" | "jpeg" => "image/jpeg",
@@ -1860,13 +1914,25 @@ pub async fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
     // rendering (mammoth.js for docx; pptx raw bytes back the fallback when
     // LibreOffice conversion failed).
     if matches!(ext.as_str(), "docx" | "pptx" | "xlsx") && size <= MAX_MEDIA {
-        if let Ok(bytes) = std::fs::read(p) {
-            let html = match ext.as_str() {
+        // spawn_blocking (B2 + B13): the read AND the Office→HTML renderers
+        // (multi-pass string scans, worst-case quadratic on pathological
+        // documents) both run off the async IPC context now.
+        let path_for_read = path.clone();
+        let ext_for_render = ext.clone();
+        let rendered = tokio::task::spawn_blocking(move || {
+            let bytes = std::fs::read(Path::new(&path_for_read)).ok()?;
+            let html = match ext_for_render.as_str() {
                 "docx" => crate::chat::office::docx_to_html(&bytes),
                 "pptx" => crate::chat::office::pptx_to_html(&bytes),
                 "xlsx" => crate::chat::office::xlsx_to_html(&bytes),
                 _ => None,
             };
+            html.map(|h| (bytes, h))
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some((bytes, html)) = rendered {
             // Encode raw file bytes for client-side rendering.
             let mime = match ext.as_str() {
                 "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1875,19 +1941,17 @@ pub async fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
                 _ => "application/octet-stream",
             };
             let data_uri = format!("data:{mime};base64,{}", base64_encode(&bytes));
-            if let Some(html) = html {
-                return Ok(ArtifactPreview {
-                    path,
-                    filename,
-                    ext,
-                    kind: "office".to_string(),
-                    text: Some(html),
-                    data_uri: Some(data_uri),
-                    original_bytes: Some(true),
-                    size,
-                    truncated: false,
-                });
-            }
+            return Ok(ArtifactPreview {
+                path,
+                filename,
+                ext,
+                kind: "office".to_string(),
+                text: Some(html),
+                data_uri: Some(data_uri),
+                original_bytes: Some(true),
+                size,
+                truncated: false,
+            });
         }
     }
 
@@ -1918,50 +1982,62 @@ pub fn is_libreoffice_available() -> bool {
 /// Copy a generated artifact to a user-chosen destination path (the frontend
 /// gets `dest` from a save dialog).
 #[tauri::command]
-pub fn download_artifact(src: String, dest: String) -> CmdResult<()> {
-    std::fs::copy(&src, &dest).map_err(|e| format!("could not save file: {e}"))?;
-    Ok(())
+pub async fn download_artifact(src: String, dest: String) -> CmdResult<()> {
+    tokio::task::spawn_blocking(move || {
+        std::fs::copy(&src, &dest).map_err(|e| format!("could not save file: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Zip several artifacts into a user-chosen destination `.zip` path. Duplicate
 /// filenames are disambiguated with a numeric suffix.
+///
+/// PERF (PERFORMANCE_AUDIT.md B3): the per-file reads + deflate run in
+/// `spawn_blocking` — the sync version blocked the IPC worker for every byte
+/// read and compressed.
 #[tauri::command]
-pub fn download_artifacts_zip(paths: Vec<String>, dest: String) -> CmdResult<()> {
-    use std::io::Write;
-    use std::path::Path;
-    use zip::write::SimpleFileOptions;
+pub async fn download_artifacts_zip(paths: Vec<String>, dest: String) -> CmdResult<()> {
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        use std::path::Path;
+        use zip::write::SimpleFileOptions;
 
-    let file = std::fs::File::create(&dest).map_err(|e| format!("could not create zip: {e}"))?;
-    let mut zip = zip::ZipWriter::new(file);
-    let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let file = std::fs::File::create(&dest).map_err(|e| format!("could not create zip: {e}"))?;
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for src in &paths {
-        let data = match std::fs::read(src) {
-            Ok(d) => d,
-            Err(_) => continue, // skip missing files rather than aborting the whole zip
-        };
-        let base = Path::new(src)
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "file".to_string());
-        let mut name = base.clone();
-        let mut n = 1;
-        while used.contains(&name) {
-            let (stem, ext) = match base.rsplit_once('.') {
-                Some((s, e)) => (s.to_string(), format!(".{e}")),
-                None => (base.clone(), String::new()),
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for src in &paths {
+            let data = match std::fs::read(src) {
+                Ok(d) => d,
+                Err(_) => continue, // skip missing files rather than aborting the whole zip
             };
-            name = format!("{stem} ({n}){ext}");
-            n += 1;
+            let base = Path::new(src)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "file".to_string());
+            let mut name = base.clone();
+            let mut n = 1;
+            while used.contains(&name) {
+                let (stem, ext) = match base.rsplit_once('.') {
+                    Some((s, e)) => (s.to_string(), format!(".{e}")),
+                    None => (base.clone(), String::new()),
+                };
+                name = format!("{stem} ({n}){ext}");
+                n += 1;
+            }
+            used.insert(name.clone());
+            zip.start_file(name, opts)
+                .map_err(|e| format!("zip error: {e}"))?;
+            zip.write_all(&data).map_err(|e| format!("zip error: {e}"))?;
         }
-        used.insert(name.clone());
-        zip.start_file(name, opts)
-            .map_err(|e| format!("zip error: {e}"))?;
-        zip.write_all(&data).map_err(|e| format!("zip error: {e}"))?;
-    }
-    zip.finish().map_err(|e| format!("zip error: {e}"))?;
-    Ok(())
+        zip.finish().map_err(|e| format!("zip error: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ---- API key management ----
@@ -2445,18 +2521,15 @@ pub async fn count_context_tokens(
     // active (non-superseded) rows feed the local model — compaction has
     // already soft-deleted summarized turns, so a stale `[compacted context]`
     // is never re-tokenized.
-    let messages: Vec<ChatMessage> = {
+    //
+    // PERF (B11): capture (last active id, count) alongside the rows so the
+    // tokenize round-trip below can be skipped entirely when the transcript,
+    // system prompt, and model are unchanged since the last poll — the common
+    // case for the frontend's 2 s idle poll.
+    let records = {
         let conn = db.0.lock();
-        let records = db::list_active_chat_messages(&conn, &chat_session_id)
-            .map_err(|e| e.to_string())?;
-        records
-            .into_iter()
-            .map(|r| ChatMessage {
-                role: r.role,
-                content: strip_think_blocks(&r.content),
-                images: Vec::new(),
-            })
-            .collect()
+        db::list_active_chat_messages(&conn, &chat_session_id)
+            .map_err(|e| e.to_string())?
     };
 
     // Use the same system-prompt builder as the send path so the meter's
@@ -2479,6 +2552,35 @@ pub async fn count_context_tokens(
         )
         .unwrap_or_default()
     };
+
+    let last_id = records.last().map(|r| r.id).unwrap_or(0);
+    let has_messages = !records.is_empty();
+    let fingerprint = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        system_str.hash(&mut h);
+        model_str.hash(&mut h);
+        format!("{:x}:{last_id}:{}", h.finish(), records.len())
+    };
+
+    // Cache hit: same transcript + prompt + model → same count. Skip the
+    // /tokenize HTTP round-trip (and the message-vec build) entirely.
+    if let Some(tokens) = chat_state.0.cached_context_tokens(&chat_session_id, &fingerprint) {
+        return Ok(crate::types::ContextUsagePayload {
+            used_tokens: if tokens > 0 || has_messages { Some(tokens) } else { None },
+            max_tokens: status.n_ctx,
+        });
+    }
+
+    let messages: Vec<ChatMessage> = records
+        .into_iter()
+        .map(|r| ChatMessage {
+            role: r.role,
+            content: strip_think_blocks(&r.content),
+            images: Vec::new(),
+        })
+        .collect();
+
     let system = if system_str.trim().is_empty() {
         None
     } else {
@@ -2507,10 +2609,11 @@ pub async fn count_context_tokens(
         }
     };
 
+    chat_state.0.store_context_tokens(&chat_session_id, fingerprint, tokens);
+
     // 0 with no messages is a genuinely empty transcript → null; 0 WITH
     // messages on a SUCCESSFUL tokenize is real data (empty system + no
     // active rows) and stays Some(0).
-    let has_messages = !messages.is_empty();
     Ok(crate::types::ContextUsagePayload {
         used_tokens: if tokens > 0 || has_messages { Some(tokens) } else { None },
         max_tokens: status.n_ctx,

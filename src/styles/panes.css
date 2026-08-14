@@ -1,0 +1,665 @@
+/* panes — Turn rail, minimized panes, terminal activity feed, splitters, split layout, browser pane + tab bar, broadcast bar.
+   Split out of the old monolithic global.css (2026-08-15). Import order in
+   global.css preserves the original cascade — do not reorder imports. */
+/* Chat mode: the chat view owns its own background and inner padding, so the
+   wrapper sits flush under the toolbar â€” no framing band of a different tint. */
+.chat-grid-wrap {
+  padding: 0;
+  gap: 0;
+  position: relative;
+}
+
+/* ---------- Turn Rail (thin vertical timeline on the chat's left edge) ---------- */
+.turn-rail {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 16px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 0;
+  pointer-events: none;
+}
+.turn-rail-tick {
+  flex: 0 0 auto;
+  height: 10px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  pointer-events: auto;
+  cursor: pointer;
+}
+/* The horizontal line (tick) growing from the left edge. */
+.turn-rail-line {
+  display: block;
+  width: 8px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--border-strong);
+  margin-left: 0;
+  transition: width 0.2s var(--ease), background 0.2s var(--ease),
+    box-shadow 0.2s var(--ease);
+}
+.turn-rail-tick:hover .turn-rail-line {
+  width: 14px;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
+}
+.turn-rail-tick.is-hovered .turn-rail-line {
+  width: 14px;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
+}
+
+/* Floating tooltip on hover: user message + assistant response (truncated). */
+.turn-rail-tooltip {
+  position: absolute;
+  left: 20px;
+  top: 50%;
+  transform: translateY(-50%);
+  min-width: 220px;
+  max-width: 320px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-solid);
+  box-shadow: 0 8px 24px -6px rgba(0, 0, 0, 0.5);
+  font-size: 11px;
+  line-height: 1.45;
+  pointer-events: none;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  animation: turn-rail-fade 0.15s var(--ease);
+}
+@keyframes turn-rail-fade {
+  from { opacity: 0; transform: translateY(-50%) translateX(-4px); }
+  to { opacity: 1; transform: translateY(-50%) translateX(0); }
+}
+.turn-rail-tooltip-user,
+.turn-rail-tooltip-assistant {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.turn-rail-tooltip-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+.turn-rail-tooltip-user .turn-rail-tooltip-label {
+  color: var(--accent);
+}
+.turn-rail-tooltip-text {
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+
+.pane-grid {
+  flex: 1;
+  display: grid;
+  gap: 10px;
+  min-height: 0;
+  position: relative;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  background: var(--surface-glass);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  /* Glass sheen: top inner highlight + soft separation shadow. The state
+     color glow (below) layers on top of this via box-shadow overrides. */
+  box-shadow: var(--glass-rim), var(--glass-shadow);
+  transition: box-shadow 0.35s var(--ease), border-color 0.35s var(--ease),
+    transform 0.18s var(--ease);
+}
+/* Minimized browser panes are mounted here (so their native webview stays alive)
+   but kept zero-size and off-screen so they take no layout space. The webview
+   itself is hidden via browser_set_visible(false) by the BrowserPane occlusion
+   effect (visible=false). */
+.dormant-browsers {
+  position: absolute;
+  left: -99999px;
+  top: -99999px;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.pane[data-state="idle"] {
+  border-color: var(--border);
+}
+.pane[data-state="working"] {
+  border-color: color-mix(in srgb, var(--state-working) 55%, transparent);
+  box-shadow: var(--glass-rim), 0 0 22px -6px var(--state-working),
+    0 0 1px 0 color-mix(in srgb, var(--state-working) 60%, transparent);
+}
+.pane[data-state="waiting"] {
+  border-color: color-mix(in srgb, var(--state-waiting) 55%, transparent);
+  box-shadow: var(--glass-rim), 0 0 22px -6px var(--state-waiting),
+    0 0 1px 0 color-mix(in srgb, var(--state-waiting) 60%, transparent);
+}
+.pane[data-state="diff_ready"] {
+  border-color: color-mix(in srgb, var(--state-diff) 60%, transparent);
+  box-shadow: var(--glass-rim), 0 0 26px -6px var(--state-diff),
+    0 0 1px 0 color-mix(in srgb, var(--state-diff) 65%, transparent);
+}
+.pane.focused {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  box-shadow: var(--glass-rim), 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent),
+    0 0 30px -8px var(--accent-glow), var(--glass-shadow);
+}
+
+.pane-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: linear-gradient(180deg, var(--surface-glass-2), var(--surface-2));
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.05) inset;
+  cursor: default;
+  flex-shrink: 0;
+}
+.pane-header .title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  font-size: 12.5px;
+}
+.pane-header .harness-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 99px;
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.pane-header .pane-activity-chip {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+  flex-shrink: 0;
+}
+/* Dev-only live memory counter (PTY child RSS, or app RSS for browser panes).
+   Rendered only in dev builds via import.meta.env.DEV. Green monospace so it
+   stands out as a diagnostic without competing with the accent color. */
+.pane-header .pane-memory-chip {
+  font-size: 10px;
+  font-family: var(--mono, ui-monospace, monospace);
+  padding: 2px 6px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--state-working, #34d17b) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--state-working, #34d17b) 30%, transparent);
+  color: var(--state-working, #34d17b);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+/* Header action buttons (peek, minimize, close). They sit right of the flex:1
+   title so they cluster at the right edge regardless of title length â€” the
+   title absorbs width changes, so the close button's x position stays put as
+   the session title or other header messages (activity chip, memory chip)
+   appear/disappear or grow. flex-shrink:0 keeps the buttons from being
+   squeezed when the title is long. */
+.pane-header .pane-action {
+  flex-shrink: 0;
+}
+.pane-header .broadcast-check {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.state-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15) inset;
+  transition: box-shadow 0.3s var(--ease);
+}
+.state-dot[data-state="idle"] { background: var(--state-idle); }
+.state-dot[data-state="working"] {
+  background: var(--state-working);
+  box-shadow: 0 0 8px -1px var(--state-working), 0 0 0 1px rgba(0, 0, 0, 0.15) inset;
+}
+.state-dot[data-state="waiting"] {
+  background: var(--state-waiting);
+  box-shadow: 0 0 8px -1px var(--state-waiting), 0 0 0 1px rgba(0, 0, 0, 0.15) inset;
+}
+.state-dot[data-state="diff_ready"] {
+  background: var(--state-diff);
+  box-shadow: 0 0 8px -1px var(--state-diff), 0 0 0 1px rgba(0, 0, 0, 0.15) inset;
+}
+
+.pane-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  /* Solid terminal backdrop â€” the old translucent fill was for the glass blur. */
+  background: var(--surface-solid);
+}
+.pane-body .xterm {
+  height: 100%;
+  padding: 6px;
+}
+
+.pane-exit-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: #fff;
+  z-index: 5;
+}
+
+/* ---------- Terminal activity feed (Feature 5) ----------
+   Expandable cards below the terminal showing detected Mermaid/HTML/JSX blocks. */
+.terminal-activity-feed {
+  flex: 0 0 auto;
+  max-height: 200px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 6px;
+}
+.terminal-feed-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--surface-glass);
+  overflow: hidden;
+  box-shadow: var(--glass-rim-soft);
+}
+.terminal-feed-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 9px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: none;
+  transition: background 0.12s var(--ease);
+}
+.terminal-feed-card-header:hover {
+  background: var(--surface-2);
+}
+.terminal-feed-card-icon {
+  flex: none;
+  font-size: 12px;
+  width: 16px;
+  text-align: center;
+}
+.terminal-feed-card-label {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 5px;
+  border-radius: 99px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.terminal-feed-card-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.terminal-feed-card-chevron {
+  flex: none;
+  font-size: 10px;
+  color: var(--text-dim);
+  transition: transform 0.15s var(--ease);
+}
+.terminal-feed-card.open .terminal-feed-card-chevron {
+  transform: rotate(90deg);
+}
+.terminal-feed-card-body {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  max-height: 320px;
+  overflow: auto;
+}
+.terminal-feed-card-body .chat-mermaid-block {
+  margin: 0;
+}
+.terminal-feed-iframe {
+  width: 100%;
+  min-height: 200px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: #fff;
+}
+.terminal-feed-code {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--surface-solid);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow: auto;
+}
+
+/* Splitters */
+.splitter {
+  background: transparent;
+  transition: background 0.2s var(--ease), box-shadow 0.2s var(--ease);
+  z-index: 3;
+  border-radius: 2px;
+}
+.splitter:hover,
+.splitter.dragging {
+  background: var(--accent-soft);
+  box-shadow: 0 0 8px -2px var(--accent-glow);
+}
+.splitter.vertical {
+  cursor: col-resize;
+}
+.splitter.horizontal {
+  cursor: row-resize;
+}
+
+/* ---------- Split layout (browser open: spotlight terminal | browser) ---------- */
+.split-layout {
+  display: flex;
+  position: relative;
+  gap: 0;
+}
+.split-left {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 6px;
+}
+/* Stack container: fills remaining height in split-left, holds up to 2
+ * terminal slots with an optional horizontal splitter between them. */
+.split-terminals-stack {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0; /* gap is handled by the splitter overlay */
+}
+/* Individual slot inside the stack â€” contains all terminals so the hidden/
+ * visible toggle pattern works identically to the single-terminal layout. */
+.split-slot {
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+.split-terminals-stack .split-slot .pane {
+  width: 100%;
+  height: 100%;
+}
+/* Legacy single-terminal container (kept for any non-split-layout uses). */
+.split-terminals {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.split-terminals .pane {
+  flex: 1;
+  min-width: 0;
+}
+.split-right {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+.split-right .pane {
+  flex: 1;
+  min-width: 0;
+}
+.spotlight-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.spotlight-bar select {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  padding: 3px 6px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: var(--radius);
+}
+
+/* ---------- Browser pane ---------- */
+.browser-urlbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto; /* toolbar, not a flex grower â€” pane-body owns the space */
+  min-width: 0;
+  padding: 5px 8px;
+  background: linear-gradient(180deg, var(--surface-glass-2), var(--surface-2));
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.05) inset;
+}
+.browser-urlbar input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 99px;
+}
+
+/* ---------- Browser tab bar (multi-tab) ---------- */
+.browser-tabbar {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 4px 8px 0;
+  background: var(--surface-glass);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.04) inset;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.browser-tabbar::-webkit-scrollbar {
+  display: none;
+}
+.browser-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  min-width: 0;
+  max-width: 180px;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease),
+    border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+  box-shadow: var(--glass-rim-soft);
+}
+.browser-tab:hover {
+  color: var(--text);
+  background: var(--surface-glass-2);
+}
+.browser-tab.active {
+  color: var(--text);
+  background: var(--surface-glass);
+  border-color: var(--border-strong);
+  box-shadow: var(--glass-rim);
+}
+.browser-tab .tab-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.browser-tab .tab-close {
+  flex: none;
+  padding: 0 3px;
+  font-size: 10px;
+  line-height: 1;
+  border-radius: 99px;
+  opacity: 0;
+  transition: opacity 0.12s var(--ease);
+}
+.browser-tab:hover .tab-close,
+.browser-tab.active .tab-close {
+  opacity: 1;
+}
+.new-tab-btn {
+  flex: none;
+  padding: 5px 9px;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  box-shadow: none;
+  margin-bottom: 4px;
+}
+.new-tab-btn:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.browser-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #fff;
+}
+.browser-spinner {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border: 2px solid var(--accent-soft, rgba(128, 128, 128, 0.4));
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: browser-spin 0.8s linear infinite;
+}
+@keyframes browser-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.browser-blocked {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  background: var(--surface-glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  z-index: 2;
+}
+
+/* ---------- Broadcast bar (Â§4.5) ---------- */
+.broadcast-bar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding: 12px;
+  width: 220px;
+  flex-shrink: 0;
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: var(--radius);
+  box-shadow: var(--glass-rim), 0 0 24px -10px var(--accent-glow);
+  overflow-y: auto;
+}
+.broadcast-bar input.broadcast-input {
+  font-family: var(--font-mono);
+}
+.broadcast-bar .pane-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.broadcast-bar .pane-checks label {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}

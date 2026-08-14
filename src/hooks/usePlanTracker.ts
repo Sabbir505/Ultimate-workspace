@@ -47,11 +47,21 @@ export function usePlanTracker(): void {
   const setPlanSteps = useChatStore((s) => s.setPlanSteps);
   const onPlanStepProgress = useChatStore((s) => s.onPlanStepProgress);
 
-  // Track which messages we've already parsed so we don't re-parse
+  // Track which messages we've already parsed so we don't re-parse.
+  // The index is only meaningful for the session it was computed against:
+  // `messages` is wholesale-replaced on selectSession, so an index carried
+  // over from the previous session would skip messages (missing plan steps)
+  // or re-scan a range that doesn't exist (duplicating them). Pair the index
+  // with its session id and reset both on a session switch (A5).
   const parsedMessageIdx = useRef<number>(-1);
+  const parsedSessionId = useRef<string | null>(null);
 
   // Parse new plans from assistant messages
   useEffect(() => {
+    if (parsedSessionId.current !== activeSessionId) {
+      parsedSessionId.current = activeSessionId;
+      parsedMessageIdx.current = -1;
+    }
     if (!activeSessionId) return;
 
     const currentSteps = planSteps[activeSessionId] ?? [];

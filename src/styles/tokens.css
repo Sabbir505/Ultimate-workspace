@@ -1,0 +1,425 @@
+/* tokens — Theme tokens (light/dark), Tailwind layers, selection highlight.
+   Split out of the old monolithic global.css (2026-08-15). Import order in
+   global.css preserves the original cascade — do not reorder imports. */
+/* Tailwind utilities + components, layered on top of the existing
+   hand-written CSS. Preflight is disabled in tailwind.config.js so the
+   Tailwind base reset doesn't clobber the existing global styles. */
+@tailwind components;
+@tailwind utilities;
+
+/* Conduit theme system â€” Cursor-style palette (deep neutral dark / warm
+   light), cyan accent. The window is opaque (transparent:false in
+   tauri.conf.json), so every surface here is a SOLID color. Surfaces still
+   carry a faint top-edge rim + soft shadow for depth.
+
+   Theme tokens are organized semantically (editor, sidebar, activity-bar,
+   status-bar, terminal, syntax) matching the modern editor taxonomy. The
+   three groups below are:
+     1. Brand-neutral root tokens (fonts, easing, radii)
+     2. :root[data-theme="dark"] â€” Cursor Dark palette + syntax tokens
+     3. :root[data-theme="light"] â€” Cursor Light palette + syntax tokens
+   Switching data-theme on <html> swaps the entire palette in one frame. */
+
+:root {
+  --font-ui: "Space Grotesk", -apple-system, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Space Mono", ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+
+  /* Pane state colors (Â§7.3 / legend Â§12.4) â€” neutral, no blue/purple.
+     working = Cursor green, waiting = Cursor warm gold, idle/diff = neutral
+     grays (Cursor uses cool desaturated tones rather than saturated blue). */
+  --state-idle: #6a6a6a;
+  --state-working: #4ec9b0;
+  --state-waiting: #dcdcaa;
+  --state-diff: #a0a0a0;
+
+  --radius: 12px;
+  --radius-sm: 8px;
+  --radius-xs: 6px;
+  --sidebar-width: 250px;
+
+  /* Surface depth helpers. Compose surfaces with var(--glass) on the
+     `background` and var(--glass-rim) on the box-shadow top edge. On solid
+     surfaces these are subtle â€” a hairline sheen, not a glass refraction. */
+  --glass-rim: inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
+  --glass-rim-soft: inset 0 1px 0 0 rgba(255, 255, 255, 0.04);
+  --glass-shadow: 0 8px 28px -14px rgba(0, 0, 0, 0.4), 0 2px 8px -6px rgba(0, 0, 0, 0.3);
+  --glass-shadow-lg: 0 24px 64px -20px rgba(0, 0, 0, 0.45), 0 8px 20px -12px rgba(0, 0, 0, 0.35);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+
+  /* Theme switch transition â€” color/bg only, no layout-affecting props.
+     Applied globally so a data-theme swap animates smoothly rather than
+     snapping. Honor the OS "reduce motion" preference. */
+  --theme-transition: background-color 0.18s var(--ease),
+                      border-color 0.18s var(--ease),
+                      color 0.18s var(--ease),
+                      box-shadow 0.18s var(--ease);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --theme-transition: none;
+  }
+}
+
+:root[data-theme="dark"] {
+  /* === Cursor Dark â€” Core UI Colors ============================== */
+  /* Editor Background:    #181818 / #1a1a1a   (main coding area)   */
+  /* Sidebar / Activity:   #141414             (darker panels)      */
+  /* Foreground / Text:    #d4d4d4 â€“ #e4e4e4   (primary text)       */
+  /* Muted / Secondary:    #858585 â€“ #a0a0a0   (comments, inactive) */
+  /* Borders / subtle:     #2a2a2a             (dividers)           */
+  /* Accent / Highlight:   #88C0D0             (cyan, selection)    */
+  /* Selection:            #404040 (opacity)   (selected text)      */
+  --bg-tint: #181818;
+  --surface: #1a1a1a;
+  --surface-2: #1f1f1f;
+  --surface-solid: #141414;
+  /* Elevated surfaces (toolbars, headers, popovers) â€” one step lighter. */
+  --surface-glass: #1e1e1e;
+  --surface-glass-2: #252525;
+  --surface-1: #1e1e1e;
+  --surface-3: #2a2a2a;
+  --bg-elevated: rgba(255, 255, 255, 0.05);
+  --glass-hover: rgba(255, 255, 255, 0.06);
+  --border: #2a2a2a;
+  --border-strong: #3a3a3a;
+  /* Light sheen reads on dark surfaces. */
+  --glass-rim: inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
+  --glass-rim-soft: inset 0 1px 0 0 rgba(255, 255, 255, 0.04);
+  /* Folded document-card corner â€” lifted above the body so the dog-ear
+     reads in dark (the body surface and surface-glass-2 are <10% luminance
+     apart, which made the fold vanish before these tokens). */
+  --doc-fold-light: #383838;
+  --doc-fold-dark: #484848;
+  --text: #e4e4e4;
+  --text-dim: #a0a0a0;
+  --accent: #6e706f;
+  --accent-soft: rgba(110, 112, 111, 0.16);
+  --accent-glow: rgba(110, 112, 111, 0.35);
+  --accent-contrast: #ffffff;
+  --danger: #ff7b72;
+  --shadow: rgba(0, 0, 0, 0.45);
+  --diff-add-bg: rgba(52, 209, 123, 0.06);
+  --diff-del-bg: rgba(255, 123, 114, 0.06);
+  --diff-hunk-bg: rgba(136, 192, 208, 0.14);
+
+  /* === Semantic Editor Tokens (Cursor/VSCode taxonomy) ============== */
+  /* Mirrors the modern editor's "what is this surface/role" vocabulary
+     so webview-injected styles (Mermaid, syntax, etc.) can reference the
+     same names rather than guessing from generic surface tokens. */
+  --editor-bg: #1a1a1a;
+  --editor-fg: #e4e4e4;
+  --editor-line-highlight: #2a2a2a;
+  --editor-selection: rgba(64, 64, 64, 0.4);
+  --editor-cursor: #e4e4e4;
+  --editor-whitespace: #3a3a3a;
+  --editor-indent-guide: #2a2a2a;
+  --editor-bracket-match: #88C0D0;
+
+  --sidebar-bg: #141414;
+  --sidebar-fg: #d4d4d4;
+  --sidebar-border: #2a2a2a;
+  --sidebar-hover-bg: #1e1e1e;
+  --sidebar-active-bg: rgba(136, 192, 208, 0.12);
+
+  --activity-bar-bg: #141414;
+  --activity-bar-fg: #a0a0a0;
+  --activity-bar-active-fg: #e4e4e4;
+  --activity-bar-badge-bg: #88C0D0;
+  --activity-bar-badge-fg: #141414;
+
+  --status-bar-bg: #141414;
+  --status-bar-fg: #a0a0a0;
+  --status-bar-debug-bg: #88C0D0;
+
+  --tab-bg: #141414;
+  --tab-active-bg: #1a1a1a;
+  --tab-fg: #a0a0a0;
+  --tab-active-fg: #e4e4e4;
+  --tab-border: #2a2a2a;
+
+  --titlebar-bg: #141414;
+  --titlebar-fg: #d4d4d4;
+  --titlebar-inactive-fg: #858585;
+
+  --input-bg: #1f1f1f;
+  --input-fg: #e4e4e4;
+  --input-border: #2a2a2a;
+  --input-placeholder: #858585;
+  --input-focus-border: #88C0D0;
+
+  --button-bg: #2a2a2a;
+  --button-hover-bg: #3a3a3a;
+  --button-fg: #e4e4e4;
+  --button-primary-bg: #88C0D0;
+  --button-primary-fg: #141414;
+
+  --scrollbar-thumb: #3a3a3a;
+  --scrollbar-thumb-hover: #4a4a4a;
+  --scrollbar-track: transparent;
+
+  --tooltip-bg: #252525;
+  --tooltip-fg: #e4e4e4;
+  --tooltip-border: #3a3a3a;
+
+  /* === Syntax Highlighting Tokens (Cursor-aligned) ================= */
+  /* Cursor's actual editor palette is mostly warm/desaturated â€” no purple
+     keywords, no bright blue variables. We follow that. The teal/salmon/
+     gold trio carries semantic weight without shouting. */
+  /* Comments:        #6A9955  (muted green, italic)                  */
+  /* Strings:         #CE9178  (warm salmon/orange)                   */
+  /* Keywords:        #C586C0  (soft mauve)                           */
+  /* Functions:       #DCDCAA  (soft gold/yellow)                     */
+  /* Types / Classes: #4EC9B0  (teal)                                 */
+  /* Variables:       #9CDCFE  (light cool blue)                     */
+  /* Numbers:         #B5CEA8  (soft green)                           */
+  /* Operators:       #D4D4D4  (near-white)                           */
+  --syntax-comment: #6a9955;
+  --syntax-string: #ce9178;
+  --syntax-keyword: #c586c0;
+  --syntax-function: #dcdcaa;
+  --syntax-type: #4ec9b0;
+  --syntax-variable: #9cdcfe;
+  --syntax-number: #b5cea8;
+  --syntax-operator: #d4d4d4;
+  --syntax-tag: #569cd6;
+  --syntax-attr-name: #9cdcfe;
+  --syntax-attr-value: #ce9178;
+  --syntax-punctuation: #a0a0a0;
+  --syntax-regex: #d16969;
+  --syntax-builtin: #4ec9b0;
+  --syntax-deleted: #ff7b72;
+  --syntax-inserted: #34d17b;
+  --syntax-changed: #88C0D0;
+}
+
+:root[data-theme="light"] {
+  /* === Cursor Light â€” Core UI Colors ============================== */
+  --bg-tint: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f3f3f3;
+  --surface-solid: #fafafa;
+  --surface-glass: #ffffff;
+  --surface-glass-2: #f3f3f3;
+  --surface-1: #f0f0f0;
+  --surface-3: #e8e8e8;
+  --bg-elevated: rgba(0, 0, 0, 0.04);
+  --glass-hover: rgba(0, 0, 0, 0.06);
+  --border: #e0e0e0;
+  --border-strong: #c8c8c8;
+  --glass-rim: inset 0 1px 0 0 rgba(0, 0, 0, 0.06);
+  --glass-rim-soft: inset 0 1px 0 0 rgba(0, 0, 0, 0.04);
+  --doc-fold-light: #e8e8e8;
+  --doc-fold-dark: #d0d0d0;
+  --text: #1a1a1a;
+  --text-dim: #6a6a6a;
+  --accent: #6e706f;
+  --accent-soft: rgba(110, 112, 111, 0.12);
+  --accent-glow: rgba(110, 112, 111, 0.28);
+  --accent-contrast: #ffffff;
+  --danger: #d64545;
+  --shadow: rgba(0, 0, 0, 0.08);
+  --diff-add-bg: rgba(22, 163, 74, 0.05);
+  --diff-del-bg: rgba(214, 69, 69, 0.05);
+  --diff-hunk-bg: rgba(0, 120, 168, 0.12);
+
+  /* === Semantic Editor Tokens (Cursor/VSCode taxonomy) ============== */
+  --editor-bg: #ffffff;
+  --editor-fg: #1a1a1a;
+  --editor-line-highlight: #f3f3f3;
+  --editor-selection: rgba(0, 120, 168, 0.2);
+  --editor-cursor: #1a1a1a;
+  --editor-whitespace: #d0d0d0;
+  --editor-indent-guide: #e0e0e0;
+  --editor-bracket-match: #0078a8;
+
+  --sidebar-bg: #fafafa;
+  --sidebar-fg: #1a1a1a;
+  --sidebar-border: #e0e0e0;
+  --sidebar-hover-bg: #f0f0f0;
+  --sidebar-active-bg: rgba(0, 120, 168, 0.08);
+
+  --activity-bar-bg: #f0f0f0;
+  --activity-bar-fg: #6a6a6a;
+  --activity-bar-active-fg: #1a1a1a;
+  --activity-bar-badge-bg: #0078a8;
+  --activity-bar-badge-fg: #ffffff;
+
+  --status-bar-bg: #f0f0f0;
+  --status-bar-fg: #6a6a6a;
+  --status-bar-debug-bg: #0078a8;
+
+  --tab-bg: #f0f0f0;
+  --tab-active-bg: #ffffff;
+  --tab-fg: #6a6a6a;
+  --tab-active-fg: #1a1a1a;
+  --tab-border: #e0e0e0;
+
+  --titlebar-bg: #fafafa;
+  --titlebar-fg: #1a1a1a;
+  --titlebar-inactive-fg: #8a8a8a;
+
+  --input-bg: #ffffff;
+  --input-fg: #1a1a1a;
+  --input-border: #d0d0d0;
+  --input-placeholder: #8a8a8a;
+  --input-focus-border: #0078a8;
+
+  --button-bg: #f0f0f0;
+  --button-hover-bg: #e0e0e0;
+  --button-fg: #1a1a1a;
+  --button-primary-bg: #0078a8;
+  --button-primary-fg: #ffffff;
+
+  --scrollbar-thumb: #c8c8c8;
+  --scrollbar-thumb-hover: #a8a8a8;
+  --scrollbar-track: transparent;
+
+  --tooltip-bg: #ffffff;
+  --tooltip-fg: #1a1a1a;
+  --tooltip-border: #d0d0d0;
+
+  /* === Syntax Highlighting Tokens (Cursor-aligned) ================= */
+  --syntax-comment: #008000;
+  --syntax-string: #a31515;
+  --syntax-keyword: #af00db;
+  --syntax-function: #795e26;
+  --syntax-type: #267f99;
+  --syntax-variable: #001080;
+  --syntax-number: #098658;
+  --syntax-operator: #1a1a1a;
+  --syntax-tag: #800000;
+  --syntax-attr-name: #ff0000;
+  --syntax-attr-value: #0451a5;
+  --syntax-punctuation: #1a1a1a;
+  --syntax-regex: #811f3f;
+  --syntax-builtin: #267f99;
+  --syntax-deleted: #d64545;
+  --syntax-inserted: #16a34a;
+  --syntax-changed: #0078a8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  /* Solid fallback: the window is non-transparent (transparent:true deadlocks
+     WebView2 child-webview creation under acrylic blur). The native blur still
+     paints the window backdrop via window-vibrancy; the rgba surfaces above
+     it composite over this solid base instead of the desktop. */
+  background: var(--surface-solid);
+  /* Theme switch: smoothly cross-fade surface + text colors when data-theme
+     toggles. Skipped when prefers-reduced-motion is on (handled in the
+     @media block above). */
+  transition: var(--theme-transition);
+}
+
+/* Global text selection highlight â€” uses the editor-selection token so
+   selected text reads consistently with the code editor's selection
+   background. */
+::selection {
+  background: var(--editor-selection);
+  color: inherit;
+}
+::-moz-selection {
+  background: var(--editor-selection);
+  color: inherit;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  user-select: none;
+  /* Crisp anti-aliasing over the glass â€” without this, light-on-dark text on
+     a translucent surface looks muddy. -webkit-font-smoothing is the only
+     knob Chromium honors here. */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: 0.005em;
+}
+
+button {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  padding: 5px 11px;
+  cursor: pointer;
+  box-shadow: var(--glass-rim-soft);
+  transition: background 0.18s var(--ease), border-color 0.18s var(--ease),
+    box-shadow 0.18s var(--ease), transform 0.08s var(--ease);
+}
+button:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-glass-2);
+}
+button:active {
+  transform: translateY(0.5px);
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+button.primary {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 92%, #fff 8%), var(--accent));
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  color: #fff;
+  box-shadow: var(--glass-rim), 0 4px 14px -6px var(--accent-glow);
+}
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--text-dim);
+}
+button.ghost:hover {
+  color: var(--text);
+  background: var(--surface-2);
+  box-shadow: var(--glass-rim-soft);
+}
+button.danger {
+  color: var(--danger);
+}
+
+input,
+textarea,
+select {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  padding: 5px 9px;
+  outline: none;
+  box-shadow: var(--glass-rim-soft);
+  transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
+}
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: var(--accent);
+  box-shadow: var(--glass-rim-soft), 0 0 0 3px var(--accent-soft);
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+
+code,
+pre,
+.mono {
+  font-family: var(--font-mono);
+}

@@ -6,7 +6,8 @@
 // a minimalist outline icon (for everything else), a bold title, and a muted
 // "Edited … ago" footer. Selecting a card jumps to the chat that produced it
 // and opens it in that chat's preview pane; the trash button deletes it.
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useArtifactsStore } from "../../state/artifacts";
 import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
@@ -160,6 +161,67 @@ function displayTitle(filename: string): string {
   return dot > 0 ? filename.slice(0, dot) : filename;
 }
 
+/** One dog-eared document card in the artifacts grid. Extracted + memoized
+ *  (PERF F5) so virtualized rows re-render cheaply. */
+function ArtifactCard({
+  artifact,
+  onOpen,
+  onRemove,
+}: {
+  artifact: ArtifactRecord;
+  onOpen: (a: ArtifactRecord) => void;
+  onRemove: (id: ArtifactRecord["id"]) => void;
+}) {
+  const a = artifact;
+  return (
+    <div
+      className="doc-card"
+      role="button"
+      tabIndex={0}
+      title={a.filename}
+      onClick={() => onOpen(a)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") onOpen(a);
+      }}
+    >
+      <button
+        className="doc-card-del"
+        title="Delete artifact"
+        aria-label="Delete artifact"
+        onClick={(e) => {
+          e.stopPropagation();
+          onRemove(a.id);
+        }}
+      >
+        ×
+      </button>
+      <div className="doc-card-thumb">
+        <ArtifactCardThumbMemo artifact={a} />
+      </div>
+      <div className="doc-card-body">
+        <div className="doc-card-title">{displayTitle(a.filename)}</div>
+        <div className="doc-card-divider" />
+        <div className="doc-card-meta">
+          <OutlineIcon kind={a.kind} />
+          <span>• Edited {relativeTime(a.createdAt)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+const ArtifactCardMemo = memo(ArtifactCard);
+ArtifactCardMemo.displayName = "ArtifactCard";
+
+/** The grid is 3 lanes ≥721px viewport, 2 ≤720px, 1 ≤480px (see
+ *  .doc-card-grid media queries in global.css) — the virtualizer chunks
+ *  artifacts into rows of this many cards. */
+function laneCount(): number {
+  if (typeof window === "undefined") return 3;
+  if (window.innerWidth <= 480) return 1;
+  if (window.innerWidth <= 720) return 2;
+  return 3;
+}
+
 export function ArtifactLibrary({
   externalOpen,
   onClose,
@@ -199,19 +261,45 @@ export function ArtifactLibrary({
 
   // Open the artifact in the preview pane of the chat that produced it: switch
   // to that session first so the pane belongs to the right conversation.
-  const openArtifact = (a: ArtifactRecord) => {
+  // useCallback so the memoized cards don't re-render on every parent render.
+  const openArtifact = useCallback((a: ArtifactRecord) => {
     if (a.chatSessionId) void selectSession(a.chatSessionId);
     setPreviewArtifact({ path: a.path, filename: a.filename });
     setActiveView("chat");
     setOpen(false);
     onClose?.();
-  };
+  }, [selectSession, setPreviewArtifact, setActiveView, setOpen, onClose]);
 
   // Newest first — feels like a document recents list.
   const sorted = useMemo(
     () => [...items].sort((a, b) => b.createdAt - a.createdAt),
     [items],
   );
+
+  // PERF (PERFORMANCE_AUDIT.md F5/mi27): virtualize the card grid — every
+  // card mounts a preview-fetching thumbnail, so rendering ALL artifacts at
+  // once costs one IPC round-trip per card plus a huge DOM. Chunk artifacts
+  // into rows matching the CSS lane count and render only visible rows.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [lanes, setLanes] = useState(laneCount);
+  useEffect(() => {
+    const onResize = () => setLanes(laneCount());
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  const rows = useMemo(() => {
+    const out: ArtifactRecord[][] = [];
+    for (let i = 0; i < sorted.length; i += lanes) {
+      out.push(sorted.slice(i, i + lanes));
+    }
+    return out;
+  }, [sorted, lanes]);
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 240,
+    overscan: 3,
+  });
 
   return (
     <>
@@ -261,47 +349,40 @@ export function ArtifactLibrary({
             </button>
           }
         >
-          <div className="artifact-lib-modal">
+          <div className="artifact-lib-modal" ref={scrollRef}>
             {items.length === 0 ? (
               <div className="artifact-lib-empty">
                 Generated files &amp; diagrams appear here (kept 30 days).
               </div>
             ) : (
-              <div className="doc-card-grid">
-                {sorted.map((a) => (
+              <div
+                style={{
+                  height: virtualizer.getTotalSize(),
+                  position: "relative",
+                }}
+              >
+                {virtualizer.getVirtualItems().map((vrow) => (
                   <div
-                    key={a.id}
-                    className="doc-card"
-                    role="button"
-                    tabIndex={0}
-                    title={a.filename}
-                    onClick={() => openArtifact(a)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") openArtifact(a);
+                    key={vrow.key}
+                    data-index={vrow.index}
+                    ref={virtualizer.measureElement}
+                    className="doc-card-grid"
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      width: "100%",
+                      transform: `translateY(${vrow.start}px)`,
                     }}
                   >
-                    <button
-                      className="doc-card-del"
-                      title="Delete artifact"
-                      aria-label="Delete artifact"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void remove(a.id);
-                      }}
-                    >
-                      ×
-                    </button>
-                    <div className="doc-card-thumb">
-                      <ArtifactCardThumbMemo artifact={a} />
-                    </div>
-                    <div className="doc-card-body">
-                      <div className="doc-card-title">{displayTitle(a.filename)}</div>
-                      <div className="doc-card-divider" />
-                      <div className="doc-card-meta">
-                        <OutlineIcon kind={a.kind} />
-                        <span>• Edited {relativeTime(a.createdAt)}</span>
-                      </div>
-                    </div>
+                    {rows[vrow.index].map((a) => (
+                      <ArtifactCardMemo
+                        key={a.id}
+                        artifact={a}
+                        onOpen={openArtifact}
+                        onRemove={(id) => void remove(id)}
+                      />
+                    ))}
                   </div>
                 ))}
               </div>

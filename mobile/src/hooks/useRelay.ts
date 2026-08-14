@@ -24,7 +24,7 @@ type DesktopMessage =
   | { type: 'ChatDone'; chat_session_id: string; usage?: ChatUsage }
   | { type: 'ChatError'; chat_session_id: string; error: string }
   | { type: 'DesktopStatus'; connected: boolean }
-  | { type: 'Transcript'; session_id: string; text: string; cols: number; rows: number }
+  | { type: 'Transcript'; session_id: string; text: string; cols: number; rows: number; unchanged?: boolean }
   | { type: 'SessionCreated'; session: SessionInfo }
   | { type: 'CostSummary'; today: number; week: number }
   | { type: 'CostDetails'; daily: DailyCostEntry[]; per_project: ProjectCostEntry[]; local_models: LocalModelUsageEntry[] }
@@ -159,7 +159,12 @@ function startPolling() {
     if (_ws?.readyState === WebSocket.OPEN) {
       _ws.send(JSON.stringify({ type: 'ListSessions' }));
       _ws.send(JSON.stringify({ type: 'GetCostSummary' }));
-      _ws.send(JSON.stringify({ type: 'GetCostDetails' }));
+      // NOTE: GetCostDetails is deliberately NOT polled — it runs three SQL
+      // aggregations under the desktop's DB mutex (~15-30 ms of lock every
+      // tick, ~6 KB payload) and changes at most once per completed turn.
+      // It's fetched on connect (ws.onopen) and on demand via
+      // refreshCostDetails() when the Settings/cost view opens or the user
+      // pulls to refresh.
     }
   }, 5000);
   _providerTimer = setInterval(() => {
@@ -215,6 +220,13 @@ function _doConnect(target: string) {
 }
 function globalConnect(url?: string) { _doConnect(url ?? _url ?? DEFAULT_RELAY_URL); }
 function globalDisconnect() { stopPolling(); if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; } if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; } nc(false); }
+
+// Stable sender identities (module-level) so screens can safely put them in
+// useEffect dependency arrays — an inline arrow in the return object would
+// change identity every render and re-fire effects on every state update.
+function refreshProvidersSend() { _send({ type: 'ListAvailableProviders' }); }
+function refreshCostSend() { _send({ type: 'GetCostSummary' }); }
+function refreshCostDetailsSend() { _send({ type: 'GetCostDetails' }); }
 
 export function useRelay() {
   const [connected, setConnected] = useState(_ws?.readyState === WebSocket.OPEN);
@@ -279,9 +291,9 @@ export function useRelay() {
 
   return { connected, desktopUnreachable: !connected, sessions, providers, costSummary, costDetails, connect, disconnect, sendChatTurn, sendToSession, getTranscript,
     cancelChatTurn: (id: string) => _send({ type: 'CancelChatTurn', chat_session_id: id }),
-    refreshProviders: () => _send({ type: 'ListAvailableProviders' }),
-    refreshCost: () => _send({ type: 'GetCostSummary' }),
-    refreshCostDetails: () => _send({ type: 'GetCostDetails' }),
+    refreshProviders: refreshProvidersSend,
+    refreshCost: refreshCostSend,
+    refreshCostDetails: refreshCostDetailsSend,
     createSession: (pid: string, h: string) => _send({ type: 'CreateSession', project_id: pid, harness: h }),
     spawnSession: (sid: string) => _send({ type: 'SpawnSession', session_id: sid }),
     startLocalModel: (model: string, ggufPath: string) => _send({ type: 'StartLocalModel', model, gguf_path: ggufPath }),

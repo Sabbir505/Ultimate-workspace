@@ -52,8 +52,13 @@ pub fn start(app: AppHandle, db: Arc<Mutex<Connection>>) {
 /// One scheduler pass: launch every automation whose next fire time is due.
 fn tick(app: Option<&AppHandle>, db: &Arc<Mutex<Connection>>) {
     let now = db::now_ts();
+    // mi2: don't hold RUNNING across the DB query (and vice versa). Snapshot
+    // the in-flight set first, release it, then take the DB lock alone. A run
+    // finishing between the two snapshots could make a freshly-idle automation
+    // look busy for one tick — harmless (it fires next tick).
+    let running_now: std::collections::HashSet<String> =
+        RUNNING.lock().iter().cloned().collect();
     let due: Vec<Automation> = {
-        let running = RUNNING.lock();
         let conn = db.lock();
         list_automations(&conn)
             .unwrap_or_default()
@@ -62,7 +67,7 @@ fn tick(app: Option<&AppHandle>, db: &Arc<Mutex<Connection>>) {
             // A run already in flight can span many ticks; it isn't "due"
             // again until it finishes — attempting it would only stamp a
             // spurious "skipped" over the healthy run's status.
-            .filter(|a| !running.contains(&a.id))
+            .filter(|a| !running_now.contains(&a.id))
             .filter(|a| {
                 let after = a.last_run_at.unwrap_or(a.created_at);
                 next_fire(&a.schedule, after).is_some_and(|t| t <= now)
@@ -201,6 +206,20 @@ fn release_guards(automation_id: &str, lock_path: &Option<std::path::PathBuf>) {
     }
 }
 
+/// Stamp `skipped` only on the TRANSITION: while the external
+/// `conduit-automation` binary holds the lock file, the in-app scheduler
+/// rejects this automation on every 30 s tick — re-writing last_status each
+/// tick made the UI's status column flap for the whole external run.
+fn stamp_skipped_once(db: &Arc<Mutex<Connection>>, automation: &Automation) {
+    if automation.last_status.as_deref() == Some("skipped") {
+        return; // already showing skipped — no write, no notify churn
+    }
+    let conn = db.lock();
+    if let Err(e) = record_status(&conn, &automation.id, "skipped") {
+        eprintln!("[automations] record_status(skipped) failed for {}: {e}", automation.id);
+    }
+}
+
 /// Inner recursion with a depth limit to prevent unbounded recursion
 /// if a misbehaving process repeatedly recreates the lock file.
 fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, source: RunSource, depth: u32) -> Result<Option<PreparedRun>, String> {
@@ -240,14 +259,12 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
                         // misbehaving process that recreates the lock file
                         // immediately after deletion.
                         if depth + 1 >= MAX_PREPARE_DEPTH {
-                            let conn = db.lock();
-                            let _ = record_status(&conn, &automation.id, "skipped");
+                            stamp_skipped_once(db, automation);
                             return Ok(None);
                         }
                         return prepare_run_inner(db, automation, source, depth + 1);
                     }
-                    let conn = db.lock();
-                    let _ = record_status(&conn, &automation.id, "skipped");
+                    stamp_skipped_once(db, automation);
                     return Ok(None);
                 }
                 Err(_) => {} // filesystem hiccup — run without the file guard
@@ -356,8 +373,30 @@ fn finalize(
     let summary = summarize(&status);
     {
         let conn = db.lock();
-        let _ = record_run(&conn, &automation.id, &status, Some(&prepared.chat_session_id));
-        let _ = finish_run(&conn, &prepared.run_id, &status, &summary);
+        // record_run is what advances last_run_at. If that write fails and we
+        // swallow it, the next 30 s tick still sees the automation as due and
+        // fires it AGAIN — repeated duplicate paid-API/harness runs until a
+        // write happens to succeed. Retry once (transient SQLITE_BUSY), then
+        // log loudly so the failure is at least diagnosable.
+        if let Err(e) = record_run(&conn, &automation.id, &status, Some(&prepared.chat_session_id)) {
+            eprintln!(
+                "[automations] record_run failed for {} ({}), retrying once: {e}",
+                automation.id, automation.name
+            );
+            std::thread::sleep(Duration::from_millis(250));
+            if let Err(e2) = record_run(&conn, &automation.id, &status, Some(&prepared.chat_session_id)) {
+                eprintln!(
+                    "[automations] record_run retry ALSO failed for {} — the scheduler may re-fire this automation: {e2}",
+                    automation.id
+                );
+            }
+        }
+        if let Err(e) = finish_run(&conn, &prepared.run_id, &status, &summary) {
+            eprintln!(
+                "[automations] finish_run failed for run {} of {}: {e}",
+                prepared.run_id, automation.id
+            );
+        }
     }
     if let Some(path) = &prepared.lock_path {
         let _ = std::fs::remove_file(path);

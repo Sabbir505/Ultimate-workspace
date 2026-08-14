@@ -366,6 +366,28 @@ pub fn list_chat_messages(
     rows.collect()
 }
 
+/// Paged variant (M7): newest `limit` messages with id < `before_id`,
+/// returned in chronological order. `None`/`None` = the latest page. Long
+/// sessions used to deserialize their ENTIRE history on every open.
+pub fn list_chat_messages_page(
+    conn: &Connection,
+    chat_session_id: &str,
+    before_id: Option<i64>,
+    limit: i64,
+) -> DbResult<Vec<ChatMessageRecord>> {
+    // Subquery picks the page newest-first, outer select re-orders it
+    // chronologically for the timeline.
+    let mut stmt = conn.prepare(
+        "SELECT * FROM (
+           SELECT * FROM chat_messages
+             WHERE chat_session_id = ?1 AND (?2 IS NULL OR id < ?2)
+             ORDER BY id DESC LIMIT ?3
+         ) ORDER BY id",
+    )?;
+    let rows = stmt.query_map(params![chat_session_id, before_id, limit], map_chat_message)?;
+    rows.collect()
+}
+
 /// The subset of messages the send path feeds to the model: every row NOT
 /// folded into a `[compacted context]` summary (i.e. `superseded_by IS NULL`).
 /// The compaction framework soft-deletes summarized turns by setting
@@ -413,18 +435,14 @@ pub fn mark_superseded(conn: &Connection, ids: &[i64], summary_id: i64) -> DbRes
         return Ok(());
     }
     // Build a positional placeholder list (?, ?, …) and bind ids + summary_id.
+    // mi3: params_from_iter borrows the ids directly — no Box<dyn ToSql> per id.
     let placeholders: Vec<&str> = ids.iter().map(|_| "?").collect();
     let sql = format!(
         "UPDATE chat_messages SET superseded_by = ? WHERE id IN ({})",
         placeholders.join(", ")
     );
-    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(ids.len() + 1);
-    params_vec.push(Box::new(summary_id));
-    for id in ids {
-        params_vec.push(Box::new(*id));
-    }
-    let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
-    conn.execute(&sql, param_refs.as_slice())?;
+    let params = rusqlite::params_from_iter(std::iter::once(summary_id).chain(ids.iter().copied()));
+    conn.execute(&sql, params)?;
     Ok(())
 }
 

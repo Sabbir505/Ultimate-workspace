@@ -276,10 +276,34 @@ pub fn write_bundle(
     let claude_instructions = claude_dir.join("instructions.md");
     let claude_settings = claude_dir.join("settings.json");
     let kimi_agent = kimi_dir.join("agent.md");
-    let _ = std::fs::write(&claude_instructions, build_instructions_md(pp, ad));
-    let _ = std::fs::write(&claude_settings,
-        serde_json::to_string_pretty(&build_claude_settings_json(pp, ad)).unwrap_or_default());
-    let _ = std::fs::write(&kimi_agent, build_kimi_agent_md(pp, ad));
+
+    // Write errors must not be swallowed: the returned paths feed CLI spawn
+    // args (`--mcp-config-file`, `--agent-file`, …) — a missing file surfaces
+    // later as an opaque "cannot read instructions file" spawn error with no
+    // hint it was a bundle-write failure (AV lock, read-only dir, disk full).
+    // Log the failing file and drop it from the returned set where the
+    // callers gate on `.exists()`; the core instructions/settings are fatal
+    // (None) because every harness reads them.
+    let write_or_none = |path: &std::path::PathBuf, contents: String| -> bool {
+        match std::fs::write(path, contents) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("[harness_bundle] failed to write {}: {e}", path.display());
+                false
+            }
+        }
+    };
+
+    let ok_instructions =
+        write_or_none(&claude_instructions, build_instructions_md(pp, ad));
+    let ok_settings = write_or_none(
+        &claude_settings,
+        serde_json::to_string_pretty(&build_claude_settings_json(pp, ad)).unwrap_or_default(),
+    );
+    let ok_agent = write_or_none(&kimi_agent, build_kimi_agent_md(pp, ad));
+    if !ok_instructions || !ok_settings || !ok_agent {
+        return None;
+    }
 
     let mut paths = HarnessBundlePaths {
         claude_instructions, claude_settings,
@@ -295,14 +319,20 @@ pub fn write_bundle(
         let bin_str = bin.to_string_lossy().replace('\\', "/");
         let token = crate::browser_mcp::mcp_auth_token();
         let claude_mcp = build_tools_mcp_json(&bin_str, project_id, ws_port, token, connectors, McpFlavor::Claude);
-        let _ = std::fs::write(&paths.claude_mcp,
-            serde_json::to_string_pretty(&claude_mcp).unwrap_or_default());
+        write_or_none(
+            &paths.claude_mcp,
+            serde_json::to_string_pretty(&claude_mcp).unwrap_or_default(),
+        );
         let kimi_mcp = build_tools_mcp_json(&bin_str, project_id, ws_port, token, connectors, McpFlavor::Kimi);
-        let _ = std::fs::write(&paths.kimi_mcp,
-            serde_json::to_string_pretty(&kimi_mcp).unwrap_or_default());
+        write_or_none(
+            &paths.kimi_mcp,
+            serde_json::to_string_pretty(&kimi_mcp).unwrap_or_default(),
+        );
         let oc = build_opencode_tools_config(&bin_str, project_id, ws_port, token, connectors);
-        let _ = std::fs::write(&paths.opencode_config,
-            serde_json::to_string_pretty(&oc).unwrap_or_default());
+        write_or_none(
+            &paths.opencode_config,
+            serde_json::to_string_pretty(&oc).unwrap_or_default(),
+        );
     }
 
     Some(paths)

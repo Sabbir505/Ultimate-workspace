@@ -296,7 +296,18 @@ fn normalize_hf_model(m: HfModel) -> Vec<CatalogEntry> {
         .replace("-", " ");
     let lower_all = m.id.to_ascii_lowercase();
     let params = extract_params_label("", &lower_all);
-    let vision = m.tags.iter().any(|t| t == "multimodal" || t == "vision");
+    // Vision signal at the repo level: tagged `multimodal`/`vision` OR the
+    // repo id itself carries a vision cue (llava, qwen-vl, internvl, minicpm-v,
+    // mmproj...). Many older vision repos don't add HF tags, so this is a
+    // heuristic on top of the tag check.
+    let repo_tags_vision = m.tags.iter().any(|t| t == "multimodal" || t == "vision");
+    let repo_id_vision = {
+        let l = &lower_all;
+        l.contains("llava") || l.contains("qwen-vl")
+            || l.contains("internvl") || l.contains("minicpm-v")
+            || l.contains("minicpmv") || l.contains("-vl") || l.contains("vision")
+    };
+    let repo_vision = repo_tags_vision || repo_id_vision;
 
     let mut entries: Vec<CatalogEntry> = Vec::new();
     for f in gguf_files {
@@ -304,6 +315,12 @@ fn normalize_hf_model(m: HfModel) -> Vec<CatalogEntry> {
         let quant = extract_quantization(&lower);
         let size = if f.size.unwrap_or(0) > 0 { f.size.unwrap_or(0) }
             else { estimate_gguf_size(params.as_deref(), quant.as_deref()) };
+        // Per-file vision: an `mmproj` (multimodal projector) GGUF is by
+        // definition a vision projector file (LLava-style stacks ship a
+        // separate `*-mmproj-*.gguf` alongside the base model). We OR it
+        // with the repo-level signal so a bare base-quant file in a vision
+        // repo is also flagged.
+        let file_vision = lower.contains("mmproj") || repo_vision;
         let id = format!("{}::{}", m.id, f.rfilename);
         let dl = format!("https://huggingface.co/{}/resolve/main/{}", m.id, f.rfilename);
         entries.push(CatalogEntry {
@@ -320,7 +337,7 @@ fn normalize_hf_model(m: HfModel) -> Vec<CatalogEntry> {
             tags: m.tags.clone(),
             sha256: f.sha256.clone(),
             download_url: dl,
-            vision,
+            vision: file_vision,
             params_label: params.clone(),
             quantization: quant,
             license: license.clone(),

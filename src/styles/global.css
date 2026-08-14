@@ -7557,7 +7557,6 @@ table.kv th {
 .chat-turn-timer.live .chat-turn-timer-label {
   color: var(--text);
 }
-
 /* ---- Process row ("Worked for Xs") wrapping an entire turn's activity ---- */
 .chat-process {
   margin: 4px 0;

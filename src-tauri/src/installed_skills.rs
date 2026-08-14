@@ -282,6 +282,16 @@ fn builtins() -> Vec<BuiltinSkill> {
             name: "Diagrams (vector SVG)",
             body: include_str!("../../skills/diagram-html-svg-skill.md"),
         },
+        BuiltinSkill {
+            slug: "goal",
+            name: "Run a goal-driven loop",
+            body: include_str!("../../skills/goal-loop-skill.md"),
+        },
+        BuiltinSkill {
+            slug: "loop",
+            name: "Run an autonomous work loop (alias for /goal)",
+            body: include_str!("../../skills/goal-loop-skill.md"),
+        },
     ]
 }
 

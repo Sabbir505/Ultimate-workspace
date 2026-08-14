@@ -2705,4 +2705,24 @@ mod tests {
         assert!(slugs.contains("docx"), "expected docx slug, got: {got:?}");
         assert!(slugs.contains("pdf"), "expected pdf slug, got: {got:?}");
     }
+
+    #[test]
+    fn parse_goal_and_loop_builtins_inject_loop_body() {
+        // /goal and /loop are built-ins backing the autonomous goal loop. Both
+        // must resolve from `parse_invoked_skills` so the model receives the
+        // sentinel protocol when the user starts a loop.
+        for slug in ["goal", "loop"] {
+            let msg = format!("/{slug} refactor the auth module");
+            let got = parse_invoked_skills(&msg);
+            assert_eq!(got.len(), 1, "expected 1 {slug} skill, got: {got:?}");
+            assert_eq!(got[0].0, slug, "expected {slug} slug, got: {got:?}");
+            assert!(
+                got[0].1.contains("LOOP_STATUS"),
+                "{slug} body should teach the LOOP_STATUS sentinel protocol",
+            );
+        }
+        // The whole goal text is never required to include the token again —
+        // a bare /goal alone also injects.
+        assert_eq!(parse_invoked_skills("/goal").len(), 1);
+    }
 }

@@ -100,6 +100,9 @@ export function ChatView() {
   const cancelStream = useChatStore((s) => s.cancelStream);
   const deleteMessage = useChatStore((s) => s.deleteMessage);
   const setPreviewArtifact = useChatStore((s) => s.setPreviewArtifact);
+  const loopState = useChatStore((s) => s.loopState);
+  const startLoop = useChatStore((s) => s.startLoop);
+  const stopLoop = useChatStore((s) => s.stopLoop);
   const sessions = useChatStore((s) => s.sessions);
   const setSessionModel = useChatStore((s) => s.setSessionModel);
   const setSessionProvider = useChatStore((s) => s.setSessionProvider);
@@ -575,9 +578,18 @@ export function ChatView() {
     (content: string, attachments: ChatAttachment[], forceResearch?: boolean) => {
       // Sending always pins to the bottom so the reply is visible.
       stickToBottomRef.current = true;
+      // Goald-loop start: a /goal or /loop prefix arms the autonomous loop for
+      // this session. We keep the slash token in the sent message (so the
+      // backend's skill injection still matches /goal or /loop and teaches the
+      // model the sentinel protocol) but hand the goal text to the loop tracker.
+      const m = /^\/(goal|loop)\s+(.+)$/s.exec(content);
+      if (m) {
+        const [, , goal] = m;
+        startLoop(goal);
+      }
       void sendMessage(content, attachments, forceResearch);
     },
-    [sendMessage],
+    [sendMessage, startLoop],
   );
 
   // Load a previous user message back into the composer for editing/resend.
@@ -737,6 +749,34 @@ export function ChatView() {
         streaming={streamingChatSessionId === activeChatSessionId}
         onSend={handleSend}
       />
+
+      {/* Goal-loop status chip: shows iteration count + Stop while a /goal or
+          /loop is running for THIS session. Sits above the composer so it
+          doesn't push the message list. */}
+      {activeChatSessionId && loopState[activeChatSessionId]?.active && (() => {
+        const loop = loopState[activeChatSessionId];
+        return (
+          <div className="composer-queue" aria-label="Goal loop running">
+            <div className="composer-queue-header" style={{ cursor: "default" }}>
+              <span className="composer-queue-chevron" aria-hidden="true">▾</span>
+              <span className="composer-queue-index" title="Active goal loop">🔁</span>
+              <span className="composer-queue-text" title={loop.goal}>
+                Goal loop — iteration {loop.iteration}/{loop.max}{" "}
+                {loop.goal ? `· ${loop.goal.slice(0, 80)}${loop.goal.length > 80 ? "…" : ""}` : ""}
+              </span>
+              <button
+                type="button"
+                className="composer-queue-remove"
+                title="Stop the goal loop"
+                aria-label="Stop the goal loop"
+                onClick={() => stopLoop()}
+              >
+                ×
+              </button>
+            </div>
+          </div>
+        );
+      })()}
 
       <ChatComposer
         draft={draft}

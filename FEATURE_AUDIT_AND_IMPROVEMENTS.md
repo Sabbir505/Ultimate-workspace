@@ -252,7 +252,7 @@ Conduit's local-model stack is already more integrated than any orchestration-sh
 | 10 | ~~**Budget/spend alerts** (per project/month, toast + mobile)~~ **DONE** | Cost dashboard exists; alerting is the natural next step | S |
 | 11 | ~~**VRAM-aware market recommendations**~~ **DONE** | Probes exist; pure UX leverage | S |
 | 12 | **More connectors** (Slack, Linear, Jira, Discord) | Framework is generic; config-level cost | S each |
-| 13 | **Terminal find + scrollback export** | xterm addons; pure frontend | S |
+| 13 | ~~**Terminal find + scrollback export**~~ **DONE** | xterm addons; pure frontend | S |
 | 14 | **Prompt template library with variables** (generalize QuickActions) | Existing primitives; multi-turn templates | S–M |
 | 15 | **Webview devtools panel** (console + network) | Agent debugging superpower; WebView2 CDP | M |
 | 16 | **Whisper sidecar for voice input** (desktop + mobile) | Same sidecar pattern as llama-server | M |

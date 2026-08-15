@@ -53,6 +53,10 @@ pub struct MobileRelayState {
     /// per-frame vt100 screen parse when this is zero — the screen model's
     /// only consumer is the phone transcript path.
     pub active_connections: std::sync::atomic::AtomicUsize,
+    /// Every live connection's channel sender, keyed by a per-process id.
+    /// Powers broadcast pushes (automation-finished notices) that aren't
+    /// scoped to a single mobile session.
+    pub conns: Arc<Mutex<std::collections::HashMap<u64, super::relay_ws::WsSender>>>,
 }
 
 impl MobileRelayState {
@@ -63,8 +67,42 @@ impl MobileRelayState {
             pairing_token: Mutex::new(None),
             owner_map: OwnerMap::default(),
             active_connections: std::sync::atomic::AtomicUsize::new(0),
+            conns: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
+}
+
+/// Send a message to every currently connected phone. Best-effort: a dead
+/// connection's send error is ignored (its cleanup guard unregisters it).
+pub fn broadcast(relay_state: &MobileRelayState, msg: DesktopMessage) {
+    let conns = relay_state.conns.lock();
+    for tx in conns.values() {
+        let _ = tx.send(msg.clone());
+    }
+}
+
+/// Push an automation-finished notice to every paired phone. Called from the
+/// scheduler's finalize path — app-only, since the headless
+/// `conduit-automation` binary has no relay.
+pub fn broadcast_automation_run_finished(
+    app: &AppHandle,
+    automation_id: &str,
+    name: &str,
+    status: &str,
+    summary: &str,
+) {
+    let Some(state) = app.try_state::<crate::MobileRelayState>() else {
+        return;
+    };
+    broadcast(
+        &state.0,
+        DesktopMessage::AutomationRunFinished {
+            automation_id: automation_id.to_string(),
+            name: name.to_string(),
+            status: status.to_string(),
+            summary: summary.to_string(),
+        },
+    );
 }
 
 /// Generate a 256-bit URL-safe pairing token.
@@ -165,11 +203,12 @@ pub async fn start_relay(
                             let db = Arc::clone(&db);
                             let chat_mgr = Arc::clone(&chat_mgr);
                             let owner_map = relay_state.owner_map.clone();
+                            let conn_registry = Arc::clone(&relay_state.conns);
                             let conns = Arc::clone(&relay_state);
                             tokio::spawn(async move {
                                 use std::sync::atomic::Ordering as AOrd;
                                 conns.active_connections.fetch_add(1, AOrd::Relaxed);
-                                if let Err(e) = handle_connection(stream, peer, app, db, chat_mgr, owner_map).await {
+                                if let Err(e) = handle_connection(stream, peer, app, db, chat_mgr, owner_map, conn_registry).await {
                                     eprintln!("[mobile-relay] connection error: {e}");
                                 }
                                 conns.active_connections.fetch_sub(1, AOrd::Relaxed);
@@ -215,6 +254,19 @@ impl Drop for OwnerCleanup {
         self.map
             .lock()
             .retain(|_, sender| !sender.same_channel(&self.tx));
+    }
+}
+
+/// Removes the connection's broadcast-registry entry when the handler exits
+/// (any path). Companion to OwnerCleanup for the session-less `conns` set.
+struct ConnCleanup {
+    map: Arc<Mutex<std::collections::HashMap<u64, super::relay_ws::WsSender>>>,
+    id: u64,
+}
+
+impl Drop for ConnCleanup {
+    fn drop(&mut self) {
+        self.map.lock().remove(&self.id);
     }
 }
 
@@ -281,6 +333,7 @@ async fn handle_connection(
     db: Arc<Mutex<Connection>>,
     chat_mgr: Arc<ChatManager>,
     owner_map: OwnerMap,
+    conn_registry: Arc<Mutex<std::collections::HashMap<u64, super::relay_ws::WsSender>>>,
 ) -> Result<(), String> {
     let ws_stream = tokio_tungstenite::accept_async(stream)
         .await
@@ -295,6 +348,17 @@ async fn handle_connection(
     // with "failed to send to owner" and the phone never saw tokens/done.
     let write: super::relay_ws::SharedWsWrite = Arc::new(tokio::sync::Mutex::new(write));
     let (conn_tx, conn_rx) = super::relay_ws::make_channel();
+    // Register for broadcast pushes (automation-finished notices) — removed
+    // by the cleanup guard when this handler exits, on any path.
+    let conn_id = {
+        static NEXT_CONN_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        NEXT_CONN_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    };
+    conn_registry.lock().insert(conn_id, conn_tx.clone());
+    let _conn_cleanup = ConnCleanup {
+        map: Arc::clone(&conn_registry),
+        id: conn_id,
+    };
     {
         let pump_write = Arc::clone(&write);
         tokio::spawn(async move {

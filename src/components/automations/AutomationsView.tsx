@@ -5,6 +5,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarClock,
+  Bell,
   CheckCircle2,
   Edit3,
   ExternalLink,
@@ -22,10 +23,17 @@ import {
   Zap,
 } from "lucide-react";
 import {
+  getRunWhileClosed,
+  getSetting,
   listAutomationRuns,
   listChatModels,
   scanLocalModels,
   listHarnessModels,
+  setRunWhileClosed,
+  setSetting,
+  testAutomationWebhook,
+  toastError,
+  toastSuccess,
   type Automation,
   type AutomationInput,
   type AutomationRun,
@@ -199,6 +207,8 @@ export function AutomationsView() {
           )}
         </div>
         <div className="automations-header-right">
+          <RunWhileClosedToggle />
+          <NotifySettingsButton />
           <button
             className="automations-btn ghost"
             onClick={() => { void load(); }}
@@ -242,7 +252,7 @@ export function AutomationsView() {
         <div className="automations-empty">
           <PlaySquare size={48} strokeWidth={1.5} />
           <h3>No automations scheduled yet</h3>
-          <p>Schedule headless agent runs that fire on a cron schedule while Conduit is open.</p>
+          <p>Schedule headless agent runs on a cron schedule — they fire while Conduit is open, or anytime with "Run while closed".</p>
           <button
             onClick={() => setShowNewForm(true)}
             className="automations-btn primary"
@@ -326,6 +336,171 @@ export function AutomationsView() {
               </div>
             )}
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- Header controls ----
+
+/** "Run while closed" — registers/unregisters the global `ConduitAutomations`
+ *  Task Scheduler entry that fires `conduit-automation run-due` every minute.
+ *  One task covers every enabled automation; the registered state is read
+ *  back from Task Scheduler itself so the UI can't drift from reality. */
+export function RunWhileClosedToggle() {
+  const [on, setOn] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    getRunWhileClosed()
+      .then(setOn)
+      .catch(() => setOn(null));
+  }, []);
+
+  const toggle = async () => {
+    if (on === null || busy) return;
+    const next = !on;
+    setBusy(true);
+    try {
+      await setRunWhileClosed(next);
+      setOn(next);
+      if (next) {
+        toastSuccess(
+          "Runs while closed: on",
+          "Task Scheduler fires every minute — due automations run headless.",
+        );
+      }
+    } catch (err) {
+      toastError("Couldn't change run-while-closed", err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (on === null) return null; // still querying (or the query failed)
+  return (
+    <label
+      className={`automations-rwc${on ? " on" : ""}`}
+      title="Run automations while Conduit is closed (Windows Task Scheduler)"
+    >
+      <input
+        type="checkbox"
+        checked={on}
+        disabled={busy}
+        onChange={() => void toggle()}
+        aria-label="Run while closed"
+      />
+      <Power size={13} strokeWidth={2} />
+      <span>Run while closed</span>
+    </label>
+  );
+}
+
+/** Bell popover: notification settings for automation runs — the webhook URL
+ *  (+ test button) and the email-on-failure toggle. Failure toasts while the
+ *  app is open are always on and follow the global Do Not Disturb setting. */
+export function NotifySettingsButton() {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [webhook, setWebhook] = useState("");
+  const [emailOn, setEmailOn] = useState(true);
+  const [testing, setTesting] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    void getSetting("automations.webhookUrl")
+      .then((v) => setWebhook(v ?? ""))
+      .catch(() => {});
+    void getSetting("automations.emailOnFailure")
+      .then((v) => setEmailOn(v !== "false"))
+      .catch(() => {});
+  }, [open]);
+
+  // Close on outside click.
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  const saveWebhook = () => {
+    void setSetting("automations.webhookUrl", webhook.trim()).catch((e) =>
+      toastError("Couldn't save webhook URL", e),
+    );
+  };
+  const toggleEmail = (next: boolean) => {
+    setEmailOn(next);
+    void setSetting("automations.emailOnFailure", String(next)).catch((e) =>
+      toastError("Couldn't save setting", e),
+    );
+  };
+  const test = async () => {
+    setTesting(true);
+    try {
+      await testAutomationWebhook();
+      toastSuccess("Test notification sent");
+    } catch (err) {
+      toastError("Webhook test failed", err);
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <div className="automations-notify-wrap" ref={wrapRef}>
+      <button
+        className="automations-btn ghost"
+        onClick={() => setOpen((o) => !o)}
+        title="Automation notifications"
+        aria-label="Automation notifications"
+        aria-expanded={open}
+      >
+        <Bell size={14} strokeWidth={2} />
+      </button>
+      {open && (
+        <div className="automations-notify-panel">
+          <div className="automations-notify-title">Notifications</div>
+          <p className="automations-notify-hint">
+            While Conduit is open, failed runs show an OS toast (follows Do Not Disturb)
+            and a paired phone gets an alert.
+          </p>
+          <label className="automations-notify-field">
+            <span>Webhook URL</span>
+            <input
+              type="text"
+              value={webhook}
+              placeholder="https://hooks.slack.com/…"
+              onChange={(e) => setWebhook(e.target.value)}
+              onBlur={saveWebhook}
+            />
+          </label>
+          <p className="automations-notify-hint">
+            POSTed on every completed run — the only channel that fires while
+            Conduit is fully closed.
+          </p>
+          <div className="automations-notify-row">
+            <button
+              className="automations-btn ghost"
+              onClick={() => void test()}
+              disabled={testing || !webhook.trim()}
+            >
+              {testing ? "Sending…" : "Send test"}
+            </button>
+          </div>
+          <label className="automations-notify-check">
+            <input
+              type="checkbox"
+              checked={emailOn}
+              onChange={(e) => toggleEmail(e.target.checked)}
+            />
+            <span>Email me on failure (Gmail connector)</span>
+          </label>
         </div>
       )}
     </div>
@@ -779,8 +954,9 @@ function AutomationForm({
         )}
 
         <p className="automation-form-hint">
-          Automations run unattended with full-auto permissions while Conduit is open.
-          Results land in a dedicated chat named after this automation.
+          Automations run unattended with full-auto permissions. They fire while
+          Conduit is open — or anytime once "Run while closed" is on. Results
+          land in a dedicated chat named after this automation.
         </p>
         {error && <p className="automation-form-error">{error}</p>}
       </div>

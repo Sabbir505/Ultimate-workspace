@@ -11,6 +11,7 @@ mod browser_mcp;
 mod browser_mcp_register;
 mod checkpoints;
 pub mod agent_sessions;
+mod automation_task;
 pub mod automations;
 mod chat;
 mod commands;
@@ -286,6 +287,9 @@ pub fn run() {
             commands::automation_cmds::delete_automation,
             commands::automation_cmds::set_automation_enabled,
             commands::automation_cmds::run_automation_now,
+            automation_task::get_run_while_closed,
+            automation_task::set_run_while_closed,
+            automation_task::test_automation_webhook,
             commands::automation_cmds::list_automation_runs,
             commands::automation_cmds::count_automation_runs,
             // settings / skills / quick actions / secrets / cost / misc

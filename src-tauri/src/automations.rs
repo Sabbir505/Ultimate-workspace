@@ -58,25 +58,35 @@ fn tick(app: Option<&AppHandle>, db: &Arc<Mutex<Connection>>) {
     // look busy for one tick — harmless (it fires next tick).
     let running_now: std::collections::HashSet<String> =
         RUNNING.lock().iter().cloned().collect();
-    let due: Vec<Automation> = {
+    let due = {
         let conn = db.lock();
-        list_automations(&conn)
-            .unwrap_or_default()
+        due_automations(&conn, now)
             .into_iter()
-            .filter(|a| a.enabled)
             // A run already in flight can span many ticks; it isn't "due"
             // again until it finishes — attempting it would only stamp a
             // spurious "skipped" over the healthy run's status.
             .filter(|a| !running_now.contains(&a.id))
-            .filter(|a| {
-                let after = a.last_run_at.unwrap_or(a.created_at);
-                next_fire(&a.schedule, after).is_some_and(|t| t <= now)
-            })
-            .collect()
+            .collect::<Vec<_>>()
     };
     for automation in due {
         let _ = launch_run(app, db, &automation, RunSource::Scheduled);
     }
+}
+
+/// Every enabled automation whose next fire time (computed from the last run,
+/// or creation) is at or before `now`. Shared by the in-app scheduler tick
+/// and the headless binary's `run-due` subcommand so both agree on due-ness
+/// (missed windows fire exactly once on the next pass, not per missed slot).
+pub fn due_automations(conn: &Connection, now: i64) -> Vec<Automation> {
+    list_automations(conn)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.enabled)
+        .filter(|a| {
+            let after = a.last_run_at.unwrap_or(a.created_at);
+            next_fire(&a.schedule, after).is_some_and(|t| t <= now)
+        })
+        .collect()
 }
 
 /// Normalize the user-facing 5-field cron (minute-first) to the `cron`
@@ -138,7 +148,7 @@ pub fn launch_run(
             format!("panic: {msg}")
         })
         .and_then(|r| r);
-        finalize(&db2, &a, &prepared, result);
+        finalize(app2.as_ref(), &db2, &a, &prepared, result);
     });
     Ok(())
 }
@@ -167,7 +177,18 @@ pub fn run_blocking(
     db: &Arc<Mutex<Connection>>,
     automation: &Automation,
 ) -> Result<(), String> {
-    let Some(prepared) = prepare_run(db, automation, RunSource::Manual)? else {
+    run_blocking_with_source(app, db, automation, RunSource::Manual)
+}
+
+/// `run_blocking` with an explicit source — the binary's `run` subcommand is
+/// manual, its `run-due` subcommand is scheduled (the Task Scheduler fires it).
+pub fn run_blocking_with_source(
+    app: Option<&AppHandle>,
+    db: &Arc<Mutex<Connection>>,
+    automation: &Automation,
+    source: RunSource,
+) -> Result<(), String> {
+    let Some(prepared) = prepare_run(db, automation, source)? else {
         return Ok(());
     };
     let result = execute(app, db, automation, &prepared);
@@ -175,7 +196,7 @@ pub fn run_blocking(
         Ok(()) => Ok(()),
         Err(e) => Err(e.clone()),
     };
-    finalize(db, automation, &prepared, result);
+    finalize(app, db, automation, &prepared, result);
     outcome
 }
 
@@ -361,6 +382,7 @@ fn execute(
 
 /// Record the outcome and release both overlap guards.
 fn finalize(
+    app: Option<&AppHandle>,
     db: &Arc<Mutex<Connection>>,
     automation: &Automation,
     prepared: &PreparedRun,
@@ -402,6 +424,224 @@ fn finalize(
         let _ = std::fs::remove_file(path);
     }
     RUNNING.lock().remove(&automation.id);
+    notify_run_finished(app, db, automation, prepared, &status, &summary);
+}
+
+// ---------------------------------------------------------------------------
+// Run-finished notifications
+// ---------------------------------------------------------------------------
+//
+// Four channels, all best-effort (a notification failure must NEVER affect
+// run recording or the overlap-guard release above):
+//   - in-app event  → the desktop frontend turns failures into OS toasts and
+//     refreshes the Automations view (app must be open);
+//   - mobile push   → relay broadcast to paired phones (app must be open);
+//   - webhook POST  → every completed run, when `automations.webhookUrl` is
+//     set — the only channel that works while Conduit is fully closed;
+//   - Gmail email   → failures only, send-to-self via the Gmail connector;
+//     works headless too (tokens refresh through the DB, no AppHandle).
+
+/// Which outcomes get an email: failures only. Success mail from a */15 cron
+/// is spam; "skipped" never reaches finalize (prepare returns early).
+fn should_email(status: &str) -> bool {
+    status != "ok" && status != "skipped"
+}
+
+/// The JSON body POSTed to the configured webhook for every completed run.
+fn webhook_payload(automation: &Automation, status: &str, summary: &str, finished_at: i64) -> serde_json::Value {
+    serde_json::json!({
+        "event": "automation.run_finished",
+        "automationId": automation.id,
+        "name": automation.name,
+        "status": status,
+        "summary": summary,
+        "finishedAt": finished_at,
+    })
+}
+
+/// Run an async notification future regardless of runtime context: in-app we
+/// spawn on Tauri's global runtime; the headless binary has no reactor, so a
+/// throwaway current-thread runtime drives it on a side thread. Either way
+/// `finalize` returns immediately.
+fn spawn_notify(app_present: bool, fut: impl std::future::Future<Output = ()> + Send + 'static) {
+    if app_present {
+        tauri::async_runtime::spawn(fut);
+    } else {
+        std::thread::spawn(move || {
+            match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt.block_on(fut),
+                Err(e) => eprintln!("[automations] notify runtime build failed: {e}"),
+            }
+        });
+    }
+}
+
+fn notify_run_finished(
+    app: Option<&AppHandle>,
+    db: &Arc<Mutex<Connection>>,
+    automation: &Automation,
+    prepared: &PreparedRun,
+    status: &str,
+    summary: &str,
+) {
+    let finished_at = db::now_ts();
+
+    // 1 + 2. In-app channels: the frontend toast/refresh event and the mobile
+    // relay broadcast. Both no-op headless.
+    if let Some(app) = app {
+        use tauri::Emitter;
+        let _ = app.emit("automation:run-finished", serde_json::json!({
+            "automationId": automation.id,
+            "name": automation.name,
+            "status": status,
+            "summary": summary,
+            "chatSessionId": prepared.chat_session_id,
+            "finishedAt": finished_at,
+        }));
+        crate::mobile::relay::broadcast_automation_run_finished(
+            app, &automation.id, &automation.name, status, summary,
+        );
+    }
+
+    // 3. Webhook — every completed run, when configured.
+    let webhook_url = {
+        let conn = db.lock();
+        db::get_setting(&conn, "automations.webhookUrl").ok().flatten()
+    };
+    if let Some(url) = webhook_url.filter(|u| !u.trim().is_empty()) {
+        let payload = webhook_payload(automation, status, summary, finished_at);
+        spawn_notify(app.is_some(), async move {
+            if let Err(e) = post_json(&url, &payload).await {
+                eprintln!("[automations] webhook POST failed: {e}");
+            }
+        });
+    }
+
+    // 4. Email on failure via the Gmail connector (opt-out via
+    // `automations.emailOnFailure` = "false"; silently skipped when Gmail
+    // isn't connected).
+    if should_email(status) {
+        let email_on = {
+            let conn = db.lock();
+            db::get_setting(&conn, "automations.emailOnFailure").ok().flatten()
+        };
+        if email_on.as_deref() != Some("false") {
+            let db2 = Arc::clone(db);
+            let name = automation.name.clone();
+            let status = status.to_string();
+            let summary = summary.to_string();
+            spawn_notify(app.is_some(), async move {
+                if let Err(e) = send_failure_email(&db2, &name, &status, &summary, finished_at).await {
+                    // "not connected" is the normal case for users without the
+                    // Gmail connector — don't spam stderr for it.
+                    if e != "connector not connected" {
+                        eprintln!("[automations] failure email failed: {e}");
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// POST a JSON body with a short timeout. Shared by the webhook and test-hook.
+pub(crate) async fn post_json(url: &str, payload: &serde_json::Value) -> Result<(), String> {
+    let resp = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .user_agent("conduit-desktop")
+        .build()
+        .map_err(|e| e.to_string())?
+        .post(url)
+        .json(payload)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("webhook HTTP {}", resp.status()));
+    }
+    Ok(())
+}
+
+/// Send-to-self failure email through the Gmail connector. Works headless:
+/// the token refresh path only needs the DB (see
+/// `connectors::oauth::ensure_valid_access_token_with_db`).
+async fn send_failure_email(
+    db: &Arc<Mutex<Connection>>,
+    automation_name: &str,
+    status: &str,
+    summary: &str,
+    finished_at: i64,
+) -> Result<(), String> {
+    let token = crate::connectors::oauth::ensure_valid_access_token_with_db(db, "gmail").await?;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .user_agent("conduit-desktop")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // Recipient: the account's own address, cached after the first lookup.
+    let cached = {
+        let conn = db.lock();
+        db::get_setting(&conn, "automations.gmailAddress")
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+    };
+    let to = match cached {
+        Some(t) => t,
+        None => {
+            let resp = http
+                .get("https://gmail.googleapis.com/gmail/v1/users/me/profile")
+                .bearer_auth(&token)
+                .send()
+                .await
+                .map_err(|e| format!("gmail profile: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("gmail profile HTTP {}", resp.status()));
+            }
+            let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            let addr = body
+                .get("emailAddress")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "gmail profile missing emailAddress".to_string())?
+                .to_string();
+            let conn = db.lock();
+            let _ = db::set_setting(&conn, "automations.gmailAddress", &addr);
+            addr
+        }
+    };
+
+    let raw = build_failure_email(&to, automation_name, status, summary, finished_at);
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes());
+    let resp = http
+        .post("https://gmail.googleapis.com/gmail/v1/users/me/messages/send")
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "raw": encoded }))
+        .send()
+        .await
+        .map_err(|e| format!("gmail send: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("gmail send HTTP {}", resp.status()));
+    }
+    Ok(())
+}
+
+/// The RFC-822 message for a failure email. Subject is RFC 2047 base64-
+/// encoded so non-ASCII automation names survive strict relays.
+fn build_failure_email(to: &str, automation_name: &str, status: &str, summary: &str, finished_at: i64) -> String {
+    use base64::Engine as _;
+    let subject_raw = format!("Conduit automation failed: {automation_name}");
+    let subject = format!("=?UTF-8?B?{}?=", base64::engine::general_purpose::STANDARD.encode(subject_raw.as_bytes()));
+    let when = chrono::DateTime::from_timestamp(finished_at, 0)
+        .map(|dt| dt.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S %Z").to_string())
+        .unwrap_or_else(|| finished_at.to_string());
+    let body = format!(
+        "Automation: {automation_name}\nFinished: {when}\n\nError:\n{status}\n\nSummary:\n{summary}\n\n\
+         Open Conduit → Automations → \"{automation_name}\" for the full transcript.\n"
+    );
+    format!(
+        "To: {to}\r\nSubject: {subject}\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n{body}"
+    )
 }
 
 /// Render the final status into a one-line summary for the run row. Keep it
@@ -466,5 +706,95 @@ mod tests {
         assert_eq!(summarize("ok"), "Completed");
         let emoji_heavy = "🔥".repeat(200);
         assert_eq!(summarize(&emoji_heavy).chars().count(), 121);
+    }
+
+    #[test]
+    fn email_policy_is_failures_only() {
+        assert!(!should_email("ok"));
+        assert!(!should_email("skipped"));
+        assert!(should_email("provider exploded"));
+        assert!(should_email("panic: boom"));
+    }
+
+    #[test]
+    fn webhook_payload_shape() {
+        let a = Automation {
+            id: "a1".into(),
+            name: "nightly".into(),
+            prompt: "p".into(),
+            harness: "claude_code".into(),
+            model: String::new(),
+            cwd: String::new(),
+            schedule: "0 9 * * *".into(),
+            enabled: true,
+            last_run_at: None,
+            last_status: None,
+            chat_session_id: None,
+            created_at: 0,
+        };
+        let p = webhook_payload(&a, "ok", "Completed", 1234);
+        assert_eq!(p["event"], "automation.run_finished");
+        assert_eq!(p["automationId"], "a1");
+        assert_eq!(p["name"], "nightly");
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["summary"], "Completed");
+        assert_eq!(p["finishedAt"], 1234);
+    }
+
+    #[test]
+    fn failure_email_is_rfc822_and_encodes_subject() {
+        let msg = build_failure_email(
+            "me@example.com",
+            "nightly 🌙",
+            "provider exploded",
+            "provider exploded",
+            1_700_000_000,
+        );
+        assert!(msg.starts_with("To: me@example.com\r\n"));
+        // Subject is RFC 2047 base64 — decodes back to the raw UTF-8 subject.
+        let subject_line = msg.lines().nth(1).unwrap();
+        assert!(subject_line.starts_with("Subject: =?UTF-8?B?"));
+        use base64::Engine as _;
+        let b64 = subject_line
+            .trim_start_matches("Subject: =?UTF-8?B?")
+            .trim_end_matches("?=");
+        let decoded = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), "Conduit automation failed: nightly 🌙");
+        // CRLF header/body separator + plain-text content type + error text.
+        assert!(msg.contains("\r\n\r\n"));
+        assert!(msg.contains("Content-Type: text/plain; charset=\"UTF-8\""));
+        assert!(msg.contains("provider exploded"));
+        assert!(msg.contains("Automation: nightly 🌙"));
+    }
+
+    #[test]
+    fn due_automations_matches_tick_semantics() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        let mk = |name: &str, schedule: &str, enabled: bool| {
+            crate::db::create_automation(
+                &conn,
+                &crate::db::AutomationInput {
+                    name: name.into(),
+                    prompt: "p".into(),
+                    harness: "claude_code".into(),
+                    model: None,
+                    cwd: None,
+                    schedule: schedule.into(),
+                    enabled: Some(enabled),
+                },
+            )
+            .unwrap()
+        };
+        // Every-minute automation created "now" is due immediately (next
+        // fire after creation lands in the past within the same minute).
+        let due_one = mk("every-minute", "* * * * *", true);
+        // Daily at 9am may or may not be due right now — but a DISABLED
+        // every-minute automation must never be due.
+        mk("disabled", "* * * * *", false);
+        let due = due_automations(&conn, db::now_ts() + 120);
+        let ids: Vec<&str> = due.iter().map(|a| a.id.as_str()).collect();
+        assert!(ids.contains(&due_one.id.as_str()), "enabled + past-due fires");
+        assert_eq!(due.len(), 1, "disabled rows never fire");
     }
 }

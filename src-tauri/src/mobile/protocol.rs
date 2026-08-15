@@ -185,6 +185,16 @@ pub enum DesktopMessage {
         message_id: Option<i64>,
         artifact: ChatArtifactPayload,
     },
+    /// Broadcast to every connected phone when an automation run finishes
+    /// (scheduled or manual). The phone shows it as a local alert — the
+    /// "your nightly task failed" pocket pager.
+    AutomationRunFinished {
+        automation_id: String,
+        name: String,
+        /// "ok" | "skipped" | error text.
+        status: String,
+        summary: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

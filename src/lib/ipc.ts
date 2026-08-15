@@ -845,6 +845,31 @@ export const listAutomationRuns = (automationId: string, limit = 100, beforeStar
 export const countAutomationRuns = (automationId: string) =>
   safeInvoke<number>("count_automation_runs", { automationId });
 
+// ---- Run while closed (Task Scheduler) + finish notifications ----
+
+/** Whether the global "ConduitAutomations" Task Scheduler entry is
+ *  registered (the task itself is the source of truth). */
+export const getRunWhileClosed = () => safeInvoke<boolean>("get_run_while_closed");
+/** Register/unregister the global run-due task. Errors on non-Windows. */
+export const setRunWhileClosed = (enabled: boolean) =>
+  safeInvoke<void>("set_run_while_closed", { enabled });
+/** POST a sample payload to the configured automations webhook URL. */
+export const testAutomationWebhook = () => safeInvoke<void>("test_automation_webhook");
+
+export interface AutomationRunFinishedPayload {
+  automationId: string;
+  name: string;
+  /** "ok" | "skipped" | error text. */
+  status: string;
+  summary: string;
+  chatSessionId: string;
+  finishedAt: number;
+}
+
+export const listenAutomationRunFinished = (
+  handler: (payload: AutomationRunFinishedPayload) => void,
+) => safeListen<AutomationRunFinishedPayload>("automation:run-finished", handler);
+
 /** Switch a chat session's provider (e.g. to/from "local_gguf" when picking a
  *  local model from the selector in a cloud session, or vice versa). */
 export const updateChatSessionProvider = (chatSessionId: string, provider: string) =>

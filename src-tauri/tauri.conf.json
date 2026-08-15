@@ -50,7 +50,8 @@
       "resources/libreoffice/**/*"
     ],
     "externalBin": [
-      "binaries/conduit-browser-mcp"
+      "binaries/conduit-browser-mcp",
+      "binaries/conduit-automation"
     ]
   },
   "plugins": {

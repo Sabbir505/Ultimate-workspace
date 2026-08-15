@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 /** The desktop relay binds loopback ONLY (127.0.0.1) on a persisted-but-random
@@ -46,7 +47,10 @@ type DesktopMessage =
   | { type: 'SessionChatError'; session_id: string; error: string }
   | { type: 'SessionChatStatus'; session_id: string; reason: string; message: string }
   | { type: 'SessionApprovalRequest'; session_id: string; pending_id: string; tool: string; summary: string; args: unknown }
-  | { type: 'SessionArtifact'; session_id: string; message_id?: number; artifact: { path: string; filename: string; inline?: { kind: 'jsx' | 'tsx'; code: string } } };
+  | { type: 'SessionArtifact'; session_id: string; message_id?: number; artifact: { path: string; filename: string; inline?: { kind: 'jsx' | 'tsx'; code: string } } }
+  // Broadcast (not session-scoped): an automation run finished on the desktop.
+  // Shown as a local alert — fires only while the relay is connected.
+  | { type: 'AutomationRunFinished'; automation_id: string; name: string; status: string; summary: string };
 interface MobileChatTurn {
   type: 'ChatTurn'; provider_id: string; model: string;
   messages: ChatMessage[]; system?: string; effort?: string; gguf_path?: string;
@@ -222,6 +226,14 @@ function _doConnect(target: string) {
           case 'SessionChatStatus': onSessionChatStatus.emit({ sessionId: msg.session_id, reason: msg.reason, message: msg.message }); break;
           case 'SessionApprovalRequest': onSessionApprovalRequest.emit({ sessionId: msg.session_id, pendingId: msg.pending_id, tool: msg.tool, summary: msg.summary, args: msg.args }); break;
           case 'SessionArtifact': onSessionArtifact.emit({ sessionId: msg.session_id, messageId: msg.message_id, artifact: msg.artifact }); break;
+          case 'AutomationRunFinished': {
+            const ok = msg.status === 'ok';
+            Alert.alert(
+              ok ? `Automation finished: ${msg.name}` : `Automation failed: ${msg.name}`,
+              msg.summary,
+            );
+            break;
+          }
         }
       } catch (e) { console.error('parse error', e); }
     };

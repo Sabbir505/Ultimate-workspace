@@ -1,6 +1,7 @@
 //! conduit-automation — headless automation runner.
 //!
 //!   conduit-automation run <automation-id>   execute one turn now (blocking)
+//!   conduit-automation run-due               run every automation that's due
 //!   conduit-automation list                  print automation ids + schedules
 //!
 //! This is the entry point an OS scheduler (Windows Task Scheduler, cron) can
@@ -9,6 +10,11 @@
 //! (automations::run_blocking): same overlap lock file, same run-log chat
 //! session, same DB. No Tauri runtime is created — AppHandle is None, so
 //! chat:* events become no-ops and everything lands in the DB directly.
+//!
+//! `run-due` is what the one-click "Run while closed" toggle registers with
+//! Task Scheduler (see automation_task.rs): the task fires every minute and
+//! this subcommand applies the app's own due-math (due_automations), so cron
+//! semantics stay identical between app-open and app-closed runs.
 //!
 //! The DB lives at the same app-data location the GUI uses
 //! (<data_dir>/dev.conduit.app/conduit.db).
@@ -37,9 +43,10 @@ fn main() -> ExitCode {
             };
             run(&id)
         }
+        Some("run-due") => run_due(),
         Some("list") => list(),
         _ => {
-            eprintln!("usage: conduit-automation run <automation-id> | list");
+            eprintln!("usage: conduit-automation run <automation-id> | run-due | list");
             ExitCode::from(2)
         }
     }
@@ -81,6 +88,38 @@ fn run(id: &str) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Run every automation whose next fire time is due — the Task Scheduler
+/// entry point. Due-ness (including missed-window catch-up) comes from the
+/// same `due_automations` the in-app tick uses. Runs execute sequentially;
+/// each is recorded as a "scheduled" run. One failing run doesn't stop the
+/// rest.
+fn run_due() -> ExitCode {
+    let db = match open_db() {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let due = {
+        let conn = db.lock();
+        automations::due_automations(&conn, db::now_ts())
+    };
+    let mut failed = false;
+    for automation in due {
+        if let Err(e) = automations::run_blocking_with_source(
+            None,
+            &db,
+            &automation,
+            automations::RunSource::Scheduled,
+        ) {
+            eprintln!("run-due: '{}' failed: {e}", automation.name);
+            failed = true;
+        }
+    }
+    if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }
 
 fn list() -> ExitCode {

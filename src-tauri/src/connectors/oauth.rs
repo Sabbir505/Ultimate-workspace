@@ -200,6 +200,19 @@ pub async fn resolve_oauth_client(
     if connector.registration_url.is_some() {
         return ensure_registered_client(app, connector).await;
     }
+    resolve_static_oauth_client(connector)
+}
+
+/// Static build-time client config — no AppHandle needed, so the headless
+/// `conduit-automation` binary can refresh tokens too. Dynamic-registration
+/// connectors are rejected here (they need the app's DB-backed registrar).
+fn resolve_static_oauth_client(connector: &Connector) -> Result<OAuthClient, String> {
+    if connector.registration_url.is_some() {
+        return Err(format!(
+            "connector `{}` uses dynamic registration — not available headless",
+            connector.id
+        ));
+    }
     if connector.client_id.is_empty() {
         return Err(format!(
             "connector `{}` has no client_id configured — set the build-time env vars \
@@ -1089,21 +1102,40 @@ pub async fn refresh_access_token(
     app: &AppHandle,
     connector: &Connector,
 ) -> Result<String, String> {
+    let client = resolve_oauth_client(app, connector).await?;
+    let db = std::sync::Arc::clone(&app.state::<crate::DbState>().0);
+    refresh_access_token_inner(&db, connector, &client).await
+}
+
+/// Headless variant for the `conduit-automation` binary (no AppHandle): uses
+/// the static build-time client config. Dynamic-registration connectors error
+/// out — none of them support unattended runs today.
+pub async fn refresh_access_token_headless(
+    db: &std::sync::Arc<Mutex<rusqlite::Connection>>,
+    connector: &Connector,
+) -> Result<String, String> {
+    let client = resolve_static_oauth_client(connector)?;
+    refresh_access_token_inner(db, connector, &client).await
+}
+
+async fn refresh_access_token_inner(
+    db: &std::sync::Arc<Mutex<rusqlite::Connection>>,
+    connector: &Connector,
+    client: &OAuthClient,
+) -> Result<String, String> {
     // Hold the per-connector single-flight for the whole read → HTTP → store
     // cycle (M16). The refresh token is read AFTER acquiring the lock so a
     // queued caller picks up the token the previous holder just stored — not
     // the invalidated predecessor it raced with.
     let refresh_lock = refresh_lock_for(connector.id);
     let _refresh_guard = refresh_lock.lock().await;
-    let db = app.state::<crate::DbState>();
     let refresh_token = {
-        let conn = db.0.lock();
+        let conn = db.lock();
         secrets::get_connector_token(&conn, connector.id, "refresh_token")
     }
     .ok_or_else(|| "no refresh token stored — reconnect required".to_string())?;
 
     let http = reqwest::Client::new();
-    let client = resolve_oauth_client(app, connector).await?;
     let mut req = http.post(connector.token_url);
     // Same Accept header as the exchange: a vendor that honors it returns
     // JSON here too.
@@ -1164,7 +1196,7 @@ pub async fn refresh_access_token(
         .map(|s| s.to_string());
     let expires_in = json.get("expires_in").and_then(|v| v.as_i64());
 
-    let conn = db.0.lock();
+    let conn = db.lock();
     secrets::set_connector_token(&conn, connector.id, "access_token", &access_token)?;
     if let Some(rt) = new_refresh {
         secrets::set_connector_token(&conn, connector.id, "refresh_token", &rt)?;
@@ -1204,26 +1236,51 @@ pub async fn ensure_valid_access_token(
         return Ok(String::new());
     }
 
-    let db = app.state::<crate::DbState>();
+    match current_access_token(&app.state::<crate::DbState>().0, connector.id)? {
+        Some(token) => Ok(token),
+        // Transparent refresh; if it fails, the caller surfaces the error
+        // (which will tell the user to reconnect).
+        None => refresh_access_token(app, connector).await,
+    }
+}
+
+/// Headless variant for the `conduit-automation` binary: same semantics as
+/// `ensure_valid_access_token` but takes the raw DB handle so no Tauri
+/// runtime is required. Used by automation failure emails.
+pub async fn ensure_valid_access_token_with_db(
+    db: &std::sync::Arc<Mutex<rusqlite::Connection>>,
+    connector_id: &str,
+) -> Result<String, String> {
+    let connector = connector_by_id(connector_id)
+        .ok_or_else(|| format!("unknown connector `{connector_id}`"))?;
+    if connector.is_public() {
+        return Ok(String::new());
+    }
+    match current_access_token(db, connector.id)? {
+        Some(token) => Ok(token),
+        None => refresh_access_token_headless(db, connector).await,
+    }
+}
+
+/// The stored access token when present and unexpired; None when a refresh is
+/// needed. Err only when the connector was never connected.
+fn current_access_token(
+    db: &std::sync::Arc<Mutex<rusqlite::Connection>>,
+    connector_id: &str,
+) -> Result<Option<String>, String> {
     let (access_token, expires_at) = {
-        let conn = db.0.lock();
-        let tok = secrets::get_connector_token(&conn, connector.id, "access_token");
-        let exp = db::get_connector_credential_row(&conn, connector.id)
+        let conn = db.lock();
+        let tok = secrets::get_connector_token(&conn, connector_id, "access_token");
+        let exp = db::get_connector_credential_row(&conn, connector_id)
             .ok()
             .flatten()
             .and_then(|r| r.expires_at);
         (tok, exp)
     };
     let access_token = access_token.ok_or_else(|| "connector not connected".to_string())?;
-
     let now = db::now_ts();
     let expired = expires_at.map_or(false, |exp| now >= exp);
-    if expired {
-        // Transparent refresh; if it fails, the caller surfaces the error
-        // (which will tell the user to reconnect).
-        return refresh_access_token(app, connector).await;
-    }
-    Ok(access_token)
+    Ok(if expired { None } else { Some(access_token) })
 }
 
 #[cfg(test)]

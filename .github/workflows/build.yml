@@ -89,6 +89,16 @@ jobs:
           cargo build --release --bin conduit-browser-mcp
           node ../scripts/stage-browser-mcp.mjs
 
+      # Headless automation runner (the "Run while closed" Task Scheduler
+      # target). Same placeholder-first dance: the Tauri build script
+      # validates externalBin paths before compiling anything.
+      - name: Build automation sidecar
+        working-directory: src-tauri
+        run: |
+          New-Item -ItemType File -Force "binaries/conduit-automation-x86_64-pc-windows-msvc.exe" | Out-Null
+          cargo build --release --bin conduit-automation
+          node ../scripts/stage-automation.mjs
+
       - name: Build (do NOT set signing env vars — the release job signs)
         env:
           NOTION_CLIENT_ID: ${{ secrets.NOTION_CLIENT_ID }}

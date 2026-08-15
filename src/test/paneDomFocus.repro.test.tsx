@@ -86,7 +86,7 @@ describe("pane focus moves DOM focus to the terminal", () => {
     await waitFor(() => expect(textareas().length).toBe(2));
     const tas = textareas();
     // Initially b is focused.
-    expect(document.activeElement).toBe(tas[1]);
+    await waitFor(() => expect(document.activeElement).toBe(tas[1]));
 
     // Now focus pane a via the store (same path Mod+1 takes).
     act(() => {
@@ -94,7 +94,11 @@ describe("pane focus moves DOM focus to the terminal", () => {
     });
 
     // After the focused-effect re-runs, DOM focus should be on a's textarea.
-    expect(document.activeElement).toBe(tas[0]);
+    // Wrapped in waitFor because the TerminalPane focus-effect (which calls
+    // xterm's termRef.focus() → textarea.focus()) is an async React effect —
+    // store state is synchronous, but the DOM-focus side effect flushes in a
+    // later microtask. Under high CPU load the synchronous assert races.
+    await waitFor(() => expect(document.activeElement).toBe(tas[0]));
     expect(usePanesStore.getState().focusedPaneId).toBe(a);
     expect(b).toBeDefined();
   });
@@ -127,9 +131,11 @@ describe("pane focus moves DOM focus to the terminal", () => {
     act(() => focusedTa.dispatchEvent(e));
 
     // After the capture-phase handler fires focusPaneByIndex(0) and the
-    // focused-effect re-runs, DOM focus must be on pane 0's terminal.
+    // focused-effect re-runs, DOM focus must be on pane 0's terminal. The store
+    // update is synchronous, but the DOM focus lands in the effect flush (see
+    // test 1 note) — wait for it.
     expect(usePanesStore.getState().focusedPaneId).toBe(a);
-    expect(document.activeElement).toBe(tas[0]);
+    await waitFor(() => expect(document.activeElement).toBe(tas[0]));
 
     focusedTa.removeEventListener("keydown", xtermStub);
   });
@@ -162,9 +168,11 @@ describe("pane focus moves DOM focus to the terminal", () => {
     act(() => pane0Ta.dispatchEvent(e));
 
     // The focus epoch must bump — proving the focus effect re-ran (so DOM
-    // focus is re-grabbed even when focusedPaneId didn't change).
+    // focus is re-grabbed even when focusedPaneId didn't change). Store state
+    // is synchronous; DOM focus on pane0Ta is reaffirmed in waitFor alongside
+    // (the focus effect calls textarea.focus() on every epoch bump).
     expect(usePanesStore.getState().focusEpoch).toBe(epochBefore + 1);
-    expect(document.activeElement).toBe(pane0Ta);
+    await waitFor(() => expect(document.activeElement).toBe(pane0Ta));
 
     pane0Ta.removeEventListener("keydown", xtermStub);
   });

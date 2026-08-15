@@ -15,6 +15,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
+import { toastError, toastSuccess, exportChatZip } from "../../lib/ipc";
 import {
   DollarSign,
   Folder,
@@ -161,6 +162,14 @@ export function Sidebar() {
     },
     [setUnread],
   );
+
+  const handleExportChat = useCallback((id: string) => {
+    exportChatZip(id)
+      .then((saved) => {
+        if (saved) toastSuccess("Chat exported to .zip");
+      })
+      .catch((err) => toastError("Chat export failed", err));
+  }, []);
 
   useEffect(() => {
     if (!chatLoaded) {
@@ -497,6 +506,7 @@ export function Sidebar() {
                     onRename={handleRenameChat}
                     onToggleStar={handleToggleStar}
                     onSetUnread={handleSetUnread}
+                    onExport={handleExportChat}
                   />
                 </div>
               );

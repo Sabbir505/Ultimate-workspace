@@ -4,9 +4,9 @@
 // not bury the short appearance/shortcut sections. Every panel reserves a
 // fixed min-height (see .settings-split / .empty-reserved) so switching
 // categories — or an empty harness list — does not reflow the modal.
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel, getDataPaths, setChatDbDir, type DataPaths, getChatConfig, type ChatConfigPayload } from "../../lib/ipc";
+import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel, getDataPaths, setChatDbDir, type DataPaths, getChatConfig, type ChatConfigPayload, exportProjectZip, importChatZip, toastError, toastSuccess } from "../../lib/ipc";
 import { runLoginFlow } from "../../lib/sessionLauncher";
 import { shortModelName } from "../../lib/modelLabel";
 import { useProjectsStore } from "../../state/projects";
@@ -1805,6 +1805,17 @@ function DataPanel() {
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<"chats" | "artifacts" | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [selectedProjectForBackup, setSelectedProjectForBackup] = useState<string | null>(null);
+  const [backupBusy, setBackupBusy] = useState<"backup" | "restore" | null>(null);
+  // Projects expose a native-list selector for "back up project" (export the
+  // chats of one project). Sourced from the projects store like the rest of
+  // the sidebar.
+  const backupProjects = useProjectsStore((s) => s.projects);
+  // After restoring, refresh the sidebar's live chat list from the DB.
+  const importDone = useCallback(async () => {
+    await useChatStore.getState().loadSessions();
+  }, []);
+
   // Store-backed deletes so the sidebar/chat view update immediately —
   // the raw IPC commands alone leave stale in-memory state on screen.
   const deleteAllChats = useChatStore((s) => s.deleteAllChats);
@@ -1814,6 +1825,39 @@ function DataPanel() {
     void getDataPaths().then((p) => p && setPaths(p));
   };
   useEffect(refresh, []);
+
+  const handleBackupProject = async () => {
+    if (!selectedProjectForBackup) return;
+    setBackupBusy("backup");
+    try {
+      await exportProjectZip(selectedProjectForBackup);
+      setNote("Project chat backup exported.");
+    } catch (err) {
+      setNote(`Backup failed: ${String(err)}`);
+      toastError("Backup failed", err);
+    } finally {
+      setBackupBusy(null);
+    }
+  };
+
+  const handleRestore = async () => {
+    setBackupBusy("restore");
+    try {
+      const imported = await importChatZip();
+      if (imported && imported.length > 0) {
+        await importDone();
+        setNote(`Restored ${imported.length} chat session(s).`);
+      } else if (imported) {
+        setNote("No chats found in that backup.");
+      }
+      // imported === null → user cancelled; stay quiet.
+    } catch (err) {
+      setNote(`Restore failed: ${String(err)}`);
+      toastError("Restore failed", err);
+    } finally {
+      setBackupBusy(null);
+    }
+  };
 
   const pickDbDir = async () => {
     const picked = await open({
@@ -1890,6 +1934,42 @@ function DataPanel() {
       </div>
 
       {note && <div className="settings-note">{note}</div>}
+
+      {/* Backup / Restore — roadmap #7 local-first backup story */}
+      <div className="settings-form-row" style={{ alignItems: "flex-start" }}>
+        <label className="settings-form-label">Backup</label>
+        <div className="settings-form-control" style={{ flexDirection: "column", alignItems: "stretch", gap: 8 }}>
+          <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+            Export a project's chats (messages + artifacts) to a <code>.zip</code>,
+            or restore a previous backup. Imported chats are added fresh — an
+            existing chat is never overwritten.
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <select
+              value={selectedProjectForBackup ?? ""}
+              onChange={(e) => setSelectedProjectForBackup(e.target.value || null)}
+              style={{ maxWidth: 220 }}
+            >
+              <option value="">Select project…</option>
+              {(backupProjects ?? []).map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+            <button
+              className="ghost"
+              onClick={() => void handleBackupProject()}
+              disabled={backupBusy !== null || !selectedProjectForBackup}
+            >
+              {backupBusy === "backup" ? "Exporting…" : "Back up project"}
+            </button>
+            <button className="ghost" onClick={() => void handleRestore()} disabled={backupBusy === "restore"}>
+              {backupBusy === "restore" ? "Restoring…" : "Restore from backup"}
+            </button>
+          </div>
+        </div>
+      </div>
 
       {/* Chat database location */}
       <div className="settings-form-row" style={{ alignItems: "flex-start" }}>

@@ -10,6 +10,7 @@ pub mod commands;
 pub mod dispatch;
 pub mod docs;
 pub mod docs_images;
+pub mod export;
 pub mod local_models;
 pub mod office;
 pub mod permission;

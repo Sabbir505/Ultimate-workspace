@@ -412,6 +412,9 @@ pub fn run() {
             docs_index::docs_set_corpus_enabled,
             docs_index::docs_start_index,
             docs_index::docs_cancel_index,
+            chat::export::export_chat_zip,
+            chat::export::export_project_zip,
+            chat::export::import_chat_zip,
         ]);
 
     let app = builder

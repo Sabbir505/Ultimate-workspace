@@ -24,6 +24,7 @@ interface Props {
   onRename: (id: string, title: string) => void;
   onToggleStar: (id: string, starred: boolean) => void;
   onSetUnread: (id: string, unread: boolean) => void;
+  onExport: (id: string) => void;
 }
 
 export function ChatSessionRow({
@@ -35,6 +36,7 @@ export function ChatSessionRow({
   onRename,
   onToggleStar,
   onSetUnread,
+  onExport,
 }: Props) {
 
   const [menuOpen, setMenuOpen] = useState(false);
@@ -210,6 +212,10 @@ export function ChatSessionRow({
           >
             <span className="chat-menu-icon">●</span>
             {session.unread ? "Mark as read" : "Mark as unread"}
+          </button>
+          <button role="menuitem" onClick={(e) => menuAction(e, () => onExport(session.id))}>
+            <span className="chat-menu-icon">↓</span>
+            Export as zip
           </button>
           <button
             role="menuitem"

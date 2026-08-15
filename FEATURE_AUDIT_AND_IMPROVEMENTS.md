@@ -246,7 +246,7 @@ Conduit's local-model stack is already more integrated than any orchestration-sh
 | 4b | **Per-turn checkpoints + one-click revert** (hidden git refs; restore workspace + conversation) | T3 Code & Cline ship this; Conduit has zero turn-level undo — biggest safety gap once agents edit code from chat | M |
 | 5 | **Automation notifications + Task Scheduler registration** | Completes the "runs while closed" promise already 90% built | S–M |
 | 6 | **LocalDocs-style local RAG** (embedding sidecar + vec table) | Defines the local-model category; composes with existing tools | M |
-| 7 | **Chat export/import + project backup zip** | Local-first story completion | S |
+| 7 | ~~**Chat export/import + project backup zip**~~ **DONE** (`175cdfa`) | Local-first story completion | S |
 | 8 | **Approval rules engine** ("always allow tool+glob") | Cline-level ergonomics on the permission system | M |
 | 9 | **Conversation branching/fork** | Table stakes in 2026 chat UIs; `superseded_by` machinery exists | M |
 | 10 | **Budget/spend alerts** (per project/month, toast + mobile) | Cost dashboard exists; alerting is the natural next step | S |

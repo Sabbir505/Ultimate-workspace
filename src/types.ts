@@ -208,3 +208,37 @@ export interface AvailableSkill {
   description: string;
   origin: "installed" | "builtin";
 }
+
+// ---- Local Knowledge (RAG corpora) ----
+
+/** A user-added document corpus indexed via the local embedding sidecar. */
+export interface DocCorpus {
+  id: string;
+  name: string;
+  path: string;
+  enabled: boolean;
+  createdAt: number;
+  lastIndexedAt: number | null;
+  fileCount: number;
+  chunkCount: number;
+}
+
+/** Status of the local embedding model/sidecar (Settings → Knowledge). */
+export interface DocsEmbeddingStatus {
+  modelPath?: string | null;
+  running: boolean;
+  baseUrl?: string | null;
+}
+
+/** Event payload streamed by the `docs:index:progress` listener. */
+export interface DocsIndexProgressPayload {
+  corpusId: string;
+  state: "running" | "done" | "cancelled" | "error";
+  processedFiles: number;
+  totalFiles: number;
+  chunksWritten: number;
+  imagesProcessed: number;
+  imagesSkipped: number;
+  error?: string | null;
+}
+

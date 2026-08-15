@@ -1403,6 +1403,7 @@ pub async fn send_chat_message(
                     web_search: pcaps.native_web_search,
                     requires_local_sandbox: pcaps.requires_local_sandbox,
                     attached_connectors: std::sync::Arc::new(Vec::new()),
+                    local_docs: false,
                 };
                 let specs = crate::chat::tools::openai_tool_specs(&caps, crate::chat::permission::PermissionMode::FullAuto);
                 let json = serde_json::to_string(&specs).unwrap_or_default();
@@ -2753,6 +2754,9 @@ pub async fn count_context_breakdown(
         web_search: false,
         requires_local_sandbox: false,
         attached_connectors: std::sync::Arc::new(Vec::new()),
+        // Pure-schema preview used by the settings UI — never saw a turn, so
+        // local-docs capability is off here even if a sidecar happens to be up.
+        local_docs: false,
     };
     let tool_specs_json = serde_json::to_string(&crate::chat::tools::openai_tool_specs(&caps, crate::chat::permission::PermissionMode::FullAuto))
         .unwrap_or_default();

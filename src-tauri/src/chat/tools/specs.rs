@@ -40,6 +40,11 @@ pub fn openai_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -> V
         openai_fn(SEARCH_FILES, SEARCH_FILES_DESC, search_files_parameters()),
         openai_fn(SEARCH_CONTENT, SEARCH_CONTENT_DESC, search_content_parameters()),
     ]);
+    // Local-docs search — only exposed when the embedding sidecar is up and at
+    // least one corpus is indexed (computed per turn into ToolCaps.local_docs).
+    if caps.local_docs {
+        specs.push(openai_fn(SEARCH_DOCS, SEARCH_DOCS_DESC, search_docs_parameters()));
+    }
     // Mutating filesystem tools — stripped from the schema under read_only.
     if mode != permission::PermissionMode::ReadOnly {
         specs.push(openai_fn(WRITE_FILE, WRITE_FILE_DESC, path_content_parameters()));
@@ -114,6 +119,9 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -
         anthropic_fn(SEARCH_FILES, SEARCH_FILES_DESC, search_files_parameters()),
         anthropic_fn(SEARCH_CONTENT, SEARCH_CONTENT_DESC, search_content_parameters()),
     ]);
+    if caps.local_docs {
+        specs.push(anthropic_fn(SEARCH_DOCS, SEARCH_DOCS_DESC, search_docs_parameters()));
+    }
     if mode != permission::PermissionMode::ReadOnly {
         specs.push(anthropic_fn(WRITE_FILE, WRITE_FILE_DESC, path_content_parameters()));
         specs.push(anthropic_fn(EDIT_FILE, EDIT_FILE_DESC, edit_file_parameters()));
@@ -241,6 +249,33 @@ fn generate_diagram_parameters() -> Value {
 /// read-only `get_source_ledger` / `reset_source_ledger` ledger tools).
 fn no_parameters() -> Value {
     json!({ "type": "object", "properties": {} })
+}
+
+/// Parameter schema for the local-docs `search_docs` tool. `query` is the
+/// natural-language question; `top_k` (optional, capped server-side at 20)
+/// controls how many hits to return.
+fn search_docs_parameters() -> Value {
+    json!({
+        "type": "object",
+        "required": ["query"],
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The natural-language question or keywords to \
+                    search the user's local-doc corpora for. Phrase the query \
+                    the way the answer would be written (e.g. 'how do we \
+                    authenticate API calls?' rather than 'auth')."
+            },
+            "top_k": {
+                "type": "integer",
+                "description": "How many top hits to return. Defaults to 5. \
+                    The server caps this at 20.",
+                "minimum": 1,
+                "maximum": 20,
+                "default": 5,
+            },
+        },
+    })
 }
 
 fn browser_read_parameters() -> Value {

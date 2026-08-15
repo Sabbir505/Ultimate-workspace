@@ -8,6 +8,8 @@ pub mod codeexec;
 pub mod compaction;
 pub mod commands;
 pub mod dispatch;
+pub mod docs;
+pub mod docs_images;
 pub mod local_models;
 pub mod office;
 pub mod permission;
@@ -29,7 +31,7 @@ use parking_lot::Mutex;
 use rusqlite::Connection;
 #[cfg(test)]
 use serde_json::json;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 // System-prompt assembly (CORE prompt, STRICT addendum, tool guide, research
 // scaffolding, and the final assembler) lives in `prompts.rs`. Re-export the
@@ -243,12 +245,25 @@ impl ChatManager {
         let client = self.client.clone();
         let sid = chat_session_id.clone();
         let pcaps = prompts::provider_capabilities(provider_id.clone(), &chat_req.model);
+        // Local-docs search tool is exposed only when (a) the embedding
+        // sidecar is already running for this turn, AND (b) at least one
+        // enabled corpus has chunks indexed. Both are cheap DB/registry queries
+        // that flip the `search_docs` schema in. Computed before the spawn so
+        // the registry's status snapshot is taken under the same turn setup.
+        let local_docs = {
+            let sidecar_up = app
+                .try_state::<local_models::LocalModelState>()
+                .is_some_and(|s| s.0.embedding_status().is_some());
+            let conn = db.lock();
+            sidecar_up && db::any_searchable_corpus(&conn)
+        };
         let caps = tools::ToolCaps {
             code_exec: code_exec_enabled,
             fs_roots,
             web_search: pcaps.native_web_search,
             requires_local_sandbox: pcaps.requires_local_sandbox,
             attached_connectors: Arc::new(Vec::new()),
+            local_docs,
         };
         let mgr = Arc::clone(self);
 

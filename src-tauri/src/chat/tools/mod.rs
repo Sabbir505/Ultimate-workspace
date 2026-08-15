@@ -120,6 +120,12 @@ pub const SEARCH_FILES: &str = "search_files";
 /// prefer this over `search_files` whenever the user means content, not
 /// filenames. Returns `path:line:col: matched-line` rows.
 pub const SEARCH_CONTENT: &str = "search_content";
+/// Search the local-doc corpora the user indexed from Settings → Knowledge.
+/// Returns path/type/score headers with the matching text excerpt per hit;
+/// image results include a path citation only (no inline content). Available
+/// only while the embedding sidecar is reachable and at least one corpus has
+/// been indexed — gated per turn by `ToolCaps.local_docs`.
+pub const SEARCH_DOCS: &str = "search_docs";
 /// Create or overwrite a file. Mutating — gated by the permission mode.
 pub const WRITE_FILE: &str = "write_file";
 /// Edit part of a file (find/replace or append). Mutating.
@@ -169,6 +175,10 @@ pub struct ToolCaps {
     /// and `ToolCaps` must remain cheaply cloneable.
     #[allow(dead_code)]
     pub attached_connectors: std::sync::Arc<Vec<crate::connectors::AttachedConnector>>,
+    /// Whether the local-docs `search_docs` tool is exposed this turn. True only
+    /// when the embedding sidecar is running AND at least one enabled corpus
+    /// has indexed chunks. Computed per turn in chat/mod.rs from DB + registry.
+    pub local_docs: bool,
 }
 
 impl Default for ToolCaps {
@@ -182,6 +192,7 @@ impl Default for ToolCaps {
             web_search: true,
             requires_local_sandbox: false,
             attached_connectors: std::sync::Arc::new(Vec::new()),
+            local_docs: false,
         }
     }
 }
@@ -224,6 +235,17 @@ const WEB_SEARCH_DESC: &str = "Search the public web for up-to-date information.
     definitions, mature syntax), do NOT search â€” just answer. For a \
     single-fact question, one targeted search is enough; only escalate to a \
     multi-source research flow if the user asked for research.";
+
+/// Description fed to the model for the local-docs `search_docs` tool. Kept
+/// distinct from `web_search` so the model doesn't conflate the two.
+const SEARCH_DOCS_DESC: &str = "Search the user's locally-indexed document folders \
+    (the corpora added in Settings → Knowledge). Use this when the user wants an \
+    answer drawn from THEIR OWN files, notes, or codebase docs rather than the \
+    public web — e.g. 'what did I write about X', 'find my notes on Y', 'does \
+    this project document Z'. Returns ranked hits, each with the relative \
+    file path, a type tag and a relevance score, plus the matching text \
+    excerpt. Image hits return the path only (no inline pixels). If nothing \
+    matches, say so plainly rather than inventing content.";
 
 const GENERATE_FILE_DESC: &str = "Generate a simple downloadable text-based \
     file/artifact and save it to disk. Best for plain formats: txt, md, csv, \
@@ -736,6 +758,35 @@ mod tests {
     fn run_code_gated_behind_capability() {
         assert!(!openai_names(&ToolCaps::default(), PermissionMode::Manual).contains(&RUN_CODE.to_string()));
         assert!(openai_names(&ToolCaps { code_exec: true, ..Default::default() }, PermissionMode::Manual).contains(&RUN_CODE.to_string()));
+    }
+
+    #[test]
+    fn search_docs_gated_behind_local_docs_capability() {
+        // Off by default (no corpus indexed / no sidecar).
+        let off = ToolCaps::default();
+        assert!(!openai_names(&off, PermissionMode::Manual).contains(&SEARCH_DOCS.to_string()));
+        assert!(
+            !anthropic_tool_specs(&off, PermissionMode::Manual)
+                .iter()
+                .any(|s| s["name"] == SEARCH_DOCS)
+        );
+        // On when the local-docs capability is set.
+        let on = ToolCaps { local_docs: true, ..Default::default() };
+        assert!(openai_names(&on, PermissionMode::Manual).contains(&SEARCH_DOCS.to_string()));
+        assert!(
+            anthropic_tool_specs(&on, PermissionMode::Manual)
+                .iter()
+                .any(|s| s["name"] == SEARCH_DOCS)
+        );
+        // The spec requires query and exposes top_k.
+        let spec_value = openai_tool_specs(&on, PermissionMode::Manual);
+        let spec = spec_value
+            .iter()
+            .find(|s| s["function"]["name"] == SEARCH_DOCS)
+            .and_then(|s| s["function"]["parameters"].as_object())
+            .expect("search_docs spec present when enabled");
+        assert!(spec["required"].as_array().unwrap().contains(&json!("query")));
+        assert!(spec["properties"]["top_k"]["maximum"] == 20);
     }
 
     #[test]

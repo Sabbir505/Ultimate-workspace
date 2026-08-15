@@ -17,6 +17,7 @@ mod chat;
 mod commands;
 mod connectors;
 pub mod db;
+mod docs_index;
 mod git;
 mod github;
 mod git_watcher;
@@ -136,6 +137,7 @@ pub fn run() {
             app.manage(std::sync::Arc::new(
                 commands::local_model_market::DownloadRegistry::default(),
             ));
+            app.manage(std::sync::Arc::new(docs_index::IndexRegistry::default()));
             // Git filesystem watcher — drives the `project:fs-changed` Tauri
             // event that replaces the 4-8s polling loops in
             // `useGitStatusPolling` / `DevDiffPanel` / `BranchDropdown`. See
@@ -403,6 +405,13 @@ pub fn run() {
             commands::local_model_market::cancel_model_download,
             commands::local_model_market::delete_downloaded_model,
             commands::local_model_market::download_mmproj,
+            docs_index::docs_embedding_status,
+            docs_index::docs_add_corpus,
+            docs_index::docs_remove_corpus,
+            docs_index::docs_list_corpora,
+            docs_index::docs_set_corpus_enabled,
+            docs_index::docs_start_index,
+            docs_index::docs_cancel_index,
         ]);
 
     let app = builder

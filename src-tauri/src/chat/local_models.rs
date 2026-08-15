@@ -23,6 +23,16 @@ pub struct GgufMeta {
     pub quantization: Option<String>,
 }
 
+/// Architectures that only make sense as embedding models (served with
+/// llama-server's `--embedding` flag). Used both to keep embedding GGUFs out
+/// of the chat-model picker and to find the corpus embedder on disk.
+pub fn is_embedding_arch(arch: &str) -> bool {
+    matches!(
+        arch,
+        "bert" | "nomic-bert" | "jina-bert-v2" | "jina-bert-v3" | "roberta" | "xlm-roberta"
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct GgufFile {
     pub id: String,
@@ -296,6 +306,18 @@ pub fn scan_folder(dir: &Path, source: &str) -> Vec<GgufFile> {
             continue;
         }
 
+        // Embedding models (nomic-embed-text etc. — the local-RAG corpus
+        // embedder) are not chat models: they only work with llama-server's
+        // --embedding flag and would fail to chat. Keep them out of the chat
+        // picker; the Knowledge panel resolves them via is_embedding_arch.
+        if meta
+            .architecture
+            .as_deref()
+            .is_some_and(is_embedding_arch)
+        {
+            continue;
+        }
+
         model_files.push((entry, meta));
     }
 
@@ -372,10 +394,24 @@ pub fn scan_default_locations() -> Vec<GgufFile> {
 
 // ---- Sidecar registry ----
 
+/// What a sidecar is for. Chat and embedding sidecars coexist (the corpus
+/// embedder runs alongside the chat model); starting one kind never stops
+/// the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidecarKind {
+    Chat,
+    Embedding,
+}
+
+/// Registry key for the embedding sidecar (it's a singleton by policy, like
+/// the chat sidecar, but keyed apart so the two never evict each other).
+pub const EMBEDDING_MODEL_KEY: &str = "__embedding__";
+
 pub struct SidecarHandle {
     pub child: tokio::process::Child,
     pub port: u16,
     pub model_id: String,
+    pub kind: SidecarKind,
     /// The effective context window (`-c`) the sidecar was launched with. The
     /// compaction framework reads this (via `status()`) so its threshold is
     /// always relative to the window the model actually has, not a hardcoded
@@ -398,7 +434,8 @@ impl LocalModelRegistry {
     }
 
     /// Start a llama-server sidecar for the given model. Stops any existing
-    /// sidecar first (v1: one at a time, though the data structure supports N).
+    /// CHAT sidecar first (v1: one chat model at a time; the embedding
+    /// sidecar is independent and keeps running).
     pub async fn start(
         &self,
         model_id: String,
@@ -407,8 +444,8 @@ impl LocalModelRegistry {
         ctx_override: Option<u32>,
         mmproj_path: Option<&str>,
     ) -> Result<StartedModel, String> {
-        // Stop any running sidecar.
-        self.stop_all().await;
+        // Stop any running chat sidecar.
+        self.stop_kind(SidecarKind::Chat).await;
 
         // Resolve llama-server binary (and its directory — on Windows the
         // process must run with the binary's dir as CWD so it can load sibling
@@ -600,6 +637,7 @@ impl LocalModelRegistry {
                     child,
                     port,
                     model_id: model_id.clone(),
+                    kind: SidecarKind::Chat,
                     n_ctx: ctx,
                     n_gpu_layers: try_ngl,
                 };
@@ -698,6 +736,21 @@ impl LocalModelRegistry {
         }
     }
 
+    /// Stop every sidecar of one kind. Chat starts stop chat sidecars only —
+    /// the corpus embedder keeps running (and vice versa).
+    pub async fn stop_kind(&self, kind: SidecarKind) {
+        let keys: Vec<String> = self
+            .handles
+            .lock()
+            .iter()
+            .filter(|(_, h)| h.kind == kind)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in keys {
+            self.stop(&key).await;
+        }
+    }
+
     /// Stop all running sidecars. Called on app exit.
     pub async fn stop_all(&self) {
         let handles: Vec<SidecarHandle> = self.handles.lock().drain().map(|(_, h)| h).collect();
@@ -707,16 +760,194 @@ impl LocalModelRegistry {
         }
     }
 
-    /// Return status of the first running sidecar (v1: at most one).
+    /// Return status of the running CHAT sidecar (v1: at most one). Embedding
+    /// sidecars are deliberately invisible here — the warmup path keys on
+    /// this, and an embedding-only registry must not look like "a chat model
+    /// is running".
     pub fn status(&self) -> Option<ActiveLocalModel> {
-        self.handles.lock().values().next().map(|h| ActiveLocalModel {
-            model_id: h.model_id.clone(),
-            port: h.port,
-            n_ctx: h.n_ctx,
-            n_gpu_layers: h.n_gpu_layers,
-            base_url: format!("http://127.0.0.1:{}", h.port),
-        })
+        self.handles
+            .lock()
+            .values()
+            .find(|h| h.kind == SidecarKind::Chat)
+            .map(|h| ActiveLocalModel {
+                model_id: h.model_id.clone(),
+                port: h.port,
+                n_ctx: h.n_ctx,
+                n_gpu_layers: h.n_gpu_layers,
+                base_url: format!("http://127.0.0.1:{}", h.port),
+            })
     }
+
+    /// Status of the embedding sidecar, if running.
+    pub fn embedding_status(&self) -> Option<ActiveLocalModel> {
+        self.handles
+            .lock()
+            .get(EMBEDDING_MODEL_KEY)
+            .map(|h| ActiveLocalModel {
+                model_id: h.model_id.clone(),
+                port: h.port,
+                n_ctx: h.n_ctx,
+                n_gpu_layers: h.n_gpu_layers,
+                base_url: format!("http://127.0.0.1:{}", h.port),
+            })
+    }
+
+    /// Start the embedding sidecar (llama-server --embedding) for a corpus
+    /// embedder GGUF. Small fixed context — nomic-embed-text is a 2k-ctx
+    /// model and chunks are ~450 tokens. Stops any previous embedding
+    /// sidecar; chat sidecars are untouched.
+    pub async fn start_embedding(&self, gguf_path: &str) -> Result<StartedModel, String> {
+        self.stop_kind(SidecarKind::Embedding).await;
+
+        let resolved = resolve_llama_server_binary()?;
+        let bin = &resolved.path;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| format!("failed to bind port: {e}"))?;
+        let port = listener.local_addr().map_err(|e| format!("local addr: {e}"))?.port();
+        drop(listener);
+
+        // Full GPU offload first, CPU fallback. The embedder is ~140 MB — OOM
+        // is unlikely, but a crowded GPU can still reject the allocation.
+        for try_ngl in [auto_ngl(gguf_path), 0] {
+            let args = vec![
+                "--model".to_string(), gguf_path.to_string(),
+                "--port".to_string(), port.to_string(),
+                "--host".to_string(), "127.0.0.1".to_string(),
+                "-c".to_string(), "2048".to_string(),
+                "--embedding".to_string(),
+                "--n-gpu-layers".to_string(), try_ngl.to_string(),
+            ];
+            let mut cmd = tokio::process::Command::new(bin);
+            cmd.args(&args)
+                .current_dir(&resolved.dir)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            #[cfg(windows)]
+            {
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    if try_ngl != 0 {
+                        eprintln!("[local-models] embedding sidecar spawn failed (ngl={try_ngl}): {e}; retrying on CPU");
+                        continue;
+                    }
+                    return Err(format!("failed to spawn llama-server for embeddings: {e}"));
+                }
+            };
+
+            // Health poll: embedding models load in a few seconds.
+            let health_url = format!("http://127.0.0.1:{port}/health");
+            let client = reqwest::Client::builder().no_proxy().build().unwrap_or_default();
+            let mut ready = false;
+            for _ in 0..60 {
+                match child.try_wait() {
+                    Ok(Some(_)) => break, // died — next ladder step
+                    _ => {}
+                }
+                match client.get(&health_url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        ready = true;
+                        break;
+                    }
+                    _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+                }
+            }
+            if ready {
+                self.handles.lock().insert(
+                    EMBEDDING_MODEL_KEY.to_string(),
+                    SidecarHandle {
+                        child,
+                        port,
+                        model_id: EMBEDDING_MODEL_KEY.to_string(),
+                        kind: SidecarKind::Embedding,
+                        n_ctx: 2048,
+                        n_gpu_layers: try_ngl,
+                    },
+                );
+                eprintln!("[local-models] embedding sidecar up on port {port} (ngl={try_ngl})");
+                return Ok(StartedModel {
+                    model_id: EMBEDDING_MODEL_KEY.to_string(),
+                    port,
+                    n_ctx: 2048,
+                    n_gpu_layers: try_ngl,
+                    base_url: format!("http://127.0.0.1:{port}"),
+                });
+            }
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        Err("llama-server embedding sidecar failed to start (GPU and CPU)".to_string())
+    }
+}
+
+/// Embed a batch of texts against a running embedding sidecar
+/// (`POST /embedding`). Returns one vector per input, in order. Tolerant of
+/// both llama-server response shapes: flat `[{embedding: [..]}]` and pooled
+/// `[{embedding: [[..]]}]` (pooling wraps the vector one level deeper).
+pub async fn embed_texts(base_url: &str, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let body = if texts.len() == 1 {
+        serde_json::json!({ "content": texts[0] })
+    } else {
+        serde_json::json!({ "content": texts })
+    };
+    let resp = client
+        .post(format!("{base_url}/embedding"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("embedding request failed: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("embedding HTTP {status}: {}", text.chars().take(200).collect::<String>()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    parse_embedding_response(&json, texts.len())
+}
+
+/// Extract `expected` vectors from a llama-server /embedding response.
+fn parse_embedding_response(json: &serde_json::Value, expected: usize) -> Result<Vec<Vec<f32>>, String> {
+    let arr = json.as_array().ok_or_else(|| "embedding response is not an array".to_string())?;
+    let mut out = Vec::with_capacity(expected);
+    for item in arr.iter().take(expected) {
+        let emb = item
+            .get("embedding")
+            .ok_or_else(|| "embedding item missing `embedding`".to_string())?;
+        // Flat: [f32, …]. Pooled: [[f32, …]] — take the first row.
+        let row = if emb.as_array().and_then(|a| a.first()).is_some_and(|v| v.is_array()) {
+            emb.get(0).cloned().unwrap_or(emb.clone())
+        } else {
+            emb.clone()
+        };
+        let vec: Vec<f32> = row
+            .as_array()
+            .ok_or_else(|| "embedding row is not an array".to_string())?
+            .iter()
+            .filter_map(|v| v.as_f64().map(|f| f as f32))
+            .collect();
+        if vec.is_empty() {
+            return Err("embedding vector is empty".to_string());
+        }
+        out.push(vec);
+    }
+    if out.len() != expected {
+        return Err(format!("embedding response had {} vectors, expected {expected}", out.len()));
+    }
+    Ok(out)
 }
 
 // ---- Sidecar response types ----
@@ -1435,5 +1666,49 @@ mod scanner_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedding_arches_are_recognized() {
+        for arch in ["bert", "nomic-bert", "jina-bert-v2", "jina-bert-v3"] {
+            assert!(is_embedding_arch(arch), "{arch}");
+        }
+        for arch in ["llama", "qwen2", "gemma3", "clip", "mmproj"] {
+            assert!(!is_embedding_arch(arch), "{arch}");
+        }
+    }
+
+    #[test]
+    fn parse_flat_embedding_response() {
+        let json = serde_json::json!([
+            {"index": 0, "embedding": [0.1, 0.2, 0.3]},
+            {"index": 1, "embedding": [0.4, 0.5, 0.6]}
+        ]);
+        let out = parse_embedding_response(&json, 2).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], vec![0.1f32, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn parse_pooled_embedding_response() {
+        // Pooling wraps the vector one level deeper.
+        let json = serde_json::json!([{"index": 0, "embedding": [[0.7, 0.8]]}]);
+        let out = parse_embedding_response(&json, 1).unwrap();
+        assert_eq!(out[0], vec![0.7f32, 0.8]);
+    }
+
+    #[test]
+    fn parse_embedding_rejects_short_or_empty() {
+        let json = serde_json::json!([{"embedding": [1.0]}]);
+        assert!(parse_embedding_response(&json, 2).is_err());
+        let empty = serde_json::json!([{"embedding": []}]);
+        assert!(parse_embedding_response(&empty, 1).is_err());
+        let not_arr = serde_json::json!({"embedding": [1.0]});
+        assert!(parse_embedding_response(&not_arr, 1).is_err());
     }
 }

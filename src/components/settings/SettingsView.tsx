@@ -16,6 +16,7 @@ import { GlassSelect } from "../common/GlassSelect";
 import { useChatStore } from "../../state/chat";
 import { useArtifactsStore } from "../../state/artifacts";
 import { ModelMarket } from "./ModelMarket";
+import { KnowledgePanel } from "./KnowledgePanel";
 import { ConnectorIcon, FamilyIcon, FAMILY_NAMES } from "./ConnectorIcon";
 import { Modal } from "../common/Modal";
 import {
@@ -30,6 +31,7 @@ import {
   GitBranch,
   Pencil,
   Trash2,
+  Library,
 } from "lucide-react";
 
 type Category =
@@ -40,6 +42,7 @@ type Category =
   | "localmodels"
   | "apikeys"
   | "connectors"
+  | "knowledge"
   | "data"
   | "git";
 
@@ -51,6 +54,7 @@ const CATEGORY_KEYS: Category[] = [
   "localmodels",
   "apikeys",
   "connectors",
+  "knowledge",
   "data",
   "git",
 ];
@@ -71,6 +75,7 @@ function SettingsNavIcon({ category }: { category: Category }) {
     case "pricing": return <Coins {...props} />;
     case "harnesses": return <TerminalSquare {...props} />;
     case "connectors": return <Plug {...props} />;
+    case "knowledge": return <Library {...props} />;
     case "data": return <Database {...props} />;
     case "git": return <GitBranch {...props} />;
     default: return null;
@@ -116,6 +121,7 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
     title: "Integrations",
     items: [
       { key: "connectors", label: "Connectors", sub: "Notion & more (OAuth)" },
+      { key: "knowledge", label: "Knowledge", sub: "Local folders (RAG)" },
     ],
   },
   {
@@ -356,6 +362,8 @@ export function SettingsView() {
               {category === "apikeys" && <ApiKeysPanel />}
 
               {category === "connectors" && <ConnectorsPanel />}
+
+              {category === "knowledge" && <KnowledgePanel />}
 
               {category === "data" && <DataPanel />}
             </div>

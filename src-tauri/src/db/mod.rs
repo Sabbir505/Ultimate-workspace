@@ -14,6 +14,7 @@ mod checkpoints;
 mod connector_credentials;
 mod cost;
 mod cost_v2;
+pub mod docs;
 mod projects;
 mod secrets;
 mod settings;
@@ -653,6 +654,39 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_workspaces_project ON workspaces(project_id);
+
+        -- Local document corpora (local RAG). Chunks carry their embedding as
+        -- a little-endian f32 BLOB; search is brute-force cosine in Rust.
+        CREATE TABLE IF NOT EXISTS doc_corpora (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          path TEXT NOT NULL UNIQUE,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at INTEGER NOT NULL,
+          last_indexed_at INTEGER,
+          file_count INTEGER NOT NULL DEFAULT 0,
+          chunk_count INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS doc_files (
+          corpus_id TEXT NOT NULL,
+          path TEXT NOT NULL,
+          mtime INTEGER NOT NULL,
+          size INTEGER NOT NULL,
+          PRIMARY KEY (corpus_id, path)
+        );
+
+        CREATE TABLE IF NOT EXISTS doc_chunks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          corpus_id TEXT NOT NULL,
+          path TEXT NOT NULL,
+          chunk_index INTEGER NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'text',
+          content TEXT NOT NULL,
+          embedding BLOB NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_doc_chunks_corpus ON doc_chunks(corpus_id, path);
         ",
     )
 }
@@ -715,6 +749,13 @@ pub use artifacts::{
 
 // source ledger (research mode)
 pub use source_ledger::{add_source_note, clear_source_notes, list_source_notes};
+
+pub use docs::{
+    add_corpus, any_searchable_corpus, blob_to_f32_slice, count_chunks, delete_chunks_for_file,
+    delete_indexed_files_not_in, f32_slice_to_blob, finish_index, get_corpus, get_corpus_by_path,
+    list_corpora, list_indexed_files, remove_corpus, replace_file_chunks, search_chunks,
+    set_corpus_enabled, upsert_indexed_file, ChunkHit, DocCorpus,
+};
 
 // chat checkpoints (per-turn git working-tree snapshots)
 pub use checkpoints::{

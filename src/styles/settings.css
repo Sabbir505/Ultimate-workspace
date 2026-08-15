@@ -388,3 +388,87 @@
   color: var(--text-dim);
   margin-top: 4px;
 }
+
+/* --- Knowledge panel (local RAG corpora) --- */
+.corpus-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.corpus-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-glass);
+  box-shadow: var(--glass-rim-soft);
+}
+.corpus-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.corpus-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.corpus-toggle {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+.corpus-toggle input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent, #58a6ff);
+  cursor: pointer;
+}
+.corpus-name {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.corpus-card-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.corpus-card-path {
+  font-size: 11px;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+.corpus-card-stats {
+  display: flex;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.corpus-card-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.corpus-bar-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+.corpus-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent, #58a6ff);
+  transition: width 160ms ease;
+}
+.corpus-bar-label {
+  font-size: 11px;
+  color: var(--text-dim);
+}

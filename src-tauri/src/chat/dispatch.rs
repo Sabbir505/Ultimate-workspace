@@ -841,6 +841,14 @@ pub(crate) async fn run_tool(
         return text;
     }
 
+    // Local-docs search: needs both DB (corpora + chunks) and the embedding
+    // sidecar (to vectorize the query), so it dispatches here rather than in
+    // execute_tool. Gated at the schema level via ToolCaps.local_docs, but we
+    // double-check the gate cheaply in case a model calls a removed tool.
+    if name == tools::SEARCH_DOCS {
+        return run_search_docs_tool(app, name, args).await;
+    }
+
     // Connector-originated tools (OAuth-backed remote MCP tools, e.g. Notion).
     // A matched tool name routes to the vendor's MCP server. Writes are gated
     // per the session's permission mode (approval under read_only/manual,
@@ -1160,4 +1168,107 @@ async fn run_ledger_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -
         Ok(text) => text,
         Err(e) => e,
     })
+}
+
+/// Dispatch the local-docs `search_docs` tool. Embeds the query via the running
+/// embedding sidecar, then brute-force cosine top-k against all enabled corpora,
+/// returning the same short summary format as `search_content`. Image hits
+/// include a path citation only (no inline pixels).
+async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Value) -> String {
+    // Parse args.
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if query.is_empty() {
+        return "Error: search_docs requires a non-empty \"query\".".to_string();
+    }
+    let top_k = args
+        .get("top_k")
+        .and_then(|v| v.as_u64())
+        .map(|v| v.min(20).max(1) as usize)
+        .unwrap_or(5);
+
+    let base_url = match app.try_state::<crate::chat::local_models::LocalModelState>() {
+        Some(state) => match state.0.embedding_status() {
+            Some(active) => active.base_url,
+            None => {
+                return "search_docs unavailable — the local embedding sidecar is \
+                        not running. Re-index a corpus from Settings → Knowledge \
+                        to start it."
+                    .to_string();
+            }
+        },
+        None => {
+            return "search_docs unavailable — the local embedding sidecar is not \
+                    registered."
+                .to_string();
+        }
+    };
+
+    // Embed the query (sidecar can vectorize one or many; one query here).
+    let vecs = match crate::chat::local_models::embed_texts(&base_url, &[query.to_string()]).await {
+        Ok(v) => v,
+        Err(e) => return format!("search_docs embedding failed: {e}"),
+    };
+    let query_vec = match vecs.into_iter().next() {
+        Some(v) => v,
+        None => {
+            return "search_docs embedding failed: sidecar returned no vectors.".to_string();
+        }
+    };
+
+    let db = app.state::<crate::DbState>();
+    let conn = db.0.lock();
+    let hits = match crate::db::search_chunks(&conn, &query_vec, top_k) {
+        Ok(h) => h,
+        Err(e) => return format!("search_docs search failed: {e}"),
+    };
+
+    if hits.is_empty() {
+        return "No local documents matched your query.".to_string();
+    }
+
+    // Format hits. Cap per-chunk content at 800 chars and the whole response at
+    // ~6k chars so a single tool result can't blow out the context window.
+    const MAX_CHUNK: usize = 800;
+    const MAX_TOTAL: usize = 6_000;
+    let mut out = String::new();
+    for (i, hit) in hits.iter().enumerate() {
+        let tag = if hit.kind == "image" {
+            // Image surrogate — give the model a citation to open rather than
+            // embedding the surrogate verbatim (which is a generated caption,
+            // not what the pixels show).
+            format!(
+                "[{}] {}  ·  image  ·  score={:.3}\n(Use read_file to view this image locally.)",
+                i + 1,
+                hit.path,
+                hit.score,
+            )
+        } else {
+            let content = if hit.content.len() > MAX_CHUNK {
+                format!("{}…", &hit.content[..MAX_CHUNK])
+            } else {
+                hit.content.clone()
+            };
+            format!(
+                "[{}] {}  ·  {}  ·  score={:.3}\n{}",
+                i + 1,
+                hit.path,
+                hit.kind,
+                hit.score,
+                content,
+            )
+        };
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(&tag);
+        if out.len() > MAX_TOTAL {
+            break;
+        }
+    }
+
+    out
 }

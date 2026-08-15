@@ -35,6 +35,7 @@ import { usePtyEvents } from "./hooks/usePtyEvents";
 import { usePaneMemory } from "./hooks/usePaneMemory";
 import { useTheme } from "./hooks/useTheme";
 import { confirmReplaceLru } from "./lib/sessionLauncher";
+import { initWorkspacePersistence } from "./lib/workspaceRestore";
 import { useProjectsStore } from "./state/projects";
 import { useSettingsStore } from "./state/settings";
 import { useSkillsStore } from "./state/skills";
@@ -68,7 +69,13 @@ export default function App() {
   // Bootstrap: settings first (theme), then projects/sessions/harnesses, skills.
   useEffect(() => {
     void useSettingsStore.getState().load();
-    void useProjectsStore.getState().loadAll();
+    // Workspace persistence wires its subscriptions and re-selects the last
+    // project (which restores its saved pane layout) — it must run AFTER the
+    // projects list exists, hence the loadAll().then chaining.
+    void useProjectsStore
+      .getState()
+      .loadAll()
+      .then(() => void initWorkspacePersistence());
     void useSkillsStore.getState().load();
 
     // Auto-updater: wire download-progress + installed events, then check on

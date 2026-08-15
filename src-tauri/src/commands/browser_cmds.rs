@@ -35,6 +35,17 @@ pub fn browser_navigate(
     browser.0.navigate(&pane_id, &tab_id, &url)
 }
 
+/// Open the WebView2 DevTools window for a pane's webview (roadmap #15):
+/// console + network + DOM inspection for agent debugging.
+#[tauri::command]
+pub fn browser_open_devtools(
+    pane_id: String,
+    tab_id: String,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.open_devtools(&pane_id, &tab_id)
+}
+
 /// Called from injected JS in the webview whenever history.pushState or
 /// history.replaceState fires. Emits browser:navigated so the frontend's
 /// address bar + history stack stay in sync with same-document navigations

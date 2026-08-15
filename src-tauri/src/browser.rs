@@ -820,6 +820,16 @@ impl BrowserManager {
         Ok(())
     }
 
+    /// Toggle the native DevTools window for a pane's webview (roadmap #15).
+    /// Gives console + network + DOM inspection for agent debugging.
+    pub fn open_devtools(&self, pane_id: &str, tab_id: &str) -> Result<(), String> {
+        ensure_supported()?;
+        let label = browser_label(pane_id, tab_id);
+        let pane = self.get(&label)?;
+        pane.webview.open_devtools();
+        Ok(())
+    }
+
     /// Shared first half of `navigate`: validate the URL, mark the pane active
     /// and resolve the pane handle. Split out so `create` (an async worker)
     /// can dispatch the controller `navigate` call itself on the main thread.

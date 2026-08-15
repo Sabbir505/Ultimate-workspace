@@ -149,6 +149,9 @@ export const browserCreateTab = (paneId: string, tabId: string, url: string, rec
   safeInvoke<void>("browser_create", { paneId, tabId, url, rect });
 export const browserNavigateTab = (paneId: string, tabId: string, url: string) =>
   safeInvoke<void>("browser_navigate", { paneId, tabId, url });
+/** Open the WebView2 DevTools window for a browser pane (console + network). */
+export const browserOpenDevtools = (paneId: string, tabId: string) =>
+  safeInvoke<void>("browser_open_devtools", { paneId, tabId });
 export const browserGoBackTab = (paneId: string, tabId: string) =>
   safeInvoke<void>("browser_go_back", { paneId, tabId });
 export const browserGoForwardTab = (paneId: string, tabId: string) =>

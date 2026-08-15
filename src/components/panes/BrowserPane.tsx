@@ -33,6 +33,7 @@ import {
   browserGoBackTab,
   browserGoForwardTab,
   browserReloadTab,
+  browserOpenDevtools,
   browserSetBoundsTab,
   browserSetVisibleTab,
   browserClosePane,
@@ -696,6 +697,13 @@ export function BrowserPane({ pane, visible = true }: Props) {
         </button>
         <button className="ghost" title="Refresh" onClick={refresh}>
           ↻
+        </button>
+        <button
+          className="ghost"
+          title="Open DevTools (console + network)"
+          onClick={() => void browserOpenDevtools(paneId, activeTabId).catch(() => {})}
+        >
+          ⚙
         </button>
         <button className="ghost" title="Home (project default URL)" onClick={goHome}>
           ⌂

@@ -240,6 +240,7 @@ pub fn run() {
             // native browser panes (child webviews)
             commands::browser_cmds::browser_create,
             commands::browser_cmds::browser_navigate,
+            commands::browser_cmds::browser_open_devtools,
             commands::browser_cmds::browser_push_state,
             commands::browser_cmds::browser_action_result,
             commands::browser_cmds::browser_go_back,

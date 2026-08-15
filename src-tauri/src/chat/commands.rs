@@ -62,6 +62,31 @@ pub fn search_chat_messages(
     db::search_chat_messages(&conn, &query, limit.unwrap_or(20)).map_err(|e| e.to_string())
 }
 
+// ---- Checkpoints (per-turn git working-tree snapshots) ----
+
+/// All checkpoints for a chat session, oldest first (timeline order).
+#[tauri::command]
+pub fn list_chat_checkpoints(
+    chat_session_id: String,
+    db: State<DbState>,
+) -> CmdResult<Vec<ChatCheckpoint>> {
+    let conn = db.0.lock();
+    db::list_chat_checkpoints(&conn, &chat_session_id).map_err(|e| e.to_string())
+}
+
+/// Roll the checkpoint's repo back to its snapshot. A safety checkpoint of
+/// the CURRENT state is taken first and returned, so the restore itself is
+/// one-click undoable. Emits `checkpoint:created` for the safety snapshot.
+#[tauri::command]
+pub fn restore_chat_checkpoint(
+    checkpoint_id: i64,
+    app: AppHandle,
+    db: State<DbState>,
+) -> CmdResult<ChatCheckpoint> {
+    let conn = db.0.lock();
+    crate::checkpoints::restore(&app, &conn, checkpoint_id).map_err(|e| e.to_string())
+}
+
 // ---- Artifacts (30-day retention) ----
 
 /// All persisted artifacts, most recent first.
@@ -190,6 +215,8 @@ pub fn delete_chat_session(
             &format!("agent.cli_session_id.{harness}.{chat_session_id}"),
         );
     }
+    // Prune this session's git checkpoint refs before the rows cascade away.
+    crate::checkpoints::prune_session_refs(&conn, &chat_session_id);
     db::delete_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())
 }
 
@@ -259,6 +286,8 @@ pub fn delete_all_chat_sessions(
                 &format!("agent.cli_session_id.{harness}.{id}"),
             );
         }
+        // Prune git checkpoint refs before the rows cascade away.
+        crate::checkpoints::prune_session_refs(&conn, id);
         db::delete_chat_session(&conn, id).map_err(|e| e.to_string())?;
     }
     Ok(count)

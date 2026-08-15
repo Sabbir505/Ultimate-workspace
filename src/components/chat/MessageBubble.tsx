@@ -19,11 +19,13 @@ import rehypeKatex from "rehype-katex";
 import type { ChatMessage } from "../../lib/ipc";
 import { readArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
+import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { useProjectsStore } from "../../state/projects";
 import { parseUnifiedDiff } from "../../lib/diff";
 import { openInBrowserPane } from "../../lib/openBrowserPane";
 import { DiffCard, editLineStats, type EditPayload } from "./DiffCard";
+import { CheckpointChip } from "./CheckpointChip";
 // InlineDiagram (vector diagrams) and MermaidDiagram (mermaid + its
 // highlight.js language pack) are rarely seen on the initial chat surface and
 // pull in heavy dependencies; lazy-load both so the main bundle stays small.
@@ -1304,6 +1306,12 @@ function MessageBubbleInner({
 }: Props) {
   const isUser = message.role === "user";
 
+  // Per-turn git checkpoints attached to this message (positive ids only —
+  // the optimistic in-flight bubble has a negative id and never has one).
+  const msgCheckpoints = useChatStore((s) =>
+    !isUser && msgId != null && msgId > 0 ? s.checkpointsByMessage[msgId] : undefined,
+  ) ?? [];
+
   // Parse attachment markers (e.g. "[Attached image: x]") out of the content
   // so they render as visual cards above the text instead of inline strings.
   // Live attachments (optimistic message) carry image base64 for thumbnails.
@@ -1489,6 +1497,7 @@ function MessageBubbleInner({
         {!isUser && artifacts && artifacts.length > 0 && (
           <MessageArtifacts artifacts={artifacts} onPreviewArtifact={onPreviewArtifact} />
         )}
+        {!isUser && msgCheckpoints.length > 0 && <CheckpointChip checkpoints={msgCheckpoints} />}
       </div>
       {!live && (
         <MessageActions

@@ -18,6 +18,8 @@ vi.mock("../lib/ipc", () => ({
     { id: 1, chatSessionId: "x", role: "user", content: "hi" },
   ]),
   listChatArtifacts: vi.fn().mockResolvedValue([]),
+  // selectSession loads checkpoint chips alongside messages/artifacts.
+  listChatCheckpoints: vi.fn().mockResolvedValue([]),
   // selectSession → loadSessionMetrics fetches these on every chat open.
   getChatSessionMetrics: vi.fn().mockResolvedValue(null),
   touchChatSession: vi.fn().mockResolvedValue(undefined),

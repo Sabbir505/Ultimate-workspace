@@ -1354,3 +1354,108 @@
   white-space: pre;
   color: var(--text-dim);
 }
+
+/* ---- Per-turn git checkpoint chip ---- */
+.chat-checkpoint {
+  margin: 6px 0 2px;
+}
+.chat-checkpoint-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 8px;
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-left: 2px solid color-mix(in srgb, var(--state-working, #46a758) 45%, transparent);
+  border-radius: 0;
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.chat-checkpoint-toggle:hover {
+  color: var(--text);
+  border-left-color: var(--state-working, #46a758);
+}
+.chat-checkpoint-icon {
+  flex: none;
+  font-size: 12px;
+}
+.chat-checkpoint-body {
+  margin: 4px 0 0;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.chat-checkpoint-empty {
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  padding: 2px 8px;
+}
+.chat-checkpoint-status {
+  flex: none;
+  margin-left: auto;
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+.chat-checkpoint-status-A {
+  color: var(--state-diff);
+  background: color-mix(in srgb, var(--state-diff) 14%, transparent);
+}
+.chat-checkpoint-status-M {
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+}
+.chat-checkpoint-status-D {
+  color: var(--danger, #e5484d);
+  background: color-mix(in srgb, var(--danger, #e5484d) 14%, transparent);
+}
+.chat-checkpoint-restore {
+  align-self: flex-start;
+  margin: 2px 0 4px;
+  padding: 5px 12px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text);
+  background: color-mix(in srgb, var(--state-working, #46a758) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--state-working, #46a758) 40%, transparent);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.chat-checkpoint-restore:hover {
+  background: color-mix(in srgb, var(--state-working, #46a758) 26%, transparent);
+  border-color: var(--state-working, #46a758);
+}
+
+/* Restore-confirm dialog (portaled to body — needs its own button styles). */
+.modal.modal-checkpoint .actions button {
+  padding: 7px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  border-radius: var(--radius-xs, 8px);
+  cursor: pointer;
+  border: 1px solid var(--border-strong, var(--border));
+  background: transparent;
+  color: var(--text);
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.modal.modal-checkpoint .actions button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.modal.modal-checkpoint .actions button.danger {
+  color: #fff;
+  border-color: color-mix(in srgb, var(--danger, #e5484d) 55%, transparent);
+  background: color-mix(in srgb, var(--danger, #e5484d) 85%, transparent);
+}
+.modal.modal-checkpoint .actions button.danger:hover:not(:disabled) {
+  background: var(--danger, #e5484d);
+}

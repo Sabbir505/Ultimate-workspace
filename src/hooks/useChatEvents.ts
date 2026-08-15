@@ -17,6 +17,7 @@ import {
   listenChatStatus,
   listenChatTaskProgress,
   listenChatToken,
+  listenCheckpointCreated,
   listenPlanStepProgress,
   listenChatPerf,
   listenChatSubagentSpawn,
@@ -100,6 +101,14 @@ export function useChatEvents(): void {
         if (ownerSessionId) {
           void emitMobileSessionChatEvent(ownerSessionId, "artifact", payload);
         }
+      }),
+    );
+
+    // Per-turn git checkpoints — appends the chip to the live message (or
+    // keeps baselines for a later restore). Desktop-only UI element.
+    unlistens.push(
+      listenCheckpointCreated((payload) => {
+        useChatStore.getState().onCheckpointCreated(payload);
       }),
     );
 

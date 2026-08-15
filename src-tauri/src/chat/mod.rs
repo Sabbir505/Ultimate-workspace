@@ -261,6 +261,22 @@ impl ChatManager {
             // (`emit_token`) can auto-record without threading references
             // through every stream helper.
             let perf = turn_perf::register(&sid, turn_perf::TurnPerf::new(app.clone(), &sid));
+            // Checkpoint baseline: snapshot the pre-turn working tree once per
+            // session (checkpoint 0 = pre-chat state, so even the first turn
+            // is undoable). Only fires for project-bound git-repo sessions;
+            // failures are logged inside and never fail the turn. Must run
+            // BEFORE the turn starts — the snapshot has to be truly pre-turn.
+            {
+                let conn = db.lock();
+                if let Some(repo) = db::chat_session_repo_path(&conn, &sid) {
+                    crate::checkpoints::maybe_baseline(
+                        Some(&app),
+                        &conn,
+                        &sid,
+                        std::path::Path::new(&repo),
+                    );
+                }
+            }
             // When tools are enabled and the session has connectors attached,
             // connect to each vendor's remote MCP server now (refreshing the
             // OAuth token, listing + classifying its tools). This is per-turn
@@ -301,6 +317,9 @@ impl ChatManager {
             match result {
                 Ok((full_response, usage)) => {
                     // Persist the assistant message with usage.
+                    // The turn's message id escapes this block for the
+                    // post-done checkpoint (chip attaches to this message).
+                    let mut turn_message_id: Option<i64> = None;
                     {
                         let conn = db.lock();
                         // provider + model_key on the row let the rollup group
@@ -353,6 +372,7 @@ impl ChatManager {
                         // is reopened.
                         if let Ok(msg) = persisted {
                             let _ = db::attach_artifacts_to_message(&conn, &sid, msg.id);
+                            turn_message_id = Some(msg.id);
                         }
                         let _ = db::touch_chat_session(&conn, &sid);
                     }
@@ -398,6 +418,28 @@ impl ChatManager {
                             }),
                         },
                     );
+
+                    // Per-turn git checkpoint — runs detached AFTER the done
+                    // event so the UI's turn handling never waits on git.
+                    // Project-bound git-repo sessions only; unchanged turns
+                    // dedup-skip inside.
+                    if let Some(mid) = turn_message_id {
+                        let db = Arc::clone(&db);
+                        let ckpt_sid = sid.clone();
+                        let ckpt_app = app.clone();
+                        std::thread::spawn(move || {
+                            let conn = db.lock();
+                            if let Some(repo) = db::chat_session_repo_path(&conn, &ckpt_sid) {
+                                crate::checkpoints::after_turn(
+                                    Some(&ckpt_app),
+                                    &conn,
+                                    &ckpt_sid,
+                                    Some(mid),
+                                    std::path::Path::new(&repo),
+                                );
+                            }
+                        });
+                    }
                 }
                 Err(e) => {
                     // The stream failed (HTTP status, SSE stall, tool loop

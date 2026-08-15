@@ -20,6 +20,7 @@ import {
   getChatMessages,
   getChatSessionMetrics,
   listChatArtifacts,
+  listChatCheckpoints,
   listChatSessions,
   readArtifactPreview,
   sendAgentChatMessage,
@@ -36,6 +37,7 @@ import {
   updateChatSessionWatchMode,
   type ChatAttachmentInput,
   type ChatArtifactPayload,
+  type ChatCheckpoint,
   type ChatConfigPayload,
   type ChatMessageRecord,
   type ChatPerfPayload,
@@ -243,6 +245,10 @@ export interface ChatState {
   artifacts: Record<string, ChatArtifact[]>;
   /** Artifacts attributed to a specific assistant message (messageId -> artifacts). */
   artifactsByMessage: Record<number, ChatArtifact[]>;
+  /** Per-turn git checkpoints, keyed by messageId → checkpoints (usually one;
+   *  pre-restore safety snapshots have messageId null and are excluded here).
+   *  Loaded in selectSession, appended live via checkpoint:created. */
+  checkpointsByMessage: Record<number, ChatCheckpoint[]>;
   /** Artifacts produced by the in-flight turn, keyed by session, until the
    *  assistant message is persisted and they can be attributed to it. */
   pendingArtifacts: Record<string, ChatArtifact[]>;
@@ -410,6 +416,9 @@ export interface ChatState {
   onPerf: (payload: ChatPerfPayload) => void;
   onError: (chatSessionId: string, message: string, code: string | null) => void;
   onArtifact: (payload: ChatArtifactPayload) => void;
+  /** Append a checkpoint from `checkpoint:created` (baseline, post-turn, or
+   *  pre-restore safety snapshot) to the live chip map. */
+  onCheckpointCreated: (payload: ChatCheckpoint) => void;
   /** Track a background chat task's progress (downloads / shell runs). */
   onTaskProgress: (payload: ChatTaskProgressPayload) => void;
   /** Replace all plan steps for a session (called after parsing a new plan). */
@@ -455,6 +464,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   codeExecEnabled: true,
   artifacts: {},
   artifactsByMessage: {},
+  checkpointsByMessage: {},
   pendingArtifacts: {},
   previewArtifacts: [],
   activePreviewPath: null,
@@ -658,9 +668,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ps.selectProject(boundProjectId);
       }
     }
-    const [messages, records] = await Promise.all([
+    const [messages, records, checkpoints] = await Promise.all([
       getChatMessages(chatSessionId, undefined, 200),
       listChatArtifacts(chatSessionId),
+      listChatCheckpoints(chatSessionId),
     ]);
     // Only update messages if the user hasn't clicked away to another session
     // while the fetch was in-flight.
@@ -690,6 +701,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
           artifacts: { ...s.artifacts, [chatSessionId]: list },
           artifactsByMessage: { ...s.artifactsByMessage, ...byMessage },
         }));
+      }
+      // Checkpoint chips: keyed by messageId, REPLACED on session open (not
+      // merged — the keys belong to this session's messages only). Baselines
+      // and safety snapshots (messageId null) are backend-only.
+      if (checkpoints) {
+        const byMessage: Record<number, ChatCheckpoint[]> = {};
+        for (const c of checkpoints) {
+          if (c.messageId == null) continue;
+          (byMessage[c.messageId] ??= []).push(c);
+        }
+        set({ checkpointsByMessage: byMessage });
       }
     }
     // Touch and reorder in the background.
@@ -851,6 +873,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       chatStatus: {},
       artifacts: {},
       artifactsByMessage: {},
+      checkpointsByMessage: {},
       pendingArtifacts: {},
       tasks: {},
       planSteps: {},
@@ -1561,6 +1584,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
         : {},
     );
+  },
+
+  onCheckpointCreated: (payload) => {
+    // Baselines / safety snapshots (messageId null) have no bubble to hang a
+    // chip on — they sit in the backend timeline until a restore needs them.
+    const mid = payload.messageId;
+    if (mid == null) return;
+    set((s) => {
+      const existing = s.checkpointsByMessage[mid] ?? [];
+      if (existing.some((c) => c.id === payload.id)) return {};
+      return {
+        checkpointsByMessage: { ...s.checkpointsByMessage, [mid]: [...existing, payload] },
+      };
+    });
   },
 
   onError: (chatSessionId, message, code) => {

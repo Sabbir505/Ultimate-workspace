@@ -10,6 +10,7 @@
 mod artifacts;
 mod automations;
 mod chat;
+mod checkpoints;
 mod connector_credentials;
 mod cost;
 mod cost_v2;
@@ -495,8 +496,7 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           completed_at INTEGER
         );
 
-        CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(chat_session_id, id);
-        -- mi26: get_cost_rollups_v2 range-scans chat_messages by created_at
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(chat_session_id, id);        -- mi26: get_cost_rollups_v2 range-scans chat_messages by created_at
         -- every poll — previously a full-table scan + join per rollup call.
         CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at);
         CREATE INDEX IF NOT EXISTS idx_chat_sessions_active ON chat_sessions(last_active_at DESC);
@@ -525,6 +525,24 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
             VALUES('delete', old.id, old.content);
           INSERT INTO chat_messages_fts(rowid, content) VALUES (new.id, new.content);
         END;
+
+        -- Per-turn git working-tree snapshots (refs/conduit/checkpoints/…).
+        -- message_id is the assistant message the checkpoint follows; NULL =
+        -- turn-start baseline / pre-restore safety snapshot. `files` is a
+        -- JSON [{path,status}] array vs the session's previous checkpoint.
+        -- Rows cascade away with the session; the delete-session command
+        -- prunes the git refs first via checkpoint_ref_paths().
+        CREATE TABLE IF NOT EXISTS chat_checkpoints (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          chat_session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+          message_id INTEGER,
+          ref TEXT NOT NULL DEFAULT '',
+          tree_sha TEXT NOT NULL,
+          repo_path TEXT NOT NULL,
+          files TEXT NOT NULL DEFAULT '[]',
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_checkpoints_session ON chat_checkpoints(chat_session_id, id);
 
         CREATE TABLE IF NOT EXISTS artifacts (
           id TEXT PRIMARY KEY,
@@ -681,6 +699,12 @@ pub use artifacts::{
 
 // source ledger (research mode)
 pub use source_ledger::{add_source_note, clear_source_notes, list_source_notes};
+
+// chat checkpoints (per-turn git working-tree snapshots)
+pub use checkpoints::{
+    chat_session_repo_path, checkpoint_ref_paths, count_chat_checkpoints, get_checkpoint,
+    insert_checkpoint, latest_checkpoint, list_chat_checkpoints, set_checkpoint_ref,
+};
 
 // connector credentials (app-scoped OAuth tokens; values in keychain)
 pub use connector_credentials::{

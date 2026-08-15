@@ -305,6 +305,36 @@ pub struct ChatSearchResult {
     pub last_active_at: i64,
 }
 
+/// One file entry in a checkpoint's changed-files list. `status` is a git
+/// name-status letter: A / M / D.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckpointFile {
+    pub path: String,
+    pub status: String,
+}
+
+/// A per-turn git working-tree snapshot (see `refs/conduit/checkpoints/…`).
+/// `message_id` is the assistant message the checkpoint follows; `None` for
+/// turn-start baselines and pre-restore safety snapshots.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatCheckpoint {
+    pub id: i64,
+    pub chat_session_id: String,
+    pub message_id: Option<i64>,
+    /// Hidden git ref backing this checkpoint (empty if ref creation failed).
+    pub ref_name: String,
+    /// Tree object sha — snapshot identity, used for changed-nothing dedup.
+    pub tree_sha: String,
+    /// Absolute path of the repo the snapshot was taken in.
+    pub repo_path: String,
+    /// Files changed vs the session's previous checkpoint (empty for the
+    /// baseline and when the diff failed — the restore still works).
+    pub files: Vec<CheckpointFile>,
+    pub created_at: i64,
+}
+
 /// A file attached to a chat message from the composer. Images are forwarded
 /// to the model as vision input; documents (docx/pptx/xlsx) are extracted to
 /// text server-side; plain-text files carry their decoded text directly.

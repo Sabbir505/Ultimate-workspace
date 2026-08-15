@@ -176,6 +176,14 @@ impl AgentSessionManager {
             }
         };
 
+        // Checkpoint baseline: snapshot the spawn dir's working tree once per
+        // session before the CLI starts touching files (checkpoint 0 =
+        // pre-chat state). Non-repo dirs (artifacts folder) skip silently.
+        if let Some(dir) = spawn_dir(cwd, &db.0) {
+            let conn = db.0.lock();
+            crate::checkpoints::maybe_baseline(Some(app), &conn, chat_session_id, &dir);
+        }
+
         match harness {
             "claude_code" => send_claude_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, connectors),
             "kimi_code" => spawn_per_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, PerTurn::Kimi, connectors),
@@ -2145,6 +2153,16 @@ fn finish_turn(
     }
 
     emit_done(app, sid, input, output, cost);
+
+    // Per-turn git checkpoint against the spawn dir (watches are ordered
+    // spawn-dir-first by turn_watch_dirs; non-repo dirs skip silently).
+    // Runs on this reader thread — already off the UI path; turns that
+    // changed nothing dedup-skip inside after_turn.
+    if let Some(spawn) = watches.first() {
+        let dir = spawn.dir.clone();
+        let conn = db.0.lock();
+        crate::checkpoints::after_turn(app, &conn, sid, message_id, &dir);
+    }
 }
 
 fn emit_token(app: Option<&AppHandle>, sid: &str, token: &str) {

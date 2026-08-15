@@ -9,6 +9,7 @@ mod browser;
 mod browser_capture;
 mod browser_mcp;
 mod browser_mcp_register;
+mod checkpoints;
 pub mod agent_sessions;
 pub mod automations;
 mod chat;
@@ -315,6 +316,8 @@ pub fn run() {
             // chat mode
             commands::chat_cmds::list_chat_sessions,
             commands::chat_cmds::search_chat_messages,
+            commands::chat_cmds::list_chat_checkpoints,
+            commands::chat_cmds::restore_chat_checkpoint,
             commands::chat_cmds::create_chat_session,
             commands::chat_cmds::delete_chat_session,
             commands::chat_cmds::delete_all_chat_sessions,

@@ -80,8 +80,8 @@ export function toastInfo(message: string): void {
   useUiStore.getState().pushToast("info", message);
 }
 
-export function toastSuccess(message: string): void {
-  useUiStore.getState().pushToast("success", message);
+export function toastSuccess(message: string, detail?: string): void {
+  useUiStore.getState().pushToast("success", message, detail);
 }
 
 // --- Projects / sessions ---
@@ -618,6 +618,36 @@ export interface ChatSearchResult {
 /** Full-text search across chat message content + session titles. */
 export const searchChatMessages = (query: string, limit?: number) =>
   safeInvoke<ChatSearchResult[] | null>("search_chat_messages", { query, limit: limit ?? null });
+
+/** One file entry in a checkpoint's changed-files list. status: A/M/D. */
+export interface CheckpointFile {
+  path: string;
+  status: string;
+}
+
+/** A per-turn git working-tree snapshot. messageId is the assistant message
+ *  the checkpoint follows (null = baseline / pre-restore safety snapshot). */
+export interface ChatCheckpoint {
+  id: number;
+  chatSessionId: string;
+  messageId: number | null;
+  /** Hidden git ref backing the snapshot (empty if ref creation failed). */
+  refName: string;
+  treeSha: string;
+  repoPath: string;
+  /** Files changed vs the session's previous checkpoint. */
+  files: CheckpointFile[];
+  createdAt: number;
+}
+
+/** All checkpoints for a session, oldest first (timeline order). */
+export const listChatCheckpoints = (chatSessionId: string) =>
+  safeInvoke<ChatCheckpoint[] | null>("list_chat_checkpoints", { chatSessionId });
+
+/** Roll a checkpoint's repo back to its snapshot. Returns the SAFETY
+ *  checkpoint taken of the current state first (restore-the-restore). */
+export const restoreChatCheckpoint = (checkpointId: number) =>
+  safeInvoke<ChatCheckpoint | null>("restore_chat_checkpoint", { checkpointId });
 export const createChatSession = (provider: string, model: string, projectId?: string | null) =>
   safeInvoke<ChatSession | null>("create_chat_session", { provider, model, projectId: projectId ?? null });
 /** Bind (or unbind with null) a chat session to a project, so it nests under
@@ -948,6 +978,10 @@ export const listenChatError = (handler: (payload: ChatErrorPayload) => void) =>
   safeListen<ChatErrorPayload>("chat:error", handler);
 export const listenChatArtifact = (handler: (payload: ChatArtifactPayload) => void) =>
   safeListen<ChatArtifactPayload>("chat:artifact", handler);
+/** Emitted after each checkpoint row+ref is created (baseline, post-turn,
+ *  or pre-restore safety snapshot) so the chip can appear live. */
+export const listenCheckpointCreated = (handler: (payload: ChatCheckpoint) => void) =>
+  safeListen<ChatCheckpoint>("checkpoint:created", handler);
 export const listenChatOpenBrowser = (handler: (payload: ChatOpenBrowserPayload) => void) =>
   safeListen<ChatOpenBrowserPayload>("chat:open-browser", handler);
 

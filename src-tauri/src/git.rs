@@ -23,9 +23,16 @@ const DIFF_CAP_BYTES: usize = 200 * 1024;
 /// case is handled separately (and fails in ~1s) via GIT_TERMINAL_PROMPT=0.
 const GIT_TIMEOUT: Duration = Duration::from_secs(90);
 
-fn git_command(cwd: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+fn git_command(
+    cwd: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> std::io::Result<std::process::Output> {
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(cwd);
+    // Extra environment (e.g. GIT_INDEX_FILE for checkpoint snapshots so the
+    // user's real index is never touched).
+    cmd.envs(envs.iter().copied());
     // This is a detached GUI process with no console. Without these env vars,
     // a `git push` needing auth hangs forever on a stdin prompt that can never
     // be answered. GIT_TERMINAL_PROMPT=0 makes git fail fast; GCM_INTERACTIVE=
@@ -116,7 +123,13 @@ fn git_command(cwd: &Path, args: &[&str]) -> std::io::Result<std::process::Outpu
 
 /// Ok(stdout trimmed) on success, Err(stderr trimmed or message) otherwise.
 fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let out = git_command(cwd, args).map_err(|e| format!("failed to run git: {e}"))?;
+    run_git_env(cwd, args, &[])
+}
+
+/// `run_git` with extra environment variables (checkpoint plumbing needs
+/// `GIT_INDEX_FILE` to stage snapshots without touching the user's index).
+fn run_git_env(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> Result<String, String> {
+    let out = git_command(cwd, args, envs).map_err(|e| format!("failed to run git: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
@@ -276,6 +289,7 @@ pub fn get_git_file_diff(path: &Path, file_path: &str) -> Result<String, String>
     let tracked = git_command(
         path,
         &["ls-files", "--error-unmatch", "--", file_path],
+        &[],
     )
     .map(|o| o.status.success())
     .unwrap_or(false);
@@ -305,6 +319,7 @@ pub fn get_git_file_diff(path: &Path, file_path: &str) -> Result<String, String>
                 "/dev/null",
                 abs.to_string_lossy().as_ref(),
             ],
+            &[],
         )
         .map_err(|e| format!("failed to run git: {e}"))?;
         let raw = String::from_utf8_lossy(&out.stdout).to_string();
@@ -357,7 +372,7 @@ pub struct ChangedFile {
 /// TWO NUL-terminated path tokens follow (old path, then new path).
 fn numstat_map(path: &Path) -> std::collections::HashMap<String, (u32, u32)> {
     let mut map = std::collections::HashMap::new();
-    let out = match git_command(path, &["diff", "--numstat", "-z", "HEAD"]) {
+    let out = match git_command(path, &["diff", "--numstat", "-z", "HEAD"], &[]) {
         Ok(o) if o.status.success() => o,
         _ => return map,
     };
@@ -401,6 +416,7 @@ fn no_index_numstat(abs: &Path) -> Option<(u32, u32)> {
             "/dev/null",
             abs.to_string_lossy().as_ref(),
         ],
+        &[],
     )
     .ok()?;
     // NOTE: no `status.success()` check — `git diff --no-index` exits 1 when
@@ -443,7 +459,7 @@ pub fn get_changed_files(path: &Path) -> Vec<ChangedFile> {
     // NOTE: must go through `git_command` (not `run_git`) — run_git trims the
     // output, but `-z` porcelain entries START with a space for worktree-side
     // changes (" M seed.txt") and that space is part of the entry format.
-    let out = match git_command(path, &["status", "--porcelain", "--untracked-files=all", "-z"]) {
+    let out = match git_command(path, &["status", "--porcelain", "--untracked-files=all", "-z"], &[]) {
         Ok(o) if o.status.success() => o,
         _ => return Vec::new(),
     };
@@ -560,6 +576,7 @@ pub fn list_branches(path: &Path) -> Result<Vec<BranchInfo>, String> {
             "--all",
             "--format=%(HEAD)%(refname:short)\u{1f}",
         ],
+        &[],
     )
     .map_err(|e| format!("failed to run git branch: {e}"))?;
     if !out.status.success() {
@@ -726,6 +743,187 @@ pub fn get_git_log(path: &Path) -> Result<Vec<GitLogEntry>, String> {
         });
     }
     Ok(entries)
+}
+
+// ---- per-turn checkpoints (hidden refs, plumbing only) ----
+//
+// A checkpoint snapshots the ENTIRE working tree (tracked + untracked,
+// .gitignore respected) into a commit object hanging off a hidden ref under
+// `refs/conduit/checkpoints/…`. Everything here uses a TEMP index
+// (`GIT_INDEX_FILE`), so the user's real index, HEAD, and working tree are
+// never touched by snapshot creation.
+
+/// SHA of git's empty tree — the diff base for the first checkpoint of a
+/// session when there is no previous checkpoint to diff against.
+const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// A working-tree snapshot: the tree object (content identity — used for
+/// turn-changed-nothing dedup) and the wrapping commit object (what the
+/// hidden ref points at). `commit_sha` is None only if `commit-tree` was
+/// skipped, which never happens in practice; kept for API honesty.
+#[derive(Debug, Clone)]
+pub struct CheckpointSnapshot {
+    pub tree_sha: String,
+    pub commit_sha: Option<String>,
+}
+
+/// One entry in a checkpoint's files-changed list (vs the previous
+/// checkpoint). `status` is a git name-status letter: A / M / D.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckpointFileChange {
+    pub path: String,
+    pub status: String,
+}
+
+/// Stage the full working tree into a throwaway index and write tree + commit
+/// objects. Does NOT create any ref and does NOT touch HEAD/index/worktree.
+pub fn snapshot_working_tree(cwd: &Path) -> Result<CheckpointSnapshot, String> {
+    // Unique temp-index path per call (pid + nanos); removed at the end.
+    let tmp_index = std::env::temp_dir().join(format!(
+        "conduit-ckpt-idx-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    ));
+    let idx = tmp_index.to_string_lossy().to_string();
+    // Explicit author/committer identity: checkpoint commits are app-made
+    // bookkeeping objects and must never fail because a machine has no
+    // global git user.name/user.email configured.
+    let envs: &[(&str, &str)] = &[
+        ("GIT_INDEX_FILE", idx.as_str()),
+        ("GIT_AUTHOR_NAME", "Conduit"),
+        ("GIT_AUTHOR_EMAIL", "checkpoints@conduit.local"),
+        ("GIT_COMMITTER_NAME", "Conduit"),
+        ("GIT_COMMITTER_EMAIL", "checkpoints@conduit.local"),
+    ];
+    let result = (|| -> Result<CheckpointSnapshot, String> {
+        run_git_env(cwd, &["add", "-A", "--", "."], envs)?;
+        let tree_sha = run_git_env(cwd, &["write-tree"], envs)?;
+        // Parent = current HEAD when the repo has commits (keeps checkpoints
+        // visible in `git log` context); root commit otherwise.
+        let head = run_git(cwd, &["rev-parse", "HEAD"]).ok();
+        let commit_sha = match &head {
+            Some(h) => run_git_env(
+                cwd,
+                &["commit-tree", &tree_sha, "-p", h, "-m", "conduit checkpoint"],
+                envs,
+            )?,
+            None => run_git_env(
+                cwd,
+                &["commit-tree", &tree_sha, "-m", "conduit checkpoint"],
+                envs,
+            )?,
+        };
+        Ok(CheckpointSnapshot {
+            tree_sha,
+            commit_sha: Some(commit_sha),
+        })
+    })();
+    let _ = std::fs::remove_file(&tmp_index);
+    result
+}
+
+/// Files that differ between two checkpoints' trees (`old_tree` = previous
+/// checkpoint, or the empty tree for a session's first). Renames are NOT
+/// detected (`--no-renames`) so every entry is a single path with an
+/// A/M/D status letter.
+pub fn checkpoint_files_diff(
+    cwd: &Path,
+    old_tree: &str,
+    new_tree: &str,
+) -> Result<Vec<CheckpointFileChange>, String> {
+    let out = run_git(
+        cwd,
+        &[
+            "diff",
+            "--name-status",
+            "--no-renames",
+            "-z",
+            old_tree,
+            new_tree,
+        ],
+    )?;
+    // -z format: "XY\0path\0XY\0path\0…" (no trailing NUL).
+    let mut files = Vec::new();
+    let mut fields = out.split('\0');
+    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
+        if status.is_empty() || path.is_empty() {
+            continue;
+        }
+        // Status may carry a score suffix (e.g. "M100"); keep the letter.
+        let letter = status.chars().next().unwrap_or('M').to_string();
+        files.push(CheckpointFileChange {
+            path: path.to_string(),
+            status: letter,
+        });
+    }
+    Ok(files)
+}
+
+/// Point (or move) a hidden checkpoint ref at a commit. Creating the ref is
+/// the ONLY visible side effect of a checkpoint.
+pub fn update_checkpoint_ref(cwd: &Path, ref_name: &str, commit_sha: &str) -> Result<(), String> {
+    run_git(cwd, &["update-ref", ref_name, commit_sha]).map(|_| ())
+}
+
+/// Drop a checkpoint ref (object stays until gc — restore-by-id would fail
+/// only after a manual gc prune, which is fine for deleted sessions).
+pub fn delete_checkpoint_ref(cwd: &Path, ref_name: &str) -> Result<(), String> {
+    run_git(cwd, &["update-ref", "-d", ref_name]).map(|_| ())
+}
+
+/// Roll the working tree + index back to a checkpoint tree, then unstage so
+/// the delta vs HEAD shows as ordinary unstaged changes in the git panel.
+/// Destructive by design — callers MUST take a safety snapshot first.
+///
+/// `read-tree -u --reset` alone only removes files that were in the REAL
+/// index; files the agent created untracked (never staged) would survive.
+/// So the extras are computed by tree-diff (files in the current full tree
+/// but not in the target tree) and deleted explicitly.
+pub fn restore_checkpoint_tree(cwd: &Path, tree_sha: &str) -> Result<(), String> {
+    // Full snapshot of the CURRENT tree (temp index — user index untouched)
+    // to diff the target against for extra-file deletion.
+    let current = snapshot_working_tree(cwd)?;
+    run_git(cwd, &["read-tree", "-u", "--reset", tree_sha])?;
+    // target → current diff: "A" entries exist in the CURRENT tree but not in
+    // the target — the agent-created extras read-tree can't know about.
+    // ("D" is the opposite: restored-by-read-tree files — leave those alone.)
+    if let Ok(extras) = checkpoint_files_diff(cwd, tree_sha, &current.tree_sha) {
+        for extra in extras.iter().filter(|f| f.status == "A") {
+            // Paths come from git tree-diff output (repo-relative, no
+            // traversal), but validate anyway — defense in depth.
+            if validate_repo_relative(cwd, &extra.path).is_ok() {
+                let abs = cwd.join(&extra.path);
+                let _ = std::fs::remove_file(&abs);
+            }
+        }
+    }
+    // `reset` (mixed) needs HEAD to exist; on a fresh repo without commits
+    // the read-tree above already left a matching index, so skip.
+    if run_git(cwd, &["rev-parse", "--verify", "HEAD"]).is_ok() {
+        run_git(cwd, &["reset"])?;
+    }
+    Ok(())
+}
+
+/// Parse `list` results back out (helper for tests).
+pub fn empty_tree_sha() -> &'static str {
+    EMPTY_TREE_SHA
+}
+
+/// Test-only: init a committed temp repo via the same shell-out path (used by
+/// checkpoint orchestration tests outside this module).
+#[cfg(test)]
+pub(crate) fn init_test_repo(path: &Path) {
+    run_git(path, &["init"]).expect("git init");
+    run_git(path, &["config", "user.email", "t@e"]).expect("email");
+    run_git(path, &["config", "user.name", "t"]).expect("name");
+    std::fs::write(path.join("seed.txt"), "seed\n").expect("seed");
+    run_git(path, &["add", "."]).expect("add");
+    run_git(path, &["commit", "-m", "init"]).expect("commit");
 }
 
 #[cfg(test)]
@@ -963,5 +1161,133 @@ mod tests {
             untracked_diff.contains("+++ b/code review report.md"),
             "untracked diff header should be the repo-relative b/<path> form, got: {untracked_diff}"
         );
+    }
+
+    // ---- checkpoint plumbing tests (real git binary, temp repos) ----
+
+    /// Init a committed temp repo with one tracked file. Returns its path.
+    fn ckpt_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+        run_git(path, &["init"]).expect("init");
+        run_git(path, &["config", "user.email", "t@e"]).expect("email");
+        run_git(path, &["config", "user.name", "t"]).expect("name");
+        std::fs::write(path.join("app.txt"), "v1\n").expect("seed");
+        run_git(path, &["add", "."]).expect("add");
+        run_git(path, &["commit", "-m", "init"]).expect("commit");
+        dir
+    }
+
+    #[test]
+    fn checkpoint_snapshot_round_trip_dedup_and_files_diff() {
+        let dir = ckpt_repo();
+        let path = dir.path();
+
+        // Baseline snapshot of the clean tree (pre-chat state).
+        let base = snapshot_working_tree(path).expect("baseline snapshot");
+        assert_eq!(base.tree_sha.len(), 40, "full tree sha");
+        assert!(base.commit_sha.is_some());
+
+        // Snapshot is read-only wrt the working tree + user index: `git
+        // status --porcelain` must still show no changes after it ran.
+        let status = run_git(path, &["status", "--porcelain"]).expect("status");
+        assert!(status.is_empty(), "snapshot must not dirty the tree: {status}");
+
+        // No changes → identical tree sha (turn-changed-nothing dedup).
+        let same = snapshot_working_tree(path).expect("second snapshot");
+        assert_eq!(same.tree_sha, base.tree_sha, "identical trees dedup");
+
+        // Simulate a turn: edit + add a file, delete nothing.
+        std::fs::write(path.join("app.txt"), "v2\n").expect("edit");
+        std::fs::write(path.join("new.rs"), "fn main() {}\n").expect("new");
+        let after = snapshot_working_tree(path).expect("post-turn snapshot");
+        assert_ne!(after.tree_sha, base.tree_sha);
+
+        // Files diff vs baseline: M app.txt, A new.rs (order not guaranteed).
+        let files = checkpoint_files_diff(path, &base.tree_sha, &after.tree_sha).expect("diff");
+        let got: Vec<(&str, &str)> = files.iter().map(|f| (f.status.as_str(), f.path.as_str())).collect();
+        assert!(got.contains(&("M", "app.txt")), "got {got:?}");
+        assert!(got.contains(&("A", "new.rs")), "got {got:?}");
+        assert_eq!(files.len(), 2, "exactly the two changed files, got {got:?}");
+
+        // Ref creation + listing under the hidden namespace. NOTE: no glob —
+        // for-each-ref's `*` doesn't cross `/` (wildmatch WM_PATHNAME), so a
+        // bare prefix is the correct way to list the whole namespace.
+        let commit = after.commit_sha.clone().expect("commit sha");
+        update_checkpoint_ref(path, "refs/conduit/checkpoints/s1/1", &commit).expect("update-ref");
+        let refs = run_git(path, &["for-each-ref", "--format=%(refname)", "refs/conduit/checkpoints"])
+            .expect("for-each-ref");
+        assert!(refs.contains("refs/conduit/checkpoints/s1/1"), "refs: {refs}");
+        delete_checkpoint_ref(path, "refs/conduit/checkpoints/s1/1").expect("delete ref");
+        let refs = run_git(path, &["for-each-ref", "--format=%(refname)", "refs/conduit/checkpoints"])
+            .expect("for-each-ref 2");
+        assert!(!refs.contains("s1/1"), "ref should be gone: {refs}");
+    }
+
+    #[test]
+    fn checkpoint_restore_rolls_tree_back_and_deletes_extras() {
+        let dir = ckpt_repo();
+        let path = dir.path();
+
+        // Turn 1: good state — snapshot it.
+        std::fs::write(path.join("good.txt"), "keep me\n").expect("good");
+        let good = snapshot_working_tree(path).expect("snapshot 1");
+
+        // Turn 2: agent wrecks things — edits, adds junk, deletes a file.
+        std::fs::write(path.join("app.txt"), "wrecked\n").expect("wreck");
+        std::fs::write(path.join("junk.txt"), "junk\n").expect("junk");
+        std::fs::remove_file(path.join("good.txt")).expect("delete good");
+        let wrecked = snapshot_working_tree(path).expect("snapshot 2");
+        assert_ne!(good.tree_sha, wrecked.tree_sha);
+
+        // Restore the good snapshot.
+        restore_checkpoint_tree(path, &good.tree_sha).expect("restore");
+
+        // Working tree matches the snapshot exactly. Content compares
+        // trim_end — with core.autocrlf=true (typical Windows) a restored
+        // file checks out with CRLF while the test wrote LF.
+        assert_eq!(
+            std::fs::read_to_string(path.join("app.txt")).unwrap().trim_end(),
+            "v1",
+            "edit rolled back"
+        );
+        assert!(path.join("good.txt").exists(), "deleted file restored");
+        assert!(!path.join("junk.txt").exists(), "extra file removed");
+
+        // And the delta vs HEAD reads as unstaged changes (git reset ran) —
+        // good.txt is an untracked addition, app.txt is clean again.
+        let status = run_git(path, &["status", "--porcelain"]).expect("status");
+        assert!(status.contains("?? good.txt"), "restored file shows untracked, got: {status}");
+        assert!(!status.contains("app.txt"), "app.txt should match HEAD again: {status}");
+    }
+
+    #[test]
+    fn checkpoint_snapshot_works_in_repo_without_commits() {
+        // Fresh `git init` — no HEAD yet. Snapshot must still work and the
+        // commit must be a root commit (no -p parent).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+        run_git(path, &["init"]).expect("init");
+        std::fs::write(path.join("a.txt"), "a\n").expect("a");
+        let snap = snapshot_working_tree(path).expect("snapshot in empty repo");
+        assert!(snap.commit_sha.is_some());
+        let commit = snap.commit_sha.unwrap();
+        // Parent count must be 0.
+        let parents = run_git(path, &["rev-list", "--parents", "-n", "1", &commit]).expect("parents");
+        assert_eq!(parents.split_whitespace().count(), 1, "root commit has no parent: {parents}");
+    }
+
+    #[test]
+    fn checkpoint_files_diff_empty_tree_base_lists_everything_as_added() {
+        let dir = ckpt_repo();
+        let path = dir.path();
+        std::fs::write(path.join("extra.txt"), "x\n").expect("extra");
+        let snap = snapshot_working_tree(path).expect("snapshot");
+        // First checkpoint of a session diffs against the EMPTY tree — every
+        // file (tracked + the untracked extra) shows as A.
+        let files = checkpoint_files_diff(path, empty_tree_sha(), &snap.tree_sha).expect("diff");
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&"app.txt") && paths.contains(&"extra.txt"), "{paths:?}");
+        assert!(files.iter().all(|f| f.status == "A"), "all additions vs empty tree");
     }
 }

@@ -17,6 +17,7 @@ mod commands;
 mod connectors;
 pub mod db;
 mod git;
+mod github;
 mod git_watcher;
 mod harness_adapters;
 mod harness_bundle;
@@ -251,6 +252,14 @@ pub fn run() {
             commands::browser_cmds::browser_resolve_pane_result,
             commands::browser_cmds::browser_open_pane_result,
             // git
+            github::github_list_prs,
+            github::github_create_pr,
+            github::github_get_pr,
+            github::github_pr_files,
+            github::github_submit_review,
+            github::github_pr_checks,
+            github::github_draft_pr_text,
+            github::github_local_branches,
             commands::git_cmds::get_git_status,
             commands::git_cmds::get_changed_files,
             commands::git_cmds::create_worktree,

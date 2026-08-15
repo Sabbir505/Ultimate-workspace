@@ -13,7 +13,7 @@ use crate::secrets;
 use crate::types::*;
 use crate::DbState;
 
-type CmdResult<T> = Result<T, String>;
+pub(crate) type CmdResult<T> = Result<T, String>;
 
 // ---- Chat session CRUD ----
 

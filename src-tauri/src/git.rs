@@ -128,7 +128,7 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
 
 /// `run_git` with extra environment variables (checkpoint plumbing needs
 /// `GIT_INDEX_FILE` to stage snapshots without touching the user's index).
-fn run_git_env(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> Result<String, String> {
+pub(crate) fn run_git_env(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> Result<String, String> {
     let out = git_command(cwd, args, envs).map_err(|e| format!("failed to run git: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())

@@ -9,6 +9,7 @@ export type ToolPanelTab =
   | "terminal"
   | "browser"
   | "files" // "Changes" — DevDiffPanel (changed files + inline diffs)
+  | "pulls" // "Pull Requests" — PullsPanel (GitHub PR list/create/review)
   | "canvas"
   | "branch" // Branch switcher + git graph
   | "commit" // Commit/push panel

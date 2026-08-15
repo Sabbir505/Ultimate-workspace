@@ -836,3 +836,76 @@ pub struct SubagentDonePayload {
     pub output: String,
     pub error: Option<String>,
 }
+
+// ---- GitHub Pulls tab ----
+
+/// One PR row in the list view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestSummary {
+    pub number: i64,
+    pub title: String,
+    pub author: String,
+    pub author_avatar: Option<String>,
+    pub head_branch: String,
+    pub base_branch: String,
+    pub draft: bool,
+    pub state: String,
+    pub html_url: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// PR detail view: the summary + markdown body + head SHA + size counters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestDetail {
+    #[serde(flatten)]
+    pub summary: PullRequestSummary,
+    pub body: String,
+    pub head_sha: String,
+    pub additions: i64,
+    pub deletions: i64,
+    pub changed_files: i64,
+    pub mergeable: Option<bool>,
+}
+
+/// One changed file in a PR (patch is None for binary/deleted files).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestFile {
+    pub path: String,
+    pub previous_path: Option<String>,
+    pub status: String,
+    pub additions: i64,
+    pub deletions: i64,
+    pub patch: Option<String>,
+}
+
+/// CI rollup badge for a PR head commit: "success" | "failure" | "pending" |
+/// "none" (no CI configured).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestChecks {
+    pub state: String,
+    pub total: i64,
+    pub failing: i64,
+    pub pending: i64,
+}
+
+/// Agent-drafted PR title + body (from the branch diff).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestDraft {
+    pub title: String,
+    pub body: String,
+}
+
+/// Branch picker option for the PR create form (local + remote branches).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchOption {
+    pub name: String,
+    pub is_current: bool,
+    pub is_remote: bool,
+}

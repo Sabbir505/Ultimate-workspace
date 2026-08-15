@@ -13,7 +13,7 @@
 import { lazy, useState, Suspense, useCallback, useEffect, useMemo, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Globe, Layout, Terminal, FileDiff, Bot, FileCode } from "lucide-react";
+import { Globe, Layout, Terminal, FileDiff, GitPullRequest, Bot, FileCode } from "lucide-react";
 import { openBrowserPane, openShellTerminal, restoreMinimizedBrowser } from "../../lib/sessionLauncher";
 import { useChatStore } from "../../state/chat";
 import {
@@ -30,6 +30,7 @@ import { harnessShortName } from "../../types";
 // and browser tabs don't need it.
 const ArtifactPreviewPane = lazy(() => import("../chat/ArtifactPreviewPane").then((m) => ({ default: m.ArtifactPreviewPane })));
 import { DevDiffPanel } from "./DevDiffPanel";
+import { PullsPanel } from "./PullsPanel";
 import { DormantBrowsers, PaneFrame } from "./PaneFrame";
 import { SubagentPanel } from "./SubagentPanel";
 
@@ -37,6 +38,7 @@ const TABS: { id: ToolPanelTab; label: string; Icon: React.ElementType }[] = [
   { id: "terminal", label: "Terminal", Icon: Terminal },
   { id: "browser", label: "Browser", Icon: Globe },
   { id: "files", label: "Changes", Icon: FileDiff },
+  { id: "pulls", label: "Pull Requests", Icon: GitPullRequest },
   { id: "canvas", label: "Canvas", Icon: Layout },
   { id: "agents", label: "Agents", Icon: Bot },
   // Artifact tabs are spawned automatically by code generation — they don't
@@ -437,6 +439,7 @@ export function ToolPanel() {
                 </>
               )}
               {activeInstance.kind === "files" && <DevDiffPanel embedded />}
+              {activeInstance.kind === "pulls" && <PullsPanel />}
               {activeInstance.kind === "canvas" && (
                 <>
                   {previewArtifacts.length === 0 && !planCanvasContent ? (

@@ -199,10 +199,46 @@ function GitHubNotch() {
       </button>
       {open && (
         <div className="composer-notch-github-popover">
+          <button
+            type="button"
+            className="composer-notch-pulls-entry"
+            onClick={() => {
+              setOpen(false);
+              useUiStore.getState().addTab("pulls");
+              useUiStore.getState().setToolPanelCollapsed(false);
+            }}
+            title="Open the Pull Requests tab in the side panel"
+          >
+            <GitPullRequestIcon />
+            <span>Pull Requests</span>
+          </button>
           <BranchDropdown onClose={() => setOpen(false)} />
         </div>
       )}
     </div>
+  );
+}
+
+/** Small git-pull-request icon for the "Pull Requests" popover row. */
+function GitPullRequestIcon() {
+  return (
+    <svg
+      width={13}
+      height={13}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="6" cy="6" r="2.5" />
+      <circle cx="18" cy="18" r="2.5" />
+      <path d="M6 8.5v7a4 4 0 0 0 4 4h5.5" />
+      <path d="M18 8.5v7" />
+      <circle cx="18" cy="6" r="2.5" />
+    </svg>
   );
 }
 

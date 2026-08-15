@@ -263,6 +263,12 @@
 .model-market-grid .model-card-tag.params { background: rgba(136,192,208,0.1); color: var(--accent); border-color: transparent; }
 .model-market-grid .model-card-tag.quant { background: var(--bg-elevated); font-family: var(--font-mono); }
 .model-market-grid .model-card-tag.quant.active { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
+.model-market-grid .model-card-tag.recommended {
+  background: color-mix(in srgb, var(--green, #3fb950) 16%, transparent);
+  color: var(--green, #3fb950);
+  border-color: color-mix(in srgb, var(--green, #3fb950) 40%, transparent);
+  font-weight: 600;
+}
 .model-market-grid span.model-card-quant-select {
   display: inline-flex;
   align-items: center;

@@ -410,6 +410,8 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
                 entry={e}
                 download={downloads[e.id]}
                 totalRam={memoryBudget}
+                vramBytes={vram && vram.bytes > 0 ? vram.bytes : null}
+                gpuName={vram && vram.bytes > 0 ? vram.name : null}
                 isDownloaded={!!isDownloaded}
                 availableQuants={quants}
                 onAction={(entry) => onStartDownload(entry)}
@@ -464,10 +466,32 @@ function ramClass(sizeBytes: number, totalRam: number): "fits" | "tight" | "too_
   return "too_large";
 }
 
+/** VRAM-aware fit classification: compares a model's loaded memory
+ *  requirement against discrete GPU VRAM. Shared thresholds with ramClass so a
+ *  model that needs <50% of VRAM is a comfortable fit. */
+function vramClass(requiredBytes: number, vramBytes: number): "fits" | "tight" | "too_large" {
+  if (!vramBytes) return "tight";
+  const r = requiredBytes / vramBytes;
+  if (r < 0.5) return "fits";
+  if (r < 0.8) return "tight";
+  return "too_large";
+}
+
+function vramByteRatio(requiredBytes: number, vramBytes: number): number {
+  if (!vramBytes) return 1;
+  return requiredBytes / vramBytes;
+}
+
 interface ModelCardProps {
   entry: CatalogEntry;
   download: PerDownload | undefined;
   totalRam: number;
+  /** Discrete GPU VRAM (bytes), or null when no dedicated GPU / probe failed.
+   *  When set, the recommendation is VRAM-aware (offload headroom factored in)
+   *  and a "Recommended" badge can show. */
+  vramBytes?: number | null;
+  /** The detected GPU name for the recommendation label (e.g. "NVIDIA ..."). */
+  gpuName?: string | null;
   isDownloaded: boolean;
   availableQuants: { label: string; entry: CatalogEntry }[];
   onAction: (entry: CatalogEntry) => void;
@@ -491,13 +515,23 @@ function fmtDate(iso: string | null | undefined): string {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function ModelCard({ entry, download, totalRam, isDownloaded, availableQuants, onAction }: ModelCardProps) {
+export function ModelCard({ entry, download, totalRam, vramBytes, gpuName, isDownloaded, availableQuants, onAction }: ModelCardProps) {
   const [detailOpen, setDetailOpen] = useState(false);
   const [selectedQuantEntry, setSelectedQuantEntry] = useState<CatalogEntry>(entry);
   const activeEntry = selectedQuantEntry || entry;
   const [quantsExpanded, setQuantsExpanded] = useState(false);
   const visibleQuants = quantsExpanded ? availableQuants : availableQuants.slice(0, 5);
-  const ram = ramClass(activeEntry.sizeBytes, totalRam);
+  // VRAM-aware recommendation (roadmap #11): when a dedicated GPU is present,
+  // estimate the loaded memory requirement (GGUF weights + ~12% KV/context
+  // overhead) and classify fit against the discrete VRAM; a model that fits
+  // with headroom (< 70%) is "Recommended". Falls back to system ROM fit when
+  // no discrete GPU is detected.
+  const vramReq = activeEntry.sizeBytes * 1.12;
+  const usingVram = !!vramBytes && vramBytes > 0;
+  const ram = usingVram
+    ? vramClass(vramReq, vramBytes!)
+    : ramClass(activeEntry.sizeBytes, totalRam);
+  const recommended = usingVram && ram === "fits" && vramByteRatio(vramReq, vramBytes!) < 0.7;
   const ramLabel = ram === "fits" ? "Fits" : ram === "tight" ? "Tight fit" : "Too large";
   const ramColor = ram === "fits" ? "var(--green)" : ram === "tight" ? "var(--yellow)" : "var(--red)";
   const state = download?.state;
@@ -587,6 +621,7 @@ function ModelCard({ entry, download, totalRam, isDownloaded, availableQuants, o
           {baseModel && <span className="model-card-tag base" title={baseModel}>Based on {baseModel.split("/").pop()}</span>}
           {entry.vision && <span className="model-card-tag vision">Vision</span>}
           <span className="model-card-tag ram" style={{ color: ramColor, borderColor: ramColor }}>{ramLabel}</span>
+          {recommended && <span className="model-card-tag recommended" title={`Fits ${gpuName || "your GPU"} with headroom`}>✓ Recommended</span>}
           {fmtDate(entry.lastModified) && <span className="model-card-tag updated">Updated {fmtDate(entry.lastModified)}</span>}
         </div>
 

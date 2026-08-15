@@ -1501,6 +1501,24 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* "Always allow <tool> for this path" capture (roadmap #8): sits between the
+ * title and the action row; ticking it persists an approval rule on Allow. */
+.approval-card-always {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+.approval-card-always input {
+  width: 12px;
+  height: 12px;
+  accent-color: var(--accent, #58a6ff);
+  cursor: pointer;
+}
 .approval-card-actions {
   display: flex;
   align-items: center;

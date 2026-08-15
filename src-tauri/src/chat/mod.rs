@@ -258,6 +258,16 @@ impl ChatManager {
             let conn = db.lock();
             sidecar_up && db::any_searchable_corpus(&conn)
         };
+        // Load the user's approval rules ("always allow tool + glob") from
+        // `app_settings` so the dispatcher can short-circuit approval cards.
+        // Invalid JSON settles to empty (never fails the turn).
+        let fs_rules: Vec<permission::ApprovalRule> = {
+            let conn = db.lock();
+            match db::get_setting(&conn, "permissions.rules") {
+                Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_default(),
+                _ => Vec::new(),
+            }
+        };
         let caps = tools::ToolCaps {
             code_exec: code_exec_enabled,
             fs_roots,
@@ -265,6 +275,7 @@ impl ChatManager {
             requires_local_sandbox: pcaps.requires_local_sandbox,
             attached_connectors: Arc::new(Vec::new()),
             local_docs,
+            fs_rules,
         };
         let mgr = Arc::clone(self);
 

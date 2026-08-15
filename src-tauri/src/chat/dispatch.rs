@@ -916,8 +916,16 @@ pub(crate) async fn run_tool(
     // duplicated per tool.
     if permission::is_filesystem_tool(name) {
         let target = fs_target_path(name, args);
+        // An approval rule ("always allow tool + glob") auto-approves past the
+        // per-action card. The hard scope-gate below still runs for mutating
+        // tools, so a rule can never grant writes outside the enabled/dir
+        // scope — it only suppresses the approval prompt.
         let decision =
-            permission::check_permission(mode, name, &target, &caps.fs_roots);
+            if permission::any_rule_allows(&caps.fs_rules, name, &target) {
+                permission::PermissionDecision::AutoRun
+            } else {
+                permission::check_permission(mode, name, &target, &caps.fs_roots)
+            };
         if matches!(decision, permission::PermissionDecision::NeedsApproval) {
             return run_gated_fs_tool(client, artifacts_dir, caps, mgr, app, sid, name, args)
                 .await;

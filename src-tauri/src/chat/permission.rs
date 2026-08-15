@@ -479,6 +479,143 @@ fn canonicalize(p: &str) -> String {
     s
 }
 
+// ===========================================================================
+// Approval rules engine ("always allow tool + glob", roadmap #8)
+// ===========================================================================
+//
+// A user-defined rule auto-approves a filesystem tool call when BOTH the tool
+// name and the target path match. This is pure opt-in ergonomics layered on
+// top of `check_permission`: rules bypass the per-action approval card but are
+// still bounded by the authoritative `path_within_scope` gate in the
+// dispatcher, so a rule can never grant writes outside the user's enabled /
+// working-directory scope (arbitrary system-file mutation stays impossible).
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRule {
+    pub id: String,
+    /// The filesystem tool this rule governs: `write_file` / `edit_file` /
+    /// `delete_file` / `move_file` / `copy_file`. An empty string matches any
+    /// mutating filesystem tool.
+    #[serde(default)]
+    pub tool: String,
+    /// Glob matched against the tool's target path (write-side for move/copy).
+    /// An empty string matches every path (still scope-gated by the dispatcher).
+    #[serde(default)]
+    pub pattern: String,
+    #[serde(default)]
+    pub created_at: i64,
+}
+
+impl ApprovalRule {
+    fn matches(&self, tool: &str, path: &str) -> bool {
+        // Tool match: exact (case-insensitive) or empty=any.
+        if !self.tool.is_empty() && !self.tool.eq_ignore_ascii_case(tool) {
+            return false;
+        }
+        // Pattern: empty=any path; otherwise glob (case-insensitive on leaves).
+        self.pattern.is_empty() || glob_match(&self.pattern, path)
+    }
+}
+
+/// True when any rule's (tool, path) pair matches — i.e. the call should
+/// auto-run past the approval gate. Rules never affect the scope gate.
+pub fn any_rule_allows(rules: &[ApprovalRule], tool: &str, path: &str) -> bool {
+    rules.iter().any(|r| r.matches(tool, path))
+}
+
+/// Home-grown glob matcher (~`glob` crate subset): supports `*` (matches any
+/// run of chars within a path segment) and `**` (matches across any number of
+/// segments, including zero). `?` and `[...]` are not supported in v1. Path
+/// matching is case-insensitive on Windows, sensitive elsewhere.
+pub fn glob_match(pattern: &str, path: &str) -> bool {
+    let pat = pattern.replace('\\', "/");
+    let pth = path.replace('\\', "/");
+    let pat_lower = pat.to_ascii_lowercase();
+    let pth_lower = pth.to_ascii_lowercase();
+    // Case-insensitive on Windows, sensitive elsewhere (so the compare below
+    // uses the lowered forms only under cfg(windows)).
+    let pat_segs: Vec<String> = {
+        let s = if cfg!(windows) { pat_lower.as_str() } else { pat.as_str() };
+        s.split('/').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect()
+    };
+    let path_segs: Vec<String> = {
+        let s = if cfg!(windows) { pth_lower.as_str() } else { pth.as_str() };
+        s.split('/').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect()
+    };
+
+    fn seg_match(pat: &str, seg: &str) -> bool {
+        if pat == seg {
+            return true;
+        }
+        if !pat.contains('*') {
+            return false;
+        }
+        // Split on '*'; the literal pieces must appear in order within `seg`.
+        // If the pattern does NOT start with '*', the first literal is anchored
+        // at start; if it doesn't end with '*', everything after the last
+        // literal must be consumed at the tail.
+        let anchored_start = !pat.starts_with('*');
+        let anchored_end = !pat.ends_with('*');
+        let mut rem = seg;
+        let mut first = true;
+        for part in pat.split('*') {
+            if part.is_empty() {
+                continue;
+            }
+            if first {
+                if anchored_start {
+                    if !rem.starts_with(part) {
+                        return false;
+                    }
+                    rem = &rem[part.len()..];
+                } else {
+                    match rem.find(part) {
+                        Some(idx) => rem = &rem[idx + part.len()..],
+                        None => return false,
+                    }
+                }
+                first = false;
+            } else {
+                match rem.find(part) {
+                    Some(idx) => rem = &rem[idx + part.len()..],
+                    None => return false,
+                }
+            }
+        }
+        // If the pattern had a trailing '*', any remainder is allowed;
+        // otherwise (anchored_end) the whole segment must have been consumed.
+        if anchored_end {
+            rem.is_empty()
+        } else {
+            true
+        }
+    }
+
+    fn rec(p: &[String], s: &[String]) -> bool {
+        match (p.first(), s.first()) {
+            (None, None) => true,
+            (None, Some(_)) => false,
+            (Some(seg_p), None) => {
+                // Path exhausted but pattern remains — only ** can match zero.
+                seg_p == "**" && rec(&p[1..], &[])
+            }
+            (Some(seg_p), Some(seg_s)) => {
+                if seg_p == "**" {
+                    rec(&p[1..], s) || rec(p, &s[1..])
+                } else if seg_match(seg_p, seg_s) {
+                    rec(&p[1..], &s[1..])
+                } else {
+                    false
+                }
+            }
+            (Some(_), None) => p.iter().all(|x| x == "**"),
+        }
+    }
+
+    rec(&pat_segs, &path_segs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -986,5 +1123,99 @@ mod tests {
         assert!(!is_system_tool(WRITE_FILE));
         assert!(!is_system_tool(READ_FILE));
         assert!(!is_system_tool("web_search"));
+    }
+
+    // ---- Approval rules engine ----
+
+    #[test]
+    fn glob_star_single_segment() {
+        assert!(glob_match("*.ts", "foo.ts"));
+        assert!(!glob_match("*.ts", "a/b/foo.ts")); // single * does NOT cross '/'
+        assert!(!glob_match("*.ts", "foo.js"));
+        // A single * matches within one segment only.
+        assert!(glob_match("src/*.ts", "src/main.ts"));
+        assert!(!glob_match("src/*.ts", "src/sub/main.ts"));
+    }
+
+    #[test]
+    fn glob_double_star_crosses_segments() {
+        assert!(glob_match("**/*.test.ts", "src/app/foo.test.ts"));
+        assert!(glob_match("**/*.test.ts", "foo.test.ts"));
+        assert!(glob_match("**/*.test.ts", "a/b/c/d.test.ts"));
+        assert!(!glob_match("**/*.test.ts", "src/app/foo.spec.ts"));
+        assert!(!glob_match("**/*.test.ts", "src/app/foo.test.js"));
+    }
+
+    #[test]
+    fn glob_double_star_zero_segments() {
+        assert!(glob_match("dist/**", "dist"));
+        assert!(glob_match("dist/**", "dist/"));
+        assert!(glob_match("dist/**", "dist/out.js"));
+        assert!(glob_match("dist/**", "dist/a/b/c.js"));
+        assert!(!glob_match("dist/**", "dist-other"));
+    }
+
+    #[test]
+    fn glob_exact_and_prefix() {
+        assert!(glob_match("**/notes.md", "notes.md"));
+        assert!(glob_match("**/notes.md", "docs/notes.md"));
+        assert!(glob_match("/C:/projects/alpha/**", "/C:/projects/alpha/src/main.rs"));
+        assert!(glob_match("src/*.ts", "src/main.ts"));
+        assert!(!glob_match("src/*.ts", "src/sub/main.ts"));
+    }
+
+    #[test]
+    fn glob_prefix_mid_segment() {
+        assert!(glob_match("**/*perf*", "metrics/perf_report.md"));
+        assert!(glob_match("**/*perf*", "perf.md"));
+        assert!(!glob_match("**/*perf*", "metrics/plain.md"));
+    }
+
+    #[test]
+    fn rule_matches_tool_and_pattern() {
+        let r = ApprovalRule {
+            id: "1".to_string(),
+            tool: "write_file".to_string(),
+            pattern: "**/*.test.ts".to_string(),
+            created_at: 0,
+        };
+        assert!(any_rule_allows(&[r.clone()], "write_file", "/p/src/foo.test.ts"));
+        assert!(!any_rule_allows(&[r.clone()], "write_file", "/p/src/foo.spec.ts"));
+        // Tool mismatch → no match.
+        assert!(!any_rule_allows(&[r.clone()], "delete_file", "/p/src/foo.test.ts"));
+    }
+
+    #[test]
+    fn rule_empty_tool_matches_any_mutator() {
+        let r = ApprovalRule {
+            id: "1".to_string(),
+            tool: String::new(),
+            pattern: "**/dist/*".to_string(),
+            created_at: 0,
+        };
+        assert!(any_rule_allows(&[r.clone()], "write_file", "/p/dist/app.js"));
+        assert!(any_rule_allows(&[r], "delete_file", "/p/dist/app.js"));
+    }
+
+    #[test]
+    fn rule_empty_pattern_matches_any_path() {
+        let r = ApprovalRule {
+            id: "1".to_string(),
+            tool: "edit_file".to_string(),
+            pattern: String::new(),
+            created_at: 0,
+        };
+        assert!(any_rule_allows(&[r], "edit_file", "/anything/at/all"));
+    }
+
+    #[test]
+    fn rule_is_case_insensitive_on_tool() {
+        let r = ApprovalRule {
+            id: "1".to_string(),
+            tool: "Delete_File".to_string(),
+            pattern: String::new(),
+            created_at: 0,
+        };
+        assert!(any_rule_allows(&[r], "delete_file", "/p/x"));
     }
 }

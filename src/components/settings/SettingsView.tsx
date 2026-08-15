@@ -17,6 +17,7 @@ import { useChatStore } from "../../state/chat";
 import { useArtifactsStore } from "../../state/artifacts";
 import { ModelMarket } from "./ModelMarket";
 import { KnowledgePanel } from "./KnowledgePanel";
+import { PermissionRulesPanel } from "./PermissionRulesPanel";
 import { ConnectorIcon, FamilyIcon, FAMILY_NAMES } from "./ConnectorIcon";
 import { Modal } from "../common/Modal";
 import {
@@ -32,6 +33,7 @@ import {
   Pencil,
   Trash2,
   Library,
+  Shield,
 } from "lucide-react";
 
 type Category =
@@ -43,6 +45,7 @@ type Category =
   | "apikeys"
   | "connectors"
   | "knowledge"
+  | "permissions"
   | "data"
   | "git";
 
@@ -55,6 +58,7 @@ const CATEGORY_KEYS: Category[] = [
   "apikeys",
   "connectors",
   "knowledge",
+  "permissions",
   "data",
   "git",
 ];
@@ -76,6 +80,7 @@ function SettingsNavIcon({ category }: { category: Category }) {
     case "harnesses": return <TerminalSquare {...props} />;
     case "connectors": return <Plug {...props} />;
     case "knowledge": return <Library {...props} />;
+    case "permissions": return <Shield {...props} />;
     case "data": return <Database {...props} />;
     case "git": return <GitBranch {...props} />;
     default: return null;
@@ -122,6 +127,12 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
     items: [
       { key: "connectors", label: "Connectors", sub: "Notion & more (OAuth)" },
       { key: "knowledge", label: "Knowledge", sub: "Local folders (RAG)" },
+    ],
+  },
+  {
+    title: "Permissions",
+    items: [
+      { key: "permissions", label: "Approval rules", sub: "Always-allow tool+glob" },
     ],
   },
   {
@@ -364,6 +375,8 @@ export function SettingsView() {
               {category === "connectors" && <ConnectorsPanel />}
 
               {category === "knowledge" && <KnowledgePanel />}
+
+              {category === "permissions" && <PermissionRulesPanel />}
 
               {category === "data" && <DataPanel />}
             </div>

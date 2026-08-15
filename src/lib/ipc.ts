@@ -269,6 +269,38 @@ export const getSetting = (key: string) => safeInvoke<string | null>("get_settin
 export const setSetting = (key: string, value: string) => safeInvoke<void>("set_setting", { key, value });
 /** Absolute path of the chat DB (read-only; fixed at the app data dir). */
 export const getChatDbPath = () => safeInvoke<string | null>("get_chat_db_path", {});
+
+// ---- Approval rules (roadmap #8) ----
+// A user-defined rule auto-approves a filesystem tool call matching
+// `(tool, path-glob)` past the approval card. Stored as a JSON array under the
+// `permissions.rules` app_settings key; matched per-turn in chat tool dispatch.
+
+export interface ApprovalRule {
+  id: string;
+  tool: string;
+  pattern: string;
+  createdAt: number;
+}
+
+const RULES_KEY = "permissions.rules";
+
+/** Load the current approval rules (empty array when unset/invalid). */
+export async function getPermissionsRules(): Promise<ApprovalRule[]> {
+  try {
+    const raw = await getSetting(RULES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as ApprovalRule[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Persist the full approval-rules list. */
+export async function setPermissionsRules(rules: ApprovalRule[]): Promise<void> {
+  await setSetting(RULES_KEY, JSON.stringify(rules));
+}
+
 export interface DataPaths {
   chatDbPath: string;
   chatDbSize: number;

@@ -179,6 +179,11 @@ pub struct ToolCaps {
     /// when the embedding sidecar is running AND at least one enabled corpus
     /// has indexed chunks. Computed per turn in chat/mod.rs from DB + registry.
     pub local_docs: bool,
+    /// User-defined approval rules ("always allow tool + glob") loaded per turn
+    /// from `app_settings` (`permissions.rules`). A matching rule auto-approves
+    /// the filesystem permission gate; the hard `path_within_scope` gate still
+    /// applies, so rules never grant writes outside the enabled/dir scope.
+    pub fs_rules: Vec<crate::chat::permission::ApprovalRule>,
 }
 
 impl Default for ToolCaps {
@@ -193,6 +198,7 @@ impl Default for ToolCaps {
             requires_local_sandbox: false,
             attached_connectors: std::sync::Arc::new(Vec::new()),
             local_docs: false,
+            fs_rules: Vec::new(),
         }
     }
 }

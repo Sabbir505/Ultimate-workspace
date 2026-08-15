@@ -124,6 +124,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_session_watch_mode(conn)?;
     migrate_chat_session_agent(conn)?;
     migrate_chat_session_project_id(conn)?;
+    migrate_chat_session_permission_mode(conn)?;
     migrate_artifacts_message_id(conn)?;
     migrate_chat_messages_superseded(conn)?;
     migrate_cost_v2(conn)?;
@@ -156,6 +157,20 @@ fn migrate_chat_session_flags(conn: &Connection) -> DbResult<()> {
 /// means "inherit global setting"; per-session values are `"on"` | `"off"`.
 fn migrate_chat_session_watch_mode(conn: &Connection) -> DbResult<()> {
     let sql = "ALTER TABLE chat_sessions ADD COLUMN watch_mode TEXT";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Add the `permission_mode` column to `chat_sessions` on databases created
+/// before the per-session approval-posture feature returned. Nullable on
+/// purpose: NULL (and empty/unknown values) read as `"manual"` in
+/// `map_chat_session`, which is also the value new rows are inserted with.
+fn migrate_chat_session_permission_mode(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE chat_sessions ADD COLUMN permission_mode TEXT";
     if let Err(e) = conn.execute(sql, []) {
         if !e.to_string().contains("duplicate column name") {
             return Err(e);
@@ -688,7 +703,8 @@ pub use chat::{
     list_chat_session_connectors, mark_superseded, search_chat_messages, set_chat_session_connectors,
     set_chat_session_project, set_chat_session_starred, set_chat_session_unread,
     touch_chat_session, update_chat_session_agent, update_chat_session_model,
-    update_chat_session_provider, update_chat_session_title, update_chat_session_watch_mode,
+    update_chat_session_permission_mode, update_chat_session_provider,
+    update_chat_session_title, update_chat_session_watch_mode,
 };
 
 // artifacts
@@ -745,6 +761,7 @@ pub(crate) fn mem() -> Connection {
     migrate_chat_session_watch_mode(&conn).unwrap();
     migrate_chat_session_agent(&conn).unwrap();
     migrate_chat_session_project_id(&conn).unwrap();
+    migrate_chat_session_permission_mode(&conn).unwrap();
     migrate_artifacts_message_id(&conn).unwrap();
     migrate_chat_messages_superseded(&conn).unwrap();
     migrate_cost_v2(&conn).unwrap();

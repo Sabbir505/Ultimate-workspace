@@ -884,3 +884,149 @@
   border-top: 1px solid var(--border);
   margin: 12px 0;
 }
+
+/* --- Filesystem permission-mode selector (matches ModelEffortMenu) --- */
+.permission-mode-menu {
+  position: relative;
+}
+.permission-mode-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+}
+.permission-mode-trigger:hover {
+  background: var(--surface);
+}
+/* Inline variant: borderless, blends into the composer footer next to the `+`
+   attach button — no pill border, transparent background, subtle hover only.
+   The colored mode dot still marks the active posture. */
+.permission-mode-trigger.inline {
+  border: none;
+  background: transparent;
+  padding: 4px 8px;
+}
+.permission-mode-trigger.inline:hover {
+  background: var(--surface-2);
+}
+.permission-mode-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  flex-shrink: 0;
+}
+/* Per-mode accent on the dot + trigger border so the active posture is visible
+   at a glance, even before opening the menu. */
+.permission-mode-trigger.mode-read_only .permission-mode-dot { background: #6b7280; }
+.permission-mode-trigger.mode-manual .permission-mode-dot { background: var(--text-dim); }
+.permission-mode-trigger.mode-auto_edit .permission-mode-dot { background: #d4a017; }
+.permission-mode-trigger.mode-full_auto .permission-mode-dot {
+  background: var(--danger);
+  box-shadow: 0 0 0 2px rgba(214, 69, 69, 0.2);
+}
+.permission-mode-chevron {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+.permission-mode-popup {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  min-width: 280px;
+  max-width: calc(100vw - 16px);
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: var(--glass-rim), 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+  z-index: 60;
+}
+.permission-mode-hint {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+.permission-mode-divider {
+  height: 1px;
+  margin: 4px 4px;
+  background: var(--border);
+}
+.permission-mode-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 12px;
+  text-align: left;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.permission-mode-item:hover,
+.permission-mode-item.active {
+  background: var(--surface-2);
+}
+.permission-mode-item.selected {
+  font-weight: 600;
+}
+.permission-mode-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.permission-mode-item-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.permission-mode-item-desc {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  font-weight: 400;
+  line-height: 1.35;
+}
+.permission-mode-badge {
+  padding: 1px 6px;
+  font-size: 10px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  color: var(--text-dim);
+}
+.permission-mode-check {
+  color: var(--accent, var(--text));
+}
+
+/* --- Composer mode glow (non-default posture) --- */
+/* A subtle colored border/glow on the composer card whenever a non-manual mode
+   is active, so it's never ambiguous which posture governs tool calls. */
+.chat-composer-card.composer-mode-read_only {
+  border-color: #6b7280;
+  box-shadow: var(--glass-rim), 0 0 0 2px rgba(107, 114, 128, 0.18);
+}
+.chat-composer-card.composer-mode-auto_edit {
+  border-color: #d4a017;
+  box-shadow: var(--glass-rim), 0 0 0 2px rgba(212, 160, 23, 0.18);
+}
+.chat-composer-card.composer-mode-full_auto {
+  border-color: var(--danger);
+  box-shadow: var(--glass-rim), 0 0 0 3px rgba(214, 69, 69, 0.22);
+}
+
+/* --- Per-action approval card (filesystem + connected-account tools) ---
+   Codex-style: one compact row (badge + tool + target + Deny/Allow), no
+   side ribbon, no payload dump. */
+.composer-approval-wrap {

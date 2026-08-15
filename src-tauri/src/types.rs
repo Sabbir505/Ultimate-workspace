@@ -285,6 +285,17 @@ pub struct ChatSession {
     /// land. Bind/unbind is a Tauri command (`set_chat_session_project`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
+    /// Per-session permission posture (`read_only` | `manual` | `auto_edit` |
+    /// `full_auto`). New sessions default to `manual`; honored by the built-in
+    /// chat tool loops AND by headless Claude Code sessions (via
+    /// `--permission-prompt-tool stdio`). Kimi/OpenCode headless have no
+    /// approval channel and always run full-auto.
+    #[serde(default = "default_permission_mode")]
+    pub permission_mode: String,
+}
+
+fn default_permission_mode() -> String {
+    "manual".to_string()
 }
 
 /// One hit from `search_chat_messages` (command palette "Chats" section).

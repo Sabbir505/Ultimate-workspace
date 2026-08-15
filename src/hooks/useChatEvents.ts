@@ -9,6 +9,8 @@
 import { useEffect } from "react";
 import {
   emitMobileSessionChatEvent,
+  listenChatApprovalRequest,
+  listenChatApprovalResolved,
   listenChatArtifact,
   listenChatDone,
   listenChatError,
@@ -120,6 +122,27 @@ export function useChatEvents(): void {
 
     // Background chat tasks (download_file / run_shell) — live progress
     // cards. Pushed from chat/tasks.rs; no mobile relay (desktop-only).
+    unlistens.push(
+      // Per-action tool approval cards. `chat:approval-request` surfaces a
+      // card the user Approves/Denies (built-in tool loop AND headless
+      // Claude Code can_use_tool requests share this event);
+      // `chat:approval-resolved` dismisses it (the backend has already
+      // resumed the paused turn).
+      listenChatApprovalRequest((payload) => {
+        useChatStore.getState().onApprovalRequest(payload);
+        const ownerSessionId = useChatStore.getState().getOwnerSessionId(payload.chatSessionId);
+        if (ownerSessionId) {
+          void emitMobileSessionChatEvent(ownerSessionId, "approval", payload);
+        }
+      }),
+    );
+
+    unlistens.push(
+      listenChatApprovalResolved((payload) => {
+        useChatStore.getState().onApprovalResolved(payload);
+      }),
+    );
+
     unlistens.push(
       listenChatTaskProgress((payload) => {
         useChatStore.getState().onTaskProgress(payload);

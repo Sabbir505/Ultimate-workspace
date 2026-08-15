@@ -212,6 +212,13 @@ impl AgentSessionManager {
             }
             entry.turn_in_flight.store(false, Ordering::SeqCst);
         }
+        // A turn paused on a can_use_tool approval card must not outlive the
+        // cancel: dropping the pendings resolves the oneshot to a deny, the
+        // reader thread wakes and writes the deny control_response, and the
+        // card clears via chat:approval-resolved.
+        if let Some(state) = app.try_state::<crate::ChatState>() {
+            state.0.drop_pending_for_session(chat_session_id);
+        }
         emit_done(Some(app), chat_session_id, None, None, None);
         Ok(())
     }
@@ -227,6 +234,16 @@ impl AgentSessionManager {
                     kill_child_tree(&mut child);
                 }
             }
+        }
+    }
+
+    /// Same teardown as remove_session, plus dropping any pending approval
+    /// cards for the session (deleting a chat mid-prompt must not leave a
+    /// stuck card or a wedged reader thread).
+    pub fn remove_session_with_app(&self, app: &AppHandle, chat_session_id: &str) {
+        self.remove_session(chat_session_id);
+        if let Some(state) = app.try_state::<crate::ChatState>() {
+            state.0.drop_pending_for_session(chat_session_id);
         }
     }
 
@@ -749,10 +766,11 @@ fn resolve_harness_bundle(
     cwd: Option<&str>,
     artifacts_dir: String,
     connectors: &[crate::connectors::HarnessMcpServer],
+    permission_mode: Option<&str>,
 ) -> Option<crate::harness_bundle::HarnessBundlePaths> {
     let data_dir = app.path().app_data_dir().ok()?;
     crate::harness_bundle::write_bundle(
-        &data_dir, project_id.unwrap_or(NO_PROJECT_BUNDLE_SLUG), cwd, Some(artifacts_dir.as_str()), None, crate::browser::BROWSER_MCP_PORT, connectors)
+        &data_dir, project_id.unwrap_or(NO_PROJECT_BUNDLE_SLUG), cwd, Some(artifacts_dir.as_str()), permission_mode, crate::browser::BROWSER_MCP_PORT, connectors)
 }
 
 fn spawn_claude(
@@ -769,6 +787,20 @@ fn spawn_claude(
     connectors: &[crate::connectors::HarnessMcpServer],
 ) -> Result<Child, String> {
     let alias = claude_model_alias(model);
+    // Per-session permission posture. Full-auto keeps the historical
+    // bypass-everything spawn; every other mode routes the CLI's permission
+    // prompts to the reader thread over the stdio control protocol
+    // (`--permission-prompt-tool stdio` — Claude Code 2.x), where they become
+    // the same chat:approval-request cards the built-in chat uses.
+    let perm_mode = {
+        let conn = db.0.lock();
+        crate::db::get_chat_session(&conn, sid)
+            .ok()
+            .flatten()
+            .map(|cs| cs.permission_mode)
+            .unwrap_or_else(|| "manual".to_string())
+    };
+    let gated = perm_mode != "full_auto";
     let mut args: Vec<String> = vec![
         "-p".into(),
         "--input-format".into(),
@@ -777,10 +809,15 @@ fn spawn_claude(
         "stream-json".into(),
         "--verbose".into(),
         "--include-partial-messages".into(),
-        "--dangerously-skip-permissions".into(),
-        "--model".into(),
-        alias,
     ];
+    if gated {
+        args.push("--permission-prompt-tool".into());
+        args.push("stdio".into());
+    } else {
+        args.push("--dangerously-skip-permissions".into());
+    }
+    args.push("--model".into());
+    args.push(alias);
     // Respawning (after a cancel, model change, or app restart) would
     // start a blank conversation — resume the captured CLI session instead.
     let resume = session_cell.lock().ok().and_then(|g| g.clone());
@@ -791,7 +828,7 @@ fn spawn_claude(
     // Conduit-owned bundle: instructions, permissions, and both MCP servers
     // (browser + tools). Registration failure degrades to no extra flags —
     // the turn still runs, just without conduit's prompt/tools.
-    if let Some(bundle) = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd), connectors) {
+    if let Some(bundle) = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd), connectors, Some(perm_mode.as_str())) {
         args.extend(crate::harness_bundle::claude_bundle_args(&bundle, &artifacts_dir_for_bundle(app, cwd)));
     }
     let spec = resolve_for_spawn(&CommandSpec {
@@ -821,11 +858,32 @@ fn spawn_claude(
         .stdout
         .take()
         .ok_or("failed to capture claude stdout")?;
-    // Take stdin and share it so the reader thread can write user input
-    // (e.g. a tool result) on stdin.
+    // Take stdin and share it so the reader thread can write user input —
+    // turn prompts AND, for gated modes, control responses that answer the
+    // CLI's can_use_tool permission prompts.
     {
         let mut guard = shared_stdin.lock().map_err(|e| e.to_string())?;
         *guard = child.stdin.take();
+        // The control protocol must be armed BEFORE the first turn: without
+        // an initialize control_request the CLI silently auto-denies every
+        // permission prompt instead of asking. Best-effort — a write failure
+        // here just means the process is already broken and the turn will
+        // surface the real error.
+        if gated {
+            if let Some(stdin) = guard.as_mut() {
+                let init = json!({
+                    "request_id": "conduit-init-1",
+                    "type": "control_request",
+                    "request": { "subtype": "initialize" },
+                })
+                .to_string();
+                let _ = stdin
+                    .write_all(init.as_bytes())
+                    .and_then(|_| stdin.write_all(b"
+"))
+                    .and_then(|_| stdin.flush());
+            }
+        }
     }
     let app2 = app.clone();
     let db2 = DbState(Arc::clone(&db.0));
@@ -848,6 +906,118 @@ fn spawn_claude(
         );
     });
     Ok(child)
+}
+
+/// Build the control_response the CLI expects on stdin after a can_use_tool
+/// prompt. Allow echoes the original input back as `updatedInput` (required
+/// since Claude Code v2.1.207 — omitting it is a validation error); deny
+/// carries the message the model sees as the tool result.
+fn can_use_tool_response(request_id: &str, approved: bool, input: &Value) -> Value {
+    if approved {
+        json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request_id,
+                "response": { "behavior": "allow", "updatedInput": input },
+            },
+        })
+    } else {
+        json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request_id,
+                "response": {
+                    "behavior": "deny",
+                    "message": "The user denied this action in Conduit. Do not retry it unless the user explicitly asks.",
+                },
+            },
+        })
+    }
+}
+
+/// Answer one Claude Code `can_use_tool` control request. Registers a
+/// pending approval on the shared ChatManager (same registry the built-in
+/// chat uses, so the existing `resolve_tool_action` command + approval-card
+/// UI work unchanged), blocks until the user resolves it, then writes the
+/// control_response to the CLI's stdin. Any failure to register (card UI
+/// unreachable) resolves to a DENY — fail closed, never auto-approve.
+fn handle_can_use_tool(
+    app: Option<&AppHandle>,
+    db: &DbState,
+    sid: &str,
+    v: &Value,
+    shared_stdin: &Arc<Mutex<Option<std::process::ChildStdin>>>,
+) {
+    let request = v.get("request").cloned().unwrap_or(json!({}));
+    let request_id = v
+        .get("request_id")
+        .and_then(|r| r.as_str())
+        .unwrap_or("")
+        .to_string();
+    if request_id.is_empty() {
+        return;
+    }
+    let tool = request
+        .get("tool_name")
+        .and_then(|t| t.as_str())
+        .unwrap_or("tool")
+        .to_string();
+    let input = request.get("input").cloned().unwrap_or(json!({}));
+    let summary = crate::chat::dispatch::harness_tool_summary(&tool, &input);
+
+    // Resolve the shared approval registry. `try_state` (not `state`): the
+    // reader thread also runs in unit tests / relay contexts where the app
+    // state may not be registered — a miss must deny, not panic.
+    let mgr = app.and_then(|a| a.try_state::<crate::ChatState>()).map(|s| Arc::clone(&s.0));
+
+    let (approved, pending_id) = if let (Some(app), Some(mgr)) = (app, mgr) {
+        let (pending_id, rx) = mgr.register_pending_approval(sid, &tool, input.clone(), summary.clone());
+        let _ = app.emit(
+            "chat:approval-request",
+            crate::types::ChatApprovalRequestPayload {
+                chat_session_id: sid.to_string(),
+                pending_id: pending_id.clone(),
+                tool: tool.clone(),
+                summary,
+                args: input.clone(),
+            },
+        );
+        // Block this reader thread until the UI resolves (or the pending is
+        // dropped on cancel → deny). The CLI is simultaneously blocked
+        // waiting on stdin, so neither side spins.
+        let approved = rx.blocking_recv().unwrap_or(false);
+        let _ = app.emit(
+            "chat:approval-resolved",
+            crate::types::ChatApprovalResolvedPayload {
+                chat_session_id: sid.to_string(),
+                pending_id: pending_id.clone(),
+                approved,
+            },
+        );
+        (approved, Some(pending_id))
+    } else {
+        // No app/registry → nobody can ever answer the card. Deny so the
+        // CLI continues instead of waiting forever.
+        (false, None)
+    };
+    let _ = pending_id; // kept in scope for clarity; the event owns it
+
+    let response = can_use_tool_response(&request_id, approved, &input);
+    let line = response.to_string();
+    if let Ok(mut guard) = shared_stdin.lock() {
+        if let Some(stdin) = guard.as_mut() {
+            let _ = stdin
+                .write_all(line.as_bytes())
+                .and_then(|_| stdin.write_all(b"
+"))
+                .and_then(|_| stdin.flush());
+        }
+    }
+    // `db` is unused by the relay itself but keeps the signature symmetric
+    // with the other reader helpers that persist state mid-turn.
+    let _ = db;
 }
 
 /// Reader loop for the persistent claude process: one JSON event per line.
@@ -1075,6 +1245,24 @@ fn read_claude_stream(
                     emit_error(app, sid, &msg);
                 }
             }
+            // Control protocol: the CLI answers our `initialize`
+            // control_request here — nothing to do with the payload.
+            Some("control_response") => {}
+
+            // can_use_tool permission prompt (`--permission-prompt-tool
+            // stdio`): surface it as the same approval card the built-in
+            // chat uses, then write the user's decision back to the CLI's
+            // stdin as a control_response. The reader blocks on the oneshot
+            // while the CLI blocks on stdin — cancel/delete drops the
+            // pending approval, which resolves to a deny so neither side
+            // can wedge.
+            Some("control_request") => {
+                let request = v.get("request").cloned().unwrap_or(json!({}));
+                if request.get("subtype").and_then(|t| t.as_str()) == Some("can_use_tool") {
+                    handle_can_use_tool(app, db, sid, &v, &shared_stdin);
+                }
+            }
+
             // system(init/hooks/status), user (tool results), rate_limit, …
             // — not needed for rendering.
             _ => {}
@@ -1121,7 +1309,9 @@ fn spawn_per_turn(
     // Failure degrades to the legacy browser-only configs below (or none).
     // The bundle hardcodes bypassPermissions in settings.json so claude
     // runs with full-auto approval.
-    let bundle = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd), connectors);
+    // Kimi/OpenCode headless have no approval channel — the bundle keeps its
+    // default (unrestricted) permissions regardless of the session's mode.
+    let bundle = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd), connectors, None);
     // Legacy fallback: browser-only MCP when the bundle (or its mcp part)
     // didn't write — keeps pty-style browser tools working in degraded mode.
     let opencode_legacy_cfg = if bundle.is_none() {
@@ -2215,6 +2405,26 @@ fn no_console_window(cmd: &mut Command) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn can_use_tool_response_shapes() {
+        let input = json!({"file_path": "C:/x.txt", "content": "hi"});
+        let allow = can_use_tool_response("req-9", true, &input);
+        assert_eq!(allow["type"], "control_response");
+        assert_eq!(allow["response"]["subtype"], "success");
+        assert_eq!(allow["response"]["request_id"], "req-9");
+        assert_eq!(allow["response"]["response"]["behavior"], "allow");
+        assert_eq!(allow["response"]["response"]["updatedInput"], input);
+
+        let deny = can_use_tool_response("req-9", false, &input);
+        assert_eq!(deny["response"]["response"]["behavior"], "deny");
+        assert!(deny["response"]["response"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("denied"));
+        // Deny must NOT echo updatedInput (the tool never runs).
+        assert!(deny["response"]["response"].get("updatedInput").is_none());
+    }
+
     use super::*;
 
     /// M13: a registered one-shot child (a cmd-wrapped tree, like automation

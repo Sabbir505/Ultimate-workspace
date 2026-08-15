@@ -8,6 +8,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ModelEffortMenu } from "./ModelEffortMenu";
 import { AgentMenu } from "./AgentMenu";
+import { PermissionModeMenu } from "./PermissionModeMenu";
+import type { PermissionMode } from "../../state/chat";
 import { ContextMeter } from "./ContextMeter";
 import { ComposerMetrics } from "./ComposerMetrics";
 import { BranchDropdown } from "./BranchDropdown";
@@ -344,6 +346,13 @@ interface Props {
   onAgentChange?: (agent: string) => void;
   /** Spinner on the agent chip while a harness's config/models load. */
   agentLoading?: boolean;
+  /** Per-session permission posture. The selector renders only when BOTH
+   *  this and onPermissionModeChange are set AND permissionModeSupported —
+   *  Kimi/OpenCode headless runs have no approval channel (they always run
+   *  full-auto), so ChatView hides the menu for those harnesses. */
+  permissionMode?: PermissionMode;
+  onPermissionModeChange?: (mode: PermissionMode) => void;
+  permissionModeSupported?: boolean;
   /** Scanned local GGUF display names, shown as a "Local models" section in
    *  the selector regardless of the session's provider. */
   localModels?: string[];
@@ -392,6 +401,9 @@ export function ChatComposer({
   agent,
   onAgentChange,
   agentLoading,
+  permissionMode,
+  onPermissionModeChange,
+  permissionModeSupported = true,
   localModels,
   effort,
   provider,
@@ -666,6 +678,16 @@ export function ChatComposer({
   // The agent chip shows whenever there's an active session (agent !==
   // undefined), including the locked no-agent state.
   const showAgentSelector = agent !== undefined && onAgentChange;
+  // The permission-mode selector shows for sessions whose runtime honors it
+  // (builtin/local + Claude Code harness).
+  const showModeSelector =
+    permissionModeSupported && permissionMode !== undefined && !!onPermissionModeChange;
+  // A colored border/glow on the composer whenever a non-default posture is
+  // active, so it's never ambiguous which mode governs tool calls.
+  const modeGlowClass =
+    showModeSelector && permissionMode && permissionMode !== "manual"
+      ? ` composer-mode-${permissionMode}`
+      : "";
 
   return (
     <div className="chat-composer">
@@ -705,7 +727,7 @@ export function ChatComposer({
             ))}
         </div>
       )}
-      <div className="chat-composer-card">
+      <div className={`chat-composer-card${modeGlowClass}`}>
         {attachments.length > 0 && (
           <div className="composer-attachments">
             {attachments.map((a) => (
@@ -850,6 +872,13 @@ export function ChatComposer({
             >
               <ResearchIcon /> Research
             </button>
+          )}
+          {showModeSelector && (
+            <PermissionModeMenu
+              mode={permissionMode!}
+              onModeChange={onPermissionModeChange!}
+              variant="inline"
+            />
           )}
           {attachError && <span className="composer-attach-error">{attachError}</span>}
           {!attachError && agentLocked && (

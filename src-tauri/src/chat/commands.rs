@@ -205,7 +205,8 @@ pub fn delete_chat_session(
     agent_state.0.remove_session(&chat_session_id);
     // Also abort an in-flight builtin-provider stream (SSE/tool loop): without
     // this, a chat deleted mid-turn keeps streaming tokens/cost for a session
-    // whose rows no longer exist.
+    // whose rows no longer exist. cancel() also drops pending approval cards,
+    // which releases a harness reader thread blocked on can_use_tool.
     chat_state.0.cancel(&chat_session_id);
     chat_state.0.invalidate_context_tokens(&chat_session_id);
     let conn = db.0.lock();
@@ -333,6 +334,26 @@ pub fn update_chat_session_provider(
     };
     let conn = db.0.lock();
     db::update_chat_session_provider(&conn, &chat_session_id, &provider).map_err(|e| e.to_string())
+}
+
+/// Update a chat session's permission posture. Per-session; new sessions
+/// start at `"manual"`. Valid values: `"read_only"` | `"manual"` |
+/// `"auto_edit"` | `"full_auto"`. Honored by the built-in chat tool loops and
+/// by headless Claude Code sessions (via `--permission-prompt-tool stdio`);
+/// Kimi/OpenCode headless have no approval channel and always run full-auto.
+#[tauri::command]
+pub fn update_chat_session_permission_mode(
+    chat_session_id: String,
+    mode: String,
+    db: State<DbState>,
+) -> CmdResult<()> {
+    // Validate against the known modes so a bogus value can't be persisted.
+    let mode = match mode.as_str() {
+        "read_only" | "manual" | "auto_edit" | "full_auto" => mode,
+        other => return Err(format!("unknown permission_mode: {other}")),
+    };
+    let conn = db.0.lock();
+    db::update_chat_session_permission_mode(&conn, &chat_session_id, &mode).map_err(|e| e.to_string())
 }
 
 /// Update a chat session's watch-mode pacing override. Per-session; new sessions
@@ -1026,14 +1047,16 @@ pub async fn send_chat_message(
         && (force_research.unwrap_or(false) || crate::chat::is_research_request(&content));
     let content = format!("{content}{extra_text}");
     let chat_mgr = &chat_state.0;
-    // 1. Look up the session — provider/model for this turn.
-    let (provider_str, model_str) = {
+    // 1. Look up the session — provider/model/permission-mode for this turn.
+    let (provider_str, model_str, permission_mode) = {
         let conn = db.0.lock();
         let cs = db::get_chat_session(&conn, &chat_session_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "chat session not found".to_string())?;
-        (cs.provider, cs.model)
+        (cs.provider, cs.model, cs.permission_mode)
     };
+    // Unknown/legacy values fail closed to Manual (the safe default).
+    let permission_mode = crate::chat::permission::PermissionMode::from_db(&permission_mode);
 
     // Connectors available to this conversation. Per-session rows
     // (chat_session_connectors, written by the old "@"-attach flow) are still
@@ -1617,7 +1640,7 @@ pub async fn send_chat_message(
         effort,
         tools_on,
         code_exec_enabled.unwrap_or(false),
-        crate::chat::permission::PermissionMode::FullAuto,
+        permission_mode,
         fs_roots,
         connector_ids,
         system,

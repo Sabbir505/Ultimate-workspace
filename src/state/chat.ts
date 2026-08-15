@@ -34,7 +34,11 @@ import {
   updateChatSessionModel,
   updateChatSessionProvider,
   updateChatSessionTitle,
+  updateChatSessionPermissionMode,
   updateChatSessionWatchMode,
+  resolveToolAction,
+  type ChatApprovalRequestPayload,
+  type ChatApprovalResolvedPayload,
   type ChatAttachmentInput,
   type ChatArtifactPayload,
   type ChatCheckpoint,
@@ -103,16 +107,31 @@ function markManuallyRenamed(sid: string) {
   capMap(manuallyRenamed, SET_CAP);
 }
 
+/** Sessions in which the user has already confirmed the full_auto modal this
+ *  app run — the one-time confirmation isn't re-shown per session. (The mode
+ *  itself persists in the DB; this set only suppresses re-prompting.) */
+const fullAutoConfirmed = new Set<string>();
+
+function markFullAutoConfirmed(sid: string) {
+  fullAutoConfirmed.add(sid);
+  if (fullAutoConfirmed.size > SET_CAP) {
+    fullAutoConfirmed.delete(fullAutoConfirmed.values().next().value as string);
+  }
+}
+
 /** Watch-mode pacing for browser actions. "on" | "off". */
 export type WatchMode = "on" | "off";
 
 /** Tool permission mode for chat sessions. */
 export type PermissionMode = "read_only" | "manual" | "auto_edit" | "full_auto";
 
-/** A pending tool-approval shown inline in the message stream. */
+/** A pending tool-approval card, one per chat session (the tool loop — or
+ *  the Claude Code can_use_tool control request — pauses until it resolves). */
 export interface PendingApproval {
+  pendingId: string;
   tool: string;
   summary: string;
+  args: unknown;
 }
 
 /** Live progress of a background chat task (download_file / run_shell),
@@ -249,6 +268,11 @@ export interface ChatState {
    *  pre-restore safety snapshots have messageId null and are excluded here).
    *  Loaded in selectSession, appended live via checkpoint:created. */
   checkpointsByMessage: Record<number, ChatCheckpoint[]>;
+  /** Pending tool-approval cards, one per chat session id. Set by
+   *  `chat:approval-request`, cleared by resolve/`chat:approval-resolved`. */
+  pendingApprovals: Record<string, PendingApproval>;
+  /** Session id the full_auto confirmation modal is open for (null = none). */
+  fullAutoConfirmingFor: string | null;
   /** Artifacts produced by the in-flight turn, keyed by session, until the
    *  assistant message is persisted and they can be attributed to it. */
   pendingArtifacts: Record<string, ChatArtifact[]>;
@@ -395,6 +419,16 @@ export interface ChatState {
   /** Set a session's watch-mode pacing override. on/off = per-session override;
    *  null clears the override so the session inherits the global setting. */
   setSessionWatchMode: (chatSessionId: string, mode: WatchMode | null) => Promise<void>;
+  /** Set a session's permission posture. Switching INTO full_auto opens the
+   *  one-time confirmation modal instead (returns false); other modes apply
+   *  immediately (returns true). */
+  setSessionPermissionMode: (chatSessionId: string, mode: PermissionMode) => Promise<boolean>;
+  /** Confirm the full_auto switch from the modal (persists + applies). */
+  confirmFullAuto: (chatSessionId: string) => Promise<void>;
+  /** Dismiss the full_auto confirmation modal without switching. */
+  cancelFullAutoConfirm: () => void;
+  /** Resolve the session's pending approval card (Approve/Deny). */
+  resolveApproval: (chatSessionId: string, approved: boolean) => Promise<void>;
   saveApiKey: (provider: string, key: string, baseUrl?: string, model?: string) => Promise<void>;
   clearApiKey: (provider: string) => Promise<void>;
 
@@ -419,6 +453,10 @@ export interface ChatState {
   /** Append a checkpoint from `checkpoint:created` (baseline, post-turn, or
    *  pre-restore safety snapshot) to the live chip map. */
   onCheckpointCreated: (payload: ChatCheckpoint) => void;
+  /** Surface/clear a session's pending approval card (chat:approval-request
+   *  / chat:approval-resolved events). */
+  onApprovalRequest: (payload: ChatApprovalRequestPayload) => void;
+  onApprovalResolved: (payload: ChatApprovalResolvedPayload) => void;
   /** Track a background chat task's progress (downloads / shell runs). */
   onTaskProgress: (payload: ChatTaskProgressPayload) => void;
   /** Replace all plan steps for a session (called after parsing a new plan). */
@@ -465,6 +503,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   artifacts: {},
   artifactsByMessage: {},
   checkpointsByMessage: {},
+  pendingApprovals: {},
+  fullAutoConfirmingFor: null,
   pendingArtifacts: {},
   previewArtifacts: [],
   activePreviewPath: null,
@@ -828,6 +868,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       delete nextArtifacts[chatSessionId];
       const nextPendingArtifacts = { ...s.pendingArtifacts };
       delete nextPendingArtifacts[chatSessionId];
+      const nextPendingApprovals = { ...s.pendingApprovals };
+      delete nextPendingApprovals[chatSessionId];
       const nextSessionProjects = { ...s.sessionProjects };
       delete nextSessionProjects[chatSessionId];
       const nextLoop = { ...s.loopState };
@@ -1272,6 +1314,50 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
+  setSessionPermissionMode: async (chatSessionId, mode) => {
+    // Switching INTO full_auto opens a one-time confirmation modal first
+    // (per session — `fullAutoConfirmed` suppresses re-prompting within the
+    // same app run). All other transitions apply immediately.
+    if (mode === "full_auto" && !fullAutoConfirmed.has(chatSessionId)) {
+      set({ fullAutoConfirmingFor: chatSessionId });
+      return false;
+    }
+    await updateChatSessionPermissionMode(chatSessionId, mode);
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === chatSessionId ? { ...sess, permissionMode: mode } : sess,
+      ),
+      fullAutoConfirmingFor: null,
+    }));
+    return true;
+  },
+
+  confirmFullAuto: async (chatSessionId) => {
+    markFullAutoConfirmed(chatSessionId);
+    await updateChatSessionPermissionMode(chatSessionId, "full_auto");
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === chatSessionId ? { ...sess, permissionMode: "full_auto" } : sess,
+      ),
+      fullAutoConfirmingFor: null,
+    }));
+  },
+
+  cancelFullAutoConfirm: () => set({ fullAutoConfirmingFor: null }),
+
+  resolveApproval: async (chatSessionId, approved) => {
+    const pending = get().pendingApprovals[chatSessionId];
+    if (!pending) return;
+    // Optimistically remove the card; the backend's `chat:approval-resolved`
+    // would also clear it, but this avoids a flicker if the event is slow.
+    set((s) => {
+      const next = { ...s.pendingApprovals };
+      delete next[chatSessionId];
+      return { pendingApprovals: next };
+    });
+    await resolveToolAction(pending.pendingId, approved);
+  },
+
   setOwnerSessionId: (chatSessionId, ownerSessionId) =>
     set((s) => ({
       ownerSessionByChatId: { ...s.ownerSessionByChatId, [chatSessionId]: ownerSessionId },
@@ -1597,6 +1683,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return {
         checkpointsByMessage: { ...s.checkpointsByMessage, [mid]: [...existing, payload] },
       };
+    });
+  },
+
+  onApprovalRequest: ({ chatSessionId, pendingId, tool, summary, args }) => {
+    // Surface the per-action approval card for this session. Only one card is
+    // shown at a time (the tool loop pauses on it); a new request replaces any
+    // stale one (the prior would already have been resolved or cancelled).
+    set((s) => ({
+      pendingApprovals: {
+        ...s.pendingApprovals,
+        [chatSessionId]: { pendingId, tool, summary, args },
+      },
+    }));
+  },
+
+  onApprovalResolved: ({ chatSessionId }) => {
+    // The backend resumed the paused tool loop — dismiss the card.
+    set((s) => {
+      const next = { ...s.pendingApprovals };
+      delete next[chatSessionId];
+      return { pendingApprovals: next };
     });
   },
 

@@ -14,6 +14,8 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { ChatComposer, type ChatAttachment } from "./ChatComposer";
+import { ApprovalCard, FullAutoConfirmModal } from "./ApprovalFlow";
+import type { PermissionMode } from "../../state/chat";
 // TypingIndicator is tiny and eager — imported from its own module so the
 // entry chunk doesn't statically pull in MessageBubble (react-markdown).
 import { TypingIndicator } from "./TypingIndicator";
@@ -474,6 +476,24 @@ export function ChatView() {
     [activeChatSessionId, setSessionAgent],
   );
 
+  // Permission posture: the approval card above the composer resolves the
+  // session's pending tool approval (built-in loop + Claude Code harness
+  // can_use_tool share the same card); the mode menu in the composer footer
+  // persists per session. Switching into full_auto goes through the one-time
+  // confirmation modal.
+  const pendingApprovals = useChatStore((s) => s.pendingApprovals);
+  const fullAutoConfirmingFor = useChatStore((s) => s.fullAutoConfirmingFor);
+  const resolveApproval = useChatStore((s) => s.resolveApproval);
+  const confirmFullAuto = useChatStore((s) => s.confirmFullAuto);
+  const cancelFullAutoConfirm = useChatStore((s) => s.cancelFullAutoConfirm);
+  const setSessionPermissionMode = useChatStore((s) => s.setSessionPermissionMode);
+  const handlePermissionModeChange = useCallback(
+    (mode: PermissionMode) => {
+      if (activeChatSessionId) void setSessionPermissionMode(activeChatSessionId, mode);
+    },
+    [activeChatSessionId, setSessionPermissionMode],
+  );
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   // Whether new content should keep the view pinned to the bottom. Flipped
@@ -861,6 +881,17 @@ export function ChatView() {
         );
       })()}
 
+      {activeChatSessionId && pendingApprovals[activeChatSessionId] && (
+        <div className="composer-approval-wrap">
+          <ApprovalCard
+            approval={pendingApprovals[activeChatSessionId]}
+            onResolve={(approved) =>
+              void resolveApproval(activeChatSessionId, approved)
+            }
+          />
+        </div>
+      )}
+
       <ChatComposer
         draft={draft}
         onSend={handleSend}
@@ -877,6 +908,18 @@ export function ChatView() {
         modelEndpoint={harnessAgent ? (harnessCfg?.endpoint ?? null) : undefined}
         agent={activeChatSessionId ? (activeSession?.agent ?? null) : undefined}
         onAgentChange={handleAgentChange}
+        permissionMode={
+          activeChatSessionId
+            ? ((activeSession?.permissionMode as PermissionMode | undefined) ?? "manual")
+            : undefined
+        }
+        onPermissionModeChange={handlePermissionModeChange}
+        permissionModeSupported={
+          // Kimi/OpenCode headless runs have no approval channel (kimi -p
+          // auto-approves; opencode run can't surface an ask) — the menu
+          // only shows for builtin/local chats and Claude Code sessions.
+          !harnessAgent || harnessAgent === "claude_code"
+        }
         agentLoading={harnessAgent ? harnessLoading : false}
         localModels={localIds}
         effort={effort}
@@ -894,6 +937,12 @@ export function ChatView() {
         onThinkingChange={setThinking}
         thinkingSupported={thinkingSupported}
       />
+      {fullAutoConfirmingFor && (
+        <FullAutoConfirmModal
+          onConfirm={() => void confirmFullAuto(fullAutoConfirmingFor)}
+          onCancel={cancelFullAutoConfirm}
+        />
+      )}
     </div>
     </div>
   );

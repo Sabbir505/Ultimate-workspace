@@ -122,19 +122,35 @@ pub fn build_instructions_md(project_path: &str, artifacts_dir: &str) -> String 
     parts.join("\n\n")
 }
 
-/// Claude Code `--settings` content: always bypass permissions (the CLI is
-/// spawned with `--dangerously-skip-permissions`, the settings file must
-/// agree or one silently overrides the other).
-pub fn build_claude_settings_json(project_path: &str, artifacts_dir: &str) -> Value {
+/// Claude Code `--settings` content. `permission_mode` is the chat session's
+/// posture: `full_auto` keeps the historical bypass (paired with
+/// `--dangerously-skip-permissions` at spawn — the two must agree or one
+/// silently overrides the other); `auto_edit` maps to `acceptEdits`; and
+/// `manual`/`read_only` use `default`, which routes every unmatched tool call
+/// to Conduit's approval card via `--permission-prompt-tool stdio`.
+pub fn build_claude_settings_json(
+    project_path: &str,
+    artifacts_dir: &str,
+    permission_mode: Option<&str>,
+) -> Value {
     // Empty entries (project-less sessions have no project path) must not
     // reach the CLI — an empty additionalDirectory is meaningless.
     let dirs: Vec<&str> = [project_path, artifacts_dir]
         .into_iter()
         .filter(|d| !d.is_empty())
         .collect();
+    let default_mode = match permission_mode.unwrap_or("full_auto") {
+        // None (legacy/kimi/opencode callers) + explicit full_auto: bypass,
+        // paired with --dangerously-skip-permissions at spawn.
+        "full_auto" => "bypassPermissions",
+        "auto_edit" => "acceptEdits",
+        // manual / read_only / anything unknown → prompt. Fail CLOSED: a
+        // stray value must never widen permissions.
+        _ => "default",
+    };
     json!({
         "permissions": {
-            "defaultMode": "bypassPermissions",
+            "defaultMode": default_mode,
             "allow": [
                 "mcp__conduit-tools__*",
                 "Bash(git:*)"
@@ -257,7 +273,7 @@ pub fn write_bundle(
     project_id: &str,
     project_path: Option<&str>,
     artifacts_dir: Option<&str>,
-    _permission: Option<&str>,
+    permission_mode: Option<&str>,
     ws_port: u16,
     connectors: &[HarnessMcpServer],
 ) -> Option<HarnessBundlePaths> {
@@ -298,7 +314,8 @@ pub fn write_bundle(
         write_or_none(&claude_instructions, build_instructions_md(pp, ad));
     let ok_settings = write_or_none(
         &claude_settings,
-        serde_json::to_string_pretty(&build_claude_settings_json(pp, ad)).unwrap_or_default(),
+        serde_json::to_string_pretty(&build_claude_settings_json(pp, ad, permission_mode))
+            .unwrap_or_default(),
     );
     let ok_agent = write_or_none(&kimi_agent, build_kimi_agent_md(pp, ad));
     if !ok_instructions || !ok_settings || !ok_agent {
@@ -405,13 +422,32 @@ mod tests {
 
     #[test]
     fn claude_settings_shape() {
-        let v = build_claude_settings_json("C:/work/proj", "C:/work/out");
+        // No mode passed (legacy callers) = the historical bypass default.
+        let v = build_claude_settings_json("C:/work/proj", "C:/work/out", None);
         assert_eq!(v["permissions"]["defaultMode"], "bypassPermissions");
         let allow = v["permissions"]["allow"].as_array().unwrap();
         assert!(allow.iter().any(|x| x == "mcp__conduit-tools__*"));
         assert!(allow.iter().any(|x| x == "Bash(git:*)"));
         let dirs = v["permissions"]["additionalDirectories"].as_array().unwrap();
         assert!(dirs.iter().any(|x| x == "C:/work/out"));
+    }
+
+    #[test]
+    fn claude_settings_permission_mode_mapping() {
+        // full_auto stays bypass (paired with --dangerously-skip-permissions);
+        // auto_edit pre-approves edits; manual/read_only route everything
+        // unmatched to the stdio permission prompt.
+        let v = build_claude_settings_json("C:/p", "C:/out", Some("full_auto"));
+        assert_eq!(v["permissions"]["defaultMode"], "bypassPermissions");
+        let v = build_claude_settings_json("C:/p", "C:/out", Some("auto_edit"));
+        assert_eq!(v["permissions"]["defaultMode"], "acceptEdits");
+        for mode in ["manual", "read_only"] {
+            let v = build_claude_settings_json("C:/p", "C:/out", Some(mode));
+            assert_eq!(v["permissions"]["defaultMode"], "default", "{mode}");
+        }
+        // Unknown values fail closed to prompting, NOT bypass.
+        let v = build_claude_settings_json("C:/p", "C:/out", Some("bogus"));
+        assert_eq!(v["permissions"]["defaultMode"], "default");
     }
 
     #[test]
@@ -429,7 +465,7 @@ mod tests {
         let md = build_instructions_md("", "C:/work/out");
         assert!(md.contains("No project folder is selected"));
         assert!(!md.contains("The project is at ``"));
-        let v = build_claude_settings_json("", "C:/work/out");
+        let v = build_claude_settings_json("", "C:/work/out", None);
         let dirs = v["permissions"]["additionalDirectories"].as_array().unwrap();
         assert_eq!(dirs.len(), 1, "empty project path must be filtered out");
         assert_eq!(dirs[0], "C:/work/out");

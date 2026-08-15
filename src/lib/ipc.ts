@@ -373,6 +373,9 @@ export interface ChatSession {
    *  unbound (shows in the flat "Chat History" list); a project id nests it
    *  under that project's expandable row. Persisted in the DB. */
   projectId?: string | null;
+  /** Per-session permission posture: "read_only" | "manual" | "auto_edit" |
+   *  "full_auto". Defaults to "manual" server-side. */
+  permissionMode?: string;
 }
 
 export interface ChatMessageRecord {
@@ -483,6 +486,27 @@ export interface ChatArtifactPayload {
 export interface ChatOpenBrowserPayload {
   chatSessionId: string;
   url: string;
+}
+
+/** A pending per-action tool approval surfaced as a card. Emitted when the
+ *  central `check_permission` gate (built-in chat) or the Claude Code
+ *  can_use_tool control request (harness chat) returns NeedsApproval. The
+ *  user's choice is sent back via `resolveToolAction`. */
+export interface ChatApprovalRequestPayload {
+  chatSessionId: string;
+  pendingId: string;
+  tool: string;
+  summary: string;
+  args: unknown;
+}
+
+/** Emitted when the user has resolved a pending approval card (so the UI can
+ *  dismiss the card). `approved` ran the tool; a denied card returned a
+ *  "user denied" tool result instead. */
+export interface ChatApprovalResolvedPayload {
+  chatSessionId: string;
+  pendingId: string;
+  approved: boolean;
 }
 
 /** Live progress for a background chat task (download_file / run_shell),
@@ -833,6 +857,17 @@ export const updateChatSessionWatchMode = (
   mode: "on" | "off" | null,
 ) =>
   safeInvoke<void>("update_chat_session_watch_mode", { chatSessionId, mode });
+/** Update a chat session's permission posture
+ *  (`read_only` | `manual` | `auto_edit` | `full_auto`). Per-session; new
+ *  sessions start at `manual`. Honored by the built-in chat tool loops and by
+ *  headless Claude Code sessions; Kimi/OpenCode headless always run full-auto.
+ *  The frontend gates the switch to `full_auto` behind a one-time
+ *  confirmation modal before calling this. */
+export const updateChatSessionPermissionMode = (
+  chatSessionId: string,
+  mode: "read_only" | "manual" | "auto_edit" | "full_auto",
+) =>
+  safeInvoke<void>("update_chat_session_permission_mode", { chatSessionId, mode });
 /** Update a chat session's agent selection from the composer's agent-then-model
  *  selector. `"builtin"` | `"local"` | `"harness:<id>"` | null (clears the
  *  selection — back to the locked fresh-chat state). Persisted per session;
@@ -845,6 +880,11 @@ export const updateChatSessionAgent = (
   safeInvoke<void>("update_chat_session_agent", { chatSessionId, agent });
 export const cancelChatMessage = (chatSessionId: string) =>
   safeInvoke<void>("cancel_chat_message", { chatSessionId });
+/** Resolve a pending per-action tool approval card. `approved` lets the paused
+ *  tool loop (or the Claude Code control request) run the action; `false`
+ *  injects a "user denied" tool result. */
+export const resolveToolAction = (pendingId: string, approved: boolean) =>
+  safeInvoke<void>("resolve_tool_action", { pendingId, approved });
 /** Persist the partial assistant reply of a cancelled stream, so the text the
  *  user already saw survives the cancel instead of vanishing. */
 export const persistPartialChatMessage = (chatSessionId: string, content: string) =>
@@ -987,6 +1027,11 @@ export const listenChatOpenBrowser = (handler: (payload: ChatOpenBrowserPayload)
 
 export const listenChatTaskProgress = (handler: (payload: ChatTaskProgressPayload) => void) =>
   safeListen<ChatTaskProgressPayload>("chat:task-progress", handler);
+
+export const listenChatApprovalRequest = (handler: (payload: ChatApprovalRequestPayload) => void) =>
+  safeListen<ChatApprovalRequestPayload>("chat:approval-request", handler);
+export const listenChatApprovalResolved = (handler: (payload: ChatApprovalResolvedPayload) => void) =>
+  safeListen<ChatApprovalResolvedPayload>("chat:approval-resolved", handler);
 
 export const listenPlanStepProgress = (handler: (payload: PlanStepProgressPayload) => void) =>
   safeListen<PlanStepProgressPayload>("chat:plan-step-progress", handler);

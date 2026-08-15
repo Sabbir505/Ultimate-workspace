@@ -1459,3 +1459,82 @@
 .modal.modal-checkpoint .actions button.danger:hover:not(:disabled) {
   background: var(--danger, #e5484d);
 }
+
+/* --- Per-action approval card (filesystem + connected-account tools) ---
+   Codex-style: one compact row (badge + tool + target + Deny/Allow), no
+   side ribbon, no payload dump. */
+.composer-approval-wrap {
+  flex-shrink: 0;
+  padding: 0 max(14px, calc((100% - 780px) / 2)) 6px;
+}
+.approval-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  box-shadow: var(--glass-rim), 0 8px 24px -14px rgba(0, 0, 0, 0.5);
+  outline: none;
+}
+.approval-card:focus-visible {
+  box-shadow: var(--glass-rim), 0 0 0 2px color-mix(in srgb, var(--approval-accent, var(--accent)) 45%, transparent);
+}
+.approval-badge {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--approval-accent, var(--text));
+  background: color-mix(in srgb, var(--approval-accent, var(--accent)) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--approval-accent, var(--accent)) 35%, transparent);
+}
+.approval-card-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.approval-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.approval-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, filter 120ms ease;
+}
+.approval-btn.deny {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.approval-btn.deny:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+  filter: none;
+}
+.approval-btn.approve {
+  background: var(--approval-accent, var(--accent));
+  color: var(--approval-accent-contrast, #fff);
+  border-color: var(--approval-accent, var(--accent));
+}
+.approval-btn.approve:hover {
+  filter: brightness(1.1);
+}
+/* Badge accent per action class (default falls back to the card accent). */
+.approval-card-delete { --approval-accent: var(--danger); --approval-accent-contrast: #fff; }
+.approval-card-send   { --approval-accent: #8b7cf6; --approval-accent-contrast: #fff; }
+.approval-card-write  { --approval-accent: #e3b341; --approval-accent-contrast: #1b1b1f; }
+.approval-card-edit   { --approval-accent: #5aa7f0; --approval-accent-contrast: #fff; }

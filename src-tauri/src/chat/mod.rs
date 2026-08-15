@@ -150,7 +150,7 @@ impl ChatManager {
     /// Drop every pending approval for a session (used when its stream is
     /// cancelled/aborted — the senders drop, the receivers error, and the
     /// paused loops resume as "denied").
-    fn drop_pending_for_session(&self, chat_session_id: &str) {
+    pub(crate) fn drop_pending_for_session(&self, chat_session_id: &str) {
         let to_remove: Vec<String> = self
             .pending
             .lock()

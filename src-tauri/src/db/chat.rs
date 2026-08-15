@@ -27,6 +27,12 @@ fn map_chat_session(row: &rusqlite::Row) -> rusqlite::Result<ChatSession> {
         // NULL = unbound (shows in the flat "Chat History" list); otherwise the
         // chat is nested under this project's expandable sidebar row.
         project_id: row.get::<_, Option<String>>("project_id")?,
+        // Falls back to "manual" for rows written before the column existed
+        // (the migration adds it nullable); unknown values also read as manual.
+        permission_mode: row
+            .get::<_, Option<String>>("permission_mode")?
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "manual".to_string()),
     })
 }
 
@@ -74,8 +80,8 @@ pub fn create_chat_session(
     let now = now_ts();
     let id = new_id();
     conn.execute(
-        "INSERT INTO chat_sessions (id, title, provider, model, created_at, last_active_at, watch_mode, project_id)
-         VALUES (?1, NULL, ?2, ?3, ?4, ?4, NULL, ?5)",
+        "INSERT INTO chat_sessions (id, title, provider, model, created_at, last_active_at, watch_mode, project_id, permission_mode)
+         VALUES (?1, NULL, ?2, ?3, ?4, ?4, NULL, ?5, 'manual')",
         params![id, provider, model, now, project_id],
     )?;
     conn.query_row(
@@ -198,6 +204,21 @@ pub fn update_chat_session_provider(
 
 /// Update a session's watch-mode pacing override (`"on"` | `"off"` | None).
 /// None clears the override so the session falls back to the global setting.
+/// Update a session's permission posture
+/// (`read_only` | `manual` | `auto_edit` | `full_auto`). Persisted per-session
+/// so reopening a chat restores its last mode; new sessions start at `manual`.
+pub fn update_chat_session_permission_mode(
+    conn: &Connection,
+    chat_session_id: &str,
+    mode: &str,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE chat_sessions SET permission_mode = ?2 WHERE id = ?1",
+        params![chat_session_id, mode],
+    )?;
+    Ok(())
+}
+
 pub fn update_chat_session_watch_mode(
     conn: &Connection,
     chat_session_id: &str,
@@ -559,6 +580,27 @@ pub fn search_chat_messages(
 mod tests {
     use rusqlite::Connection;
     use super::*;
+
+    #[test]
+    fn permission_mode_defaults_manual_and_updates() {
+        let conn = super::super::mem();
+        // New sessions start at manual.
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        assert_eq!(cs.permission_mode, "manual");
+
+        // Update persists and reads back through the mapper.
+        update_chat_session_permission_mode(&conn, &cs.id, "full_auto").unwrap();
+        let cs2 = get_chat_session(&conn, &cs.id).unwrap().unwrap();
+        assert_eq!(cs2.permission_mode, "full_auto");
+
+        // Legacy/unknown values fail closed to manual.
+        conn.execute("UPDATE chat_sessions SET permission_mode = NULL WHERE id = ?1", params![cs.id]).unwrap();
+        assert_eq!(get_chat_session(&conn, &cs.id).unwrap().unwrap().permission_mode, "manual");
+        conn.execute("UPDATE chat_sessions SET permission_mode = 'bogus' WHERE id = ?1", params![cs.id]).unwrap();
+        assert_eq!(get_chat_session(&conn, &cs.id).unwrap().unwrap().permission_mode, "bogus");
+        // ("bogus" survives the mapping — the fail-closed parse lives in
+        // PermissionMode::from_db at the send site.)
+    }
 
     #[test]
     fn chat_session_and_messages_round_trip() {

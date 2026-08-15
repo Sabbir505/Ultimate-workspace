@@ -117,6 +117,42 @@ fn fs_target_path(name: &str, args: &Value) -> String {
     }
 }
 
+/// Human-facing summary for a Claude Code tool call that arrived over the
+/// can_use_tool control request (harness approval relay). The tool names are
+/// the CLI's own (Write/Edit/Bash/…), so the builtin `fs_tool_summary` doesn't
+/// apply — this maps the common ones and falls back to the raw name.
+pub(crate) fn harness_tool_summary(tool: &str, input: &Value) -> String {
+    let pick = |keys: &[&str]| -> Option<String> {
+        for k in keys {
+            if let Some(v) = input.get(*k).and_then(|v| v.as_str()) {
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+        None
+    };
+    let target = pick(&["file_path", "path", "notebook_path", "command", "pattern", "url", "prompt"])
+        .map(|t| if t.chars().count() > 160 { format!("{}…", t.chars().take(160).collect::<String>()) } else { t })
+        .unwrap_or_default();
+    let verb = match tool {
+        "Write" => "Write a file at",
+        "Edit" | "MultiEdit" | "NotebookEdit" => "Edit a file at",
+        "Bash" => "Run a shell command:",
+        "Read" => "Read",
+        "Glob" | "Grep" => "Search for",
+        "WebFetch" => "Fetch",
+        "WebSearch" => "Search the web for",
+        "Task" => "Launch a subagent:",
+        other => other,
+    };
+    if target.is_empty() {
+        verb.to_string()
+    } else {
+        format!("{verb} {target}")
+    }
+}
+
 /// Build a short human-facing summary of a filesystem tool call for the
 /// approval card (e.g. "write_file → C:/…/main.rs").
 fn fs_tool_summary(name: &str, args: &Value) -> String {

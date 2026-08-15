@@ -240,7 +240,7 @@ fn handle_send_chat_message(
     //    mobile turn picks it up). Previously this hardcoded Anthropic +
     //    the literal key "no-key" — every turn 401'd even with a real key
     //    configured, and non-Anthropic sessions were ignored entirely.
-    let (chat_session_id, provider_str, model) = {
+    let (chat_session_id, provider_str, model, permission_mode) = {
         let conn = db.lock();
         let id = resolve_chat_session(
             &conn,
@@ -251,7 +251,7 @@ fn handle_send_chat_message(
         let row = db::get_chat_session(&conn, &id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "chat session missing right after resolve".to_string())?;
-        (id, row.provider, row.model)
+        (id, row.provider, row.model, row.permission_mode)
     };
 
     // 2. Resolve provider + credentials exactly like the desktop
@@ -334,7 +334,7 @@ fn handle_send_chat_message(
         None,
         true,
         true,
-        crate::chat::permission::PermissionMode::FullAuto,
+        crate::chat::permission::PermissionMode::from_db(&permission_mode),
         Vec::new(),
         Vec::new(),
         None,

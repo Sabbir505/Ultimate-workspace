@@ -16,7 +16,7 @@ import { BranchDropdown } from "./BranchDropdown";
 import { useUiStore } from "../../state/ui";
 import { useChatStore } from "../../state/chat";
 import { useProjectsStore } from "../../state/projects";
-import { listChatSkills } from "../../lib/ipc";
+import { listChatSkills, listPromptTemplates, templateVariables, fillTemplate, type PromptTemplate } from "../../lib/ipc";
 
 const MAX_TEXT_BYTES = 512 * 1024;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
@@ -508,6 +508,14 @@ export function ChatComposer({
   }
   const [slashSkills, setSlashSkills] = useState<SlashSkill[]>([]);
   const [slashIndex, setSlashIndex] = useState(0);
+  // Prompt templates (roadmap #14): loaded alongside skills for the slash menu.
+  const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
+  // Variable-fill state: when a template with variables is selected, show a
+  // small inline form to fill them before inserting.
+  const [fillingTemplate, setFillingTemplate] = useState<PromptTemplate | null>(null);
+  const [fillValues, setFillValues] = useState<Record<string, string>>({});
+  // Standalone template picker popover (opens from the attach menu).
+  const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
 
   // The popup is active while the whole content is a partial first token
   // starting with "/" (no space typed yet).
@@ -523,6 +531,10 @@ export function ChatComposer({
     void listChatSkills().then((list) => {
       if (stale || !list) return;
       setSlashSkills(list.map((s) => ({ name: s.name, slug: s.slug })));
+    });
+    void listPromptTemplates().then((t) => {
+      if (stale) return;
+      setPromptTemplates(t);
     });
     return () => {
       stale = true;
@@ -549,6 +561,20 @@ export function ChatComposer({
     if (ta) {
       ta.focus();
       requestAnimationFrame(() => ta.setSelectionRange(command.length + 2, command.length + 2));
+    }
+  }, []);
+
+  // Insert a filled prompt template into the composer (roadmap #14).
+  const insertTemplateText = useCallback((text: string) => {
+    if (!text) return;
+    setContent((prev) => {
+      const sep = prev && !prev.endsWith("\n") ? "\n" : "";
+      return prev ? `${prev}${sep}${text}` : text;
+    });
+    const ta = textareaRef.current;
+    if (ta) {
+      ta.focus();
+      requestAnimationFrame(() => ta.setSelectionRange(-1, -1));
     }
   }, []);
 
@@ -856,6 +882,21 @@ export function ChatComposer({
                   role="menuitem"
                   onClick={() => {
                     setAttachMenuOpen(false);
+                    void listPromptTemplates().then((t) => {
+                      setPromptTemplates(t);
+                      setTemplatePickerOpen(true);
+                    });
+                  }}
+                >
+                  <span className="composer-attach-menu-icon">𝈟</span>
+                  <span>Insert prompt template…</span>
+                </button>
+                <button
+                  type="button"
+                  className="composer-attach-menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setAttachMenuOpen(false);
                     void pickWorkingFolder();
                   }}
                 >
@@ -899,6 +940,74 @@ export function ChatComposer({
               </div>
             )}
           </div>
+          {templatePickerOpen && (
+            <div className="composer-template-picker">
+              <div className="composer-template-picker-head">
+                <span>Insert prompt template</span>
+                <button type="button" className="ghost" onClick={() => { setTemplatePickerOpen(false); setFillingTemplate(null); }}>
+                  ✕
+                </button>
+              </div>
+              {fillingTemplate ? (
+                <div className="composer-template-fill">
+                  <div className="composer-template-fill-title">{fillingTemplate.name}</div>
+                  {templateVariables(fillingTemplate.body).map((v) => (
+                    <input
+                      key={v}
+                      value={fillValues[v] ?? ""}
+                      placeholder={`{{${v}}}`}
+                      onChange={(e) => setFillValues((f) => ({ ...f, [v]: e.target.value }))}
+                      autoFocus={v === templateVariables(fillingTemplate.body)[0]}
+                    />
+                  ))}
+                  <div className="composer-template-fill-actions">
+                    <button
+                      type="button"
+                      className="primary"
+                      onClick={() => {
+                        const filled = fillTemplate(fillingTemplate.body, fillValues);
+                        insertTemplateText(filled);
+                        setTemplatePickerOpen(false);
+                        setFillingTemplate(null);
+                        setFillValues({});
+                      }}
+                    >
+                      Insert
+                    </button>
+                    <button type="button" className="ghost" onClick={() => setFillingTemplate(null)}>
+                      Back
+                    </button>
+                  </div>
+                </div>
+              ) : promptTemplates.length === 0 ? (
+                <div className="composer-template-empty">No templates yet — add one under Settings → Assistant → Prompt templates.</div>
+              ) : (
+                <div className="composer-template-list">
+                  {promptTemplates.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      className="composer-template-item"
+                      onClick={() => {
+                        if (templateVariables(t.body).length > 0) {
+                          setFillingTemplate(t);
+                          setFillValues({});
+                        } else {
+                          insertTemplateText(t.body);
+                          setTemplatePickerOpen(false);
+                        }
+                      }}
+                    >
+                      <span className="composer-template-item-name">{t.name}</span>
+                      <span className="composer-template-item-vars">
+                        {templateVariables(t.body).map((v) => `{{${v}}}`).join(" ")}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {forceResearch && (
             <button
               type="button"

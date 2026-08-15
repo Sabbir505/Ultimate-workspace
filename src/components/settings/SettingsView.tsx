@@ -18,6 +18,7 @@ import { useArtifactsStore } from "../../state/artifacts";
 import { ModelMarket } from "./ModelMarket";
 import { KnowledgePanel } from "./KnowledgePanel";
 import { PermissionRulesPanel } from "./PermissionRulesPanel";
+import { PromptTemplatesPanel } from "./PromptTemplatesPanel";
 import { ConnectorIcon, FamilyIcon, FAMILY_NAMES } from "./ConnectorIcon";
 import { Modal } from "../common/Modal";
 import {
@@ -281,7 +282,12 @@ export function SettingsView() {
                 </>
               )}
 
-              {category === "assistant" && <AssistantPanel />}
+              {category === "assistant" && (
+                <>
+                  <AssistantPanel />
+                  <PromptTemplatesPanel />
+                </>
+              )}
               {category === "git" && <GitPanel />}
 
               {category === "pricing" && (

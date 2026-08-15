@@ -380,6 +380,54 @@ export const checkBudgets = () =>
 export const onBudgetAlert = (handler: (p: BudgetAlertPayload) => void) =>
   safeListen<BudgetAlertPayload>("budget:alert", handler);
 
+// ---- Prompt templates (roadmap #14) ----
+// A prompt template is a reusable prompt body with `{{variable}}` placeholders.
+// Selecting one in the composer fills the variables and inserts the completed
+// text. Stored as a JSON array under the `prompts.templates` app_settings key.
+
+export interface PromptTemplate {
+  id: string;
+  name: string;
+  /** Prompt body with `{{varName}}` placeholders. */
+  body: string;
+  /** Optional `/trigger` that lists this template in the slash menu. */
+  trigger?: string;
+  createdAt: number;
+}
+
+const PROMPT_TEMPLATES_KEY = "prompts.templates";
+
+export async function listPromptTemplates(): Promise<PromptTemplate[]> {
+  try {
+    const raw = await getSetting(PROMPT_TEMPLATES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as PromptTemplate[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function savePromptTemplates(templates: PromptTemplate[]): Promise<void> {
+  await setSetting(PROMPT_TEMPLATES_KEY, JSON.stringify(templates));
+}
+
+/** Extract `{{var}}` placeholders from a template body (deduped, in order). */
+export function templateVariables(body: string): string[] {
+  const vars: string[] = [];
+  const re = /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(body)) !== null) {
+    if (!vars.includes(m[1])) vars.push(m[1]);
+  }
+  return vars;
+}
+
+/** Substitute `{{var}}` placeholders using the provided values (missing → empty). */
+export function fillTemplate(body: string, values: Record<string, string>): string {
+  return body.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, name: string) => values[name] ?? "");
+}
+
 // --- Installed skills / loops (harness skill directories) ---
 export const listInstalledSkills = () => safeInvoke<InstalledSkill[] | null>("list_installed_skills");
 export const listInstalledLoops = () => safeInvoke<InstalledSkill[] | null>("list_installed_loops");

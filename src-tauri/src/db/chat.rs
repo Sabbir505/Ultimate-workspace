@@ -446,6 +446,115 @@ pub fn mark_superseded(conn: &Connection, ids: &[i64], summary_id: i64) -> DbRes
     Ok(())
 }
 
+// ---- full-text search ----
+
+/// Build a safe FTS5 MATCH expression from free-form user input. FTS5 has its
+/// own query language (AND/OR/NOT, phrases, column filters), so each term is
+/// stripped to alphanumeric/underscore, double-quoted (quoted strings are
+/// never parsed as operators), and given a trailing `*` prefix marker —
+/// "stream" also hits "streaming". Returns None when nothing searchable
+/// remains.
+fn fts_match_query(query: &str) -> Option<String> {
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .filter_map(|t| {
+            let clean: String = t
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if clean.is_empty() {
+                None
+            } else {
+                Some(format!("\"{clean}\"*"))
+            }
+        })
+        .collect();
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" "))
+    }
+}
+
+/// Full-text search across chat message content (FTS5) plus session titles
+/// (LIKE). Title hits come first (strong signal), then content hits ordered
+/// by FTS rank. Superseded messages (folded into a compaction summary) are
+/// excluded.
+pub fn search_chat_messages(
+    conn: &Connection,
+    query: &str,
+    limit: u32,
+) -> DbResult<Vec<ChatSearchResult>> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let limit = limit.clamp(1, 100) as i64;
+    let mut out: Vec<ChatSearchResult> = Vec::new();
+
+    // Pass 1: session titles. LIKE with escaped wildcards; no FTS needed for
+    // a single short column.
+    let like = format!(
+        "%{}%",
+        trimmed.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    );
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, title, last_active_at FROM chat_sessions
+             WHERE title IS NOT NULL AND title LIKE ?1 ESCAPE '\\'
+             ORDER BY last_active_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![like, limit], |row| {
+            Ok(ChatSearchResult {
+                chat_session_id: row.get("id")?,
+                session_title: row.get("title")?,
+                message_id: None,
+                snippet: None,
+                role: None,
+                created_at: row.get("last_active_at")?,
+                last_active_at: row.get("last_active_at")?,
+            })
+        })?;
+        for r in rows {
+            out.push(r?);
+        }
+    }
+
+    // Pass 2: message content via the FTS5 external-content index.
+    if let Some(fts_query) = fts_match_query(trimmed) {
+        let remaining = limit - out.len() as i64;
+        if remaining > 0 {
+            let mut stmt = conn.prepare(
+                "SELECT m.chat_session_id, s.title, m.id,
+                        snippet(chat_messages_fts, 0, '', '', '…', 24) AS snip,
+                        m.role, m.created_at, s.last_active_at
+                 FROM chat_messages_fts
+                 JOIN chat_messages m ON m.id = chat_messages_fts.rowid
+                 JOIN chat_sessions s ON s.id = m.chat_session_id
+                 WHERE chat_messages_fts MATCH ?1 AND m.superseded_by IS NULL
+                 ORDER BY rank
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![fts_query, remaining], |row| {
+                Ok(ChatSearchResult {
+                    chat_session_id: row.get("chat_session_id")?,
+                    session_title: row.get("title")?,
+                    message_id: Some(row.get("id")?),
+                    snippet: row.get("snip")?,
+                    role: row.get("role")?,
+                    created_at: row.get("created_at")?,
+                    last_active_at: row.get("last_active_at")?,
+                })
+            })?;
+            for r in rows {
+                out.push(r?);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
@@ -632,5 +741,133 @@ mod tests {
 
         // Unknown id is a no-op, not an error.
         assert!(!delete_chat_message(&conn, 9999).unwrap());
+    }
+
+    // Insert a plain message with only the fields FTS tests care about.
+    fn add_msg(conn: &Connection, session: &str, role: &str, content: &str) -> ChatMessageRecord {
+        add_chat_message(
+            conn, session, role, content, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn fts_finds_content_across_sessions_with_prefix_match() {
+        let conn = super::super::mem();
+        let a = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        let b = create_chat_session(&conn, "openai", "gpt-4o", None).unwrap();
+        update_chat_session_title(&conn, &a.id, "rust work").unwrap();
+        add_msg(&conn, &a.id, "user", "how do I stream tokens from the API?");
+        add_msg(&conn, &b.id, "user", "unrelated cooking question");
+
+        // Prefix query: "stream" must hit "streaming".
+        add_msg(&conn, &b.id, "assistant", "streaming responses use SSE");
+        let hits = search_chat_messages(&conn, "stream", 10).unwrap();
+        assert_eq!(hits.len(), 2, "both streaming messages should match");
+        assert!(hits.iter().all(|h| h.message_id.is_some()));
+        assert!(hits.iter().any(|h| h.chat_session_id == a.id));
+        assert!(hits.iter().any(|h| h.chat_session_id == b.id));
+        let snippet = hits[0].snippet.as_deref().unwrap_or("");
+        assert!(snippet.contains("stream"), "snippet should carry context: {snippet}");
+
+        // No match anywhere → empty, not an error.
+        assert!(search_chat_messages(&conn, "zzzznothing", 10).unwrap().is_empty());
+        // Empty/whitespace query short-circuits.
+        assert!(search_chat_messages(&conn, "   ", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn fts_matches_session_titles_without_message_hit() {
+        let conn = super::super::mem();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        update_chat_session_title(&conn, &cs.id, "Deploy the relay server").unwrap();
+        add_msg(&conn, &cs.id, "user", "ok");
+
+        let hits = search_chat_messages(&conn, "relay", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chat_session_id, cs.id);
+        assert!(hits[0].message_id.is_none(), "title-only hit has no message");
+        assert_eq!(hits[0].session_title.as_deref(), Some("Deploy the relay server"));
+
+        // LIKE wildcards in the query must be literal, not pattern syntax.
+        assert!(search_chat_messages(&conn, "100%", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn fts_excludes_superseded_and_tracks_edits_and_deletes() {
+        let conn = super::super::mem();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        let m1 = add_msg(&conn, &cs.id, "user", "the quixotic buffer overflowed");
+        let m2 = add_msg(&conn, &cs.id, "assistant", "quixotic indeed, retrying");
+        mark_superseded(&conn, &[m1.id], m2.id).unwrap();
+
+        // Superseded rows are folded into a summary — not searchable.
+        let hits = search_chat_messages(&conn, "quixotic", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, Some(m2.id));
+
+        // Content edits re-index via the UPDATE trigger.
+        conn.execute(
+            "UPDATE chat_messages SET content = 'patched answer' WHERE id = ?1",
+            rusqlite::params![m2.id],
+        )
+        .unwrap();
+        assert!(search_chat_messages(&conn, "quixotic", 10).unwrap().is_empty());
+        assert_eq!(search_chat_messages(&conn, "patched", 10).unwrap().len(), 1);
+
+        // Deletes drop the row from the index.
+        delete_chat_message(&conn, m2.id).unwrap();
+        assert!(search_chat_messages(&conn, "patched", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn fts_query_syntax_junk_is_sanitized() {
+        let conn = super::super::mem();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        add_msg(&conn, &cs.id, "user", "plain message about anchors");
+
+        // FTS5 operators / punctuation must not parse as query syntax.
+        for junk in [
+            "\"unclosed",
+            "AND OR NOT NEAR",
+            "content:foo",
+            "anchors)",
+            "*",
+            "!!! ---",
+            "anchors AND \"",
+        ] {
+            let _ = search_chat_messages(&conn, junk, 10).unwrap();
+        }
+        // A real term buried in junk still matches.
+        let hits = search_chat_messages(&conn, "\"anchors\" (", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn fts_backfill_migration_indexes_preexisting_rows() {
+        // Simulate a pre-FTS database: build the schema, drop the FTS objects,
+        // insert rows directly, then re-run configure() and confirm the
+        // rebuild backfilled the index.
+        let conn = super::super::mem();
+        conn.execute_batch(
+            "DROP TRIGGER chat_messages_fts_ai;
+             DROP TRIGGER chat_messages_fts_ad;
+             DROP TRIGGER chat_messages_fts_au;
+             DROP TABLE chat_messages_fts;",
+        )
+        .unwrap();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        conn.execute(
+            "INSERT INTO chat_messages (chat_session_id, role, content, created_at)
+             VALUES (?1, 'user', 'legacy message about flux capacitors', 1)",
+            rusqlite::params![cs.id],
+        )
+        .unwrap();
+
+        super::super::configure(&conn).unwrap();
+        let hits = search_chat_messages(&conn, "flux", 10).unwrap();
+        assert_eq!(hits.len(), 1, "backfill should index pre-existing rows");
+        assert_eq!(hits[0].chat_session_id, cs.id);
     }
 }

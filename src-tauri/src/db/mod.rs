@@ -84,6 +84,26 @@ fn migrate_unc_paths(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// One-time backfill for databases created before the FTS index existed.
+/// The FTS table is external-content, so a plain scan of it reads the CONTENT
+/// table and can't reveal whether the index is populated — compare row counts
+/// against the `docsize` shadow table (one row per indexed document) instead.
+/// On mismatch, `rebuild` re-reads chat_messages; when in sync this is a no-op.
+fn migrate_chat_fts(conn: &Connection) -> DbResult<()> {
+    let in_sync = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM chat_messages)
+                   = (SELECT COUNT(*) FROM chat_messages_fts_docsize)",
+            [],
+            |r| r.get::<_, bool>(0),
+        )
+        .ok();
+    if in_sync != Some(true) {
+        conn.execute_batch("INSERT INTO chat_messages_fts(chat_messages_fts) VALUES('rebuild');")?;
+    }
+    Ok(())
+}
+
 #[cfg(not(windows))]
 fn migrate_unc_paths(_conn: &Connection) -> DbResult<()> {
     Ok(())
@@ -109,6 +129,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_messages_v2(conn)?;
     migrate_chat_messages_started_completed(conn)?;
     migrate_chat_messages_perf(conn)?;
+    migrate_chat_fts(conn)?;
     migrate_unc_paths(conn)
 }
 
@@ -480,6 +501,31 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at);
         CREATE INDEX IF NOT EXISTS idx_chat_sessions_active ON chat_sessions(last_active_at DESC);
 
+        -- Full-text search over chat messages (command palette Chats
+        -- section). External-content table: chat_messages stays the source of
+        -- truth and the triggers below keep the index in sync on
+        -- insert/delete/content-update. Existing rows are backfilled once by
+        -- migrate_chat_fts().
+        CREATE VIRTUAL TABLE IF NOT EXISTS chat_messages_fts USING fts5(
+          content,
+          content='chat_messages',
+          content_rowid='id',
+          tokenize='unicode61'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS chat_messages_fts_ai AFTER INSERT ON chat_messages BEGIN
+          INSERT INTO chat_messages_fts(rowid, content) VALUES (new.id, new.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS chat_messages_fts_ad AFTER DELETE ON chat_messages BEGIN
+          INSERT INTO chat_messages_fts(chat_messages_fts, rowid, content)
+            VALUES('delete', old.id, old.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS chat_messages_fts_au AFTER UPDATE OF content ON chat_messages BEGIN
+          INSERT INTO chat_messages_fts(chat_messages_fts, rowid, content)
+            VALUES('delete', old.id, old.content);
+          INSERT INTO chat_messages_fts(rowid, content) VALUES (new.id, new.content);
+        END;
+
         CREATE TABLE IF NOT EXISTS artifacts (
           id TEXT PRIMARY KEY,
           chat_session_id TEXT,
@@ -621,7 +667,7 @@ pub use chat::{
     delete_chat_sessions_for_project, delete_empty_chat_sessions,
     get_chat_session, list_active_chat_messages, list_chat_messages, list_chat_messages_page,
     list_chat_sessions,
-    list_chat_session_connectors, mark_superseded, set_chat_session_connectors,
+    list_chat_session_connectors, mark_superseded, search_chat_messages, set_chat_session_connectors,
     set_chat_session_project, set_chat_session_starred, set_chat_session_unread,
     touch_chat_session, update_chat_session_agent, update_chat_session_model,
     update_chat_session_provider, update_chat_session_title, update_chat_session_watch_mode,

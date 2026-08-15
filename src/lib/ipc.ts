@@ -603,6 +603,21 @@ export interface ChatErrorPayload {
 
 export const listChatSessions = () =>
   safeInvoke<ChatSession[] | null>("list_chat_sessions");
+/** One hit from searchChatMessages (command palette "Chats" section).
+ *  messageId/snippet/role are null for title-only matches. */
+export interface ChatSearchResult {
+  chatSessionId: string;
+  sessionTitle: string | null;
+  messageId: number | null;
+  /** Short plain-text excerpt around the match (no highlight markers). */
+  snippet: string | null;
+  role: string | null;
+  createdAt: number;
+  lastActiveAt: number;
+}
+/** Full-text search across chat message content + session titles. */
+export const searchChatMessages = (query: string, limit?: number) =>
+  safeInvoke<ChatSearchResult[] | null>("search_chat_messages", { query, limit: limit ?? null });
 export const createChatSession = (provider: string, model: string, projectId?: string | null) =>
   safeInvoke<ChatSession | null>("create_chat_session", { provider, model, projectId: projectId ?? null });
 /** Bind (or unbind with null) a chat session to a project, so it nests under

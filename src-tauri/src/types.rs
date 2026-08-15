@@ -287,6 +287,24 @@ pub struct ChatSession {
     pub project_id: Option<String>,
 }
 
+/// One hit from `search_chat_messages` (command palette "Chats" section).
+/// `message_id`/`snippet`/`role` are `None` for title-only matches — the
+/// session title matched the query, not a specific message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSearchResult {
+    pub chat_session_id: String,
+    pub session_title: Option<String>,
+    pub message_id: Option<i64>,
+    /// Short plain-text excerpt around the match (no highlight markers).
+    pub snippet: Option<String>,
+    pub role: Option<String>,
+    /// Message `created_at` for content hits; session `last_active_at` for
+    /// title-only hits.
+    pub created_at: i64,
+    pub last_active_at: i64,
+}
+
 /// A file attached to a chat message from the composer. Images are forwarded
 /// to the model as vision input; documents (docx/pptx/xlsx) are extracted to
 /// text server-side; plain-text files carry their decoded text directly.

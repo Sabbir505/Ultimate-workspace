@@ -314,6 +314,7 @@ pub fn run() {
             commands::skills_cmds::list_chat_skills,
             // chat mode
             commands::chat_cmds::list_chat_sessions,
+            commands::chat_cmds::search_chat_messages,
             commands::chat_cmds::create_chat_session,
             commands::chat_cmds::delete_chat_session,
             commands::chat_cmds::delete_all_chat_sessions,

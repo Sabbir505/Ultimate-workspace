@@ -1,18 +1,22 @@
 // Command palette (§7.5, wireframe §12.3): fuzzy search over sessions,
 // projects, and top-level actions. Hand-rolled scorer in lib/fuzzy.ts.
+// The "Chats" section is different: full-text search over chat message
+// content + titles via the backend FTS5 index (debounced IPC).
 import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { fuzzyFilter } from "../../lib/fuzzy";
+import { searchChatMessages, type ChatSearchResult } from "../../lib/ipc";
 import { relativeTime } from "../../lib/relativeTime";
 import { sessionDisplayTitle } from "../../lib/sessionTitle";
 import { defaultHarness, newSessionFlow, openSession } from "../../lib/sessionLauncher";
+import { useChatStore } from "../../state/chat";
 import { useProjectsStore } from "../../state/projects";
 import { useUiStore } from "../../state/ui";
 import type { SessionRecord } from "../../types";
 
 interface PaletteItem {
   id: string;
-  section: "Sessions" | "Projects" | "Actions";
+  section: "Sessions" | "Chats" | "Projects" | "Actions";
   label: string;
   hint?: string;
   run: () => void;
@@ -25,15 +29,42 @@ export function CommandPalette() {
   const sessions = useProjectsStore((s) => s.sessions);
   const [query, setQuery] = useState("");
   const [activeIdx, setActiveIdx] = useState(0);
+  const [chatHits, setChatHits] = useState<ChatSearchResult[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (paletteOpen) {
       setQuery("");
       setActiveIdx(0);
+      setChatHits([]);
       requestAnimationFrame(() => inputRef.current?.focus());
     }
   }, [paletteOpen]);
+
+  // Debounced full-text chat search. Unlike the fuzzy sections (in-memory),
+  // this hits the SQLite FTS5 index over every stored chat message.
+  useEffect(() => {
+    if (!paletteOpen) return;
+    const q = query.trim();
+    if (q.length < 2) {
+      setChatHits([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void searchChatMessages(q, 12)
+        .then((res) => {
+          if (!cancelled) setChatHits(res ?? []);
+        })
+        .catch(() => {
+          if (!cancelled) setChatHits([]);
+        });
+    }, 200);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [paletteOpen, query]);
 
   const items = useMemo<PaletteItem[]>(() => {
     if (!paletteOpen) return [];
@@ -136,9 +167,22 @@ export function CommandPalette() {
 
   if (!paletteOpen) return null;
 
+  // FTS hits are server-ranked already (titles first, then rank) — no
+  // fuzzyFilter here. Selecting a hit opens that chat session.
+  const chatItems: PaletteItem[] = chatHits.map((hit) => ({
+    id: `chat:${hit.chatSessionId}:${hit.messageId ?? "title"}`,
+    section: "Chats",
+    label: hit.sessionTitle?.trim() || "Untitled chat",
+    hint: hit.snippet ?? (hit.messageId == null ? "Title match" : undefined),
+    run: () => {
+      setPaletteOpen(false);
+      void useChatStore.getState().selectSession(hit.chatSessionId);
+    },
+  }));
+
   const sections: Array<{ name: PaletteItem["section"]; items: PaletteItem[] }> = [];
-  for (const name of ["Sessions", "Projects", "Actions"] as const) {
-    const sectionItems = items.filter((i) => i.section === name);
+  for (const name of ["Sessions", "Chats", "Projects", "Actions"] as const) {
+    const sectionItems = name === "Chats" ? chatItems : items.filter((i) => i.section === name);
     if (sectionItems.length > 0) sections.push({ name, items: sectionItems });
   }
   const flat = sections.flatMap((s) => s.items);
@@ -156,7 +200,7 @@ export function CommandPalette() {
       <div className="palette">
         <input
           ref={inputRef}
-          placeholder="Search sessions, projects, actions…"
+          placeholder="Search sessions, chats, projects, actions…"
           value={query}
           onChange={(e) => {
             setQuery(e.target.value);

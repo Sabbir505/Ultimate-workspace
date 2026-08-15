@@ -50,6 +50,18 @@ pub fn list_chat_sessions(db: State<DbState>) -> CmdResult<Vec<ChatSession>> {
     db::list_chat_sessions(&conn).map_err(|e| e.to_string())
 }
 
+/// Full-text search across chat message content + session titles (powers the
+/// command palette "Chats" section).
+#[tauri::command]
+pub fn search_chat_messages(
+    query: String,
+    limit: Option<u32>,
+    db: State<DbState>,
+) -> CmdResult<Vec<ChatSearchResult>> {
+    let conn = db.0.lock();
+    db::search_chat_messages(&conn, &query, limit.unwrap_or(20)).map_err(|e| e.to_string())
+}
+
 // ---- Artifacts (30-day retention) ----
 
 /// All persisted artifacts, most recent first.

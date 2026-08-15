@@ -13,8 +13,10 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
+import { SerializeAddon } from "@xterm/addon-serialize";
 import "@xterm/xterm/css/xterm.css";
-import { resizePty, safeListen, updateSessionTitle, writePty } from "../../lib/ipc";
+import { resizePty, safeListen, updateSessionTitle, writePty, exportSessionMarkdown } from "../../lib/ipc";
 import { ptyChannel } from "../../lib/channels";
 import { respawnPane } from "../../lib/sessionLauncher";
 import { expandSkillCommand } from "../../lib/skillExpansion";
@@ -114,6 +116,8 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const searchRef = useRef<SearchAddon | null>(null);
+  const serializeRef = useRef<SerializeAddon | null>(null);
 
   const paneId = pane.paneId;
   const exited = pane.data.kind === "terminal" ? pane.data.exited : false;
@@ -124,6 +128,12 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
   // Accumulate Mermaid/HTML/JSX blocks rendered as expandable cards below the
   // terminal. Max 5 items; auto-scrolls to newest on add. Cleared on exit/respawn.
   const [feedItems, setFeedItems] = useState<DetectedBlock[]>([]);
+  // Find-in-terminal (roadmap #13): a small search bar that highlights + jumps
+  // within the xterm scrollback using the SearchAddon.
+  const [findOpen, setFindOpen] = useState(false);
+  const [findTerm, setFindTerm] = useState("");
+  const [findIndex, setFindIndex] = useState(0);
+  const [copied, setCopied] = useState(false);
   const feedEndRef = useRef<HTMLDivElement>(null);
 
   // --- Per-pane activity parsing from PTY output ---
@@ -249,9 +259,15 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    const search = new SearchAddon();
+    term.loadAddon(search);
+    const serialize = new SerializeAddon();
+    term.loadAddon(serialize);
     term.open(container);
     termRef.current = term;
     fitRef.current = fit;
+    searchRef.current = search;
+    serializeRef.current = serialize;
 
     // Ctrl+scroll font zoom (standard terminal behavior).
     //
@@ -514,8 +530,77 @@ export function TerminalPane({ pane, focused, visible = true }: Props) {
     return () => window.removeEventListener("keydown", handler);
   }, [exited, paneId]);
 
+  // Ctrl/Cmd+F opens the find bar (roadmap #13); Esc closes it.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+        if (usePanesStore.getState().focusedPaneId === paneId) {
+          e.preventDefault();
+          setFindOpen(true);
+        }
+      } else if (e.key === "Escape") {
+        setFindOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [paneId]);
+
+  // Run a find (next/prev match) using the SearchAddon.
+  const runFind = (dir: 1 | -1 = 1) => {
+    const addon = searchRef.current;
+    if (!addon || !findTerm) return;
+    if (dir === 1) addon.findNext(findTerm, { incremental: false });
+    else addon.findPrevious(findTerm, { incremental: false });
+    setFindIndex((i) => i + 1);
+  };
+
+  // Export the full scrollback as markdown via the existing backend command.
+  const runExport = async () => {
+    if (!sessionId) return;
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const dest = await save({
+      defaultPath: `${Date.now()}-session.md`,
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+    });
+    if (!dest) return;
+    try {
+      const md = await exportSessionMarkdown(paneId);
+      if (md) {
+        const writeTextFile = (await import("@tauri-apps/plugin-fs")).writeTextFile;
+        await writeTextFile(dest, md);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1800);
+      }
+    } catch {
+      setCopied(true); // surface failure via the same copied flash is imperfect
+      setTimeout(() => setCopied(false), 1800);
+    }
+  };
+
   return (
     <>
+      {findOpen && (
+        <div className="terminal-find-bar">
+          <input
+            value={findTerm}
+            onChange={(e) => { setFindTerm(e.target.value); setFindIndex(-1); }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { e.preventDefault(); runFind(e.shiftKey ? -1 : 1); }
+              else if (e.key === "Escape") setFindOpen(false);
+            }}
+            placeholder="Find in terminal…"
+            autoFocus
+          />
+          <button className="ghost" onClick={() => runFind(-1)} title="Previous match">↑</button>
+          <button className="ghost" onClick={() => runFind(1)} title="Next match">↓</button>
+          <span className="terminal-find-count">{findIndex >= 0 && findTerm ? "match" : ""}</span>
+          <button className="ghost" onClick={() => void runExport()} disabled={!sessionId} title="Export scrollback as Markdown">
+            {copied ? "Exported" : "Export"}
+          </button>
+          <button className="ghost" onClick={() => setFindOpen(false)} title="Close (Esc)">✕</button>
+        </div>
+      )}
       <div className="pane-body" ref={containerRef} />
       {/* Activity feed: detected Mermaid/HTML/JSX blocks from terminal output. */}
       {feedItems.length > 0 && (

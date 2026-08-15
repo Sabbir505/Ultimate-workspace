@@ -663,3 +663,39 @@
   gap: 3px;
   white-space: nowrap;
 }
+
+/* --- Terminal find bar + scrollback export (roadmap #13) --- */
+.terminal-find-bar {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--surface-glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  box-shadow: var(--glass-rim-soft);
+}
+.terminal-find-bar input {
+  width: 180px;
+  padding: 3px 8px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs, 4px);
+}
+.terminal-find-bar input:focus {
+  outline: none;
+  border-color: var(--accent, #58a6ff);
+}
+.terminal-find-count {
+  min-width: 18px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}

@@ -1025,8 +1025,3 @@
   border-color: var(--danger);
   box-shadow: var(--glass-rim), 0 0 0 3px rgba(214, 69, 69, 0.22);
 }
-
-/* --- Per-action approval card (filesystem + connected-account tools) ---
-   Codex-style: one compact row (badge + tool + target + Deny/Allow), no
-   side ribbon, no payload dump. */
-.composer-approval-wrap {

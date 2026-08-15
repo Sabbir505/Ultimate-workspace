@@ -16,7 +16,7 @@ import { BranchDropdown } from "./BranchDropdown";
 import { useUiStore } from "../../state/ui";
 import { useChatStore } from "../../state/chat";
 import { useProjectsStore } from "../../state/projects";
-import { listChatSkills, listPromptTemplates, templateVariables, fillTemplate, type PromptTemplate } from "../../lib/ipc";
+import { listChatSkills, listPromptTemplates, templateVariables, fillTemplate, transcribeAudio, type PromptTemplate } from "../../lib/ipc";
 
 const MAX_TEXT_BYTES = 512 * 1024;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
@@ -516,6 +516,11 @@ export function ChatComposer({
   const [fillValues, setFillValues] = useState<Record<string, string>>({});
   // Standalone template picker popover (opens from the attach menu).
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
+  // Voice recording (roadmap #16): MediaRecorder state.
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
   // The popup is active while the whole content is a partial first token
   // starting with "/" (no space typed yet).
@@ -577,6 +582,42 @@ export function ChatComposer({
       requestAnimationFrame(() => ta.setSelectionRange(-1, -1));
     }
   }, []);
+
+  // Voice recording (roadmap #16): start/stop MediaRecorder, then transcribe
+  // the clip and insert the recognized text.
+  const toggleRecording = useCallback(async () => {
+    if (recording) {
+      mediaRecorderRef.current?.stop();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const rec = new MediaRecorder(stream);
+      audioChunksRef.current = [];
+      rec.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
+      rec.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const blob = new Blob(audioChunksRef.current, { type: rec.mimeType || "audio/webm" });
+        setRecording(false);
+        setTranscribing(true);
+        try {
+          const buf = await blob.arrayBuffer();
+          const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+          const res = await transcribeAudio(b64, blob.type);
+          if (res?.text) insertTemplateText(res.text);
+        } catch {
+          // transcription failed — leave composer unchanged
+        } finally {
+          setTranscribing(false);
+        }
+      };
+      mediaRecorderRef.current = rec;
+      rec.start();
+      setRecording(true);
+    } catch {
+      // no mic permission / unsupported — ignore
+    }
+  }, [recording, insertTemplateText]);
 
   // Close the "+" popover on outside click.
   useEffect(() => {
@@ -852,6 +893,16 @@ export function ChatComposer({
             }}
           />
           <div className="composer-attach-wrap" ref={attachMenuRef}>
+            <button
+              type="button"
+              className={`composer-mic-btn${recording ? " recording" : ""}`}
+              title={recording ? "Stop recording" : transcribing ? "Transcribing…" : "Record voice"}
+              aria-label={recording ? "Stop recording" : "Record voice"}
+              disabled={transcribing}
+              onClick={() => void toggleRecording()}
+            >
+              {transcribing ? "…" : recording ? "◼" : "🎙"}
+            </button>
             <button
               type="button"
               className="composer-attach-btn"

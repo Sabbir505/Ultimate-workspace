@@ -421,6 +421,7 @@ pub fn run() {
             commands::budget::set_budget,
             commands::budget::remove_budget,
             commands::budget::check_budgets,
+            commands::speech::transcribe_audio,
         ]);
 
     let app = builder

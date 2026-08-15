@@ -1707,3 +1707,30 @@
   display: flex;
   gap: 8px;
 }
+
+/* --- Voice recording mic button (roadmap #16) --- */
+.composer-mic-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.composer-mic-btn:hover {
+  background: var(--surface-2);
+}
+.composer-mic-btn.recording {
+  background: color-mix(in srgb, var(--danger, #f85149) 16%, transparent);
+  color: var(--danger, #f85149);
+  border-color: var(--danger, #f85149);
+}
+.composer-mic-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

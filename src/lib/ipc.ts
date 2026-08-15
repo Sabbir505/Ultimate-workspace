@@ -383,6 +383,21 @@ export const checkBudgets = () =>
 export const onBudgetAlert = (handler: (p: BudgetAlertPayload) => void) =>
   safeListen<BudgetAlertPayload>("budget:alert", handler);
 
+// ---- Voice input (roadmap #16) ----
+
+export interface TranscriptionResult {
+  text: string;
+  baseUrl: string;
+}
+
+/** Transcribe a recorded audio clip (base64 WAV/MP3) via a whisper-compatible
+ *  endpoint. Returns the recognized text. */
+export const transcribeAudio = (payload: string, mime?: string) =>
+  safeInvoke<TranscriptionResult | null>("transcribe_audio", {
+    payload,
+    mime: mime ?? null,
+  });
+
 // ---- Prompt templates (roadmap #14) ----
 // A prompt template is a reusable prompt body with `{{variable}}` placeholders.
 // Selecting one in the composer fills the variables and inserts the completed

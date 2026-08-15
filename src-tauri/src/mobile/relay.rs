@@ -105,6 +105,28 @@ pub fn broadcast_automation_run_finished(
     );
 }
 
+/// Push a budget-alert notice to every connected phone (roadmap #10).
+pub fn broadcast_budget_alert(
+    app: &AppHandle,
+    project_id: &str,
+    project_name: &str,
+    monthly_usd: f64,
+    spent_usd: f64,
+) {
+    let Some(state) = app.try_state::<crate::MobileRelayState>() else {
+        return;
+    };
+    broadcast(
+        &state.0,
+        DesktopMessage::BudgetAlert {
+            project_id: project_id.to_string(),
+            project_name: project_name.to_string(),
+            monthly_usd,
+            spent_usd,
+        },
+    );
+}
+
 /// Generate a 256-bit URL-safe pairing token.
 fn new_pairing_token() -> String {
     let mut bytes = [0u8; 32];

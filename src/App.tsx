@@ -28,6 +28,7 @@ import { GitToolsSidebar } from "./components/chat/GitToolsSidebar";
 const CommandPalette = lazy(() => import("./components/command-palette/CommandPalette").then((m) => ({ default: m.CommandPalette })));
 import { useChatEvents } from "./hooks/useChatEvents";
 import { useAutomationEvents } from "./hooks/useAutomationEvents";
+import { useBudgetEvents } from "./hooks/useBudgetEvents";
 import { useBrowserMcpEvents } from "./hooks/useBrowserMcpEvents";
 import { useGitStatusPolling } from "./hooks/useGitStatusPolling";
 import { useKeybindings } from "./hooks/useKeybindings";
@@ -98,6 +99,7 @@ export default function App() {
   usePtyEvents();
   useChatEvents();
   useAutomationEvents();
+  useBudgetEvents();
   usePaneMemory();
   useModelDownloadEvents();
   useBrowserMcpEvents();

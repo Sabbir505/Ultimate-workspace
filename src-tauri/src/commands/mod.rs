@@ -13,4 +13,5 @@ pub mod local_model_market;
 pub mod projects;
 pub mod pty_cmds;
 pub mod skills_cmds;
+pub mod budget;
 pub mod updater_cmds;

@@ -416,6 +416,10 @@ pub fn run() {
             chat::export::export_chat_zip,
             chat::export::export_project_zip,
             chat::export::import_chat_zip,
+            commands::budget::list_budgets,
+            commands::budget::set_budget,
+            commands::budget::remove_budget,
+            commands::budget::check_budgets,
         ]);
 
     let app = builder

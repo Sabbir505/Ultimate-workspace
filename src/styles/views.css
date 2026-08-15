@@ -906,3 +906,65 @@
   font-size: 11px;
   line-height: 1.4;
 }
+
+/* --- Budget/spend alerts panel (roadmap #10) --- */
+.budget-panel {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  padding: 12px 14px;
+  background: var(--surface-glass);
+}
+.budget-panel-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+.budget-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.budget-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+.budget-row-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.budget-row-spend {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+.budget-row-pct {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.budget-row-pct.over {
+  color: var(--danger, #f85149);
+  font-weight: 700;
+}
+.budget-row-edit {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.budget-row-edit input {
+  width: 90px;
+  padding: 3px 6px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs, 4px);
+}

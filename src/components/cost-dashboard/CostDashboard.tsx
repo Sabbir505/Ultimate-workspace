@@ -7,6 +7,7 @@ import { DailyChart } from "./DailyChart";
 import { StatsRow } from "./StatsRow";
 import { ModelBreakdownTable } from "./ModelBreakdownTable";
 import { CostQualityPanel } from "./CostQualityPanel";
+import { BudgetPanel } from "./BudgetPanel";
 
 export function CostDashboard() {
   const setActiveView = useUiStore(s => s.setActiveView);
@@ -53,6 +54,7 @@ export function CostDashboard() {
                 <ModelBreakdownTable rows={rollups.perModel} />
                 <CostQualityPanel q={rollups.costQuality} cacheSavingsUsd={rollups.costQuality.cacheSavingsUsd} />
               </div>
+              <BudgetPanel perProject={rollups.perProject} />
             </>
           ) : null}
         </div>

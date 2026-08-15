@@ -195,6 +195,14 @@ pub enum DesktopMessage {
         status: String,
         summary: String,
     },
+    /// A project's monthly spend crossed its configured budget threshold
+    /// (roadmap #10). The phone shows it as a spend alert.
+    BudgetAlert {
+        project_id: String,
+        project_name: String,
+        monthly_usd: f64,
+        spent_usd: f64,
+    },
 }
 
 // ---------------------------------------------------------------------------

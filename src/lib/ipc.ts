@@ -348,6 +348,38 @@ export const exportSessionMarkdown = (paneId: string) =>
   safeInvoke<string | null>("export_session_markdown", { paneId });
 export const readFileText = (path: string) => safeInvoke<string | null>("read_file_text", { path });
 
+// ---- Budget / spend alerts (roadmap #10) ----
+
+export interface BudgetConfig {
+  projectId: string;
+  monthlyUsd: number;
+  thresholdPct: number;
+}
+
+export interface BudgetAlertPayload {
+  projectId: string;
+  projectName: string;
+  monthlyUsd: number;
+  spentUsd: number;
+  usedPct: number;
+}
+
+export const listBudgets = () => safeInvoke<BudgetConfig[] | null>("list_budgets");
+export const setBudget = (projectId: string, monthlyUsd: number, thresholdPct?: number) =>
+  safeInvoke<BudgetConfig | null>("set_budget", {
+    projectId,
+    monthlyUsd,
+    thresholdPct: thresholdPct ?? null,
+  });
+export const removeBudget = (projectId: string) =>
+  safeInvoke<void>("remove_budget", { projectId });
+export const checkBudgets = () =>
+  safeInvoke<BudgetAlertPayload[] | null>("check_budgets");
+
+/** Stream `budget:alert` events (threshold crossed) — drives the in-app toast. */
+export const onBudgetAlert = (handler: (p: BudgetAlertPayload) => void) =>
+  safeListen<BudgetAlertPayload>("budget:alert", handler);
+
 // --- Installed skills / loops (harness skill directories) ---
 export const listInstalledSkills = () => safeInvoke<InstalledSkill[] | null>("list_installed_skills");
 export const listInstalledLoops = () => safeInvoke<InstalledSkill[] | null>("list_installed_loops");

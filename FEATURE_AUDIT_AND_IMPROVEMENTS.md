@@ -250,7 +250,7 @@ Conduit's local-model stack is already more integrated than any orchestration-sh
 | 8 | ~~**Approval rules engine** ("always allow tool+glob")~~ **DONE** | Cline-level ergonomics on the permission system | M |
 | 9 | ~~**Conversation branching/fork**~~ **DONE** | Table stakes in 2026 chat UIs; `superseded_by` machinery exists | M |
 | 10 | ~~**Budget/spend alerts** (per project/month, toast + mobile)~~ **DONE** | Cost dashboard exists; alerting is the natural next step | S |
-| 11 | **VRAM-aware market recommendations** | Probes exist; pure UX leverage | S |
+| 11 | ~~**VRAM-aware market recommendations**~~ **DONE** | Probes exist; pure UX leverage | S |
 | 12 | **More connectors** (Slack, Linear, Jira, Discord) | Framework is generic; config-level cost | S each |
 | 13 | **Terminal find + scrollback export** | xterm addons; pure frontend | S |
 | 14 | **Prompt template library with variables** (generalize QuickActions) | Existing primitives; multi-turn templates | S–M |

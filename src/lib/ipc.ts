@@ -433,6 +433,11 @@ export interface ChatMessageRecord {
   toolTimeMs?: number | null;
   ttftMs?: number | null;
   tokensPerSecond?: number | null;
+  /** Id of the message this row was superseded/forked from (roadmap #9, and
+   *  compaction summaries). Non-null means the row is part of a retired branch
+   *  or was folded into a `[compacted context]` summary — it no longer feeds
+   *  the model but stays in the timeline for reference. */
+  supersededBy?: number | null;
   /** Live attachment objects for the optimistic just-sent user message, so the
    *  bubble can show real image thumbnails before the backend persists. Not
    *  present on persisted messages (those carry attachment text markers in
@@ -628,6 +633,12 @@ export const deleteAllArtifacts = () =>
  *  from local state regardless. */
 export const deleteChatMessage = (messageId: number) =>
   safeInvoke<void>("delete_chat_message", { messageId });
+
+/** Retire the conversation branch at `messageId` (edit-to-fork): marks that
+ *  message and every later row of its session as superseded so the model no
+ *  longer sees the old tail. Returns how many rows were retired. */
+export const supersedeChatTail = (messageId: number) =>
+  safeInvoke<number>("supersede_chat_tail", { messageId });
 
 /** In-app preview of a generated artifact (see `read_artifact_preview`). */
 export interface ArtifactPreview {

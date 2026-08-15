@@ -102,6 +102,7 @@ export function ChatView() {
   const loadSessions = useChatStore((s) => s.loadSessions);
   const sendMessage = useChatStore((s) => s.sendMessage);
   const regenerate = useChatStore((s) => s.regenerate);
+  const editMessage = useChatStore((s) => s.editMessage);
   const cancelStream = useChatStore((s) => s.cancelStream);
   const deleteMessage = useChatStore((s) => s.deleteMessage);
   const setPreviewArtifact = useChatStore((s) => s.setPreviewArtifact);
@@ -651,10 +652,16 @@ export function ChatView() {
     [sendMessage, startLoop],
   );
 
-  // Load a previous user message back into the composer for editing/resend.
-  const handleEdit = useCallback((content: string) => {
-    setDraft({ text: content, nonce: Date.now() });
-  }, []);
+  // Edit-to-fork submit (roadmap #9): retire this message's tail, then re-send
+  // the edited text as a new turn. Wired per item so the bubble's Save handler
+  // carries the message id.
+  const handleSubmitEdit = useCallback(
+    (messageId: number | undefined, newContent: string) => {
+      if (messageId == null) return;
+      void editMessage(messageId, newContent);
+    },
+    [editMessage],
+  );
 
   const handleStop = useCallback(() => {
     void cancelStream();
@@ -687,29 +694,55 @@ export function ChatView() {
   // created inside the memo too, so it stays reference-stable between
   // renders and doesn't break the memo either.
   const items: Array<
-    ChatMessage & { key: string; id?: number; live?: boolean; onDelete?: () => void }
+    ChatMessage & {
+      key: string;
+      id?: number;
+      live?: boolean;
+      onDelete?: () => void;
+      onEdit?: (newContent: string) => void;
+      superseded?: boolean;
+      segmentStart?: boolean;
+    }
   > = useMemo(() => {
     const list: Array<
-      ChatMessage & { key: string; id?: number; live?: boolean; onDelete?: () => void }
-    > = messages.map((m) => ({
-      role: m.role as "user" | "assistant" | "system",
-      content: m.content,
-      attachments: m.attachments,
-      // Assistant turns carry a worked-duration window; null/legacy rows omit it.
-      durationSec:
-        m.startedAt != null && m.completedAt != null
-          ? m.completedAt - m.startedAt
-          : undefined,
-      key: `msg-${m.id}`,
-      id: m.id,
-      onDelete: () => handleDelete(m.id),
-    }));
+      ChatMessage & {
+        key: string;
+        id?: number;
+        live?: boolean;
+        onDelete?: () => void;
+        onEdit?: (newContent: string) => void;
+        superseded?: boolean;
+        segmentStart?: boolean;
+      }
+    > = messages.map((m, i) => {
+      const superseded = !!m.supersededBy;
+      // A retired segment begins when a superseded row follows an active one
+      // (chronological order). Renders the "— edited —" divider above it.
+      const prev = messages[i - 1];
+      const segmentStart = superseded && !prev?.supersededBy;
+      return {
+        role: m.role as "user" | "assistant" | "system",
+        content: m.content,
+        attachments: m.attachments,
+        // Assistant turns carry a worked-duration window; null/legacy rows omit it.
+        durationSec:
+          m.startedAt != null && m.completedAt != null
+            ? m.completedAt - m.startedAt
+            : undefined,
+        key: `msg-${m.id}`,
+        id: m.id,
+        superseded,
+        segmentStart,
+        onDelete: () => handleDelete(m.id),
+        onEdit: m.role === "user" ? (newContent) => handleSubmitEdit(m.id, newContent) : undefined,
+      };
+    });
     // If streaming, append the live assistant bubble (no action bar while live).
     if (isStreaming) {
       list.push({ role: "assistant", content: activeStream, key: "streaming", live: true });
     }
     return list;
-  }, [messages, isStreaming, activeStream, handleDelete]);
+  }, [messages, isStreaming, activeStream, handleDelete, handleSubmitEdit]);
 
   // PERF (PERFORMANCE_AUDIT.md F5): virtualize the message list — long
   // conversations used to mount EVERY MessageBubble (each re-parsing markdown
@@ -771,7 +804,7 @@ export function ChatView() {
                       message={item}
                       live={item.live}
                       msgId={item.id}
-                      onEdit={item.role === "user" ? handleEdit : undefined}
+                      onEdit={item.role === "user" ? item.onEdit : undefined}
                       onRepeat={
                         item.role === "assistant" && item.key === lastAssistantKey
                           ? handleRepeat
@@ -780,6 +813,8 @@ export function ChatView() {
                       onDelete={!item.live ? item.onDelete : undefined}
                       artifacts={item.id != null ? artifactsByMessage[item.id] : undefined}
                       onPreviewArtifact={setPreviewArtifact}
+                      superseded={item.superseded}
+                      segmentStart={item.segmentStart}
                     />
                   </Suspense>
                 </div>

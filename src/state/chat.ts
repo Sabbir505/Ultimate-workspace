@@ -28,6 +28,7 @@ import {
   setChatApiKey,
   setChatSessionStarred,
   setChatSessionUnread,
+  supersedeChatTail,
   toastError,
   touchChatSession,
   updateChatSessionAgent,
@@ -404,6 +405,10 @@ export interface ChatState {
   ) => Promise<void>;
   /** Re-run the last user message to get a fresh assistant response. */
   regenerate: () => Promise<void>;
+  /** Edit-to-fork (roadmap #9): retire this message's tail, reload, and send a
+   *  fresh turn with `newContent`. The old branch stays in the timeline,
+   *  dimmed, but no longer feeds the model. */
+  editMessage: (messageId: number, newContent: string) => Promise<void>;
   /** Delete one message (user or assistant) from the active chat, both in
    *  the local state and the backend. The optimistic just-sent message has
    *  a negative id and the backend's DELETE matches zero rows; we still
@@ -1224,13 +1229,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // only. Re-sending those markers would let the model misinterpret them as
   // fresh attachments and try to process nonexistent files. Strip them so
   // the regenerated turn mirrors what the BACKEND actually persisted.
+  // Re-run the last user message to get a fresh assistant response. This is
+  // branch-aware (roadmap #9): it retires the current tail first, so the model
+  // doesn't keep seeing the stale answer being regenerated.
   regenerate: async () => {
-    const { messages, streamingChatSessionId } = get();
+    const { messages, streamingChatSessionId, activeChatSessionId } = get();
     if (streamingChatSessionId) return; // don't regenerate mid-stream
-    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    const active = messages.filter((m) => !m.supersededBy);
+    const lastUser = [...active].reverse().find((m) => m.role === "user");
     if (!lastUser) return;
     const clean = lastUser.content.replace(/\n\n\[Attached (?:image|file):[^\n]*\]/g, "");
-    await get().sendMessage(clean);
+    try {
+      await supersedeChatTail(lastUser.id);
+      if (activeChatSessionId) await get().loadMessages(activeChatSessionId);
+      await get().sendMessage(clean);
+    } catch (err) {
+      toastError("Regenerate failed", err);
+    }
+  },
+
+  // Edit-to-fork (roadmap #9): retire the branch at `messageId`, reload the
+  // active message list, then send the edited text as a fresh turn. The old
+  // branch stays in the timeline (dimmed) but no longer feeds the model.
+  editMessage: async (messageId, newContent) => {
+    const { streamingChatSessionId, activeChatSessionId } = get();
+    if (streamingChatSessionId || !activeChatSessionId) return;
+    try {
+      await supersedeChatTail(messageId);
+      if (activeChatSessionId) await get().loadMessages(activeChatSessionId);
+      // Send the edited text as a new turn.
+      await get().sendMessage(newContent);
+    } catch (err) {
+      toastError("Failed to edit message", err);
+    }
   },
 
   // Delete a single chat message by id. Optimistically removes the bubble

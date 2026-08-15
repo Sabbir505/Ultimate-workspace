@@ -306,6 +306,26 @@ pub async fn delete_chat_message(message_id: i64, db: State<'_, DbState>) -> Cmd
     Ok(())
 }
 
+/// Retire the conversation branch at `message_id` (edit-to-fork). Marks that
+/// message and every later row of its session as superseded, so the model no
+/// longer sees the old tail. Returns how many rows were retired. The user then
+/// edits the fork-point message and re-sends to continue a fresh branch.
+#[tauri::command]
+pub fn supersede_chat_tail(message_id: i64, db: State<'_, DbState>) -> CmdResult<usize> {
+    let conn = db.0.lock();
+    let session_id: Option<String> = conn
+        .query_row(
+            "SELECT chat_session_id FROM chat_messages WHERE id = ?1",
+            rusqlite::params![message_id],
+            |r| r.get(0),
+        )
+        .ok();
+    let Some(session_id) = session_id else {
+        return Ok(0); // unknown message — nothing to retire
+    };
+    db::mark_branch_superseded(&conn, &session_id, message_id).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn update_chat_session_model(
     chat_session_id: String,
@@ -1330,21 +1350,16 @@ pub async fn send_chat_message(
 
     // 6. Build message history from DB.
     //
-    // For local-model sessions, only the *active* (non-superseded) rows feed
-    // the model — the compaction framework soft-deletes summarized turns via
-    // `superseded_by`. API providers never compact, so their history has no
-    // superseded rows and `list_active_chat_messages` returns the same set as
-    // `list_chat_messages`. We carry each row's DB id alongside so compaction
-    // can mark the rows it folds into a summary.
+    // Only the *active* (non-superseded) rows feed the model — compaction
+    // soft-deletes summarized turns via `superseded_by` for local models, and
+    // the edit-to-fork flow (roadmap #9) retires a message's tail via the same
+    // flag for every provider. Rows the user has forked away from are thus
+    // never re-sent. We carry each row's DB id alongside so compaction can
+    // mark the rows it folds into a summary.
     let mut messages: Vec<crate::chat::compaction::CompactionEntry> = {
         let conn = db.0.lock();
-        let records = if matches!(provider_id, ChatProviderId::LocalGguf) {
-            db::list_active_chat_messages(&conn, &chat_session_id)
-                .map_err(|e| e.to_string())?
-        } else {
-            db::list_chat_messages(&conn, &chat_session_id)
-                .map_err(|e| e.to_string())?
-        };
+        let records = db::list_active_chat_messages(&conn, &chat_session_id)
+            .map_err(|e| e.to_string())?;
         records
             .into_iter()
             .map(|r| crate::chat::compaction::CompactionEntry {

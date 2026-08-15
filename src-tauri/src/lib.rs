@@ -338,6 +338,7 @@ pub fn run() {
             commands::chat_cmds::delete_all_chat_sessions,
             commands::chat_cmds::delete_empty_chat_sessions,
             commands::chat_cmds::delete_chat_message,
+            commands::chat_cmds::supersede_chat_tail,
             commands::chat_cmds::update_chat_session_title,
             commands::chat_cmds::generate_chat_title,
             commands::chat_cmds::generate_commit_message,

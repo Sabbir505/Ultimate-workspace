@@ -1556,3 +1556,66 @@
 .approval-card-send   { --approval-accent: #8b7cf6; --approval-accent-contrast: #fff; }
 .approval-card-write  { --approval-accent: #e3b341; --approval-accent-contrast: #1b1b1f; }
 .approval-card-edit   { --approval-accent: #5aa7f0; --approval-accent-contrast: #fff; }
+
+/* --- Conversation branching (roadmap #9) ---
+ * Retired (superseded) rows are dimmed with a "previous version" tag; a
+ * "— edited —" divider marks where a branch diverged. The inline editor
+ * replaces a user bubble while an edit is being drafted. */
+.chat-bubble.superseded {
+  opacity: 0.45;
+  filter: grayscale(0.35);
+}
+.chat-bubble.superseded .chat-msg-actions {
+  display: none; /* retired bubbles aren't editable/regenerable/deletable */
+}
+.superseded-tag {
+  display: inline-block;
+  margin-bottom: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.superseded-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  font-size: 10px;
+  color: var(--text-dim);
+  user-select: none;
+}
+.superseded-divider::before,
+.superseded-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.message-edit-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.message-edit-editor textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 64px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+}
+.message-edit-editor textarea:focus {
+  outline: none;
+  border-color: var(--accent, #58a6ff);
+}
+.message-edit-actions {
+  display: flex;
+  gap: 8px;
+}

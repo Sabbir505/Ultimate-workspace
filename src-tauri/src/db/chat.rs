@@ -467,6 +467,26 @@ pub fn mark_superseded(conn: &Connection, ids: &[i64], summary_id: i64) -> DbRes
     Ok(())
 }
 
+/// Retire a conversation branch: mark `from_message_id` AND every later row of
+/// the session as superseded (edit-to-fork branching, roadmap #9). Unlike
+/// [`mark_superseded`] (which points at a compaction summary), `superseded_by`
+/// here points at the fork-point row itself — the first row of the retired
+/// branch — so the UI can find where an old version diverged. Rows already
+/// superseded (e.g. compaction-folded) are left untouched, keeping the
+/// original fold reference intact. Returns how many rows were retired.
+pub fn mark_branch_superseded(
+    conn: &Connection,
+    chat_session_id: &str,
+    from_message_id: i64,
+) -> DbResult<usize> {
+    let n = conn.execute(
+        "UPDATE chat_messages SET superseded_by = ?3
+          WHERE chat_session_id = ?1 AND id >= ?2 AND superseded_by IS NULL",
+        params![chat_session_id, from_message_id, from_message_id],
+    )?;
+    Ok(n)
+}
+
 // ---- full-text search ----
 
 /// Build a safe FTS5 MATCH expression from free-form user input. FTS5 has its
@@ -911,5 +931,66 @@ mod tests {
         let hits = search_chat_messages(&conn, "flux", 10).unwrap();
         assert_eq!(hits.len(), 1, "backfill should index pre-existing rows");
         assert_eq!(hits[0].chat_session_id, cs.id);
+    }
+
+    #[test]
+    fn branch_supersede_retires_fork_point_and_tail_only() {
+        let conn = super::super::mem();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        let m1 = add_msg(&conn, &cs.id, "user", "first question");
+        let m2 = add_msg(&conn, &cs.id, "assistant", "first answer");
+        let m3 = add_msg(&conn, &cs.id, "user", "second question");
+        let m4 = add_msg(&conn, &cs.id, "assistant", "second answer");
+
+        // Edit-to-fork from m3: m3 + m4 retire; m1/m2 stay active.
+        let n = mark_branch_superseded(&conn, &cs.id, m3.id).unwrap();
+        assert_eq!(n, 2);
+        let active = list_active_chat_messages(&conn, &cs.id).unwrap();
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[0].id, m1.id);
+        assert_eq!(active[1].id, m2.id);
+        // superseded_by points at the fork-point row (m3 itself).
+        let all = list_chat_messages(&conn, &cs.id).unwrap();
+        assert_eq!(all[2].superseded_by, Some(m3.id));
+        assert_eq!(all[3].superseded_by, Some(m3.id));
+        assert_eq!(all[0].superseded_by, None);
+        assert_eq!(all[1].superseded_by, None);
+    }
+
+    #[test]
+    fn branch_supersede_is_session_scoped() {
+        let conn = super::super::mem();
+        let a = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        let b = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        let a1 = add_msg(&conn, &a.id, "user", "a1");
+        let b1 = add_msg(&conn, &b.id, "user", "b1");
+
+        // Superseding session a's tail must not touch session b (ids are
+        // global autoincrement, so the id >= guard alone would catch b1).
+        let n = mark_branch_superseded(&conn, &a.id, a1.id).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(list_active_chat_messages(&conn, &b.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn branch_supersede_keeps_compaction_folds_intact() {
+        let conn = super::super::mem();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        let m1 = add_msg(&conn, &cs.id, "user", "old turn");
+        let summary = add_msg(&conn, &cs.id, "system", "[compacted context]
+
+summary");
+        // Compaction folded m1 into the summary row.
+        mark_superseded(&conn, &[m1.id], summary.id).unwrap();
+        let m3 = add_msg(&conn, &cs.id, "user", "after compaction");
+
+        // Branch-fork from m3: m1 must KEEP pointing at the summary (not be
+        // re-pointed at the fork row); only m3 retires.
+        let n = mark_branch_superseded(&conn, &cs.id, m3.id).unwrap();
+        assert_eq!(n, 1);
+        let all = list_chat_messages(&conn, &cs.id).unwrap();
+        assert_eq!(all[0].superseded_by, Some(summary.id));
+        assert_eq!(all[1].superseded_by, None); // summary stays active
+        assert_eq!(all[2].superseded_by, Some(m3.id));
     }
 }

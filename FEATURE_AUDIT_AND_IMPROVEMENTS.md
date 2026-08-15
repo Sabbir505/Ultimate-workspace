@@ -247,7 +247,7 @@ Conduit's local-model stack is already more integrated than any orchestration-sh
 | 5 | **Automation notifications + Task Scheduler registration** | Completes the "runs while closed" promise already 90% built | S–M |
 | 6 | **LocalDocs-style local RAG** (embedding sidecar + vec table) | Defines the local-model category; composes with existing tools | M |
 | 7 | ~~**Chat export/import + project backup zip**~~ **DONE** (`175cdfa`) | Local-first story completion | S |
-| 8 | **Approval rules engine** ("always allow tool+glob") | Cline-level ergonomics on the permission system | M |
+| 8 | ~~**Approval rules engine** ("always allow tool+glob")~~ **DONE** | Cline-level ergonomics on the permission system | M |
 | 9 | **Conversation branching/fork** | Table stakes in 2026 chat UIs; `superseded_by` machinery exists | M |
 | 10 | **Budget/spend alerts** (per project/month, toast + mobile) | Cost dashboard exists; alerting is the natural next step | S |
 | 11 | **VRAM-aware market recommendations** | Probes exist; pure UX leverage | S |

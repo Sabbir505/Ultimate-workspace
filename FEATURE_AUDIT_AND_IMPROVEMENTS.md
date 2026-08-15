@@ -255,7 +255,7 @@ Conduit's local-model stack is already more integrated than any orchestration-sh
 | 13 | ~~**Terminal find + scrollback export**~~ **DONE** | xterm addons; pure frontend | S |
 | 14 | ~~**Prompt template library with variables** (generalize QuickActions)~~ **DONE** | Existing primitives; multi-turn templates | S–M |
 | 15 | ~~**Webview devtools panel** (console + network)~~ **DONE** | Agent debugging superpower; WebView2 CDP | M |
-| 16 | **Whisper sidecar for voice input** (desktop + mobile) | Same sidecar pattern as llama-server | M |
+| 16 | ~~**Whisper sidecar for voice input** (desktop + mobile)~~ **DESKTOP DONE** | Same sidecar pattern as llama-server | M |
 | 17 | **Pop-out chats/panes into windows** | Tauri multi-window proven (Linux browsers) | M |
 | 18 | **Multi-chat "team" broadcast** (send one prompt to N chat sessions) | The old pane BroadcastBar is dead code post-layout-merge; rebuild broadcast against chat sessions / ToolPanel tabs | M |
 | 19 | **Theme import (JSON)** + theme gallery | Token system is data-driven | S |

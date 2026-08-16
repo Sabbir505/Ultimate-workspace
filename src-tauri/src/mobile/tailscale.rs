@@ -35,6 +35,8 @@ struct TailscaleStatusJson {
 struct StatusNode {
     #[serde(rename = "DNSName")]
     dns_name: Option<String>,
+    #[serde(rename = "TailscaleIPs", default)]
+    tailscale_ips: Vec<String>,
 }
 
 /// Aggregated Tailscale status for the settings UI.
@@ -44,6 +46,10 @@ pub struct TailscaleStatus {
     pub installed: bool,
     pub logged_in: bool,
     pub dns_name: Option<String>,
+    /// The primary Tailscale IP (CGNAT range, e.g. "100.x.y.z") for this node.
+    /// Used to construct a direct WebSocket URL that works over the tailnet
+    /// without requiring HTTPS serve to be enabled on the tailnet.
+    pub tailscale_ip: Option<String>,
     pub backend_state: String,
 }
 
@@ -55,6 +61,7 @@ pub fn status() -> TailscaleStatus {
             installed: false,
             logged_in: false,
             dns_name: None,
+            tailscale_ip: None,
             backend_state: "not_installed".to_string(),
         };
     }
@@ -77,6 +84,7 @@ pub fn status() -> TailscaleStatus {
                 installed: true,
                 logged_in: false,
                 dns_name: None,
+                tailscale_ip: None,
                 backend_state: "spawn_failed".to_string(),
             };
         }
@@ -88,6 +96,7 @@ pub fn status() -> TailscaleStatus {
                 installed: true,
                 logged_in: false,
                 dns_name: None,
+                tailscale_ip: None,
                 backend_state: "parse_failed".to_string(),
             };
         }
@@ -97,11 +106,17 @@ pub fn status() -> TailscaleStatus {
         .as_ref()
         .and_then(|n| n.dns_name.as_ref())
         .map(|s| s.trim_end_matches('.').to_string());
+    let tailscale_ip = parsed
+        .self_node
+        .as_ref()
+        .and_then(|n| n.tailscale_ips.first())
+        .cloned();
     let logged_in = parsed.backend_state == "Running";
     TailscaleStatus {
         installed: true,
         logged_in,
         dns_name: dns,
+        tailscale_ip,
         backend_state: parsed.backend_state,
     }
 }
@@ -251,10 +266,9 @@ mod tests {
         let json = br#"{"BackendState":"Running","Self":{"DNSName":"laptop.tailnet.ts.net.","HostName":"laptop","TailscaleIPs":["100.64.0.1"]}}"#;
         let parsed: TailscaleStatusJson = serde_json::from_slice(json).unwrap();
         assert_eq!(parsed.backend_state, "Running");
-        assert_eq!(
-            parsed.self_node.unwrap().dns_name.as_deref(),
-            Some("laptop.tailnet.ts.net.")
-        );
+        let node = parsed.self_node.unwrap();
+        assert_eq!(node.dns_name.as_deref(), Some("laptop.tailnet.ts.net."));
+        assert_eq!(node.tailscale_ips, vec!["100.64.0.1".to_string()]);
     }
 
     #[test]
@@ -268,11 +282,12 @@ mod tests {
     #[test]
     fn status_aggregate_from_running_json() {
         let st = status_from_json(
-            br#"{"BackendState":"Running","Self":{"DNSName":"desk.tailnet.ts.net."}}"#,
+            br#"{"BackendState":"Running","Self":{"DNSName":"desk.tailnet.ts.net.","TailscaleIPs":["100.68.1.2"]}}"#,
         );
         assert!(st.installed);
         assert!(st.logged_in);
         assert_eq!(st.dns_name.as_deref(), Some("desk.tailnet.ts.net"));
+        assert_eq!(st.tailscale_ip.as_deref(), Some("100.68.1.2"));
         assert_eq!(st.backend_state, "Running");
     }
 
@@ -283,11 +298,17 @@ mod tests {
             .as_ref()
             .and_then(|n| n.dns_name.as_ref())
             .map(|s| s.trim_end_matches('.').to_string());
+        let tailscale_ip = parsed
+            .self_node
+            .as_ref()
+            .and_then(|n| n.tailscale_ips.first())
+            .cloned();
         let logged_in = parsed.backend_state == "Running";
         TailscaleStatus {
             installed: true,
             logged_in,
             dns_name: dns,
+            tailscale_ip,
             backend_state: parsed.backend_state,
         }
     }

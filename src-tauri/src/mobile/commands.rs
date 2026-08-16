@@ -74,6 +74,10 @@ pub struct MobilePairingInfo {
     /// this `wss://<machine>.<tailnet>.ts.net/#<token>` URL instead of the
     /// local one. Cross-network access without exposing the relay to the LAN.
     pub tailscale_url: Option<String>,
+    /// When non-empty, the relay is bound to the Tailscale interface and the
+    /// phone can reach it at `ws://<tailscale-ip>:<port>/#<token>` directly
+    /// over the tailnet (no HTTPS serve required).
+    pub tailnet_url: Option<String>,
 }
 
 /// Get the relay port + pairing token + Tailscale state. The token is read
@@ -103,6 +107,13 @@ pub fn get_mobile_pairing_info(
         (true, true, true, Some(dns), Some(t)) => Some(format!("{}#{}", tailscale::wss_url(dns), t)),
         _ => None,
     };
+    // Tailnet URL: reachable from any device on the tailnet (which is
+    // encrypted by WireGuard). This works even when HTTPS serve is not
+    // enabled on the tailnet, so it's the reliable cross-network path.
+    let tailnet_url = match (running, port, ts.logged_in, ts.tailscale_ip.as_ref(), token.as_ref()) {
+        (true, Some(p), true, Some(ip), Some(t)) => Some(format!("ws://{ip}:{p}/#{t}")),
+        _ => None,
+    };
     Ok(MobilePairingInfo {
         running,
         port: port.unwrap_or(0),
@@ -110,6 +121,7 @@ pub fn get_mobile_pairing_info(
         local_url,
         tailscale: ts,
         tailscale_url,
+        tailnet_url,
     })
 }
 

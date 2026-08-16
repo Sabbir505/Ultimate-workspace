@@ -1618,6 +1618,9 @@ export interface TailscaleStatus {
   installed: boolean;
   loggedIn: boolean;
   dnsName: string | null;
+  /** The machine's Tailscale IP (CGNAT range). Used for direct tailnet
+   *  WebSocket connections without needing HTTPS serve enabled on the tailnet. */
+  tailscaleIp: string | null;
   backendState: string;
 }
 
@@ -1625,9 +1628,13 @@ export interface MobilePairingInfo {
   running: boolean;
   port: number;
   token: string | null;
+  /** ws://127.0.0.1:<port> — for USB-bridge / same-machine connections. */
   localUrl: string | null;
   tailscale: TailscaleStatus;
+  /** wss://<machine>.<tailnet>.ts.net — requires HTTPS serve enabled on tailnet. */
   tailscaleUrl: string | null;
+  /** ws://<tailscale-ip>:<port> — direct tailnet connection, no HTTPS serve needed. */
+  tailnetUrl: string | null;
 }
 
 export const getMobilePairingInfo = () =>

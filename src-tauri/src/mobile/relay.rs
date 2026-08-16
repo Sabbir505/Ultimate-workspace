@@ -1,7 +1,11 @@
 //! WebSocket relay server that accepts connections from the mobile companion app.
 //!
-//! - Binds to 0.0.0.0 on a persistent port (saved across launches so the phone
-//!   URL stays the same). Falls back to a random port if the saved one is taken.
+//! - Binds to 127.0.0.1:<port> (USB-bridge / same-machine connections) AND
+//!   <tailscale-ip>:<port> when the machine is on a Tailnet. The tailnet bind
+//!   uses the CGNAT IP (100.64.0.0/10 range) so only tailnet peers (encrypted
+//!   by WireGuard) can reach it — no LAN exposure.
+//! - Port is persisted across launches so the phone URL stays stable.
+//! - Pairing token is rotated on every relay start (fail-closed gate).
 //! - Accepts WebSocket connections; on connect sends `DesktopStatus { connected: true }`.
 //! - Handles `ListAvailableProviders` by querying keys + local model state.
 //! - Handles `ChatTurn` by creating a temporary DB session and running a
@@ -17,8 +21,10 @@ use parking_lot::Mutex;
 use rand::RngCore;
 use rusqlite::Connection;
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::chat::providers::{ChatProviderId, ChatRequest, REASONING_PREFIX};
@@ -159,12 +165,11 @@ pub async fn start_relay(
             .and_then(|s| s.parse().ok())
     };
 
-    // SECURITY: bind ONLY to the loopback interface. The previous 0.0.0.0
-    // bind exposed the relay to the entire LAN — anyone on the same network
-    // could connect, send chat turns, write to active PTYs, and read
-    // transcripts. Mobile devices pair over an SSH tunnel / USB bridge, so
-    // 127.0.0.1 is sufficient and reduces the attack surface to processes on
-    // the same host.
+    // SECURITY: bind to the loopback interface so the relay is never exposed
+    // to the LAN. When the machine is on a Tailnet, ALSO bind the same port
+    // on the Tailscale interface (CGNAT range) — only tailnet peers can route
+    // to that address, and all traffic over it is encrypted by WireGuard, so
+    // the phone can connect cross-network without HTTPS serve being enabled.
     let bind_addr = if let Some(port) = saved_port {
         format!("127.0.0.1:{port}")
     } else {
@@ -181,6 +186,17 @@ pub async fn start_relay(
         .local_addr()
         .map_err(|e| format!("local_addr: {e}"))?
         .port();
+
+    // Same port on the Tailscale interface, when the machine is on a tailnet.
+    // Wrapped in Arc so the future can own a reference to it (avoids borrow
+    // checker issues when storing the accept future in a local variable).
+    // Best-effort: if this bind fails (interface vanished between the status
+    // call and now) we keep loopback-only rather than fail.
+    let ts_ip = super::tailscale::status().tailscale_ip;
+    let tailnet_listener = match ts_ip {
+        Some(ip) => TcpListener::bind(format!("{ip}:{port}")).await.ok().map(Arc::new),
+        None => None,
+    };
 
     // Persist the port + a fresh per-launch pairing token. The token must be
     // presented on the first frame of the first WebSocket connection from a
@@ -209,13 +225,58 @@ pub async fn start_relay(
         }
     });
 
-    tokio::spawn(async move {
+tokio::spawn(async move {
+        let tailnet_addr = tailnet_listener
+            .as_ref()
+            .and_then(|l| l.local_addr().ok().map(|a| a.to_string()));
         eprintln!("[mobile-relay] listening on ws://127.0.0.1:{port} (pairing required)");
+        if let Some(ref addr) = tailnet_addr {
+            eprintln!("[mobile-relay] also on ws://{addr} (tailnet, pairing required)");
+        }
+
+        // The tailnet listener runs in its own task and forwards accepted
+        // connections over a channel — TcpListener::accept() futures are not
+        // Send, so they can't be stored alongside the loopback accept in the
+        // same select. Shutdown is signalled via a shared atomic that the
+        // main loop sets right before it stops polling.
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (tailnet_tx, mut tailnet_rx) = mpsc::channel::<(TcpStream, std::net::SocketAddr)>(64);
+        if let Some(listener) = tailnet_listener {
+            let shutdown_task = Arc::clone(&shutdown);
+            tokio::spawn(async move {
+                loop {
+                    if shutdown_task.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    tokio::select! {
+                        biased;
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                            if shutdown_task.load(Ordering::Relaxed) { break; }
+                        }
+                        accept = listener.accept() => {
+                            if shutdown_task.load(Ordering::Relaxed) { break; }
+                            match accept {
+                                Ok((stream, peer)) => {
+                                    if tailnet_tx.send((stream, peer)).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(_) => {
+                                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
         loop {
             tokio::select! {
                 biased;
                 _ = &mut abort_rx => {
                     eprintln!("[mobile-relay] shutting down");
+                    shutdown.store(true, Ordering::Relaxed);
                     break;
                 }
                 accept = listener.accept() => {
@@ -238,6 +299,30 @@ pub async fn start_relay(
                         }
                         Err(e) => {
                             eprintln!("[mobile-relay] accept error: {e}");
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        }
+                    }
+                }
+                incoming = tailnet_rx.recv() => {
+                    match incoming {
+                        Some((stream, peer)) => {
+                            let app = app.clone();
+                            let db = Arc::clone(&db);
+                            let chat_mgr = Arc::clone(&chat_mgr);
+                            let owner_map = relay_state.owner_map.clone();
+                            let conn_registry = Arc::clone(&relay_state.conns);
+                            let conns = Arc::clone(&relay_state);
+                            tokio::spawn(async move {
+                                use std::sync::atomic::Ordering as AOrd;
+                                conns.active_connections.fetch_add(1, AOrd::Relaxed);
+                                if let Err(e) = handle_connection(stream, peer, app, db, chat_mgr, owner_map, conn_registry).await {
+                                    eprintln!("[mobile-relay] connection error: {e}");
+                                }
+                                conns.active_connections.fetch_sub(1, AOrd::Relaxed);
+                            });
+                        }
+                        None => {
+                            // Tailnet task exited; keep serving loopback.
                             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                         }
                     }

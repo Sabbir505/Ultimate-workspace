@@ -89,7 +89,8 @@ export function Sidebar() {
     try {
       const info = await getMobilePairingInfo();
       setPairingInfo(info);
-      const url = info?.tailscaleUrl ?? info?.localUrl ?? "";
+      // Prefer: tailnet direct (no HTTPS serve needed) → HTTPS serve → local USB bridge.
+      const url = info?.tailnetUrl ?? info?.tailscaleUrl ?? info?.localUrl ?? "";
       if (url) {
         const { default: QRCode } = await import("qrcode");
         const dataUrl = await QRCode.toDataURL(url, { width: 240, margin: 1 });
@@ -665,17 +666,17 @@ export function Sidebar() {
                   <div className="pairing-modal-qr">
                     <img src={pairingQr} alt="Pairing QR" width={240} height={240} />
                   </div>
-                  <p className="pairing-modal-hint">
-                    Scan with the mobile app to pair. Works over Tailscale
-                    {pairingInfo.tailscaleUrl ? " (cross-network)" : " (local)"}.
-                    Token rotates each time the relay restarts.
-                  </p>
-                  <div className="field">
-                    <label className="field-label" style={{ fontSize: 11 }}>URL</label>
-                    <code className="pairing-modal-url" style={{ color: "var(--text-dim)" }}>
-                      {pairingInfo.tailscaleUrl ?? pairingInfo.localUrl}
-                    </code>
-                  </div>
+<p className="pairing-modal-hint">
+                  Scan with the mobile app to pair. Works over Tailscale
+                  {pairingInfo.tailnetUrl || pairingInfo.tailscaleUrl ? " (cross-network)" : " (local)"}.
+                  Token rotates each time the relay restarts.
+                </p>
+                <div className="field">
+                  <label className="field-label" style={{ fontSize: 11 }}>URL</label>
+                  <code className="pairing-modal-url" style={{ color: "var(--text-dim)" }}>
+                    {pairingInfo.tailnetUrl ?? pairingInfo.tailscaleUrl ?? pairingInfo.localUrl}
+                  </code>
+                </div>
                 </>
               ) : (
                 <p className="muted" style={{ fontSize: 12 }}>

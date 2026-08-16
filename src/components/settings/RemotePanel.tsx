@@ -94,23 +94,26 @@ export function RemotePanel() {
   }
 
   // ── QR generation ─────────────────────────────────────────────────────────
+  // Priority: tailnet (direct WireGuard, no HTTPS serve needed) → tailscale
+  // (HTTPS serve, requires tailnet admin) → local (USB bridge).
+  const primaryUrl = info?.tailnetUrl ?? info?.tailscaleUrl ?? info?.localUrl ?? "";
   useEffect(() => {
-    const url = info?.tailscaleUrl ?? info?.localUrl ?? "";
-    if (url) {
-      QRCode.toDataURL(url, { width: 240, margin: 1 })
+    if (primaryUrl) {
+      QRCode.toDataURL(primaryUrl, { width: 240, margin: 1 })
         .then(setLocalQr)
         .catch(() => setLocalQr(""));
     } else {
       setLocalQr("");
     }
-    if (info?.tailscaleUrl && info?.localUrl) {
+    // Show a second QR for HTTPS serve when the primary is the direct tailnet URL.
+    if (info?.tailscaleUrl && info?.tailnetUrl) {
       QRCode.toDataURL(info.tailscaleUrl, { width: 240, margin: 1 })
         .then(setTsQr)
         .catch(() => setTsQr(""));
     } else {
       setTsQr("");
     }
-  }, [info?.tailscaleUrl, info?.localUrl]);
+  }, [info?.tailnetUrl, info?.tailscaleUrl, info?.localUrl]);
 
   const handleStartRelay = async () => {
     setBusy(true);
@@ -210,9 +213,9 @@ export function RemotePanel() {
   }
 
   const ts = info?.tailscale;
-  const activeUrl = info?.tailscaleUrl ?? info?.localUrl;
-  const isServing = !!info?.tailscaleUrl;
-
+  const activeUrl = primaryUrl;
+  // True when a cross-network path is active (tailnet direct or HTTPS serve).
+  const isServing = !!(info?.tailnetUrl || info?.tailscaleUrl);
   // QR is shown whenever the relay is running.
   const showQr = info?.running && info.token && activeUrl;
 
@@ -255,7 +258,11 @@ export function RemotePanel() {
           <div className="pairing-details">
             <div className="field" style={{ marginBottom: 12 }}>
               <label className="field-label">
-                {isServing ? "Cross-network URL (Tailscale)" : "Local URL (USB bridge)"}
+                {info?.tailnetUrl
+                  ? "Tailnet URL (cross-network)"
+                  : isServing
+                    ? "HTTPS serve URL (cross-network)"
+                    : "Local URL (USB bridge)"}
               </label>
               <div className="value-row">
                 <code className="mono-text">{activeUrl}</code>
@@ -275,8 +282,10 @@ export function RemotePanel() {
             </div>
             {isServing && tsQr && (
               <div className="field">
-                <label className="field-label">Local fallback QR (USB bridge)</label>
-                <img src={tsQr} alt="Local pairing QR" width={160} height={160} />
+                <label className="field-label">
+                  {info?.tailnetUrl ? "HTTPS serve QR (optional)" : "Local fallback QR (USB bridge)"}
+                </label>
+                <img src={tsQr} alt="Secondary pairing QR" width={160} height={160} />
               </div>
             )}
           </div>

@@ -749,10 +749,8 @@
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
   display: flex;
-  align-items: flex-start;
-  justify-content: flex-start;
-  padding-top: 72px;
-  padding-left: 88px;
+  align-items: center;
+  justify-content: center;
   z-index: 60;
   animation: overlay-in 0.18s var(--ease);
 }

@@ -22,6 +22,7 @@ import { PermissionRulesPanel } from "./PermissionRulesPanel";
 import { PromptTemplatesPanel } from "./PromptTemplatesPanel";
 import { ThemeGalleryPanel } from "./ThemeGalleryPanel";
 import { AcpAgentsPanel } from "./AcpAgentsPanel";
+import { McpGalleryPanel } from "./McpGalleryPanel";
 import { RemotePanel } from "./RemotePanel";
 import { ConnectorIcon, FamilyIcon, FAMILY_NAMES } from "./ConnectorIcon";
 import { Modal } from "../common/Modal";
@@ -31,6 +32,7 @@ import {
   Palette,
   Plug,
   Bot,
+  Blocks,
   Cpu,
   Coins,
   TerminalSquare,
@@ -51,6 +53,7 @@ type Category =
   | "apikeys"
   | "connectors"
   | "knowledge"
+  | "mcpgallery"
   | "permissions"
   | "data"
   | "git"
@@ -65,6 +68,7 @@ const CATEGORY_KEYS: Category[] = [
   "apikeys",
   "connectors",
   "knowledge",
+  "mcpgallery",
   "permissions",
   "data",
   "git",
@@ -87,6 +91,7 @@ function SettingsNavIcon({ category }: { category: Category }) {
     case "pricing": return <Coins {...props} />;
     case "harnesses": return <TerminalSquare {...props} />;
     case "connectors": return <Plug {...props} />;
+    case "mcpgallery": return <Blocks {...props} />;
     case "knowledge": return <Library {...props} />;
     case "permissions": return <Shield {...props} />;
     case "data": return <Database {...props} />;
@@ -135,6 +140,7 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
     title: "Integrations",
     items: [
       { key: "connectors", label: "Connectors", sub: "Notion & more (OAuth)" },
+      { key: "mcpgallery", label: "MCP Servers", sub: "Gallery + custom MCP" },
       { key: "knowledge", label: "Knowledge", sub: "Local folders (RAG)" },
       { key: "remote", label: "Remote", sub: "Mobile pairing + Tailscale" },
     ],
@@ -395,6 +401,8 @@ export function SettingsView() {
               {category === "connectors" && <ConnectorsPanel />}
 
               {category === "knowledge" && <KnowledgePanel />}
+
+              {category === "mcpgallery" && <McpGalleryPanel />}
 
               {category === "permissions" && <PermissionRulesPanel />}
 

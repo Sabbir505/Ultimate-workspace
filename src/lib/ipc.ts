@@ -1940,3 +1940,64 @@ export const onDocsCorpusUpdated = (
 ) =>
   safeListen<DocCorpus>("docs:corpus:updated", (c) => handler(c.id));
 
+// ---- MCP server gallery (§3.2.14) ----
+// User-installable stdio MCP servers whose tools join every tool-enabled
+// chat turn under prefixed names (`mcp_<server>_<tool>`). Mirrors the Rust
+// types in src-tauri/src/mcp_gallery.rs (serde camelCase).
+
+export interface McpCatalogEntry {
+  id: string;
+  name: string;
+  description: string;
+  command: string;
+  args: string[];
+  envKeys: string[];
+}
+
+export interface McpServerDef {
+  id: string;
+  name: string;
+  description: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  enabled: boolean;
+  fromGallery: boolean;
+}
+
+export interface McpGalleryList {
+  catalog: McpCatalogEntry[];
+  installed: McpServerDef[];
+}
+
+export interface McpToolView {
+  wireName: string;
+  rawName: string;
+  description?: string | null;
+  /** "read" | "write" — same classification as connector tools. */
+  kind: string;
+}
+
+export interface McpConnectResult {
+  serverId: string;
+  tools: McpToolView[];
+}
+
+export const mcpGalleryList = () =>
+  safeInvoke<McpGalleryList | null>("mcp_gallery_list");
+
+export const mcpGalleryInstall = (catalogId?: string, custom?: Partial<McpServerDef>) =>
+  safeInvoke<McpServerDef | null>("mcp_gallery_install", { catalogId, custom });
+
+export const mcpGalleryRemove = (id: string) =>
+  safeInvoke<null>("mcp_gallery_remove", { id });
+
+export const mcpGallerySetEnabled = (id: string, enabled: boolean) =>
+  safeInvoke<null>("mcp_gallery_set_enabled", { id, enabled });
+
+export const mcpGalleryConnect = (id: string) =>
+  safeInvoke<McpConnectResult | null>("mcp_gallery_connect", { id });
+
+export const mcpGalleryDisconnect = (id: string) =>
+  safeInvoke<null>("mcp_gallery_disconnect", { id });
+

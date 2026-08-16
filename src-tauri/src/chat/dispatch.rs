@@ -294,6 +294,72 @@ async fn run_gated_connector_tool(
     execute_connector_tool(attached, app, idx, name, args).await
 }
 
+/// MCP-gallery Write tool flagged for approval: register a pending approval,
+/// emit `chat:approval-request`, pause on the oneshot until the UI resolves,
+/// then forward to the server. Identical flow to `run_gated_connector_tool`.
+async fn run_gated_mcp_tool(
+    mgr: &Arc<ChatManager>,
+    app: &AppHandle,
+    sid: &str,
+    entry: &crate::mcp_gallery::McpToolEntry,
+    args: &Value,
+) -> String {
+    let summary = format!(
+        "{} MCP server: {}{}",
+        entry.server_name,
+        entry.raw_name,
+        if args.is_object() && !args.as_object().unwrap().is_empty() {
+            format!(" — {}", serde_json::to_string(args).unwrap_or_default())
+        } else {
+            String::new()
+        }
+    );
+    let (pending_id, rx) = mgr.register_pending_approval(sid, &entry.wire_name, args.clone(), summary.clone());
+
+    let _ = app.emit(
+        "chat:approval-request",
+        ChatApprovalRequestPayload {
+            chat_session_id: sid.to_string(),
+            pending_id: pending_id.clone(),
+            tool: entry.wire_name.clone(),
+            summary,
+            args: args.clone(),
+        },
+    );
+
+    let approved = rx.await.unwrap_or(false);
+    let _ = app.emit(
+        "chat:approval-resolved",
+        ChatApprovalResolvedPayload {
+            chat_session_id: sid.to_string(),
+            pending_id,
+            approved,
+        },
+    );
+
+    if !approved {
+        return format!(
+            "The user denied the {} action ({}). Do not retry it unless the user explicitly asks.",
+            entry.raw_name, entry.server_name
+        );
+    }
+
+    execute_mcp_tool(app, entry, args).await
+}
+
+/// Forward a tool call to a gallery MCP server (self-healing the child
+/// process if it died since the turn started).
+async fn execute_mcp_tool(
+    app: &AppHandle,
+    entry: &crate::mcp_gallery::McpToolEntry,
+    args: &Value,
+) -> String {
+    match crate::mcp_gallery::call_tool(app, &entry.server_id, &entry.raw_name, args).await {
+        Ok(text) => text,
+        Err(e) => format!("MCP tool `{}` failed: {e}", entry.raw_name),
+    }
+}
+
 /// Execute an approved connector tool call. Fallback tools (gmail REST while
 /// Google's MCP service layer is gated) run locally; everything else forwards
 /// to the vendor's MCP server.
@@ -871,6 +937,19 @@ pub(crate) async fn run_tool(
         // AutoRun (Read kind, or Write under auto_edit/full_auto): execute
         // immediately.
         return execute_connector_tool(&caps.attached_connectors, app, idx, name, args).await;
+    }
+
+    // MCP-gallery tools (§3.2.14): user-installed stdio MCP servers, matched
+    // by prefixed wire name (`mcp_<server>_<tool>`). Same gating as connector
+    // tools — classified Read/Write at attach, Writes approval-gated under
+    // read_only/manual — and the same approval oneshot, so there is exactly
+    // one gating UX for every remote tool.
+    if let Some((_, entry)) = crate::mcp_gallery::find_tool(&caps.mcp_tools, name) {
+        let decision = permission::check_connector_permission(mode, entry.kind);
+        if matches!(decision, permission::PermissionDecision::NeedsApproval) {
+            return run_gated_mcp_tool(mgr, app, sid, entry, args).await;
+        }
+        return execute_mcp_tool(app, entry, args).await;
     }
 
     // System tools (background downloads + native shell). `download_file` is

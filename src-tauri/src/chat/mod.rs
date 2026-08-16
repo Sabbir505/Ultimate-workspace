@@ -286,6 +286,7 @@ impl ChatManager {
             requires_local_sandbox: pcaps.requires_local_sandbox,
             attached_connectors: Arc::new(Vec::new()),
             local_docs,
+            mcp_tools: Arc::new(Vec::new()),
             fs_rules,
         };
         let mgr = Arc::clone(self);
@@ -326,6 +327,16 @@ impl ChatManager {
                 let attached = crate::connectors::connect_all(&app, &connector_ids).await;
                 if !attached.is_empty() {
                     caps.attached_connectors = Arc::new(attached);
+                }
+            }
+            // MCP-gallery servers (§3.2.14): every ENABLED installed server
+            // attaches to every tool-enabled turn (global, not per-chat).
+            // Sessions are cached across turns; a server that fails to
+            // start is skipped without failing the turn.
+            if tools_enabled {
+                let mcp_tools = crate::mcp_gallery::attach_enabled(&app).await;
+                if !mcp_tools.is_empty() {
+                    caps.mcp_tools = Arc::new(mcp_tools);
                 }
             }
 

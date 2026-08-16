@@ -808,3 +808,147 @@
   word-break: break-all;
   font-family: ui-monospace, monospace;
 }
+
+/* ---- MCP server gallery (§3.2.14) ---- */
+
+.mcp-gallery-subhead {
+  margin: 18px 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.7;
+}
+
+.mcp-gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.mcp-gallery-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+  border-radius: var(--radius-sm, 8px);
+  background: var(--bg-2, rgba(255, 255, 255, 0.03));
+}
+
+.mcp-gallery-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mcp-gallery-card-desc {
+  font-size: 12px;
+  line-height: 1.45;
+  opacity: 0.8;
+  flex: 1;
+}
+
+.mcp-gallery-card-cmd {
+  font-size: 10.5px;
+  font-family: ui-monospace, monospace;
+  opacity: 0.6;
+  word-break: break-all;
+}
+
+.mcp-installed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mcp-installed-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+  border-radius: var(--radius-sm, 8px);
+  background: var(--bg-2, rgba(255, 255, 255, 0.03));
+}
+
+.mcp-installed-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mcp-installed-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.mcp-installed-cmd {
+  font-size: 10.5px;
+  font-family: ui-monospace, monospace;
+  opacity: 0.6;
+  word-break: break-all;
+}
+
+.mcp-installed-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.mcp-badge {
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.15));
+  opacity: 0.75;
+  font-weight: 500;
+}
+
+.mcp-badge-on {
+  color: var(--ok, #3fb950);
+  border-color: var(--ok, #3fb950);
+}
+
+.mcp-badge-off {
+  opacity: 0.5;
+}
+
+.mcp-tool-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.mcp-tool-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+}
+
+.mcp-tool-kind {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-family: var(--font-sans, sans-serif);
+  opacity: 0.8;
+}
+
+.mcp-tool-read {
+  color: var(--ok, #3fb950);
+}
+
+.mcp-tool-write {
+  color: var(--warn, #d29922);
+}

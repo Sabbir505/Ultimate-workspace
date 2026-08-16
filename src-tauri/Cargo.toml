@@ -94,7 +94,7 @@ url = "2"
 # `config.auth_header(token)` rather than building our own reqwest::Client
 # (our app reqwest is pinned to 0.12, rmcp needs 0.13 — sharing a client would
 # require a cross-major bump of the app's reqwest, out of scope here).
-rmcp = { version = "=3.0.0-beta.2", features = ["client", "transport-streamable-http-client-reqwest", "reqwest"] }
+rmcp = { version = "=3.0.0-beta.2", features = ["client", "transport-streamable-http-client-reqwest", "transport-child-process", "reqwest"] }
 # Text extraction from PDF attachments in the Chat tab.
 pdf-extract = "0.7"
 # Text extraction from legacy binary Office attachments (.doc/.ppt/.xls) — the

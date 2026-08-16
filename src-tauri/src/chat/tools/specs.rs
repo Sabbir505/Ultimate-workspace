@@ -73,6 +73,7 @@ pub fn openai_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -> V
     // object schema and let the server validate. Write-kind tools get an
     // approval note in the description so the model knows each will be gated.
     append_connector_tools_openai(&caps.attached_connectors, mode, &mut specs);
+    append_mcp_tools_openai(&caps.mcp_tools, mode, &mut specs);
     specs
 }
 
@@ -141,6 +142,7 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -
         specs.push(anthropic_fn(RUN_CODE, RUN_CODE_DESC, run_code_parameters()));
     }
     append_connector_tools_anthropic(&caps.attached_connectors, mode, &mut specs);
+    append_mcp_tools_anthropic(&caps.mcp_tools, mode, &mut specs);
     specs
 }
 
@@ -743,9 +745,114 @@ fn append_connector_tools_anthropic(
     }
 }
 
+// MCP-gallery tools (§3.2.14): user-installed stdio MCP servers. Same
+// contract as connector tools — permissive schema (the server validates the
+// real args), Write-kind tools tagged in the description and stripped under
+// read_only — but advertised under prefixed wire names
+// (`mcp_<server>_<tool>`) so two servers can expose the same raw tool name
+// without colliding with each other or the built-ins.
+
+fn mcp_tool_description(entry: &crate::mcp_gallery::McpToolEntry) -> String {
+    let header = format!(
+        "[{} MCP server{}] ",
+        entry.server_name,
+        match entry.kind {
+            permission::ConnectorToolKind::Write => " · WRITES — gated",
+            _ => "",
+        }
+    );
+    match &entry.description {
+        Some(d) if !d.is_empty() => format!("{header}{d}"),
+        _ => format!("{header}{}", entry.raw_name),
+    }
+}
+
+pub(crate) fn append_mcp_tools_openai(
+    entries: &[crate::mcp_gallery::McpToolEntry],
+    mode: permission::PermissionMode,
+    specs: &mut Vec<Value>,
+) {
+    for entry in entries {
+        if mode == permission::PermissionMode::ReadOnly
+            && entry.kind == permission::ConnectorToolKind::Write
+        {
+            continue;
+        }
+        specs.push(openai_fn(
+            &entry.wire_name,
+            &mcp_tool_description(entry),
+            permissive_params(),
+        ));
+    }
+}
+
+pub(crate) fn append_mcp_tools_anthropic(
+    entries: &[crate::mcp_gallery::McpToolEntry],
+    mode: permission::PermissionMode,
+    specs: &mut Vec<Value>,
+) {
+    for entry in entries {
+        if mode == permission::PermissionMode::ReadOnly
+            && entry.kind == permission::ConnectorToolKind::Write
+        {
+            continue;
+        }
+        specs.push(anthropic_fn(
+            &entry.wire_name,
+            &mcp_tool_description(entry),
+            permissive_params(),
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_gallery_tools_merge_with_prefix_and_write_stripping() {
+        use crate::chat::permission::ConnectorToolKind;
+        use crate::mcp_gallery::McpToolEntry;
+
+        let entries = vec![
+            McpToolEntry {
+                server_id: "memory".into(),
+                server_name: "Memory".into(),
+                wire_name: crate::mcp_gallery::wire_tool_name("memory", "search_nodes"),
+                raw_name: "search_nodes".into(),
+                kind: ConnectorToolKind::Read,
+                description: Some("Search the knowledge graph".into()),
+            },
+            McpToolEntry {
+                server_id: "memory".into(),
+                server_name: "Memory".into(),
+                wire_name: crate::mcp_gallery::wire_tool_name("memory", "create_entities"),
+                raw_name: "create_entities".into(),
+                kind: ConnectorToolKind::Write,
+                description: Some("Create entities".into()),
+            },
+        ];
+
+        // FullAuto: both tools advertised, write tagged in the description.
+        let mut specs = Vec::new();
+        append_mcp_tools_openai(&entries, permission::PermissionMode::FullAuto, &mut specs);
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0]["function"]["name"], "mcp_memory_search_nodes");
+        assert!(specs[0]["function"]["description"]
+            .as_str()
+            .unwrap()
+            .starts_with("[Memory MCP server] Search the knowledge graph"));
+        assert!(specs[1]["function"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("WRITES — gated"));
+
+        // read_only: the Write tool is stripped entirely.
+        let mut ro = Vec::new();
+        append_mcp_tools_anthropic(&entries, permission::PermissionMode::ReadOnly, &mut ro);
+        assert_eq!(ro.len(), 1);
+        assert_eq!(ro[0]["name"], "mcp_memory_search_nodes");
+    }
 
     #[test]
     fn browser_read_parameters_schema_has_mode_and_selector() {

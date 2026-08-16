@@ -179,6 +179,12 @@ pub struct ToolCaps {
     /// when the embedding sidecar is running AND at least one enabled corpus
     /// has indexed chunks. Computed per turn in chat/mod.rs from DB + registry.
     pub local_docs: bool,
+    /// MCP-gallery servers attached to this turn (§3.2.14): every ENABLED
+    /// installed server's tools, under prefixed wire names (`mcp_<server>_
+    /// <tool>`). Unlike connectors these are global (not per-conversation)
+    /// — mirroring how Cline treats global MCP config. The dispatcher
+    /// resolves the wire name to the live session via the gallery registry.
+    pub mcp_tools: std::sync::Arc<Vec<crate::mcp_gallery::McpToolEntry>>,
     /// User-defined approval rules ("always allow tool + glob") loaded per turn
     /// from `app_settings` (`permissions.rules`). A matching rule auto-approves
     /// the filesystem permission gate; the hard `path_within_scope` gate still
@@ -198,6 +204,7 @@ impl Default for ToolCaps {
             requires_local_sandbox: false,
             attached_connectors: std::sync::Arc::new(Vec::new()),
             local_docs: false,
+            mcp_tools: std::sync::Arc::new(Vec::new()),
             fs_rules: Vec::new(),
         }
     }

@@ -27,6 +27,7 @@ mod harness_adapters;
 mod harness_bundle;
 mod harness_config;
 mod installed_skills;
+mod mcp_gallery;
 mod mcp_tools_bridge;
 mod mobile;
 mod pty;
@@ -145,6 +146,9 @@ pub fn run() {
             // `useGitStatusPolling` / `DevDiffPanel` / `BranchDropdown`. See
             // src-tauri/src/git_watcher.rs for the design.
             app.manage(git_watcher::WatcherState::new());
+            // MCP gallery: live stdio MCP server children (§3.2.14). Killed
+            // on app exit via mcp_gallery::kill_all in the RunEvent handler.
+            app.manage(mcp_gallery::McpGalleryState::default());
             {
                 let app_handle = app.handle().clone();
                 let db_state = DbState(Arc::clone(&shared_db));
@@ -436,6 +440,12 @@ pub fn run() {
             commands::speech::transcribe_audio,
             commands::worktree_cmds::ensure_chat_session_worktree,
             commands::worktree_cmds::set_chat_session_worktree,
+            mcp_gallery::mcp_gallery_list,
+            mcp_gallery::mcp_gallery_install,
+            mcp_gallery::mcp_gallery_remove,
+            mcp_gallery::mcp_gallery_set_enabled,
+            mcp_gallery::mcp_gallery_connect,
+            mcp_gallery::mcp_gallery_disconnect,
         ]);
 
     let app = builder
@@ -494,6 +504,8 @@ pub fn run() {
             if let Some(state) = handle.try_state::<MobileRelayState>() {
                 mobile::relay::stop_relay(&state.0);
             }
+            // Kill every live MCP-gallery stdio child (§3.2.14).
+            mcp_gallery::kill_all(handle);
             // Abort the browser MCP server task (mi20).
             if let Some(state) = handle.try_state::<BrowserMcpHandle>() {
                 if let Some(h) = state.0.lock().take() {

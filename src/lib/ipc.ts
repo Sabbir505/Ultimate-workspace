@@ -398,6 +398,10 @@ export const transcribeAudio = (payload: string, mime?: string) =>
     mime: mime ?? null,
   });
 
+/** Pop a chat session out into its own OS window (roadmap #17). */
+export const popOutChat = (sessionId: string) =>
+  safeInvoke<void>("pop_out_chat", { sessionId });
+
 // ---- Prompt templates (roadmap #14) ----
 // A prompt template is a reusable prompt body with `{{variable}}` placeholders.
 // Selecting one in the composer fills the variables and inserts the completed

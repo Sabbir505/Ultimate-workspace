@@ -320,6 +320,7 @@ pub fn run() {
             commands::data::list_workspaces,
             commands::data::save_workspace,
             commands::data::delete_workspace,
+            commands::data::pop_out_chat,
             // installed skills / loops (harness skill directories)
             commands::skills_cmds::list_installed_skills,
             commands::skills_cmds::list_installed_loops,

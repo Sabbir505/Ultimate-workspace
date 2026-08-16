@@ -699,3 +699,16 @@
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
+
+/* --- Pop-out chat window root (roadmap #17) --- */
+.popout-chat-root {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-tint, transparent);
+}
+.popout-chat-root .chat-view {
+  flex: 1;
+  min-height: 0;
+}

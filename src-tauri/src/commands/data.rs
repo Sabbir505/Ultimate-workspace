@@ -498,3 +498,26 @@ pub fn delete_workspace(id: String, db: State<DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     db::delete_workspace(&conn, &id).map_err(|e| e.to_string())
 }
+
+/// Pop a chat session out into its own OS window (roadmap #17). The new
+/// window loads the same app with `?popout=chat&session=<id>` so App.tsx
+/// renders a standalone ChatView (no sidebar, no tool panel).
+#[tauri::command]
+pub fn pop_out_chat(app: AppHandle, session_id: String) -> CmdResult<()> {
+    use tauri::webview::WebviewWindowBuilder;
+    let label = format!("chat-{}", session_id.chars().take(16).collect::<String>());
+    // If the window already exists, just focus it.
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+    let url = format!("index.html?popout=chat&session={session_id}");
+    WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App(url.into()))
+        .title("Conduit — Chat")
+        .inner_size(720.0, 820.0)
+        .min_inner_size(420.0, 480.0)
+        .resizable(true)
+        .build()
+        .map_err(|e| format!("could not open pop-out window: {e}"))?;
+    Ok(())
+}

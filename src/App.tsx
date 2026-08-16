@@ -10,7 +10,7 @@
 // CommandPalette is also lazy: it pulls in fuzzy search + relative-time libs
 // (~6 KB) and is invisible until the user hits Cmd/Ctrl+K. Sidebar stays
 // eager because it's the first thing visible on every page.
-import { lazy, Suspense, useEffect, useRef } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef } from "react";
 import { Modal } from "./components/common/Modal";
 import { ToastHost } from "./components/common/ToastHost";
 import { OnboardingBanner } from "./components/onboarding/OnboardingBanner";
@@ -68,6 +68,19 @@ export default function App() {
   );
   const markGitRepo = useProjectsStore((s) => s.markGitRepo);
 
+  // Pop-out chat window (roadmap #17): when the window is opened with
+  // `?popout=chat&session=<id>`, render a standalone ChatView (no sidebar,
+  // no tool panel) so the user can keep one chat in a dedicated window.
+  const popout = useMemo(() => {
+    try {
+      const q = new URLSearchParams(window.location.search);
+      if (q.get("popout") === "chat") {
+        return { kind: "chat" as const, session: q.get("session") };
+      }
+    } catch { /* ignore */ }
+    return null;
+  }, []);
+
   // Bootstrap: settings first (theme), then projects/sessions/harnesses, skills.
   useEffect(() => {
     void useSettingsStore.getState().load();
@@ -117,6 +130,17 @@ export default function App() {
   const pendingSession = pendingReplace
     ? useProjectsStore.getState().sessions.find((s) => s.id === pendingReplace.sessionId)
     : null;
+
+  // Pop-out chat window: standalone ChatView without the shell (no sidebar,
+  // no tool panel). Selecting the requested session happens inside a small
+  // effect in the popout branch itself.
+  if (popout?.kind === "chat") {
+    return (
+      <div className="popout-chat-root">
+        <ChatView popoutSessionId={popout.session ?? undefined} />
+      </div>
+    );
+  }
 
   return (
     <div className="app">

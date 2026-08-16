@@ -15,7 +15,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import { toastError, toastSuccess, exportChatZip } from "../../lib/ipc";
+import { toastError, toastSuccess, exportChatZip, popOutChat } from "../../lib/ipc";
 import {
   DollarSign,
   Folder,
@@ -169,6 +169,11 @@ export function Sidebar() {
         if (saved) toastSuccess("Chat exported to .zip");
       })
       .catch((err) => toastError("Chat export failed", err));
+  }, []);
+
+  // Pop a chat out into its own OS window (roadmap #17).
+  const handlePopOutChat = useCallback((id: string) => {
+    popOutChat(id).catch((err) => toastError("Could not open chat window", err));
   }, []);
 
   useEffect(() => {
@@ -507,6 +512,7 @@ export function Sidebar() {
                     onToggleStar={handleToggleStar}
                     onSetUnread={handleSetUnread}
                     onExport={handleExportChat}
+                    onPopOut={handlePopOutChat}
                   />
                 </div>
               );

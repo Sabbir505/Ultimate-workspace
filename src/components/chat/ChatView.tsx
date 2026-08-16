@@ -91,7 +91,7 @@ function includesModelId(ids: string[], id: string): boolean {
   return ids.some((i) => i.trim().toLowerCase() === key);
 }
 
-export function ChatView() {
+export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {}) {
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
   const messages = useChatStore((s) => s.messages);
   const streaming = useChatStore((s) => s.streaming);
@@ -521,6 +521,16 @@ export function ChatView() {
       void loadSessions();
     }
   }, [loaded, loadSessions]);
+
+  // Pop-out window (roadmap #17): select the requested session once the
+  // session list has loaded, so the standalone window shows that chat.
+  const selectSession = useChatStore((s) => s.selectSession);
+  useEffect(() => {
+    if (!popoutSessionId || !loaded) return;
+    if (useChatStore.getState().activeChatSessionId === popoutSessionId) return;
+    const exists = useChatStore.getState().sessions.some((s) => s.id === popoutSessionId);
+    if (exists) void selectSession(popoutSessionId);
+  }, [popoutSessionId, loaded, selectSession]);
 
   // Load the saved provider config (used for auto-starting a session).
   useEffect(() => {

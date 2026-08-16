@@ -25,6 +25,7 @@ interface Props {
   onToggleStar: (id: string, starred: boolean) => void;
   onSetUnread: (id: string, unread: boolean) => void;
   onExport: (id: string) => void;
+  onPopOut?: (id: string) => void;
 }
 
 export function ChatSessionRow({
@@ -37,6 +38,7 @@ export function ChatSessionRow({
   onToggleStar,
   onSetUnread,
   onExport,
+  onPopOut,
 }: Props) {
 
   const [menuOpen, setMenuOpen] = useState(false);
@@ -217,6 +219,12 @@ export function ChatSessionRow({
             <span className="chat-menu-icon">↓</span>
             Export as zip
           </button>
+          {onPopOut && (
+            <button role="menuitem" onClick={(e) => menuAction(e, () => onPopOut(session.id))}>
+              <span className="chat-menu-icon">⧉</span>
+              Open in new window
+            </button>
+          )}
           <button
             role="menuitem"
             className="danger"

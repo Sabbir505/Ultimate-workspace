@@ -16,3 +16,4 @@ pub mod skills_cmds;
 pub mod budget;
 pub mod speech;
 pub mod updater_cmds;
+pub mod worktree_cmds;

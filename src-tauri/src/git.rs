@@ -220,6 +220,24 @@ pub fn create_worktree(project_path: &Path, branch_name: &str) -> Result<String,
     Ok(wt_str)
 }
 
+/// True when `path` names an existing directory (worktrees are plain dirs
+/// registered with the repo's `.git/worktrees/<name>`).
+pub fn worktree_dir_exists(path: &Path) -> bool {
+    path.is_dir()
+}
+
+/// `git worktree remove --force <path>` run from the project root (git needs
+/// to resolve the worktree's registration in the main repo). `--force` prunes
+/// uncommitted changes in the worktree — safe to use on chat-owned worktrees
+/// because the worktree's branch (`conduit/<id>`) remains in the repo, so
+/// committed work is never lost. Errors (unknown worktree, missing git) are
+/// surfaced for the caller to swallow: cleanup is always best-effort.
+pub fn remove_worktree(project_path: &Path, worktree_path: &Path) -> Result<(), String> {
+    let wt_str = worktree_path.to_string_lossy().into_owned();
+    run_git(project_path, &["worktree", "remove", "--force", &wt_str])?;
+    Ok(())
+}
+
 /// Unified diff of the working tree against HEAD (staged + unstaged),
 /// truncated at ~200KB per CONTRACT.md.
 pub fn get_git_diff(path: &Path) -> Result<String, String> {
@@ -1289,5 +1307,45 @@ mod tests {
         let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
         assert!(paths.contains(&"app.txt") && paths.contains(&"extra.txt"), "{paths:?}");
         assert!(files.iter().all(|f| f.status == "A"), "all additions vs empty tree");
+    }
+
+    /// Worktree-per-session (roadmap P0 §3.1.1): create_worktree + round-trip
+    /// remove_worktree. The branch must survive the remove (committed work is
+    /// never lost), and the linked working tree must be gone from disk.
+    #[test]
+    fn worktree_create_remove_round_trip_keeps_branch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+        init_test_repo(path);
+        // Create the worktree as ensure_chat_session_worktree would.
+        let wt = create_worktree(path, "conduit/abc12345").expect("create worktree");
+        let wt_path = PathBuf::from(&wt);
+        assert!(worktree_dir_exists(&wt_path), "worktree dir exists");
+        // The branch exists and is checked out in the worktree.
+        let branch = run_git(&wt_path, &["branch", "--show-current"]).expect("branch");
+        assert_eq!(branch.trim(), "conduit/abc12345");
+        // Committed work in the worktree survives removal (it's on the branch).
+        std::fs::write(wt_path.join("agent-note.txt"), "work\n").expect("write");
+        run_git(&wt_path, &["add", "."]).expect("add");
+        run_git(&wt_path, &["commit", "-m", "agent work"]).expect("commit");
+
+        remove_worktree(path, &wt_path).expect("remove worktree");
+        assert!(!wt_path.exists(), "worktree dir removed from disk");
+        // The branch persists in the main repo.
+        let has_branch = run_git(path, &["show-ref", "--verify", "refs/heads/conduit/abc12345"]);
+        assert!(has_branch.is_ok(), "branch survives worktree removal");
+    }
+
+    /// remove_worktree on a path that isn't a registered worktree errors
+    /// (the caller treats it as best-effort and leaves the dir alone).
+    #[test]
+    fn remove_worktree_unregistered_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+        init_test_repo(path);
+        let bogus = path.join("not-a-worktree");
+        std::fs::create_dir_all(&bogus).expect("dir");
+        assert!(remove_worktree(path, &bogus).is_err());
+        assert!(bogus.exists(), "unregistered dir left in place");
     }
 }

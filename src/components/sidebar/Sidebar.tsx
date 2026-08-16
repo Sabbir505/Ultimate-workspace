@@ -69,6 +69,7 @@ export function Sidebar() {
   const renameChat = useChatStore((s) => s.renameChat);
   const setStarred = useChatStore((s) => s.setStarred);
   const setUnread = useChatStore((s) => s.setUnread);
+  const toggleSessionWorktree = useChatStore((s) => s.toggleSessionWorktree);
   const loadSessions = useChatStore((s) => s.loadSessions);
   const loadConfig = useChatStore((s) => s.loadConfig);
 
@@ -207,6 +208,7 @@ export function Sidebar() {
           lastMessage: undefined,
           starred: s.starred ?? false,
           unread: s.unread ?? false,
+          worktreePath: s.worktreePath ?? null,
         })),
     [chatSessions],
   );
@@ -214,7 +216,7 @@ export function Sidebar() {
   // Chats grouped by project id (starred first, then most-recent), for the
   // nested dropdown rows under each project.
   const chatsByProject = useMemo(() => {
-    const map = new Map<string, { id: string; title: string; lastActiveAt: number; starred: boolean; unread: boolean }[]>();
+    const map = new Map<string, { id: string; title: string; lastActiveAt: number; starred: boolean; unread: boolean; worktreePath: string | null }[]>();
     for (const s of chatSessions) {
       if (!s.projectId) continue;
       const arr = map.get(s.projectId) ?? [];
@@ -224,6 +226,7 @@ export function Sidebar() {
         lastActiveAt: s.lastActiveAt,
         starred: s.starred ?? false,
         unread: s.unread ?? false,
+        worktreePath: s.worktreePath ?? null,
       });
       map.set(s.projectId, arr);
     }
@@ -437,6 +440,25 @@ export function Sidebar() {
                                   </span>
                                   <span className="sidebar-project-chat-title">{c.title}</span>
                                   <span className="sidebar-project-chat-time">{relativeTime(c.lastActiveAt)}</span>
+                                  {project.isGitRepo && (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        void toggleSessionWorktree(c.id);
+                                      }}
+                                      className={`sidebar-project-chat-worktree ${c.worktreePath ? "is-active" : ""}`}
+                                      title={
+                                        c.worktreePath
+                                          ? `Isolated worktree (${c.worktreePath}). Click to join the main working tree.`
+                                          : "Isolate this chat in its own git worktree (branch conduit/<id>)"
+                                      }
+                                      aria-label={
+                                        c.worktreePath ? "Join main working tree" : "Isolate in worktree"
+                                      }
+                                    >
+                                      {c.worktreePath ? "⛓" : "🪵"}
+                                    </button>
+                                  )}
                                 </div>
                               );
                             })}

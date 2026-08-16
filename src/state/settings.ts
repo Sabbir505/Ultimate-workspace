@@ -15,6 +15,10 @@ const K_CUSTOM_THEME_ID = "themes.customThemeId"; // active custom theme id ("" 
 const K_DND = "doNotDisturb";
 const K_NOTIFY_SOUND = "notifySound";
 const K_WATCH_MODE = "watchMode";
+/** Worktree-per-session default (roadmap P0 §3.1.1): "true" (default) gives
+ *  every new chat on a git project its own isolated worktree. Any value other
+ *  than the literal "false" reads as enabled — mirrors `checkpoints.enabled`. */
+const K_WORKTREE_DEFAULT = "worktrees.defaultEnabled";
 const K_KEYBINDINGS = "keybindingOverrides";
 const K_BROWSER_URLS = "browserLastUrls"; // JSON: { global: string, perProject: Record<string, string> }
 const K_BROWSER_PANE_STATE = "browserPaneState"; // JSON: { paneTabs: Record<string, BrowserPaneTabState> }
@@ -58,6 +62,10 @@ interface SettingsState {
   /** Play a subtle sound when a PTY notification fires (alongside the OS toast). */
   notifySound: boolean;
   watchMode: boolean;
+  /** Worktree-per-session default: give every new chat on a git project its
+   *  own isolated worktree. Default true; off skips auto-creation (per-chat
+   *  isolation stays available via the toggle). */
+  worktreeDefault: boolean;
   keybindings: KeybindingMap;
   browserUrls: BrowserUrlState;
   browserPaneState: PersistedBrowserPaneState;
@@ -74,6 +82,7 @@ interface SettingsState {
   setDnd: (dnd: boolean) => void;
   setNotifySound: (on: boolean) => void;
   setWatchMode: (watchMode: boolean) => void;
+  setWorktreeDefault: (enabled: boolean) => void;
   setKeybinding: (action: KeybindingAction, accelerator: string) => void;
   resetKeybindings: () => void;
   lastBrowserUrl: (projectId: string | null) => string;
@@ -103,6 +112,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   dnd: false,
   notifySound: true,
   watchMode: false,
+  worktreeDefault: true,
   keybindings: { ...DEFAULT_KEYBINDINGS },
   browserUrls: { global: "https://www.google.com", perProject: {} },
   browserPaneState: { paneTabs: {} },
@@ -110,7 +120,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   localPinExchanges: DEFAULT_LOCAL_PIN_EXCHANGES,
 
   load: async () => {
-    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId] = await Promise.all([
+    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault] = await Promise.all([
       getSetting(K_THEME),
       getSetting(K_DND),
       getSetting(K_NOTIFY_SOUND),
@@ -122,6 +132,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       getSetting(K_LOCAL_PIN_EXCHANGES),
       getSetting(K_THEMES),
       getSetting(K_CUSTOM_THEME_ID),
+      getSetting(K_WORKTREE_DEFAULT),
     ]);
     set((state) => {
       const next = { ...state, loaded: true };
@@ -138,6 +149,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       if (dnd === "true" || dnd === "false") next.dnd = dnd === "true";
       if (notifySound === "true" || notifySound === "false") next.notifySound = notifySound === "true";
       if (watchMode === "true" || watchMode === "false") next.watchMode = watchMode === "true";
+      // Default ON: only the literal "false" disables (mirrors the backend's
+      // `checkpoints.enabled` convention — any other value reads as enabled).
+      if (worktreeDefault === "false") next.worktreeDefault = false;
       if (kbJson) {
         try {
           const overrides = JSON.parse(kbJson) as Partial<KeybindingMap>;
@@ -221,6 +235,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setWatchMode: (watchMode) => {
     set({ watchMode });
     void setSetting(K_WATCH_MODE, String(watchMode));
+  },
+
+  setWorktreeDefault: (enabled) => {
+    set({ worktreeDefault: enabled });
+    void setSetting(K_WORKTREE_DEFAULT, String(enabled));
   },
 
   setKeybinding: (action, accelerator) => {

@@ -295,6 +295,13 @@ pub struct ChatSession {
     /// land. Bind/unbind is a Tauri command (`set_chat_session_project`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
+    /// Per-session isolated git worktree (roadmap P0 §3.1.1). `None` = the chat
+    /// works directly in its bound project's working tree. When set, the
+    /// worktree dir (a sibling of the project, branch `conduit/<id>`) becomes
+    /// the chat's working directory for sends, spawns, checkpoints and diffs —
+    /// see `ensure_chat_session_worktree`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
     /// Per-session permission posture (`read_only` | `manual` | `auto_edit` |
     /// `full_auto`). New sessions default to `manual`; honored by the built-in
     /// chat tool loops AND by headless Claude Code sessions (via

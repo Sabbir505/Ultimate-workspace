@@ -311,6 +311,38 @@
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
+/* Worktree-per-session toggle on a nested project-chat row (roadmap P0
+ * §3.1.1). Hidden until hover; active chats show a ⛓ (isolated). */
+.sidebar-project-chat-worktree {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.sidebar-project-chat-row:hover .sidebar-project-chat-worktree,
+.sidebar-project-chat-worktree:focus-visible {
+  opacity: 1;
+}
+.sidebar-project-chat-worktree:hover {
+  background: var(--bg-tint);
+  color: var(--text);
+}
+.sidebar-project-chat-worktree.is-active {
+  opacity: 1;
+  color: var(--accent);
+}
 /* "Show sidebar" button â€” rendered inline at the start of the toolbar while
  * the sidebar is collapsed (App.tsx), so it never overlaps the title. */
 .sidebar-restore {

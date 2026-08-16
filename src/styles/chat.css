@@ -186,6 +186,12 @@
   flex: none;
   white-space: nowrap;
 }
+/* Isolated-worktree badge on a session row (roadmap P0 §3.1.1). */
+.chat-session-worktree-badge {
+  font-size: 9px;
+  color: var(--accent);
+  cursor: help;
+}
 /* Title + timer on one row; preview below */
 .chat-session-info {
   display: flex;

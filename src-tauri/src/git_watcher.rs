@@ -203,19 +203,22 @@ pub fn uninstall(state: &WatcherState, path: &Path) {
     }
 }
 
-/// Install watchers for every registered project + every worktree path.
+/// Install watchers for every registered project + every worktree path
+/// (legacy PTY sessions AND chat-session worktrees — roadmap P0 §3.1.1).
 /// Called on app boot and after project add/remove.
 pub fn install_all_known(app: &AppHandle, db_state: &DbState) {
     let (project_paths, worktree_paths): (Vec<PathBuf>, Vec<PathBuf>) = {
         let conn = db_state.0.lock();
         let projects = db::list_projects(&conn).unwrap_or_default();
         let sessions = db::list_sessions(&conn, None).unwrap_or_default();
+        let chat_worktrees = db::chat_worktree_paths(&conn, None).unwrap_or_default();
         let ppaths: Vec<PathBuf> = projects.into_iter().map(|p| PathBuf::from(p.path)).collect();
-        let wpaths: Vec<PathBuf> = sessions
+        let mut wpaths: Vec<PathBuf> = sessions
             .into_iter()
             .filter_map(|s| s.worktree_path)
             .map(PathBuf::from)
             .collect();
+        wpaths.extend(chat_worktrees.into_iter().map(PathBuf::from));
         (ppaths, wpaths)
     };
     for p in project_paths {

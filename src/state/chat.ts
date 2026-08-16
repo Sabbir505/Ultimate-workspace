@@ -38,6 +38,9 @@ import {
   updateChatSessionPermissionMode,
   updateChatSessionWatchMode,
   resolveToolAction,
+  ensureChatSessionWorktree,
+  setChatSessionWorktree,
+  getSetting,
   type ChatApprovalRequestPayload,
   type ChatApprovalResolvedPayload,
   type ChatAttachmentInput,
@@ -92,6 +95,32 @@ function isCliAgent(agent: string | null | undefined): agent is string {
 /** Extract the adapter/agent id from a "harness:<id>" / "acp:<id>" value. */
 function cliAgentId(agent: string): string {
   return agent.startsWith("acp:") ? agent.slice("acp:".length) : agent.slice("harness:".length);
+}
+
+/** Worktree-per-session default (roadmap P0 §3.1.1): give a fresh chat on a
+ *  git project its own isolated worktree, and patch the session row when the
+ *  path resolves. Fires-and-forgets by design — the send path falls back to
+ *  the project root until (or unless) the worktree exists, so this must NEVER
+ *  block session creation or a send. Skipped when the chat is unbound, already
+ *  isolated, the project isn't a git repo, or the global default is off. */
+async function maybeEnsureWorktree(session: ChatSession | null | undefined): Promise<void> {
+  if (!session?.id || !session.projectId || session.worktreePath) return;
+  const enabled = (await getSetting("worktrees.defaultEnabled").catch(() => null)) !== "false";
+  if (!enabled) return;
+  const project = useProjectsStore.getState().projectById(session.projectId);
+  if (!project?.isGitRepo) return;
+  try {
+    const path = await ensureChatSessionWorktree(session.id);
+    if (path) {
+      useChatStore.setState((s) => ({
+        sessions: s.sessions.map((sess) =>
+          sess.id === session.id ? { ...sess, worktreePath: path } : sess,
+        ),
+      }));
+    }
+  } catch {
+    // Best-effort: the chat works in the project root instead.
+  }
 }
 
 /** Session list with tombstoned (deleted-this-run) sessions removed. */
@@ -394,6 +423,10 @@ export interface ChatState {
   /** Set/clear a session's custom working folder (null clears, reverting to
    *  the selected project's path). */
   setCwdOverride: (chatSessionId: string, path: string | null) => void;
+  /** Worktree-per-session toggle (roadmap P0 §3.1.1): a session with an
+   *  isolated worktree joins the main working tree (removing the worktree
+   *  best-effort); a session without one gets isolated. */
+  toggleSessionWorktree: (chatSessionId: string) => Promise<void>;
   /** Fully unbind a session from its project: drop the per-chat project
    *  binding AND any custom-folder override, so the composer notch disappears
    *  and the working directory falls back to the global selection. */
@@ -566,10 +599,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sessionProjects,
         cwdOverrides,
         sessions: s.sessions.map((sess) =>
-          sess.id === chatSessionId ? { ...sess, projectId: null } : sess,
+          sess.id === chatSessionId ? { ...sess, projectId: null, worktreePath: null } : sess,
         ),
       };
     });
+  },
+
+  toggleSessionWorktree: async (chatSessionId) => {
+    const session = get().sessions.find((s) => s.id === chatSessionId);
+    if (!session) return;
+    if (session.worktreePath) {
+      // "Join main working tree": backend removes the worktree best-effort
+      // (branch stays in the repo) and clears the pointer; mirror locally.
+      try {
+        await setChatSessionWorktree(chatSessionId, null);
+      } catch {
+        // Best-effort by design — still clear the local pointer below.
+      }
+      set((s) => ({
+        sessions: s.sessions.map((sess) =>
+          sess.id === chatSessionId ? { ...sess, worktreePath: null } : sess,
+        ),
+      }));
+      return;
+    }
+    // Isolate: create + persist + watch, patching state when it resolves.
+    await maybeEnsureWorktree(session);
   },
 
   removeQueuedMessage: (chatSessionId, id) =>
@@ -832,6 +887,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 provider: provider || sess.provider,
                 model: model || sess.model,
                 projectId: targetProject ?? null,
+                // The backend removes the old project's worktree on rebind;
+                // mirror that locally so a stale pointer can't block ensure.
+                worktreePath:
+                  targetProject !== sess.projectId ? null : sess.worktreePath,
               }
             : sess,
         ),
@@ -844,6 +903,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ),
         error: null,
       }));
+      // Give the (possibly just rebound) chat its own worktree, fire-and-forget.
+      void maybeEnsureWorktree(get().sessions.find((s) => s.id === active.id));
       return active;
     }
 
@@ -863,6 +924,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
             ? { ...s.sessionProjects, [session.id]: session.projectId }
             : s.sessionProjects,
       }));
+      // Worktree-per-session default: isolate the new chat, fire-and-forget.
+      void maybeEnsureWorktree(session);
     }
     return session;
   },
@@ -1160,16 +1223,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const session = get().sessions.find((s) => s.id === activeChatSessionId);
 
     // Working folder resolution, shared by both send paths: a custom folder
-    // from the composer "+" picker wins, then the chat's bound project,
-    // then the global selection. This is read-only — browsing a project
-    // does NOT rebind the chat to it (binding is explicit; see newChat and
-    // unbindProject). An unbound chat resolves its working directory against
-    // the currently-selected project without persisting a binding.
+    // from the composer "+" picker wins, then the chat's isolated worktree
+    // (roadmap P0 §3.1.1), then the chat's bound project, then the global
+    // selection. This is read-only — browsing a project does NOT rebind the
+    // chat to it (binding is explicit; see newChat and unbindProject). An
+    // unbound chat resolves its working directory against the
+    // currently-selected project without persisting a binding.
     const projectsState = useProjectsStore.getState();
     const boundProject = projectsState.projectById(
       get().sessionProjects[activeChatSessionId] ?? projectsState.selectedProjectId,
     );
-    const workingDir = get().cwdOverrides[activeChatSessionId] ?? boundProject?.path;
+    const workingDir =
+      get().cwdOverrides[activeChatSessionId] ??
+      session?.worktreePath ??
+      boundProject?.path;
 
     // CLI harness / ACP agents (Phase 2 + roadmap #20): the turn goes to the
     // headless CLI process (agent_sessions.rs) instead of the built-in
@@ -1278,7 +1345,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const boundProject = projectsState.projectById(
         get().sessionProjects[sid] ?? projectsState.selectedProjectId,
       );
-      const workingDir = get().cwdOverrides[sid] ?? boundProject?.path;
+      const workingDir =
+        get().cwdOverrides[sid] ?? session.worktreePath ?? boundProject?.path;
       try {
         if (isCliAgent(session.agent)) {
           await sendAgentChatMessage(

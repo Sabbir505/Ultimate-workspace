@@ -57,7 +57,14 @@ export function GitToolsSidebar() {
 
   const projectId = boundProjectId ?? selectedProjectId;
   const project = projects.find((p) => p.id === projectId);
-  const path = project?.path ?? null;
+  // The diff/branch surface follows the chat's working directory: when the
+  // active chat runs in an isolated worktree (roadmap P0 §3.1.1), git
+  // status/diff resolve against THAT dir — git is worktree-transparent, and
+  // showing the project root's branch would mislead.
+  const session = useChatStore((s) =>
+    s.activeChatSessionId ? s.sessions.find((x) => x.id === s.activeChatSessionId) : undefined,
+  );
+  const path = session?.worktreePath ?? project?.path ?? null;
   const gitStatus = projectId ? gitStatuses[projectId] : undefined;
 
   // Changed files for the +/- line counts.

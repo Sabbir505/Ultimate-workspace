@@ -539,6 +539,26 @@
   opacity: 0;
   transition: opacity 0.12s ease;
 }
+/* Isolated-worktree chip inside the folder notch (roadmap P0 §3.1.1) —
+ * always visible; clicking it joins the main working tree. */
+.composer-notch-worktree {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.composer-notch-worktree:hover {
+  background: var(--bg-tint);
+}
 .composer-notch-folder:hover .composer-notch-folder-clear,
 .composer-notch-folder-clear:focus-visible {
   opacity: 1;

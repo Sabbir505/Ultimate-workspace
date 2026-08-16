@@ -547,6 +547,11 @@ export interface ChatSession {
    *  unbound (shows in the flat "Chat History" list); a project id nests it
    *  under that project's expandable row. Persisted in the DB. */
   projectId?: string | null;
+  /** Per-session isolated git worktree (roadmap P0 §3.1.1). null/undefined =
+   *  the chat works in its bound project's working tree; a path = the chat's
+   *  isolated git worktree (sibling of the project, branch `conduit/<id>`),
+   *  which becomes its working dir for sends/spawns/diffs. */
+  worktreePath?: string | null;
   /** Per-session permission posture: "read_only" | "manual" | "auto_edit" |
    *  "full_auto". Defaults to "manual" server-side. */
   permissionMode?: string;
@@ -863,6 +868,16 @@ export const createChatSession = (provider: string, model: string, projectId?: s
  *  that project's expandable sidebar row. */
 export const setChatSessionProject = (chatSessionId: string, projectId?: string | null) =>
   safeInvoke<void>("set_chat_session_project", { chatSessionId, projectId: projectId ?? null });
+/** Worktree-per-session (roadmap P0 §3.1.1): make sure the chat has an
+ *  isolated git worktree and returns its path (null when unbound or the
+ *  project isn't a git repo). Idempotent and best-effort — callers must never
+ *  block a send on this. */
+export const ensureChatSessionWorktree = (chatSessionId: string) =>
+  safeInvoke<string | null>("ensure_chat_session_worktree", { sessionId: chatSessionId });
+/** "Join main working tree" (or point the chat at a specific worktree): clears
+ *  the pointer and best-effort removes the previous on-disk worktree. */
+export const setChatSessionWorktree = (chatSessionId: string, worktreePath?: string | null) =>
+  safeInvoke<void>("set_chat_session_worktree", { sessionId: chatSessionId, worktreePath: worktreePath ?? null });
 export const deleteChatSession = (chatSessionId: string) =>
   safeInvoke<void>("delete_chat_session", { chatSessionId });
 /** Sweep empty "Untitled" session rows (zero messages), keeping the session

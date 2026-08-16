@@ -91,14 +91,21 @@ const NO_QUEUED_MESSAGES: import("../../state/chat").QueuedChatMessage[] = [];
 
 /** Notch chip beside the agent selector showing the directory the chat is
  *  working in: the custom folder chosen via the "+" picker when set, else the
- *  selected project's folder. The × (visible on hover) fully unbinds the chat
- *  from that project — drop the per-chat binding, any custom-folder override,
- *  and the global selection when it's the same project. Hidden when neither
- *  resolves (no project selected). */
+ *  chat's isolated worktree (roadmap P0 §3.1.1), else the selected project's
+ *  folder. The × (visible on hover) fully unbinds the chat from that project —
+ *  drop the per-chat binding, any custom-folder override, and the global
+ *  selection when it's the same project. Hidden when neither resolves (no
+ *  project selected). When the chat works in an isolated worktree a ⛓ chip
+ *  sits beside the folder name — clicking it joins the main working tree. */
 function FolderNotch() {
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
   const override = useChatStore((s) =>
     s.activeChatSessionId ? s.cwdOverrides[s.activeChatSessionId] : undefined,
+  );
+  const worktreePath = useChatStore((s) =>
+    s.activeChatSessionId
+      ? s.sessions.find((x) => x.id === s.activeChatSessionId)?.worktreePath
+      : undefined,
   );
   const unbindProject = useChatStore((s) => s.unbindProject);
   const selectProject = useProjectsStore((s) => s.selectProject);
@@ -111,7 +118,7 @@ function FolderNotch() {
   const project = useProjectsStore((s) =>
     s.projectById(boundProjectId ?? s.selectedProjectId),
   );
-  const path = override ?? project?.path ?? null;
+  const path = override ?? worktreePath ?? project?.path ?? null;
   if (!path || !activeChatSessionId) return null;
   const unbind = () => {
     unbindProject(activeChatSessionId);
@@ -128,6 +135,20 @@ function FolderNotch() {
     <div className="composer-notch-folder" title={path}>
       <FolderIcon />
       <span className="composer-notch-folder-name">{pathBasename(path)}</span>
+      {worktreePath && (
+        <button
+          type="button"
+          className="composer-notch-worktree"
+          title={`Isolated worktree (branch on ${pathBasename(worktreePath)}). Click to join the main working tree.`}
+          aria-label="Join main working tree"
+          onClick={(e) => {
+            e.stopPropagation();
+            void useChatStore.getState().toggleSessionWorktree(activeChatSessionId);
+          }}
+        >
+          ⛓
+        </button>
+      )}
       <button
         type="button"
         className="composer-notch-folder-clear"

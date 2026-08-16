@@ -41,6 +41,16 @@ fn verify_project_path(path: &Path, db: &DbState) -> CmdResult<()> {
             }
         }
     }
+    // Chat-session worktrees (roadmap P0 §3.1.1) live in the same sibling
+    // layout; allowlist the exact recorded paths the same way.
+    let chat_worktrees = db::chat_worktree_paths(&conn, None).map_err(|e| e.to_string())?;
+    for wt in chat_worktrees {
+        if let Ok(wt_canon) = Path::new(&wt).canonicalize() {
+            if crate::util::path_starts_with_ci(&canon, &wt_canon) {
+                return Ok(());
+            }
+        }
+    }
     Err("path is outside allowed project roots".to_string())
 }
 

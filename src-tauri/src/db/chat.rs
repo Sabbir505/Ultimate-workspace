@@ -27,6 +27,9 @@ fn map_chat_session(row: &rusqlite::Row) -> rusqlite::Result<ChatSession> {
         // NULL = unbound (shows in the flat "Chat History" list); otherwise the
         // chat is nested under this project's expandable sidebar row.
         project_id: row.get::<_, Option<String>>("project_id")?,
+        // NULL = work in the bound project's working tree; a path = the chat's
+        // isolated git worktree (roadmap P0 §3.1.1, branch `conduit/<id>`).
+        worktree_path: row.get::<_, Option<String>>("worktree_path")?,
         // Falls back to "manual" for rows written before the column existed
         // (the migration adds it nullable); unknown values also read as manual.
         permission_mode: row
@@ -103,6 +106,36 @@ pub fn set_chat_session_project(
         params![chat_session_id, project_id],
     )?;
     Ok(())
+}
+
+/// Point a chat at its isolated git worktree (or clear the pointer with
+/// `None`). The on-disk worktree itself is created/removed by the command
+/// layer (`ensure_chat_session_worktree` / `set_chat_session_worktree`); this
+/// function only persists the association.
+pub fn set_chat_session_worktree(
+    conn: &Connection,
+    chat_session_id: &str,
+    worktree_path: Option<&str>,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE chat_sessions SET worktree_path = ?2 WHERE id = ?1",
+        params![chat_session_id, worktree_path],
+    )?;
+    Ok(())
+}
+
+/// Every recorded chat worktree path for `project_id` (or for all chats when
+/// `None`). Used by the command layer to best-effort remove worktree dirs
+/// BEFORE the owning rows are deleted (delete paths), so no orphaned linked
+/// working trees accumulate on disk.
+pub fn chat_worktree_paths(conn: &Connection, project_id: Option<&str>) -> DbResult<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT worktree_path FROM chat_sessions
+         WHERE worktree_path IS NOT NULL AND worktree_path <> ''
+           AND (?1 IS NULL OR project_id = ?1)",
+    )?;
+    let rows = stmt.query_map(params![project_id], |r| r.get::<_, String>(0))?;
+    rows.collect()
 }
 
 /// Delete every chat session bound to a project (and, via FK cascade, its
@@ -600,6 +633,30 @@ pub fn search_chat_messages(
 mod tests {
     use rusqlite::Connection;
     use super::*;
+
+    #[test]
+    fn worktree_path_defaults_null_and_round_trips() {
+        let conn = super::super::mem();
+        // Fresh sessions have no worktree pointer.
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        assert_eq!(cs.worktree_path, None);
+
+        // Set persists and reads back through the mapper (the migration that
+        // adds the column runs inside mem(), so this also covers the schema).
+        set_chat_session_worktree(&conn, &cs.id, Some("D:/proj/conduit-abc12345")).unwrap();
+        let read = get_chat_session(&conn, &cs.id).unwrap().unwrap();
+        assert_eq!(read.worktree_path.as_deref(), Some("D:/proj/conduit-abc12345"));
+
+        // Clear reads back as None.
+        set_chat_session_worktree(&conn, &cs.id, None).unwrap();
+        let read = get_chat_session(&conn, &cs.id).unwrap().unwrap();
+        assert_eq!(read.worktree_path, None);
+
+        // chat_worktree_paths only surfaces non-null values.
+        assert!(chat_worktree_paths(&conn, None).unwrap().is_empty());
+        set_chat_session_worktree(&conn, &cs.id, Some("D:/proj/conduit-abc12345")).unwrap();
+        assert_eq!(chat_worktree_paths(&conn, None).unwrap(), vec!["D:/proj/conduit-abc12345"]);
+    }
 
     #[test]
     fn permission_mode_defaults_manual_and_updates() {

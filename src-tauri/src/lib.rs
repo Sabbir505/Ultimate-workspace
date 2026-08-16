@@ -426,6 +426,8 @@ pub fn run() {
             commands::budget::remove_budget,
             commands::budget::check_budgets,
             commands::speech::transcribe_audio,
+            commands::worktree_cmds::ensure_chat_session_worktree,
+            commands::worktree_cmds::set_chat_session_worktree,
         ]);
 
     let app = builder

@@ -218,11 +218,22 @@ pub fn delete_chat_session(
     }
     // Prune this session's git checkpoint refs before the rows cascade away.
     crate::checkpoints::prune_session_refs(&conn, &chat_session_id);
+    // Best-effort remove the session's isolated worktree before its row is
+    // deleted (roadmap P0 §3.1.1) — the `conduit/<id>` branch stays in the
+    // repo, so committed work survives the delete.
+    if let Ok(Some(sess)) = db::get_chat_session(&conn, &chat_session_id) {
+        crate::commands::worktree_cmds::remove_worktree_for_session(&conn, &sess);
+    }
     db::delete_chat_session(&conn, &chat_session_id).map_err(|e| e.to_string())
 }
 
 /// Bind (or unbind with `None`) a chat session to a project. Drives the chat's
 /// nesting under the project's expandable sidebar row.
+///
+/// When the binding actually changes, any worktree the chat had under the OLD
+/// project is removed best-effort and its pointer cleared (roadmap P0 §3.1.1):
+/// a worktree belongs to a specific project, so rebinding/unbinding orphans it
+/// — the `conduit/<id>` branch stays in the repo, so nothing committed is lost.
 #[tauri::command]
 pub fn set_chat_session_project(
     chat_session_id: String,
@@ -230,6 +241,14 @@ pub fn set_chat_session_project(
     db: State<DbState>,
 ) -> CmdResult<()> {
     let conn = db.0.lock();
+    let before = db::get_chat_session(&conn, &chat_session_id)
+        .map_err(|e| e.to_string())?;
+    if let Some(sess) = &before {
+        let changed = sess.project_id.as_deref() != project_id.as_deref();
+        if changed && sess.worktree_path.is_some() {
+            crate::commands::worktree_cmds::remove_worktree_for_session(&conn, sess);
+        }
+    }
     db::set_chat_session_project(&conn, &chat_session_id, project_id.as_deref())
         .map_err(|e| e.to_string())
 }
@@ -258,15 +277,12 @@ pub fn delete_all_chat_sessions(
     agent_state: State<crate::agent_sessions::AgentSessionState>,
     chat_state: State<'_, crate::ChatState>,
 ) -> CmdResult<usize> {
-    let ids = {
+    let sessions = {
         let conn = db.0.lock();
-        db::list_chat_sessions(&conn)
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(|s| s.id)
-            .collect::<Vec<_>>()
+        db::list_chat_sessions(&conn).map_err(|e| e.to_string())?
     };
-    let count = ids.len();
+    let count = sessions.len();
+    let ids = sessions.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
     // Phase 1 (no DB lock): kill harness processes, abort in-flight streams,
     // and drop memoized context-meter counts. These touch in-memory state
     // only, so they stay out of the DB critical section.
@@ -280,7 +296,8 @@ pub fn delete_all_chat_sessions(
     // delete 3 settings + the session row, serializing against every other
     // query in the app for O(sessions) lock cycles.
     let conn = db.0.lock();
-    for id in &ids {
+    for sess in &sessions {
+        let id = &sess.id;
         for harness in ["claude_code", "kimi_code", "opencode"] {
             let _ = db::delete_setting(
                 &conn,
@@ -289,6 +306,9 @@ pub fn delete_all_chat_sessions(
         }
         // Prune git checkpoint refs before the rows cascade away.
         crate::checkpoints::prune_session_refs(&conn, id);
+        // Best-effort remove each session's isolated worktree before its row
+        // is deleted (roadmap P0 §3.1.1) — branches stay in the repos.
+        crate::commands::worktree_cmds::remove_worktree_for_session(&conn, sess);
         db::delete_chat_session(&conn, id).map_err(|e| e.to_string())?;
     }
     Ok(count)

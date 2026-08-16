@@ -435,6 +435,17 @@ fn is_path_allowed(path: &Path, app: &AppHandle, db: &DbState) -> bool {
             }
         }
     }
+    // Chat-session worktrees (roadmap P0 §3.1.1) sit in the same sibling
+    // layout; allowlist the exact recorded paths the same way.
+    if let Ok(chat_worktrees) = db::chat_worktree_paths(&conn, None) {
+        for wt in chat_worktrees {
+            if let Ok(wt_canon) = Path::new(&wt).canonicalize() {
+                if crate::util::path_starts_with_ci(path, &wt_canon) {
+                    return true;
+                }
+            }
+        }
+    }
     // Allow anything under the configured artifacts dir (Settings →
     // Storage & Data, `storage.artifactsDir`) when set.
     if let Some(configured) = crate::chat::dispatch::configured_artifacts_dir(&conn) {

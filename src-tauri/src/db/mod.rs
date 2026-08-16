@@ -126,6 +126,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_session_agent(conn)?;
     migrate_chat_session_project_id(conn)?;
     migrate_chat_session_permission_mode(conn)?;
+    migrate_chat_session_worktree(conn)?;
     migrate_artifacts_message_id(conn)?;
     migrate_chat_messages_superseded(conn)?;
     migrate_cost_v2(conn)?;
@@ -172,6 +173,23 @@ fn migrate_chat_session_watch_mode(conn: &Connection) -> DbResult<()> {
 /// `map_chat_session`, which is also the value new rows are inserted with.
 fn migrate_chat_session_permission_mode(conn: &Connection) -> DbResult<()> {
     let sql = "ALTER TABLE chat_sessions ADD COLUMN permission_mode TEXT";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Add the `worktree_path` column to `chat_sessions` on databases created
+/// before the worktree-per-session feature (roadmap P0 §3.1.1). NULL = the
+/// chat works in its bound project's working tree; a path = the chat's
+/// isolated git worktree (branch `conduit/<id>`, a sibling of the project).
+/// The column is maintained by `ensure_chat_session_worktree` /
+/// `set_chat_session_worktree`; see the legacy `sessions.worktree_path`
+/// (PTY harness sessions) for the older sibling of this concept.
+fn migrate_chat_session_worktree(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE chat_sessions ADD COLUMN worktree_path TEXT";
     if let Err(e) = conn.execute(sql, []) {
         if !e.to_string().contains("duplicate column name") {
             return Err(e);
@@ -735,8 +753,10 @@ pub use chat::{
     get_chat_session, list_active_chat_messages, list_chat_messages, list_chat_messages_page,
     list_chat_sessions,
     list_chat_session_connectors, mark_branch_superseded, mark_superseded, search_chat_messages,
+    chat_worktree_paths,
     set_chat_session_connectors,
     set_chat_session_project, set_chat_session_starred, set_chat_session_unread,
+    set_chat_session_worktree,
     touch_chat_session, update_chat_session_agent, update_chat_session_model,
     update_chat_session_permission_mode, update_chat_session_provider,
     update_chat_session_title, update_chat_session_watch_mode,
@@ -804,6 +824,7 @@ pub(crate) fn mem() -> Connection {
     migrate_chat_session_agent(&conn).unwrap();
     migrate_chat_session_project_id(&conn).unwrap();
     migrate_chat_session_permission_mode(&conn).unwrap();
+    migrate_chat_session_worktree(&conn).unwrap();
     migrate_artifacts_message_id(&conn).unwrap();
     migrate_chat_messages_superseded(&conn).unwrap();
     migrate_cost_v2(&conn).unwrap();

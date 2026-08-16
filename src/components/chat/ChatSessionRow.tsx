@@ -12,6 +12,8 @@ export interface ChatSessionRowData {
   lastMessage?: string;
   starred?: boolean;
   unread?: boolean;
+  /** Isolated git worktree path (roadmap P0 §3.1.1); shows a small badge. */
+  worktreePath?: string | null;
 }
 
 interface Props {
@@ -172,6 +174,14 @@ export function ChatSessionRow({
           )}
           <div className="chat-session-meta">
             <span>{relativeTime(session.lastActiveAt)}</span>
+            {session.worktreePath && (
+              <span
+                className="chat-session-worktree-badge"
+                title={`Isolated worktree: ${session.worktreePath}`}
+              >
+                ⛓
+              </span>
+            )}
           </div>
         </div>
         {truncated && <span className="chat-session-preview">{truncated}</span>}

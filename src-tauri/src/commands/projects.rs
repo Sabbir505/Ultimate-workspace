@@ -44,6 +44,16 @@ pub fn add_project(path: String, db: State<DbState>) -> CmdResult<Project> {
 #[tauri::command]
 pub fn remove_project(project_id: String, db: State<DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
+    // Best-effort remove the project's chat worktrees (roadmap P0 §3.1.1)
+    // before the rows cascade away — `git worktree remove --force` must run
+    // from the project root, which is still present here.
+    if let Ok(Some(proj)) = db::get_project(&conn, &project_id) {
+        if let Ok(wts) = db::chat_worktree_paths(&conn, Some(&project_id)) {
+            for wt in wts {
+                let _ = git::remove_worktree(Path::new(&proj.path), Path::new(&wt));
+            }
+        }
+    }
     db::remove_project(&conn, &project_id).map_err(|e| e.to_string())
 }
 

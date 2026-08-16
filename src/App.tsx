@@ -14,6 +14,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef } from "react";
 import { Modal } from "./components/common/Modal";
 import { ToastHost } from "./components/common/ToastHost";
 import { OnboardingBanner } from "./components/onboarding/OnboardingBanner";
+import { WorktreeNudgeBanner } from "./components/onboarding/WorktreeNudgeBanner";
 // ToolPanel (right-side tool/agents/artifact panel) statically imports
 // react-markdown via SubagentPanel — lazy so it leaves the entry chunk
 // (PERFORMANCE_AUDIT.md item 12).
@@ -175,6 +176,8 @@ export default function App() {
         </div>
 
         <OnboardingBanner />
+
+        <WorktreeNudgeBanner />
 
         {activeView === "chat" ? (
           <div className="grid-wrap chat-grid-wrap">

@@ -944,6 +944,8 @@ function AssistantPanel() {
  *  assistant). Stored as a provider+model pair because API keys resolve
  *  per-provider. */
 function GitPanel() {
+  const worktreeDefault = useSettingsStore((s) => s.worktreeDefault);
+  const setWorktreeDefault = useSettingsStore((s) => s.setWorktreeDefault);
   const [cmProvider, setCmProvider] = useState<ChatProvider | "">("");
   const [cmModel, setCmModel] = useState("");
   const [cmModels, setCmModels] = useState<string[]>([]);
@@ -1065,6 +1067,32 @@ function GitPanel() {
               </div>
             </div>
           )}
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Worktree-per-session isolation</div>
+        <p className="settings-section-hint">
+          Every new chat bound to a git project gets its own isolated worktree (branch{" "}
+          <code>conduit/&lt;id&gt;</code>, a sibling folder), so agents never collide in the same
+          working tree. The worktree becomes the chat's working directory for sends, harness/ACP
+          spawns, checkpoints and diffs; deleting or unbinding the chat removes it best-effort (the
+          branch stays in the repo, so committed work is never lost). Turn off to keep new chats in
+          the project root — per-chat isolation stays available via the 🪵/⛓ toggle in the sidebar
+          and composer.
+        </p>
+        <div className="settings-form-row">
+          <label className="settings-form-label">Default</label>
+          <div className="settings-form-control">
+            <label className="settings-checkbox-row">
+              <input
+                type="checkbox"
+                checked={worktreeDefault}
+                onChange={(e) => setWorktreeDefault(e.target.checked)}
+              />
+              <span>Isolate new chats in their own worktree</span>
+            </label>
+          </div>
         </div>
       </div>
     </>

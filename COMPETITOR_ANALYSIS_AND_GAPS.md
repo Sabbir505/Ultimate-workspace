@@ -161,19 +161,19 @@ Ranked by how much they matter for Conduit's actual positioning (orchestration s
 | P0 | ~~**Worktree-per-session default** for new agent sessions (+ migration nudge)~~ **DONE** (`92f7596a`) | §3.1.1 — the core orchestrator mechanic | M |
 | P0 | ~~**Per-turn checkpoints + one-click revert** (hidden git refs, à la T3 Code/Cline)~~ **DONE** (`4ca284a1` + `b81a0fb9`) | §3.1.2 — T3's signature safety feature | M |
 | P0 | ~~**Wire the permission-mode UI end-to-end** (or delete it)~~ **DONE** (`ff0b812f`) | §3.0 — T3 ships 4 wired modes; Conduit's are dead code | S–M |
-| P0 | **PR create/review/status via GitHub connector** | §3.1.3 — closes the git loop | M |
-| P0 | **Restore panes/sessions on launch** | §3.1.4 — Superset parity, cheap (Workspaces IPC exists, unwired) | S–M |
-| P0 | **Finish local-model onboarding polish** (recommendations, wizard, cached NGL, remove personal-path hacks) | §4.1 — protect the moat | S–M |
-| P1 | **Agent board view** (status-at-a-glance over existing pane states) | §3.1.6 — convergent UX expectation | M |
-| P1 | **Task Scheduler registration + automation notifications (incl. mobile push)** | §4.3 — complete the headless story; T3's systemd service already shipped theirs | S–M |
-| P1 | **Remote-access hardening** (TLS/Tailscale-style guide, remove hardcoded dev IP, fix relay perf trio, attachments) | §3.0 — T3's pairing/Tailscale/SSH sets the bar | S–M |
-| P1 | **LocalDocs-class RAG** | §3.1.7 + local-model moat | M |
+| P0 | ~~**PR create/review/status via GitHub connector**~~ **DONE** (`a7e575c7`) | §3.1.3 — closes the git loop | M |
+| P0 | ~~**Restore panes/sessions on launch**~~ **DONE** (`263fac10`) | §3.1.4 — Superset parity, cheap (Workspaces IPC exists, unwired) | S–M |
+| P0 | **Finish local-model onboarding polish** (recommendations, wizard, cached NGL, remove personal-path hacks) — *recs done (`d64895d5`), personal-path hacks already clean; remaining: cached ngl persistence, HF listing cache, first-run wizard* | §4.1 — protect the moat | S–M |
+| P1 | **Agent board view** (status-at-a-glance over existing pane states) — *missing* | §3.1.6 — convergent UX expectation | M |
+| P1 | ~~**Task Scheduler registration + automation notifications (incl. mobile push)**~~ **DONE** (`acb0ad3c`) — Windows-only schtasks by design; mobile push is relay-broadcast (app-open) | §4.3 — complete the headless story; T3's systemd service already shipped theirs | S–M |
+| P1 | **Remote-access hardening** (TLS/Tailscale-style guide, remove hardcoded dev IP, fix relay perf trio, attachments) — *dev IP gone, loopback bind + pairing token + perf done; remaining: TLS/wss posture, mobile attachment picker* | §3.0 — T3's pairing/Tailscale/SSH sets the bar | S–M |
+| P1 | **LocalDocs-class RAG** — *search_docs tool + corpora + embedding sidecar shipped (`1cfc86fb`); remaining: automatic per-turn retrieval injection, per-chat attachment, harness/MCP exposure* | §3.1.7 + local-model moat | M |
 | P2 | **"Diff review" AI quick action** (review agent) | §3.2.8 | S |
 | P2 | **E2E encryption on the relay** | §3.2.11 — match Happy Coder | M |
 | P2 | **MCP server gallery for built-in chat** | §3.2.14 | M |
 | P3 | **macOS build job** (when growth > focus) | §3.2.12 | M–L |
-| P3 | **ACP client support** | §3.2.10 — watch the standard, don't lead it | L |
-| P3 | **Voice input (whisper sidecar)** | §3.2.15 | M |
+| P3 | ~~**ACP client support**~~ **DONE** (`b5bdc8fe`, roadmap #20) | §3.2.10 — watch the standard, don't lead it | L |
+| P3 | **Voice input (whisper sidecar)** — *desktop done (`3626bbb5`, roadmap #16); mobile missing* | §3.2.15 | M |
 
 **Strategic summary in one paragraph:** Conduit's defensible position is *the local-model-native orchestration shell with a built-in agentic chat, headless automations, and a no-cloud mobile companion* — the "Windows-first" and "has a mobile app" claims alone no longer differentiate now that **T3 Code** (viral, MIT, cross-platform incl. Windows, native iOS/Android) owns the "control surface for your existing CLI subscriptions" niche. The gaps that matter are the ones the converging "command center" cohort has standardized — worktree isolation per agent, PR-centric flows, session persistence, and a board view — all of which Conduit has the primitives for. The gaps to ignore are IDE features and cloud execution. The single biggest risk is that the local-model experience (the moat) stays at "power-user functional" while LM Studio-class polish sets user expectations and T3 Code matures; the single biggest opportunity is absorbing the users of the sunsetting/pivoting orchestrator cohort (Vibe Kanban, Crystal, Roo) with the one thing T3 Code and the rest can't offer: **local models + a full agentic chat + automations that run while everything is closed.**
 

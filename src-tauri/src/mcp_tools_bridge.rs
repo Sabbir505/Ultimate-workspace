@@ -1,10 +1,11 @@
 //! App-side half of the `conduit-tools` MCP server. The relay binary forwards
 //! `tools/call` for generate_document / generate_diagram / generate_file /
-//! get_skill / list_skills over the loopback WebSocket; this module runs them
-//! through the SAME `chat::tools::execute_tool` dispatcher the built-in chat
-//! uses, so the harness gets the identical output pipeline and artifact
-//! classification. Generated files land in the shared artifacts dir, where
-//! the session's DirWatch post-turn diff surfaces them as artifact chips.
+//! get_skill / list_skills / search_docs over the loopback WebSocket; this
+//! module runs them through the SAME `chat::tools::execute_tool` dispatcher
+//! the built-in chat uses, so the harness gets the identical output pipeline
+//! and artifact classification. Generated files land in the shared artifacts
+//! dir, where the session's DirWatch post-turn diff surfaces them as artifact
+//! chips.
 
 use serde_json::{json, Value};
 use crate::browser_mcp::McpError;
@@ -16,12 +17,15 @@ use crate::chat::tools::{self, ToolCaps};
 /// (write_file/delete_file/run_shell/…) with no permission-mode gate, since
 /// this path intentionally runs the same ungated dispatcher the built-in chat
 /// uses (where the caller enforces the gate BEFORE reaching execute_tool).
-const ALLOWED_RELAY_TOOLS: [&str; 5] = [
+/// `search_docs` is read-only and self-guards at runtime (returns
+/// "unavailable" when the embedding sidecar isn't running), so it's safe here.
+const ALLOWED_RELAY_TOOLS: [&str; 6] = [
     tools::GENERATE_DOCUMENT,
     tools::GENERATE_DIAGRAM,
     tools::GENERATE_FILE,
     tools::GET_SKILL,
     tools::LIST_SKILLS,
+    tools::SEARCH_DOCS,
 ];
 
 /// Strip the `conduit_tools:` prefix from a WS op; None for non-tool ops and
@@ -67,6 +71,7 @@ mod tests {
     #[test]
     fn tool_name_extraction() {
         assert_eq!(tool_from_op("conduit_tools:generate_document"), Some("generate_document".to_string()));
+        assert_eq!(tool_from_op("conduit_tools:search_docs"), Some("search_docs".to_string()));
         assert_eq!(tool_from_op("navigate"), None);
         assert_eq!(tool_from_op("conduit_tools:"), None);
         // Mutating/dangerous chat tools must be rejected server-side even

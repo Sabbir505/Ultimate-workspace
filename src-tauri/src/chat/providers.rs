@@ -79,6 +79,14 @@ pub struct ChatRequest {
     /// instead and ignore this flag.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<bool>,
+    /// Automatic per-turn local-docs retrieval (roadmap P1 §3.1.7): pre-computed
+    /// formatted hits from the user's indexed corpora, injected as a synthetic
+    /// "Retrieved context" user message ahead of the conversation so the model
+    /// answers from the user's own documents WITHOUT having to call the
+    /// `search_docs` tool. Each entry is already rendered (path, score, excerpt);
+    /// empty when the embedding sidecar isn't running or nothing matched.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub local_docs_retrieval: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -207,13 +215,21 @@ fn anthropic_request(
         kind: "enabled",
         budget_tokens: (max_tokens - 1024).max(1024),
     });
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    if !req.local_docs_retrieval.is_empty() {
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": req.local_docs_retrieval.join("\n\n")
+        }));
+    }
+    messages.extend(
+        req.messages
+            .iter()
+            .map(crate::chat::proto::anthropic_message_json),
+    );
     let body = AnthropicWireBody {
         model: req.model.clone(),
-        messages: req
-            .messages
-            .iter()
-            .map(crate::chat::proto::anthropic_message_json)
-            .collect(),
+        messages,
         max_tokens,
         stream: true,
         system: req.system.clone(),
@@ -241,6 +257,15 @@ fn openai_request(
         if !sys.is_empty() {
             messages.push(serde_json::json!({ "role": "system", "content": sys }));
         }
+    }
+    // Per-turn local-docs auto-retrieval (§3.1.7): first user message carries
+    // the retrieved context so the model answers from the user's own docs
+    // without an explicit search_docs call.
+    if !req.local_docs_retrieval.is_empty() {
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": req.local_docs_retrieval.join("\n\n")
+        }));
     }
     messages.extend(
         req.messages

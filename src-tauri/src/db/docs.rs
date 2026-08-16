@@ -295,6 +295,82 @@ pub fn search_chunks(
     Ok(hits)
 }
 
+/// Cosine top-k within a SINGLE corpus (used for per-chat pinned docs — those
+/// must come back regardless of what the rest of the corpora match).
+pub fn search_chunks_in_corpus(
+    conn: &Connection,
+    query: &[f32],
+    corpus_id: &str,
+    top_k: usize,
+) -> DbResult<Vec<ChunkHit>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.corpus_id, c.path, c.kind, c.content, c.embedding
+           FROM doc_chunks c
+          WHERE c.corpus_id = ?1",
+    )?;
+    let rows = stmt.query_map([corpus_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, Vec<u8>>(4)?,
+        ))
+    })?;
+
+    let qnorm = query.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if qnorm == 0.0 {
+        return Ok(Vec::new());
+    }
+    let mut hits: Vec<ChunkHit> = Vec::new();
+    for row in rows {
+        let (corpus_id, path, kind, content, blob) = row?;
+        let v = blob_to_f32_slice(&blob);
+        if v.len() != query.len() {
+            continue; // mixed-dimension corpora (model swapped) — skip
+        }
+        let vnorm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if vnorm == 0.0 {
+            continue;
+        }
+        let dot = query.iter().zip(v.iter()).map(|(a, b)| a * b).sum::<f32>();
+        let score = dot / (qnorm * vnorm);
+        hits.push(ChunkHit { corpus_id, path, kind, content, score });
+    }
+    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    hits.truncate(top_k);
+    Ok(hits)
+}
+
+/// Pin a corpus to a chat session so its documents are always in the
+/// auto-retrieval context for that chat (§3.1.7).
+pub fn attach_corpus_to_chat(conn: &Connection, chat_session_id: &str, corpus_id: &str) -> DbResult<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO chat_documents (chat_session_id, corpus_id, attached_at)
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params![chat_session_id, corpus_id, crate::db::now_ts()],
+    )?;
+    Ok(())
+}
+
+/// Remove a corpus from a chat's pinned set. No-op when absent.
+pub fn detach_corpus_from_chat(conn: &Connection, chat_session_id: &str, corpus_id: &str) -> DbResult<()> {
+    conn.execute(
+        "DELETE FROM chat_documents WHERE chat_session_id = ?1 AND corpus_id = ?2",
+        rusqlite::params![chat_session_id, corpus_id],
+    )?;
+    Ok(())
+}
+
+/// List the corpus ids pinned to a chat session (empty = no pinned docs).
+pub fn attached_corpus_ids(conn: &Connection, chat_session_id: &str) -> DbResult<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT corpus_id FROM chat_documents WHERE chat_session_id = ?1 ORDER BY attached_at",
+    )?;
+    let rows = stmt.query_map([chat_session_id], |r| r.get::<_, String>(0))?;
+    rows.collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,5 +466,52 @@ mod tests {
         replace_file_chunks(&conn, &c.id, "a.md", "text", &[("v1".into(), vec![1.0])]).unwrap();
         replace_file_chunks(&conn, &c.id, "a.md", "text", &[("v2a".into(), vec![1.0]), ("v2b".into(), vec![0.0])]).unwrap();
         assert_eq!(count_chunks(&conn, &c.id).unwrap(), 2);
+    }
+
+    #[test]
+    fn chat_documents_attach_and_detach() {
+        let conn = mem();
+        let c = add_corpus(&conn, "D:/notes", "notes").unwrap();
+
+        // Initially no pinned docs.
+        assert!(attached_corpus_ids(&conn, "s1").unwrap().is_empty());
+
+        attach_corpus_to_chat(&conn, "s1", &c.id).unwrap();
+        assert_eq!(attached_corpus_ids(&conn, "s1").unwrap(), vec![c.id.clone()]);
+
+        // Idempotent re-attach.
+        attach_corpus_to_chat(&conn, "s1", &c.id).unwrap();
+        assert_eq!(attached_corpus_ids(&conn, "s1").unwrap().len(), 1);
+
+        // Different session stays clean.
+        assert!(attached_corpus_ids(&conn, "s2").unwrap().is_empty());
+
+        // Detach.
+        detach_corpus_from_chat(&conn, "s1", &c.id).unwrap();
+        assert!(attached_corpus_ids(&conn, "s1").unwrap().is_empty());
+
+        // Detach again is a no-op.
+        detach_corpus_from_chat(&conn, "s1", &c.id).unwrap();
+        assert!(attached_corpus_ids(&conn, "s1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_chunks_in_corpus_scopes_to_one_corpus() {
+        let conn = mem();
+        let a = add_corpus(&conn, "D:/corp-a", "a").unwrap();
+        let b = add_corpus(&conn, "D:/corp-b", "b").unwrap();
+        let query_vec = vec![1.0f32, 0.0, 0.0];
+
+        replace_file_chunks(&conn, &a.id, "a1.md", "text", &[("in a".into(), query_vec.clone())]).unwrap();
+        replace_file_chunks(&conn, &b.id, "b1.md", "text", &[("in b".into(), query_vec.clone())]).unwrap();
+
+        // Scoped search returns only that corpus.
+        let hits_a = search_chunks_in_corpus(&conn, &query_vec, &a.id, 5).unwrap();
+        assert_eq!(hits_a.len(), 1);
+        assert_eq!(hits_a[0].path, "a1.md");
+
+        let hits_b = search_chunks_in_corpus(&conn, &query_vec, &b.id, 5).unwrap();
+        assert_eq!(hits_b.len(), 1);
+        assert_eq!(hits_b[0].path, "b1.md");
     }
 }

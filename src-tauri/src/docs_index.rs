@@ -233,6 +233,39 @@ pub fn docs_set_corpus_enabled(
     docs_db::set_corpus_enabled(&conn, &corpus_id, enabled).map_err(|e| e.to_string())
 }
 
+/// Pin a corpus to a chat session so its documents are ALWAYS in that chat's
+/// auto-retrieval context regardless of query (§3.1.7 per-chat attachment).
+#[tauri::command]
+pub fn docs_attach_corpus_to_chat(
+    db: State<'_, DbState>,
+    chat_session_id: String,
+    corpus_id: String,
+) -> CmdResult<()> {
+    let conn = db.0.lock();
+    docs_db::attach_corpus_to_chat(&conn, &chat_session_id, &corpus_id).map_err(|e| e.to_string())
+}
+
+/// Remove a corpus from a chat's pinned set.
+#[tauri::command]
+pub fn docs_detach_corpus_from_chat(
+    db: State<'_, DbState>,
+    chat_session_id: String,
+    corpus_id: String,
+) -> CmdResult<()> {
+    let conn = db.0.lock();
+    docs_db::detach_corpus_from_chat(&conn, &chat_session_id, &corpus_id).map_err(|e| e.to_string())
+}
+
+/// List the corpus ids pinned to a chat session (empty = none pinned).
+#[tauri::command]
+pub fn docs_attached_corpus_ids(
+    db: State<'_, DbState>,
+    chat_session_id: String,
+) -> CmdResult<Vec<String>> {
+    let conn = db.0.lock();
+    docs_db::attached_corpus_ids(&conn, &chat_session_id).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn docs_start_index(
     app: AppHandle,

@@ -220,7 +220,7 @@ fn tool_op(tool: &str) -> Result<String, &'static str> {
         "navigate" | "read_page" | "click" | "type_text" | "scroll" | "wait_for"
         | "history" | "hover" | "evaluate" | "click_and_wait" => Ok(tool.to_string()),
         "generate_document" | "generate_diagram" | "generate_file"
-        | "get_skill" | "list_skills" => Ok(format!("conduit_tools:{tool}")),
+        | "get_skill" | "list_skills" | "search_docs" => Ok(format!("conduit_tools:{tool}")),
         _ => Err("unknown tool"),
     }
 }
@@ -484,6 +484,18 @@ fn tool_schemas() -> Vec<Value> {
             "description": "List every available skill slug.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
+        json!({
+            "name": "search_docs",
+            "description": "Search the user's locally-indexed document folders (Settings → Knowledge). Use when the user asks about their own files, notes, or docs. Returns ranked hits with path, score, and text excerpt. Images return a path citation only. Self-reports unavailable when the embedding sidecar isn't running.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Natural-language search query." },
+                    "top_k": { "type": "integer", "description": "Max results to return (1–20, default 5)." }
+                },
+                "required": ["query"]
+            }
+        }),
     ]
 }
 
@@ -499,7 +511,7 @@ mod tests {
             .filter_map(|t| t["name"].as_str())
             .collect();
         for tool in ["navigate", "read_page", "generate_document", "generate_diagram",
-                     "generate_file", "get_skill", "list_skills",
+                     "generate_file", "get_skill", "list_skills", "search_docs",
                      "history", "hover", "evaluate", "click_and_wait"] {
             assert!(names.contains(&tool), "missing tool schema: {tool}");
         }
@@ -508,6 +520,7 @@ mod tests {
     #[test]
     fn conduit_tool_routing_uses_tools_namespace() {
         assert_eq!(tool_op("generate_document").unwrap(), "conduit_tools:generate_document");
+        assert_eq!(tool_op("search_docs").unwrap(), "conduit_tools:search_docs");
         assert_eq!(tool_op("navigate").unwrap(), "navigate"); // browser tools unchanged
         // New browser tools keep their bare op names (dispatched in
         // browser_mcp::dispatch) — never the conduit_tools namespace.

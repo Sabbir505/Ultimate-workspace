@@ -638,6 +638,17 @@ pub(crate) async fn run_openai_tool_loop(
             messages.push(json!({ "role": "system", "content": sys }));
         }
     }
+    // Per-turn local-docs auto-retrieval (§3.1.7): inject the retrieved
+    // context as the FIRST user message (right after the system prompt) so
+    // the model answers from the user's own documents without an explicit
+    // search_docs call. The retrieval is computed once per turn and re-sent
+    // on every tool round-trip, matching how the history is re-sent.
+    if !req.local_docs_retrieval.is_empty() {
+        messages.push(json!({
+            "role": "user",
+            "content": req.local_docs_retrieval.join("\n\n")
+        }));
+    }
     for m in &req.messages {
         messages.push(openai_message_json(m));
     }
@@ -850,6 +861,15 @@ pub(crate) async fn run_anthropic_tool_loop(
         .iter()
         .map(anthropic_message_json)
         .collect();
+    // Per-turn local-docs auto-retrieval (§3.1.7): inject the retrieved
+    // context as the FIRST user message so the model answers from the user's
+    // own documents without an explicit search_docs call.
+    if !req.local_docs_retrieval.is_empty() {
+        messages.insert(0, json!({
+            "role": "user",
+            "content": req.local_docs_retrieval.join("\n\n")
+        }));
+    }
 
     let mut full = String::new();
     let mut total = RoundUsage::default();

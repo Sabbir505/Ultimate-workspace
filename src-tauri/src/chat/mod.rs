@@ -215,6 +215,7 @@ impl ChatManager {
             system: system.filter(|s| !s.trim().is_empty()),
             effort,
             thinking,
+            local_docs_retrieval: Vec::new(),
         };
 
         // OpenRouter and LocalGguf speak the OpenAI wire format, so they ride
@@ -257,6 +258,16 @@ impl ChatManager {
                 .is_some_and(|s| s.0.embedding_status().is_some());
             let conn = db.lock();
             sidecar_up && db::any_searchable_corpus(&conn)
+        };
+        // Keep the embedding sidecar URL for the turn — the auto-retrieval
+        // below and the `search_docs` tool both need it. Snapshot under the
+        // same registry lock as the capability flag so both see one state.
+        let embedding_base = if local_docs {
+            app.try_state::<local_models::LocalModelState>()
+                .and_then(|s| s.0.embedding_status())
+                .map(|a| a.base_url)
+        } else {
+            None
         };
         // Load the user's approval rules ("always allow tool + glob") from
         // `app_settings` so the dispatcher can short-circuit approval cards.
@@ -317,6 +328,40 @@ impl ChatManager {
                     caps.attached_connectors = Arc::new(attached);
                 }
             }
+
+            // ── Per-turn local-docs auto-retrieval (§3.1.7) ─────────────────
+            // When the embedding sidecar is running AND the tool is gated on,
+            // pre-compute relevant document hits and inject them as a synthetic
+            // "Retrieved context" user message so the model answers from the
+            // user's own documents WITHOUT an explicit search_docs call.
+            let mut chat_req = chat_req;
+            if let (Some(base_url), true) = (&embedding_base, tools_enabled && local_docs) {
+                // Pinned corpus ids are read synchronously (parking_lot guards
+                // aren't Send — they can't cross the await below).
+                let pinned_ids = {
+                    let conn = db.lock();
+                    db::attached_corpus_ids(&conn, &sid).unwrap_or_default()
+                };
+                let query = chat_req
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "user")
+                    .map(|m| m.content.trim())
+                    .filter(|c| !c.is_empty())
+                    .map(|c| c.to_string());
+                let retrieval = compute_docs_retrieval(
+                    &db,
+                    base_url,
+                    query,
+                    &pinned_ids,
+                )
+                .await;
+                if !retrieval.is_empty() {
+                    chat_req.local_docs_retrieval = retrieval;
+                }
+            }
+
             let result = if tools_enabled && is_openai {
                 run_openai_tool_loop(
                     &client, &tool_base, &api_key, &chat_req, &caps, permission_mode, &mgr, &sid, &app, research_mode, perf.clone(),
@@ -536,6 +581,109 @@ impl ChatManager {
             self.pending.lock().remove(&id);
         }
     }
+}
+
+/// Pre-compute the per-turn local-docs auto-retrieval (§3.1.7).
+///
+/// Two retrieval paths are merged (both results passed in from the synchronous
+/// caller so no parking_lot guards cross the async boundary):
+/// 1. **Pinned** — top 2 hits from any corpus the user explicitly attached
+///    to this chat. Always included so pinned docs are always in context.
+/// 2. **Auto-matched** — top 2 hits from ALL enabled corpora using the
+///    latest user message as the query. Included when a meaningful query exists.
+///
+/// Results are deduplicated by path and capped at 4 total. Best-effort:
+/// any step failing returns an empty Vec so the turn proceeds without injection
+/// (the user still has the `search_docs` tool as a manual fallback).
+pub(crate) async fn compute_docs_retrieval(
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    base_url: &str,
+    query: Option<String>,
+    pinned_ids: &[String],
+) -> Vec<String> {
+    let query_vec = match &query {
+        Some(q) => {
+            let vecs = match local_models::embed_texts(base_url, &[q.clone()]).await {
+                Ok(v) => v,
+                Err(_) => return Vec::new(),
+            };
+            match vecs.into_iter().next() {
+                Some(v) => Some(v),
+                None => None,
+            }
+        }
+        None => None,
+    };
+
+    // DB reads happen in spawn_blocking: parking_lot guards aren't Send, so a
+    // guard held across an await would make the spawn future non-Send. The Arc
+    // is Send+Sync (Connection is Send), so it clones cleanly into the closure.
+    let db = Arc::clone(db);
+    let base_url_owned = base_url.to_string();
+    let query_vec_owned = query_vec;
+    let pinned_ids_owned: Vec<String> = pinned_ids.iter().cloned().collect();
+    let hits = tokio::task::spawn_blocking(move || {
+        let conn = db.lock();
+        let mut results: Vec<(String, String, f32)> = Vec::new();
+
+        // Pinned: always include top 2 hits per pinned corpus.
+        for corpus_id in &pinned_ids_owned {
+            if let Ok(list) = crate::db::search_chunks_in_corpus(
+                &conn,
+                query_vec_owned.as_deref().unwrap_or(&[]),
+                corpus_id,
+                2,
+            ) {
+                for h in list {
+                    results.push((h.path, h.content, h.score));
+                }
+            }
+        }
+
+        // Auto-matched: top 2 from all corpora (deduplicated against pinned).
+        if let Some(ref qv) = query_vec_owned {
+            if let Ok(auto) = crate::db::search_chunks(&conn, qv, 2) {
+                for h in auto {
+                    if !results.iter().any(|(p, _, _)| p == &h.path) {
+                        results.push((h.path, h.content, h.score));
+                    }
+                }
+            }
+        }
+
+        results
+    })
+    .await
+    .unwrap_or_default();
+
+    if hits.is_empty() {
+        return Vec::new();
+    }
+
+    const MAX_CHUNK: usize = 600;
+    const MAX_HITS: usize = 4;
+    let body: Vec<String> = hits
+        .into_iter()
+        .take(MAX_HITS)
+        .map(|(path, content, score)| {
+            let text = if content.len() > MAX_CHUNK {
+                format!("{}…", &content[..MAX_CHUNK])
+            } else {
+                content
+            };
+            format!("[{} · score={:.2}]\n{}", path, score, text)
+        })
+        .collect();
+
+    // Prefix with a contextual hint so the model knows what this is.
+    let prefix = if pinned_ids.is_empty() {
+        "Retrieved from your local documents:".to_string()
+    } else {
+        "From your pinned documents and your local documents:".to_string()
+    };
+    std::iter::once(prefix)
+        .chain(body)
+        .collect()
 }
 
 /// Runs the full SSE stream lifecycle for one chat request.

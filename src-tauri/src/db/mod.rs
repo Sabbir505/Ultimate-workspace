@@ -705,6 +705,17 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_doc_chunks_corpus ON doc_chunks(corpus_id, path);
+
+        -- Per-chat attached corpora (§3.1.7): when a user explicitly pins a
+        -- corpus to a chat, its chunks are included in the auto-retrieval
+        -- alongside the global (auto-matched) hits, so the model ALWAYS has
+        -- those documents in context for this chat regardless of query.
+        CREATE TABLE IF NOT EXISTS chat_documents (
+          chat_session_id TEXT NOT NULL,
+          corpus_id TEXT NOT NULL,
+          attached_at INTEGER NOT NULL,
+          PRIMARY KEY (chat_session_id, corpus_id)
+        );
         ",
     )
 }
@@ -772,9 +783,11 @@ pub use artifacts::{
 pub use source_ledger::{add_source_note, clear_source_notes, list_source_notes};
 
 pub use docs::{
-    add_corpus, any_searchable_corpus, blob_to_f32_slice, count_chunks, delete_chunks_for_file,
-    delete_indexed_files_not_in, f32_slice_to_blob, finish_index, get_corpus, get_corpus_by_path,
-    list_corpora, list_indexed_files, remove_corpus, replace_file_chunks, search_chunks,
+    add_corpus, any_searchable_corpus, attach_corpus_to_chat, attached_corpus_ids,
+    blob_to_f32_slice, count_chunks, delete_chunks_for_file,
+    delete_indexed_files_not_in, detach_corpus_from_chat, f32_slice_to_blob, finish_index,
+    get_corpus, get_corpus_by_path, list_corpora, list_indexed_files, remove_corpus,
+    replace_file_chunks, search_chunks, search_chunks_in_corpus,
     set_corpus_enabled, upsert_indexed_file, ChunkHit, DocCorpus,
 };
 

@@ -1153,6 +1153,8 @@ async fn handle_chat_turn(
         // Mobile relay doesn't yet surface a per-turn thinking toggle; leave
         // it at the provider default.
         thinking: None,
+        // Per-turn auto-retrieval is not wired through the mobile relay path yet.
+        local_docs_retrieval: Vec::new(),
     };
 
     let provider = crate::chat::streaming::resolve_provider(&provider_id);

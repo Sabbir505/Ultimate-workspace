@@ -1908,6 +1908,18 @@ export const docsStartIndex = (corpusId: string) =>
 export const docsCancelIndex = (corpusId: string) =>
   safeInvoke<boolean>("docs_cancel_index", { corpusId });
 
+// ── Per-chat document attachment (§3.1.7) ────────────────────────────────
+// Pin a corpus to a chat session so its chunks are ALWAYS in that chat's
+// auto-retrieval context, regardless of the query.
+export const docsAttachCorpusToChat = (chatSessionId: string, corpusId: string) =>
+  safeInvoke<void>("docs_attach_corpus_to_chat", { chatSessionId, corpusId });
+
+export const docsDetachCorpusFromChat = (chatSessionId: string, corpusId: string) =>
+  safeInvoke<void>("docs_detach_corpus_from_chat", { chatSessionId, corpusId });
+
+export const docsAttachedCorpusIds = (chatSessionId: string) =>
+  safeInvoke<string[] | null>("docs_attached_corpus_ids", { chatSessionId });
+
 /** Stream `docs:index:progress` events for an in-flight index run. */
 export const onDocsIndexProgress = (
   handler: (p: DocsIndexProgressPayload) => void,

@@ -131,6 +131,16 @@ cron = "0.12"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 subtle = "2.6.1"
 memchr = "2.8.3"
+# XChaCha20-Poly1305 AEAD for E2E encryption of the relay channel (§3.2.11).
+# chacha20poly1305 re-exports chacha20 + poly1305; both are RustCrypto primitives
+# with no unsafe code and clean SIMD implementations on all targets.
+chacha20poly1305 = "0.10"
+# HKDF-HMAC-SHA256 for deriving per-session encryption keys from the pairing token.
+# Pure Rust, no unsafe deps.
+hkdf = "0.12"
+# HMAC-SHA256 for the E2E pairing proof (relay_crypto::compute_pair_proof).
+# Same RustCrypto family as hkdf/chacha20poly1305.
+hmac = "0.12"
 
 [dev-dependencies]
 tempfile = "3"

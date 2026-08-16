@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { computePairProof, deriveSessionKey, decryptFrame, encryptFrame } from '../lib/relayCrypto';
 
 /** The desktop relay binds loopback ONLY (127.0.0.1) on a persisted-but-random
  *  port, so there is no universal default URL: physical devices connect via a
@@ -8,10 +9,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
  *  over the tailnet (Tailscale serve → wss://<machine>.<tailnet>.ts.net).
  *
  *  The pairing token rides in the URL fragment: `ws://host:port/#<token>` or
- *  `wss://host/#<token>`. On connect, the token is split out and sent as the
- *  first WS frame (the desktop's relay requires a `Pair { token }` frame
- *  within 30 s or it drops the connection). URLs without a fragment fall back
- *  to the old unauthenticated path (legacy / dev). */
+ *  `wss://host/#<token>`. On connect the phone sends an HMAC proof of the
+ *  token (never the raw token) as the first WS frame; both sides then derive
+ *  an XChaCha20-Poly1305 session key from the token and every further frame
+ *  is encrypted Binary (§3.2.11). A desktop that rejects the proof-only Pair
+ *  frame (pre-E2E build) gets a legacy raw-token reconnect, which runs the
+ *  connection in plaintext. URLs without a fragment fall back to the old
+ *  unauthenticated path (legacy / dev). */
 const RELAY_URL_STORAGE_KEY = 'conduit.relayUrl';
 const RELAY_TOKEN_STORAGE_KEY = 'conduit.relayToken';
 
@@ -147,6 +151,17 @@ export interface SessionChatAttachment {
 let _ws: WebSocket | null = null;
 let _url: string | null = null;
 let _token: string | null = null;
+// E2E session state (§3.2.11). `_e2eKey` is set the moment we decide to pair
+// with a proof (before the Pair frame leaves) so every subsequent send is
+// encrypted; the desktop enables its side when the proof verifies. Counters
+// are per-direction and reset on every (re)connect.
+let _e2eKey: Uint8Array | null = null;
+let _outCounter = 0;
+let _inCounter = 0;
+// Flipped when an E2E pair attempt is rejected by a pre-E2E desktop; the
+// reconnect then falls back to legacy raw-token pairing (plaintext). Cleared
+// whenever a new URL is explicitly set (fresh QR scan → maybe new desktop).
+let _desktopLegacy = false;
 // Loaded once from AsyncStorage; connect() awaits this so a persisted URL
 // wins over the loopback default on cold start.
 const _storedUrlReady: Promise<string | null> = AsyncStorage.getItem(RELAY_URL_STORAGE_KEY)
@@ -173,14 +188,22 @@ function np(v: ProviderInfo[]) { onProviderList.emit(v); _pl.forEach(fn => fn(v)
 function ns(v: Session[]) { onSessionList.emit(v); _sl.forEach(fn => fn(v)); }
 function ncs(v: CostSummary) { _csl.forEach(fn => fn(v)); }
 function ncd(v: CostDetails) { onCostDetails.emit(v); _cdl.forEach(fn => fn(v)); }
-function _send(msg: MobileMessagePlain) { if (_ws?.readyState === WebSocket.OPEN) _ws.send(JSON.stringify(msg)); }
+function _send(msg: MobileMessagePlain) {
+  if (_ws?.readyState !== WebSocket.OPEN) return;
+  const json = JSON.stringify(msg);
+  if (_e2eKey) {
+    _ws.send(encryptFrame(_e2eKey, _outCounter++, new TextEncoder().encode(json)));
+  } else {
+    _ws.send(json);
+  }
+}
 
 function startPolling() {
   stopPolling();
   _pollTimer = setInterval(() => {
     if (_ws?.readyState === WebSocket.OPEN) {
-      _ws.send(JSON.stringify({ type: 'ListSessions' }));
-      _ws.send(JSON.stringify({ type: 'GetCostSummary' }));
+      _send({ type: 'ListSessions' });
+      _send({ type: 'GetCostSummary' });
       // NOTE: GetCostDetails is deliberately NOT polled — it runs three SQL
       // aggregations under the desktop's DB mutex (~15-30 ms of lock every
       // tick, ~6 KB payload) and changes at most once per completed turn.
@@ -190,7 +213,7 @@ function startPolling() {
     }
   }, 5000);
   _providerTimer = setInterval(() => {
-    if (_ws?.readyState === WebSocket.OPEN) _ws.send(JSON.stringify({ type: 'ListAvailableProviders' }));
+    if (_ws?.readyState === WebSocket.OPEN) _send({ type: 'ListAvailableProviders' });
   }, 30000);
 }
 function stopPolling() {
@@ -219,19 +242,30 @@ function _doConnect(target: string) {
   if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; }
   _url = target;
   _token = extractToken(target);
+  _e2eKey = null; _outCounter = 0; _inCounter = 0;
   _connecting = true;
   try {
     const ws = new WebSocket(target); _ws = ws;
+    // Binary frames (E2E-encrypted payloads) arrive as ArrayBuffer; without
+    // this React Native may hand us a Blob we'd have to read asynchronously.
+    ws.binaryType = 'arraybuffer';
     ws.onopen = () => {
       _connecting = false; nc(true); startPolling();
       // The relay requires the FIRST frame to be a Pair message (token
-      // check at relay.rs). Without it the connection is dropped before any
-      // command is honored. If no token is in the URL (legacy), skip Pair
-      // and send the bootstrap directly — the relay will reject with a
-      // ChatError frame and the user sees "first frame was not a Pair
-      // message" in the connect error state.
+      // check at relay.rs). E2E flow (§3.2.11): send an HMAC proof of the
+      // token — never the raw token — and derive the session key up front so
+      // every following send is already encrypted. Pre-E2E desktops reject
+      // the proof-only frame with a pairing ChatError and close; the
+      // `_desktopLegacy` fallback then reconnects with the raw token.
+      // No token in the URL (legacy) → skip Pair; the relay rejects with a
+      // ChatError frame and the user sees the connect error state.
       if (_token) {
-        ws.send(JSON.stringify({ type: 'Pair', token: _token }));
+        if (_desktopLegacy) {
+          ws.send(JSON.stringify({ type: 'Pair', token: _token }));
+        } else {
+          _e2eKey = deriveSessionKey(_token);
+          ws.send(JSON.stringify({ type: 'Pair', proof: computePairProof(_token) }));
+        }
       }
       _send({ type: 'ListAvailableProviders' });
       _send({ type: 'ListSessions' });
@@ -240,7 +274,30 @@ function _doConnect(target: string) {
     };
     ws.onmessage = (event) => {
       try {
-        const msg = JSON.parse(event.data) as DesktopMessage;
+        // Inbound: Text = plaintext (pre-pair frames, or a legacy
+        // connection). Binary = E2E-encrypted payload — decrypt with the
+        // inbound counter, which advances regardless of success so it stays
+        // in lockstep with the desktop's send counter.
+        let text: string;
+        if (typeof event.data === 'string') {
+          text = event.data;
+        } else if (_e2eKey) {
+          const frame = new Uint8Array(event.data as ArrayBuffer);
+          const plain = decryptFrame(_e2eKey, _inCounter, frame);
+          _inCounter++;
+          if (!plain) { console.warn('[relay] E2E frame failed to decrypt'); return; }
+          text = new TextDecoder().decode(plain);
+        } else {
+          // Binary frame with no E2E session — protocol violation; ignore.
+          return;
+        }
+        const msg = JSON.parse(text) as DesktopMessage;
+        // A pairing ChatError during an E2E attempt means the desktop build
+        // predates E2E (it can't parse the proof-only Pair frame). Flip to
+        // legacy so the automatic reconnect pairs with the raw token.
+        if (msg.type === 'ChatError' && msg.chat_session_id === 'pair' && _e2eKey && !_desktopLegacy) {
+          _desktopLegacy = true;
+        }
         switch (msg.type) {
           case 'AvailableProviders': np(msg.providers || []); break;
           case 'SessionList': ns((msg.sessions || []).map(toSession)); break;
@@ -285,9 +342,12 @@ function globalConnect(url?: string) {
   if (url) {
     // Explicit URL from the Settings field or QR scan: use it and persist it
     // so the next cold start reconnects without re-entry. The token is split
-    // out of the fragment and persisted separately for diagnostics.
+    // out of the fragment and persisted separately for diagnostics. A fresh
+    // URL clears the legacy-desktop flag — the user may have pointed the app
+    // at an updated desktop that speaks E2E.
     _url = url;
     _token = extractToken(url);
+    _desktopLegacy = false;
     void AsyncStorage.setItem(RELAY_URL_STORAGE_KEY, url).catch(() => {});
     void AsyncStorage.setItem(RELAY_TOKEN_STORAGE_KEY, _token ?? '').catch(() => {});
     _doConnect(url);
@@ -305,7 +365,7 @@ export function getRelayUrl(): string | null { return _url; }
  *  token is present — legacy/dev connect). Used by the Settings screen to
  *  show the token status. */
 export function getRelayToken(): string | null { return _token; }
-function globalDisconnect() { stopPolling(); if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; } if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; } nc(false); }
+function globalDisconnect() { stopPolling(); if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; } if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; } _e2eKey = null; _outCounter = 0; _inCounter = 0; nc(false); }
 
 // Stable sender identities (module-level) so screens can safely put them in
 // useEffect dependency arrays — an inline arrow in the return object would

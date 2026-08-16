@@ -6,6 +6,9 @@
 //!   by WireGuard) can reach it — no LAN exposure.
 //! - Port is persisted across launches so the phone URL stays stable.
 //! - Pairing token is rotated on every relay start (fail-closed gate).
+//! - E2E payload encryption (§3.2.11): a phone that pairs with an HMAC
+//!   proof of the token (instead of the raw token) gets an
+//!   XChaCha20-Poly1305 session — see `relay_crypto` for the design.
 //! - Accepts WebSocket connections; on connect sends `DesktopStatus { connected: true }`.
 //! - Handles `ListAvailableProviders` by querying keys + local model state.
 //! - Handles `ChatTurn` by creating a temporary DB session and running a
@@ -445,7 +448,7 @@ async fn handle_connection(
     let ws_stream = tokio_tungstenite::accept_async(stream)
         .await
         .map_err(|e| format!("ws handshake failed: {e}"))?;
-    let (write, mut read) = ws_stream.split();
+    let (sink, mut read) = ws_stream.split();
     // Share the write half with the per-connection owner-channel pump: the
     // request loop writes request/response messages directly while streaming
     // session-chat events arrive out-of-band on the channel registered in
@@ -453,7 +456,15 @@ async fn handle_connection(
     // and must be pumped onto the SAME socket concurrently. Previously the
     // receiver was dropped on the floor, so every forwarded event failed
     // with "failed to send to owner" and the phone never saw tokens/done.
-    let write: super::relay_ws::SharedWsWrite = Arc::new(tokio::sync::Mutex::new(write));
+    // The sink carries the per-connection E2E state alongside it so the
+    // request loop, the pump, and the decryptor all share one crypto
+    // context (§3.2.11).
+    let write: super::relay_ws::SharedWsWrite = Arc::new(tokio::sync::Mutex::new(
+        super::relay_ws::SinkState {
+            sink,
+            e2e: super::relay_ws::RelayE2E::default(),
+        },
+    ));
     let (conn_tx, conn_rx) = super::relay_ws::make_channel();
     // Register for broadcast pushes (automation-finished notices) — removed
     // by the cleanup guard when this handler exits, on any path.
@@ -480,9 +491,9 @@ async fn handle_connection(
     };
 
     // Send immediate status so the mobile app knows it's talking to the desktop.
+    // Plaintext on purpose: it precedes pairing, so no key exists yet.
     let hello = DesktopMessage::DesktopStatus { connected: true };
-    let hello_text = serde_json::to_string(&hello).unwrap_or_default();
-    let _ = write.lock().await.send(Message::Text(hello_text)).await;
+    let _ = send_msg(&write, &hello).await;
 
     // Load the current pairing token. The first inbound frame MUST be a
     // Pair { token } — anything else is rejected and the connection is
@@ -503,6 +514,11 @@ async fn handle_connection(
         Ok(None) => return Err("peer disconnected before pairing".into()),
         Err(_) => return Err("pairing timed out".into()),
     };
+    // The Pair frame itself is plaintext on purpose — it is what establishes
+    // the key. The E2E flow (§3.2.11) carries only an HMAC proof of the
+    // token, never the raw token, so a passive observer can neither derive
+    // the session key nor impersonate the phone (the proof is one-way and
+    // replaying it yields a connection whose frames they cannot craft).
     let first_text = match first {
         Message::Text(t) => t,
         _ => {
@@ -525,8 +541,8 @@ async fn handle_connection(
             return Err(format!("malformed Pair frame: {e}"));
         }
     };
-    let presented = match paired {
-        MobileMessage::Pair { token } => token,
+    let (legacy_token, proof) = match paired {
+        MobileMessage::Pair { token, proof } => (token, proof),
         _ => {
             let err = DesktopMessage::ChatError {
                 chat_session_id: "pair".into(),
@@ -536,21 +552,50 @@ async fn handle_connection(
             return Err("first frame was not a Pair message".into());
         }
     };
-    if !pairing_token_accepted(&expected_token, &presented) {
-        // Constant-time-ish comparison via length-trim to avoid leaking the
-        // token length. The token is 256 bits so brute force is moot; this
-        // is just defense-in-depth.
-        if presented.len() != expected_token.len() {
-            return Err("pairing token length mismatch".into());
+    match (proof, legacy_token) {
+        // E2E path: proof-only. Verify the HMAC against the expected token,
+        // then both sides derive the same session key from the shared PSK.
+        (Some(p), _) => {
+            if !super::relay_crypto::verify_pair_proof(&expected_token, &p) {
+                let err = DesktopMessage::ChatError {
+                    chat_session_id: "pair".into(),
+                    error: "pairing failed: invalid E2E proof".into(),
+                };
+                let _ = send_msg(&write, &err).await;
+                return Err("pairing failed: invalid E2E proof".into());
+            }
+            let key = super::relay_crypto::derive_session_key(&expected_token);
+            super::relay_ws::enable_e2e(&write, key).await;
+            eprintln!("[mobile-relay] paired (E2E encrypted); processing commands");
         }
-        let err = DesktopMessage::ChatError {
-            chat_session_id: "pair".into(),
-            error: "pairing failed: invalid token".into(),
-        };
-        let _ = send_msg(&write, &err).await;
-        return Err("pairing failed: invalid token".into());
+        // Legacy plaintext path: raw token compare (pre-E2E clients).
+        (None, Some(presented)) => {
+            if !pairing_token_accepted(&expected_token, &presented) {
+                // Constant-time-ish comparison via length-trim to avoid leaking the
+                // token length. The token is 256 bits so brute force is moot; this
+                // is just defense-in-depth.
+                if presented.len() != expected_token.len() {
+                    return Err("pairing token length mismatch".into());
+                }
+                let err = DesktopMessage::ChatError {
+                    chat_session_id: "pair".into(),
+                    error: "pairing failed: invalid token".into(),
+                };
+                let _ = send_msg(&write, &err).await;
+                return Err("pairing failed: invalid token".into());
+            }
+            eprintln!("[mobile-relay] paired (legacy plaintext); processing commands");
+        }
+        // Neither field: not a valid Pair frame.
+        (None, None) => {
+            let err = DesktopMessage::ChatError {
+                chat_session_id: "pair".into(),
+                error: "pairing failed: Pair frame must carry a proof or a token".into(),
+            };
+            let _ = send_msg(&write, &err).await;
+            return Err("pairing failed: Pair frame carried neither proof nor token".into());
+        }
     }
-    eprintln!("[mobile-relay] paired; processing commands");
 
     // Keepalive: ping the phone on a fixed cadence and treat the connection
     // as dead if NO inbound frame (message or pong) arrives within
@@ -568,6 +613,7 @@ async fn handle_connection(
                 if ping_write
                     .lock()
                     .await
+                    .sink
                     .send(Message::Ping(Vec::new()))
                     .await
                     .is_err()
@@ -593,10 +639,40 @@ async fn handle_connection(
         if msg.is_close() {
             break;
         }
+        // Ping/Pong are WebSocket control frames and stay unencrypted by
+        // protocol. Application payloads arrive as Binary (E2E-encrypted) or
+        // Text (legacy plaintext connections).
         let text = match msg {
             Message::Text(t) => t,
+            Message::Binary(b) => {
+                let plain = match super::relay_ws::decrypt_binary(&write, &b).await {
+                    Some(p) => p,
+                    None => {
+                        // E2E not enabled (protocol violation) or tag
+                        // mismatch. The inbound counter already advanced, so
+                        // later frames stay decryptable — report and move on.
+                        let err = DesktopMessage::ChatError {
+                            chat_session_id: "unknown".to_string(),
+                            error: "undecryptable frame (E2E not enabled or tag mismatch)".into(),
+                        };
+                        let _ = send_msg(&write, &err).await;
+                        continue;
+                    }
+                };
+                match String::from_utf8(plain) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        let err = DesktopMessage::ChatError {
+                            chat_session_id: "unknown".to_string(),
+                            error: "binary frame was not valid UTF-8".into(),
+                        };
+                        let _ = send_msg(&write, &err).await;
+                        continue;
+                    }
+                }
+            }
             Message::Ping(p) => {
-                let _ = write.lock().await.send(Message::Pong(p)).await;
+                let _ = write.lock().await.sink.send(Message::Pong(p)).await;
                 continue;
             }
             _ => continue,
@@ -1023,17 +1099,14 @@ async fn handle_connection(
     Ok(())
 }
 
+/// Send one DesktopMessage on the socket. Delegates to the shared sink
+/// helper, which encrypts to a Binary frame when the connection paired with
+/// an E2E proof (§3.2.11) and falls back to plaintext Text otherwise.
 async fn send_msg(
     write: &super::relay_ws::SharedWsWrite,
     msg: &DesktopMessage,
 ) -> Result<(), String> {
-    let text = serde_json::to_string(msg).map_err(|e| e.to_string())?;
-    write
-        .lock()
-        .await
-        .send(Message::Text(text))
-        .await
-        .map_err(|e| e.to_string())
+    super::relay_ws::send_ws_message(write, msg).await
 }
 
 // ---------------------------------------------------------------------------

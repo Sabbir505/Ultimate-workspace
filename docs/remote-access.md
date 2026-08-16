@@ -16,7 +16,7 @@ ws://localhost:54321/#<token>          # USB bridge
 wss://laptop.tailnet-name.ts.net/#<token>  # Tailscale
 ```
 
-On connect, the phone sends the token as the first WebSocket frame (`{ "type": "Pair", "token": "<token>" }`). The desktop validates it before any command is honored; mismatch closes the connection within 30 seconds.
+On connect, the phone pairs as the first WebSocket frame. Current builds use **E2E pairing (§3.2.11)**: the phone sends an HMAC-SHA256 *proof* of the token (`{ "type": "Pair", "proof": "<hex>" }`) — never the raw token — and both sides derive an XChaCha20-Poly1305 session key from the token via HKDF-SHA256. Every post-pair frame is then AEAD-encrypted (Binary WS frames, per-direction counter nonces), so a passive on-path observer sees ciphertext, not conversations. Pre-E2E desktops are auto-detected (pairing rejection) and the phone falls back to legacy raw-token pairing, which runs the connection in plaintext. Mismatch either way closes the connection within 30 seconds.
 
 ### Option A: USB bridge (adb)
 
@@ -62,7 +62,8 @@ The desktop processes mobile attachments through the same path as desktop-attach
 | Layer | Protection |
 |---|---|
 | Network bind | `127.0.0.1` only — not reachable from LAN without a tunnel |
-| Pairing | Per-launch token (43-char base64), constant-time compared, 30s timeout |
+| Pairing | Per-launch token (43-char base64), constant-time HMAC proof, 30s timeout |
+| Payload encryption | XChaCha20-Poly1305 session key derived via HKDF-SHA256 from the pairing token; per-direction counter nonces; raw token never on the wire (§3.2.11) |
 | TLS | Via Tailscale Serve (HTTPS/WSS) — the relay itself is plain WS behind the proxy |
 | API keys | Phone never holds keys — all requests proxied through the desktop |
 

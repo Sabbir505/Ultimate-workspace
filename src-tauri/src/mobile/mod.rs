@@ -10,6 +10,7 @@ pub mod commands;
 pub mod dispatch;
 pub mod protocol;
 pub mod relay;
+pub mod relay_crypto;
 pub mod relay_owner;
 pub mod relay_ws;
 pub mod session_chat;

@@ -11,11 +11,27 @@ use crate::chat::providers::ChatMessage;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum MobileMessage {
-    /// First frame every WebSocket connection MUST send. The desktop compares
-    /// `token` against the per-launch pairing token it generated when the
-    /// relay started; mismatch closes the connection before any command is
-    /// honored. The token is rotated on every app launch.
-    Pair { token: String },
+    /// First frame every WebSocket connection MUST send. Two pairing modes:
+    ///
+    /// - **E2E (§3.2.11):** send only `proof` = lowercase-hex
+    ///   `HMAC-SHA256(key = token, data = "E2E")`. The desktop verifies the
+    ///   proof against its per-launch token, both sides derive a session key
+    ///   from the token via HKDF, and every subsequent frame is
+    ///   XChaCha20-Poly1305 encrypted Binary. The raw token never rides the
+    ///   wire, so a passive observer can neither derive the key nor
+    ///   impersonate the phone.
+    /// - **Legacy:** send the raw `token`. Verified against the per-launch
+    ///   pairing token; the connection then runs in plaintext. Pre-E2E
+    ///   clients only.
+    ///
+    /// Sending neither (or both) is rejected. The token is rotated on every
+    /// app launch.
+    Pair {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proof: Option<String>,
+    },
     /// Query the current state of all providers.
     ListAvailableProviders,
     /// Query active CLI sessions running on the desktop.

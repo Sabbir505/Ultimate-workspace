@@ -243,7 +243,7 @@ Conduit's local-model stack is already more integrated than any orchestration-sh
 | 2 | **Global toast/error surface** | Perceived reliability; prerequisites nothing | S |
 | 3 | **Restore panes on launch** (persistent workspaces) | Superset's headline feature; resume-by-id makes it cheap — and the Workspaces IPC already exists backend-side with no frontend callers | S–M |
 | 4 | **PR create/review via GitHub connector** | Completes the git loop; every orchestrator competitor is PR-centric (T3 Code ships 4-provider PR review tabs) | M |
-| 4b | **Per-turn checkpoints + one-click revert** (hidden git refs; restore workspace + conversation) | T3 Code & Cline ship this; Conduit has zero turn-level undo — biggest safety gap once agents edit code from chat | M |
+| 4b | ~~**Per-turn checkpoints + one-click revert** (hidden git refs; restore workspace + conversation)~~ **DONE** (`4ca284a1` + `b81a0fb9`) | T3 Code & Cline ship this; Conduit has zero turn-level undo — biggest safety gap once agents edit code from chat | M |
 | 5 | **Automation notifications + Task Scheduler registration** | Completes the "runs while closed" promise already 90% built | S–M |
 | 6 | **LocalDocs-style local RAG** (embedding sidecar + vec table) | Defines the local-model category; composes with existing tools | M |
 | 7 | ~~**Chat export/import + project backup zip**~~ **DONE** (`175cdfa`) | Local-first story completion | S |

@@ -403,6 +403,15 @@ export interface ChatState {
     attachments?: ChatAttachmentInput[],
     forceResearch?: boolean,
   ) => Promise<void>;
+  /** Team broadcast (roadmap #18): send one prompt to N chat sessions at once.
+   *  The active session goes through the normal send; background sessions get
+   *  a direct per-session send (streaming state is session-keyed, so they
+   *  stream concurrently and the sidebar shows each one working). */
+  broadcastToSessions: (
+    sessionIds: string[],
+    content: string,
+    forceResearch?: boolean,
+  ) => Promise<void>;
   /** Re-run the last user message to get a fresh assistant response. */
   regenerate: () => Promise<void>;
   /** Edit-to-fork (roadmap #9): retire this message's tail, reload, and send a
@@ -1221,6 +1230,66 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  // Team broadcast (roadmap #18): one prompt to N sessions. The active session
+  // reuses sendMessage (optimistic bubble + queue rules); background sessions
+  // get a direct send — streaming state is session-keyed so they run
+  // concurrently and each sidebar row shows its own working dot.
+  broadcastToSessions: async (sessionIds, content, forceResearch) => {
+    const state = get();
+    const targets = sessionIds.filter(
+      (id) => state.sessions.some((s) => s.id === id) && !(id in state.streaming),
+    );
+    if (targets.length === 0) return;
+
+    const activeId = get().activeChatSessionId;
+    const projectsState = useProjectsStore.getState();
+
+    for (const sid of targets) {
+      if (sid === activeId) {
+        // Active session: full optimistic path.
+        await get().sendMessage(content, undefined, forceResearch);
+        continue;
+      }
+      // Background session: mark it streaming and fire the send directly.
+      // No optimistic bubble — `messages` only holds the active session's
+      // list; the persisted user row will appear when the session is opened.
+      const session = get().sessions.find((s) => s.id === sid);
+      if (!session) continue;
+      set((s) => ({
+        streaming: { ...s.streaming, [sid]: "" },
+        chatStatus: { ...s.chatStatus, [sid]: { reason: "thinking", message: "" } },
+        pendingArtifacts: { ...s.pendingArtifacts, [sid]: [] },
+      }));
+      const boundProject = projectsState.projectById(
+        get().sessionProjects[sid] ?? projectsState.selectedProjectId,
+      );
+      const workingDir = get().cwdOverrides[sid] ?? boundProject?.path;
+      try {
+        if (session.agent?.startsWith("harness:")) {
+          await sendAgentChatMessage(
+            sid,
+            content,
+            session.agent.slice("harness:".length),
+            session.model || undefined,
+            workingDir,
+            projectsState.selectedProjectId ?? undefined,
+          );
+        } else {
+          await sendChatMessage(sid, content, undefined, undefined, undefined, undefined, forceResearch, undefined, workingDir);
+        }
+      } catch (err) {
+        // Clear this session's streaming state so its dot doesn't wedge.
+        set((s) => {
+          const streaming = { ...s.streaming };
+          const chatStatus = { ...s.chatStatus };
+          delete streaming[sid];
+          delete chatStatus[sid];
+          return { streaming, chatStatus };
+        });
+        toastError(`Broadcast to "${session.title ?? sid}" failed`, err);
+      }
+    }
+  },
   // Regenerate resends the most recent user message. The backend appends a
   // new assistant turn (history is rebuilt from the DB each send).
   //

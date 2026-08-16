@@ -474,6 +474,9 @@ export function ChatComposer({
   // "×" drops one from the queue.
   const [queueExpanded, setQueueExpanded] = useState(false);
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
+  // Team broadcast (roadmap #18): the session list + the broadcast action.
+  const broadcastSessions = useChatStore((s) => s.sessions);
+  const broadcastToSessions = useChatStore((s) => s.broadcastToSessions);
   const queuedMessages = useChatStore((s) =>
     s.activeChatSessionId
       ? (s.messageQueue[s.activeChatSessionId] ?? NO_QUEUED_MESSAGES)
@@ -516,6 +519,10 @@ export function ChatComposer({
   const [fillValues, setFillValues] = useState<Record<string, string>>({});
   // Standalone template picker popover (opens from the attach menu).
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
+  // Team broadcast (roadmap #18): pick N sessions + a prompt, send to all.
+  const [broadcastOpen, setBroadcastOpen] = useState(false);
+  const [broadcastTargets, setBroadcastTargets] = useState<Record<string, boolean>>({});
+  const [broadcastText, setBroadcastText] = useState("");
   // Voice recording (roadmap #16): MediaRecorder state.
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
@@ -948,6 +955,18 @@ export function ChatComposer({
                   role="menuitem"
                   onClick={() => {
                     setAttachMenuOpen(false);
+                    setBroadcastOpen(true);
+                  }}
+                >
+                  <span className="composer-attach-menu-icon">⇶</span>
+                  <span>Broadcast to chats…</span>
+                </button>
+                <button
+                  type="button"
+                  className="composer-attach-menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setAttachMenuOpen(false);
                     void pickWorkingFolder();
                   }}
                 >
@@ -1057,6 +1076,61 @@ export function ChatComposer({
                   ))}
                 </div>
               )}
+            </div>
+          )}
+          {broadcastOpen && (
+            <div className="composer-template-picker">
+              <div className="composer-template-picker-head">
+                <span>Broadcast to chats</span>
+                <button type="button" className="ghost" onClick={() => setBroadcastOpen(false)}>
+                  ✕
+                </button>
+              </div>
+              <div className="composer-broadcast-list">
+                {broadcastSessions.map((s) => (
+                  <label key={s.id} className="composer-broadcast-item">
+                    <input
+                      type="checkbox"
+                      checked={!!broadcastTargets[s.id]}
+                      onChange={(e) =>
+                        setBroadcastTargets((t) => ({ ...t, [s.id]: e.target.checked }))
+                      }
+                    />
+                    <span className="composer-broadcast-name">{s.title || "Untitled"}</span>
+                  </label>
+                ))}
+              </div>
+              <textarea
+                className="composer-broadcast-text"
+                rows={3}
+                placeholder="Prompt to send to every selected chat…"
+                value={broadcastText}
+                onChange={(e) => setBroadcastText(e.target.value)}
+              />
+              <div className="composer-template-fill-actions">
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={
+                    !broadcastText.trim() ||
+                    !Object.values(broadcastTargets).some(Boolean)
+                  }
+                  onClick={() => {
+                    const ids = Object.entries(broadcastTargets)
+                      .filter(([, v]) => v)
+                      .map(([id]) => id);
+                    void broadcastToSessions(ids, broadcastText.trim());
+                    setBroadcastOpen(false);
+                    setBroadcastText("");
+                    setBroadcastTargets({});
+                  }}
+                >
+                  Send to {Object.values(broadcastTargets).filter(Boolean).length || 0} chat(s)
+                </button>
+                <button type="button" className="ghost" onClick={() => setBroadcastOpen(false)}>
+                  Cancel
+                </button>
+              </div>
             </div>
           )}
           {forceResearch && (

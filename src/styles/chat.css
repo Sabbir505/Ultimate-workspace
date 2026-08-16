@@ -1734,3 +1734,49 @@
   opacity: 0.5;
   cursor: default;
 }
+
+/* --- Team broadcast picker (roadmap #18) --- */
+.composer-broadcast-list {
+  flex: 1;
+  overflow-y: auto;
+  max-height: 160px;
+  padding: 4px;
+}
+.composer-broadcast-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: var(--radius-xs, 4px);
+}
+.composer-broadcast-item:hover {
+  background: var(--surface-2);
+}
+.composer-broadcast-item input {
+  width: 13px;
+  height: 13px;
+  accent-color: var(--accent, #58a6ff);
+}
+.composer-broadcast-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.composer-broadcast-text {
+  margin: 8px 10px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs, 4px);
+  resize: vertical;
+}
+.composer-broadcast-text:focus {
+  outline: none;
+  border-color: var(--accent, #58a6ff);
+}

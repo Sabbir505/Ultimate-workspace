@@ -21,7 +21,7 @@
 // stand up a second one.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getChangedFiles, getGitFileDiff, safeListen, writePtySubmit } from "../../lib/ipc";
+import { getChangedFiles, getGitFileDiff, safeListen, writePtySubmit, generateDiffReview } from "../../lib/ipc";
 import { parseUnifiedDiff } from "../../lib/diff";
 import { useChatStore } from "../../state/chat";
 import { usePanesStore } from "../../state/panes";
@@ -556,6 +556,50 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     void useChatStore.getState().sendMessage(SEND_PR_PROMPT);
   };
 
+  // Diff-review state + callbacks. Whole-tree review and per-file review are
+  // independent. Callbacks use getState() to read activeChatSessionId at call
+  // time so they don't close over a stale value.
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [reviewText, setReviewText] = useState<string | null>(null);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [wholeTreeReviewLoading, setWholeTreeReviewLoading] = useState(false);
+  const [wholeTreeReview, setWholeTreeReview] = useState<string | null>(null);
+
+  const reviewCurrentDiff = useCallback(async () => {
+    if (!diffCwd || !selectedFile) return;
+    setReviewLoading(true);
+    setReviewError(null);
+    try {
+      const chatId = useChatStore.getState().activeChatSessionId ?? undefined;
+      const text = await generateDiffReview(diffCwd, chatId, selectedFile);
+      setReviewText(text);
+    } catch (e) {
+      setReviewError(String(e));
+    } finally {
+      setReviewLoading(false);
+    }
+  }, [diffCwd, selectedFile]);
+
+  const reviewWholeTree = useCallback(async () => {
+    if (!cwd || files.length === 0) return;
+    setWholeTreeReviewLoading(true);
+    try {
+      const chatId = useChatStore.getState().activeChatSessionId ?? undefined;
+      const text = await generateDiffReview(cwd, chatId, undefined);
+      setWholeTreeReview(text);
+    } catch {
+      // Silent
+    } finally {
+      setWholeTreeReviewLoading(false);
+    }
+  }, [cwd, files.length]);
+
+  // Clear per-file review when the selection or cwd changes.
+  useEffect(() => {
+    setReviewText(null);
+    setReviewError(null);
+  }, [selectedFile, diffCwd]);
+
   const openFileDiff = (file: ChangedFile) => {
     // Show the diff INLINE inside this side panel — the file list is
     // replaced by the diff view for the clicked file. The user explicitly
@@ -563,6 +607,111 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     if (!projectId) return;
     setSelectedFile(file.path);
   };
+
+  // Extract branches as named variables so the return JSX stays flat.
+  const diffDetail = selectedFile ? (
+    <div className="dev-diff-detail">
+      <button className="dev-diff-back" onClick={() => setSelectedFile(null)} title="Back to file list" aria-label="Back to file list">‹ Files</button>
+      <button
+        className="dev-diff-review-btn"
+        onClick={() => void reviewCurrentDiff()}
+        disabled={reviewLoading || diffLoading || diffFiles.length === 0}
+        title={diffFiles.length === 0 ? "No diff loaded" : "Review this file's diff with AI"}
+      >
+        {reviewLoading ? "Reviewing…" : "🔍 Review"}
+      </button>
+      <div className="dev-diff-detail-path" title={selectedFile}>
+        <span className="dev-diff-detail-path-name">{selectedFile}</span>
+        {!diffLoading && diffFiles.length > 0 && (
+          <span className="dev-diff-stats">
+            {diffStats.added > 0 && <span className="dev-diff-stat-add">+{diffStats.added.toLocaleString()}</span>}
+            {diffStats.deleted > 0 && <span className="dev-diff-stat-del">−{diffStats.deleted.toLocaleString()}</span>}
+          </span>
+        )}
+      </div>
+      {diffLoading ? (
+        <div className="dev-diff-empty">Loading diff…</div>
+      ) : diffFiles.length === 0 ? (
+        <div className="dev-diff-empty">No changes in {selectedFile}.</div>
+      ) : (
+        diffFiles.map((file, i) => {
+          const visibleLines = file.lines.filter((l) => l.type !== "meta");
+          const capped = visibleLines.length > DIFF_LINE_CAP;
+          const rows = capped ? visibleLines.slice(0, DIFF_LINE_CAP) : visibleLines;
+          return (
+            <div className="diff-file" key={`${file.newPath}-${i}`}>
+              {rows.map((line, j) => (
+                <div key={j} className={`diff-line ${line.type}`}>
+                  <span className="diff-line-gutter diff-line-gutter-old">{line.oldLine ?? ""}</span>
+                  <span className="diff-line-gutter diff-line-gutter-new">{line.newLine ?? ""}</span>
+                  <span className="diff-line-content">
+                    {line.type === "add" ? "+ " : line.type === "del" ? "- " : line.type === "hunk" ? "" : "  "}
+                    {line.text}
+                  </span>
+                </div>
+              ))}
+              {capped && (
+                <div className="diff-line meta">
+                  <span className="diff-line-content">… {(visibleLines.length - DIFF_LINE_CAP).toLocaleString()} more lines not shown (large diff truncated)</span>
+                </div>
+              )}
+            </div>
+          );
+        })
+      )}
+      {reviewText && (
+        <div className="dev-diff-review-card">
+          <div className="dev-diff-review-card-header">
+            <span className="dev-diff-review-card-title">AI Review</span>
+            <button className="dev-diff-review-card-close" onClick={() => { setReviewText(null); setReviewError(null); }} title="Dismiss review">✕</button>
+          </div>
+          <pre className="dev-diff-review-card-body">{reviewText}</pre>
+        </div>
+      )}
+      {reviewError && <div className="dev-diff-review-error">Review failed: {reviewError}</div>}
+    </div>
+  ) : null;
+
+  const fileList = files.length === 0 ? (
+    <div className="dev-diff-empty">{loading ? "Scanning…" : "No changes yet"}</div>
+  ) : (
+    <>
+      <ul className="dev-diff-file-list">
+        {files.slice(0, FILE_ROW_CAP).map((f, i) => (
+          <li
+            key={`${f.path}-${i}`}
+            className={`dev-diff-file dev-diff-kind-${f.kind}${panePaths && !panePaths.has(f.path) ? " dev-diff-file-out-of-scope" : ""}`}
+            onClick={() => openFileDiff(f)}
+            title={f.oldPath ? `${f.oldPath} → ${f.path}` : panePaths && !panePaths.has(f.path) ? `${f.path} (outside the focused pane's working tree)` : f.path}
+          >
+            <span className="dev-diff-file-icon" aria-hidden="true">{iconFor(f.kind)}</span>
+            <span className="dev-diff-file-path">{f.path}</span>
+            <span className="dev-diff-file-status">{f.status}</span>
+            {(f.added ?? 0) + (f.deleted ?? 0) > 0 && (
+              <span className="dev-diff-file-counter" title={`${f.path}: added / deleted lines`}>
+                {(f.added ?? 0) > 0 && <span className="dev-diff-stat-add">+{(f.added ?? 0).toLocaleString()}</span>}
+                {(f.deleted ?? 0) > 0 && <span className="dev-diff-stat-del">−{(f.deleted ?? 0).toLocaleString()}</span>}
+              </span>
+            )}
+          </li>
+        ))}
+        {files.length > FILE_ROW_CAP && (
+          <li className="dev-diff-file dev-diff-file-out-of-scope">
+            <span className="dev-diff-file-path">… {(files.length - FILE_ROW_CAP).toLocaleString()} more files not shown</span>
+          </li>
+        )}
+      </ul>
+      {wholeTreeReview && (
+        <div className="dev-diff-review-card">
+          <div className="dev-diff-review-card-header">
+            <span className="dev-diff-review-card-title">Whole-tree AI Review</span>
+            <button className="dev-diff-review-card-close" onClick={() => setWholeTreeReview(null)} title="Dismiss review">✕</button>
+          </div>
+          <pre className="dev-diff-review-card-body">{wholeTreeReview}</pre>
+        </div>
+      )}
+    </>
+  );
 
   return (
     <div
@@ -625,6 +774,14 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
         >
           ⇧ Send PR
         </button>
+        <button
+          className="dev-diff-review-all"
+          onClick={() => void reviewWholeTree()}
+          disabled={files.length === 0 || wholeTreeReviewLoading}
+          title={files.length === 0 ? "No changes here yet" : "Review all changes with AI"}
+        >
+          {wholeTreeReviewLoading ? "Reviewing…" : "🔍 Review all"}
+        </button>
         {!embedded && (
           <button
             className="dev-diff-panel-collapse"
@@ -637,132 +794,8 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
         )}
       </div>
       <div className="dev-diff-panel-body">
-        {selectedFile ? (
-          // Inline diff view: replaces the file list when a row is clicked.
-          // Shows the same line-numbered diff as the per-pane overlay used
-          // to, but rendered inside the side panel itself — exactly where
-          // the user asked for it.
-          <div className="dev-diff-detail">
-            <button
-              className="dev-diff-back"
-              onClick={() => setSelectedFile(null)}
-              title="Back to file list"
-              aria-label="Back to file list"
-            >
-              ‹ Files
-            </button>
-            <div className="dev-diff-detail-path" title={selectedFile}>
-              <span className="dev-diff-detail-path-name">{selectedFile}</span>
-              {/* Diff stat counter: added (green) / deleted (red) line
-                 counts, right-aligned on the filename row. Only shown
-                 when the diff has loaded and isn't empty. */}
-              {!diffLoading && diffFiles.length > 0 && (
-                <span className="dev-diff-stats">
-                  {diffStats.added > 0 && (
-                    <span className="dev-diff-stat-add">
-                      +{diffStats.added.toLocaleString()}
-                    </span>
-                  )}
-                  {diffStats.deleted > 0 && (
-                    <span className="dev-diff-stat-del">
-                      −{diffStats.deleted.toLocaleString()}
-                    </span>
-                  )}
-                </span>
-              )}
-            </div>
-            {diffLoading ? (
-              <div className="dev-diff-empty">Loading diff…</div>
-            ) : diffFiles.length === 0 ? (
-              <div className="dev-diff-empty">No changes in {selectedFile}.</div>
-            ) : (
-              diffFiles.map((file, i) => {
-                const visibleLines = file.lines.filter((l) => l.type !== "meta");
-                const capped = visibleLines.length > DIFF_LINE_CAP;
-                const rows = capped ? visibleLines.slice(0, DIFF_LINE_CAP) : visibleLines;
-                return (
-                <div className="diff-file" key={`${file.newPath}-${i}`}>
-                  {rows.map((line, j) => (
-                      <div key={j} className={`diff-line ${line.type}`}>
-                        <span className="diff-line-gutter diff-line-gutter-old">
-                          {line.oldLine ?? ""}
-                        </span>
-                        <span className="diff-line-gutter diff-line-gutter-new">
-                          {line.newLine ?? ""}
-                        </span>
-                        <span className="diff-line-content">
-                          {line.type === "add"
-                            ? "+ "
-                            : line.type === "del"
-                            ? "- "
-                            : line.type === "hunk"
-                            ? ""
-                            : "  "}
-                          {line.text}
-                        </span>
-                      </div>
-                    ))}
-                  {capped && (
-                    <div className="diff-line meta">
-                      <span className="diff-line-content">
-                        … {(
-                          visibleLines.length - DIFF_LINE_CAP
-                        ).toLocaleString()} more lines not shown (large diff truncated)
-                      </span>
-                    </div>
-                  )}
-                </div>
-                );
-              })
-            )}
-          </div>
-        ) : files.length === 0 ? (
-          <div className="dev-diff-empty">
-            {loading ? "Scanning…" : "No changes yet"}
-          </div>
-        ) : (
-          <ul className="dev-diff-file-list">
-            {files.slice(0, FILE_ROW_CAP).map((f, i) => (
-              <li
-                key={`${f.path}-${i}`}
-                className={`dev-diff-file dev-diff-kind-${f.kind}${
-                  panePaths && !panePaths.has(f.path) ? " dev-diff-file-out-of-scope" : ""
-                }`}
-                onClick={() => openFileDiff(f)}
-                title={
-                  f.oldPath
-                    ? `${f.oldPath} → ${f.path}`
-                    : panePaths && !panePaths.has(f.path)
-                    ? `${f.path} (outside the focused pane's working tree)`
-                    : f.path
-                }
-              >
-                <span className="dev-diff-file-icon" aria-hidden="true">
-                  {iconFor(f.kind)}
-                </span>
-                <span className="dev-diff-file-path">{f.path}</span>
-                <span className="dev-diff-file-status">{f.status}</span>
-                {(f.added ?? 0) + (f.deleted ?? 0) > 0 && (
-                  <span className="dev-diff-file-counter" title={`${f.path}: added / deleted lines`}>
-                    {(f.added ?? 0) > 0 && (
-                      <span className="dev-diff-stat-add">+{(f.added ?? 0).toLocaleString()}</span>
-                    )}
-                    {(f.deleted ?? 0) > 0 && (
-                      <span className="dev-diff-stat-del">−{(f.deleted ?? 0).toLocaleString()}</span>
-                    )}
-                  </span>
-                )}
-              </li>
-            ))}
-            {files.length > FILE_ROW_CAP && (
-              <li className="dev-diff-file dev-diff-file-out-of-scope">
-                <span className="dev-diff-file-path">
-                  … {(files.length - FILE_ROW_CAP).toLocaleString()} more files not shown
-                </span>
-              </li>
-            )}
-          </ul>
-        )}
+        {diffDetail}
+        {fileList}
       </div>
     </div>
   );

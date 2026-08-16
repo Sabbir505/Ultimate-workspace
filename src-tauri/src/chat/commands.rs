@@ -857,6 +857,148 @@ fn clean_commit_message(raw: &str) -> String {
     t.trim().to_string()
 }
 
+/// Generate an automated, model-backed review of the working-tree diff
+/// (§3.2.8 "Diff review" quick action). Reviews either the whole working
+/// tree (`file_path` = None) or a single file (`file_path` = Some(path)).
+///
+/// Provider/model resolution mirrors `generate_commit_message`: a dedicated
+/// `diffReview.provider` + `diffReview.model` pair is preferred, then the
+/// active chat session's `(provider, model)`, then — when no chat session is
+/// bound (the diff panel isn't tied to one chat) — the first provider with a
+/// configured API key. Returns None when there's no diff or generation fails.
+#[tauri::command]
+pub async fn generate_diff_review(
+    path: String,
+    chat_session_id: Option<String>,
+    file_path: Option<String>,
+    db: State<'_, DbState>,
+) -> CmdResult<Option<String>> {
+    // Resolve provider + model. Preference order: dedicated diffReview
+    // settings, the bound chat session's provider/model, then the first
+    // provider that has a usable API key (the panel isn't tied to a single
+    // chat, so "whatever the app has configured" is the sane default).
+    let (provider_str, model_str) = {
+        let conn = db.0.lock();
+        let dr_provider = db::get_setting(&conn, "diffReview.provider")
+            .ok()
+            .flatten()
+            .filter(|p| !p.trim().is_empty());
+        let dr_model = db::get_setting(&conn, "diffReview.model")
+            .ok()
+            .flatten()
+            .filter(|m| !m.trim().is_empty());
+        if let (Some(p), Some(m)) = (dr_provider, dr_model) {
+            (p, m)
+        } else if let Some(cs) = chat_session_id
+            .as_deref()
+            .and_then(|sid| db::get_chat_session(&conn, sid).ok().flatten())
+        {
+            (cs.provider, cs.model)
+        } else {
+            const PROVIDERS: [&str; 5] =
+                ["openai", "openrouter", "anthropic", "openai_compatible", "anthropic_compatible"];
+            let mut fallback = None;
+            for p in PROVIDERS {
+                if secrets::get_chat_api_key(&conn, p).is_some() {
+                    fallback = Some(p.to_string());
+                    break;
+                }
+            }
+            let p = fallback.unwrap_or_else(|| "openai".to_string());
+            let m = db::get_setting(&conn, &format!("chat.{p}.model"))
+                .ok()
+                .flatten()
+                .filter(|m| !m.trim().is_empty())
+                .unwrap_or_else(|| "gpt-4o-mini".to_string());
+            (p, m)
+        }
+    };
+
+    let api_key = {
+        let conn = db.0.lock();
+        secrets::get_chat_api_key(&conn, &provider_str)
+    };
+    if api_key.is_none() && provider_str != "local_gguf" {
+        return Ok(None);
+    }
+    let api_key = api_key.unwrap_or_default();
+
+    let (base_url, model_override) = {
+        let conn = db.0.lock();
+        let base = db::get_setting(&conn, &format!("chat.{provider_str}.base_url"))
+            .map_err(|e| e.to_string())?;
+        let mo = db::get_setting(&conn, &format!("chat.{provider_str}.model"))
+            .map_err(|e| e.to_string())?;
+        (base, mo)
+    };
+    let model = if model_str.trim().is_empty() {
+        match model_override {
+            Some(m) if !m.trim().is_empty() => m,
+            _ => return Ok(None),
+        }
+    } else {
+        model_str
+    };
+
+    // Fetch the diff: whole working tree, or a single file. Reviews benefit
+    // from more context than a one-line commit subject, so the cap is higher —
+    // but still bounded so a giant diff can't blow the prompt window.
+    let diff = match &file_path {
+        Some(fp) => crate::git::get_git_file_diff(Path::new(&path), fp)?,
+        None => crate::git::get_git_diff(Path::new(&path))?,
+    };
+    let diff: String = diff.chars().take(24000).collect();
+    if diff.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let system = concat!(
+        "You are a senior engineer doing a focused, high-signal code review. ",
+        "Read the unified diff and write a concise review. Structure it with three short sections:\n",
+        "## Summary — 2–3 sentences on what the change does and your overall take.\n",
+        "## Issues — bullet list of concrete bugs, edge cases, or regressions, each ",
+        "pointing at the relevant file/line and a one-line fix. Only list real problems; don't invent nitpicks.\n",
+        "## Suggestions — optional: smaller improvements (naming, extraction, tests) worth doing, in a brief bullet list.\n",
+        "Use `file +line: message` to reference exact spots. If the diff is ",
+        "trivial (typos, docs, formatting), say so plainly instead of padding. ",
+        "Keep the whole review under ~60 lines of Markdown. Do not restate the diff back."
+    );
+    let user = format!("Please review this diff:\n\n{diff}");
+
+    let base_url = base_url.filter(|b| !b.trim().is_empty());
+    let client = reqwest::Client::new();
+    let raw = match provider_str.as_str() {
+        "openai" => {
+            let base = base_url.as_deref().unwrap_or(OpenAIProvider::DEFAULT_BASE);
+            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
+        }
+        "openrouter" => {
+            let base = base_url.as_deref().unwrap_or(OpenRouterProvider::DEFAULT_BASE);
+            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
+        }
+        "openai_compatible" | "local_gguf" => {
+            let Some(base) = base_url.as_deref() else {
+                return Ok(None);
+            };
+            openai_oneshot(&client, &api_key, base, &model, system, &user).await?
+        }
+        "anthropic" => {
+            let base = base_url.as_deref().unwrap_or(AnthropicProvider::DEFAULT_BASE);
+            anthropic_oneshot(&client, &api_key, base, &model, system, &user, 2048).await?
+        }
+        "anthropic_compatible" => {
+            let Some(base) = base_url.as_deref() else {
+                return Ok(None);
+            };
+            anthropic_oneshot(&client, &api_key, base, &model, system, &user, 2048).await?
+        }
+        _ => return Ok(None),
+    };
+
+    let review = strip_think_blocks(&raw).trim().to_string();
+    if review.is_empty() { Ok(None) } else { Ok(Some(review)) }
+}
+
 #[tauri::command]
 pub fn set_chat_session_starred(
     chat_session_id: String,

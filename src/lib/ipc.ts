@@ -304,6 +304,12 @@ export const getRemoteUrl = (path: string) =>
 export const generateCommitMessage = (path: string, chatSessionId: string) =>
   safeInvoke<string | null>("generate_commit_message", { path, chatSessionId });
 
+/** Generate a model-backed review of the working-tree diff (§3.2.8).
+ *  Reviews either the whole working tree (`filePath` = null) or a single file.
+ *  Returns the review text, or null when there's no diff or generation failed. */
+export const generateDiffReview = (path: string, chatSessionId?: string, filePath?: string) =>
+  safeInvoke<string | null>("generate_diff_review", { path, chatSessionId, filePath });
+
 // --- Settings / skills / quick actions / secrets / cost ---
 export const getSetting = (key: string) => safeInvoke<string | null>("get_setting", { key });
 export const setSetting = (key: string, value: string) => safeInvoke<void>("set_setting", { key, value });

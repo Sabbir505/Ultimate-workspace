@@ -385,6 +385,71 @@
   color: var(--text);
 }
 
+/* ---- Activity strip (§3.1.6) — streaming chats + in-flight automations.
+   Rendered only when something is actually running, so the strip appearing
+   IS the signal. "Now" label matches the sidebar's uppercase micro-headers. */
+.git-sidebar-activity {
+  margin: 0 8px 6px;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.git-sidebar-activity-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+.git-sidebar-activity-items {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.git-sidebar-activity-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text);
+  min-width: 0;
+}
+.git-sidebar-activity-item > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.git-sidebar-activity-item strong {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.git-sidebar-activity-spinner {
+  width: 9px;
+  height: 9px;
+  flex-shrink: 0;
+  margin-top: 2px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  border-top-color: var(--state-working);
+  border-right-color: var(--state-working);
+  animation: git-sidebar-spin 0.9s linear infinite;
+}
+.git-sidebar-activity-play {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--state-diff);
+}
+@keyframes git-sidebar-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* ---- Collapsed git sidebar (~48px wide strip) ---- */
 .git-sidebar-collapsed {
   width: auto !important;

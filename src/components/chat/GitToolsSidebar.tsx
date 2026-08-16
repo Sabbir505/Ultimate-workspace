@@ -20,6 +20,7 @@ import {
 } from "../../lib/ipc";
 import { useProjectsStore } from "../../state/projects";
 import { useChatStore } from "../../state/chat";
+import { useAutomationsStore } from "../../state/automations";
 import { useUiStore } from "../../state/ui";
 import { BranchDropdown } from "./BranchDropdown";
 import { CommitModal } from "./CommitModal";
@@ -42,6 +43,12 @@ export function GitToolsSidebar() {
   const subagents = useChatStore((s) =>
     s.activeChatSessionId ? s.subagents[s.activeChatSessionId] ?? {} : {},
   );
+  // Across-app activity for the summary strip (§3.1.6): any session that is
+  // streaming a reply right now, and any automation whose run is in flight.
+  const streamingSessions = useChatStore((s) => s.streaming);
+  const allSessions = useChatStore((s) => s.sessions);
+  const runningAutomations = useAutomationsStore((s) => s.automations);
+  const runningNow = useAutomationsStore((s) => s.runningNow);
 
   // Activate plan-step parsing and completion tracking
   usePlanTracker();
@@ -66,6 +73,21 @@ export function GitToolsSidebar() {
   );
   const path = session?.worktreePath ?? project?.path ?? null;
   const gitStatus = projectId ? gitStatuses[projectId] : undefined;
+
+  // §3.1.6 summary strip: names of currently-streaming chats (any session,
+  // not just the active one) and in-flight automations.
+  const activeStreaming = useMemo(() => {
+    const ids = Object.keys(streamingSessions);
+    if (ids.length === 0) return [];
+    const byId = new Map(allSessions.map((s) => [s.id, s]));
+    return ids
+      .map((id) => byId.get(id)?.title ?? `Session ${id.slice(0, 8)}`)
+      .filter((t): t is string => !!t);
+  }, [streamingSessions, allSessions]);
+  const runningNowList = useMemo(
+    () => runningAutomations.filter((a) => runningNow[a.id]),
+    [runningAutomations, runningNow],
+  );
 
   // Changed files for the +/- line counts.
   const [added, setAdded] = useState(0);
@@ -263,6 +285,37 @@ export function GitToolsSidebar() {
           </svg>
         </button>
       </div>
+
+      {/* Activity strip (§3.1.6) — at-a-glance for what's happening RIGHT NOW
+          across the whole app: streaming chats + in-flight automations.
+          Hidden entirely when nothing is active. */}
+      {(activeStreaming.length > 0 || runningNowList.length > 0) && (
+        <div className="git-sidebar-activity">
+          <span className="git-sidebar-activity-label">Now</span>
+          <div className="git-sidebar-activity-items">
+            {activeStreaming.length > 0 && (
+              <div className="git-sidebar-activity-item" title={activeStreaming.join(", ")}>
+                <span className="git-sidebar-activity-spinner" />
+                <span>
+                  <strong>{activeStreaming.length}</strong> streaming, {activeStreaming.slice(0, 2).join(", ")}
+                  {activeStreaming.length > 2 ? "…" : ""}
+                </span>
+              </div>
+            )}
+            {runningNowList.length > 0 && (
+              <div className="git-sidebar-activity-item" title={runningNowList.map((a) => a.name).join(", ")}>
+                <svg width={11} height={11} viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth={1} strokeLinecap="round" strokeLinejoin="round" className="git-sidebar-activity-play">
+                  <path d="M5 3l14 9-14 9V3z" />
+                </svg>
+                <span>
+                  <strong>{runningNowList.length}</strong> running: {runningNowList.slice(0, 2).map((a) => a.name).join(", ")}
+                  {runningNowList.length > 2 ? "…" : ""}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Top section: Changes / Branch / Commit rows */}
       <div className="git-sidebar-section">

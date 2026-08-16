@@ -1,6 +1,7 @@
 //! Tauri IPC commands that expose the mobile relay to the frontend.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tauri::{AppHandle, State};
 
@@ -112,16 +113,18 @@ pub fn get_mobile_pairing_info(
     })
 }
 
-/// Enable `tailscale serve` fronting the relay's loopback port. Returns the
-/// resulting `wss://<machine>.<tailnet>.ts.net` URL. Requires the relay to
-/// be running (so the port is known) and tailscale to be logged in.
+/// Enable `tailscale serve` fronting the relay's loopback port. Runs
+/// asynchronously with a confirmation poll so the frontend knows serve is
+/// actually up before returning. Returns the `wss://` URL on success.
 #[tauri::command]
-pub fn tailscale_serve_enable(
+pub async fn tailscale_serve_enable(
     relay_state: State<'_, MobileRelayState>,
     db: State<'_, DbState>,
 ) -> CmdResult<String> {
-    let port = *relay_state.0.port.lock();
-    let port = port.ok_or_else(|| "relay is not running".to_string())?;
+    let port = {
+        let guard = relay_state.0.port.lock();
+        guard.ok_or_else(|| "relay is not running".to_string())?
+    };
     let ts = tailscale::status();
     if !ts.installed {
         return Err("tailscale CLI not found on PATH".into());
@@ -129,19 +132,43 @@ pub fn tailscale_serve_enable(
     if !ts.logged_in {
         return Err("tailscale is not logged in (run `tailscale up` first)".into());
     }
-    let args = tailscale::serve_args(port);
-    let _ = tailscale::run_tailscale(&args)?;
-    // Persist the URL so get_mobile_pairing_info can report it even before
-    // the next tailscale status poll.
+
+    // Spawn the serve command in a background thread — it exits quickly but
+    // cert provisioning is async.
+    let port_clone = port;
+    let _join_handle = tokio::task::spawn_blocking(move || {
+        let args = tailscale::serve_args(port_clone);
+        let _ = tailscale::run_tailscale(&args);
+    });
+
+    // Poll serve_active() until it's up (or we time out). This is critical:
+    // tailscale serve --bg exits 0 before the HTTPS config is fully live.
     let url = match ts.dns_name.as_ref() {
         Some(dns) => tailscale::wss_url(dns),
         None => return Err("tailscale is logged in but has no DNS name".into()),
     };
-    {
-        let conn = db.0.lock();
-        let _ = crate::db::set_setting(&conn, "mobile.tailscale_url", &url);
+
+    const MAX_WAIT_MS: u64 = 8_000;
+    const POLL_INTERVAL_MS: u64 = 500;
+    let deadline = std::time::Instant::now() + Duration::from_millis(MAX_WAIT_MS);
+    while std::time::Instant::now() < deadline {
+        // Give serve a moment to initialise on first check.
+        tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
+        if tailscale::serve_active() {
+            // Persist so future get_mobile_pairing_info calls know serve is live.
+            let conn = db.0.lock();
+            let _ = crate::db::set_setting(&conn, "mobile.tailscale_url", &url);
+            return Ok(url);
+        }
     }
-    Ok(url)
+
+    // Timed out — serve never came up. This typically means HTTPS serving
+    // is not enabled on this tailnet (Tailscale admin console required).
+    Err(format!(
+        "Tailscale serve did not activate within {MAX_WAIT_MS}ms — \
+        HTTPS serving may not be enabled on your tailnet. \
+        Visit https://login.tailscale.com/f/serve to enable it."
+    ))
 }
 
 /// Disable `tailscale serve` (tears down ALL serve paths on this node).

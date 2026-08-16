@@ -13,6 +13,7 @@
 // [data-theme="dark"] so a single source of truth covers both themes.
 import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { toastError, toastSuccess, exportChatZip, popOutChat, getMobilePairingInfo, type MobilePairingInfo } from "../../lib/ipc";
@@ -643,43 +644,48 @@ export function Sidebar() {
         </button>
       </div>
 
-      {/* ── Pairing QR modal (sidebar quick access) ────────────────────── */}
-      {pairingModalOpen && (
-        <div className="pairing-modal" onClick={closePairingModal}>
-          <div className="pairing-modal-card" onClick={(e) => e.stopPropagation()}>
-            <div className="pairing-modal-head">
-              <span className="pairing-modal-title">Phone pairing</span>
-              <button className="pairing-modal-close" onClick={closePairingModal} aria-label="Close">
-                <X size={16} />
-              </button>
-            </div>
-            {pairingLoading ? (
-              <p className="muted" style={{ fontSize: 12 }}>Loading…</p>
-            ) : pairingInfo?.running && pairingQr ? (
-              <>
-                <div className="pairing-modal-qr">
-                  <img src={pairingQr} alt="Pairing QR" width={240} height={240} />
-                </div>
-                <p className="pairing-modal-hint">
-                  Scan with the mobile app to pair. Works over Tailscale
-                  {pairingInfo.tailscaleUrl ? " (cross-network)" : " (local)"}.
-                  Token rotates each time the relay restarts.
+      {/* ── Pairing QR modal (sidebar quick access) ──────────────────────
+          Rendered via portal to document.body so it overlays the entire app
+          (the sidebar's backdrop-blur creates its own containing block,
+          which would trap a position:fixed overlay inside the rail). */}
+      {pairingModalOpen &&
+        createPortal(
+          <div className="pairing-modal" onClick={closePairingModal}>
+            <div className="pairing-modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="pairing-modal-head">
+                <span className="pairing-modal-title">Phone pairing</span>
+                <button className="pairing-modal-close" onClick={closePairingModal} aria-label="Close">
+                  <X size={16} />
+                </button>
+              </div>
+              {pairingLoading ? (
+                <p className="muted" style={{ fontSize: 12 }}>Loading…</p>
+              ) : pairingInfo?.running && pairingQr ? (
+                <>
+                  <div className="pairing-modal-qr">
+                    <img src={pairingQr} alt="Pairing QR" width={240} height={240} />
+                  </div>
+                  <p className="pairing-modal-hint">
+                    Scan with the mobile app to pair. Works over Tailscale
+                    {pairingInfo.tailscaleUrl ? " (cross-network)" : " (local)"}.
+                    Token rotates each time the relay restarts.
+                  </p>
+                  <div className="field">
+                    <label className="field-label" style={{ fontSize: 11 }}>URL</label>
+                    <code className="pairing-modal-url" style={{ color: "var(--text-dim)" }}>
+                      {pairingInfo.tailscaleUrl ?? pairingInfo.localUrl}
+                    </code>
+                  </div>
+                </>
+              ) : (
+                <p className="muted" style={{ fontSize: 12 }}>
+                  Relay is not running. Open Settings → Remote to start it.
                 </p>
-                <div className="field">
-                  <label className="field-label" style={{ fontSize: 11 }}>URL</label>
-                  <code className="pairing-modal-url" style={{ color: "var(--text-dim)" }}>
-                    {pairingInfo.tailscaleUrl ?? pairingInfo.localUrl}
-                  </code>
-                </div>
-              </>
-            ) : (
-              <p className="muted" style={{ fontSize: 12 }}>
-                Relay is not running. Open Settings → Remote to start it.
-              </p>
-            )}
-          </div>
-        </div>
-      )}
+              )}
+            </div>
+          </div>,
+          document.body,
+        )}
     </aside>
   );
 }

@@ -4,10 +4,11 @@
 //   1. USB bridge (adb reverse) → ws://localhost:<port> — same machine only
 //   2. Tailscale serve → wss://<machine>.<tailnet>.ts.net — cross-network
 //
-// The panel shows a QR of the active URL (token in the fragment), the raw
-// token for manual entry, and the Tailscale card (install/login guidance,
-// enable/disable serve). When Tailscale serve is active the cross-network
-// QR replaces the local one.
+// The panel auto-starts the relay on mount. If Tailscale is installed and
+// already logged in, it auto-enables serve so the QR is immediately scannable
+// from any network. If Tailscale is installed but not logged in, a "Log in"
+// button spawns `tailscale up` (opens browser) and the panel polls until
+// login completes, then auto-enables serve.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import QRCode from "qrcode";
@@ -15,6 +16,7 @@ import {
   getMobilePairingInfo,
   tailscaleServeEnable,
   tailscaleServeDisable,
+  tailscaleLogin,
   startMobileRelay,
   stopMobileRelay,
   type MobilePairingInfo,
@@ -25,27 +27,73 @@ export function RemotePanel() {
   const [info, setInfo] = useState<MobilePairingInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [tsLoginInProgress, setTsLoginInProgress] = useState(false);
   const [localQr, setLocalQr] = useState<string>("");
   const [tsQr, setTsQr] = useState<string>("");
   const refreshTimer = useRef<number | null>(null);
+  // Guard: only auto-start/auto-serve once per panel open (not on every refresh).
+  const didAutoStart = useRef(false);
 
   const refresh = useCallback(async () => {
     const data = await getMobilePairingInfo();
     setInfo(data);
     setLoading(false);
+    return data;
   }, []);
 
   useEffect(() => {
     void refresh();
-    // Poll every 5s so the token + tailscale state stay live in the UI
-    // (token rotates on relay restart; tailscale state can change externally).
     refreshTimer.current = window.setInterval(() => void refresh(), 5000);
     return () => {
       if (refreshTimer.current) window.clearInterval(refreshTimer.current);
     };
   }, [refresh]);
 
-  // Generate QRs whenever the active URL changes.
+  // ── Auto-start relay + auto-serve on mount ──────────────────────────────
+  useEffect(() => {
+    if (didAutoStart.current || loading) return;
+    didAutoStart.current = true;
+    void ensurePairingReady();
+  }, [loading]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function ensurePairingReady() {
+    const data = await refresh();
+    const ts = data?.tailscale;
+
+    // 1. Start relay if not running.
+    if (!data?.running) {
+      setBusy(true);
+      try {
+        await startMobileRelay();
+        await new Promise(r => setTimeout(r, 600));
+      } catch (e) {
+        toastError("Failed to start relay", e);
+        return;
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    // Re-read state after relay started.
+    const afterRelay = await refresh();
+    const ts2 = afterRelay?.tailscale;
+
+    // 2. If Tailscale installed + logged in, auto-enable serve.
+    if (ts2?.installed && ts2?.loggedIn) {
+      setBusy(true);
+      try {
+        await tailscaleServeEnable();
+        toastSuccess("Remote access ready", "Phone can now scan the QR from any network");
+      } catch (e) {
+        toastError("Failed to enable Tailscale serve", e);
+      } finally {
+        setBusy(false);
+        await refresh();
+      }
+    }
+  }
+
+  // ── QR generation ─────────────────────────────────────────────────────────
   useEffect(() => {
     const url = info?.tailscaleUrl ?? info?.localUrl ?? "";
     if (url) {
@@ -55,7 +103,6 @@ export function RemotePanel() {
     } else {
       setLocalQr("");
     }
-    // When both URLs exist, render a second QR for the tailscale URL.
     if (info?.tailscaleUrl && info?.localUrl) {
       QRCode.toDataURL(info.tailscaleUrl, { width: 240, margin: 1 })
         .then(setTsQr)
@@ -94,10 +141,8 @@ export function RemotePanel() {
   const handleEnableServe = async () => {
     setBusy(true);
     try {
-      const url = await tailscaleServeEnable();
-      if (url) {
-        toastSuccess("Tailscale serve enabled", url);
-      }
+      await tailscaleServeEnable();
+      toastSuccess("Tailscale serve enabled");
       await refresh();
     } catch (e) {
       toastError("Tailscale serve failed", e);
@@ -119,6 +164,37 @@ export function RemotePanel() {
     }
   };
 
+  const handleLogin = async () => {
+    setTsLoginInProgress(true);
+    try {
+      await tailscaleLogin();
+      // The browser is now open. Poll until Tailscale reports "Running".
+      toastSuccess("Browser opened", "Complete Tailscale login, then return here");
+    } catch (e) {
+      toastError("Failed to start Tailscale login", e);
+      setTsLoginInProgress(false);
+    }
+  };
+
+  // Once logged in (polled via refresh), auto-enable serve and stop the spinner.
+  useEffect(() => {
+    if (tsLoginInProgress && info?.tailscale?.loggedIn) {
+      setTsLoginInProgress(false);
+      void (async () => {
+        setBusy(true);
+        try {
+          await tailscaleServeEnable();
+          toastSuccess("Remote access ready", "Phone can now scan the QR from any network");
+        } catch (e) {
+          toastError("Failed to enable Tailscale serve", e);
+        } finally {
+          setBusy(false);
+          await refresh();
+        }
+      })();
+    }
+  }, [tsLoginInProgress, info?.tailscale?.loggedIn]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const copyToClipboard = async (text: string | null, label: string) => {
     if (!text) return;
     try {
@@ -136,6 +212,9 @@ export function RemotePanel() {
   const ts = info?.tailscale;
   const activeUrl = info?.tailscaleUrl ?? info?.localUrl;
   const isServing = !!info?.tailscaleUrl;
+
+  // QR is shown whenever the relay is running.
+  const showQr = info?.running && info.token && activeUrl;
 
   return (
     <div className="panel-section">
@@ -164,7 +243,7 @@ export function RemotePanel() {
       </div>
 
       {/* Pairing QR + token */}
-      {info?.running && info.token && activeUrl ? (
+      {showQr ? (
         <div className="remote-pairing-card" style={{ marginBottom: 20 }}>
           <div className="qr-section">
             {localQr ? (
@@ -188,8 +267,8 @@ export function RemotePanel() {
             <div className="field" style={{ marginBottom: 12 }}>
               <label className="field-label">Pairing token</label>
               <div className="value-row">
-                <code className="mono-text">{info.token}</code>
-                <button className="ghost" style={{ padding: "2px 8px" }} onClick={() => void copyToClipboard(info.token, "Token")}>
+                <code className="mono-text">{info!.token}</code>
+                <button className="ghost" style={{ padding: "2px 8px" }} onClick={() => void copyToClipboard(info!.token, "Token")}>
                   Copy
                 </button>
               </div>
@@ -218,7 +297,7 @@ export function RemotePanel() {
           <h4>Tailscale (cross-network)</h4>
           {ts?.installed ? (
             <span className={`status-chip ${ts.loggedIn ? "ok" : "warn"}`}>
-              {ts.loggedIn ? "Logged in" : "Not logged in"}
+              {tsLoginInProgress ? "Logging in…" : ts.loggedIn ? "Logged in" : "Not logged in"}
             </span>
           ) : (
             <span className="status-chip off">Not installed</span>
@@ -228,21 +307,29 @@ export function RemotePanel() {
         {!ts?.installed ? (
           <div>
             <p className="muted" style={{ marginBottom: 8 }}>
-              Install <a href="https://tailscale.com/download" target="_blank" rel="noreferrer">Tailscale</a> and log in on both this machine and your phone
-              to connect across different networks. The relay stays loopback-only; Tailscale fronts it with TLS.
+              Install <a href="https://tailscale.com/download" target="_blank" rel="noreferrer">Tailscale</a> on this machine and your phone,
+              then log in to connect across different networks. The relay stays loopback-only; Tailscale fronts it with TLS.
             </p>
           </div>
         ) : !ts.loggedIn ? (
           <div>
             <p className="muted" style={{ marginBottom: 8 }}>
-              Tailscale is installed but not running. Run <code className="mono-text">tailscale up</code> in a terminal
-              to log in, then return here to enable remote access.
+              Tailscale is installed but not logged in. Click <strong>Log in</strong> to open the browser,
+              complete the login, then return here — serve enables automatically.
             </p>
             {ts.dnsName && (
               <p className="muted" style={{ fontSize: 12 }}>
                 Machine: <code className="mono-text">{ts.dnsName}</code> · State: {ts.backendState}
               </p>
             )}
+            <button
+              className="ghost"
+              style={{ marginTop: 10 }}
+              disabled={busy || tsLoginInProgress}
+              onClick={() => void handleLogin()}
+            >
+              {tsLoginInProgress ? "Opening browser…" : "Log in with Tailscale"}
+            </button>
           </div>
         ) : (
           <div>

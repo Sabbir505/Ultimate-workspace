@@ -15,7 +15,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import { toastError, toastSuccess, exportChatZip, popOutChat } from "../../lib/ipc";
+import { toastError, toastSuccess, exportChatZip, popOutChat, getMobilePairingInfo, type MobilePairingInfo } from "../../lib/ipc";
 import {
   DollarSign,
   Folder,
@@ -28,6 +28,7 @@ import {
   ChevronDown,
   ChevronRight,
   X,
+  QrCode,
 } from "lucide-react";
 import { useProjectsStore } from "../../state/projects";
 import { useChatStore } from "../../state/chat";
@@ -75,6 +76,53 @@ export function Sidebar() {
 
   // Artifacts count
   const artifactItems = useArtifactsStore((s) => s.items);
+
+  // ── Pairing QR modal (sidebar footer quick access) ─────────────────────
+  const [pairingModalOpen, setPairingModalOpen] = useState(false);
+  const [pairingInfo, setPairingInfo] = useState<MobilePairingInfo | null>(null);
+  const [pairingQr, setPairingQr] = useState<string>("");
+  const [pairingLoading, setPairingLoading] = useState(false);
+  const pairingTimer = useRef<number | null>(null);
+
+  const loadPairingInfo = useCallback(async () => {
+    try {
+      const info = await getMobilePairingInfo();
+      setPairingInfo(info);
+      const url = info?.tailscaleUrl ?? info?.localUrl ?? "";
+      if (url) {
+        const { default: QRCode } = await import("qrcode");
+        const dataUrl = await QRCode.toDataURL(url, { width: 240, margin: 1 });
+        setPairingQr(dataUrl);
+      } else {
+        setPairingQr("");
+      }
+    } catch {
+      setPairingInfo(null);
+      setPairingQr("");
+    } finally {
+      setPairingLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!pairingModalOpen) return;
+    setPairingLoading(true);
+    void loadPairingInfo();
+    // Poll while modal is open so QR stays fresh if serve state changes.
+    pairingTimer.current = window.setInterval(() => void loadPairingInfo(), 3000);
+    return () => {
+      if (pairingTimer.current) window.clearInterval(pairingTimer.current);
+    };
+  }, [pairingModalOpen, loadPairingInfo]);
+
+  const closePairingModal = useCallback(() => {
+    if (pairingTimer.current) window.clearInterval(pairingTimer.current);
+    setPairingModalOpen(false);
+  }, []);
+
+  const openPairingModal = useCallback(() => {
+    setPairingModalOpen(true);
+  }, []);
 
   // DEV-ONLY mock update for visual review (see SHOW_FAKE_UPDATE in state/updater).
   useEffect(() => {
@@ -571,6 +619,18 @@ export function Sidebar() {
         </button>
         <button
           className={`p-2 rounded-lg transition-all duration-150 active:scale-95 ${
+            pairingModalOpen
+              ? "bg-gray-200 dark:bg-white/15 border border-gray-300 dark:border-white/30 text-gray-900 dark:text-white"
+              : "bg-transparent dark:bg-transparent border border-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white"
+          }`}
+          onClick={openPairingModal}
+          title="Phone pairing QR"
+          aria-label="Phone pairing QR"
+        >
+          <QrCode size={16} strokeWidth={1.8} />
+        </button>
+        <button
+          className={`p-2 rounded-lg transition-all duration-150 active:scale-95 ${
             activeView === "settings"
               ? "bg-gray-200 dark:bg-white/15 border border-gray-300 dark:border-white/30 text-gray-900 dark:text-white"
               : "bg-transparent dark:bg-transparent border border-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white"
@@ -582,6 +642,44 @@ export function Sidebar() {
           <Settings size={16} strokeWidth={1.8} />
         </button>
       </div>
+
+      {/* ── Pairing QR modal (sidebar quick access) ────────────────────── */}
+      {pairingModalOpen && (
+        <div className="pairing-modal" onClick={closePairingModal}>
+          <div className="pairing-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="pairing-modal-head">
+              <span className="pairing-modal-title">Phone pairing</span>
+              <button className="pairing-modal-close" onClick={closePairingModal} aria-label="Close">
+                <X size={16} />
+              </button>
+            </div>
+            {pairingLoading ? (
+              <p className="muted" style={{ fontSize: 12 }}>Loading…</p>
+            ) : pairingInfo?.running && pairingQr ? (
+              <>
+                <div className="pairing-modal-qr">
+                  <img src={pairingQr} alt="Pairing QR" width={240} height={240} />
+                </div>
+                <p className="pairing-modal-hint">
+                  Scan with the mobile app to pair. Works over Tailscale
+                  {pairingInfo.tailscaleUrl ? " (cross-network)" : " (local)"}.
+                  Token rotates each time the relay restarts.
+                </p>
+                <div className="field">
+                  <label className="field-label" style={{ fontSize: 11 }}>URL</label>
+                  <code className="pairing-modal-url" style={{ color: "var(--text-dim)" }}>
+                    {pairingInfo.tailscaleUrl ?? pairingInfo.localUrl}
+                  </code>
+                </div>
+              </>
+            ) : (
+              <p className="muted" style={{ fontSize: 12 }}>
+                Relay is not running. Open Settings → Remote to start it.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
     </aside>
   );
 }

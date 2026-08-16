@@ -25,7 +25,7 @@ import {
 import Ionicons from '@expo/vector-icons/Ionicons';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
-import { theme } from '../theme';
+import { theme } from '../../theme';
 import type { SessionChatAttachment } from '../../hooks/useRelay';
 
 // M4: lucide-react-native cannot be tree-shaken by Metro (one giant JS
@@ -192,6 +192,8 @@ export default function ChatComposer({
               color: theme.colors.text,
               backgroundColor: theme.colors.surface2,
               borderColor: theme.colors.border,
+              height: Math.min(text.length > 200 ? 88 : 44, 88),
+              maxHeight: 88,
             },
           ]}
           value={text}
@@ -199,7 +201,6 @@ export default function ChatComposer({
           placeholder={placeholder}
           placeholderTextColor={theme.colors.textSecondary}
           multiline
-          maxHeight={4 * 22}
           editable={!streaming}
           onSubmitEditing={handleSend}
           blurOnSubmit={false}

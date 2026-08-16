@@ -1639,6 +1639,10 @@ export const tailscaleServeEnable = () =>
 export const tailscaleServeDisable = () =>
   safeInvoke<void>("tailscale_serve_disable");
 
+/** Trigger `tailscale up` in the background (opens browser for login). */
+export const tailscaleLogin = () =>
+  safeInvoke<void>("tailscale_login");
+
 
 // ---- Local Models market (Hugging Face browse + download) ----
 

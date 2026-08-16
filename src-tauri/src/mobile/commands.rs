@@ -97,8 +97,9 @@ pub fn get_mobile_pairing_info(
         _ => None,
     };
     let ts = tailscale::status();
-    let tailscale_url = match (ts.installed, ts.logged_in, ts.dns_name.as_ref(), token.as_ref()) {
-        (true, true, Some(dns), Some(t)) => Some(format!("{}#{}", tailscale::wss_url(dns), t)),
+    let serving = tailscale::serve_active();
+    let tailscale_url = match (serving, ts.installed, ts.logged_in, ts.dns_name.as_ref(), token.as_ref()) {
+        (true, true, true, Some(dns), Some(t)) => Some(format!("{}#{}", tailscale::wss_url(dns), t)),
         _ => None,
     };
     Ok(MobilePairingInfo {
@@ -151,4 +152,12 @@ pub fn tailscale_serve_disable(db: State<'_, DbState>) -> CmdResult<()> {
     let conn = db.0.lock();
     let _ = crate::db::set_setting(&conn, "mobile.tailscale_url", "");
     Ok(())
+}
+
+/// Start the Tailscale login flow (`tailscale up` in the background — the
+/// CLI opens the browser automatically). Poll `get_mobile_pairing_info` for
+/// the logged-in transition.
+#[tauri::command]
+pub fn tailscale_login() -> CmdResult<()> {
+    tailscale::spawn_login()
 }

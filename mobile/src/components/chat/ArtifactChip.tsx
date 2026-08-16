@@ -24,8 +24,8 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 const FileCode2 = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="code-slash" size={size} color={color} />;
 const FileText = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="document-text" size={size} color={color} />;
 const X = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="close" size={size} color={color} />;
-import { theme } from '../theme';
-import type { SessionArtifact } from '../hooks/useRelay';
+import { theme } from '../../theme';
+import type { SessionArtifact } from '../../hooks/useRelay';
 
 interface ArtifactChipProps {
   artifact: SessionArtifact;

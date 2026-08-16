@@ -740,3 +740,73 @@
   align-items: center;
   gap: 8px;
 }
+
+/* ---- Pairing QR modal (sidebar footer quick access) ---- */
+.pairing-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding-top: 72px;
+  padding-left: 88px;
+  z-index: 60;
+  animation: overlay-in 0.18s var(--ease);
+}
+.pairing-modal-card {
+  width: 320px;
+  max-height: 82vh;
+  overflow-y: auto;
+  background: var(--surface, #ffffff);
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.pairing-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.pairing-modal-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text, #1a1a1a);
+}
+.pairing-modal-close {
+  background: transparent;
+  border: none;
+  color: var(--text-dim, #888);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+}
+.pairing-modal-close:hover {
+  color: var(--text, #1a1a1a);
+  background: color-mix(in srgb, var(--text-dim, #888) 15%, transparent);
+}
+.pairing-modal-qr {
+  display: flex;
+  justify-content: center;
+}
+.pairing-modal-qr img {
+  border-radius: 8px;
+  border: 1px solid var(--border, #e0e0e0);
+  background: #fff;
+}
+.pairing-modal-hint {
+  font-size: 11px;
+  color: var(--text-muted, #6a6a6a);
+  line-height: 1.5;
+}
+.pairing-modal-url {
+  font-size: 11px;
+  word-break: break-all;
+  font-family: ui-monospace, monospace;
+}

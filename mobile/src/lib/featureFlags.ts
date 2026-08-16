@@ -28,7 +28,7 @@ async function loadStorage(): Promise<AsyncStorageLike> {
       setItem: async (k: string, v: string) => { memoryStore.set(k, v); },
     };
   }
-  return storageImpl;
+  return storageImpl!;
 }
 
 export async function getUseChatSession(): Promise<boolean> {

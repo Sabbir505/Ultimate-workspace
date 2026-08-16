@@ -402,6 +402,7 @@ pub fn run() {
             mobile::commands::get_mobile_pairing_info,
             mobile::commands::tailscale_serve_enable,
             mobile::commands::tailscale_serve_disable,
+            mobile::commands::tailscale_login,
             // local model market (Hugging Face browse + download)
             commands::local_model_market::fetch_model_catalog,
             commands::local_model_market::get_gpu_vram,

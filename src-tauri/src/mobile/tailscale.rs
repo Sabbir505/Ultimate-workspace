@@ -128,6 +128,54 @@ pub fn serve_off_args() -> Vec<String> {
     vec!["serve".to_string(), "off".to_string()]
 }
 
+/// Returns true when `tailscale serve` is currently active (a non-empty
+/// ServeConfig is present). Polling this lets the UI reflect external
+/// changes without depending on the persisted DB setting alone.
+pub fn serve_active() -> bool {
+    if !cli_present() {
+        return false;
+    }
+    match run_tailscale(&["serve".to_string(), "status".to_string(), "--json".to_string()]) {
+        Ok(out) => {
+            #[derive(serde::Deserialize)]
+            struct ServeStatusJson {
+                #[serde(rename = "ServeConfig")]
+                serve_config: Option<serde_json::Value>,
+            }
+            match serde_json::from_str::<ServeStatusJson>(&out) {
+                Ok(s) => s.serve_config.is_some(),
+                Err(_) => false,
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+/// Spawn `tailscale up` in the background to start the login flow. The CLI
+/// opens the default browser automatically (or prints the auth URL) and
+/// waits for the user to finish; this call returns immediately so the UI
+/// can poll `status()` for the transition to "Running".
+pub fn spawn_login() -> Result<(), String> {
+    if !cli_present() {
+        return Err("tailscale CLI not found on PATH".into());
+    }
+    let spec = resolve_for_spawn(&CommandSpec::new("tailscale", &["up"]));
+    let mut cmd = Command::new(&spec.program);
+    cmd.args(&spec.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.spawn()
+        .map_err(|e| format!("failed to spawn tailscale up: {e}"))?;
+    Ok(())
+}
+
 /// Construct the `wss://` URL the phone should use when serve is active.
 /// `dns_name` is the node's tailnet DNS name (e.g. "laptop.tailnet-name.ts.net").
 /// A trailing dot (FQDN root) is stripped.

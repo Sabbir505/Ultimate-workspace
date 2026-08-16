@@ -19,7 +19,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 const ShieldAlert = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="shield" size={size} color={color} />;
 const Check = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="checkmark" size={size} color={color} />;
 const X = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="close" size={size} color={color} />;
-import { theme } from '../theme';
+import { theme } from '../../theme';
 
 export interface ApprovalCardProps {
   tool: string;

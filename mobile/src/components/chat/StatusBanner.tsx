@@ -15,7 +15,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 // bundle of every icon); Ionicons is a glyph font already bundled with the
 // app. These wrappers preserve the lucide call-sites' (size, color) props.
 const Loader = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="sync" size={size} color={color} />;
-import { theme } from '../theme';
+import { theme } from '../../theme';
 
 export interface StatusBannerProps {
   message: string;

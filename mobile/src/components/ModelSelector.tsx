@@ -21,6 +21,9 @@ const Cpu = ({ size, color }: { size?: number; color?: string; style?: object })
 import { theme } from '../theme';
 import { ProviderInfo } from '../hooks/useRelay';
 
+/** A flattened search-result row (search crosses provider + model names). */
+type SearchRow = { provider: ProviderInfo; model: string; key: string };
+
 interface ModelSelectorProps {
   providers: ProviderInfo[];
   selectedProvider: string;
@@ -240,7 +243,7 @@ export default function ModelSelector({
     return out;
   }, [query, providers]);
 
-  const flatData = useMemo(() => {
+  const flatData: Array<ProviderInfo | SearchRow> = useMemo(() => {
     if (searchResults) return searchResults;
     // Provider list — selected provider sorted first for quick access.
     return [...providers].sort((a, b) => {
@@ -305,7 +308,7 @@ export default function ModelSelector({
 
             <FlatList
               data={flatData}
-              keyExtractor={(item) => searchResults ? (item as any).key : keyFor(item as ProviderInfo)}
+              keyExtractor={(item) => searchResults ? (item as SearchRow).key : keyFor(item as ProviderInfo)}
               keyboardShouldPersistTaps="handled"
               ListEmptyComponent={
                 <View style={styles.emptyState}>
@@ -318,7 +321,7 @@ export default function ModelSelector({
               }
               renderItem={({ item }) => {
                 if (searchResults) {
-                  const r = item as { provider: ProviderInfo; model: string; key: string };
+                  const r = item as SearchRow;
                   const isSelected =
                     r.provider.id === selectedProvider && r.model === selectedModel;
                   return (

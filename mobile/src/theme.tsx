@@ -19,9 +19,29 @@ export const lightColors = {
   gray: '#9E9E9E',
   white: '#FFFFFF',
   black: '#000000',
-} as const;
+};
 
-export const darkColors: typeof lightColors = {
+export type ThemeColors = {
+  background: string;
+  surface: string;
+  surface2: string;
+  primary: string;
+  primaryLight: string;
+  text: string;
+  textSecondary: string;
+  border: string;
+  success: string;
+  warning: string;
+  error: string;
+  green: string;
+  yellow: string;
+  blue: string;
+  gray: string;
+  white: string;
+  black: string;
+};
+
+export const darkColors: ThemeColors = {
   background: '#181818',
   surface: '#1a1a1a',
   surface2: '#1f1f1f',
@@ -39,9 +59,7 @@ export const darkColors: typeof lightColors = {
   gray: '#9E9E9E',
   white: '#FFFFFF',
   black: '#000000',
-} as const;
-
-export type ThemeColors = typeof lightColors;
+};
 
 // ---- Reactive theme singleton ----
 // Components that import `theme` get colors that update when dark mode toggles.

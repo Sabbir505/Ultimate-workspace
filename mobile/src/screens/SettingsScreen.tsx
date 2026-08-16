@@ -7,6 +7,8 @@ import {
   TouchableOpacity,
   Switch,
   TextInput,
+  Modal,
+  Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
@@ -17,6 +19,7 @@ const Settings = ({ size, color }: { size?: number; color?: string }) => <Ionico
 const Moon = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="moon" size={size} color={color} />;
 const DollarSign = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="cash" size={size} color={color} />;
 const Wifi = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="wifi" size={size} color={color} />;
+const QrIcon = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="qr-code" size={size} color={color} />;
 const Monitor = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="desktop" size={size} color={color} />;
 const ChevronRight = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="chevron-forward" size={size} color={color} />;
 const Cpu = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="hardware-chip" size={size} color={color} />;
@@ -38,6 +41,12 @@ function usd(n: number): string {
 function tokens(n: number): string {
   return n.toLocaleString();
 }
+
+// ---------------------------------------------------------------------------
+// QR scan modal (lazy camera — only imported when the user taps "Scan QR")
+// ---------------------------------------------------------------------------
+
+const QrScanModal = React.lazy(() => import('./QrScanModal'));
 
 // ---------------------------------------------------------------------------
 // SettingRow — a row with icon, title, subtitle, and optional switch or arrow
@@ -251,14 +260,24 @@ export default function SettingsScreen() {
   // prefill the field with the current one.
   const [relayUrl, setRelayUrl] = useState(() => getRelayUrl() ?? '');
 
+  // QR scanner modal — shown when the user taps "Scan QR" on the Desktop
+  // Connection card. The scanned payload is a `ws://host:port/#token` or
+  // `wss://host/#token` URL emitted by the desktop's Remote settings panel.
+  const [qrScanning, setQrScanning] = useState(false);
+
   // 5-tap easter egg on the version row to reveal the developer toggle.
   const [tapCount, setTapCount] = useState(0);
   const [devVisible, setDevVisible] = useState(chatSession);
 
-  const handleConnect = useCallback(() => {
-    connect(relayUrl.trim() || undefined);
+  const handleConnect = useCallback((url?: string) => {
+    connect(url ?? relayUrl.trim() ?? undefined);
   }, [connect, relayUrl]);
 
+  const handleQrScan = useCallback((scannedUrl: string) => {
+    setRelayUrl(scannedUrl);
+    setQrScanning(false);
+    connect(scannedUrl);
+  }, [connect]);
   const handleVersionTap = useCallback(() => {
     setTapCount(prev => {
       const next = prev + 1;
@@ -302,7 +321,7 @@ export default function SettingsScreen() {
             {!connected && (
               <TextInput
                 style={[styles.urlInput, { backgroundColor: c.background, borderColor: c.border, color: c.text }]}
-                placeholder="ws://localhost:<desktop relay port>"
+                placeholder="ws://host:port/#token or wss://machine.tailnet.ts.net/#token"
                 placeholderTextColor={c.textSecondary}
                 value={relayUrl}
                 onChangeText={setRelayUrl}
@@ -315,10 +334,16 @@ export default function SettingsScreen() {
             {/* Connect / Disconnect */}
             <View style={styles.connectionActions}>
               {!connected ? (
-                <TouchableOpacity style={[styles.connectButton, { backgroundColor: c.primary }]} onPress={handleConnect} activeOpacity={0.7}>
-                  <Wifi size={16} color="#fff" />
-                  <Text style={styles.connectButtonText}>Connect</Text>
-                </TouchableOpacity>
+                <>
+                  <TouchableOpacity style={[styles.scanButton, { borderColor: c.border }]} onPress={() => setQrScanning(true)} activeOpacity={0.7}>
+                    <QrIcon size={16} color={c.text} />
+                    <Text style={[styles.connectButtonText, { color: c.text }]}>Scan QR</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.connectButton, { backgroundColor: c.primary, flex: 1 }]} onPress={() => handleConnect()} activeOpacity={0.7}>
+                    <Wifi size={16} color="#fff" />
+                    <Text style={styles.connectButtonText}>Connect</Text>
+                  </TouchableOpacity>
+                </>
               ) : (
                 <TouchableOpacity style={[styles.disconnectButton, { borderColor: 'rgba(229, 57, 53, 0.2)' }]} onPress={disconnect} activeOpacity={0.7}>
                   <Text style={[styles.disconnectButtonText, { color: c.error }]}>Disconnect</Text>
@@ -451,6 +476,13 @@ export default function SettingsScreen() {
           </View>
         )}
       </ScrollView>
+
+      {/* QR scanner modal — lazy-loaded so expo-camera isn't on the cold-start
+          path. The modal shows a live camera preview and calls onScanned when
+          a barcode/QR is detected. */}
+      <React.Suspense fallback={null}>
+        <QrScanModal visible={qrScanning} onScanned={handleQrScan} onClose={() => setQrScanning(false)} />
+      </React.Suspense>
     </SafeAreaView>
   );
 }
@@ -500,6 +532,11 @@ const styles = StyleSheet.create({
   connectButton: {
     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     backgroundColor: theme.colors.primary, paddingVertical: 14, borderRadius: theme.borderRadius.md, gap: 8,
+  },
+  scanButton: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    paddingVertical: 14, paddingHorizontal: 16, borderRadius: theme.borderRadius.md,
+    borderWidth: 1, gap: 8,
   },
   connectButtonText: { color: '#fff', fontWeight: '600', fontSize: theme.fontSize.md },
   disconnectButton: {

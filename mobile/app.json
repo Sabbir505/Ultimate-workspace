@@ -6,12 +6,32 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Conduit needs camera access to scan the desktop pairing QR code.",
+          "microphonePermission": false
+        }
+      ],
+      [
+        "expo-document-picker",
+        {
+          "iCloudContainerEnvironment": "Production"
+        }
+      ]
+    ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.conduit.mobile"
+      "bundleIdentifier": "com.conduit.mobile",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Conduit needs camera access to scan the desktop pairing QR code.",
+        "UIBackgroundModes": ["remote-notification"]
+      }
     },
     "android": {
       "package": "com.conduit.mobile",
+      "permissions": ["android.permission.CAMERA"],
       "adaptiveIcon": {
         "backgroundColor": "#FAF7F5"
       }

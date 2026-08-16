@@ -399,6 +399,9 @@ pub fn run() {
             mobile::commands::start_mobile_relay,
             mobile::commands::stop_mobile_relay,
             mobile::commands::get_mobile_relay_status,
+            mobile::commands::get_mobile_pairing_info,
+            mobile::commands::tailscale_serve_enable,
+            mobile::commands::tailscale_serve_disable,
             // local model market (Hugging Face browse + download)
             commands::local_model_market::fetch_model_catalog,
             commands::local_model_market::get_gpu_vram,

@@ -38,6 +38,7 @@ import {
   useRelay,
   type SessionMessageRecord,
   type SessionArtifact,
+  type SessionChatAttachment,
 } from './useRelay';
 
 export interface PendingApproval {
@@ -226,7 +227,7 @@ export function useSessionChat(sessionId: string | null) {
   // --- actions ---
 
   const send = useCallback(
-    (text: string) => {
+    (text: string, attachments: SessionChatAttachment[] = []) => {
       if (!sessionId) return;
       // Optimistically show the user message immediately so the UI feels
       // responsive before the desktop echoes it back via GetSessionMessages.
@@ -237,7 +238,7 @@ export function useSessionChat(sessionId: string | null) {
         created_at: Math.floor(Date.now() / 1000),
       };
       setState((s) => ({ ...s, messages: [userMsg, ...s.messages], streaming: true, streamingContent: '' }));
-      sendSessionChat(sessionId, text, []);
+      sendSessionChat(sessionId, text, attachments);
     },
     [sessionId, sendSessionChat],
   );

@@ -5,9 +5,15 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 /** The desktop relay binds loopback ONLY (127.0.0.1) on a persisted-but-random
  *  port, so there is no universal default URL: physical devices connect via a
  *  USB bridge (`adb reverse tcp:<port> tcp:<port>` → ws://localhost:<port>) or
- *  an explicit URL entered in Settings. Explicit URLs are persisted to
- *  AsyncStorage on connect so the user never re-enters them. */
+ *  over the tailnet (Tailscale serve → wss://<machine>.<tailnet>.ts.net).
+ *
+ *  The pairing token rides in the URL fragment: `ws://host:port/#<token>` or
+ *  `wss://host/#<token>`. On connect, the token is split out and sent as the
+ *  first WS frame (the desktop's relay requires a `Pair { token }` frame
+ *  within 30 s or it drops the connection). URLs without a fragment fall back
+ *  to the old unauthenticated path (legacy / dev). */
 const RELAY_URL_STORAGE_KEY = 'conduit.relayUrl';
+const RELAY_TOKEN_STORAGE_KEY = 'conduit.relayToken';
 
 export interface ProviderInfo {
   id: string; display_name: string; models: string[];
@@ -140,10 +146,11 @@ export interface SessionChatAttachment {
 
 let _ws: WebSocket | null = null;
 let _url: string | null = null;
+let _token: string | null = null;
 // Loaded once from AsyncStorage; connect() awaits this so a persisted URL
 // wins over the loopback default on cold start.
 const _storedUrlReady: Promise<string | null> = AsyncStorage.getItem(RELAY_URL_STORAGE_KEY)
-  .then((stored) => { if (stored) _url = stored; return stored; })
+  .then((stored) => { if (stored) { _url = stored; _token = extractToken(stored); } return stored; })
   .catch(() => null);
 let _connecting = false;
 let _reconnectTimer: any = null;
@@ -191,13 +198,46 @@ function stopPolling() {
   if (_providerTimer) { clearInterval(_providerTimer); _providerTimer = null; }
 }
 
+/** Extract the pairing token from a URL's fragment (`ws://host:port/#token`
+ *  or `wss://host/#token`). Returns null when no fragment is present (legacy
+ *  unauthenticated connect — the relay will reject this, but we fall through
+ *  so the error surfaces as a connection close rather than a silent skip). */
+function extractToken(url: string): string | null {
+  const hashIdx = url.indexOf('#');
+  if (hashIdx === -1) return null;
+  const frag = url.slice(hashIdx + 1);
+  // Strip any trailing path/query that snuck into the fragment.
+  const endIdx = Math.min(frag.indexOf('?'), frag.indexOf('&')) === -1
+    ? frag.length
+    : Math.min(frag.indexOf('?'), frag.indexOf('&'));
+  const token = frag.slice(0, endIdx === -1 ? frag.length : endIdx);
+  return token || null;
+}
+
 function _doConnect(target: string) {
   if (_ws?.readyState === WebSocket.OPEN && target === _url) return;
   if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; }
-  _url = target; _connecting = true;
+  _url = target;
+  _token = extractToken(target);
+  _connecting = true;
   try {
     const ws = new WebSocket(target); _ws = ws;
-    ws.onopen = () => { _connecting = false; nc(true); startPolling(); _send({ type: 'ListAvailableProviders' }); _send({ type: 'ListSessions' }); _send({ type: 'GetCostSummary' }); _send({ type: 'GetCostDetails' }); };
+    ws.onopen = () => {
+      _connecting = false; nc(true); startPolling();
+      // The relay requires the FIRST frame to be a Pair message (token
+      // check at relay.rs). Without it the connection is dropped before any
+      // command is honored. If no token is in the URL (legacy), skip Pair
+      // and send the bootstrap directly — the relay will reject with a
+      // ChatError frame and the user sees "first frame was not a Pair
+      // message" in the connect error state.
+      if (_token) {
+        ws.send(JSON.stringify({ type: 'Pair', token: _token }));
+      }
+      _send({ type: 'ListAvailableProviders' });
+      _send({ type: 'ListSessions' });
+      _send({ type: 'GetCostSummary' });
+      _send({ type: 'GetCostDetails' });
+    };
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data) as DesktopMessage;
@@ -243,10 +283,13 @@ function _doConnect(target: string) {
 }
 function globalConnect(url?: string) {
   if (url) {
-    // Explicit URL from the Settings field: use it and persist it so the
-    // next cold start reconnects without re-entry.
+    // Explicit URL from the Settings field or QR scan: use it and persist it
+    // so the next cold start reconnects without re-entry. The token is split
+    // out of the fragment and persisted separately for diagnostics.
     _url = url;
+    _token = extractToken(url);
     void AsyncStorage.setItem(RELAY_URL_STORAGE_KEY, url).catch(() => {});
+    void AsyncStorage.setItem(RELAY_TOKEN_STORAGE_KEY, _token ?? '').catch(() => {});
     _doConnect(url);
     return;
   }
@@ -258,6 +301,10 @@ function globalConnect(url?: string) {
 /** The URL the relay is currently connected/connecting to (null before any
  *  successful or attempted connect). Used to prefill the Settings field. */
 export function getRelayUrl(): string | null { return _url; }
+/** The pairing token extracted from the current URL's fragment (null when no
+ *  token is present — legacy/dev connect). Used by the Settings screen to
+ *  show the token status. */
+export function getRelayToken(): string | null { return _token; }
 function globalDisconnect() { stopPolling(); if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; } if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; } nc(false); }
 
 // Stable sender identities (module-level) so screens can safely put them in

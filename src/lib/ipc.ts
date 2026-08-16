@@ -1612,6 +1612,33 @@ export const stopMobileRelay = () =>
 export const getMobileRelayStatus = () =>
   safeInvoke<MobileRelayStatus | null>("get_mobile_relay_status");
 
+// ---- Mobile pairing + Tailscale remote access ----
+
+export interface TailscaleStatus {
+  installed: boolean;
+  loggedIn: boolean;
+  dnsName: string | null;
+  backendState: string;
+}
+
+export interface MobilePairingInfo {
+  running: boolean;
+  port: number;
+  token: string | null;
+  localUrl: string | null;
+  tailscale: TailscaleStatus;
+  tailscaleUrl: string | null;
+}
+
+export const getMobilePairingInfo = () =>
+  safeInvoke<MobilePairingInfo | null>("get_mobile_pairing_info");
+
+export const tailscaleServeEnable = () =>
+  safeInvoke<string | null>("tailscale_serve_enable");
+
+export const tailscaleServeDisable = () =>
+  safeInvoke<void>("tailscale_serve_disable");
+
 
 // ---- Local Models market (Hugging Face browse + download) ----
 

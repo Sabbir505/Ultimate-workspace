@@ -22,6 +22,7 @@ import { PermissionRulesPanel } from "./PermissionRulesPanel";
 import { PromptTemplatesPanel } from "./PromptTemplatesPanel";
 import { ThemeGalleryPanel } from "./ThemeGalleryPanel";
 import { AcpAgentsPanel } from "./AcpAgentsPanel";
+import { RemotePanel } from "./RemotePanel";
 import { ConnectorIcon, FamilyIcon, FAMILY_NAMES } from "./ConnectorIcon";
 import { Modal } from "../common/Modal";
 import {
@@ -38,6 +39,7 @@ import {
   Trash2,
   Library,
   Shield,
+  Smartphone,
 } from "lucide-react";
 
 type Category =
@@ -51,7 +53,8 @@ type Category =
   | "knowledge"
   | "permissions"
   | "data"
-  | "git";
+  | "git"
+  | "remote";
 
 const CATEGORY_KEYS: Category[] = [
   "appearance",
@@ -65,6 +68,7 @@ const CATEGORY_KEYS: Category[] = [
   "permissions",
   "data",
   "git",
+  "remote",
 ];
 
 function isCategory(v: string | null): v is Category {
@@ -87,6 +91,7 @@ function SettingsNavIcon({ category }: { category: Category }) {
     case "permissions": return <Shield {...props} />;
     case "data": return <Database {...props} />;
     case "git": return <GitBranch {...props} />;
+    case "remote": return <Smartphone {...props} />;
     default: return null;
   }
 }
@@ -131,6 +136,7 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
     items: [
       { key: "connectors", label: "Connectors", sub: "Notion & more (OAuth)" },
       { key: "knowledge", label: "Knowledge", sub: "Local folders (RAG)" },
+      { key: "remote", label: "Remote", sub: "Mobile pairing + Tailscale" },
     ],
   },
   {
@@ -393,6 +399,8 @@ export function SettingsView() {
               {category === "permissions" && <PermissionRulesPanel />}
 
               {category === "data" && <DataPanel />}
+
+              {category === "remote" && <RemotePanel />}
             </div>
           </div>
         </div>

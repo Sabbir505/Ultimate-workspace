@@ -1009,7 +1009,7 @@ pub fn touch_chat_session(
 /// files and extracted document text are appended to the message body so they
 /// persist in history; images are collected separately to be sent as vision
 /// content on the live turn (a short placeholder is added to the body text).
-fn process_attachments(
+pub(crate) fn process_attachments(
     attachments: &[ChatAttachmentInput],
 ) -> (String, Vec<ChatImage>) {
     let mut extra = String::new();

@@ -13,6 +13,7 @@ pub mod relay;
 pub mod relay_owner;
 pub mod relay_ws;
 pub mod session_chat;
+pub mod tailscale;
 
 #[cfg(test)]
 mod relay_tests;

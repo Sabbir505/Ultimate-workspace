@@ -232,7 +232,7 @@ fn handle_send_chat_message(
     chat_mgr: &Arc<chat::ChatManager>,
     owner_session_id: String,
     text: String,
-    _attachments: Vec<ChatAttachment>,
+    attachments: Vec<ChatAttachment>,
 ) -> Result<Vec<DesktopMessage>, String> {
     // 1. Look up (or create) a chat_session row keyed by owner_session_id,
     //    then read back its provider/model. The phone has no provider picker;
@@ -280,25 +280,41 @@ fn handle_send_chat_message(
             .flatten()
     };
 
-    // 2. Persist the user message. Attachments are not yet processed for the
-    //    mobile path (the desktop composer formats them inline + adds vision
-    //    images to the live turn; that work belongs to a later task). For
-    //    now we persist the text verbatim and leave the attachment
-    //    parameter as future-work so the chat pipeline receives the same
-    //    shape the desktop sends.
+    // 2. Process attachments exactly like the desktop composer: images become
+    //    vision content on the live turn (+ a placeholder in the body text),
+    //    docs are base64-decoded and run through doc_to_text then inlined as
+    //    fenced blocks, text is inlined verbatim. The (extra_text, images)
+    //    pair mirrors the desktop send_chat_message path so the chat pipeline
+    //    receives the same shape regardless of which client sent the turn.
+    let attachments_input: Vec<crate::types::ChatAttachmentInput> = attachments
+        .into_iter()
+        .map(|a| crate::types::ChatAttachmentInput {
+            name: a.name,
+            kind: a.kind,
+            text: a.text,
+            data: a.data,
+            media_type: a.media_type,
+            format: a.format,
+        })
+        .collect();
+    let (extra_text, images) = crate::chat::commands::process_attachments(&attachments_input);
+    let content = format!("{text}{extra_text}");
+
+    // 3. Persist the user message (with attachment-derived text inlined so the
+    //    history matches what the model actually saw).
     {
         let conn = db.lock();
-        db::add_chat_message(&conn, &chat_session_id, "user", &text, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None)
+        db::add_chat_message(&conn, &chat_session_id, "user", &content, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None)
             .map_err(|e| format!("failed to persist user message: {e}"))?;
         db::touch_chat_session(&conn, &chat_session_id)
             .map_err(|e| format!("failed to touch chat session: {e}"))?;
     }
 
-    // 3. Load the conversation history from the DB so the model sees the
+    // 4. Load the conversation history from the DB so the model sees the
     //    whole session (previously an empty Vec was passed — the model
     //    received a blank conversation every turn). Mirrors the desktop
     //    history selection: compacted-active rows for local models.
-    let messages: Vec<crate::chat::providers::ChatMessage> = {
+    let mut messages: Vec<crate::chat::providers::ChatMessage> = {
         let conn = db.lock();
         let records = if matches!(provider_id, crate::chat::providers::ChatProviderId::LocalGguf) {
             db::list_active_chat_messages(&conn, &chat_session_id)
@@ -316,7 +332,17 @@ fn handle_send_chat_message(
             .collect()
     };
 
-    // 4. Hand off to the chat pipeline. `ChatManager::send` cancels any
+    // 5. If this turn carries vision images, attach them to the final user
+    //    message so the live request includes them. History rows loaded above
+    //    never carry images (they're DB text only); only the live turn gets
+    //    the image vec.
+    if !images.is_empty() {
+        if let Some(last) = messages.last_mut() {
+            last.images = images.clone();
+        }
+    }
+
+    // 6. Hand off to the chat pipeline. `ChatManager::send` cancels any
     //    in-flight stream for this `chat_session_id`, then spawns a tokio
     //    task that emits the same `chat:token` / `chat:status` /
     //    `chat:done` / `chat:error` / `chat:approval_request` /
@@ -345,7 +371,7 @@ fn handle_send_chat_message(
         None,
     );
 
-    // 5. Tell the React side which chat_session_id maps to this owner_session_id,
+    // 7. Tell the React side which chat_session_id maps to this owner_session_id,
     //    so the re-broadcast in useChatEvents.ts can route streaming events back
     //    to the right phone via the owner map. Without this, getOwnerSessionId()
     //    always returns undefined and the re-broadcast is a no-op.

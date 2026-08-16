@@ -654,3 +654,89 @@
   color: var(--text-dim);
   font-style: italic;
 }
+
+/* ---- Settings: Remote panel (mobile pairing + Tailscale) ---- */
+
+.panel-section {
+  margin-bottom: 20px;
+}
+.panel-section .muted {
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.remote-pairing-card {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+.remote-pairing-card .qr-section {
+  flex-shrink: 0;
+}
+.remote-pairing-card .qr-placeholder {
+  background: var(--bg-inset);
+  border-radius: var(--radius-xs);
+}
+.remote-pairing-card .pairing-details {
+  flex: 1;
+  min-width: 0;
+}
+.remote-pairing-card .field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.remote-pairing-card .field-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.remote-pairing-card .value-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mono-text {
+  font-family: var(--font-mono, "JetBrains Mono", "Fira Code", monospace);
+  font-size: 11px;
+  word-break: break-all;
+  background: var(--bg-inset);
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+  flex: 1;
+  min-width: 0;
+}
+.settings-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+.status-chip {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.status-chip.ok {
+  background: color-mix(in srgb, var(--green, #22c55e) 18%, transparent);
+  color: var(--green, #22c55e);
+}
+.status-chip.warn {
+  background: color-mix(in srgb, var(--yellow, #eab308) 18%, transparent);
+  color: var(--yellow, #eab308);
+}
+.status-chip.off {
+  background: color-mix(in srgb, var(--text-dim, #888) 14%, transparent);
+  color: var(--text-dim, #888);
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

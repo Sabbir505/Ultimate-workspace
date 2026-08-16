@@ -19,6 +19,7 @@ vi.mock("../lib/ipc", () => ({
 }));
 
 import { useChatStore } from "../state/chat";
+import type { ChatSession } from "../lib/ipc";
 
 const session = (id: string, over: Record<string, unknown> = {}) =>
   ({
@@ -29,7 +30,7 @@ const session = (id: string, over: Record<string, unknown> = {}) =>
     createdAt: 1,
     lastActiveAt: 2,
     ...over,
-  }) as Parameters<typeof useChatStore.setState>[0]["sessions"][number];
+  }) as ChatSession;
 
 beforeEach(() => {
   vi.clearAllMocks();

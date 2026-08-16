@@ -2,10 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { CostDashboard } from "../components/cost-dashboard/CostDashboard";
 
-// Mock the IPC layer so the dashboard gets a known rollup.
-vi.mock("../lib/ipc", () => ({
-  ...vi.importActual("../lib/ipc"),
-  getCostRollups: vi.fn().mockResolvedValue({
+// Mock the IPC layer so the dashboard gets a known rollup. importOriginal
+// keeps every other export (listBudgets, setBudget, …) real so the
+// BudgetPanel mounted inside CostDashboard doesn't hit undefined exports.
+vi.mock("../lib/ipc", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/ipc")>();
+  return {
+    ...actual,
+    getCostRollups: vi.fn().mockResolvedValue({
     totals: { rawTokenCostUsd: 100, providerReportedUsd: 5, estimatedUsd: 95, unpricedUsd: 0 },
     perProvider: [{ provider: "claude_code", costUsd: 80, tokens: 1_000_000, sharePct: 80 }],
     daily: [{ day: "2026-08-01", costUsd: 10, tokensByProvider: { claude_code: 100_000 }, costByProvider: { claude_code: 8 } }],
@@ -15,8 +19,9 @@ vi.mock("../lib/ipc", () => ({
     perProject: [{ projectId: "p1", totalCostUsd: 80, totalInputTokens: 1_000_000, totalOutputTokens: 50_000 }],
     rangeStart: "2026-07-09", rangeEnd: "2026-08-07", rangeDays: 30,
   }),
-  safeListen: vi.fn().mockResolvedValue(() => {}),
-}));
+    safeListen: vi.fn().mockResolvedValue(() => {}),
+  };
+});
 
 describe("CostDashboard", () => {
   it("renders the raw token cost and the model breakdown", async () => {

@@ -19,6 +19,7 @@ import { ModelMarket } from "./ModelMarket";
 import { KnowledgePanel } from "./KnowledgePanel";
 import { PermissionRulesPanel } from "./PermissionRulesPanel";
 import { PromptTemplatesPanel } from "./PromptTemplatesPanel";
+import { ThemeGalleryPanel } from "./ThemeGalleryPanel";
 import { ConnectorIcon, FamilyIcon, FAMILY_NAMES } from "./ConnectorIcon";
 import { Modal } from "../common/Modal";
 import {
@@ -279,6 +280,8 @@ export function SettingsView() {
                       </div>
                     </div>
                   </div>
+                  {/* Custom theme import/export + gallery (roadmap #19). */}
+                  <ThemeGalleryPanel />
                 </>
               )}
 

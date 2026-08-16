@@ -5,10 +5,13 @@ import { create } from "zustand";
 import { getSetting, setSetting } from "../lib/ipc";
 import { DEFAULT_KEYBINDINGS, type KeybindingAction, type KeybindingMap } from "../lib/keybindings";
 import { DEFAULT_BROWSER_URL } from "../lib/browserHistory";
+import { parseThemeList, type CustomTheme } from "../lib/themes";
 
 export type ThemeSetting = "light" | "dark" | "system";
 
 const K_THEME = "theme";
+const K_THEMES = "themes.custom"; // JSON: CustomTheme[]
+const K_CUSTOM_THEME_ID = "themes.customThemeId"; // active custom theme id ("" = none)
 const K_DND = "doNotDisturb";
 const K_NOTIFY_SOUND = "notifySound";
 const K_WATCH_MODE = "watchMode";
@@ -46,6 +49,11 @@ export interface PersistedBrowserPaneState {
 interface SettingsState {
   loaded: boolean;
   theme: ThemeSetting;
+  /** Custom themes (roadmap #19): importable JSON override maps layered on
+   *  top of the built-in light/dark palette. */
+  customThemes: CustomTheme[];
+  /** Active custom theme id (null = built-in theme only). */
+  customThemeId: string | null;
   dnd: boolean;
   /** Play a subtle sound when a PTY notification fires (alongside the OS toast). */
   notifySound: boolean;
@@ -60,6 +68,9 @@ interface SettingsState {
 
   load: () => Promise<void>;
   setTheme: (theme: ThemeSetting) => void;
+  setCustomTheme: (id: string | null) => void;
+  importCustomTheme: (theme: CustomTheme) => void;
+  deleteCustomTheme: (id: string) => void;
   setDnd: (dnd: boolean) => void;
   setNotifySound: (on: boolean) => void;
   setWatchMode: (watchMode: boolean) => void;
@@ -87,6 +98,8 @@ function persistKeybindings(map: KeybindingMap) {
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   loaded: false,
   theme: "system",
+  customThemes: [],
+  customThemeId: null,
   dnd: false,
   notifySound: true,
   watchMode: false,
@@ -97,7 +110,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   localPinExchanges: DEFAULT_LOCAL_PIN_EXCHANGES,
 
   load: async () => {
-    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin] = await Promise.all([
+    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId] = await Promise.all([
       getSetting(K_THEME),
       getSetting(K_DND),
       getSetting(K_NOTIFY_SOUND),
@@ -107,10 +120,21 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       getSetting(K_BROWSER_PANE_STATE),
       getSetting(K_LOCAL_COMPACTION_THRESHOLD),
       getSetting(K_LOCAL_PIN_EXCHANGES),
+      getSetting(K_THEMES),
+      getSetting(K_CUSTOM_THEME_ID),
     ]);
     set((state) => {
       const next = { ...state, loaded: true };
       if (theme === "light" || theme === "dark" || theme === "system") next.theme = theme;
+      if (themesJson) {
+        next.customThemes = parseThemeList(themesJson);
+        // A dangling active id (theme deleted while off) is dropped so
+        // useTheme never resolves an overlay that no longer exists.
+        if (next.customThemeId && !next.customThemes.some((t) => t.id === next.customThemeId)) {
+          next.customThemeId = null;
+        }
+      }
+      if (customThemeId) next.customThemeId = customThemeId;
       if (dnd === "true" || dnd === "false") next.dnd = dnd === "true";
       if (notifySound === "true" || notifySound === "false") next.notifySound = notifySound === "true";
       if (watchMode === "true" || watchMode === "false") next.watchMode = watchMode === "true";
@@ -158,8 +182,30 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   setTheme: (theme) => {
-    set({ theme });
+    // Switching the base mode deselects the custom overlay (the user
+    // explicitly picked a built-in theme).
+    set({ theme, customThemeId: null });
     void setSetting(K_THEME, theme);
+    void setSetting(K_CUSTOM_THEME_ID, "");
+  },
+
+  setCustomTheme: (id) => {
+    set({ customThemeId: id });
+    void setSetting(K_CUSTOM_THEME_ID, id ?? "");
+  },
+
+  importCustomTheme: (theme) => {
+    const customThemes = [...get().customThemes.filter((t) => t.id !== theme.id), theme];
+    set({ customThemes });
+    void setSetting(K_THEMES, JSON.stringify(customThemes));
+  },
+
+  deleteCustomTheme: (id) => {
+    const customThemes = get().customThemes.filter((t) => t.id !== id);
+    const wasActive = get().customThemeId === id;
+    set({ customThemes, customThemeId: wasActive ? null : get().customThemeId });
+    void setSetting(K_THEMES, JSON.stringify(customThemes));
+    if (wasActive) void setSetting(K_CUSTOM_THEME_ID, "");
   },
 
   setDnd: (dnd) => {

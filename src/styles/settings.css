@@ -486,3 +486,95 @@
   background: var(--surface);
   color: var(--text);
 }
+
+/* ---- Custom theme gallery (roadmap #19) ---- */
+.theme-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+}
+.theme-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px);
+  padding: 8px;
+  cursor: pointer;
+  background: var(--surface-2);
+  transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease),
+    transform 0.08s var(--ease);
+}
+.theme-card:hover {
+  border-color: var(--border-strong);
+}
+.theme-card:active {
+  transform: translateY(0.5px);
+}
+.theme-card.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.theme-card-swatches {
+  display: flex;
+  height: 26px;
+  border-radius: var(--radius-xs, 6px);
+  overflow: hidden;
+  margin-bottom: 6px;
+  border: 1px solid var(--border);
+}
+.theme-card-swatches span {
+  flex: 1;
+}
+.theme-card-name {
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.theme-card-base {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: var(--surface-3);
+  border-radius: 4px;
+  padding: 1px 5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.theme-card-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.theme-card-actions button {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+.theme-token-hint {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.theme-token-hint summary {
+  cursor: pointer;
+}
+.theme-token-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.theme-token-chip {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  color: var(--text-dim);
+}
+.theme-token-chip span {
+  color: var(--text-dim);
+}

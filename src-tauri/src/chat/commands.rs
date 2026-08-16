@@ -399,9 +399,10 @@ pub fn update_chat_session_watch_mode(
 /// agent-then-model selector. Per-session; new sessions start with no
 /// selection (NULL = locked model chip). Valid values: `"builtin"` |
 /// `"local"` | `"harness:<id>"` where `<id>` is a registered harness adapter
-/// (e.g. `"harness:claude_code"`) | null (clears the selection). Selecting a
-/// harness agent does NOT reroute messages yet — the headless CLI chat
-/// protocol lands separately; this only records the user's pick.
+/// (e.g. `"harness:claude_code"`) | `"acp:<id>"` where `<id>` is a registered
+/// ACP agent (roadmap #20, e.g. `"acp:zed"`) | null (clears the selection).
+/// Harness/ACP sessions route sends to the headless CLI chat path
+/// (agent_sessions.rs), not the built-in provider path.
 #[tauri::command]
 pub fn update_chat_session_agent(
     chat_session_id: String,
@@ -413,10 +414,16 @@ pub fn update_chat_session_agent(
             || a == "local"
             || a
                 .strip_prefix("harness:")
-                .is_some_and(|id| crate::harness_adapters::get_adapter(id).is_some());
+                .is_some_and(|id| crate::harness_adapters::get_adapter(id).is_some())
+            || a
+                .strip_prefix("acp:")
+                .is_some_and(|id| {
+                    let conn = db.0.lock();
+                    crate::acp_agents::find_agent(&conn, id).is_some()
+                });
         if !valid {
             return Err(format!(
-                "unknown agent: {a} (expected 'builtin', 'local', or 'harness:<id>')"
+                "unknown agent: {a} (expected 'builtin', 'local', 'harness:<id>', or 'acp:<id>')"
             ));
         }
     }

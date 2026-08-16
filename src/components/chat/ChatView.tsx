@@ -140,6 +140,12 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   const harnessAgent = activeSession?.agent?.startsWith("harness:")
     ? activeSession.agent.slice("harness:".length)
     : null;
+  // ACP agent selected ("acp:<id>", roadmap #20) — Zed/Devin-ecosystem CLIs
+  // speaking Agent Client Protocol over stdio. No model picker (the agent
+  // decides), no approval channel, and sends route to the same headless path.
+  const acpAgent = activeSession?.agent?.startsWith("acp:")
+    ? activeSession.agent.slice("acp:".length)
+    : null;
   const [harnessCfg, setHarnessCfg] = useState<HarnessModelConfig | null>(null);
   const [harnessLoading, setHarnessLoading] = useState(false);
 
@@ -944,7 +950,7 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
         streaming={streamingChatSessionId === activeChatSessionId && streamingChatSessionId !== null}
         disabled={false}
         model={activeChatSessionId ? (resolvedModel ?? "") : undefined}
-        models={harnessAgent ? harnessModels.map((m) => m.id) : cloudIds}
+        models={harnessAgent ? harnessModels.map((m) => m.id) : acpAgent ? [] : cloudIds}
         modelLabels={
           harnessAgent
             ? Object.fromEntries(harnessModels.map((m) => [m.id, m.label]))
@@ -960,10 +966,11 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
         }
         onPermissionModeChange={handlePermissionModeChange}
         permissionModeSupported={
-          // Kimi/OpenCode headless runs have no approval channel (kimi -p
-          // auto-approves; opencode run can't surface an ask) — the menu
-          // only shows for builtin/local chats and Claude Code sessions.
-          !harnessAgent || harnessAgent === "claude_code"
+          // Kimi/OpenCode/ACP headless runs have no approval channel (kimi -p
+          // auto-approves; opencode run can't surface an ask; ACP v1 doesn't
+          // map permissions) — the menu only shows for builtin/local chats
+          // and Claude Code sessions.
+          (!harnessAgent && !acpAgent) || harnessAgent === "claude_code"
         }
         agentLoading={harnessAgent ? harnessLoading : false}
         localModels={localIds}

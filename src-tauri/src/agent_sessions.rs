@@ -81,6 +81,13 @@ struct AgentChild {
     /// Shared stdin for writing user input (e.g. a tool result) from the reader thread
     /// on stdin.
     stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
+    /// ACP: content queued for the reader thread to send as `session/request`
+    /// once the initialize → session/new handshake completes (first turn only;
+    /// later turns write the request directly from `send`).
+    acp_pending: Arc<Mutex<Option<String>>>,
+    /// ACP: id of the in-flight `session/request`, for a best-effort
+    /// `request/cancel` notification before the process tree is killed.
+    acp_request_id: Arc<Mutex<Option<u64>>>,
 }
 
 impl AgentSessionManager {
@@ -128,6 +135,8 @@ impl AgentSessionManager {
                     turn_in_flight: Arc::new(AtomicBool::new(false)),
                     cancelled: Arc::new(AtomicBool::new(false)),
                     stdin: Arc::new(Mutex::new(None)),
+                    acp_pending: Arc::new(Mutex::new(None)),
+                    acp_request_id: Arc::new(Mutex::new(None)),
                 }
             });
         // Harness switch on an existing chat: kill the old CLI's process and
@@ -188,6 +197,9 @@ impl AgentSessionManager {
             "claude_code" => send_claude_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, connectors),
             "kimi_code" => spawn_per_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, PerTurn::Kimi, connectors),
             "opencode" => spawn_per_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, PerTurn::OpenCode, connectors),
+            s if s.starts_with("acp:") => {
+                send_acp_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, &s[4..])
+            }
             other => Err(format!("harness '{other}' has no headless chat backend yet")),
         }
     }
@@ -207,6 +219,21 @@ impl AgentSessionManager {
         let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
         if let Some(entry) = sessions.get_mut(chat_session_id) {
             entry.cancelled.store(true, Ordering::SeqCst);
+            // ACP: best-effort graceful cancel — notify the agent which
+            // request is being cancelled, then kill the tree. The next send
+            // respawns a fresh process + session (ACP has no --resume), so a
+            // failed write here is irrelevant.
+            if entry.harness.starts_with("acp:") {
+                if let Ok(mut guard) = entry.stdin.lock() {
+                    if let Some(stdin) = guard.as_mut() {
+                        let rid = entry.acp_request_id.lock().ok().and_then(|g| *g);
+                        if let Some(rid) = rid {
+                            let line = crate::acp::encode_notification("request/cancel", &json!({ "requestId": rid }));
+                            let _ = write_acp_line(stdin, &line);
+                        }
+                    }
+                }
+            }
             if let Some(mut child) = entry.child.take() {
                 kill_child_tree(&mut child);
             }
@@ -441,6 +468,437 @@ fn claude_model_alias(model: &str) -> String {
     } else {
         model.to_string()
     }
+}
+
+// ---------------------------------------------------------------- ACP (roadmap #20)
+//
+// ACP (Agent Client Protocol) is a JSON-RPC 2.0 protocol over stdio spoken by
+// Zed/Devin-ecosystem agents. The client launches the binary, does the
+// initialize → initialized handshake, opens a `session/new`, then drives each
+// turn with `session/request` and streams `session/update` notifications until
+// `session/finish`. Wire framing + event translation live in `crate::acp`;
+// this section owns the process lifecycle, reusing the persistent-process
+// shape of the claude path (one long-lived child per chat, shared stdin, a
+// reader thread normalizing output onto the chat's `chat:*` events).
+//
+// v1 scope: text/reasoning streaming, tool-call markers (replied to with an
+// error result so the agent doesn't hang), request/cancel, fresh session per
+// spawn. Out of scope: `session/prompt` (agent-initiated questions), MCP
+// server registration, tool execution.
+
+/// Write one ACP message (a JSON line) to the child's stdin.
+fn write_acp_line(stdin: &mut std::process::ChildStdin, line: &str) -> std::io::Result<()> {
+    stdin.write_all(line.as_bytes())?;
+    stdin.write_all(b"\n")?;
+    stdin.flush()
+}
+
+/// Write one ACP message through the shared stdin cell (used by reader
+/// threads, which don't own the stdin guard directly).
+fn write_line_shared(
+    shared: &Arc<Mutex<Option<std::process::ChildStdin>>>,
+    line: &str,
+) -> std::io::Result<()> {
+    let mut guard = shared
+        .lock()
+        .map_err(|_| std::io::Error::other("stdin lock poisoned"))?;
+    let stdin = guard
+        .as_mut()
+        .ok_or_else(|| std::io::Error::other("stdin closed"))?;
+    write_acp_line(stdin, line)
+}
+
+/// Persistent-process path for ACP agents: spawn on first use, handshake,
+/// then `session/request` per turn. The reader thread performs the handshake
+/// for the FIRST turn (the content is queued in `entry.acp_pending` and sent
+/// once `session/new` returns); later turns write the request directly — the
+/// session id is known by then, serialized under the session_id lock so the
+/// reader can never double-send the first request.
+fn send_acp_turn(
+    app: &AppHandle,
+    db: &DbState,
+    sid: &str,
+    content: &str,
+    entry: &mut AgentChild,
+    cwd: Option<&str>,
+    project_id: Option<&str>,
+    acp_id: &str,
+) -> Result<(), String> {
+    let agent = {
+        let conn = db.0.lock();
+        crate::acp_agents::find_agent(&conn, acp_id)
+    }
+    .ok_or_else(|| format!("ACP agent '{acp_id}' is not registered"))?;
+    if entry.child.is_none() {
+        // Fresh per-process cancel flag: a respawn after cancel() must not
+        // inherit the previous process's `true`.
+        let cancelled = Arc::new(AtomicBool::new(false));
+        entry.cancelled = Arc::clone(&cancelled);
+        // ACP has no `--resume`: every spawn opens a brand-new session via
+        // session/new. Drop any stale captured id so the handshake restarts.
+        if let Ok(mut g) = entry.cli_session_id.lock() {
+            *g = None;
+        }
+        // Conduit-owned bundle is not part of ACP v1 (no MCP servers, no
+        // permission flags) — the agent's own config governs its tools.
+        let spec = resolve_for_spawn(&CommandSpec {
+            program: agent.command.clone(),
+            args: agent.args.clone(),
+        });
+        let mut cmd = Command::new(&spec.program);
+        cmd.args(&spec.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        for (k, v) in &agent.env {
+            cmd.env(k, v);
+        }
+        let watch_dirs = turn_watch_dirs(cwd, &db.0);
+        if let Some(dir) = watch_dirs.first() {
+            cmd.current_dir(dir);
+        }
+        let watches: Vec<DirWatch> = watch_dirs.into_iter().map(DirWatch::new).collect();
+        no_console_window(&mut cmd);
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("failed to spawn ACP agent '{}': {e}", agent.display_name))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("failed to capture ACP stdout")?;
+        {
+            let mut guard = entry.stdin.lock().map_err(|e| e.to_string())?;
+            *guard = child.stdin.take();
+            // Kick off the handshake: initialize. The reader thread answers
+            // it (initialized + session/new) and sends the queued turn.
+            if let Some(stdin) = guard.as_mut() {
+                let init = crate::acp::encode_request(
+                    1,
+                    "initialize",
+                    &json!({
+                        "protocolVersion": crate::acp::ACP_PROTOCOL_VERSION,
+                        "clientCapabilities": {},
+                    }),
+                );
+                let _ = write_acp_line(stdin, &init);
+            }
+        }
+        let app2 = app.clone();
+        let db2 = DbState(Arc::clone(&db.0));
+        let sid2 = sid.to_string();
+        let in_flight2 = Arc::clone(&entry.turn_in_flight);
+        let session_cell2 = Arc::clone(&entry.cli_session_id);
+        let cancelled2 = Arc::clone(&cancelled);
+        let stdin2 = Arc::clone(&entry.stdin);
+        let pending2 = Arc::clone(&entry.acp_pending);
+        let request_id2 = Arc::clone(&entry.acp_request_id);
+        std::thread::spawn(move || {
+            read_acp_stream(
+                Some(&app2),
+                &db2,
+                &sid2,
+                stdout,
+                &in_flight2,
+                &session_cell2,
+                &cancelled2,
+                stdin2,
+                &pending2,
+                &request_id2,
+                watches,
+            );
+        });
+        entry.child = Some(child);
+    }
+
+    // Queue the turn. The reader drains `acp_pending` right after the
+    // handshake's session/new response (first turn); later turns write
+    // `session/request` directly below.
+    {
+        let mut g = entry.acp_pending.lock().map_err(|e| e.to_string())?;
+        *g = Some(content.to_string());
+    }
+    entry.turn_in_flight.store(true, Ordering::SeqCst);
+
+    // Later turns: the handshake already completed (session id known). Write
+    // the request now — while holding the session_id lock so the reader's
+    // handshake branch (which consumes `acp_pending` under the same lock)
+    // can't race us into sending the first turn twice.
+    let sess_guard = entry.cli_session_id.lock().map_err(|e| e.to_string())?;
+    if let Some(sess) = sess_guard.as_ref() {
+        let rid = crate::acp::next_request_id();
+        *entry.acp_request_id.lock().map_err(|e| e.to_string())? = Some(rid);
+        let params = crate::acp::user_session_request(sess, content);
+        let line = crate::acp::encode_request(rid, "session/request", &params);
+        let write_result = {
+            let mut guard = entry.stdin.lock().map_err(|e| e.to_string())?;
+            let stdin = guard.as_mut().ok_or("ACP agent process stdin is closed")?;
+            write_acp_line(stdin, &line)
+        };
+        match write_result {
+            Ok(()) => {
+                let mut p = entry.acp_pending.lock().map_err(|e| e.to_string())?;
+                *p = None;
+            }
+            Err(e) => {
+                entry.turn_in_flight.store(false, Ordering::SeqCst);
+                return Err(format!("failed to write to ACP stdin: {e}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reader thread for an ACP child. Drives the initialize → session/new
+/// handshake, sends the first turn once the session is open, then streams
+/// session/update content onto the chat events until session/finish (or
+/// session/error / process exit).
+#[allow(clippy::too_many_arguments)]
+fn read_acp_stream(
+    app: Option<&AppHandle>,
+    db: &DbState,
+    sid: &str,
+    stdout: impl std::io::Read,
+    in_flight: &Arc<AtomicBool>,
+    session_cell: &Arc<Mutex<Option<String>>>,
+    cancelled: &Arc<AtomicBool>,
+    shared_stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
+    pending: &Arc<Mutex<Option<String>>>,
+    request_id_cell: &Arc<Mutex<Option<u64>>>,
+    mut watches: Vec<DirWatch>,
+) {
+    let mut full = String::new();
+    // "Worked for Xs" label: the turn window runs from when we start watching
+    // for the turn's output until session/finish. Reset at each finish so the
+    // next turn (sent directly by send_acp_turn) gets its own window.
+    let mut turn_started = crate::db::now_ts();
+    let _perf = crate::chat::turn_perf::register(sid, crate::chat::turn_perf::TurnPerf::new_headless(sid));
+    let mut handshake_done = false;
+    // Id of the session/new request we're awaiting a response for.
+    let mut awaiting_session_new: Option<u64> = None;
+    // Id of the first turn's session/request (so its JSON-RPC error response
+    // can fail the turn); later turns' ids live in request_id_cell.
+    let mut pending_request_id: Option<u64> = None;
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        if cancelled.load(Ordering::SeqCst) {
+            break;
+        }
+        let Some(msg) = crate::acp::decode_line(line.trim()) else {
+            continue;
+        };
+        use crate::acp::events::AcpEvent;
+        use crate::acp::AcpLine;
+        match msg {
+            AcpLine::Response { id, result, error } => {
+                if let Some(err) = error {
+                    let msg = err
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("unknown JSON-RPC error");
+                    if !handshake_done || Some(id) == pending_request_id {
+                        // Handshake or first-turn request failed → the turn
+                        // is over before it streamed anything.
+                        emit_error(
+                            app,
+                            sid,
+                            &format!("ACP request failed: {msg}"),
+                        );
+                        full.clear();
+                        in_flight.store(false, Ordering::SeqCst);
+                        if !handshake_done {
+                            return;
+                        }
+                    }
+                    // Tool-result replies can error harmlessly — keep going.
+                    continue;
+                }
+                if id == 1 && !handshake_done {
+                    // initialize acknowledged → initialized notification +
+                    // session/new with the spawn dir (or artifacts fallback).
+                    handshake_done = true;
+                    let _ = write_line_shared(
+                        &shared_stdin,
+                        &crate::acp::encode_notification("initialized", &json!({})),
+                    );
+                    let cwd_str = watches
+                        .first()
+                        .map(|w| w.dir.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let new_id = crate::acp::next_request_id();
+                    awaiting_session_new = Some(new_id);
+                    let params = json!({ "cwd": cwd_str, "mcpServers": {} });
+                    let _ = write_line_shared(
+                        &shared_stdin,
+                        &crate::acp::encode_request(new_id, "session/new", &params),
+                    );
+                } else if Some(id) == awaiting_session_new {
+                    awaiting_session_new = None;
+                    let sess = result
+                        .as_ref()
+                        .and_then(|r| r.get("sessionId"))
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string());
+                    let Some(sess) = sess else {
+                        emit_error(
+                            app,
+                            sid,
+                            "ACP agent returned no sessionId for session/new",
+                        );
+                        full.clear();
+                        in_flight.store(false, Ordering::SeqCst);
+                        return;
+                    };
+                    // Store the session id and, if a turn is already queued
+                    // (the first send raced ahead of the handshake), send its
+                    // session/request now — all under the session_id lock so
+                    // send_acp_turn can't double-send the first turn.
+                    let queued = {
+                        let mut cell = session_cell.lock().unwrap_or_else(|e| e.into_inner());
+                        *cell = Some(sess.clone());
+                        pending.lock().ok().and_then(|mut p| p.take())
+                    };
+                    if let Some(text) = queued {
+                        let rid = crate::acp::next_request_id();
+                        if let Ok(mut g) = request_id_cell.lock() {
+                            *g = Some(rid);
+                        }
+                        pending_request_id = Some(rid);
+                        let params = crate::acp::user_session_request(&sess, &text);
+                        let _ = write_line_shared(
+                            &shared_stdin,
+                            &crate::acp::encode_request(rid, "session/request", &params),
+                        );
+                    }
+                }
+                // Other responses (tool-result acks) need no action.
+            }
+            AcpLine::Notification { method, params } => match method.as_str() {
+                "session/update" => {
+                    for ev in crate::acp::events::translate_session_update(&params) {
+                        match ev {
+                            AcpEvent::Text(t) => {
+                                full.push_str(&t);
+                                emit_token(app, sid, &t);
+                            }
+                            AcpEvent::Reasoning(t) => {
+                                let wrapped = format!("<think>{t}</think>");
+                                full.push_str(&wrapped);
+                                emit_token(app, sid, &wrapped);
+                            }
+                            AcpEvent::ToolCall { id, name, input } => {
+                                let marker = format!("<tool>{}</tool>", tool_meta_generic(&name, &input));
+                                full.push_str(&marker);
+                                emit_token(app, sid, &marker);
+                                // v1 does not execute ACP tools — answer with
+                                // an error result so the agent doesn't wait
+                                // forever on a result that never comes.
+                                reply_acp_tool_error(&shared_stdin, session_cell, &id);
+                            }
+                            AcpEvent::Finished
+                            | AcpEvent::Failed(_)
+                            | AcpEvent::PromptIgnored => {}
+                        }
+                    }
+                }
+                "session/finish" => {
+                    for ev in crate::acp::events::translate_session_finish(&params) {
+                        match ev {
+                            AcpEvent::Text(t) => {
+                                full.push_str(&t);
+                                emit_token(app, sid, &t);
+                            }
+                            AcpEvent::Reasoning(t) => {
+                                let wrapped = format!("<think>{t}</think>");
+                                full.push_str(&wrapped);
+                                emit_token(app, sid, &wrapped);
+                            }
+                            _ => {}
+                        }
+                    }
+                    let started = turn_started;
+                    turn_started = crate::db::now_ts();
+                    if cancelled.load(Ordering::SeqCst) {
+                        // Cancel already emitted chat:done — discard the
+                        // partial reply.
+                        full.clear();
+                    } else {
+                        finish_turn(app, db, sid, &mut full, None, None, None, &mut watches, started);
+                    }
+                    in_flight.store(false, Ordering::SeqCst);
+                    pending_request_id = None;
+                }
+                "session/error" => {
+                    if let AcpEvent::Failed(m) = crate::acp::events::translate_session_error(&params) {
+                        emit_error(app, sid, &m);
+                    }
+                    full.clear();
+                    in_flight.store(false, Ordering::SeqCst);
+                    pending_request_id = None;
+                }
+                "session/prompt" => {
+                    // Out of scope v1 — surface a note instead of silently
+                    // ignoring the agent's question.
+                    let note = "<think>[Agent asked a question — ACP prompts are not supported yet]</think>";
+                    full.push_str(note);
+                    emit_token(app, sid, note);
+                }
+                _ => {}
+            },
+            AcpLine::Request { .. } => {
+                // Server-initiated requests (e.g. session/prompt as a request)
+                // — out of scope v1. Respond with a method-not-found error so
+                // the agent doesn't wait on us.
+                // (The notification form above is the common one; this is a
+                // safety net for agents that send the request form.)
+                let err = json!({
+                    "jsonrpc": "2.0",
+                    "id": 0,
+                    "error": { "code": -32601, "message": "Method not supported by Conduit ACP v1" },
+                });
+                let _ = write_line_shared(&shared_stdin, &err.to_string());
+            }
+        }
+    }
+    // EOF: the process died. If a turn was in flight it never finished —
+    // surface that instead of leaving the spinner up forever (unless we
+    // killed it ourselves via cancel, which already emitted chat:done).
+    if !handshake_done {
+        emit_error(
+            app,
+            sid,
+            "ACP agent exited before completing the handshake — is it running with ACP over stdio?",
+        );
+        in_flight.store(false, Ordering::SeqCst);
+        return;
+    }
+    if in_flight.swap(false, Ordering::SeqCst) && !cancelled.load(Ordering::SeqCst) {
+        emit_error(app, sid, "ACP agent exited mid-turn");
+    }
+}
+
+/// Answer an ACP tool call with an error tool_result (v1 doesn't execute
+/// tools). The reader sends a fresh session/request carrying the result;
+/// the agent continues the same turn.
+fn reply_acp_tool_error(
+    shared_stdin: &Arc<Mutex<Option<std::process::ChildStdin>>>,
+    session_cell: &Arc<Mutex<Option<String>>>,
+    tool_call_id: &str,
+) {
+    let sess = session_cell.lock().ok().and_then(|g| g.clone());
+    let Some(sess) = sess else { return };
+    let rid = crate::acp::next_request_id();
+    let params = crate::acp::tool_error_session_request(&sess, tool_call_id);
+    let _ = write_line_shared(
+        shared_stdin,
+        &crate::acp::encode_request(rid, "session/request", &params),
+    );
 }
 
 /// Working directory for agent spawns. With no project selected the CLI

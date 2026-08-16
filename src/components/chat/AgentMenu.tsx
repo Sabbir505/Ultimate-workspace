@@ -5,12 +5,12 @@
 // and the two non-CLI modes that keep today's behavior: built-in cloud chat
 // and local GGUF models.
 import { useEffect, useRef, useState } from "react";
-import { listHarnesses } from "../../lib/ipc";
-import type { HarnessStatus } from "../../types";
+import { listHarnesses, listAcpAgents } from "../../lib/ipc";
+import type { HarnessStatus, AcpAgentStatus } from "../../types";
 
 interface Props {
   /** Current selection: null/undefined = none (locked state). Values:
-   *  "builtin" | "local" | "harness:<id>". */
+   *  "builtin" | "local" | "harness:<id>" | "acp:<id>". */
   agent: string | null | undefined;
   onAgentChange: (agent: string) => void;
   /** True while the selected harness is "opening" — its config/models are
@@ -24,9 +24,15 @@ function harnessIdOf(agent: string | null | undefined): string | null {
   return agent?.startsWith("harness:") ? agent.slice("harness:".length) : null;
 }
 
+/** Parse "acp:<id>" → the ACP agent id; null for everything else. */
+function acpIdOf(agent: string | null | undefined): string | null {
+  return agent?.startsWith("acp:") ? agent.slice("acp:".length) : null;
+}
+
 export function AgentMenu({ agent, onAgentChange, loading }: Props) {
   const [open, setOpen] = useState(false);
   const [harnesses, setHarnesses] = useState<HarnessStatus[]>([]);
+  const [acpAgents, setAcpAgents] = useState<AcpAgentStatus[]>([]);
   const rootRef = useRef<HTMLDivElement>(null);
 
   // Refresh the install status every time the menu opens so a CLI installed
@@ -36,6 +42,9 @@ export function AgentMenu({ agent, onAgentChange, loading }: Props) {
     let stale = false;
     void listHarnesses().then((list) => {
       if (!stale && list) setHarnesses(list);
+    });
+    void listAcpAgents().then((list) => {
+      if (!stale && list) setAcpAgents(list);
     });
     return () => {
       stale = true;
@@ -53,13 +62,16 @@ export function AgentMenu({ agent, onAgentChange, loading }: Props) {
   }, [open]);
 
   const selectedHarness = harnessIdOf(agent);
+  const selectedAcp = acpIdOf(agent);
   const selectedName = selectedHarness
     ? (harnesses.find((h) => h.id === selectedHarness)?.displayName ?? selectedHarness)
-    : agent === "local"
-      ? "Local model"
-      : agent === "builtin"
-        ? "API based"
-        : null;
+    : selectedAcp
+      ? (acpAgents.find((a) => a.id === selectedAcp)?.displayName ?? selectedAcp)
+      : agent === "local"
+        ? "Local model"
+        : agent === "builtin"
+          ? "API based"
+          : null;
 
   const pick = (value: string) => {
     onAgentChange(value);
@@ -114,6 +126,35 @@ export function AgentMenu({ agent, onAgentChange, loading }: Props) {
               </span>
             </button>
           ))}
+          {/* ACP agents (roadmap #20): Zed/Devin-ecosystem CLIs speaking the
+              Agent Client Protocol over stdio. Same installed/dimmed shape as
+              the harness list. */}
+          {acpAgents.length > 0 && (
+            <>
+              <div className="model-effort-section-label">Agents · ACP</div>
+              {acpAgents.map((a) => (
+                <button
+                  key={a.id}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={agent === `acp:${a.id}`}
+                  className={`model-effort-item agent-item${
+                    agent === `acp:${a.id}` ? " selected" : ""
+                  }${a.installed ? "" : " disabled"}`}
+                  disabled={!a.installed}
+                  onClick={() => pick(`acp:${a.id}`)}
+                >
+                  <span className="agent-item-name">
+                    <span className={`agent-dot${a.installed ? "" : " off"}`} aria-hidden="true" />
+                    {a.displayName}
+                  </span>
+                  <span className={`agent-status${a.installed ? " on" : ""}`}>
+                    {a.installed ? "installed" : "not installed"}
+                  </span>
+                </button>
+              ))}
+            </>
+          )}
           {/* Gemini CLI isn't a harness adapter yet — shown as a disabled
               placeholder like the mockup's "not installed" row. */}
           <button type="button" className="model-effort-item agent-item disabled" disabled>

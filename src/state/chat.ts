@@ -80,6 +80,20 @@ const manuallyRenamed = new Map<string, number>();
  *  very race condition this set exists to prevent happen again). */
 const deletedSessions = new Map<string, number>();
 
+/** True for sessions whose sends route to the headless CLI chat path
+ *  (agent_sessions.rs): harness adapters ("harness:<id>") AND ACP agents
+ *  ("acp:<id>", roadmap #20). Both kinds use sendAgentChatMessage +
+ *  cancelAgentChatMessage and stream the same chat:* events back. Type
+ *  predicate so callers get `agent` narrowed to a plain string. */
+function isCliAgent(agent: string | null | undefined): agent is string {
+  return !!agent && (agent.startsWith("harness:") || agent.startsWith("acp:"));
+}
+
+/** Extract the adapter/agent id from a "harness:<id>" / "acp:<id>" value. */
+function cliAgentId(agent: string): string {
+  return agent.startsWith("acp:") ? agent.slice("acp:".length) : agent.slice("harness:".length);
+}
+
 /** Session list with tombstoned (deleted-this-run) sessions removed. */
 function withoutDeleted(sessions: ChatSession[]): ChatSession[] {
   return sessions.filter((s) => !deletedSessions.has(s.id));
@@ -860,7 +874,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // no longer exists — and onToken would re-create the streaming state
     // deleteChat just removed.
     const session = get().sessions.find((s) => s.id === chatSessionId);
-    if (session?.agent?.startsWith("harness:")) {
+    if (isCliAgent(session?.agent)) {
       try { await cancelAgentChatMessage(chatSessionId); } catch { /* best-effort */ }
     } else if (chatSessionId in get().streaming) {
       // Builtin-provider turn in flight: the backend delete only kills
@@ -909,7 +923,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // their events would recreate state for sessions that no longer exist.
     const state = get();
     const harnessIds = state.sessions
-      .filter((s) => s.agent?.startsWith("harness:"))
+      .filter((s) => isCliAgent(s.agent))
       .map((s) => s.id);
     const builtinIds = Object.keys(state.streaming).filter((id) => !harnessIds.includes(id));
     await Promise.allSettled([
@@ -990,7 +1004,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // via the spawned_model check, but killing here stops any in-flight work
     // immediately instead of letting it finish on the old model).
     const session = get().sessions.find((s) => s.id === chatSessionId);
-    if (session?.agent?.startsWith("harness:") && session.model !== model) {
+    if (session && isCliAgent(session.agent) && session.model !== model) {
       try { await cancelAgentChatMessage(chatSessionId); } catch { /* best-effort */ }
     }
     await updateChatSessionModel(chatSessionId, model);
@@ -1015,7 +1029,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // harnesses, must kill the running CLI process — otherwise it keeps
     // executing and emitting tokens for this session.
     const prev = get().sessions.find((s) => s.id === chatSessionId);
-    if (prev?.agent?.startsWith("harness:") && prev.agent !== agent) {
+    if (prev && isCliAgent(prev.agent) && prev.agent !== agent) {
       try { await cancelAgentChatMessage(chatSessionId); } catch { /* best-effort */ }
     }
     await updateChatSessionAgent(chatSessionId, agent);
@@ -1157,17 +1171,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     );
     const workingDir = get().cwdOverrides[activeChatSessionId] ?? boundProject?.path;
 
-    // CLI harness agents (Phase 2): the turn goes to the headless CLI process
-    // (agent_sessions.rs) instead of the built-in provider path. Same chat:*
-    // events come back, so streaming/done handling above works unchanged.
-    if (session?.agent?.startsWith("harness:")) {
+    // CLI harness / ACP agents (Phase 2 + roadmap #20): the turn goes to the
+    // headless CLI process (agent_sessions.rs) instead of the built-in
+    // provider path. Same chat:* events come back, so streaming/done handling
+    // above works unchanged.
+    if (session && isCliAgent(session.agent)) {
       const projects = useProjectsStore.getState();
       const cwd = workingDir;
       try {
         await sendAgentChatMessage(
           activeChatSessionId,
           content,
-          session.agent.slice("harness:".length),
+          cliAgentId(session.agent),
           session.model || undefined,
           cwd,
           // Feeds the conduit-browser MCP registration (CONDUIT_PROJECT_ID) so
@@ -1175,7 +1190,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           projects.selectedProjectId ?? undefined,
         );
       } catch (err) {
-        console.error('[harness] sendAgentChatMessage failed:', err);
+        console.error('[agent] sendAgentChatMessage failed:', err);
         // Delete the keys (not `undefined` assignments — those keep the key
         // present, so `sid in streaming` stays true and the sidebar "Working…"
         // dot never clears; it also breaks the Record<string, string> type).
@@ -1265,11 +1280,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
       const workingDir = get().cwdOverrides[sid] ?? boundProject?.path;
       try {
-        if (session.agent?.startsWith("harness:")) {
+        if (isCliAgent(session.agent)) {
           await sendAgentChatMessage(
             sid,
             content,
-            session.agent.slice("harness:".length),
+            cliAgentId(session.agent),
             session.model || undefined,
             workingDir,
             projectsState.selectedProjectId ?? undefined,
@@ -1481,7 +1496,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           /* best-effort: the cancel itself still proceeds */
         }
       }
-      if (session?.agent?.startsWith("harness:")) {
+      if (isCliAgent(session?.agent)) {
         await cancelAgentChatMessage(streamingChatSessionId);
       } else {
         await cancelChatMessage(streamingChatSessionId);

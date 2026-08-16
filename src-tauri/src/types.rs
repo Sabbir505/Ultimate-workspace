@@ -39,6 +39,16 @@ pub struct HarnessStatus {
     pub installed: bool,
 }
 
+/// An ACP agent (roadmap #20) exposed to the composer's agent menu — static
+/// registry + user-defined entries, with install detection.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpAgentStatus {
+    pub id: String,
+    pub display_name: String,
+    pub installed: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitStatusInfo {

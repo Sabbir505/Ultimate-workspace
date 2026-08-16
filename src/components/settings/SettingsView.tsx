@@ -20,6 +20,7 @@ import { KnowledgePanel } from "./KnowledgePanel";
 import { PermissionRulesPanel } from "./PermissionRulesPanel";
 import { PromptTemplatesPanel } from "./PromptTemplatesPanel";
 import { ThemeGalleryPanel } from "./ThemeGalleryPanel";
+import { AcpAgentsPanel } from "./AcpAgentsPanel";
 import { ConnectorIcon, FamilyIcon, FAMILY_NAMES } from "./ConnectorIcon";
 import { Modal } from "../common/Modal";
 import {
@@ -374,6 +375,9 @@ export function SettingsView() {
                       </tbody>
                     </table>
                   )}
+                  {/* ACP agents (roadmap #20): user-defined Zed/Devin-ecosystem
+                      CLIs + the built-in registry. */}
+                  <AcpAgentsPanel />
                 </>
               )}
 

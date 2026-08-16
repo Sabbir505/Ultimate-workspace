@@ -29,6 +29,14 @@ export interface HarnessStatus {
   installed: boolean;
 }
 
+/** An ACP agent (roadmap #20) shown in the composer's agent menu — static
+ *  registry (Zed/Devin) + user-defined entries, with install detection. */
+export interface AcpAgentStatus {
+  id: string;
+  displayName: string;
+  installed: boolean;
+}
+
 /** Compact badge label for a harness id — used in pane headers, session rows,
  *  and the spotlight bar where a full display name won't fit. Single source of
  *  truth so adding a harness doesn't require hunting down ternaries. */

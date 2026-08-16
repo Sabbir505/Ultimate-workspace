@@ -67,6 +67,25 @@ pub fn list_harness_models(harness_id: String) -> crate::harness_config::Harness
     crate::harness_config::harness_model_config(&harness_id)
 }
 
+/// ACP agents (roadmap #20) for the composer's agent menu: the static
+/// Zed/Devin registry plus user-defined entries from the `acp.agents`
+/// app_settings blob, each with an install probe. Mirrors `list_harnesses`.
+#[tauri::command]
+pub fn list_acp_agents(db: State<DbState>) -> Result<Vec<crate::types::AcpAgentStatus>, String> {
+    let conn = db.0.lock();
+    Ok(crate::acp_agents::all_agents(&conn)
+        .into_iter()
+        .map(|a| {
+            let installed = crate::acp_agents::is_installed(&a);
+            crate::types::AcpAgentStatus {
+                id: a.id,
+                display_name: a.display_name,
+                installed,
+            }
+        })
+        .collect())
+}
+
 /// Register a typed `Channel<ChatTokenPayload>` for a chat session. The
 /// chat streaming code in `chat::dispatch::emit_token` and the headless CLI
 /// chat path in `agent_sessions::emit_token` will route tokens through this

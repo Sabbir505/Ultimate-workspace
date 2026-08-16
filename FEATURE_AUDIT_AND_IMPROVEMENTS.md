@@ -259,7 +259,7 @@ Conduit's local-model stack is already more integrated than any orchestration-sh
 | 17 | ~~**Pop-out chats/panes into windows**~~ **CHATS DONE** | Tauri multi-window proven (Linux browsers) | M |
 | 18 | ~~**Multi-chat "team" broadcast** (send one prompt to N chat sessions)~~ **DONE** | The old pane BroadcastBar is dead code post-layout-merge; rebuild broadcast against chat sessions / ToolPanel tabs | M |
 | 19 | ~~**Theme import (JSON)** + theme gallery~~ **DONE** | Token system is data-driven | S |
-| 20 | **ACP client support** (talk to Zed/Devin-ecosystem agents) | Emerging standard; future-proofs the shell | L |
+| 20 | ~~**ACP client support** (talk to Zed/Devin-ecosystem agents)~~ **DONE** | Emerging standard; future-proofs the shell | L |
 
 ---
 

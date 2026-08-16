@@ -13,6 +13,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useUiStore } from "../state/ui";
 import type {
   AvailableSkill,
+  AcpAgentStatus,
   ChangedFile,
   CostEvent,
   CostRollups,
@@ -210,6 +211,42 @@ export const listenBrowserActivity = (
 export const listHarnesses = () => safeInvoke<HarnessStatus[] | null>("list_harnesses");
 export const runHarnessLogin = (paneId: string, harnessId: HarnessId, cwd: string) =>
   safeInvoke<void>("run_harness_login", { paneId, harnessId, cwd });
+
+// --- ACP agents (roadmap #20) ---
+// ACP = Agent Client Protocol: JSON-RPC 2.0 over stdio, spoken by Zed/Devin-
+// ecosystem agents. The agent menu lists static registry entries + user-defined
+// agents (see AcpAgentsPanel); user definitions persist as a JSON array under
+// the `acp.agents` app_settings key (same KV-blob pattern as prompts.templates).
+
+export const listAcpAgents = () => safeInvoke<AcpAgentStatus[] | null>("list_acp_agents");
+
+export interface AcpAgentDef {
+  id: string;
+  displayName: string;
+  /** Command on PATH (or an absolute path). */
+  command: string;
+  /** Args that launch the ACP stdio server (e.g. ["--stdio"]). */
+  args: string[];
+  /** Extra environment variables for the spawn. */
+  env: Record<string, string>;
+}
+
+const ACP_AGENTS_KEY = "acp.agents";
+
+export async function listAcpAgentDefs(): Promise<AcpAgentDef[]> {
+  try {
+    const raw = await getSetting(ACP_AGENTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as AcpAgentDef[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveAcpAgentDefs(agents: AcpAgentDef[]): Promise<void> {
+  await setSetting(ACP_AGENTS_KEY, JSON.stringify(agents));
+}
 
 // --- Git ---
 export const getGitStatus = (path: string) => safeInvoke<GitStatusInfo | null>("get_git_status", { path });

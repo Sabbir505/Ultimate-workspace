@@ -4,11 +4,14 @@
 // Expanding lists the files the checkpoint captured vs the previous one;
 // "Restore" rolls the working tree back to the snapshot — the backend takes
 // a SAFETY checkpoint of the current state first, so a bad restore is itself
-// one-click undoable (the safety chip appears after restoring).
+// one-click undoable (the safety chip appears after restoring). The restore
+// modal defaults to ALSO trimming the conversation after this turn (T3 Code
+// parity: revert restores workspace *and* conversation).
 import { useState } from "react";
 import { Modal } from "../common/Modal";
 import { restoreChatCheckpoint, toastError, toastSuccess, type ChatCheckpoint } from "../../lib/ipc";
 import { relativeTime } from "../../lib/relativeTime";
+import { useChatStore } from "../../state/chat";
 
 const STATUS_LABEL: Record<string, string> = {
   A: "added",
@@ -39,16 +42,25 @@ export function CheckpointChip({ checkpoints }: { checkpoints: ChatCheckpoint[] 
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  const [rollback, setRollback] = useState(true);
   if (!latest) return null;
 
   const restore = async () => {
     setRestoring(true);
     try {
-      const safety = await restoreChatCheckpoint(latest.id);
-      toastSuccess(
-        "Working tree rolled back",
-        safety ? "A safety snapshot of the previous state was saved — restore it to undo this." : undefined,
-      );
+      const result = await restoreChatCheckpoint(latest.id, rollback);
+      const deleted = result?.deletedMessages ?? 0;
+      const detail = [
+        deleted > 0
+          ? `${deleted} message${deleted === 1 ? "" : "s"} rolled back with the tree.`
+          : undefined,
+        "A safety snapshot of the previous state was saved — restore it to undo this.",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      toastSuccess("Working tree rolled back", detail);
+      // The conversation may have been trimmed — refetch from the backend.
+      void useChatStore.getState().loadMessages(latest.chatSessionId);
       setConfirming(false);
       setOpen(false);
     } catch (err) {
@@ -83,7 +95,13 @@ export function CheckpointChip({ checkpoints }: { checkpoints: ChatCheckpoint[] 
               ))}
             </ul>
           )}
-          <button className="chat-checkpoint-restore" onClick={() => setConfirming(true)}>
+          <button
+            className="chat-checkpoint-restore"
+            onClick={() => {
+              setRollback(true); // fresh modal → conversation rollback back on
+              setConfirming(true);
+            }}
+          >
             Restore to this point
           </button>
         </div>
@@ -99,7 +117,11 @@ export function CheckpointChip({ checkpoints }: { checkpoints: ChatCheckpoint[] 
                 Cancel
               </button>
               <button className="danger" onClick={() => void restore()} disabled={restoring}>
-                {restoring ? "Restoring…" : "Roll back working tree"}
+                {restoring
+                  ? "Restoring…"
+                  : rollback
+                    ? "Roll back tree + conversation"
+                    : "Roll back working tree"}
               </button>
             </>
           }
@@ -108,6 +130,14 @@ export function CheckpointChip({ checkpoints }: { checkpoints: ChatCheckpoint[] 
             Files in <code>{latest.repoPath}</code> will be rolled back to the state right after
             this message's turn. Uncommitted changes made since then will be overwritten.
           </p>
+          <label className="chat-checkpoint-rollback">
+            <input
+              type="checkbox"
+              checked={rollback}
+              onChange={(e) => setRollback(e.target.checked)}
+            />
+            Also roll back the conversation to this point (delete later messages)
+          </label>
           <p>
             Conduit saves a safety snapshot of the current state first, so you can undo this
             restore afterwards.

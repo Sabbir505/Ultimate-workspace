@@ -858,10 +858,24 @@ export interface ChatCheckpoint {
 export const listChatCheckpoints = (chatSessionId: string) =>
   safeInvoke<ChatCheckpoint[] | null>("list_chat_checkpoints", { chatSessionId });
 
+/** Result of a checkpoint restore: the SAFETY checkpoint taken of the
+ *  pre-restore state (restore-the-restore) plus how many conversation
+ *  messages were rolled back with it (0 when `rollbackMessages` was off or
+ *  the checkpoint followed no message). */
+export interface RestoreCheckpointResult {
+  safety: ChatCheckpoint;
+  deletedMessages: number;
+}
+
 /** Roll a checkpoint's repo back to its snapshot. Returns the SAFETY
- *  checkpoint taken of the current state first (restore-the-restore). */
-export const restoreChatCheckpoint = (checkpointId: number) =>
-  safeInvoke<ChatCheckpoint | null>("restore_chat_checkpoint", { checkpointId });
+ *  checkpoint taken of the current state first (restore-the-restore). With
+ *  `rollbackMessages` (default false) the conversation is trimmed to the
+ *  checkpointed turn as well. */
+export const restoreChatCheckpoint = (checkpointId: number, rollbackMessages?: boolean) =>
+  safeInvoke<RestoreCheckpointResult | null>("restore_chat_checkpoint", {
+    checkpointId,
+    rollbackMessages: rollbackMessages ?? false,
+  });
 export const createChatSession = (provider: string, model: string, projectId?: string | null) =>
   safeInvoke<ChatSession | null>("create_chat_session", { provider, model, projectId: projectId ?? null });
 /** Bind (or unbind with null) a chat session to a project, so it nests under

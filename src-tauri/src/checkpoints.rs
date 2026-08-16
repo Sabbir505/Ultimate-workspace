@@ -20,7 +20,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::db;
 use crate::git;
-use crate::types::ChatCheckpoint;
+use crate::types::{ChatCheckpoint, RestoreCheckpointResult};
 
 /// Hidden-ref namespace for all checkpoints.
 pub const REFS_PREFIX: &str = "refs/conduit/checkpoints";
@@ -143,11 +143,15 @@ pub fn after_turn(
 /// Roll the checkpoint's repo back to its snapshot. Destructive by design —
 /// a SAFETY checkpoint of the current state is taken first and returned, so
 /// the restore itself is one-click undoable ("restore the safety snapshot").
+/// With `rollback_messages` the conversation is trimmed to the checkpointed
+/// turn as well; the message delete is best-effort (logged, never fails the
+/// restore — the tree rollback already happened).
 pub fn restore(
     app: &AppHandle,
     conn: &Connection,
     checkpoint_id: i64,
-) -> Result<ChatCheckpoint, String> {
+    rollback_messages: bool,
+) -> Result<RestoreCheckpointResult, String> {
     let ckpt = db::get_checkpoint(conn, checkpoint_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "checkpoint not found".to_string())?;
@@ -163,7 +167,31 @@ pub fn restore(
         .map_err(|e| format!("failed to record safety checkpoint: {e:?}"))?;
     git::restore_checkpoint_tree(&dir, &ckpt.tree_sha)
         .map_err(|e| format!("restore failed: {e}"))?;
-    Ok(safety)
+    let deleted_messages = if rollback_messages {
+        match rollback_conversation(conn, &ckpt) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!(
+                    "[checkpoints] conversation rollback failed for {}: {e:?}",
+                    ckpt.chat_session_id
+                );
+                0
+            }
+        }
+    } else {
+        0
+    };
+    Ok(RestoreCheckpointResult {
+        safety,
+        deleted_messages,
+    })
+}
+
+/// The conversation half of restore: delete every message after the
+/// checkpoint's message (all messages for a baseline checkpoint). Returns
+/// the number of rows deleted.
+pub(crate) fn rollback_conversation(conn: &Connection, ckpt: &ChatCheckpoint) -> db::DbResult<i64> {
+    db::delete_chat_messages_after(conn, &ckpt.chat_session_id, ckpt.message_id)
 }
 
 /// Best-effort prune of a session's checkpoint refs from their repos — call
@@ -260,5 +288,37 @@ mod tests {
         db::set_setting(&conn, "checkpoints.enabled", "false").unwrap();
         maybe_baseline(None, &conn, &cs.id, repo.path());
         assert_eq!(db::count_chat_checkpoints(&conn, &cs.id).unwrap(), 0);
+    }
+
+    #[test]
+    fn rollback_messages_keeps_checkpointed_turn_and_wipes_on_baseline() {
+        let conn = db::mem();
+        let cs = chat_db::create_chat_session(&conn, "anthropic", "m", None).unwrap();
+        let m1 = db::add_chat_message(&conn, &cs.id, "user", "hi", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+        let m2 = db::add_chat_message(&conn, &cs.id, "assistant", "hello", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+        let m3 = db::add_chat_message(&conn, &cs.id, "user", "do it", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+        let m4 = db::add_chat_message(&conn, &cs.id, "assistant", "done", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+
+        // Post-turn checkpoint following m2: rollback keeps m1+m2, drops m3+m4.
+        let ckpt = ChatCheckpoint {
+            id: 1,
+            chat_session_id: cs.id.clone(),
+            message_id: Some(m2.id),
+            ref_name: String::new(),
+            tree_sha: "t".into(),
+            repo_path: "D:/repo".into(),
+            files: vec![],
+            created_at: 0,
+        };
+        assert_eq!(rollback_conversation(&conn, &ckpt).unwrap(), 2);
+        let rest = db::list_chat_messages(&conn, &cs.id).unwrap();
+        assert_eq!(rest.len(), 2);
+        assert_eq!(rest[0].id, m1.id);
+        assert_eq!(rest[1].id, m2.id);
+
+        // Baseline checkpoint (message_id None): whole conversation wiped.
+        let baseline = ChatCheckpoint { message_id: None, ..ckpt };
+        assert_eq!(rollback_conversation(&conn, &baseline).unwrap(), 2);
+        assert!(db::list_chat_messages(&conn, &cs.id).unwrap().is_empty());
     }
 }

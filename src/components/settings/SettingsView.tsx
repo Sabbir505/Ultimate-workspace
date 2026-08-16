@@ -946,6 +946,8 @@ function AssistantPanel() {
 function GitPanel() {
   const worktreeDefault = useSettingsStore((s) => s.worktreeDefault);
   const setWorktreeDefault = useSettingsStore((s) => s.setWorktreeDefault);
+  const checkpointsEnabled = useSettingsStore((s) => s.checkpointsEnabled);
+  const setCheckpointsEnabled = useSettingsStore((s) => s.setCheckpointsEnabled);
   const [cmProvider, setCmProvider] = useState<ChatProvider | "">("");
   const [cmModel, setCmModel] = useState("");
   const [cmModels, setCmModels] = useState<string[]>([]);
@@ -1091,6 +1093,31 @@ function GitPanel() {
                 onChange={(e) => setWorktreeDefault(e.target.checked)}
               />
               <span>Isolate new chats in their own worktree</span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Per-turn checkpoints</div>
+        <p className="settings-section-hint">
+          Every turn that changes files gets a hidden git-ref snapshot
+          (<code>refs/conduit/checkpoints/…</code>) of the worktree, shown as a restore chip under
+          the assistant message. Restoring rolls the files back and — by default — trims the
+          conversation to that turn, with a safety snapshot of the pre-restore state kept for
+          one-click undo. Turn off to stop recording checkpoints entirely (existing snapshots stay
+          restorable).
+        </p>
+        <div className="settings-form-row">
+          <label className="settings-form-label">Default</label>
+          <div className="settings-form-control">
+            <label className="settings-checkbox-row">
+              <input
+                type="checkbox"
+                checked={checkpointsEnabled}
+                onChange={(e) => setCheckpointsEnabled(e.target.checked)}
+              />
+              <span>Record a checkpoint after every turn</span>
             </label>
           </div>
         </div>

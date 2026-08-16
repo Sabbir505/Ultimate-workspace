@@ -19,6 +19,10 @@ const K_WATCH_MODE = "watchMode";
  *  every new chat on a git project its own isolated worktree. Any value other
  *  than the literal "false" reads as enabled — mirrors `checkpoints.enabled`. */
 const K_WORKTREE_DEFAULT = "worktrees.defaultEnabled";
+/** Per-turn git checkpoints (roadmap P0 §3.1.2): "false" disables snapshots,
+ *  baselines and restores entirely; anything else (or missing) = enabled.
+ *  Mirrors the backend `checkpoints.rs` gate exactly. */
+const K_CHECKPOINTS_ENABLED = "checkpoints.enabled";
 const K_KEYBINDINGS = "keybindingOverrides";
 const K_BROWSER_URLS = "browserLastUrls"; // JSON: { global: string, perProject: Record<string, string> }
 const K_BROWSER_PANE_STATE = "browserPaneState"; // JSON: { paneTabs: Record<string, BrowserPaneTabState> }
@@ -66,6 +70,9 @@ interface SettingsState {
    *  own isolated worktree. Default true; off skips auto-creation (per-chat
    *  isolation stays available via the toggle). */
   worktreeDefault: boolean;
+  /** Per-turn git checkpoints (hidden-ref snapshots + restore chip on
+   *  changed messages). Default true; "false" turns the whole feature off. */
+  checkpointsEnabled: boolean;
   keybindings: KeybindingMap;
   browserUrls: BrowserUrlState;
   browserPaneState: PersistedBrowserPaneState;
@@ -83,6 +90,7 @@ interface SettingsState {
   setNotifySound: (on: boolean) => void;
   setWatchMode: (watchMode: boolean) => void;
   setWorktreeDefault: (enabled: boolean) => void;
+  setCheckpointsEnabled: (enabled: boolean) => void;
   setKeybinding: (action: KeybindingAction, accelerator: string) => void;
   resetKeybindings: () => void;
   lastBrowserUrl: (projectId: string | null) => string;
@@ -113,6 +121,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   notifySound: true,
   watchMode: false,
   worktreeDefault: true,
+  checkpointsEnabled: true,
   keybindings: { ...DEFAULT_KEYBINDINGS },
   browserUrls: { global: "https://www.google.com", perProject: {} },
   browserPaneState: { paneTabs: {} },
@@ -120,7 +129,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   localPinExchanges: DEFAULT_LOCAL_PIN_EXCHANGES,
 
   load: async () => {
-    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault] = await Promise.all([
+    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault, checkpointsEnabled] = await Promise.all([
       getSetting(K_THEME),
       getSetting(K_DND),
       getSetting(K_NOTIFY_SOUND),
@@ -133,6 +142,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       getSetting(K_THEMES),
       getSetting(K_CUSTOM_THEME_ID),
       getSetting(K_WORKTREE_DEFAULT),
+      getSetting(K_CHECKPOINTS_ENABLED),
     ]);
     set((state) => {
       const next = { ...state, loaded: true };
@@ -152,6 +162,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       // Default ON: only the literal "false" disables (mirrors the backend's
       // `checkpoints.enabled` convention — any other value reads as enabled).
       if (worktreeDefault === "false") next.worktreeDefault = false;
+      // Same convention for per-turn checkpoints (backend gate in checkpoints.rs).
+      if (checkpointsEnabled === "false") next.checkpointsEnabled = false;
       if (kbJson) {
         try {
           const overrides = JSON.parse(kbJson) as Partial<KeybindingMap>;
@@ -240,6 +252,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setWorktreeDefault: (enabled) => {
     set({ worktreeDefault: enabled });
     void setSetting(K_WORKTREE_DEFAULT, String(enabled));
+  },
+
+  setCheckpointsEnabled: (enabled) => {
+    set({ checkpointsEnabled: enabled });
+    void setSetting(K_CHECKPOINTS_ENABLED, String(enabled));
   },
 
   setKeybinding: (action, accelerator) => {

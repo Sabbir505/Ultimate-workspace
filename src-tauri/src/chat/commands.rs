@@ -76,15 +76,20 @@ pub fn list_chat_checkpoints(
 
 /// Roll the checkpoint's repo back to its snapshot. A safety checkpoint of
 /// the CURRENT state is taken first and returned, so the restore itself is
-/// one-click undoable. Emits `checkpoint:created` for the safety snapshot.
+/// one-click undoable. With `rollback_messages`, conversation messages after
+/// the checkpointed turn are deleted too (the tree restore is primary; a
+/// message-delete failure is logged and never fails the command). Emits
+/// `checkpoint:created` for the safety snapshot.
 #[tauri::command]
 pub fn restore_chat_checkpoint(
     checkpoint_id: i64,
+    rollback_messages: bool,
     app: AppHandle,
     db: State<DbState>,
-) -> CmdResult<ChatCheckpoint> {
+) -> CmdResult<RestoreCheckpointResult> {
     let conn = db.0.lock();
-    crate::checkpoints::restore(&app, &conn, checkpoint_id).map_err(|e| e.to_string())
+    crate::checkpoints::restore(&app, &conn, checkpoint_id, rollback_messages)
+        .map_err(|e| e.to_string())
 }
 
 // ---- Artifacts (30-day retention) ----

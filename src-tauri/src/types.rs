@@ -363,6 +363,17 @@ pub struct ChatCheckpoint {
     pub created_at: i64,
 }
 
+/// Result of a checkpoint restore: the SAFETY checkpoint taken of the
+/// pre-restore state (restore-the-restore) plus how many conversation
+/// messages were rolled back with it (0 when `rollback_messages` was off or
+/// the checkpoint followed no message).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreCheckpointResult {
+    pub safety: ChatCheckpoint,
+    pub deleted_messages: i64,
+}
+
 /// A file attached to a chat message from the composer. Images are forwarded
 /// to the model as vision input; documents (docx/pptx/xlsx) are extracted to
 /// text server-side; plain-text files carry their decoded text directly.

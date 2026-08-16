@@ -479,6 +479,40 @@ pub fn delete_chat_message(conn: &Connection, message_id: i64) -> DbResult<bool>
     Ok(changed > 0)
 }
 
+/// Delete every message with id strictly greater than `after_id` in a
+/// session — the conversation-rollback half of checkpoint restore (undo
+/// turns N+1.., keep the checkpointed turn and everything before it).
+/// `None` deletes the session's whole conversation (restore to the pre-chat
+/// baseline). Artifacts attributed to the removed messages are detached
+/// (not deleted — same policy as `delete_chat_message`). Returns the number
+/// of rows deleted.
+pub fn delete_chat_messages_after(
+    conn: &Connection,
+    chat_session_id: &str,
+    after_id: Option<i64>,
+) -> DbResult<i64> {
+    // Detach artifacts BEFORE deleting so the subquery still sees the rows.
+    let _ = conn.execute(
+        "UPDATE artifacts SET chat_message_id = NULL
+         WHERE chat_message_id IN (
+             SELECT id FROM chat_messages
+             WHERE chat_session_id = ?1 AND (?2 IS NULL OR id > ?2)
+         )",
+        params![chat_session_id, after_id],
+    );
+    let changed = match after_id {
+        Some(after) => conn.execute(
+            "DELETE FROM chat_messages WHERE chat_session_id = ?1 AND id > ?2",
+            params![chat_session_id, after],
+        )?,
+        None => conn.execute(
+            "DELETE FROM chat_messages WHERE chat_session_id = ?1",
+            params![chat_session_id],
+        )?,
+    };
+    Ok(changed as i64)
+}
+
 /// Mark the given message rows as superseded by `summary_id` (the id of the
 /// `[compacted context]` summary row that folded them in). Used both for the
 /// aged-out real turns AND any prior summary row, so re-compaction collapses
@@ -860,6 +894,48 @@ mod tests {
 
         // Unknown id is a no-op, not an error.
         assert!(!delete_chat_message(&conn, 9999).unwrap());
+    }
+
+    #[test]
+    fn delete_chat_messages_after_trims_later_turns_and_detaches_artifacts() {
+        let conn = super::super::mem();
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        let m1 = add_chat_message(&conn, &cs.id, "user", "hi", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+        let m2 = add_chat_message(&conn, &cs.id, "assistant", "hello", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+        let m3 = add_chat_message(&conn, &cs.id, "user", "do it", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+        let m4 = add_chat_message(&conn, &cs.id, "assistant", "done", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+
+        // Artifact attributed to a message the rollback will remove.
+        let art = super::super::insert_artifact(
+            &conn,
+            Some(&cs.id),
+            "report.docx",
+            "/tmp/report.docx",
+            "docx",
+        )
+        .unwrap();
+        super::super::attach_artifacts_to_message(&conn, &cs.id, m4.id).unwrap();
+
+        // Roll back to the m2 turn: strictly-greater ids are removed, the
+        // checkpointed turn and everything before it stay.
+        assert_eq!(delete_chat_messages_after(&conn, &cs.id, Some(m2.id)).unwrap(), 2);
+        let rest = list_chat_messages(&conn, &cs.id).unwrap();
+        assert_eq!(rest.len(), 2);
+        assert_eq!(rest[0].id, m1.id);
+        assert_eq!(rest[1].id, m2.id);
+        // Artifact row survives, unlinked (same policy as single delete).
+        let linked: Option<i64> = conn
+            .query_row(
+                "SELECT chat_message_id FROM artifacts WHERE id = ?1",
+                rusqlite::params![art.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked, None);
+
+        // None wipes the whole conversation (restore to the pre-chat baseline).
+        assert_eq!(delete_chat_messages_after(&conn, &cs.id, None).unwrap(), 2);
+        assert!(list_chat_messages(&conn, &cs.id).unwrap().is_empty());
     }
 
     // Insert a plain message with only the fields FTS tests care about.

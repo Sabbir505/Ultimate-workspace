@@ -114,12 +114,15 @@ pub fn checkpoint_ref_paths(
     rows.collect()
 }
 
-/// The git repo directory a chat session's checkpoints live against:
-/// `chat_sessions.project_id → projects.path`. None for unbound chats (or a
-/// missing project row).
+/// The git repo directory a chat session's checkpoints live against.
+/// Worktree-isolated sessions snapshot the WORKTREE (their agent edits land
+/// there); everything else resolves `chat_sessions.project_id →
+/// projects.path`. None for unbound chats (or a missing project row). A
+/// stale worktree path (dir removed) is still returned — the caller's
+/// `checkpointable` git-repo gate skips it silently.
 pub fn chat_session_repo_path(conn: &Connection, chat_session_id: &str) -> Option<String> {
     conn.query_row(
-        "SELECT p.path FROM chat_sessions s
+        "SELECT COALESCE(NULLIF(s.worktree_path, ''), p.path) FROM chat_sessions s
          JOIN projects p ON p.id = s.project_id
          WHERE s.id = ?1",
         params![chat_session_id],
@@ -213,5 +216,39 @@ mod tests {
         chat::delete_chat_session(&conn, &bound.id).unwrap();
         assert_eq!(count_chat_checkpoints(&conn, &bound.id).unwrap(), 0);
         assert_eq!(count_chat_checkpoints(&conn, &loose.id).unwrap(), 1);
+    }
+
+    #[test]
+    fn repo_lookup_prefers_worktree_path_over_project_path() {
+        let conn = db::mem();
+        let pid = db::new_id();
+        conn.execute(
+            "INSERT INTO projects (id, path, name, created_at) VALUES (?1, 'D:/proj', 'proj', 0)",
+            rusqlite::params![pid],
+        )
+        .unwrap();
+        // Worktree-isolated session: the agent edits land in the worktree, so
+        // checkpoints must snapshot/restore there, not the project root.
+        let isolated = chat::create_chat_session(&conn, "anthropic", "m", Some(&pid)).unwrap();
+        conn.execute(
+            "UPDATE chat_sessions SET worktree_path = 'D:/proj-conduit-abc' WHERE id = ?1",
+            rusqlite::params![isolated.id],
+        )
+        .unwrap();
+        assert_eq!(
+            chat_session_repo_path(&conn, &isolated.id).as_deref(),
+            Some("D:/proj-conduit-abc")
+        );
+        // Empty-string worktree path (stale/migrated row) degrades to project.
+        let blank = chat::create_chat_session(&conn, "anthropic", "m", Some(&pid)).unwrap();
+        conn.execute(
+            "UPDATE chat_sessions SET worktree_path = '' WHERE id = ?1",
+            rusqlite::params![blank.id],
+        )
+        .unwrap();
+        assert_eq!(chat_session_repo_path(&conn, &blank.id).as_deref(), Some("D:/proj"));
+        // Unbound chats still resolve to None.
+        let loose = chat::create_chat_session(&conn, "anthropic", "m", None).unwrap();
+        assert!(chat_session_repo_path(&conn, &loose.id).is_none());
     }
 }

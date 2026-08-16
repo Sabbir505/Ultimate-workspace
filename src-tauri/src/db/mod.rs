@@ -748,8 +748,8 @@ pub use cost_v2::{get_cost_rollups_v2, read_rate_overrides};
 
 // chat
 pub use chat::{
-    add_chat_message, create_chat_session, delete_chat_message, delete_chat_session,
-    delete_chat_sessions_for_project, delete_empty_chat_sessions,
+    add_chat_message, create_chat_session, delete_chat_message, delete_chat_messages_after,
+    delete_chat_session, delete_chat_sessions_for_project, delete_empty_chat_sessions,
     get_chat_session, list_active_chat_messages, list_chat_messages, list_chat_messages_page,
     list_chat_sessions,
     list_chat_session_connectors, mark_branch_superseded, mark_superseded, search_chat_messages,

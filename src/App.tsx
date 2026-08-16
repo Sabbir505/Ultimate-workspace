@@ -15,6 +15,7 @@ import { Modal } from "./components/common/Modal";
 import { ToastHost } from "./components/common/ToastHost";
 import { OnboardingBanner } from "./components/onboarding/OnboardingBanner";
 import { WorktreeNudgeBanner } from "./components/onboarding/WorktreeNudgeBanner";
+import { LocalModelBanner } from "./components/onboarding/LocalModelBanner";
 // ToolPanel (right-side tool/agents/artifact panel) statically imports
 // react-markdown via SubagentPanel — lazy so it leaves the entry chunk
 // (PERFORMANCE_AUDIT.md item 12).
@@ -178,6 +179,8 @@ export default function App() {
         <OnboardingBanner />
 
         <WorktreeNudgeBanner />
+
+        <LocalModelBanner />
 
         {activeView === "chat" ? (
           <div className="grid-wrap chat-grid-wrap">

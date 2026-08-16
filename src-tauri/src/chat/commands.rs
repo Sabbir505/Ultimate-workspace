@@ -1258,14 +1258,21 @@ pub async fn send_chat_message(
                         // start_local_model command wrapper, which we're not
                         // going through here. Without this write, step 5 below
                         // reads the stale chat.local_gguf.base_url (the dead port
-                        // from before the restart) and the send fails.
+                        // from before the restart) and the send fails. The
+                        // user's persisted runtime overrides (incl. last-good
+                        // ngl) load here too, so warm-up respawns honor them
+                        // instead of re-probing from scratch.
+                        let warm_model_id = g.meta.name.clone().unwrap_or_else(|| g.filename.clone());
+                        let warm_overrides = {
+                            let conn = db.0.lock();
+                            local_models::load_overrides(&conn, &warm_model_id)
+                        };
                         match local
                             .start(
-                                g.meta.name.unwrap_or(g.filename).clone(),
+                                warm_model_id,
                                 &g.path,
-                                None,
-                                None,
                                 g.mmproj_path.as_deref(),
+                                Some(&warm_overrides),
                             )
                             .await
                         {
@@ -1283,6 +1290,11 @@ pub async fn send_chat_message(
                                 );
                                 let _ =
                                     db::set_setting(&conn, "chat.active_provider", "local_gguf");
+                                local_models::save_last_good_ngl(
+                                    &conn,
+                                    &started.model_id,
+                                    started.n_gpu_layers,
+                                );
                                 eprintln!(
                                     "[local-warmup] sidecar started OK, persisted base_url={:?}",
                                     started.base_url
@@ -2530,18 +2542,31 @@ pub fn scan_local_models(
 }
 
 /// Start a llama-server sidecar, health-check it, and persist the base_url +
-/// model so `send_chat_message` picks it up immediately.
+/// model so `send_chat_message` picks it up immediately. `overrides` carries
+/// live-edited runtime tweaks; when None the persisted per-model blob is
+/// loaded (`localModels.overrides`), so every spawn path shares one source of
+/// truth. The last-good GPU-layer count is recorded back into the blob so
+/// restarts skip the probe ladder.
 #[tauri::command]
 pub async fn start_local_model(
     model_id: String,
     path: String,
-    ngl: Option<i32>,
-    ctx: Option<u32>,
     mmproj_path: Option<String>,
+    overrides: Option<local_models::LlamaOverrides>,
     db: State<'_, DbState>,
     local: State<'_, local_models::LocalModelState>,
 ) -> CmdResult<StartedModel> {
-    let started = local.0.start(model_id, &path, ngl, ctx, mmproj_path.as_deref()).await?;
+    let ovr = match overrides {
+        Some(o) => o,
+        None => {
+            let conn = db.0.lock();
+            local_models::load_overrides(&conn, &model_id)
+        }
+    };
+    let started = local
+        .0
+        .start(model_id, &path, mmproj_path.as_deref(), Some(&ovr))
+        .await?;
 
     // Persist the base_url + model for the send path (chat.local_gguf.*).
     {
@@ -2552,6 +2577,7 @@ pub async fn start_local_model(
             .map_err(|e| e.to_string())?;
         db::set_setting(&conn, "chat.active_provider", "local_gguf")
             .map_err(|e| e.to_string())?;
+        local_models::save_last_good_ngl(&conn, &started.model_id, started.n_gpu_layers);
     }
 
     // The frontend expects these exact camelCase fields (mirrors types.rs).

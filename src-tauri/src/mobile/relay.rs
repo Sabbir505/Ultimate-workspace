@@ -1819,10 +1819,24 @@ pub async fn warm_up_local_model(
             return Ok(active.base_url);
         }
     }
-    // Spin up the sidecar.
+    // Spin up the sidecar with the persisted per-model runtime overrides
+    // (incl. last-good ngl) so phone-triggered warm-ups behave exactly like
+    // desktop restarts.
+    let overrides = {
+        let conn = app.state::<crate::DbState>().inner().0.lock();
+        crate::chat::local_models::load_overrides(&conn, model_name)
+    };
     let result = local_state
-        .start(model_name.to_string(), model_path, None, None, None)
+        .start(model_name.to_string(), model_path, None, Some(&overrides))
         .await
         .map_err(|e| format!("failed to start local model: {e}"))?;
+    {
+        let conn = app.state::<crate::DbState>().inner().0.lock();
+        crate::chat::local_models::save_last_good_ngl(
+            &conn,
+            &result.model_id,
+            result.n_gpu_layers,
+        );
+    }
     Ok(result.base_url)
 }

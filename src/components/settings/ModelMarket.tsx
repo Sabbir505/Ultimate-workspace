@@ -82,6 +82,9 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tokenInput, setTokenInput] = useState("");
+  // True when the backend served a cached catalog because huggingface.co
+  // was unreachable — renders an offline hint instead of an error.
+  const [staleCatalog, setStaleCatalog] = useState(false);
   const [tokenDirty, setTokenDirty] = useState(false);
   const [downloads, setDownloads] = useState<Record<string, PerDownload>>({});
   // Bump on every successful fetch so effect deps stay cheap.
@@ -202,6 +205,9 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
         return;
       }
       setEntries(res.entries);
+      // Cached copy served because huggingface.co was unreachable — keep
+      // the list but flag it instead of showing a dead error banner.
+      setStaleCatalog(res.stale === true);
       setSettings((prev) =>
         prev
           ? { ...prev, hasHuggingFaceToken: res.hasHuggingFaceToken }
@@ -211,6 +217,7 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
       console.error("[ModelMarket] fetch error:", e);
       setLoadError(e instanceof Error ? e.message : String(e));
       setEntries([]);
+      setStaleCatalog(false);
     } finally {
       setLoading(false);
       setFetchTick((t) => t + 1);
@@ -359,6 +366,12 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
       {loadError && (
         <div className="model-market-error">
           Could not load catalog: {loadError}
+        </div>
+      )}
+
+      {staleCatalog && !loadError && (
+        <div className="model-market-stale" title="huggingface.co was unreachable — showing the cached catalog (up to 10 minutes old).">
+          ⚠ Offline — showing a cached catalog
         </div>
       )}
 

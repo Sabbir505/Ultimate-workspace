@@ -4,9 +4,9 @@
 // not bury the short appearance/shortcut sections. Every panel reserves a
 // fixed min-height (see .settings-split / .empty-reserved) so switching
 // categories — or an empty harness list — does not reflow the modal.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel, getDataPaths, setChatDbDir, type DataPaths, getChatConfig, type ChatConfigPayload, exportProjectZip, importChatZip, toastError, toastSuccess } from "../../lib/ipc";
+import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel, getDataPaths, setChatDbDir, type DataPaths, getChatConfig, type ChatConfigPayload, exportProjectZip, importChatZip, toastError, toastSuccess, getLocalModelOverrides, setLocalModelOverrides, type LlamaOverrides } from "../../lib/ipc";
 import { runLoginFlow } from "../../lib/sessionLauncher";
 import { shortModelName } from "../../lib/modelLabel";
 import { useProjectsStore } from "../../state/projects";
@@ -16,6 +16,7 @@ import { GlassSelect } from "../common/GlassSelect";
 import { useChatStore } from "../../state/chat";
 import { useArtifactsStore } from "../../state/artifacts";
 import { ModelMarket } from "./ModelMarket";
+import { LlamaAdvancedFields } from "../chat/LlamaAdvancedFields";
 import { KnowledgePanel } from "./KnowledgePanel";
 import { PermissionRulesPanel } from "./PermissionRulesPanel";
 import { PromptTemplatesPanel } from "./PromptTemplatesPanel";
@@ -428,9 +429,36 @@ function LocalModelsPanel() {
   // shows a spinner while the sidecar spawns + loads the GGUF.
   const [starting, setStarting] = useState<Record<string, boolean>>({});
   const [folders, setFolders] = useState<string[]>([]);
-  const [advanced, setAdvanced] = useState<Record<string, { ngl?: number; ctx?: number }>>({});
+  // Persisted per-model llama-server runtime overrides (`localModels.overrides`
+  // blob — the same source the backend reads at spawn time). Edits debounce
+  // 600ms into the KV; a ref mirror keeps the persist helper stale-free.
+  const [overridesMap, setOverridesMap] = useState<Record<string, LlamaOverrides>>({});
+  const overridesMapRef = useRef<Record<string, LlamaOverrides>>({});
+  const overridesPersistTimer = useRef<number | null>(null);
   // Panel tabs: "models" = on-disk GGUF list, "market" = Hugging Face browser.
   const [tab, setTab] = useState<"models" | "market">("models");
+  // One-shot deep-link (local-model onboarding banner): open straight to the
+  // market tab. Consumed on first boot of the panel.
+  const openMarket = useUiStore((s) => s.localModelsOpenMarket);
+  const setLocalModelsOpenMarket = useUiStore((s) => s.setLocalModelsOpenMarket);
+  useEffect(() => {
+    if (openMarket) {
+      setTab("market");
+      setLocalModelsOpenMarket(false);
+    }
+  }, [openMarket, setLocalModelsOpenMarket]);
+
+  /** Update one model's overrides: patch state immediately, debounce the
+   *  KV write so dragging/typing doesn't hammer the setting. */
+  const setModelOverrides = (id: string, next: LlamaOverrides) => {
+    const map = { ...overridesMapRef.current, [id]: next };
+    overridesMapRef.current = map;
+    setOverridesMap(map);
+    if (overridesPersistTimer.current) window.clearTimeout(overridesPersistTimer.current);
+    overridesPersistTimer.current = window.setTimeout(() => {
+      void setLocalModelOverrides(JSON.stringify(map));
+    }, 600);
+  };
 
   const newChat = useChatStore((s) => s.newChat);
   const setActiveView = useUiStore((s) => s.setActiveView);
@@ -477,6 +505,20 @@ function LocalModelsPanel() {
         }
       }
       if (!stale) setFolders(initialFolders);
+      // Load the persisted runtime-override blob (lenient — corrupt JSON
+      // settles to empty, the backend parses the same way).
+      const blob = await getLocalModelOverrides();
+      if (!stale && blob) {
+        try {
+          const parsed = JSON.parse(blob) as Record<string, LlamaOverrides>;
+          if (parsed && typeof parsed === "object") {
+            overridesMapRef.current = parsed;
+            setOverridesMap(parsed);
+          }
+        } catch {
+          /* corrupt — start empty */
+        }
+      }
       await runScan();
       if (!stale) {
         setLoaded(true);
@@ -524,14 +566,13 @@ function LocalModelsPanel() {
     });
     setStarting((prev) => ({ ...prev, [m.id]: true }));
     try {
-      const overrides = advanced[m.id];
-      const started = await startLocalModel(
-        m.id,
-        m.path,
-        overrides?.ngl,
-        overrides?.ctx,
-        m.mmprojPath,
-      );
+      // Pass the live override entry when one exists (flushes faster than
+      // the debounced KV write); otherwise undefined lets the backend load
+      // the persisted blob itself (which preserves last-good ngl).
+      const live = overridesMapRef.current[m.id];
+      const overrides =
+        live && Object.keys(live).length > 0 ? live : undefined;
+      const started = await startLocalModel(m.id, m.path, m.mmprojPath, overrides);
       if (!started) throw new Error("start_local_model returned null");
       refreshStatus();
       // start_local_model persisted chat.local_gguf.model + chat.active_provider.
@@ -693,7 +734,6 @@ function LocalModelsPanel() {
         {models.map((m) => {
         const ram = classifyRam(m.sizeBytes);
         const err = errors[m.id];
-        const overrides = advanced[m.id] ?? {};
         const isStarting = starting[m.id];
         const isRunning = active?.modelId === m.id;
         const displayName = shortModelName(m.name || m.filename);
@@ -793,34 +833,32 @@ function LocalModelsPanel() {
             <details className="model-advanced">
               <summary>Advanced</summary>
               <div className="model-advanced-fields">
-                <label>
-                  -ngl
-                  <input
-                    type="number"
-                    placeholder="auto"
-                    value={overrides.ngl ?? ""}
-                    onChange={(e) =>
-                      setAdvanced((prev) => ({
-                        ...prev,
-                        [m.id]: { ...prev[m.id], ngl: e.target.value ? Number(e.target.value) : undefined },
-                      }))
-                    }
-                  />
-                </label>
-                <label>
-                  -c
-                  <input
-                    type="number"
-                    placeholder="auto"
-                    value={overrides.ctx ?? ""}
-                    onChange={(e) =>
-                      setAdvanced((prev) => ({
-                        ...prev,
-                        [m.id]: { ...prev[m.id], ctx: e.target.value ? Number(e.target.value) : undefined },
-                      }))
-                    }
-                  />
-                </label>
+                <LlamaAdvancedFields
+                  overrides={overridesMap[m.id] ?? {}}
+                  onChange={(next) => setModelOverrides(m.id, next)}
+                />
+                {active?.modelId === m.id && (
+                  <button
+                    className="ghost"
+                    style={{ padding: "3px 10px", alignSelf: "flex-start" }}
+                    disabled={starting[m.id]}
+                    title="Persist these settings and reload the running model with them"
+                    onClick={() => {
+                      // Flush the debounced persist immediately, then restart.
+                      if (overridesPersistTimer.current) window.clearTimeout(overridesPersistTimer.current);
+                      void setLocalModelOverrides(JSON.stringify(overridesMapRef.current));
+                      setStarting((prev) => ({ ...prev, [m.id]: true }));
+                      void startLocalModel(m.id, m.path, m.mmprojPath, overridesMapRef.current[m.id])
+                        .then(() => refreshStatus())
+                        .catch((err) =>
+                          setErrors((prev) => ({ ...prev, [m.id]: String(err) })),
+                        )
+                        .finally(() => setStarting((prev) => ({ ...prev, [m.id]: false })));
+                    }}
+                  >
+                    {starting[m.id] ? "Restarting…" : "↻ Restart with new settings"}
+                  </button>
+                )}
               </div>
             </details>
           </div>
@@ -834,7 +872,15 @@ function LocalModelsPanel() {
       </>
       )}
       {tab === "market" && (
-        <ModelMarket onDownloadComplete={() => void runScan()} localModels={models} />
+        <ModelMarket
+          onDownloadComplete={() => {
+            void runScan();
+            // First successful download marks local-model onboarding as
+            // seen so the nudge banner never returns.
+            void setSetting("localModels.onboarded", "1").catch(() => {});
+          }}
+          localModels={models}
+        />
       )}
     </>
   );

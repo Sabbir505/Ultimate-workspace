@@ -28,7 +28,7 @@ const MessageBubble = lazy(() => import("./MessageBubble").then((m) => ({ defaul
 // internal `import('mermaid')`); the diff card chunk downloads on first
 // edit-tool call. None of these appear on the empty welcome screen.
 const TaskProgressCard = lazy(() => import("./TaskProgressCard").then((m) => ({ default: m.TaskProgressCard })));
-import { listChatModels, listHarnessModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, deleteEmptyChatSessions, type ChatMessage, type GgufModel, type HarnessModelConfig } from "../../lib/ipc";
+import { listChatModels, listHarnessModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, deleteEmptyChatSessions, getLocalModelOverrides, setLocalModelOverrides, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides } from "../../lib/ipc";
 import { harnessModelCatalog } from "../../lib/harnessModels";
 import { setChatScrollToMessage } from "../../lib/chatScroll";
 import { TurnNavigator } from "./TurnNavigator";
@@ -224,6 +224,42 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   // the session's stored model, since the user may have killed the sidecar
   // manually between sessions).
   const [activeLocalModelId, setActiveLocalModelId] = useState<string | null>(null);
+  // Persisted per-model runtime overrides (`localModels.overrides` blob) —
+  // the single source of truth the backend also reads at spawn time. Loaded
+  // on mount and refreshed after every Apply; a ref mirror keeps the spawn
+  // handlers free of stale closures.
+  const [localOverridesMap, setLocalOverridesMap] = useState<Record<string, LlamaOverrides>>({});
+  const localOverridesMapRef = useRef<Record<string, LlamaOverrides>>({});
+  const refreshLocalOverrides = useCallback(async () => {
+    try {
+      const blob = await getLocalModelOverrides();
+      const map = blob ? (JSON.parse(blob) as Record<string, LlamaOverrides>) : {};
+      localOverridesMapRef.current = map;
+      setLocalOverridesMap(map);
+    } catch {
+      /* best-effort — empty map means "all auto" */
+    }
+  }, []);
+  useEffect(() => {
+    void refreshLocalOverrides();
+  }, [refreshLocalOverrides]);
+  // The active session's local model record, when it resolves in the scan —
+  // gates the inline Advanced runtime editor and provides its spawn args.
+  const activeLocal = useMemo(
+    () =>
+      isLocal && activeSession?.model
+        ? localModels.find((m) => (m.name || m.filename) === activeSession.model) ?? null
+        : null,
+    [isLocal, activeSession?.model, localModels],
+  );
+  /** Slider-ctx merge for one-off spawns: the composer ctx slider wins over
+   *  the persisted ctx when set; no slider → undefined lets the backend load
+   *  the persisted blob itself (incl. last-good ngl). */
+  const ovrWithCtx = useCallback(
+    (id: string): LlamaOverrides | undefined =>
+      localCtx ? { ...(localOverridesMapRef.current[id] ?? {}), ctx: localCtx } : undefined,
+    [localCtx],
+  );
 
   // Fetch the cloud model list (uses the stored key and base URL from
   // Settings). Refetched when the listed provider changes.
@@ -369,7 +405,7 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
         setLocalLoading(true);
         let startErr: string | null = null;
         try {
-          await startLocalModel(localMatch.id, localMatch.path, undefined, localCtx || undefined, localMatch.mmprojPath);
+          await startLocalModel(localMatch.id, localMatch.path, localMatch.mmprojPath, ovrWithCtx(localMatch.id));
         } catch (err) {
           // Keep the failure reason around so the user sees a meaningful
           // error instead of a cryptic 400 on the NEXT send. Two important
@@ -417,7 +453,7 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
       }
       void setSessionModel(activeChatSessionId, model);
     },
-    [activeChatSessionId, setSessionModel, setSessionProvider, isLocal, localModels, localCtx, config?.provider],
+    [activeChatSessionId, setSessionModel, setSessionProvider, isLocal, localModels, ovrWithCtx, config?.provider],
   );
 
   // Apply context-size changes to a running local model: llama-server's -c is
@@ -441,12 +477,38 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
     const t = setTimeout(() => {
       appliedCtxRef.current = localCtx;
       setLocalLoading(true);
-      startLocalModel(match.id, match.path, undefined, localCtx || undefined, match.mmprojPath)
+      startLocalModel(match.id, match.path, match.mmprojPath, ovrWithCtx(match.id))
         .catch((err) => console.warn("restart local model with new ctx failed", err))
         .finally(() => setLocalLoading(false));
     }, 800);
     return () => clearTimeout(t);
-  }, [localCtx, isLocal, activeSession?.model, localModels]);
+  }, [localCtx, isLocal, activeSession?.model, localModels, ovrWithCtx]);
+
+  // "Apply & reload" from the composer's inline Advanced runtime editor:
+  // persist the draft into the overrides blob, then restart the sidecar with
+  // it (start_local_model records the fresh last-good ngl on success).
+  const handleApplyLocalOverrides = useCallback(
+    async (overrides: LlamaOverrides) => {
+      if (!activeLocal) return;
+      setLocalLoading(true);
+      try {
+        const next = { ...localOverridesMapRef.current, [activeLocal.id]: overrides };
+        await setLocalModelOverrides(JSON.stringify(next));
+        localOverridesMapRef.current = next;
+        setLocalOverridesMap(next);
+        await startLocalModel(activeLocal.id, activeLocal.path, activeLocal.mmprojPath, overrides);
+        const status = await localModelStatus();
+        setActiveLocalModelId(status?.modelId ?? null);
+      } catch (err) {
+        useChatStore.setState({
+          error: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        setLocalLoading(false);
+      }
+    },
+    [activeLocal],
+  );
 
   // Eject the running local-model sidecar. Stops the llama-server process
   // (releasing its VRAM), clears the model on the active session so the chat
@@ -983,6 +1045,14 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
         onLocalCtxChange={setLocalCtx}
         onEjectLocalModel={ejectLocalModel}
         localModelActive={isLocal && !!activeLocalModelId}
+        activeLocal={
+          activeLocal
+            ? { id: activeLocal.id, path: activeLocal.path, mmprojPath: activeLocal.mmprojPath }
+            : null
+        }
+        localOverrides={activeLocal ? localOverridesMap[activeLocal.id] : undefined}
+        onApplyLocalOverrides={handleApplyLocalOverrides}
+        applyingOverrides={localLoading}
         usedTokens={usedTokens}
         liveMaxTokens={isLocal ? liveUsage.maxTokens : 0}
         thinking={thinking}

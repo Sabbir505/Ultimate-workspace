@@ -1201,13 +1201,50 @@ export interface ActiveLocalModel {
 export const scanLocalModels = (folder?: string) =>
   safeInvoke<GgufModel[] | null>("scan_local_models", folder ? { folder } : {});
 
-export const startLocalModel = (modelId: string, path: string, ngl?: number, ctx?: number, mmprojPath?: string | null) =>
+/** Per-model llama-server runtime overrides (LM Studio-style tweaks),
+ *  persisted as JSON under the `localModels.overrides` app setting keyed by
+ *  model id. `undefined` everywhere = auto. `lastGoodNgl` is recorded by the
+ *  backend after each successful start ("cached ngl" — restarts skip the
+ *  GPU probe ladder). */
+export interface LlamaOverrides {
+  ngl?: number;
+  ctx?: number;
+  flashAttn?: boolean;
+  /** "f16" | "q8_0" | "q4_0" — K cache; V follows when flashAttn is on. */
+  kvCache?: string;
+  threads?: number;
+  batch?: number;
+  ubatch?: number;
+  parallel?: number;
+  noMmap?: boolean;
+  seed?: number;
+  temp?: number;
+  topP?: number;
+  topK?: number;
+  minP?: number;
+  repeatPenalty?: number;
+  /** Free-form extra llama-server args, whitespace-split. Escape hatch. */
+  extraArgs?: string;
+  lastGoodNgl?: number;
+}
+
+/** Read/write the whole persisted overrides map (`localModels.overrides`). */
+export const getLocalModelOverrides = () =>
+  safeInvoke<string | null>("get_setting", { key: "localModels.overrides" });
+export const setLocalModelOverrides = (blob: string) =>
+  safeInvoke<void>("set_setting", { key: "localModels.overrides", value: blob });
+
+export const startLocalModel = (
+  modelId: string,
+  path: string,
+  mmprojPath?: string | null,
+  overrides?: LlamaOverrides | null,
+) =>
   safeInvoke<StartedModel | null>("start_local_model", {
     modelId,
     path,
-    ngl: ngl ?? null,
-    ctx: ctx ?? null,
     mmprojPath: mmprojPath ?? null,
+    overrides: overrides ?? null,
   });
 
 export const stopLocalModel = (modelId: string) =>
@@ -1605,6 +1642,9 @@ export interface FetchCatalogResult {
   entries: CatalogEntry[];
   hasHuggingFaceToken: boolean;
   defaultModelsDir?: string | null;
+  /** True when huggingface.co was unreachable and a cached copy (any age)
+   *  was served — the UI shows an offline hint instead of an error. */
+  stale?: boolean;
 }
 
 export interface MarketSettings {

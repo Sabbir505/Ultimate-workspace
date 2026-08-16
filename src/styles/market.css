@@ -516,3 +516,10 @@
   font-size: 12px;
   font-weight: 600;
 }
+.model-market-stale {
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warning, #b54708) 14%, transparent);
+  color: var(--warning, #b54708);
+  font-size: 12px;
+}

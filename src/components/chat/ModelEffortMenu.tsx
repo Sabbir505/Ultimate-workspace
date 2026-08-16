@@ -1,10 +1,14 @@
 // Combined model + effort selector for the chat composer. A single pill
 // trigger ("kimi-k2.6 · Medium ▾") opens an upward glass menu listing the
-// fetched models, with a search box to filter them (fuzzy, same matcher as the
-// command palette) and an "Effort" row that expands a side submenu.
+// fetched models, with a search box to filter them (fuzzy, same matcher as
+// the command palette) and an "Effort" row that expands a side submenu. For
+// local models the submenu also hosts the context slider and the full
+// LM Studio-style runtime-tweak editor ("Advanced runtime settings").
 import { useEffect, useMemo, useRef, useState } from "react";
 import { fuzzyFilter, type FuzzyResult } from "../../lib/fuzzy";
 import { shortModelName } from "../../lib/modelLabel";
+import { LlamaAdvancedFields } from "./LlamaAdvancedFields";
+import type { LlamaOverrides } from "../../lib/ipc";
 
 export const EFFORT_LABELS: Record<string, string> = {
   "": "Default",
@@ -44,6 +48,18 @@ interface Props {
   /** True when a local-model sidecar is currently running and the eject
    *  button should be visible on the trigger pill. Defaults to false. */
   localModelActive?: boolean;
+  /** The active local model's spawn record — present only when the session
+   *  is local AND the model resolves in the scanned list. Gates the inline
+   *  Advanced runtime settings editor. */
+  activeLocal?: { id: string; path: string; mmprojPath?: string | null } | null;
+  /** The active local model's persisted runtime overrides (from
+   *  `localModels.overrides`). Seeds the editor draft. */
+  localOverrides?: LlamaOverrides;
+  /** "Apply & reload" — persists the draft and restarts the sidecar with
+   *  it. Wired by ChatView; the menu only manages the draft. */
+  onApplyLocalOverrides?: (overrides: LlamaOverrides) => Promise<void> | void;
+  /** True while the Apply & reload restart is in flight. */
+  applyingOverrides?: boolean;
 }
 
 /** Render `text` with the matched indices from `res` wrapped in <mark>. */
@@ -162,6 +178,10 @@ export function ModelEffortMenu({
   onLocalCtxChange,
   onEjectLocalModel,
   localModelActive,
+  activeLocal,
+  localOverrides,
+  onApplyLocalOverrides,
+  applyingOverrides,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
@@ -170,6 +190,18 @@ export function ModelEffortMenu({
   const searchRef = useRef<HTMLInputElement>(null);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [activeIndex, setActiveIndex] = useState(0);
+  // Advanced runtime tweaks: draft copy of the persisted overrides. Re-seeded
+  // whenever the target model (or its persisted entry) changes; an unapplied
+  // draft is discarded when the menu closes.
+  const [advOpen, setAdvOpen] = useState(false);
+  const [draft, setDraft] = useState<LlamaOverrides>({});
+  useEffect(() => {
+    setDraft(activeLocal ? { ...(localOverrides ?? {}) } : {});
+  }, [activeLocal?.id, localOverrides]);
+  const dirty = useMemo(
+    () => JSON.stringify(draft) !== JSON.stringify(localOverrides ?? {}),
+    [draft, localOverrides],
+  );
 
   // Close on outside pointer.
   useEffect(() => {
@@ -247,7 +279,12 @@ export function ModelEffortMenu({
       requestAnimationFrame(() => searchRef.current?.focus());
     } else {
       setEffortOpen(false);
+      setAdvOpen(false);
+      // Discard an unapplied advanced draft — the persisted entry is the
+      // source of truth, the menu is just an editor.
+      setDraft(activeLocal ? { ...(localOverrides ?? {}) } : {});
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   // Scroll the active item into view during keyboard navigation.
@@ -467,6 +504,51 @@ export function ModelEffortMenu({
                     {value === effort && <span className="model-effort-check">✓</span>}
                   </button>
                 ))}
+                {provider === "local_gguf" && activeLocal && onApplyLocalOverrides && (
+                  <>
+                    <div className="model-effort-divider" />
+                    <div className="model-effort-llama">
+                      <button
+                        type="button"
+                        className="model-effort-item"
+                        aria-expanded={advOpen}
+                        onClick={() => setAdvOpen((a) => !a)}
+                      >
+                        <span>⚙ Advanced runtime settings</span>
+                        <span className="model-effort-current">{advOpen ? "▾" : "▸"}</span>
+                      </button>
+                      {advOpen && (
+                        <>
+                          <LlamaAdvancedFields
+                            variant="menu"
+                            overrides={draft}
+                            onChange={setDraft}
+                          />
+                          <div className="model-effort-llama-actions">
+                            <button
+                              type="button"
+                              className="model-effort-llama-apply"
+                              disabled={applyingOverrides || !dirty}
+                              title={
+                                dirty
+                                  ? "Persist these settings and reload the model with them"
+                                  : "No changes to apply"
+                              }
+                              onClick={() => void onApplyLocalOverrides(draft)}
+                            >
+                              {applyingOverrides ? "Applying…" : "Apply & reload"}
+                            </button>
+                            {dirty && (
+                              <span className="model-effort-llama-hint">
+                                unsaved — closing the menu discards
+                              </span>
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </>
+                )}
                 {provider === "local_gguf" && onLocalCtxChange && (
                   <>
                     <div className="model-effort-divider" />

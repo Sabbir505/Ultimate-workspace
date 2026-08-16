@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 
 // ---- GGUF scanner types ----
 
@@ -432,17 +433,172 @@ impl LocalModelRegistry {
             handles: Mutex::new(HashMap::new()),
         }
     }
+}
 
+// ---- LM Studio-style runtime overrides (persisted per model) ----
+
+/// App-settings key holding the JSON `Record<modelId, LlamaOverrides>`
+/// blob. Written by the frontend (settings panel + composer Apply), read
+/// by every spawn path; `last_good_ngl` inside each entry is written by
+/// the backend after a successful start.
+pub const OVERRIDES_KEY: &str = "localModels.overrides";
+
+/// Per-model llama-server runtime overrides — the LM Studio "runtime
+/// settings" analog. `None` everywhere means "auto". `last_good_ngl` is
+/// never user-set: the backend records the GPU-layer count of the last
+/// successful start so respawns skip the probe ladder.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlamaOverrides {
+    /// GPU layers (`--n-gpu-layers`). None = auto (last-good, else probe).
+    pub ngl: Option<i32>,
+    /// Context size (`-c`). None = auto-tiered by GGUF size.
+    pub ctx: Option<u32>,
+    /// Opt-in `--flash-attn` — unsupported builds fail the health-check
+    /// at runtime, so it stays off by default.
+    pub flash_attn: Option<bool>,
+    /// KV-cache quant for the K cache: "f16" | "q8_0" | "q4_0" (V cache
+    /// follows when flash-attn is on; llama.cpp requires FA for V quant).
+    pub kv_cache: Option<String>,
+    pub threads: Option<i32>,
+    pub batch: Option<u32>,
+    pub ubatch: Option<u32>,
+    pub parallel: Option<u32>,
+    pub no_mmap: Option<bool>,
+    pub seed: Option<i64>,
+    // Sampler defaults applied server-side (per-request values still win).
+    pub temp: Option<f32>,
+    pub top_p: Option<f32>,
+    pub top_k: Option<i32>,
+    pub min_p: Option<f32>,
+    pub repeat_penalty: Option<f32>,
+    /// Free-form extra args, whitespace-split and appended verbatim —
+    /// the power-user escape hatch for flags we don't surface.
+    pub extra_args: Option<String>,
+    /// Auto-recorded ngl of the last successful start (backend-written).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_good_ngl: Option<i32>,
+}
+
+/// Append the override flags to a llama-server arg list. Order-stable and
+/// idempotent per flag (retains removes any stale copy first, mirroring
+/// how `--n-gpu-layers` is handled by the ladder). Unknown kv-cache
+/// values are skipped rather than risking a bad flag.
+pub fn apply_overrides_args(args: &mut Vec<String>, o: &LlamaOverrides) {
+    let mut push = |flag: &str, val: String, args: &mut Vec<String>| {
+        args.retain(|a| a != flag);
+        args.push(flag.to_string());
+        args.push(val);
+    };
+    if o.flash_attn == Some(true) {
+        args.retain(|a| a != "--flash-attn");
+        args.push("--flash-attn".to_string());
+    }
+    if let Some(kv) = o.kv_cache.as_deref() {
+        if matches!(kv, "f16" | "q8_0" | "q4_0") {
+            push("--cache-type-k", kv.to_string(), args);
+            // V-cache quant requires flash attention; only mirror it when
+            // FA is on so CPU/unpadded builds never get a rejected flag.
+            if o.flash_attn == Some(true) {
+                push("--cache-type-v", kv.to_string(), args);
+            }
+        }
+    }
+    if let Some(v) = o.threads {
+        push("--threads", v.to_string(), args);
+    }
+    if let Some(v) = o.batch {
+        push("--batch", v.to_string(), args);
+    }
+    if let Some(v) = o.ubatch {
+        push("--ubatch", v.to_string(), args);
+    }
+    if let Some(v) = o.parallel {
+        push("--parallel", v.to_string(), args);
+    }
+    if o.no_mmap == Some(true) {
+        args.retain(|a| a != "--no-mmap");
+        args.push("--no-mmap".to_string());
+    }
+    if let Some(v) = o.seed {
+        push("--seed", v.to_string(), args);
+    }
+    if let Some(v) = o.temp {
+        push("--temp", format!("{v}"), args);
+    }
+    if let Some(v) = o.top_p {
+        push("--top-p", format!("{v}"), args);
+    }
+    if let Some(v) = o.top_k {
+        push("--top-k", v.to_string(), args);
+    }
+    if let Some(v) = o.min_p {
+        push("--min-p", format!("{v}"), args);
+    }
+    if let Some(v) = o.repeat_penalty {
+        push("--repeat-penalty", format!("{v}"), args);
+    }
+    if let Some(extra) = o.extra_args.as_deref() {
+        for tok in extra.split_whitespace() {
+            args.push(tok.to_string());
+        }
+    }
+}
+
+/// The GPU-layer attempt ladder: the preferred rung (user override →
+/// last-good → auto probe) followed by the fixed 64→32→16→8→4→0
+/// fallback, deduped (e.g. user ngl=32 mustn't try 32 twice).
+pub fn build_ngl_ladder(preferred: i32) -> Vec<i32> {
+    let mut seen = std::collections::HashSet::new();
+    [preferred, 64, 32, 16, 8, 4, 0]
+        .into_iter()
+        .filter(|x| seen.insert(*x))
+        .collect()
+}
+
+/// Read the whole persisted overrides map. Corrupt/missing JSON settles
+/// to an empty map — overrides are ergonomics, never a hard failure.
+pub fn load_overrides_map(conn: &rusqlite::Connection) -> HashMap<String, LlamaOverrides> {
+    crate::db::get_setting(conn, OVERRIDES_KEY)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
+}
+
+/// The persisted overrides for one model (default when absent).
+pub fn load_overrides(conn: &rusqlite::Connection, model_id: &str) -> LlamaOverrides {
+    load_overrides_map(conn)
+        .get(model_id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Record the ngl of a successful start into the persisted blob so the
+/// next spawn starts there instead of re-probing. Best-effort: failures
+/// only log.
+pub fn save_last_good_ngl(conn: &rusqlite::Connection, model_id: &str, ngl: i32) {
+    let mut map = load_overrides_map(conn);
+    let entry = map.entry(model_id.to_string()).or_default();
+    entry.last_good_ngl = Some(ngl);
+    if let Ok(json) = serde_json::to_string(&map) {
+        if let Err(e) = crate::db::set_setting(conn, OVERRIDES_KEY, &json) {
+            eprintln!("[local-models] failed to persist last-good ngl: {e:?}");
+        }
+    }
+}
+
+impl LocalModelRegistry {
     /// Start a llama-server sidecar for the given model. Stops any existing
     /// CHAT sidecar first (v1: one chat model at a time; the embedding
-    /// sidecar is independent and keeps running).
+    /// sidecar is independent and keeps running). `overrides` carries the
+    /// user's persisted per-model runtime tweaks; None = defaults.
     pub async fn start(
         &self,
         model_id: String,
         gguf_path: &str,
-        ngl_override: Option<i32>,
-        ctx_override: Option<u32>,
         mmproj_path: Option<&str>,
+        overrides: Option<&LlamaOverrides>,
     ) -> Result<StartedModel, String> {
         // Stop any running chat sidecar.
         self.stop_kind(SidecarKind::Chat).await;
@@ -461,11 +617,18 @@ impl LocalModelRegistry {
         let port = listener.local_addr().map_err(|e| format!("local addr: {e}"))?.port();
         drop(listener);
 
-        // Auto-detect GPU layers (now GGUF+VRAM-aware).
-        let ngl = ngl_override.unwrap_or_else(|| auto_ngl(gguf_path));
+        // GPU layers: user override → last successful count → auto probe.
+        // The last-good rung is the "cached ngl" — a restart that previously
+        // settled at, say, 40 layers starts there (one spawn+health-check)
+        // instead of re-running the full probe ladder.
+        let ovr = overrides.cloned().unwrap_or_default();
+        let ngl = ovr
+            .ngl
+            .or(ovr.last_good_ngl)
+            .unwrap_or_else(|| auto_ngl(gguf_path));
 
         // Auto-pick context size.
-        let ctx = ctx_override.unwrap_or_else(|| auto_ctx_size(gguf_path));
+        let ctx = ovr.ctx.unwrap_or_else(|| auto_ctx_size(gguf_path));
 
         // Spawn llama-server. We deliberately do NOT pass `--flash-attn`: it is
         // a perf optimization, not required for correctness, and support varies
@@ -500,13 +663,18 @@ impl LocalModelRegistry {
             }
             v
         };
+        // Fold in the user's runtime tweaks (FA, KV quant, threads, batch,
+        // sampler defaults, extra args…). Runs on the template so every
+        // ladder attempt inherits them.
+        apply_overrides_args(&mut args_template, &ovr);
 
         // Stepwise GPU-fallback ladder. We start with the smart-picked (or
-        // user-override) ngl, then descend through 64 → 32 → 16 → 8 → 4 → 0
-        // on OOM. Each step is a full spawn+health-check cycle. This handles
-        // the case where the smart pick overshot (e.g., the VRAM probe
-        // underestimated system VRAM usage at load time, or llama.cpp's
-        // allocator rejected the requested count for fragmentation reasons).
+        // user-override / last-good) ngl, then descend through 64 → 32 → 16
+        // → 8 → 4 → 0 on OOM. Each step is a full spawn+health-check cycle.
+        // This handles the case where the smart pick overshot (e.g., the
+        // VRAM probe underestimated system VRAM usage at load time, or
+        // llama.cpp's allocator rejected the requested count for
+        // fragmentation reasons).
         //
         // Why linear and not binary search? llama.cpp's allocation behavior
         // isn't strictly monotonic with --n-gpu-layers: a model may fail at
@@ -522,17 +690,9 @@ impl LocalModelRegistry {
             "out of memory",
         ];
 
-        // Build the attempt ladder. Dedupe (e.g., user_ngl=32 mustn't try 32 twice).
-        let ladder_raw: Vec<i32> = if let Some(user_ngl) = ngl_override {
-            vec![user_ngl, 64, 32, 16, 8, 4, 0]
-        } else {
-            vec![ngl, 64, 32, 16, 8, 4, 0]
-        };
-        let mut seen = std::collections::HashSet::new();
-        let attempt_ngls: Vec<i32> = ladder_raw
-            .into_iter()
-            .filter(|x| seen.insert(*x))
-            .collect();
+        // Build the attempt ladder (deduped: a user/last-good ngl that is
+        // already a fallback rung mustn't be tried twice).
+        let attempt_ngls: Vec<i32> = build_ngl_ladder(ngl);
 
         for (attempt_idx, try_ngl) in attempt_ngls.iter().enumerate() {
             let try_ngl = *try_ngl;
@@ -1672,6 +1832,97 @@ mod scanner_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ngl_ladder_dedupes_and_orders() {
+        // Auto probe (999) leads, full fallback follows.
+        assert_eq!(build_ngl_ladder(999), vec![999, 64, 32, 16, 8, 4, 0]);
+        // A user/last-good rung that is also a fallback rung mustn't repeat.
+        assert_eq!(build_ngl_ladder(32), vec![32, 64, 16, 8, 4, 0]);
+        assert_eq!(build_ngl_ladder(0), vec![0, 64, 32, 16, 8, 4]);
+    }
+
+    #[test]
+    fn overrides_args_spell_each_flag_once() {
+        let o = LlamaOverrides {
+            flash_attn: Some(true),
+            kv_cache: Some("q8_0".into()),
+            threads: Some(8),
+            batch: Some(512),
+            ubatch: Some(128),
+            parallel: Some(2),
+            no_mmap: Some(true),
+            seed: Some(42),
+            temp: Some(0.7),
+            top_p: Some(0.9),
+            top_k: Some(40),
+            min_p: Some(0.05),
+            repeat_penalty: Some(1.1),
+            extra_args: Some("--foo bar".into()),
+            ..Default::default()
+        };
+        // Pre-existing stale flag values must be replaced, not duplicated.
+        let mut args = vec!["--model".to_string(), "x.gguf".into(), "--threads".into(), "4".into()];
+        apply_overrides_args(&mut args, &o);
+        assert_eq!(args.iter().filter(|a| *a == "--threads").count(), 1);
+        let idx = args.iter().position(|a| a == "--threads").unwrap();
+        assert_eq!(args[idx + 1], "8");
+        for flag in [
+            "--flash-attn",
+            "--cache-type-k",
+            "--cache-type-v",
+            "--batch",
+            "--ubatch",
+            "--parallel",
+            "--no-mmap",
+            "--seed",
+            "--temp",
+            "--top-p",
+            "--top-k",
+            "--min-p",
+            "--repeat-penalty",
+        ] {
+            assert!(args.iter().any(|a| a == flag), "missing {flag}");
+        }
+        assert!(args.windows(2).any(|w| w[0] == "--cache-type-k" && w[1] == "q8_0"));
+        // Extra args are split on whitespace and appended verbatim.
+        assert!(args.iter().any(|a| a == "--foo"));
+        assert!(args.iter().any(|a| a == "bar"));
+    }
+
+    #[test]
+    fn overrides_args_skip_unknown_kv_and_gate_v_on_fa() {
+        let mut args = vec![];
+        apply_overrides_args(&mut args, &LlamaOverrides { kv_cache: Some("bogus".into()), ..Default::default() });
+        assert!(args.is_empty(), "unknown kv value skipped entirely");
+
+        let mut args = vec![];
+        apply_overrides_args(&mut args, &LlamaOverrides { kv_cache: Some("q4_0".into()), ..Default::default() });
+        assert!(args.iter().any(|a| a == "--cache-type-k"));
+        assert!(!args.iter().any(|a| a == "--cache-type-v"), "V quant requires FA");
+
+        let mut args = vec![];
+        apply_overrides_args(&mut args, &LlamaOverrides { flash_attn: Some(false), ..Default::default() });
+        assert!(args.is_empty(), "explicit false stays off");
+    }
+
+    #[test]
+    fn overrides_persist_round_trip_merge_and_lenient_parse() {
+        let conn = crate::db::mem();
+        assert!(load_overrides(&conn, "m1").ngl.is_none());
+        save_last_good_ngl(&conn, "m1", 40);
+        assert_eq!(load_overrides(&conn, "m1").last_good_ngl, Some(40));
+
+        // Merge preserves sibling models and their fields.
+        crate::db::set_setting(&conn, OVERRIDES_KEY, r#"{"m2":{"ngl":8}}"#).unwrap();
+        save_last_good_ngl(&conn, "m1", 12);
+        assert_eq!(load_overrides(&conn, "m2").ngl, Some(8));
+        assert_eq!(load_overrides(&conn, "m1").last_good_ngl, Some(12));
+
+        // Corrupt blob settles to an empty map, never panics.
+        crate::db::set_setting(&conn, OVERRIDES_KEY, "not json").unwrap();
+        assert!(load_overrides_map(&conn).is_empty());
+    }
 
     #[test]
     fn embedding_arches_are_recognized() {

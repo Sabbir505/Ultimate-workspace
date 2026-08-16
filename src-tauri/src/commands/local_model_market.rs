@@ -109,6 +109,68 @@ pub struct FetchCatalogResult {
     /// Default directory where new models will be saved (if not yet
     /// persisted, the user hasn't picked one — UI shows the picker).
     pub default_models_dir: Option<String>,
+    /// True when this response came from the cache because huggingface.co
+    /// was unreachable — the data may be older than the TTL. The UI shows
+    /// an offline hint instead of a dead error banner.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stale: bool,
+}
+
+// ---- In-memory catalog cache ----
+
+/// Cache key: the exact request shape plus token presence (a token can see
+/// gated models an anonymous request can't, so the two must never mix).
+type CatalogCacheKey = (String, String, u32, bool);
+
+#[derive(Clone)]
+struct CatalogCacheEntry {
+    fetched_at: std::time::Instant,
+    result: FetchCatalogResult,
+}
+
+/// How long a cached catalog response is served without revalidation. The
+/// Market tab remounts on every settings-tab switch; without this each
+/// remount hits huggingface.co live.
+const CATALOG_CACHE_TTL_SECS: u64 = 600;
+
+static CATALOG_CACHE: std::sync::LazyLock<Mutex<HashMap<CatalogCacheKey, CatalogCacheEntry>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Pure freshness check (unit-testable without touching the clock).
+fn catalog_cache_fresh(fetched_at: std::time::Instant, now: std::time::Instant) -> bool {
+    now.duration_since(fetched_at).as_secs() < CATALOG_CACHE_TTL_SECS
+}
+
+fn catalog_cache_get(key: &CatalogCacheKey) -> Option<FetchCatalogResult> {
+    let cache = CATALOG_CACHE.lock();
+    let hit = cache.get(key)?;
+    if catalog_cache_fresh(hit.fetched_at, std::time::Instant::now()) {
+        Some(hit.result.clone())
+    } else {
+        None
+    }
+}
+
+/// Any-age lookup for the stale-on-error fallback (marked `stale: true`).
+fn catalog_cache_stale_get(key: &CatalogCacheKey) -> Option<FetchCatalogResult> {
+    let mut cache = CATALOG_CACHE.lock();
+    let hit = cache.get_mut(key)?;
+    let mut result = hit.result.clone();
+    result.stale = true;
+    // Refresh the timestamp so repeated offline reloads keep hitting this
+    // entry instead of erroring after the TTL.
+    hit.fetched_at = std::time::Instant::now();
+    Some(result)
+}
+
+fn catalog_cache_put(key: CatalogCacheKey, result: FetchCatalogResult) {
+    CATALOG_CACHE.lock().insert(
+        key,
+        CatalogCacheEntry {
+            fetched_at: std::time::Instant::now(),
+            result,
+        },
+    );
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -467,6 +529,15 @@ pub async fn fetch_model_catalog(
     let query = query.unwrap_or_default();
     let sort = sort.unwrap_or_else(|| "downloads".to_string());
 
+    // Fresh cache hit → serve it (with the CURRENT token/dir flags patched
+    // in, so a mid-session setting change isn't masked by the cache).
+    let cache_key: CatalogCacheKey = (query.clone(), sort.clone(), limit, token.is_some());
+    if let Some(mut hit) = catalog_cache_get(&cache_key) {
+        hit.has_hugging_face_token = token.is_some();
+        hit.default_models_dir = default_models_dir.clone();
+        return Ok(hit);
+    }
+
     let client = http_client();
 
     // full=true is required to get the `siblings` file list for each model
@@ -493,12 +564,21 @@ pub async fn fetch_model_catalog(
     };
 
     let mut entries: Vec<CatalogEntry> = Vec::new();
-    let resp = build_hf_request(&client, &url, token.as_deref())
-        .send()
-        .await
-        .map_err(|e| format!("HF catalog request failed: {e}"))?;
+    let resp = match build_hf_request(&client, &url, token.as_deref()).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            // Network failure: a cached copy of any age beats a dead banner.
+            if let Some(stale) = catalog_cache_stale_get(&cache_key) {
+                return Ok(stale);
+            }
+            return Err(format!("HF catalog request failed: {e}"));
+        }
+    };
     let status = resp.status();
     if !status.is_success() {
+        if let Some(stale) = catalog_cache_stale_get(&cache_key) {
+            return Ok(stale);
+        }
         return Err(format!("HF returned HTTP {status} for catalog"));
     }
     let models: Vec<HfModel> = resp
@@ -511,11 +591,14 @@ pub async fn fetch_model_catalog(
     }
     entries.truncate(limit as usize);
 
-    Ok(FetchCatalogResult {
+    let result = FetchCatalogResult {
         entries,
         has_hugging_face_token: token.is_some(),
         default_models_dir,
-    })
+        stale: false,
+    };
+    catalog_cache_put(cache_key, result.clone());
+    Ok(result)
 }
 
 /// GPU VRAM info for the model-market size gate. Returns the largest dedicated
@@ -1536,16 +1619,63 @@ mod tests {
     // (just exercises the JSON shape so a serialization regression shows up)
 
     #[test]
+    fn catalog_cache_freshness_boundary() {
+        let now = std::time::Instant::now();
+        assert!(catalog_cache_fresh(now, now));
+        // Instant supports Sub<Duration>, so an "old" timestamp is easy.
+        let old = now - std::time::Duration::from_secs(CATALOG_CACHE_TTL_SECS + 1);
+        assert!(!catalog_cache_fresh(old, now));
+        let edge = now - std::time::Duration::from_secs(CATALOG_CACHE_TTL_SECS);
+        assert!(!catalog_cache_fresh(edge, now), "TTL boundary counts as expired");
+    }
+
+    #[test]
+    fn catalog_cache_stale_get_marks_and_extends() {
+        // Unique key so the shared static can't race other cache tests.
+        let key: CatalogCacheKey = ("stale-test".into(), "downloads".into(), 7, false);
+        catalog_cache_put(
+            key.clone(),
+            FetchCatalogResult {
+                entries: vec![],
+                has_hugging_face_token: false,
+                default_models_dir: None,
+                stale: false,
+            },
+        );
+        let fresh = catalog_cache_get(&key).expect("just inserted is fresh");
+        assert!(!fresh.stale);
+        // Age it past the TTL, then the stale-on-error path serves it marked.
+        {
+            let mut cache = CATALOG_CACHE.lock();
+            cache.get_mut(&key).unwrap().fetched_at =
+                std::time::Instant::now() - std::time::Duration::from_secs(CATALOG_CACHE_TTL_SECS + 5);
+        }
+        assert!(catalog_cache_get(&key).is_none(), "expired entry is not fresh");
+        let stale = catalog_cache_stale_get(&key).expect("expired entry still serves stale");
+        assert!(stale.stale);
+        // The stale path refreshed the timestamp, so it now reads fresh again
+        // (repeated offline reloads keep working instead of erroring).
+        let again = catalog_cache_get(&key).expect("refreshed by stale hit");
+        assert!(!again.stale);
+    }
+
+    #[test]
     fn fetch_catalog_result_serializes_camel_case() {
         let r = FetchCatalogResult {
             entries: vec![],
             has_hugging_face_token: true,
             default_models_dir: Some("/tmp/models".to_string()),
+            stale: false,
         };
         let s = serde_json::to_string(&r).unwrap();
         let v: HashMap<String, serde_json::Value> = serde_json::from_str(&s).unwrap();
         assert!(v.contains_key("hasHuggingFaceToken"));
         assert!(v.contains_key("defaultModelsDir"));
+        // `stale` is skipped when false — only an offline-served copy carries it.
+        assert!(!v.contains_key("stale"));
+        let stale_r = FetchCatalogResult { stale: true, ..r };
+        let s2 = serde_json::to_string(&stale_r).unwrap();
+        assert!(s2.contains("\"stale\":true"));
         // camelCase verified.
     }
 

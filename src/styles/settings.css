@@ -578,3 +578,79 @@
 .theme-token-chip span {
   color: var(--text-dim);
 }
+
+/* ---- Llama runtime overrides (shared: settings panel + composer menu) ---- */
+.llama-advanced {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+.llama-advanced-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  gap: 8px 10px;
+}
+.llama-advanced-menu .llama-advanced-grid {
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px 8px;
+}
+.llama-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.llama-field-label {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.llama-field input[type="number"],
+.llama-field input[type="text"],
+.llama-field select {
+  width: 100%;
+  padding: 4px 7px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--surface-raised, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs, 8px);
+}
+.llama-field input:focus,
+.llama-field select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.llama-field input[type="checkbox"] {
+  width: auto;
+  align-self: flex-start;
+  margin-top: 2px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.llama-field-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+.llama-field-check .llama-field-label {
+  white-space: normal;
+}
+.llama-field-wide {
+  grid-column: 1 / -1;
+}
+.llama-advanced-sub {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+  padding-top: 7px;
+}
+.llama-advanced-note {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  font-style: italic;
+}

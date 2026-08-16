@@ -80,6 +80,10 @@ export interface UiState {
    *  (e.g. "connectors" from the sidebar's Connectors row). SettingsView
    *  consumes and clears it. */
   settingsCategory: string | null;
+  /** One-shot deep-link consumed by the Local Models settings panel: open
+   *  directly on the "market" tab (used by the local-model onboarding
+   *  banner). Cleared after the first consume. */
+  localModelsOpenMarket: boolean;
   /** When true, the Changes (diff) panel is hidden and replaced with a
    *  thin restore strip (matches the browser pane's minimize UX). */
   diffPanelCollapsed: boolean;
@@ -133,6 +137,7 @@ export interface UiState {
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebar: () => void;
   setSettingsCategory: (category: string | null) => void;
+  setLocalModelsOpenMarket: (open: boolean) => void;
   setDiffPanelCollapsed: (collapsed: boolean) => void;
   toggleDiffPanel: () => void;
   setDiffPanelWidth: (width: number) => void;
@@ -204,6 +209,7 @@ export const useUiStore = create<UiState>((set) => ({
   gitPromptProjectId: null,
   sidebarCollapsed: false,
   settingsCategory: null,
+  localModelsOpenMarket: false,
   modalOpen: false,
   openModalIds: [],
   diffPanelCollapsed: false,
@@ -266,6 +272,7 @@ export const useUiStore = create<UiState>((set) => ({
   setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   setSettingsCategory: (settingsCategory) => set({ settingsCategory }),
+  setLocalModelsOpenMarket: (localModelsOpenMarket) => set({ localModelsOpenMarket }),
   setDiffPanelCollapsed: (diffPanelCollapsed) => set({ diffPanelCollapsed }),
   toggleDiffPanel: () => set((s) => ({ diffPanelCollapsed: !s.diffPanelCollapsed })),
   setDiffPanelWidth: (diffPanelWidth) => set({ diffPanelWidth: Math.max(180, Math.min(720, diffPanelWidth)) }),

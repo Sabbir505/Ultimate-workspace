@@ -16,7 +16,7 @@ import { BranchDropdown } from "./BranchDropdown";
 import { useUiStore } from "../../state/ui";
 import { useChatStore } from "../../state/chat";
 import { useProjectsStore } from "../../state/projects";
-import { listChatSkills, listPromptTemplates, templateVariables, fillTemplate, transcribeAudio, type PromptTemplate } from "../../lib/ipc";
+import { listChatSkills, listPromptTemplates, templateVariables, fillTemplate, transcribeAudio, type PromptTemplate, type LlamaOverrides } from "../../lib/ipc";
 
 const MAX_TEXT_BYTES = 512 * 1024;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
@@ -428,6 +428,13 @@ interface Props {
   /** True when a local-model sidecar is currently running — the model pill
    *  shows an ⏏ button when this is set. Defaults to false. */
   localModelActive?: boolean;
+  /** Active local model's spawn record + persisted runtime overrides, and
+   *  the Apply handler — threaded to ModelEffortMenu's inline Advanced
+   *  runtime settings editor. */
+  activeLocal?: { id: string; path: string; mmprojPath?: string | null } | null;
+  localOverrides?: LlamaOverrides;
+  onApplyLocalOverrides?: (overrides: LlamaOverrides) => Promise<void> | void;
+  applyingOverrides?: boolean;
   /** Per-session extended-thinking toggle. `null` (default) lets the provider
    *  decide; `true` / `false` forces it. Hidden entirely when the active
    *  provider is one that doesn't expose thinking (e.g. plain OpenAI). */
@@ -471,6 +478,10 @@ export function ChatComposer({
   onLocalCtxChange,
   onEjectLocalModel,
   localModelActive,
+  activeLocal,
+  localOverrides,
+  onApplyLocalOverrides,
+  applyingOverrides,
   usedTokens,
   liveMaxTokens,
   thinking,
@@ -1200,6 +1211,10 @@ export function ChatComposer({
               onLocalCtxChange={onLocalCtxChange}
               onEjectLocalModel={onEjectLocalModel}
               localModelActive={localModelActive}
+              activeLocal={activeLocal}
+              localOverrides={localOverrides}
+              onApplyLocalOverrides={onApplyLocalOverrides}
+              applyingOverrides={applyingOverrides}
             />
           )}
           <div className="composer-send-wrap">

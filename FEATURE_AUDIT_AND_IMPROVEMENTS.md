@@ -36,17 +36,16 @@ Each section: **what exists** → **what's weak/missing** → **concrete improve
 
 ### 1.2 Permission & approval system
 
-**Exists:** Four modes (`read_only` / `manual` / `auto_edit` / `full_auto`) persisted per session on `chat_sessions.permission_mode`; per-session granted roots with junction/symlink-safe containment (fixed in Round 2); approval oneshot + `chat:approval-request` + `resolve_tool_action`; delete_file and run_shell always gated; connector writes gated, reads auto.
+**Exists:** Four modes (`read_only` / `manual` / `auto_edit` / `full_auto`) persisted per session on `chat_sessions.permission_mode`; per-session granted roots with junction/symlink-safe containment (fixed in Round 2); approval oneshot + `chat:approval-request` + `resolve_tool_action`; delete_file and run_shell always gated; connector writes gated, reads auto. **Wired end-to-end** (`ff0b812f`): `PermissionModeMenu` in the composer footer (builtin/local/Claude Code sessions), `ApprovalCard` + `FullAutoConfirmModal`, approval rules engine (`8757a8b6`, roadmap #8 — "always allow tool+glob" KV rules + settings panel + capture on the card), and a Claude Code `can_use_tool` stdio relay so headless Claude asks surface as normal approval cards.
 
 **Weak/missing:**
-- `ApprovalFlow.tsx` and `PermissionModeMenu.tsx` are **dead files on disk** — the permission UI was removed; headless CLI chat always runs full-auto. The backend is fully live for built-in chat, but there is **no UI to change modes** — the most misleading gap in the product (OVERVIEW #1).
-- No **per-tool or per-path memory** ("always allow write in src/"), no approval rules like Cline's auto-approve matrix.
-- Headless CLI chat has **zero** approval surface — an agent can `rm -rf` inside a project with no guardrail beyond the harness's own `--dangerously-skip-permissions`.
+- Kimi/OpenCode/ACP headless runs have **no approval channel** (kimi `-p` auto-approves; `opencode run` can't surface an ask; ACP v1 doesn't map permissions) — they always run full-auto; the mode menu is hidden for them.
+- Mobile can approve/deny relayed requests but has no permission-mode picker (declined 2026-08-16 as post-P0 polish).
 
 **To best level:**
-1. **Ship or remove.** Rebuild a minimal mode picker in the composer (cycle button) + approval card UI, or delete the dead files and the column. Decide per the on-hold H2 decision.
-2. Approval rules engine: remember "allow once / allow for session / always allow this tool+path-glob" per session and per project; a rules editor in Settings.
-3. For harness chat: intercept `run_shell`-equivalent destructive patterns via the bundle config (deny-list in the per-project harness settings) rather than blind `--dangerously-skip-permissions`, or add a per-automation permission profile.
+1. ~~**Ship or remove.**~~ **DONE** (`ff0b812f`).
+2. ~~Approval rules engine~~ **DONE** (`8757a8b6`, roadmap #8).
+3. For Kimi/OpenCode harness chat: intercept `run_shell`-equivalent destructive patterns via the bundle config (deny-list in the per-project harness settings), or add a per-automation permission profile.
 
 ### 1.3 Harness agents (chat-first) + optional interactive terminal panes
 

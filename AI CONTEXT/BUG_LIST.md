@@ -4,7 +4,7 @@ Whole-project audit of Conduit (Rust backend `src-tauri/` + React frontend `src/
 67 findings from 7 parallel audit passes. Fix order: critical → high → medium → low.
 Mark items `[x]` as fixed; add a note with the fix commit/approach.
 
-**Status: 68/69 fixed** (all Critical + all High except H2-on-hold; C1, C2, C3, H12, L12, L13 — it.2; H1, H15 — it.3; H3, H4, H5 — it.4; H6+L18, H7, H8 — it.5; H9, H10, H11 — it.6; H13, H14, H16, H17 — it.7; M1, M2, M3, M4 — it.8; M5, M6, M7, M8, B1 — it.9; M9+L17, M10, M11, M12 — it.10; M13, M14, M15, M16 — it.11; M17, M18, M19, M20 — it.12; M21, M22+M25, M23, M24 — it.13; M26, M27, M28+M29+L11, L1, L2, L3, L4, L5, L6+L19, L7, L8, L9, L10, L14, L15, L16, B2 — it.14)
+**Status: 69/69 fixed** (H2 resolved by the permission rewire `ff0b812f`; C1, C2, C3, H12, L12, L13 — it.2; H1, H15 — it.3; H3, H4, H5 — it.4; H6+L18, H7, H8 — it.5; H9, H10, H11 — it.6; H13, H14, H16, H17 — it.7; M1, M2, M3, M4 — it.8; M5, M6, M7, M8, B1 — it.9; M9+L17, M10, M11, M12 — it.10; M13, M14, M15, M16 — it.11; M17, M18, M19, M20 — it.12; M21, M22+M25, M23, M24 — it.13; M26, M27, M28+M29+L11, L1, L2, L3, L4, L5, L6+L19, L7, L8, L9, L10, L14, L15, L16, B2 — it.14)
 
 ---
 
@@ -26,11 +26,8 @@ Mark items `[x]` as fixed; add a note with the fix commit/approach.
 - [x] **H1. Granted-root containment uses raw prefix match — sibling dirs pass** — `src-tauri/src/chat/permission.rs:364`
   **FIXED:** segment-boundary match (`needle == root || needle.starts_with(root + "/")`) + regression test `granted_root_requires_segment_boundary`. 27 permission tests pass.
 
-- [ ] **H2. Session permission mode hardcoded to FullAuto** — `src-tauri/src/chat/commands.rs:1213` (also `mobile/session_chat.rs:274`)
-  `PermissionMode::from_db` has no caller; no `permission_mode` column. Every send runs FullAuto: write/edit/move/copy/download auto-run inside fs_roots with no approval.
-  ⚠️ Possibly intentional WIP — `ApprovalFlow.tsx` and `PermissionModeMenu.tsx` were deleted in the working tree. VERIFY WITH USER before "fixing".
-  **Fix (if bug):** persist permission_mode per session, load via `from_db`, default Manual.
-  **ON HOLD (user decision 2026-08-08):** FullAuto is intentional while the approval UX is being reworked — do not "fix".
+- [x] **H2. Session permission mode hardcoded to FullAuto** — `src-tauri/src/chat/commands.rs:1213` (also `mobile/session_chat.rs:274`)
+  **FIXED (was ON HOLD):** the permission rewire (`ff0b812f`, 2026-08-15) shipped the intended design — `chat_sessions.permission_mode` column (default `manual`), `PermissionMode::from_db` fail-closed load at send time (`chat/commands.rs:1103`), `update_chat_session_permission_mode` IPC, the `PermissionModeMenu` + `ApprovalCard`/`FullAutoConfirmModal` UI, the approval-rules engine, and the Claude Code `can_use_tool` stdio relay. Automations/headless one-shots remain intentionally full-auto (unattended turns can't answer prompts).
 
 - [x] **H3. Non-tool streaming path has no partial-line buffering — split SSE lines abort the turn** — `src-tauri/src/chat/mod.rs:414`
   **FIXED:** `pending` carry-over buffer; only newline-terminated lines reach `parse_sse_chunk` (mirrors streaming.rs rounds). EOF flush parses a final unterminated line (preserves pre-fix `str::lines` behavior) but tolerates its failure instead of killing a completed turn.
@@ -200,7 +197,7 @@ Mark items `[x]` as fixed; add a note with the fix commit/approach.
 ---
 
 ## Notes
-- H2 on hold per user decision (2026-08-08): FullAuto is intentional WIP while the approval UX is reworked — do not fix.
+- H2 resolved by the permission rewire (`ff0b812f`, 2026-08-15): per-session `permission_mode` wired end-to-end; the 2026-08-08 "keep FullAuto" hold applied only while the approval UX was being reworked.
 - L12/L13 share one root cause; H1/H15 same bug class (path prefix boundary) in different modules — fixed together.
 - L18 folded into H6.
 - Frontend test suite exists (`npm test` / vitest); Rust has `cargo test`. Run relevant subset after each fix.

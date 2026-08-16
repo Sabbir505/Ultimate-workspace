@@ -9,7 +9,6 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 const Home = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="home" size={size} color={color} />;
 const Settings = ({ size, color }: { size?: number; color?: string }) => <Ionicons name="settings" size={size} color={color} />;
 import { StatusBar } from 'expo-status-bar';
-import { useRelay } from './src/hooks/useRelay';
 import { ThemeProvider, useTheme } from './src/theme';
 import BottomNav from './src/components/BottomNav';
 import HomeScreen from './src/screens/HomeScreen';
@@ -37,14 +36,9 @@ function HomeStackScreen() {
 }
 
 function AppTabs() {
-  const { sessions } = useRelay();
   const { isDark } = useTheme();
-  // Inbox badge = live sessions paused on user input or diff review.
-  const badgeCount = sessions.filter(
-    s => s.isLive && (s.status === 'waiting' || s.status === 'diff_ready')
-  ).length;
 
-  const tabBar = useMemo(() => (props: any) => <BottomNav {...props} badgeCount={badgeCount} />, [badgeCount]);
+  const tabBar = useMemo(() => (props: any) => <BottomNav {...props} />, []);
 
   return (
     <>

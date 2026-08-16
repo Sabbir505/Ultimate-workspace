@@ -6,7 +6,6 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 // app. These wrappers preserve the lucide call-sites' (size, color) props.
 const Home = ({ size, color }: { size?: number; color?: string; strokeWidth?: number; }) => <Ionicons name="home" size={size} color={color} />;
 const MessageSquare = ({ size, color }: { size?: number; color?: string; strokeWidth?: number; }) => <Ionicons name="chatbubble" size={size} color={color} />;
-const Bell = ({ size, color }: { size?: number; color?: string; strokeWidth?: number; }) => <Ionicons name="notifications" size={size} color={color} />;
 const Settings = ({ size, color }: { size?: number; color?: string; strokeWidth?: number; }) => <Ionicons name="settings" size={size} color={color} />;
 import { theme, useTheme } from '../theme';
 
@@ -14,16 +13,14 @@ interface BottomNavProps {
   state: any;
   descriptors: any;
   navigation: any;
-  badgeCount?: number;
 }
 
-export default function BottomNav({ state, descriptors, navigation, badgeCount = 0 }: BottomNavProps) {
+export default function BottomNav({ state, descriptors, navigation }: BottomNavProps) {
   useTheme(); // subscribe so theme.colors is reactive
   const c = theme.colors;
   const icons = useMemo(() => ({
     Home: Home,
     Chat: MessageSquare,
-    Approvals: Bell,
     Settings: Settings,
   }), []);
 
@@ -68,11 +65,6 @@ export default function BottomNav({ state, descriptors, navigation, badgeCount =
                 color={isFocused ? theme.colors.primary : theme.colors.textSecondary}
                 strokeWidth={isFocused ? 2.5 : 2}
               />
-              {route.name === 'Approvals' && badgeCount > 0 && (
-                <View style={styles.badge}>
-                  <Text style={styles.badgeText}>{badgeCount > 99 ? '99+' : badgeCount}</Text>
-                </View>
-              )}
             </View>
             <Text
               style={[
@@ -123,24 +115,5 @@ const styles = StyleSheet.create({
   },
   labelUnfocused: {
     color: theme.colors.textSecondary,
-  },
-  badge: {
-    position: 'absolute',
-    top: -6,
-    right: -10,
-    backgroundColor: theme.colors.error,
-    borderRadius: 10,
-    minWidth: 18,
-    height: 18,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 4,
-    borderWidth: 1.5,
-    borderColor: theme.colors.surface,
-  },
-  badgeText: {
-    color: '#fff',
-    fontSize: 10,
-    fontWeight: '700',
   },
 });

@@ -160,7 +160,7 @@ Ranked by how much they matter for Conduit's actual positioning (orchestration s
 |---|---|---|---|
 | P0 | ~~**Worktree-per-session default** for new agent sessions (+ migration nudge)~~ **DONE** (`92f7596a`) | §3.1.1 — the core orchestrator mechanic | M |
 | P0 | ~~**Per-turn checkpoints + one-click revert** (hidden git refs, à la T3 Code/Cline)~~ **DONE** (`4ca284a1` + `b81a0fb9`) | §3.1.2 — T3's signature safety feature | M |
-| P0 | **Wire the permission-mode UI end-to-end** (or delete it) | §3.0 — T3 ships 4 wired modes; Conduit's are dead code | S–M |
+| P0 | ~~**Wire the permission-mode UI end-to-end** (or delete it)~~ **DONE** (`ff0b812f`) | §3.0 — T3 ships 4 wired modes; Conduit's are dead code | S–M |
 | P0 | **PR create/review/status via GitHub connector** | §3.1.3 — closes the git loop | M |
 | P0 | **Restore panes/sessions on launch** | §3.1.4 — Superset parity, cheap (Workspaces IPC exists, unwired) | S–M |
 | P0 | **Finish local-model onboarding polish** (recommendations, wizard, cached NGL, remove personal-path hacks) | §4.1 — protect the moat | S–M |

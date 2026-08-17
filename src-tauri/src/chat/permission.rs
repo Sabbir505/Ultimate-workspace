@@ -9,12 +9,12 @@
 //! The four modes mirror Claude Code's permission modes and Codex's
 //! Suggest/Auto-Edit/Full-Auto modes:
 //!
-//! | Mode        | Reads | Writes/Edits      | Move/Copy          | Delete           |
-//! |-------------|-------|-------------------|--------------------|------------------|
-//! | `read_only` | run   | (tool absent)     | (tool absent)      | (tool absent)    |
-//! | `manual`    | run   | approve each      | approve each       | approve each     |
-//! | `auto_edit` | run   | run in roots      | approve (gated)    | approve (gated)  |
-//! | `full_auto` | run   | run in roots      | run in roots       | **approve always**|
+//! | Mode        | Reads | Writes/Edits      | Move/Copy          | Delete                        |
+//! |-------------|-------|-------------------|--------------------|-------------------------------|
+//! | `read_only` | run   | (tool absent)     | (tool absent)      | (tool absent)                 |
+//! | `manual`    | run   | approve each      | approve each       | approve each                  |
+//! | `auto_edit` | run   | run in roots      | approve (gated)    | approve (gated)               |
+//! | `full_auto` | run   | run in roots      | run in roots       | run in roots (gated outside)  |
 //!
 //! `read_only` filtering happens earlier (the mutating tools are stripped
 //! from the tool schema before the model sees them — see `tools.rs`), so
@@ -44,9 +44,12 @@ pub enum PermissionMode {
     /// Reads and writes/edits within granted roots auto-run; delete, move and
     /// copy still require per-action approval.
     AutoEdit,
-    /// Reads, writes, edits, copies and moves within granted roots auto-run.
-    /// Delete is STILL gated with a per-action card in this mode — no mode
-    /// bypasses the delete gate.
+    /// Reads, writes, edits, copies and moves within granted roots auto-run,
+    /// as do native `run_shell` commands and deletes within granted roots.
+    /// Outside the granted roots, mutating calls still gate. FullAuto is the
+    /// only mode where shell/delete auto-run — the user explicitly confirmed
+    /// the one-time Full Auto modal to get exactly that behavior (bug report
+    /// #2: asking for approval on every shell call made the mode useless).
     FullAuto,
 }
 
@@ -128,9 +131,10 @@ pub fn is_filesystem_tool(name: &str) -> bool {
 //     filesystem access beyond workspace boundaries; the approval card is the
 //     gate. Stripped from the schema under `read_only` (see tools/specs.rs).
 //   * `run_shell` is native code execution with the user's privileges, so it
-//     is ALWAYS gated — a hard rule in every mode, mirroring `delete_file`.
-//     It is still present in the schema outside `read_only` so the model can
-//     propose it, but it never auto-runs.
+//     is gated in every mode except `full_auto` — the one-time Full Auto
+//     modal is the explicit consent that lets it auto-run (mirroring Claude
+//     Code's bypassPermissions / Codex full-access). It is present in the
+//     schema outside `read_only` so the model can propose it in every mode.
 //   * The tracking tools (`download_progress`, `get_task_status`,
 //     `cancel_task`) are read-only/benign — they only inspect or abort tasks
 //     the model itself started in this conversation. Auto-run everywhere,
@@ -162,8 +166,14 @@ pub fn check_system_permission(mode: PermissionMode, tool: &str) -> PermissionDe
         // Subagent delegation — auto-run; it's a model-level sub-turn, not a
         // shell/filesystem action.
         TASK => PermissionDecision::AutoRun,
-        // Native shell execution: hard rule — always gated, every mode.
-        RUN_SHELL => PermissionDecision::NeedsApproval,
+        // Native shell execution: gated in every mode EXCEPT full_auto —
+        // the one-time Full Auto modal is the explicit user consent that
+        // shell commands may run without per-action cards (Claude Code's
+        // bypassPermissions / Codex full-access work the same way).
+        RUN_SHELL => match mode {
+            PermissionMode::FullAuto => PermissionDecision::AutoRun,
+            _ => PermissionDecision::NeedsApproval,
+        },
         // Downloads write to disk; follow the connector-write posture.
         DOWNLOAD_FILE => match mode {
             PermissionMode::ReadOnly | PermissionMode::Manual => PermissionDecision::NeedsApproval,
@@ -182,8 +192,8 @@ pub fn check_system_permission(mode: PermissionMode, tool: &str) -> PermissionDe
 /// set of directory roots the user has already approved writing into.
 ///
 /// Hard rules enforced here (not in UI copy):
-/// - **Delete is always gated**, in every mode. No `PermissionMode` value
-///   bypasses it. This is the filesystem task's destructive-action carve-out.
+/// - **Delete is gated in every mode except `full_auto`** — and even there
+///   only within granted roots. No other mode auto-runs a delete.
 /// - **`read_only` never auto-runs a mutating tool** — mutating tools reaching
 ///   here under read-only is a bug (they should have been filtered from the
 ///   schema), but it is treated as `NeedsApproval` rather than executing.
@@ -200,9 +210,21 @@ pub fn check_permission(
         return PermissionDecision::AutoRun;
     }
 
-    // Delete is ALWAYS gated, regardless of mode — hard rule.
+    // Delete: gated under read_only/manual/auto_edit. Under full_auto it
+    // auto-runs ONLY within granted roots (the user consented via the
+    // one-time Full Auto modal); outside the roots it still gates so a
+    // stray delete of e.g. C:\Windows\… never runs silently.
     if tool == DELETE_FILE {
-        return PermissionDecision::NeedsApproval;
+        return match mode {
+            PermissionMode::FullAuto => {
+                if path_within_granted_roots(path, granted_roots) {
+                    PermissionDecision::AutoRun
+                } else {
+                    PermissionDecision::NeedsApproval
+                }
+            }
+            _ => PermissionDecision::NeedsApproval,
+        };
     }
 
     // move/copy: gated under read_only/manual/auto_edit (the destructive-ish
@@ -711,24 +733,34 @@ mod tests {
     }
 
     #[test]
-    fn delete_is_gated_under_full_auto() {
-        // The acceptance test: delete_file under full_auto STILL needs approval.
+    fn delete_auto_runs_under_full_auto_within_roots_but_gates_outside() {
+        // Full Auto (explicitly confirmed via the one-time modal) auto-runs
+        // deletes inside granted roots…
         let d = check_permission(
             PermissionMode::FullAuto,
             DELETE_FILE,
             "C:/projects/alpha/throwaway.txt",
             &roots(),
         );
-        assert_eq!(d, PermissionDecision::NeedsApproval);
+        assert_eq!(d, PermissionDecision::AutoRun);
+        // …and still gates them outside the roots.
+        assert_eq!(
+            check_permission(
+                PermissionMode::FullAuto,
+                DELETE_FILE,
+                "C:/elsewhere/throwaway.txt",
+                &roots()
+            ),
+            PermissionDecision::NeedsApproval
+        );
     }
 
     #[test]
-    fn delete_is_gated_under_every_mode() {
+    fn delete_is_gated_under_every_other_mode() {
         for mode in [
             PermissionMode::ReadOnly,
             PermissionMode::Manual,
             PermissionMode::AutoEdit,
-            PermissionMode::FullAuto,
         ] {
             assert_eq!(
                 check_permission(mode, DELETE_FILE, "C:/projects/alpha/x", &roots()),
@@ -1039,7 +1071,7 @@ mod tests {
                 "{tool} should be gated under auto_edit"
             );
         }
-        // But full_auto auto-runs move/copy within granted roots (delete stays gated).
+        // But full_auto auto-runs move/copy/delete within granted roots.
         for tool in [MOVE_FILE, COPY_FILE] {
             assert_eq!(
                 check_permission(
@@ -1057,14 +1089,14 @@ mod tests {
     // ---- system tools (downloads + native shell) ----
 
     #[test]
-    fn run_shell_always_gated_in_every_mode() {
-        // Native code execution is a hard gate like delete_file — no mode
-        // bypasses the approval card.
+    fn run_shell_gated_except_full_auto() {
+        // Native code execution stays gated in every mode except full_auto —
+        // the one-time Full Auto modal is the explicit consent that shell
+        // commands run without per-action cards (bug report #2).
         for mode in [
             PermissionMode::ReadOnly,
             PermissionMode::Manual,
             PermissionMode::AutoEdit,
-            PermissionMode::FullAuto,
         ] {
             assert_eq!(
                 check_system_permission(mode, RUN_SHELL),
@@ -1072,6 +1104,10 @@ mod tests {
                 "run_shell must be gated under {mode:?}"
             );
         }
+        assert_eq!(
+            check_system_permission(PermissionMode::FullAuto, RUN_SHELL),
+            PermissionDecision::AutoRun
+        );
     }
 
     #[test]

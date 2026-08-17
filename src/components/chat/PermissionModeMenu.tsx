@@ -40,7 +40,7 @@ export const PERMISSION_MODES: ModeOption[] = [
     value: "full_auto",
     label: "Full Auto",
     description:
-      "Everything auto-runs — files and connected accounts — except delete, which is always gated.",
+      "Everything auto-runs — files, shell commands and connected accounts. Writes/deletes outside granted roots still ask.",
   },
 ];
 

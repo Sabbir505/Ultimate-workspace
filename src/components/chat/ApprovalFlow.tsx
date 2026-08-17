@@ -167,15 +167,14 @@ export function FullAutoConfirmModal({
       }
     >
       <p>
-        In <strong>Full Auto</strong>, the model can read, write, edit, move and copy
-        files within already-granted roots — and use connected-account tools like
-        sending email or editing Notion — without pausing for an approval card each
-        time.
+        In <strong>Full Auto</strong>, the model can read, write, edit, move, copy
+        and <strong>delete</strong> files within already-granted roots — and run{" "}
+        <strong>shell commands</strong> and connected-account tools like sending
+        email or editing Notion — without pausing for an approval card each time.
       </p>
       <p>
-        <strong>Delete is still gated</strong> with a per-action approval card in
-        every mode — no mode selection bypasses the delete gate. This is a hard rule,
-        not a default.
+        Actions <strong>outside the granted roots</strong> (e.g. a delete or a
+        shell-driven write to a system folder) still pause for approval.
       </p>
       <p className="modal-note">
         You can switch back to Manual or Auto-Edit at any time.

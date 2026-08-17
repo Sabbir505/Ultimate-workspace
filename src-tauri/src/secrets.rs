@@ -45,7 +45,13 @@ fn account(project_id: &str, key: &str) -> String {
 pub fn set_secret(conn: &Connection, project_id: &str, key: &str, value: &str) -> Result<(), String> {
     platform::store(project_id, key, value)?;
     let blob = platform::stored_blob(value);
-    db::upsert_secret_row(conn, project_id, key, &blob).map_err(|e| e.to_string())
+    if let Err(e) = db::upsert_secret_row(conn, project_id, key, &blob) {
+        // The keychain entry is unlisted without its DB row — remove it so a
+        // failed registry write doesn't leave an orphaned secret behind (L11).
+        platform::remove(project_id, key);
+        return Err(e.to_string());
+    }
+    Ok(())
 }
 
 pub fn delete_secret(conn: &Connection, project_id: &str, key: &str) -> Result<(), String> {

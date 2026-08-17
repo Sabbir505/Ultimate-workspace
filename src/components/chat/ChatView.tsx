@@ -95,7 +95,6 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
   const messages = useChatStore((s) => s.messages);
   const streaming = useChatStore((s) => s.streaming);
-  const streamingChatSessionId = useChatStore((s) => s.streamingChatSessionId);
   const chatStatus = useChatStore((s) => s.chatStatus);
   const error = useChatStore((s) => s.error);
   const loaded = useChatStore((s) => s.loaded);
@@ -374,7 +373,11 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
     return null;
   }, [messages]);
 
-  const isStreamingForMeter = streamingChatSessionId === activeChatSessionId;
+  // Per-session streaming flag from the `streaming` map (the source of
+  // truth). The legacy streamingChatSessionId scalar flips between
+  // concurrently-streaming sessions and can't be trusted for display.
+  const isStreamingForMeter =
+    activeChatSessionId != null && activeChatSessionId in streaming;
   // `compactionRevision` is bumped by onStatus whenever a `context_compacted`
   // event lands for the active session — drives an immediate re-poll so the
   // meter ticks down right after compaction instead of waiting up to 2s for
@@ -597,7 +600,9 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
     if (!popoutSessionId || !loaded) return;
     if (useChatStore.getState().activeChatSessionId === popoutSessionId) return;
     const exists = useChatStore.getState().sessions.some((s) => s.id === popoutSessionId);
-    if (exists) void selectSession(popoutSessionId);
+    if (exists) void selectSession(popoutSessionId).catch(() => {
+      /* best-effort popout binding — the main view still works */
+    });
   }, [popoutSessionId, loaded, selectSession]);
 
   // Load the saved provider config (used for auto-starting a session).
@@ -700,13 +705,12 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   // Build the list of items to render: persisted messages, plus a live
   // streaming bubble for the active session if tokens are arriving.
   const activeStream = activeChatSessionId ? (streaming[activeChatSessionId] ?? "") : "";
-  const isStreaming = streamingChatSessionId === activeChatSessionId && activeStream.length > 0;
+  const activeIsStreaming =
+    activeChatSessionId != null && activeChatSessionId in streaming;
+  const isStreaming = activeIsStreaming && activeStream.length > 0;
   // The request is in flight but no content has streamed yet: show the
   // Claude-style "thinking" animation so the user knows something is happening.
-  const waitingForFirstToken =
-    streamingChatSessionId === activeChatSessionId &&
-    streamingChatSessionId !== null &&
-    activeStream.length === 0;
+  const waitingForFirstToken = activeIsStreaming && activeStream.length === 0;
   // A pre-token status notice (chat:status) explains *why* it's waiting — e.g.
   // a local model is cold-starting after an app restart. When present, render
   // its message next to a spinner instead of the generic thinking dots.
@@ -962,7 +966,7 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
       <PlanPreview
         messages={messages}
         activeSessionId={activeChatSessionId}
-        streaming={streamingChatSessionId === activeChatSessionId}
+        streaming={activeIsStreaming}
         onSend={handleSend}
       />
 
@@ -1009,7 +1013,7 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
         draft={draft}
         onSend={handleSend}
         onStop={handleStop}
-        streaming={streamingChatSessionId === activeChatSessionId && streamingChatSessionId !== null}
+        streaming={activeIsStreaming}
         disabled={false}
         model={activeChatSessionId ? (resolvedModel ?? "") : undefined}
         models={harnessAgent ? harnessModels.map((m) => m.id) : acpAgent ? [] : cloudIds}

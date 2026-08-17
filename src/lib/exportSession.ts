@@ -28,10 +28,9 @@ export async function exportFocusedSession(): Promise<boolean> {
   const pane = panes.find((p) => p.paneId === focusedPaneId);
   if (!pane || pane.data.kind !== "terminal" || !pane.data.sessionId) return false;
 
-  const markdown = await exportSessionMarkdown(pane.paneId);
-  if (!markdown) return false;
-
   try {
+    const markdown = await exportSessionMarkdown(pane.paneId);
+    if (!markdown) return false;
     const path = await save({
       defaultPath: defaultFileName(pane.data.sessionId),
       filters: [{ name: "Markdown", extensions: ["md"] }],

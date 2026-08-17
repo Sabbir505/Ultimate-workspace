@@ -272,13 +272,95 @@ function sortSessions(list: ChatSession[]): ChatSession[] {
   return [...starred, ...rest];
 }
 
+/** Strip EVERY per-session keyed entry for one chat session (audit H3).
+ *  deleteChat used to clear only some of these — chatStatus, messageQueue,
+ *  tasks, planSteps, subagents, livePerf, sessionMetrics, cwdOverrides and
+ *  the message-keyed maps survived forever, so churn of create/delete chats
+ *  grew these records for the app's lifetime. Message-keyed maps are only
+ *  pruned when the buffer holds this session's rows (its ids are then
+ *  known); ids are globally unique, so removal is always safe.
+ *  Returns a partial state patch — merge with the caller's extra fields. */
+function clearSessionState(s: ChatState, chatSessionId: string): Partial<ChatState> {
+  const streaming = { ...s.streaming };
+  delete streaming[chatSessionId];
+  const chatStatus = { ...s.chatStatus };
+  delete chatStatus[chatSessionId];
+  const artifacts = { ...s.artifacts };
+  delete artifacts[chatSessionId];
+  const pendingArtifacts = { ...s.pendingArtifacts };
+  delete pendingArtifacts[chatSessionId];
+  const pendingApprovals = { ...s.pendingApprovals };
+  delete pendingApprovals[chatSessionId];
+  const sessionProjects = { ...s.sessionProjects };
+  delete sessionProjects[chatSessionId];
+  const loopState = { ...s.loopState };
+  delete loopState[chatSessionId];
+  const messageQueue = { ...s.messageQueue };
+  delete messageQueue[chatSessionId];
+  const tasks = { ...s.tasks };
+  delete tasks[chatSessionId];
+  const planSteps = { ...s.planSteps };
+  delete planSteps[chatSessionId];
+  const subagents = { ...s.subagents };
+  delete subagents[chatSessionId];
+  const livePerf = { ...s.livePerf };
+  delete livePerf[chatSessionId];
+  const sessionMetrics = { ...s.sessionMetrics };
+  delete sessionMetrics[chatSessionId];
+  const cwdOverrides = { ...s.cwdOverrides };
+  delete cwdOverrides[chatSessionId];
+  const ownerSessionByChatId = { ...s.ownerSessionByChatId };
+  delete ownerSessionByChatId[chatSessionId];
+  let artifactsByMessage = s.artifactsByMessage;
+  let checkpointsByMessage = s.checkpointsByMessage;
+  if (s.messagesSessionId === chatSessionId) {
+    artifactsByMessage = { ...s.artifactsByMessage };
+    checkpointsByMessage = { ...s.checkpointsByMessage };
+    for (const m of s.messages) {
+      delete artifactsByMessage[m.id];
+      delete checkpointsByMessage[m.id];
+    }
+  }
+  return {
+    streaming,
+    chatStatus,
+    artifacts,
+    pendingArtifacts,
+    pendingApprovals,
+    sessionProjects,
+    loopState,
+    messageQueue,
+    tasks,
+    planSteps,
+    subagents,
+    livePerf,
+    sessionMetrics,
+    cwdOverrides,
+    ownerSessionByChatId,
+    artifactsByMessage,
+    checkpointsByMessage,
+    streamingChatSessionId:
+      s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
+    fullAutoConfirmingFor:
+      s.fullAutoConfirmingFor === chatSessionId ? null : s.fullAutoConfirmingFor,
+  };
+}
+
 export interface ChatState {
   loaded: boolean;
   sessions: ChatSession[];
   activeChatSessionId: string | null;
   messages: ChatMessageRecord[];
+  /** Which session's rows the `messages` buffer currently holds. Guards the
+   *  "outgoing chat is empty" check in selectSession — reading the buffer
+   *  alone can't tell an empty chat from a not-yet-fetched one (H1). */
+  messagesSessionId: string | null;
   streaming: Record<string, string>; // chatSessionId -> accumulating assistant text
-  streamingChatSessionId: string | null; // which session is currently streaming
+  /** LEGACY scalar naming whichever session emitted the last token. The
+   *  per-session `streaming` map is the source of truth for "is this session
+   *  streaming" — never gate logic on this scalar (sessions can stream
+   *  concurrently and flip it between them; see H2/M1/M2). */
+  streamingChatSessionId: string | null;
   /** Pre-token status notice per session (chatSessionId -> reason+message),
    *  e.g. a local model cold-starting after a restart. Cleared on the first
    *  token / done / error. */
@@ -537,6 +619,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   activeChatSessionId: null,
   messages: [],
+  messagesSessionId: null,
   hasMoreHistory: false,
   streaming: {},
   streamingChatSessionId: null,
@@ -714,6 +797,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const messages = await getChatMessages(chatSessionId, undefined, 200);
     set((s) => ({
       messages: s.activeChatSessionId === chatSessionId ? (messages ?? []) : s.messages,
+      messagesSessionId:
+        s.activeChatSessionId === chatSessionId ? chatSessionId : s.messagesSessionId,
       hasMoreHistory: s.activeChatSessionId === chatSessionId ? (messages?.length ?? 0) >= 200 : s.hasMoreHistory,
     }));
   },
@@ -723,7 +808,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!first || first.id <= 0 || !get().hasMoreHistory) return 0;
     const older = await getChatMessages(chatSessionId, first.id, 200);
     if (!older || older.length === 0) {
-      set({ hasMoreHistory: false });
+      // Guard the flag the same way as the set below: an unguarded write
+      // while the user switched sessions would kill infinite scroll for the
+      // newly-viewed chat (audit L1).
+      if (get().activeChatSessionId === chatSessionId) {
+        set({ hasMoreHistory: false });
+      }
       return 0;
     }
     set((s) => {
@@ -763,8 +853,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Capture the outgoing session's emptiness BEFORE the switch: the
     // `messages` buffer is replaced by the target session's messages below,
     // so the post-switch check would always see a non-empty buffer.
+    // The buffer only counts as the outgoing session's emptiness when it
+    // actually holds THAT session's rows — a rapid A→B→C switch reaches here
+    // before B's fetch commits, and the buffer still shows A's (empty) page;
+    // trusting it would delete B's whole history (audit H1).
     const outgoingId = get().activeChatSessionId;
-    const outgoingEmpty = get().messages.length === 0;
+    const outgoingEmpty =
+      get().messagesSessionId === outgoingId && get().messages.length === 0;
     // Opening a chat clears its unread mark (persisted only if it was set).
     const wasUnread = get().sessions.find((s) => s.id === chatSessionId)?.unread ?? false;
     // Reset the per-session thinking override to the provider default
@@ -801,13 +896,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (get().activeChatSessionId === chatSessionId) {
       set({
         messages: messages ?? [],
+        messagesSessionId: chatSessionId,
         activeChatSessionId: chatSessionId,
         hasMoreHistory: (messages?.length ?? 0) >= 200,
       });
       // Restore this chat's generated artifacts (inline diagrams / file chips)
       // so they reappear when the session is reopened. Skip sessions that are
-      // mid-stream — their live buffers are the source of truth.
-      if (records && get().streamingChatSessionId !== chatSessionId) {
+      // mid-stream — their live buffers are the source of truth. Per-session
+      // check: the legacy scalar can name another concurrently-streaming chat.
+      if (records && !(chatSessionId in get().streaming)) {
         const list: ChatArtifact[] = records.map((r) => ({
           path: r.path,
           filename: r.filename,
@@ -837,11 +934,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({ checkpointsByMessage: byMessage });
       }
     }
-    // Touch and reorder in the background.
-    void touchChatSession(chatSessionId).then(async () => {
-      const sessions = await listChatSessions();
-      if (sessions) set({ sessions: withoutDeleted(sessions) });
-    });
+    // Touch and reorder in the background. Rejection-tolerant: a failed
+    // touch/relist must not surface as an unhandled rejection (M9).
+    void touchChatSession(chatSessionId)
+      .then(async () => {
+        const sessions = await listChatSessions();
+        if (sessions) set({ sessions: withoutDeleted(sessions) });
+      })
+      .catch(() => {
+        /* best-effort: the sidebar relists on the next interaction */
+      });
     // Switching away from a brand-new chat that never received a message
     // (e.g. the auto-started default chat) should not leave an empty session
     // row behind in the sidebar. deleteChat() tombstones it, so the relist
@@ -862,11 +964,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // empty session. If the caller wants a different provider/model than the
     // empty session already has (e.g. Settings → "Use this model"), update it
     // in place rather than creating a duplicate.
-    const { activeChatSessionId, messages, sessions } = get();
+    const { activeChatSessionId, messages, messagesSessionId, sessions } = get();
     const active = activeChatSessionId
       ? sessions.find((s) => s.id === activeChatSessionId)
       : undefined;
-    if (active && messages.length === 0) {
+    // Buffer-ownership guard (same H1 shape): only reuse the active session
+    // when the buffer actually holds ITS rows — after a fast session switch
+    // the buffer can still show the previous chat's (empty) page, and
+    // reusing based on that would silently hijack a chat with history.
+    if (active && messagesSessionId === active.id && messages.length === 0) {
       if (provider && active.provider !== provider) {
         await updateChatSessionProvider(active.id, provider);
       }
@@ -916,6 +1022,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sessions: sortSessions([session, ...s.sessions]),
         activeChatSessionId: session.id,
         messages: [],
+        messagesSessionId: session.id,
         error: null,
         // Seed the in-memory binding cache from the persisted value so the
         // composer notch + working-dir resolution work before first send.
@@ -950,34 +1057,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // relist) can't resurrect it via a stale IPC payload that raced the
     // DELETE. Cleared on a full app restart.
     markDeleted(chatSessionId);
-    set((s) => {
-      // Drop any per-session state too, so switching sessions never briefly
-      // shows this chat's old messages/artifacts.
-      const nextStreaming = { ...s.streaming };
-      delete nextStreaming[chatSessionId];
-      const nextArtifacts = { ...s.artifacts };
-      delete nextArtifacts[chatSessionId];
-      const nextPendingArtifacts = { ...s.pendingArtifacts };
-      delete nextPendingArtifacts[chatSessionId];
-      const nextPendingApprovals = { ...s.pendingApprovals };
-      delete nextPendingApprovals[chatSessionId];
-      const nextSessionProjects = { ...s.sessionProjects };
-      delete nextSessionProjects[chatSessionId];
-      const nextLoop = { ...s.loopState };
-      delete nextLoop[chatSessionId];
-      return {
-        sessions: s.sessions.filter((sess) => sess.id !== chatSessionId),
-        activeChatSessionId: s.activeChatSessionId === chatSessionId ? null : s.activeChatSessionId,
-        messages: s.activeChatSessionId === chatSessionId ? [] : s.messages,
-        streaming: nextStreaming,
-        streamingChatSessionId:
-          s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
-        artifacts: nextArtifacts,
-        pendingArtifacts: nextPendingArtifacts,
-        sessionProjects: nextSessionProjects,
-        loopState: nextLoop,
-      };
-    });
+    manuallyRenamed.delete(chatSessionId);
+    set((s) => ({
+      // Strip every per-session key (H3), plus the session row and — when
+      // the deleted chat was active — the message buffer, so switching
+      // sessions never briefly shows this chat's old messages/artifacts.
+      ...clearSessionState(s, chatSessionId),
+      sessions: s.sessions.filter((sess) => sess.id !== chatSessionId),
+      activeChatSessionId: s.activeChatSessionId === chatSessionId ? null : s.activeChatSessionId,
+      messages: s.activeChatSessionId === chatSessionId ? [] : s.messages,
+      messagesSessionId:
+        s.activeChatSessionId === chatSessionId ? null : s.messagesSessionId,
+    }));
   },
 
   deleteAllChats: async () => {
@@ -1001,6 +1092,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessions: [],
       activeChatSessionId: null,
       messages: [],
+      messagesSessionId: null,
       streaming: {},
       streamingChatSessionId: null,
       chatStatus: {},
@@ -1008,6 +1100,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       artifactsByMessage: {},
       checkpointsByMessage: {},
       pendingArtifacts: {},
+      pendingApprovals: {},
       tasks: {},
       planSteps: {},
       messageQueue: {},
@@ -1015,17 +1108,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessionProjects: {},
       ownerSessionByChatId: {},
       loopState: {},
+      subagents: {},
+      livePerf: {},
+      sessionMetrics: {},
+      previewArtifacts: [],
+      activePreviewPath: null,
     }));
     return count;
   },
 
   deleteActiveIfEmpty: async () => {
-    const { activeChatSessionId, messages } = get();
+    const { activeChatSessionId, messages, messagesSessionId } = get();
     if (!activeChatSessionId) return null;
-    // Only delete when there are genuinely no persisted messages — a chat the
-    // user typed into (even if the turn errored before an assistant reply)
-    // keeps its user message and should persist.
-    if (messages.length > 0) return null;
+    // Only delete when the buffer genuinely holds THIS session's (empty)
+    // rows — trusting a buffer that still belongs to the previous session
+    // after a fast switch would delete a chat with history (same H1 shape).
+    if (messagesSessionId !== activeChatSessionId || messages.length > 0) return null;
     await get().deleteChat(activeChatSessionId);
     return activeChatSessionId;
   },
@@ -1133,7 +1231,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // A turn is already running for this session: stack the message above
     // the composer instead of dropping it. drainQueue sends the queue FIFO
     // when the current turn finishes (onDone / onError / cancelStream).
-    if (get().streamingChatSessionId === activeChatSessionId) {
+    // Per-session check (H2): concurrent sessions each own a `streaming` key,
+    // and the legacy scalar may name whichever session last emitted a token —
+    // gating on it would let a second turn start in an already-streaming chat.
+    if (activeChatSessionId in get().streaming) {
       const queued: QueuedChatMessage = {
         id: Date.now(),
         content,
@@ -1385,8 +1486,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // branch-aware (roadmap #9): it retires the current tail first, so the model
   // doesn't keep seeing the stale answer being regenerated.
   regenerate: async () => {
-    const { messages, streamingChatSessionId, activeChatSessionId } = get();
-    if (streamingChatSessionId) return; // don't regenerate mid-stream
+    const { messages, activeChatSessionId } = get();
+    // Don't regenerate mid-stream — per-session check (the legacy scalar can
+    // name a different concurrently-streaming chat, which used to block
+    // regenerate in an idle chat or allow it mid-stream in this one).
+    if (activeChatSessionId && activeChatSessionId in get().streaming) return;
     const active = messages.filter((m) => !m.supersededBy);
     const lastUser = [...active].reverse().find((m) => m.role === "user");
     if (!lastUser) return;
@@ -1404,8 +1508,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // active message list, then send the edited text as a fresh turn. The old
   // branch stays in the timeline (dimmed) but no longer feeds the model.
   editMessage: async (messageId, newContent) => {
-    const { streamingChatSessionId, activeChatSessionId } = get();
-    if (streamingChatSessionId || !activeChatSessionId) return;
+    const { activeChatSessionId } = get();
+    // Per-session streaming guard (same reasoning as regenerate above).
+    if (!activeChatSessionId || activeChatSessionId in get().streaming) return;
     try {
       await supersedeChatTail(messageId);
       if (activeChatSessionId) await get().loadMessages(activeChatSessionId);
@@ -1448,7 +1553,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (activeChatSessionId) {
         try {
           const msgs = await getChatMessages(activeChatSessionId);
-          set({ messages: msgs ?? [] });
+          set({ messages: msgs ?? [], messagesSessionId: activeChatSessionId });
         } catch {
           /* best-effort rollback */
         }
@@ -1538,7 +1643,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       delete next[chatSessionId];
       return { pendingApprovals: next };
     });
-    await resolveToolAction(pending.pendingId, approved);
+    try {
+      await resolveToolAction(pending.pendingId, approved);
+    } catch (err) {
+      // The backend tool loop is still paused waiting for a resolution — if
+      // this IPC call failed the turn would hang forever with no card to
+      // retry. Put the card back and surface the failure (audit M3).
+      set((s) => ({
+        pendingApprovals: { ...s.pendingApprovals, [chatSessionId]: pending },
+      }));
+      toastError("Couldn't deliver the approval decision", err);
+    }
   },
 
   setOwnerSessionId: (chatSessionId, ownerSessionId) =>
@@ -1549,8 +1664,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   getOwnerSessionId: (chatSessionId) => get().ownerSessionByChatId[chatSessionId],
 
   cancelStream: async () => {
-    const { streamingChatSessionId } = get();
-    if (streamingChatSessionId) {
+    // Cancel the ACTIVE session's stream (the one the user is looking at).
+    // The legacy scalar names whichever session last emitted a token — with
+    // concurrent streams it could point at a background chat, cancelling the
+    // wrong turn (or no-op when it's null before the first token lands).
+    const { activeChatSessionId } = get();
+    if (activeChatSessionId && activeChatSessionId in get().streaming) {
+      const streamingChatSessionId = activeChatSessionId;
       const session = get().sessions.find((s) => s.id === streamingChatSessionId);
       // Persist the partial reply BEFORE cancelling: the backend's abort path
       // discards its accumulated buffer, and the streaming buffer here holds
@@ -1603,7 +1723,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       try {
         const messages = await getChatMessages(streamingChatSessionId);
         if (messages && get().activeChatSessionId === streamingChatSessionId) {
-          set({ messages });
+          set({ messages, messagesSessionId: streamingChatSessionId });
         }
       } catch {
         /* best-effort refresh */
@@ -1707,10 +1827,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // Refetch messages from the backend to get the final persisted
     // ChatMessageRecord with usage data. Best-effort: a transient IPC/DB
-    // failure must not skip the title refresh + relist below.
+    // failure must not skip the title refresh + relist below. Same 200-row
+    // page cap as loadMessages (M10): replacing the capped page with the
+    // FULL history on every completed turn re-rendered huge sessions and
+    // defeated pagination. The title logic only needs the young-session
+    // turn counts (1 or 3), which always fit inside the latest page.
     let messages: ChatMessageRecord[] | null = null;
     try {
-      messages = await getChatMessages(chatSessionId);
+      messages = await getChatMessages(chatSessionId, undefined, 200);
     } catch {
       /* keep null; downstream guards handle it */
     }
@@ -1760,6 +1884,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         delete nextPending[chatSessionId];
         return {
           messages: isActiveSession ? messages : s.messages,
+          messagesSessionId: isActiveSession ? chatSessionId : s.messagesSessionId,
+          hasMoreHistory: isActiveSession
+            ? messages.length >= 200
+            : s.hasMoreHistory,
           artifactsByMessage,
           pendingArtifacts: nextPending,
         };
@@ -1784,8 +1912,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // drainQueue didn't already start a new turn (no queued user messages),
     // inspect the just-finished assistant reply and, on `continue`, auto-issue
     // the next iteration. Pauses if the user switched away (active-session
-    // guard), and never fires while another stream is already running.
-    if (get().activeChatSessionId === chatSessionId && !get().streamingChatSessionId) {
+    // guard), and never fires while THIS session already has another turn
+    // running (per-session check — a background chat streaming elsewhere
+    // must not stall the loop).
+    if (get().activeChatSessionId === chatSessionId && !(chatSessionId in get().streaming)) {
       const loop = get().loopState[chatSessionId];
       if (loop && loop.active) {
         const lastReply = [...(get().messages ?? [])]
@@ -1892,14 +2022,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   onError: (chatSessionId, message, code) => {
     // Clear streaming state and surface the error for the active session.
+    // Also drop this session's live-perf chip and pending-artifact buffer —
+    // onDone clears both, and an errored turn must not leave them stuck
+    // (audit H3).
     set((s) => {
       const nextStreaming = { ...s.streaming };
       delete nextStreaming[chatSessionId];
       const nextStatus = { ...s.chatStatus };
       delete nextStatus[chatSessionId];
+      const nextLivePerf = { ...s.livePerf };
+      delete nextLivePerf[chatSessionId];
+      const nextPendingArtifacts = { ...s.pendingArtifacts };
+      delete nextPendingArtifacts[chatSessionId];
       return {
         streaming: nextStreaming,
         chatStatus: nextStatus,
+        livePerf: nextLivePerf,
+        pendingArtifacts: nextPendingArtifacts,
         streamingChatSessionId:
           s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
         error:
@@ -1985,7 +2124,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const sessionSubagents = s.subagents[payload.chatSessionId];
       const sub = sessionSubagents?.[payload.subagentId];
       if (!sessionSubagents || !sub) return {};
-      const updated = { ...sessionSubagents, [payload.subagentId]: { ...sub, output: sub.output + payload.chunk } };
+      // Same 200k code-point cap as the main token stream (onToken) — an
+      // uncapped subagent output grows memory without bound (audit H3).
+      const output = tailCodePoints(sub.output + payload.chunk, 200_000);
+      const updated = { ...sessionSubagents, [payload.subagentId]: { ...sub, output } };
       return { subagents: { ...s.subagents, [payload.chatSessionId]: updated } };
     });
   },

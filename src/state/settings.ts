@@ -147,15 +147,17 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     set((state) => {
       const next = { ...state, loaded: true };
       if (theme === "light" || theme === "dark" || theme === "system") next.theme = theme;
+      if (customThemeId) next.customThemeId = customThemeId;
       if (themesJson) {
         next.customThemes = parseThemeList(themesJson);
         // A dangling active id (theme deleted while off) is dropped so
-        // useTheme never resolves an overlay that no longer exists.
+        // useTheme never resolves an overlay that no longer exists. Runs
+        // AFTER the stored id is applied so it validates the just-loaded
+        // value, not the previous state's (audit L2 — it was dead code).
         if (next.customThemeId && !next.customThemes.some((t) => t.id === next.customThemeId)) {
           next.customThemeId = null;
         }
       }
-      if (customThemeId) next.customThemeId = customThemeId;
       if (dnd === "true" || dnd === "false") next.dnd = dnd === "true";
       if (notifySound === "true" || notifySound === "false") next.notifySound = notifySound === "true";
       if (watchMode === "true" || watchMode === "false") next.watchMode = watchMode === "true";

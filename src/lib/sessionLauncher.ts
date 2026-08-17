@@ -137,11 +137,14 @@ export async function newSessionFlow(projectId: string, harness: HarnessId): Pro
   if (session) await openSession(session);
 }
 
-/** Pick a harness for Cmd+N: prefer the only installed one, else Claude Code. */
-export function defaultHarness(): HarnessId {
+/** Pick a harness for Cmd+N: prefer the only installed one, else Claude Code
+ *  when it's installed. Null when NOTHING is installed — callers must handle
+ *  it (previously it returned "claude_code" anyway and the session failed to
+ *  spawn; audit L14). */
+export function defaultHarness(): HarnessId | null {
   const installed = useProjectsStore.getState().harnesses.filter((h) => h.installed);
   if (installed.length === 1) return installed[0].id;
-  return installed.find((h) => h.id === "claude_code")?.id ?? installed[0]?.id ?? "claude_code";
+  return installed.find((h) => h.id === "claude_code")?.id ?? installed[0]?.id ?? null;
 }
 
 /** Run a per-project quick action in its own shell pane (§7.7). */
@@ -210,7 +213,13 @@ export function openArtifactInBrowserPane(path: string): void {
   const browsers = store.panes.filter(
     (p) => p.data.kind === "browser" && !p.data.collapsed,
   );
-  const fileUrl = encodeURI(`file:///${path.replace(/^\/+/, "")}`);
+  // Build a well-formed file URL: forward slashes only (Windows paths arrive
+  // with backslashes, which are invalid in URLs), and `#`/`?` percent-encoded
+  // (encodeURI leaves them, and a `#` truncates the URL at the fragment —
+  // files with those characters failed to load; audit L5).
+  const fileUrl = encodeURI(`file:///${path.replace(/^\/+/, "").replace(/\\/g, "/")}`)
+    .replace(/#/g, "%23")
+    .replace(/\?/g, "%3F");
   if (browsers.length > 0) {
     const target = browsers[browsers.length - 1];
     if (target.data.kind === "browser") {
@@ -257,7 +266,12 @@ export async function openShellTerminal(): Promise<void> {
   const projectId = useProjectsStore.getState().selectedProjectId;
   const project = useProjectsStore.getState().projectById(projectId);
   const cwd = project?.path ?? ".";
-  const command = navigator.platform.startsWith("Win") ? "powershell.exe" : "bash";
+  // navigator.platform is deprecated and empty in some embedded webviews —
+  // prefer userAgentData with a userAgent fallback (audit L15).
+  const isWindows =
+    (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData
+      ?.platform === "Windows" || /Windows/i.test(navigator.userAgent);
+  const command = isWindows ? "powershell.exe" : "bash";
   const spec: TerminalSpawnSpec = { type: "shell", cwd, command };
   const paneId = panesStore.addPane(terminalDescriptor(spec, "Terminal", null, null));
   await spawnForPane(paneId, spec);

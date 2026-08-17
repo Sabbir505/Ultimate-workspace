@@ -104,7 +104,8 @@ export function CommandPalette() {
         run: () => {
           close();
           const projectId = store.selectedProjectId ?? store.projects[0]?.id;
-          if (projectId) void newSessionFlow(projectId, defaultHarness());
+          const harness = defaultHarness();
+          if (projectId && harness) void newSessionFlow(projectId, harness);
         },
       },
       {

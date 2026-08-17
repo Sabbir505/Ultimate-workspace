@@ -60,6 +60,14 @@ export function parseUnifiedDiff(diffText: string): DiffFile[] {
       seenHunk = false;
       continue;
     }
+    // Classic unified diffs (no `diff --git` header) start at `--- `. Start a
+    // file there too — previously the whole input was dropped because
+    // `current` stayed null and every line hit the `if (!current) continue`
+    // guard below (audit L4).
+    if (!current && line.startsWith("--- ")) {
+      current = { oldPath: "", newPath: "", lines: [] };
+      files.push(current);
+    }
     if (!current) continue;
 
     if (!seenHunk && line.startsWith("--- ")) {

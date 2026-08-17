@@ -165,7 +165,7 @@ export function DocumentsLibrary() {
   }, [sorted, query]);
 
   const openArtifact = (a: ArtifactRecord) => {
-    if (a.chatSessionId) void selectSession(a.chatSessionId);
+    if (a.chatSessionId) void selectSession(a.chatSessionId).catch(() => {});
     setPreviewArtifact({ path: a.path, filename: a.filename });
     setActiveView("chat");
   };

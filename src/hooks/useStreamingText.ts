@@ -56,11 +56,11 @@ export function useStreamingText<T = string>({
   const buffer = useRef("");
   const rafId = useRef<number | null>(null);
   const streaming = useRef(false);
-
-  // Read displayed as a ref so the rAF callback always sees the latest value
-  // without re-subscribing.
-  const displayedRef = useRef(displayed);
-  displayedRef.current = displayed;
+  // Bumped by reset(). A flush that was scheduled (or whose transition update
+  // was queued) before a reset must not resurrect the old session's text on
+  // top of the new one — the flush checks the epoch it captured at schedule
+  // time and discards itself when reset happened in between.
+  const epoch = useRef(0);
 
   useEffect(() => {
     const transform = toText ?? ((c: unknown) => c as string);
@@ -75,11 +75,16 @@ export function useStreamingText<T = string>({
           const flushed = buffer.current;
           buffer.current = "";
           if (!flushed) return;
-          // Capture the current displayed text once, then update via the
-          // transition so input/scroll stay responsive.
-          const base = displayedRef.current;
+          const flushEpoch = epoch.current;
+          // Functional update (not a displayedRef snapshot): a snapshot can
+          // go stale when a previous transition hasn't committed yet, and a
+          // second frame's flush would then overwrite the first flush's
+          // pending update — silently dropping streamed text. The epoch guard
+          // makes a flush queued just before reset() a no-op instead of
+          // resurrecting the pre-reset text.
           startTransition(() => {
-            setDisplayed(base + flushed);
+            if (epoch.current !== flushEpoch) return;
+            setDisplayed((prev) => prev + flushed);
           });
         });
       }
@@ -117,6 +122,9 @@ export function useStreamingText<T = string>({
   return {
     displayed,
     reset: (next: string) => {
+      // Invalidate any flush that was already scheduled or queued — its
+      // text belongs to the previous stream and must not land on `next`.
+      epoch.current += 1;
       buffer.current = "";
       if (rafId.current !== null) {
         cancelAnimationFrame(rafId.current);

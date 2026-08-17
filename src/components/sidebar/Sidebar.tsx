@@ -180,7 +180,7 @@ export function Sidebar() {
 
   const handleSelectChat = useCallback(
     (id: string) => {
-      void selectSession(id);
+      void selectSession(id).catch((err) => toastError("Couldn't open that chat", err));
       setActiveView("chat");
     },
     [selectSession, setActiveView],

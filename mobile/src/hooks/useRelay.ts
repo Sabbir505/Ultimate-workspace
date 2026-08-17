@@ -229,16 +229,20 @@ function extractToken(url: string): string | null {
   const hashIdx = url.indexOf('#');
   if (hashIdx === -1) return null;
   const frag = url.slice(hashIdx + 1);
-  // Strip any trailing path/query that snuck into the fragment.
-  const endIdx = Math.min(frag.indexOf('?'), frag.indexOf('&')) === -1
-    ? frag.length
-    : Math.min(frag.indexOf('?'), frag.indexOf('&'));
-  const token = frag.slice(0, endIdx === -1 ? frag.length : endIdx);
+  // Cut at the first `?` or `&` that appears in the fragment (whichever
+  // comes first) — taking Math.min of both indexes breaks when only ONE
+  // separator exists (min(-1, x) === -1 swallowed the whole fragment).
+  const ends = [frag.indexOf('?'), frag.indexOf('&')].filter((i) => i !== -1);
+  const token = ends.length ? frag.slice(0, Math.min(...ends)) : frag;
   return token || null;
 }
 
 function _doConnect(target: string) {
   if (_ws?.readyState === WebSocket.OPEN && target === _url) return;
+  // Cancel any pending reconnect first: a stale timer closing over the OLD
+  // target would fire ~3s later and silently reconnect to the previous
+  // desktop, overriding a URL the user just changed (audit M8).
+  if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
   if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; }
   _url = target;
   _token = extractToken(target);
@@ -334,7 +338,9 @@ function _doConnect(target: string) {
         }
       } catch (e) { console.error('parse error', e); }
     };
-    ws.onclose = () => { _connecting = false; stopPolling(); nc(false); _ws = null; if (_reconnectTimer === null) { _reconnectTimer = setTimeout(() => { _reconnectTimer = null; _doConnect(target); }, 3000); } };
+    // Reconnect after 3s — re-reading _url (not the captured target) so a
+    // URL change between close and reconnect wins (audit M8).
+    ws.onclose = () => { _connecting = false; stopPolling(); nc(false); _ws = null; if (_reconnectTimer === null) { _reconnectTimer = setTimeout(() => { _reconnectTimer = null; if (_url) _doConnect(_url); }, 3000); } };
     ws.onerror = () => { _connecting = false; nc(false); };
   } catch (e) { _connecting = false; nc(false); }
 }

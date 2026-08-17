@@ -241,7 +241,25 @@ pub fn remove_worktree(project_path: &Path, worktree_path: &Path) -> Result<(), 
 /// Unified diff of the working tree against HEAD (staged + unstaged),
 /// truncated at ~200KB per CONTRACT.md.
 pub fn get_git_diff(path: &Path) -> Result<String, String> {
-    let mut diff = run_git(path, &["diff", "HEAD"])?;
+    // Unborn HEAD (fresh `git init`, zero commits): `git diff HEAD` fails
+    // with "ambiguous argument 'HEAD'", erroring the Changes panel on a repo
+    // this app itself just created (init_git_repo). Every file is untracked
+    // at that point, so synthesize an all-added diff per file via the same
+    // --no-index path get_git_file_diff uses (audit M7).
+    let head_born = git_command(path, &["rev-parse", "--verify", "--quiet", "HEAD"], &[])
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let mut diff = if head_born {
+        run_git(path, &["diff", "HEAD"])?
+    } else {
+        get_changed_files(path)
+            .into_iter()
+            .filter(|c| c.status == "??")
+            .filter_map(|c| get_git_file_diff(path, &c.path).ok())
+            .filter(|d| !d.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     if diff.len() > DIFF_CAP_BYTES {
         // Truncate on a char boundary to keep the string valid UTF-8.
         let mut end = DIFF_CAP_BYTES;
@@ -302,15 +320,22 @@ pub fn get_git_file_diff(path: &Path, file_path: &str) -> Result<String, String>
         return Ok(String::new());
     }
     validate_repo_relative(path, file_path)?;
+    // On an unborn HEAD (zero commits) `git diff HEAD` cannot resolve HEAD at
+    // all — even for staged files — so everything takes the synthesized
+    // all-added path below (audit M7).
+    let head_born = git_command(path, &["rev-parse", "--verify", "--quiet", "HEAD"], &[])
+        .map(|o| o.status.success())
+        .unwrap_or(false);
     // First, is the file tracked? `git ls-files --error-unmatch` exits non-zero
     // for untracked paths — that's how we detect them without parsing status.
-    let tracked = git_command(
-        path,
-        &["ls-files", "--error-unmatch", "--", file_path],
-        &[],
-    )
-    .map(|o| o.status.success())
-    .unwrap_or(false);
+    let tracked = head_born
+        && git_command(
+            path,
+            &["ls-files", "--error-unmatch", "--", file_path],
+            &[],
+        )
+        .map(|o| o.status.success())
+        .unwrap_or(false);
 
     if !tracked {
         // Untracked: synthesize an "all added" diff. `git diff --no-index`
@@ -720,8 +745,16 @@ pub struct GitLogEntry {
     pub refs: String,
 }
 
-/// Recent commit log with graph lines (last 50 commits).
+/// Recent commit log with graph lines (last 50 commits). An unborn HEAD
+/// (fresh `git init`, zero commits) is not an error — the repo simply has
+/// no commits to show yet (audit M7).
 pub fn get_git_log(path: &Path) -> Result<Vec<GitLogEntry>, String> {
+    let head_born = git_command(path, &["rev-parse", "--verify", "--quiet", "HEAD"], &[])
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !head_born {
+        return Ok(Vec::new());
+    }
     let out = run_git(
         path,
         &[
@@ -997,6 +1030,36 @@ mod tests {
         let s = get_git_status(Path::new("/definitely/not/here-xyz-123"));
         assert!(!s.is_repo);
         assert_eq!(s.branch, None);
+    }
+
+    /// M7: a freshly-`git init`ed repo has an unborn HEAD — `git diff HEAD`
+    /// and `git log` used to error out (the exact state init_git_repo
+    /// creates). The diff must synthesize all-added hunks for untracked
+    /// files, the per-file diff must work, and the log must be empty.
+    #[test]
+    fn unborn_head_diff_and_log_are_not_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+        run_git(path, &["init"]).expect("git init succeeds");
+        std::fs::write(path.join("hello.txt"), "line1\nline2\n").expect("write");
+
+        // Whole-tree diff: all-added, not an error.
+        let diff = get_git_diff(path).expect("unborn-HEAD tree diff succeeds");
+        assert!(diff.contains("diff --git a/hello.txt b/hello.txt"), "got: {diff}");
+        assert!(diff.contains("+line1"));
+
+        // Per-file diff: same story.
+        let file_diff = get_git_file_diff(path, "hello.txt").expect("per-file diff succeeds");
+        assert!(file_diff.contains("+line2"));
+
+        // Staged file (A) in an unborn repo: still no error.
+        run_git(path, &["add", "."]).expect("git add succeeds");
+        let staged = get_git_file_diff(path, "hello.txt").expect("staged per-file diff succeeds");
+        assert!(!staged.is_empty());
+
+        // Log: empty, not an error.
+        let log = get_git_log(path).expect("unborn-HEAD log succeeds");
+        assert!(log.is_empty());
     }
 
     /// Mirrors the core of `init_git_repo` (commands::projects): a non-repo

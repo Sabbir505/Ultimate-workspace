@@ -7,7 +7,10 @@ function normalizeLabel(raw: string): string {
     .replace(/\*\*(.+?)\*\*/g, "$1")    // bold
     .replace(/\*(.+?)\*/g, "$1")         // italic
     .replace(/`(.+?)`/g, "$1")           // inline code
-    .replace(/_/g, "")                   // underscores
+    // Only markdown-EMPHASIS underscores (paired _like_this_), never the
+    // single underscores inside snake_case identifiers — stripping all of
+    // them mangled labels like "parse_plan_steps" (audit L7).
+    .replace(/(?<![\w])_([^_\s]+)_(?![\w])/g, "$1")
     .replace(/\s+/g, " ")
     .trim();
 }

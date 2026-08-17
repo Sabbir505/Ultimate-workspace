@@ -19,6 +19,7 @@ vi.mock("../lib/ipc", () => ({
   getChatMessages: vi.fn().mockResolvedValue([]),
   listChatSessions: vi.fn().mockResolvedValue([]),
   listChatArtifacts: vi.fn().mockResolvedValue([]),
+  listChatCheckpoints: vi.fn().mockResolvedValue([]),
   touchChatSession: vi.fn().mockResolvedValue(undefined),
   createChatSession: vi.fn(),
   generateChatTitle: vi.fn().mockResolvedValue(null),
@@ -44,6 +45,10 @@ vi.mock("../lib/ipc", () => ({
 import { cancelChatMessage, cancelAgentChatMessage } from "../lib/ipc";
 import { useChatStore } from "../state/chat";
 
+// C5 spies replace the store's sendMessage via setState; capture the real
+// action so seed() can restore it for later suites (H2).
+const realSendMessage = useChatStore.getState().sendMessage;
+
 function seed(sessions: { id: string; agent?: string }[]) {
   useChatStore.setState({
     sessions: sessions.map((s) => ({
@@ -61,6 +66,7 @@ function seed(sessions: { id: string; agent?: string }[]) {
     streamingChatSessionId: null,
     messageQueue: {},
     loopState: {},
+    sendMessage: realSendMessage as never,
   });
 }
 
@@ -73,17 +79,39 @@ describe("A3: cancelStream clears per-session state", () => {
   it("deletes streaming + chatStatus keys for the cancelled session", async () => {
     seed([{ id: "s1" }]);
     useChatStore.setState({
+      activeChatSessionId: "s1",
       streaming: { s1: "partial reply" },
       chatStatus: { s1: { kind: "notice", message: "loading" } } as never,
       streamingChatSessionId: "s1",
     });
 
+    // Stop acts on the session the user is VIEWING (audit M1) — s1 is
+    // active, so it is the one cancelled and cleared.
     await useChatStore.getState().cancelStream();
 
     const s = useChatStore.getState();
     expect(s.streamingChatSessionId).toBeNull();
     expect("s1" in s.streaming).toBe(false);
     expect("s1" in s.chatStatus).toBe(false);
+  });
+
+  it("M1: with two concurrent streams, Stop cancels the ACTIVE session only", async () => {
+    seed([{ id: "a" }, { id: "b" }]);
+    useChatStore.setState({
+      activeChatSessionId: "b",
+      // Legacy scalar points at the background session — exactly the case
+      // that used to cancel the wrong turn.
+      streaming: { a: "bg turn", b: "viewed turn" },
+      streamingChatSessionId: "a",
+    });
+
+    await useChatStore.getState().cancelStream();
+
+    const s = useChatStore.getState();
+    expect("b" in s.streaming).toBe(false); // viewed session cancelled
+    expect("a" in s.streaming).toBe(true); // background stream untouched
+    expect(cancelChatMessage).toHaveBeenCalledWith("b");
+    expect(cancelChatMessage).not.toHaveBeenCalledWith("a");
   });
 });
 
@@ -165,5 +193,52 @@ describe("C5: drainQueue is per-session", () => {
     useChatStore.getState().drainQueue("a");
 
     expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe("H2: sendMessage double-send guard is per-session", () => {
+  it("queues when the ACTIVE session streams, even though the scalar names another", async () => {
+    seed([{ id: "a" }, { id: "b" }]);
+    useChatStore.setState({
+      activeChatSessionId: "a",
+      // Both stream concurrently; the legacy scalar last flipped to B.
+      streaming: { a: "turn in flight", b: "background turn" },
+      streamingChatSessionId: "b",
+    });
+
+    await useChatStore.getState().sendMessage("second message while a streams");
+
+    // Must NOT have started a second turn in A — the message is queued.
+    const state = useChatStore.getState();
+    expect((state.messageQueue.a ?? []).length).toBe(1);
+    expect(state.messageQueue.a?.[0]?.content).toBe("second message while a streams");
+    // sendChatMessage is only called when a turn actually starts — A already
+    // streams and B is background, so no new send may fire.
+    const { sendChatMessage } = await import("../lib/ipc");
+    expect(sendChatMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe("H1: rapid session switch must not delete a chat with history", () => {
+  it("does not treat the outgoing chat as empty when the buffer belongs to another session", async () => {
+    seed([{ id: "a" }, { id: "b" }, { id: "c" }]);
+    const { getChatMessages, deleteChatSession } = await import("../lib/ipc");
+    // B HAS history on disk…
+    (getChatMessages as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 1, chatSessionId: "b", role: "user", content: "hi" },
+    ]);
+    // …and the user already clicked into B (active=B), but B's fetch hasn't
+    // committed — the buffer still shows A's empty page. Clicking C now makes
+    // B the OUTGOING session; the old code read the bare empty buffer and
+    // deleted B's whole history.
+    useChatStore.setState({
+      activeChatSessionId: "b",
+      messages: [],
+      messagesSessionId: "a",
+    });
+
+    await useChatStore.getState().selectSession("c");
+
+    expect(deleteChatSession).not.toHaveBeenCalledWith("b");
   });
 });

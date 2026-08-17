@@ -14,8 +14,7 @@
 //! waiter thread (polls `try_wait` -> `pty:exit`). A single monitor thread
 //! drives the working -> waiting/diff_ready silence heuristic for all panes.
 
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -569,15 +568,24 @@ pub struct PtyManager {
     /// Maps session_id → pane_id so the mobile relay can route messages
     /// to the correct pty. A session_id may map to at most one live pane.
     session_to_pane: Arc<Mutex<HashMap<String, String>>>,
+    /// Transcripts of explicitly-CLOSED panes, newest-last, capped so
+    /// `export_session_markdown` still works just after a close. Without
+    /// this the whole `Arc<Pane>` (ring transcript + vt100 screen) was
+    /// retained forever — one per pane ever opened (audit M6).
+    retained_transcripts: Arc<Mutex<VecDeque<(String, String)>>>,
     app: AppHandle,
     db: SharedDb,
 }
+
+/// How many closed-pane transcripts to keep for export-after-close.
+const RETAINED_TRANSCRIPTS_CAP: usize = 20;
 
 impl PtyManager {
     pub fn new(app: AppHandle, db: SharedDb) -> Arc<Self> {
         let mgr = Arc::new(Self {
             panes: Arc::new(Mutex::new(HashMap::new())),
             session_to_pane: Arc::new(Mutex::new(HashMap::new())),
+            retained_transcripts: Arc::new(Mutex::new(VecDeque::new())),
             app,
             db,
         });
@@ -738,7 +746,11 @@ impl PtyManager {
             thread::spawn(move || {
                 let mut buf = [0u8; 8192];
                 let mut tail = String::new();
-                let mut seen_urls: HashSet<String> = HashSet::new();
+                // Insertion-ordered seen-URL list: pruning must drop the
+                // OLDEST entries — a HashSet iterates in arbitrary order, so
+                // the old "skip(200)" prune could evict a just-seen URL and
+                // re-fire it, re-opening a browser pane the user closed.
+                let mut seen_urls: Vec<String> = Vec::new();
                 // Coalescing state: accumulate raw bytes until either
                 //  - 16 ms elapse since the first byte in the current frame, or
                 //  - 64 KB of raw data have buffered (well past any single
@@ -824,23 +836,18 @@ impl PtyManager {
                                     }
                                     // Only emit each unique URL once per pane
                                     // to avoid re-opening a browser pane the
-                                    // user just closed. Prune periodically
-                                    // (keep most-recent 800 of 1000) instead of
-                                    // a hard clear that would re-open the most
+                                    // user just closed. Prune the OLDEST 200
+                                    // of 1000 (insertion order — see the
+                                    // seen_urls declaration) instead of a
+                                    // hard clear that would re-open the most
                                     // recently detected local URL.
-                                    if seen_urls.insert(url.clone()) {
+                                    if !seen_urls.iter().any(|u| u == &url) {
+                                        seen_urls.push(url.clone());
                                         if seen_urls.len() > 1000 {
-                                            // Drop the oldest 200 entries rather
-                                            // than clearing — a full clear lets
-                                            // a just-detected URL re-fire on the
-                                            // next matching line.
-                                            let keep: Vec<String> = seen_urls
-                                                .iter()
-                                                .skip(200)
-                                                .cloned()
-                                                .collect();
-                                            seen_urls.clear();
-                                            seen_urls.extend(keep);
+                                            // Drop the oldest 200 entries:
+                                            // split_off keeps positions
+                                            // 200.. in insertion order.
+                                            seen_urls = seen_urls.split_off(200);
                                         }
                                         let _ = app.emit(
                                             "browser:url_detected",
@@ -961,6 +968,11 @@ impl PtyManager {
         }
 
         self.panes.lock().insert(pane_id.to_string(), pane);
+        // Reusing a pane id starts a fresh transcript — drop any retained
+        // copy from a previous close of this id.
+        self.retained_transcripts
+            .lock()
+            .retain(|(id, _)| id != pane_id);
 
         // Register session_id → pane_id mapping for the mobile relay.
         if let Some(ref sid) = session_id {
@@ -1010,6 +1022,20 @@ impl PtyManager {
             if !pane.exited.load(Ordering::Relaxed) {
                 pane.kill();
             }
+            // Evict the closed pane — its buffers used to accumulate for the
+            // app's lifetime. Keep just the transcript text in a bounded LRU
+            // so a just-closed session can still be exported. (Panes whose
+            // process merely EXITED are not evicted here: the respawn overlay
+            // still needs them.)
+            let transcript = pane.transcript.lock().to_string();
+            let mut retained = self.retained_transcripts.lock();
+            retained.retain(|(id, _)| id != pane_id);
+            retained.push_back((pane_id.to_string(), transcript));
+            while retained.len() > RETAINED_TRANSCRIPTS_CAP {
+                retained.pop_front();
+            }
+            drop(retained);
+            self.panes.lock().remove(pane_id);
         }
     }
 
@@ -1052,13 +1078,23 @@ impl PtyManager {
         }
     }
 
-    /// Transcript accessor for `export_session_markdown`. The buffer survives
-    /// pane kill/exit so a just-closed session can still be exported.
+    /// Transcript accessor for `export_session_markdown`. Falls back to the
+    /// closed-pane LRU so a just-closed session can still be exported.
     pub fn transcript(&self, pane_id: &str) -> Option<String> {
-        self.panes
+        if let Some(text) = self
+            .panes
             .lock()
             .get(pane_id)
             .map(|p| p.transcript.lock().to_string())
+        {
+            return Some(text);
+        }
+        self.retained_transcripts
+            .lock()
+            .iter()
+            .rev()
+            .find(|(id, _)| id == pane_id)
+            .map(|(_, t)| t.clone())
     }
 
     fn get_pane(&self, pane_id: &str) -> Result<Arc<Pane>, String> {

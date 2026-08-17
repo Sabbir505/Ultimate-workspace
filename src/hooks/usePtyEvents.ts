@@ -67,6 +67,18 @@ export function usePtyEvents(): void {
         const prev = pane?.state;
         panesStore.setPaneState(paneId, state);
 
+        // Focusing a pane clears its notify cooldown (the documented §7.13
+        // behavior — the user has seen it, so the next completion should
+        // notify again). Previously this was promised in the comment but
+        // never wired (audit L3).
+        if (panesStore.focusedPaneId === paneId) {
+          clearNotifyCooldown(paneId);
+        }
+        // A closed pane's cooldown entry is dead weight — drop it.
+        if (!pane && lastNotifiedAt.has(paneId)) {
+          clearNotifyCooldown(paneId);
+        }
+
         // §7.13: notify on working -> waiting/diff_ready for unfocused panes,
         // unless Do Not Disturb is on. Throttled per-pane so a flapping pane
         // (working→waiting→working→waiting) doesn't spam toasts + chimes.

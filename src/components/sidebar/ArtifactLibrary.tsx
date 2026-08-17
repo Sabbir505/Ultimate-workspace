@@ -263,7 +263,7 @@ export function ArtifactLibrary({
   // to that session first so the pane belongs to the right conversation.
   // useCallback so the memoized cards don't re-render on every parent render.
   const openArtifact = useCallback((a: ArtifactRecord) => {
-    if (a.chatSessionId) void selectSession(a.chatSessionId);
+    if (a.chatSessionId) void selectSession(a.chatSessionId).catch(() => {});
     setPreviewArtifact({ path: a.path, filename: a.filename });
     setActiveView("chat");
     setOpen(false);

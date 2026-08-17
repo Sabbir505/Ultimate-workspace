@@ -47,20 +47,21 @@ export function usePlanTracker(): void {
   const setPlanSteps = useChatStore((s) => s.setPlanSteps);
   const onPlanStepProgress = useChatStore((s) => s.onPlanStepProgress);
 
-  // Track which messages we've already parsed so we don't re-parse.
-  // The index is only meaningful for the session it was computed against:
-  // `messages` is wholesale-replaced on selectSession, so an index carried
-  // over from the previous session would skip messages (missing plan steps)
-  // or re-scan a range that doesn't exist (duplicating them). Pair the index
-  // with its session id and reset both on a session switch (A5).
-  const parsedMessageIdx = useRef<number>(-1);
+  // Track the newest message id we've already parsed so we don't re-parse.
+  // An INDEX watermark breaks twice: loadOlderMessages PREPENDS rows and
+  // onDone replaces the 200-row page with a fresh fetch — both shift indices,
+  // re-parsing already-seen messages with a new planIndex and duplicating
+  // their steps. Message ids are persisted-DB autoincrement values, so "parse
+  // only ids strictly greater than the watermark" is invariant under both.
+  // Paired with the session id and reset on a session switch (A5).
+  const parsedUpToId = useRef<number | null>(null);
   const parsedSessionId = useRef<string | null>(null);
 
   // Parse new plans from assistant messages
   useEffect(() => {
     if (parsedSessionId.current !== activeSessionId) {
       parsedSessionId.current = activeSessionId;
-      parsedMessageIdx.current = -1;
+      parsedUpToId.current = null;
     }
     if (!activeSessionId) return;
 
@@ -71,24 +72,26 @@ export function usePlanTracker(): void {
     let foundNew = false;
     const allSteps = [...currentSteps];
 
-    // Only scan messages newer than the last parsed
-    for (let i = parsedMessageIdx.current + 1; i < messages.length; i++) {
-      const m = messages[i];
-      if (m.role !== "assistant") continue;
-
-      const content = m.content || "";
-      const plan = extractPlanSection(content);
-      if (!plan) continue;
-
-      nextPlanIndex++;
-      const newSteps = parsePlanSteps(plan, activeSessionId, nextPlanIndex);
-      if (newSteps.length > 0) {
-        allSteps.push(...newSteps);
-        foundNew = true;
+    const upTo = parsedUpToId.current;
+    let watermark = upTo;
+    for (const m of messages) {
+      if (upTo !== null && m.id <= upTo) continue; // already parsed
+      if (m.role === "assistant") {
+        const plan = extractPlanSection(m.content || "");
+        if (plan) {
+          nextPlanIndex++;
+          const newSteps = parsePlanSteps(plan, activeSessionId, nextPlanIndex);
+          if (newSteps.length > 0) {
+            allSteps.push(...newSteps);
+            foundNew = true;
+          }
+        }
       }
+      // Only advance on persisted ids — optimistic bubbles use negative
+      // temp ids and must not move the watermark.
+      if (m.id > 0 && (watermark === null || m.id > watermark)) watermark = m.id;
     }
-
-    parsedMessageIdx.current = messages.length - 1;
+    parsedUpToId.current = watermark;
 
     if (foundNew) {
       setPlanSteps(activeSessionId, allSteps);

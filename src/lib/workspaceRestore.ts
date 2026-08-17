@@ -116,7 +116,9 @@ export function scheduleLayoutSave(): void {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    void saveLayoutNow();
+    void saveLayoutNow().catch(() => {
+      /* best-effort autosave — retried on the next pane mutation */
+    });
   }, SAVE_DEBOUNCE_MS);
 }
 
@@ -144,7 +146,9 @@ function flushLayoutSave(projectId?: string): void {
   if (!saveTimer) return; // nothing unsaved
   clearTimeout(saveTimer);
   saveTimer = null;
-  void saveLayoutNow(projectId);
+  void saveLayoutNow(projectId).catch(() => {
+    /* best-effort flush — the next autosave retries */
+  });
 }
 
 /**

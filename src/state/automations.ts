@@ -65,7 +65,7 @@ export const useAutomationsStore = create<AutomationsState>((set, get) => ({
     try {
       await runAutomationNow(id);
       // Refresh after a beat so lastStatus/lastRunAt reflect the launch.
-      setTimeout(() => void get().load(), 1500);
+      setTimeout(() => void get().load().catch(() => {}), 1500);
     } finally {
       set((s) => {
         const runningNow = { ...s.runningNow };

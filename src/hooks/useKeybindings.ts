@@ -35,7 +35,8 @@ export function useKeybindings(): void {
           "newSession",
           () => {
             const projectId = useProjectsStore.getState().selectedProjectId;
-            if (projectId) void newSessionFlow(projectId, defaultHarness());
+            const harness = defaultHarness();
+            if (projectId && harness) void newSessionFlow(projectId, harness);
           },
         ],
         [

@@ -28,7 +28,7 @@ export function useBudgetEvents(): void {
     // On every cost:updated event, run the budget check.
     void safeListen<CostUpdatedPayload>("cost:updated", () => {
       if (disposed) return;
-      void checkBudgets();
+      void checkBudgets().catch(() => {});
     }).then((u) => {
       if (disposed) u();
       else unlistenCost = u;

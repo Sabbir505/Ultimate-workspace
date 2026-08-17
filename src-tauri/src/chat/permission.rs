@@ -596,10 +596,10 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
         match (p.first(), s.first()) {
             (None, None) => true,
             (None, Some(_)) => false,
-            (Some(seg_p), None) => {
-                // Path exhausted but pattern remains — only ** can match zero.
-                seg_p == "**" && rec(&p[1..], &[])
-            }
+            // Path exhausted but pattern remains — only ** can match zero.
+            // (This arm fully covers the former unreachable `(Some(_), None)`
+            // duplicate below it, which the compiler flagged; removed.)
+            (Some(seg_p), None) => seg_p == "**" && rec(&p[1..], &[]),
             (Some(seg_p), Some(seg_s)) => {
                 if seg_p == "**" {
                     rec(&p[1..], s) || rec(p, &s[1..])
@@ -609,7 +609,6 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
                     false
                 }
             }
-            (Some(_), None) => p.iter().all(|x| x == "**"),
         }
     }
 

@@ -17,7 +17,9 @@ export function useAutomationEvents(): void {
     void listenAutomationRunFinished((p) => {
       // Refresh the list + status regardless of outcome.
       const store = useAutomationsStore.getState();
-      if (store.loaded) void store.load();
+      // Promise.resolve wrapper: tolerate a sync/mock load() that returns
+      // undefined while still swallowing real rejections (M9).
+      if (store.loaded) void Promise.resolve(store.load()).catch(() => {});
 
       // Toast policy: failures only — a healthy */15 cron toasting every
       // success would be noise. "skipped" is informational, not a failure.

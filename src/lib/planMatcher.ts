@@ -78,7 +78,9 @@ export function scanForCompletions(
       new RegExp(`-\\s*\\[x\\]\\s*${label}`, "i"),
       new RegExp(`[✓✔]\\s*${label}`, "i"),
       new RegExp(`~~${label}~~`, "i"),
-      new RegExp(`(?:completed|finished|done)[\\s:]*${label}`, "i"),
+      // \b anchors the verbs: "unfinished setup db" must not satisfy the
+      // "finished …" pattern (audit L6).
+      new RegExp(`\\b(?:completed|finished|done)\\b[\\s:]*${label}`, "i"),
     ];
 
     for (const re of patterns) {

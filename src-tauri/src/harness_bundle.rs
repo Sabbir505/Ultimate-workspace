@@ -122,16 +122,18 @@ pub fn build_instructions_md(project_path: &str, artifacts_dir: &str) -> String 
     parts.join("\n\n")
 }
 
-/// Claude Code `--settings` content. `permission_mode` is the chat session's
-/// posture: `full_auto` keeps the historical bypass (paired with
-/// `--dangerously-skip-permissions` at spawn — the two must agree or one
-/// silently overrides the other); `auto_edit` maps to `acceptEdits`; and
-/// `manual`/`read_only` use `default`, which routes every unmatched tool call
-/// to Conduit's approval card via `--permission-prompt-tool stdio`.
+/// Claude Code `--settings` content. `sandbox` + `approval` are the chat
+/// session's dual policies: `full_access` approval keeps the historical
+/// bypass (paired with `--dangerously-skip-permissions` at spawn — the two
+/// must agree or one silently overrides the other); `auto_edit` maps to
+/// `acceptEdits`; `read_only` sandbox and `on_request` approval use
+/// `default`, which routes every unmatched tool call to Conduit's approval
+/// card via `--permission-prompt-tool stdio`.
 pub fn build_claude_settings_json(
     project_path: &str,
     artifacts_dir: &str,
-    permission_mode: Option<&str>,
+    sandbox: Option<&str>,
+    approval: Option<&str>,
 ) -> Value {
     // Empty entries (project-less sessions have no project path) must not
     // reach the CLI — an empty additionalDirectory is meaningless.
@@ -139,13 +141,15 @@ pub fn build_claude_settings_json(
         .into_iter()
         .filter(|d| !d.is_empty())
         .collect();
-    let default_mode = match permission_mode.unwrap_or("full_auto") {
-        // None (legacy/kimi/opencode callers) + explicit full_auto: bypass,
-        // paired with --dangerously-skip-permissions at spawn.
-        "full_auto" => "bypassPermissions",
-        "auto_edit" => "acceptEdits",
-        // manual / read_only / anything unknown → prompt. Fail CLOSED: a
-        // stray value must never widen permissions.
+    // Map the dual policies to Claude Code's single defaultMode. The approval
+    // dimension dominates: full_access → bypass, auto_edit → acceptEdits,
+    // on_request → default. read_only sandbox also forces default.
+    let default_mode = match (sandbox.unwrap_or("workspace_write"), approval.unwrap_or("full_access")) {
+        ("read_only", _) => "default",
+        (_, "full_access") => "bypassPermissions",
+        (_, "auto_edit") => "acceptEdits",
+        // on_request / unknown → prompt. Fail CLOSED: a stray value must
+        // never widen permissions.
         _ => "default",
     };
     json!({
@@ -273,7 +277,8 @@ pub fn write_bundle(
     project_id: &str,
     project_path: Option<&str>,
     artifacts_dir: Option<&str>,
-    permission_mode: Option<&str>,
+    sandbox: Option<&str>,
+    approval: Option<&str>,
     ws_port: u16,
     connectors: &[HarnessMcpServer],
 ) -> Option<HarnessBundlePaths> {
@@ -314,7 +319,7 @@ pub fn write_bundle(
         write_or_none(&claude_instructions, build_instructions_md(pp, ad));
     let ok_settings = write_or_none(
         &claude_settings,
-        serde_json::to_string_pretty(&build_claude_settings_json(pp, ad, permission_mode))
+        serde_json::to_string_pretty(&build_claude_settings_json(pp, ad, sandbox, approval))
             .unwrap_or_default(),
     );
     let ok_agent = write_or_none(&kimi_agent, build_kimi_agent_md(pp, ad));
@@ -423,7 +428,7 @@ mod tests {
     #[test]
     fn claude_settings_shape() {
         // No mode passed (legacy callers) = the historical bypass default.
-        let v = build_claude_settings_json("C:/work/proj", "C:/work/out", None);
+        let v = build_claude_settings_json("C:/work/proj", "C:/work/out", None, None);
         assert_eq!(v["permissions"]["defaultMode"], "bypassPermissions");
         let allow = v["permissions"]["allow"].as_array().unwrap();
         assert!(allow.iter().any(|x| x == "mcp__conduit-tools__*"));
@@ -434,19 +439,20 @@ mod tests {
 
     #[test]
     fn claude_settings_permission_mode_mapping() {
-        // full_auto stays bypass (paired with --dangerously-skip-permissions);
-        // auto_edit pre-approves edits; manual/read_only route everything
-        // unmatched to the stdio permission prompt.
-        let v = build_claude_settings_json("C:/p", "C:/out", Some("full_auto"));
+        // full_access approval stays bypass (paired with --dangerously-skip-permissions);
+        // auto_edit approval pre-approves edits; on_request approval and
+        // read_only sandbox route everything unmatched to the stdio permission
+        // prompt.
+        let v = build_claude_settings_json("C:/p", "C:/out", Some("workspace_write"), Some("full_access"));
         assert_eq!(v["permissions"]["defaultMode"], "bypassPermissions");
-        let v = build_claude_settings_json("C:/p", "C:/out", Some("auto_edit"));
+        let v = build_claude_settings_json("C:/p", "C:/out", Some("workspace_write"), Some("auto_edit"));
         assert_eq!(v["permissions"]["defaultMode"], "acceptEdits");
-        for mode in ["manual", "read_only"] {
-            let v = build_claude_settings_json("C:/p", "C:/out", Some(mode));
-            assert_eq!(v["permissions"]["defaultMode"], "default", "{mode}");
-        }
-        // Unknown values fail closed to prompting, NOT bypass.
-        let v = build_claude_settings_json("C:/p", "C:/out", Some("bogus"));
+        let v = build_claude_settings_json("C:/p", "C:/out", Some("workspace_write"), Some("on_request"));
+        assert_eq!(v["permissions"]["defaultMode"], "default", "on_request");
+        let v = build_claude_settings_json("C:/p", "C:/out", Some("read_only"), Some("on_request"));
+        assert_eq!(v["permissions"]["defaultMode"], "default", "read_only");
+        // Unknown approval values fail closed to prompting, NOT bypass.
+        let v = build_claude_settings_json("C:/p", "C:/out", Some("workspace_write"), Some("bogus"));
         assert_eq!(v["permissions"]["defaultMode"], "default");
     }
 
@@ -465,7 +471,7 @@ mod tests {
         let md = build_instructions_md("", "C:/work/out");
         assert!(md.contains("No project folder is selected"));
         assert!(!md.contains("The project is at ``"));
-        let v = build_claude_settings_json("", "C:/work/out", None);
+        let v = build_claude_settings_json("", "C:/work/out", None, None);
         let dirs = v["permissions"]["additionalDirectories"].as_array().unwrap();
         assert_eq!(dirs.len(), 1, "empty project path must be filtered out");
         assert_eq!(dirs[0], "C:/work/out");
@@ -582,7 +588,7 @@ mod tests {
         // instructions/settings/agent write unconditionally (independent of the
         // sidecar binary); the mcp.json / opencode.json parts need
         // mcp_binary_path() and are skipped in CI. Assert the unconditional ones.
-        let b = write_bundle(&dir, "p1", Some("C:/work/proj"), Some("C:/work/out"), None, 7681, &[]);
+        let b = write_bundle(&dir, "p1", Some("C:/work/proj"), Some("C:/work/out"), None, None, 7681, &[]);
         let b = b.expect("base dir should create");
         assert!(b.claude_instructions.exists(), "claude instructions written");
         assert!(b.claude_settings.exists(), "claude settings written");

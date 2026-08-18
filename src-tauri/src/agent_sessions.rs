@@ -1224,11 +1224,12 @@ fn resolve_harness_bundle(
     cwd: Option<&str>,
     artifacts_dir: String,
     connectors: &[crate::connectors::HarnessMcpServer],
-    permission_mode: Option<&str>,
+    sandbox: Option<&str>,
+    approval: Option<&str>,
 ) -> Option<crate::harness_bundle::HarnessBundlePaths> {
     let data_dir = app.path().app_data_dir().ok()?;
     crate::harness_bundle::write_bundle(
-        &data_dir, project_id.unwrap_or(NO_PROJECT_BUNDLE_SLUG), cwd, Some(artifacts_dir.as_str()), permission_mode, crate::browser::BROWSER_MCP_PORT, connectors)
+        &data_dir, project_id.unwrap_or(NO_PROJECT_BUNDLE_SLUG), cwd, Some(artifacts_dir.as_str()), sandbox, approval, crate::browser::BROWSER_MCP_PORT, connectors)
 }
 
 fn spawn_claude(
@@ -1245,20 +1246,20 @@ fn spawn_claude(
     connectors: &[crate::connectors::HarnessMcpServer],
 ) -> Result<Child, String> {
     let alias = claude_model_alias(model);
-    // Per-session permission posture. Full-auto keeps the historical
-    // bypass-everything spawn; every other mode routes the CLI's permission
-    // prompts to the reader thread over the stdio control protocol
+    // Per-session dual permission policies. full_access approval keeps the
+    // historical bypass-everything spawn; every other posture routes the CLI's
+    // permission prompts to the reader thread over the stdio control protocol
     // (`--permission-prompt-tool stdio` — Claude Code 2.x), where they become
     // the same chat:approval-request cards the built-in chat uses.
-    let perm_mode = {
+    let (sandbox_str, approval_str) = {
         let conn = db.0.lock();
         crate::db::get_chat_session(&conn, sid)
             .ok()
             .flatten()
-            .map(|cs| cs.permission_mode)
-            .unwrap_or_else(|| "manual".to_string())
+            .map(|cs| (cs.sandbox_policy, cs.approval_policy))
+            .unwrap_or_else(|| ("workspace_write".to_string(), "on_request".to_string()))
     };
-    let gated = perm_mode != "full_auto";
+    let gated = approval_str != "full_access";
     let mut args: Vec<String> = vec![
         "-p".into(),
         "--input-format".into(),
@@ -1286,7 +1287,7 @@ fn spawn_claude(
     // Conduit-owned bundle: instructions, permissions, and both MCP servers
     // (browser + tools). Registration failure degrades to no extra flags —
     // the turn still runs, just without conduit's prompt/tools.
-    if let Some(bundle) = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd), connectors, Some(perm_mode.as_str())) {
+    if let Some(bundle) = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd), connectors, Some(&sandbox_str), Some(&approval_str)) {
         args.extend(crate::harness_bundle::claude_bundle_args(&bundle, &artifacts_dir_for_bundle(app, cwd)));
     }
     let spec = resolve_for_spawn(&CommandSpec {
@@ -1769,7 +1770,7 @@ fn spawn_per_turn(
     // runs with full-auto approval.
     // Kimi/OpenCode headless have no approval channel — the bundle keeps its
     // default (unrestricted) permissions regardless of the session's mode.
-    let bundle = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd), connectors, None);
+    let bundle = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd), connectors, None, None);
     // Legacy fallback: browser-only MCP when the bundle (or its mcp part)
     // didn't write — keeps pty-style browser tools working in degraded mode.
     let opencode_legacy_cfg = if bundle.is_none() {
@@ -1876,6 +1877,22 @@ fn spawn_per_turn(
         .ok_or("failed to capture CLI stdout")?;
     entry.turn_in_flight.store(true, Ordering::SeqCst);
     entry.child = Some(child);
+
+    // Emit a "starting" status so the UI shows immediate activity.
+    // OpenCode/Kimi have a 60-90s cold start (config load, provider auth,
+    // session creation) before the first JSON event arrives — without this
+    // the user sees a stuck spinner and assumes the harness is broken.
+    // Cleared by the first real `chat:token` event (frontend onToken clears
+    // chatStatus for the session) or by `chat:done`/`chat:error`.
+    let harness_name = match kind {
+        PerTurn::Kimi => "Kimi",
+        PerTurn::OpenCode => "OpenCode",
+    };
+    let _ = app.emit(
+        "chat:status",
+        json!({ "chatSessionId": sid, "reason": "harness_starting", "message": format!("{harness_name} is starting up…") }),
+    );
+
     // Fresh per-turn cancel flag: a reader thread from a cancelled turn must
     // keep seeing `true` even after the next send replaces the entry's flag.
     let cancelled = Arc::new(AtomicBool::new(false));

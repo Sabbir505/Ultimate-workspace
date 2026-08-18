@@ -57,6 +57,8 @@ pub struct ExportedChat {
     pub agent: Option<String>,
     pub project_id: Option<String>,
     pub permission_mode: String,
+    pub sandbox_policy: String,
+    pub approval_policy: String,
     pub messages: Vec<ExportedMessage>,
 }
 
@@ -214,6 +216,8 @@ fn serialize_chat(
             agent: session.agent.clone(),
             project_id: session.project_id.clone(),
             permission_mode: session.permission_mode.clone(),
+            sandbox_policy: session.sandbox_policy.clone(),
+            approval_policy: session.approval_policy.clone(),
             messages: exported,
         },
         files,
@@ -418,8 +422,9 @@ fn import_zip_bytes(
         conn.execute(
             "INSERT INTO chat_sessions
                 (id, title, provider, model, created_at, last_active_at,
-                 starred, unread, watch_mode, agent, project_id, permission_mode)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                 starred, unread, watch_mode, agent, project_id, permission_mode,
+                 sandbox_policy, approval_policy)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             rusqlite::params![
                 new_id,
                 title,
@@ -433,6 +438,8 @@ fn import_zip_bytes(
                 chat.agent,
                 project_id,
                 chat.permission_mode,
+                chat.sandbox_policy,
+                chat.approval_policy,
             ],
         )
         .map_err(|e| format!("insert session: {e}"))?;

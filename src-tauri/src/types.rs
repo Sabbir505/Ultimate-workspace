@@ -303,16 +303,33 @@ pub struct ChatSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
     /// Per-session permission posture (`read_only` | `manual` | `auto_edit` |
-    /// `full_auto`). New sessions default to `manual`; honored by the built-in
-    /// chat tool loops AND by headless Claude Code sessions (via
-    /// `--permission-prompt-tool stdio`). Kimi/OpenCode headless have no
-    /// approval channel and always run full-auto.
+    /// `full_auto`). Legacy single-dimension mode — superseded by
+    /// `sandbox_policy` + `approval_policy`. Retained for backward compat
+    /// and DB migration; not used in decision paths after the refactor.
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
+    /// Per-session sandbox scope (`read_only` | `workspace_write`). Decides
+    /// which tools are visible to the model. New sessions default to
+    /// `workspace_write`.
+    #[serde(default = "default_sandbox_policy")]
+    pub sandbox_policy: String,
+    /// Per-session approval posture (`on_request` | `auto_edit` |
+    /// `full_access`). Decides when visible tools pause for approval. New
+    /// sessions default to `on_request`.
+    #[serde(default = "default_approval_policy")]
+    pub approval_policy: String,
 }
 
 fn default_permission_mode() -> String {
     "manual".to_string()
+}
+
+fn default_sandbox_policy() -> String {
+    "workspace_write".to_string()
+}
+
+fn default_approval_policy() -> String {
+    "on_request".to_string()
 }
 
 /// One hit from `search_chat_messages` (command palette "Chats" section).

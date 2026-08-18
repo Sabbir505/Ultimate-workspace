@@ -16,6 +16,8 @@ import { useUiStore } from "../../state/ui";
 import { ChatComposer, type ChatAttachment } from "./ChatComposer";
 import { ApprovalCard, FullAutoConfirmModal } from "./ApprovalFlow";
 import type { PermissionMode } from "../../state/chat";
+import { permissionModeToPolicies } from "../../state/chat";
+import type { ChatPerfPayload } from "../../lib/ipc";
 // TypingIndicator is tiny and eager — imported from its own module so the
 // entry chunk doesn't statically pull in MessageBubble (react-markdown).
 import { TypingIndicator } from "./TypingIndicator";
@@ -95,6 +97,7 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
   const messages = useChatStore((s) => s.messages);
   const streaming = useChatStore((s) => s.streaming);
+  const livePerf = useChatStore((s) => s.livePerf);
   const chatStatus = useChatStore((s) => s.chatStatus);
   const error = useChatStore((s) => s.error);
   const loaded = useChatStore((s) => s.loaded);
@@ -554,16 +557,18 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   // persists per session. Switching into full_auto goes through the one-time
   // confirmation modal.
   const pendingApprovals = useChatStore((s) => s.pendingApprovals);
-  const fullAutoConfirmingFor = useChatStore((s) => s.fullAutoConfirmingFor);
+  const fullAccessConfirmingFor = useChatStore((s) => s.fullAccessConfirmingFor);
   const resolveApproval = useChatStore((s) => s.resolveApproval);
-  const confirmFullAuto = useChatStore((s) => s.confirmFullAuto);
-  const cancelFullAutoConfirm = useChatStore((s) => s.cancelFullAutoConfirm);
-  const setSessionPermissionMode = useChatStore((s) => s.setSessionPermissionMode);
+  const confirmFullAccess = useChatStore((s) => s.confirmFullAccess);
+  const cancelFullAccessConfirm = useChatStore((s) => s.cancelFullAccessConfirm);
+  const setSessionPolicies = useChatStore((s) => s.setSessionPolicies);
   const handlePermissionModeChange = useCallback(
     (mode: PermissionMode) => {
-      if (activeChatSessionId) void setSessionPermissionMode(activeChatSessionId, mode);
+      if (!activeChatSessionId) return;
+      const { sandbox, approval } = permissionModeToPolicies(mode);
+      void setSessionPolicies(activeChatSessionId, sandbox, approval);
     },
-    [activeChatSessionId, setSessionPermissionMode],
+    [activeChatSessionId, setSessionPolicies],
   );
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -682,6 +687,31 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
     stickToBottomRef.current = true;
   }, [activeChatSessionId]);
 
+  // The per-action approval card sits below the message list in the composer
+  // flex column. Mounting/unmounting it shrinks/grows the scroll viewport, and
+  // the browser clamps scrollTop when the viewport shrinks — so the chat
+  // appears to "jump to the top" when an approval card appears mid-stream.
+  // Preserve the user's scroll anchor across approval-card mount/unmount.
+  const approvalKey = activeChatSessionId
+    ? pendingApprovals[activeChatSessionId]?.pendingId ?? null
+    : null;
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    // Snapshot the relative scroll position (distance from bottom) before the
+    // card's height change is reflected in the layout.
+    const prevBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    let raf = requestAnimationFrame(() => {
+      // After the card mounts/unmounts, restore the same distance-from-bottom
+      // so the chat content stays visually put.
+      const el = messagesContainerRef.current;
+      if (!el) return;
+      el.scrollTop = el.scrollHeight - el.clientHeight - prevBottom;
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [approvalKey]);
+
   // Register a scroll-to-message helper so the TurnNavigator can jump to a
   // specific turn. Sets stickToBottom OFF first so the auto-follow effect
   // doesn't yank the scroll back to the bottom while streaming.
@@ -784,6 +814,7 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
       onEdit?: (newContent: string) => void;
       superseded?: boolean;
       segmentStart?: boolean;
+      livePerf?: ChatPerfPayload | null;
     }
   > = useMemo(() => {
     const list: Array<
@@ -795,6 +826,7 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
         onEdit?: (newContent: string) => void;
         superseded?: boolean;
         segmentStart?: boolean;
+        livePerf?: ChatPerfPayload | null;
       }
     > = messages.map((m, i) => {
       const superseded = !!m.supersededBy;
@@ -821,7 +853,13 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
     });
     // If streaming, append the live assistant bubble (no action bar while live).
     if (isStreaming) {
-      list.push({ role: "assistant", content: activeStream, key: "streaming", live: true });
+      list.push({
+        role: "assistant",
+        content: activeStream,
+        key: "streaming",
+        live: true,
+        livePerf: livePerf[activeChatSessionId] ?? null,
+      });
     }
     return list;
   }, [messages, isStreaming, activeStream, handleDelete, handleSubmitEdit]);
@@ -897,6 +935,7 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
                       onPreviewArtifact={setPreviewArtifact}
                       superseded={item.superseded}
                       segmentStart={item.segmentStart}
+                      livePerf={item.livePerf}
                     />
                   </Suspense>
                 </div>
@@ -1063,10 +1102,10 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
         onThinkingChange={setThinking}
         thinkingSupported={thinkingSupported}
       />
-      {fullAutoConfirmingFor && (
+      {fullAccessConfirmingFor && (
         <FullAutoConfirmModal
-          onConfirm={() => void confirmFullAuto(fullAutoConfirmingFor)}
-          onCancel={cancelFullAutoConfirm}
+          onConfirm={() => void confirmFullAccess(fullAccessConfirmingFor!)}
+          onCancel={cancelFullAccessConfirm}
         />
       )}
     </div>
@@ -1080,15 +1119,18 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
 // Designed to be inclusive enough for real-world responses (Claude, GPT, etc.)
 // but not so loose it triggers on every bullet list.
 const PLAN_PATTERNS = [
-  // Markdown heading with plan keywords
-  /^#{1,3}\s*(?:Plan|Planning|Approach|Strategy|Steps|Implementation|Proposed Solution|Game Plan|Roadmap|To[- ]Do|Action Plan)/im,
+  // Markdown heading with plan keywords. "Steps" alone is too loose (file
+  // trees, install steps, etc.) — require it to be "Steps to/for/of …".
+  /^#{1,3}\s*(?:Plan|Planning|Approach|Strategy|Implementation|Proposed Solution|Game Plan|Roadmap|To[- ]Do|Action Plan)\b/im,
+  /^#{1,3}\s*Steps\s+(?:to|for|of)\b/im,
   // Phrasal intros — model says "Here's my plan" or "Let me outline"
   /(?:^|\n\n)(?:Here(?:'s| is) (?:my |the |a |an )?(?:plan|approach|breakdown|strategy|outline|steps?))/im,
   /(?:^|\n\n)(?:Let me (?:(?:quickly )?(?:plan|outline|break(?:\s+down)?|sketch|lay out|map out|walk through)|explain (?:my |the )?(?:plan|approach|thinking)))/im,
   /(?:^|\n\n)(?:I(?:'ll| will) (?:plan|break|outline|do the following|take the following|proceed (?:as follows|in these steps)|tackle this (?:in |with )?steps?|start by))/im,
   /(?:^|\n\n)(?:My (?:plan|approach|strategy|recommendation|suggestion) (?:is|would be|:))/im,
   /(?:^|\n\n)(?:Here(?:'s| is) (?:how|what) I(?:'ll| will) (?:do|approach|proceed|tackle|handle|implement))/im,
-  // Numbered plan marker
+  // Numbered plan marker: requires TWO consecutive numbered items (a real
+  // ordered plan), not just one numbered line.
   /(?:^|\n)(?:\d+[.)]\s+)(?:\*\*[^*]+\*\*\s*)?(?:\d+[.)]\s+)/m,
 ];
 

@@ -146,6 +146,10 @@ export interface UiState {
    *  so effect loops don't churn. */
   setModalOpen: (id: string, open: boolean) => void;
   setToolPanelTab: (tab: ToolPanelTab) => void;
+  /** Open or focus the singleton working-tree diff tab. */
+  openFilesTab: () => void;
+  /** Open or focus the singleton Canvas (diagram/markdown/preview) tab. */
+  openCanvasTab: () => void;
   /** Open tabs in the right-side tool panel — supports MULTIPLE instances of
    *  the same kind (several terminals, several browsers, several agents, …).
    *  Each instance carries its own kind and optional target (paneId for
@@ -286,6 +290,59 @@ export const useUiStore = create<UiState>((set) => ({
       return { openModalIds, modalOpen: openModalIds.length > 0 };
     }),
   setToolPanelTab: (toolPanelTab) => set({ toolPanelTab }),
+  // Open (or activate) the singleton "files" diff tab. Used by the
+  // FilesChangedSummary Review button and other entry points that should
+  // surface the working-tree diff panel. Unlike `addTab("files")` this never
+  // stacks duplicate files tabs — it finds the existing one and activates it,
+  // falling back to addTab when none exists.
+  openFilesTab: () =>
+    set((s) => {
+      const existing = s.openTabs.find((t) => t.kind === "files");
+      if (existing) {
+        return {
+          activeTabId: existing.instanceId,
+          toolPanelTab: "files",
+          toolPanelCollapsed: false,
+        };
+      }
+      const instanceId = `t${s.nextTabId}`;
+      const tab: ToolPanelTabInstance = { instanceId, kind: "files" };
+      const openTabs = [...s.openTabs, tab];
+      if (openTabs.length > 8) openTabs.splice(0, openTabs.length - 8);
+      return {
+        openTabs,
+        nextTabId: s.nextTabId + 1,
+        activeTabId: instanceId,
+        toolPanelTab: "files",
+        toolPanelCollapsed: false,
+      };
+    }),
+  // Open (or activate) the singleton Canvas tab. Multiple callers (ToolPanel
+  // auto-open effect, InlineDiagram, PlanBanner) used to call `addTab("canvas")`
+  // which has no dedupe, stacking a new canvas tab on every fire. This finds
+  // the existing canvas instance and activates it, or creates one if none.
+  openCanvasTab: () =>
+    set((s) => {
+      const existing = s.openTabs.find((t) => t.kind === "canvas");
+      if (existing) {
+        return {
+          activeTabId: existing.instanceId,
+          toolPanelTab: "canvas",
+          toolPanelCollapsed: false,
+        };
+      }
+      const instanceId = `t${s.nextTabId}`;
+      const tab: ToolPanelTabInstance = { instanceId, kind: "canvas" };
+      const openTabs = [...s.openTabs, tab];
+      if (openTabs.length > 8) openTabs.splice(0, openTabs.length - 8);
+      return {
+        openTabs,
+        nextTabId: s.nextTabId + 1,
+        activeTabId: instanceId,
+        toolPanelTab: "canvas",
+        toolPanelCollapsed: false,
+      };
+    }),
   // Add a new tab INSTANCE of the given kind (multiple same-kind tabs allowed).
   addTab: (kind, target) =>
     set((s) => {

@@ -101,8 +101,7 @@ export function InlineDiagram({
   const [containerW, setContainerW] = useState(0);
 
   const setPreviewArtifact = useChatStore((s) => s.setPreviewArtifact);
-  const setToolPanelTab = useUiStore((s) => s.addTab);
-  const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
+  const openCanvasTab = useUiStore((s) => s.openCanvasTab);
 
   // Close kebab on outside click
   useEffect(() => {
@@ -119,8 +118,7 @@ export function InlineDiagram({
   const openInCanvas = () => {
     setMenuOpen(false);
     setPreviewArtifact(artifact);
-    setToolPanelTab("canvas");
-    setToolPanelCollapsed(false);
+    openCanvasTab();
   };
 
   const downloadFile = () => {

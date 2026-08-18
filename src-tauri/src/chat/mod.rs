@@ -189,7 +189,8 @@ impl ChatManager {
         effort: Option<String>,
         tools_enabled: bool,
         code_exec_enabled: bool,
-        permission_mode: permission::PermissionMode,
+        sandbox: permission::SandboxPolicy,
+        approval: permission::ApprovalPolicy,
         fs_roots: Vec<String>,
         // Connector ids attached to this conversation (per-session opt-in).
         // When tools are enabled, each is connected (OAuth token refreshed,
@@ -375,12 +376,12 @@ impl ChatManager {
 
             let result = if tools_enabled && is_openai {
                 run_openai_tool_loop(
-                    &client, &tool_base, &api_key, &chat_req, &caps, permission_mode, &mgr, &sid, &app, research_mode, perf.clone(),
+                    &client, &tool_base, &api_key, &chat_req, &caps, sandbox, approval, &mgr, &sid, &app, research_mode, perf.clone(),
                 )
                 .await
             } else if tools_enabled && is_anthropic {
                 run_anthropic_tool_loop(
-                    &client, &tool_base, &api_key, &chat_req, &caps, permission_mode, &mgr, &sid, &app, research_mode, perf.clone(),
+                    &client, &tool_base, &api_key, &chat_req, &caps, sandbox, approval, &mgr, &sid, &app, research_mode, perf.clone(),
                 )
                 .await
             } else {

@@ -16,7 +16,7 @@ import { BranchDropdown } from "./BranchDropdown";
 import { useUiStore } from "../../state/ui";
 import { useChatStore } from "../../state/chat";
 import { useProjectsStore } from "../../state/projects";
-import { listChatSkills, listPromptTemplates, templateVariables, fillTemplate, transcribeAudio, type PromptTemplate, type LlamaOverrides } from "../../lib/ipc";
+import { listChatSkills, listPromptTemplates, templateVariables, fillTemplate, transcribeAudio, toastError, toastInfo, type PromptTemplate, type LlamaOverrides } from "../../lib/ipc";
 
 const MAX_TEXT_BYTES = 512 * 1024;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
@@ -629,8 +629,25 @@ export function ChatComposer({
       mediaRecorderRef.current?.stop();
       return;
     }
+    let stream: MediaStream;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      // getUserMedia fails when: the host (WebView2) hasn't granted mic
+      // permission, the device has no mic, or the user denied the prompt.
+      // Surface the reason instead of dying silently — this is the #1 cause
+      // of "mic doesn't work" reports.
+      const name = (e as Error)?.name ?? "Error";
+      if (name === "NotAllowedError" || name === "SecurityError") {
+        toastError("Microphone permission denied — allow it in Windows settings and reload.");
+      } else if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+        toastError("No microphone found on this device.");
+      } else {
+        toastError("Could not start microphone.", e);
+      }
+      return;
+    }
+    try {
       const rec = new MediaRecorder(stream);
       audioChunksRef.current = [];
       rec.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
@@ -641,11 +658,25 @@ export function ChatComposer({
         setTranscribing(true);
         try {
           const buf = await blob.arrayBuffer();
-          const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+          // Chunked base64 — spreading the whole buffer into String.fromCharCode
+          // throws RangeError on clips > ~100KB. 8KB chunks are safe and fast.
+          const bytes = new Uint8Array(buf);
+          let binary = "";
+          const CHUNK = 0x8000;
+          for (let i = 0; i < bytes.length; i += CHUNK) {
+            binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+          }
+          const b64 = btoa(binary);
           const res = await transcribeAudio(b64, blob.type);
-          if (res?.text) insertTemplateText(res.text);
-        } catch {
-          // transcription failed — leave composer unchanged
+          if (res?.text) {
+            insertTemplateText(res.text);
+          } else {
+            toastError("Transcription returned no text. Is a Whisper server running? See Settings → API Keys.");
+          }
+        } catch (e) {
+          // Most common cause: no whisper-compatible server reachable at the
+          // configured base URL (default http://127.0.0.1:8081) → ECONNREFUSED.
+          toastError("Voice transcription failed — check the Whisper server in Settings → API Keys.", e);
         } finally {
           setTranscribing(false);
         }
@@ -653,8 +684,9 @@ export function ChatComposer({
       mediaRecorderRef.current = rec;
       rec.start();
       setRecording(true);
-    } catch {
-      // no mic permission / unsupported — ignore
+    } catch (e) {
+      stream.getTracks().forEach((t) => t.stop());
+      toastError("Could not initialize audio recorder.", e);
     }
   }, [recording, insertTemplateText]);
 

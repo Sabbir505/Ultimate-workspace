@@ -107,7 +107,10 @@ interface CategoryDef {
   sub: string;
 }
 
-/** Grouped nav sections: section header + its categories, in display order. */
+/** Grouped nav sections: section header + its categories, in display order.
+ *  IA follows desktop-app best practice (VS Code / Raycast / Windows 11):
+ *  6 top-level groups, each with 1–4 items — broad enough to scan at a glance,
+ *  narrow enough that related settings stay adjacent. */
 const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
   {
     title: "General",
@@ -131,9 +134,10 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
     ],
   },
   {
-    title: "Version Control",
+    title: "Workspace & Safety",
     items: [
       { key: "git", label: "Commit message model", sub: "Utility model for auto-commits" },
+      { key: "permissions", label: "Approval rules", sub: "Always-allow tool+glob" },
     ],
   },
   {
@@ -143,12 +147,6 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
       { key: "mcpgallery", label: "MCP Servers", sub: "Gallery + custom MCP" },
       { key: "knowledge", label: "Knowledge", sub: "Local folders (RAG)" },
       { key: "remote", label: "Remote", sub: "Mobile pairing + Tailscale" },
-    ],
-  },
-  {
-    title: "Permissions",
-    items: [
-      { key: "permissions", label: "Approval rules", sub: "Always-allow tool+glob" },
     ],
   },
   {
@@ -194,6 +192,21 @@ export function SettingsView() {
   const settingsCategory = useUiStore((s) => s.settingsCategory);
   const setSettingsCategory = useUiStore((s) => s.setSettingsCategory);
   const [category, setCategory] = useState<Category>("appearance");
+  // Search filter for the nav (VS Code / Raycast pattern). Empty = grouped
+  // nav; non-empty = flat filtered list hiding section titles.
+  const [navQuery, setNavQuery] = useState("");
+  const navQueryTrim = navQuery.trim().toLowerCase();
+  const filteredItems = useMemo(() => {
+    if (!navQueryTrim) return null;
+    const all = NAV_SECTIONS.flatMap((s) => s.items);
+    return all.filter(
+      (c) =>
+        c.label.toLowerCase().includes(navQueryTrim) ||
+        c.sub.toLowerCase().includes(navQueryTrim) ||
+        c.key.toLowerCase().includes(navQueryTrim),
+    );
+  }, [navQueryTrim]);
+
   useEffect(() => {
     if (settingsCategory && isCategory(settingsCategory)) {
       setCategory(settingsCategory as Category);
@@ -220,25 +233,72 @@ export function SettingsView() {
         </div>
         <div className="view-body">
           <div className="settings-split">
-            <nav className="settings-nav">
-              {NAV_SECTIONS.map((section) => (
-                <div key={section.title} className="settings-nav-section">
-                  <div className="settings-nav-section-title">{section.title}</div>
-                  {section.items.map((c) => (
-                    <button
-                      key={c.key}
-                      className={`nav-item${category === c.key ? " active" : ""}`}
-                      onClick={() => pickCategory(c.key)}
-                    >
-                      <span className="nav-item-label">
-                        <SettingsNavIcon category={c.key} />
-                        {c.label}
-                      </span>
-                      <span className="nav-sub">{c.sub}</span>
-                    </button>
-                  ))}
+            <nav className={`settings-nav${filteredItems ? " filtered" : ""}`}>
+              <div className="settings-search">
+                <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <circle cx="11" cy="11" r="8" />
+                  <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                </svg>
+                <input
+                  type="text"
+                  value={navQuery}
+                  onChange={(e) => setNavQuery(e.target.value)}
+                  placeholder="Search settings…"
+                  aria-label="Search settings"
+                />
+                {navQuery && (
+                  <button
+                    className="settings-search-clear"
+                    onClick={() => setNavQuery("")}
+                    aria-label="Clear search"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+              {filteredItems ? (
+                <div className="settings-nav-section">
+                  {filteredItems.length > 0 ? (
+                    filteredItems.map((c) => (
+                      <button
+                        key={c.key}
+                        className={`nav-item${category === c.key ? " active" : ""}`}
+                        onClick={() => {
+                          pickCategory(c.key);
+                          setNavQuery("");
+                        }}
+                      >
+                        <span className="nav-item-label">
+                          <SettingsNavIcon category={c.key} />
+                          {c.label}
+                        </span>
+                        <span className="nav-sub">{c.sub}</span>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="settings-nav-empty">No matches</div>
+                  )}
                 </div>
-              ))}
+              ) : (
+                NAV_SECTIONS.map((section) => (
+                  <div key={section.title} className="settings-nav-section">
+                    <div className="settings-nav-section-title">{section.title}</div>
+                    {section.items.map((c) => (
+                      <button
+                        key={c.key}
+                        className={`nav-item${category === c.key ? " active" : ""}`}
+                        onClick={() => pickCategory(c.key)}
+                      >
+                        <span className="nav-item-label">
+                          <SettingsNavIcon category={c.key} />
+                          {c.label}
+                        </span>
+                        <span className="nav-sub">{c.sub}</span>
+                      </button>
+                    ))}
+                  </div>
+                ))
+              )}
             </nav>
 
             <div className="settings-panel">

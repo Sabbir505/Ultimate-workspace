@@ -6,6 +6,7 @@ import {
   listBudgets,
   setBudget,
   removeBudget,
+  listProjects,
   type BudgetConfig,
 } from "../../lib/ipc";
 import type { ProjectCostRollup } from "../../types";
@@ -19,6 +20,9 @@ export function BudgetPanel({ perProject }: Props) {
   const [busy, setBusy] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [draftUsd, setDraftUsd] = useState("");
+  // Project id → name. `perProject` only carries the UUID; without this
+  // lookup the panel renders raw UUIDs where a name is expected.
+  const [projectNames, setProjectNames] = useState<Map<string, string>>(new Map());
 
   const refresh = useCallback(async () => {
     const b = await listBudgets();
@@ -26,6 +30,15 @@ export function BudgetPanel({ perProject }: Props) {
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
+
+  useEffect(() => {
+    void (async () => {
+      const ps = await listProjects();
+      if (ps) setProjectNames(new Map(ps.map((p) => [p.id, p.name])));
+    })();
+  }, []);
+
+  const displayName = (id: string) => projectNames.get(id) ?? id.slice(0, 8);
 
   const handleSet = async (projectId: string) => {
     const val = parseFloat(draftUsd);
@@ -60,7 +73,7 @@ export function BudgetPanel({ perProject }: Props) {
           const over = pct && parseFloat(pct) >= (cfg?.thresholdPct ?? 100);
           return (
             <div key={p.projectId} className="budget-row">
-              <span className="budget-row-name">{p.projectId}</span>
+              <span className="budget-row-name">{displayName(p.projectId)}</span>
               <span className="budget-row-spend">${p.totalCostUsd.toFixed(2)}</span>
               {editing === p.projectId ? (
                 <div className="budget-row-edit">

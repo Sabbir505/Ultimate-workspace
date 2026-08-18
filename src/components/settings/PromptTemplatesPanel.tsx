@@ -21,7 +21,20 @@ export function PromptTemplatesPanel() {
   const [note, setNote] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    setTemplates(await listPromptTemplates());
+    const loaded = await listPromptTemplates();
+    // Deduplicate persisted entries that share the same (name, trigger, body)
+    // — historical appends with no dedup guard could leave duplicates behind.
+    const seen = new Set<string>();
+    const deduped = loaded.filter((t) => {
+      const key = `${t.name}│${t.trigger ?? ""}│${t.body}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    setTemplates(deduped);
+    if (deduped.length !== loaded.length) {
+      void savePromptTemplates(deduped);
+    }
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
@@ -60,7 +73,16 @@ export function PromptTemplatesPanel() {
         await persist(templates.map((t) => (t.id === editingId ? next : t)));
         setNote(`Updated template "${next.name}"${vars}.`);
       } else {
-        await persist([...templates, next]);
+        // Prevent duplicate prompts by replacing any exact same-name/trigger/body
+        // template, and also collapsing same name+trigger variants to a single
+        // latest entry.
+        const sameKey = templates.filter(
+          (t) => !(t.name === next.name && (t.trigger ?? "") === (next.trigger ?? "") && t.body === next.body),
+        );
+        const sameSlot = sameKey.filter(
+          (t) => !(t.name === next.name && (t.trigger ?? "") === (next.trigger ?? "")),
+        );
+        await persist([...sameSlot, next]);
         setNote(`Added template "${next.name}"${vars}.`);
       }
       setEditingId(null);

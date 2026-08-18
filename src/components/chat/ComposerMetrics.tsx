@@ -30,21 +30,23 @@ function fmtMs(ms: number | null | undefined): string | null {
   return `${m}m ${rem}s`;
 }
 
+function fmtTokens(n: number | null | undefined): string | null {
+  if (n == null || !Number.isFinite(n)) return null;
+  if (n === 0) return "0 tok";
+  if (n < 1000) return `${n} tok`;
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k tok`;
+  return `${(n / 1_000_000).toFixed(1)}M tok`;
+}
+
 function fmtTokPerSecond(t: number | null | undefined): string | null {
-  if (t == null || !Number.isFinite(t) || t <= 0) return null;
+  if (t == null || !Number.isFinite(t) || t < 0) return null;
+  if (t === 0) return "0 tok/s";
   return `${t.toFixed(t < 10 ? 1 : 0)} tok/s`;
 }
 
 function fmtPct(p: number | null | undefined): string | null {
   if (p == null || !Number.isFinite(p) || p < 0) return null;
   return `${Math.round(p * 100)}% cache`;
-}
-
-function fmtTokens(n: number | null | undefined): string | null {
-  if (n == null || !Number.isFinite(n) || n <= 0) return null;
-  if (n < 1000) return `${n} tok`;
-  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k tok`;
-  return `${(n / 1_000_000).toFixed(1)}M tok`;
 }
 
 interface MetricChipProps {
@@ -84,10 +86,14 @@ export function ComposerMetrics({ chatSessionId, streaming }: Props) {
   // carry input tokens (those come with usage at turn end), so "in" only shows
   // in the idle/session-aggregate state.
   if (live) {
-    const out = fmtTokens(live.outputTokens);
-    if (out) chips.push({ label: "out", value: out, live: true });
-    const tokS = fmtTokPerSecond(live.tokensPerSecond ?? undefined);
-    if (tokS) chips.push({ label: "speed", value: tokS, live: true });
+    // While streaming, always surface output tokens + speed even at zero so the
+    // user can see the counter live-tick from the first token. The remaining
+    // chips only render when they have a positive value (e.g. llm/tools/ttft
+    // are null or 0 before the first measurement lands).
+    const out = fmtTokens(live.outputTokens) ?? "0 tok";
+    chips.push({ label: "out", value: out, live: true });
+    const tokS = fmtTokPerSecond(live.tokensPerSecond ?? undefined) ?? "0 tok/s";
+    chips.push({ label: "speed", value: tokS, live: true });
     const llm = fmtMs(live.llmTimeMs);
     if (llm) chips.push({ label: "llm", value: llm });
     if (live.toolTimeMs > 0) {

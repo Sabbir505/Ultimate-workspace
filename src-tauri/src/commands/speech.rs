@@ -52,17 +52,22 @@ pub async fn transcribe_audio(
         .decode(payload.as_bytes())
         .map_err(|e| format!("could not decode audio payload: {e}"))?;
 
-    let ext = match mime.as_deref() {
-        Some("audio/wav" | "audio/wave" | "audio/x-wav") => "wav",
-        Some("audio/ogg") => "ogg",
-        Some("audio/mp4" | "audio/mpeg") | Some("audio/mp3") => "mp3",
-        _ => "wav",
+    // WebView2's MediaRecorder defaults to WebM/Opus on Windows; macOS Safari
+    // produces mp4; Whisper.cpp / openai-whisper accept all three. Pick the
+    // extension to match the actual container so the server decodes correctly
+    // (sending a .webm body with mime "audio/wav" makes whisper fail silently).
+    let (ext, part_mime) = match mime.as_deref() {
+        Some("audio/wav" | "audio/wave" | "audio/x-wav") => ("wav", "audio/wav"),
+        Some("audio/ogg") => ("ogg", "audio/ogg"),
+        Some("audio/mp4" | "audio/mpeg") | Some("audio/mp3") => ("mp3", "audio/mpeg"),
+        Some("audio/webm") | Some("video/webm") => ("webm", "audio/webm"),
+        _ => ("wav", "audio/wav"),
     };
     let filename = format!("recording.{ext}");
 
     let part = multipart::Part::bytes(bytes)
         .file_name(filename)
-        .mime_str(mime.as_deref().unwrap_or("audio/wav"))
+        .mime_str(part_mime)
         .map_err(|e| e.to_string())?;
     let form = multipart::Form::new().part("file", part).text("model", "whisper-1");
 

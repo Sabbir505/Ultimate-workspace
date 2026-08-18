@@ -9,7 +9,7 @@
 use super::super::permission;
 use super::*;
 
-pub fn openai_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -> Vec<Value> {
+pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) -> Vec<Value> {
     let mut specs: Vec<Value> = vec![];
     if caps.web_search {
         specs.push(openai_fn(WEB_SEARCH, WEB_SEARCH_DESC, web_search_parameters()));
@@ -46,7 +46,7 @@ pub fn openai_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -> V
         specs.push(openai_fn(SEARCH_DOCS, SEARCH_DOCS_DESC, search_docs_parameters()));
     }
     // Mutating filesystem tools — stripped from the schema under read_only.
-    if mode != permission::PermissionMode::ReadOnly {
+    if sandbox.allows_mutating_tools() {
         specs.push(openai_fn(WRITE_FILE, WRITE_FILE_DESC, path_content_parameters()));
         specs.push(openai_fn(EDIT_FILE, EDIT_FILE_DESC, edit_file_parameters()));
         specs.push(openai_fn(DELETE_FILE, DELETE_FILE_DESC, path_parameters()));
@@ -56,7 +56,7 @@ pub fn openai_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -> V
     // System tools. The mutating ones (download_file, run_shell) are stripped
     // under read_only exactly like filesystem writes; the read-only task
     // tracking/cancelling tools are always present.
-    if mode != permission::PermissionMode::ReadOnly {
+    if sandbox.allows_mutating_tools() {
         specs.push(openai_fn(DOWNLOAD_FILE, DOWNLOAD_FILE_DESC, download_file_parameters()));
         specs.push(openai_fn(RUN_SHELL, RUN_SHELL_DESC, run_shell_parameters()));
     }
@@ -72,8 +72,8 @@ pub fn openai_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -> V
     // we don't store the full input schema per turn, we advertise a permissive
     // object schema and let the server validate. Write-kind tools get an
     // approval note in the description so the model knows each will be gated.
-    append_connector_tools_openai(&caps.attached_connectors, mode, &mut specs);
-    append_mcp_tools_openai(&caps.mcp_tools, mode, &mut specs);
+    append_connector_tools_openai(&caps.attached_connectors, sandbox, &mut specs);
+    append_mcp_tools_openai(&caps.mcp_tools, sandbox, &mut specs);
     specs
 }
 
@@ -90,7 +90,7 @@ fn openai_fn(name: &str, description: &str, parameters: Value) -> Value {
 
 /// Anthropic `tools` array (`{name, description, input_schema}` entries).
 /// Same read-only filtering as [`openai_tool_specs`].
-pub fn anthropic_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -> Vec<Value> {
+pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) -> Vec<Value> {
     let mut specs: Vec<Value> = vec![];
     if caps.web_search {
         specs.push(anthropic_fn(WEB_SEARCH, WEB_SEARCH_DESC, web_search_parameters()));
@@ -123,14 +123,14 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -
     if caps.local_docs {
         specs.push(anthropic_fn(SEARCH_DOCS, SEARCH_DOCS_DESC, search_docs_parameters()));
     }
-    if mode != permission::PermissionMode::ReadOnly {
+    if sandbox.allows_mutating_tools() {
         specs.push(anthropic_fn(WRITE_FILE, WRITE_FILE_DESC, path_content_parameters()));
         specs.push(anthropic_fn(EDIT_FILE, EDIT_FILE_DESC, edit_file_parameters()));
         specs.push(anthropic_fn(DELETE_FILE, DELETE_FILE_DESC, path_parameters()));
         specs.push(anthropic_fn(MOVE_FILE, MOVE_FILE_DESC, src_dest_parameters()));
         specs.push(anthropic_fn(COPY_FILE, COPY_FILE_DESC, src_dest_parameters()));
     }
-    if mode != permission::PermissionMode::ReadOnly {
+    if sandbox.allows_mutating_tools() {
         specs.push(anthropic_fn(DOWNLOAD_FILE, DOWNLOAD_FILE_DESC, download_file_parameters()));
         specs.push(anthropic_fn(RUN_SHELL, RUN_SHELL_DESC, run_shell_parameters()));
     }
@@ -141,8 +141,8 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, mode: permission::PermissionMode) -
     if caps.code_exec {
         specs.push(anthropic_fn(RUN_CODE, RUN_CODE_DESC, run_code_parameters()));
     }
-    append_connector_tools_anthropic(&caps.attached_connectors, mode, &mut specs);
-    append_mcp_tools_anthropic(&caps.mcp_tools, mode, &mut specs);
+    append_connector_tools_anthropic(&caps.attached_connectors, sandbox, &mut specs);
+    append_mcp_tools_anthropic(&caps.mcp_tools, sandbox, &mut specs);
     specs
 }
 
@@ -706,7 +706,7 @@ fn permissive_params() -> Value {
 
 fn append_connector_tools_openai(
     attached: &[crate::connectors::AttachedConnector],
-    mode: permission::PermissionMode,
+    sandbox: permission::SandboxPolicy,
     specs: &mut Vec<Value>,
 ) {
     for att in attached {
@@ -714,7 +714,7 @@ fn append_connector_tools_openai(
             // Under read_only, connector Write tools are stripped from the
             // schema (mirrors the filesystem mutating tools) so the model
             // cannot even propose them.
-            if mode == permission::PermissionMode::ReadOnly
+            if !sandbox.allows_mutating_tools()
                 && att.tools.get(name).map(|(k, _)| *k)
                     == Some(permission::ConnectorToolKind::Write)
             {
@@ -728,12 +728,12 @@ fn append_connector_tools_openai(
 
 fn append_connector_tools_anthropic(
     attached: &[crate::connectors::AttachedConnector],
-    mode: permission::PermissionMode,
+    sandbox: permission::SandboxPolicy,
     specs: &mut Vec<Value>,
 ) {
     for att in attached {
         for name in att.tools.keys() {
-            if mode == permission::PermissionMode::ReadOnly
+            if !sandbox.allows_mutating_tools()
                 && att.tools.get(name).map(|(k, _)| *k)
                     == Some(permission::ConnectorToolKind::Write)
             {
@@ -769,11 +769,11 @@ fn mcp_tool_description(entry: &crate::mcp_gallery::McpToolEntry) -> String {
 
 pub(crate) fn append_mcp_tools_openai(
     entries: &[crate::mcp_gallery::McpToolEntry],
-    mode: permission::PermissionMode,
+    sandbox: permission::SandboxPolicy,
     specs: &mut Vec<Value>,
 ) {
     for entry in entries {
-        if mode == permission::PermissionMode::ReadOnly
+        if !sandbox.allows_mutating_tools()
             && entry.kind == permission::ConnectorToolKind::Write
         {
             continue;
@@ -788,11 +788,11 @@ pub(crate) fn append_mcp_tools_openai(
 
 pub(crate) fn append_mcp_tools_anthropic(
     entries: &[crate::mcp_gallery::McpToolEntry],
-    mode: permission::PermissionMode,
+    sandbox: permission::SandboxPolicy,
     specs: &mut Vec<Value>,
 ) {
     for entry in entries {
-        if mode == permission::PermissionMode::ReadOnly
+        if !sandbox.allows_mutating_tools()
             && entry.kind == permission::ConnectorToolKind::Write
         {
             continue;
@@ -835,7 +835,7 @@ mod tests {
 
         // FullAuto: both tools advertised, write tagged in the description.
         let mut specs = Vec::new();
-        append_mcp_tools_openai(&entries, permission::PermissionMode::FullAuto, &mut specs);
+        append_mcp_tools_openai(&entries, permission::SandboxPolicy::WorkspaceWrite, &mut specs);
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0]["function"]["name"], "mcp_memory_search_nodes");
         assert!(specs[0]["function"]["description"]
@@ -849,7 +849,7 @@ mod tests {
 
         // read_only: the Write tool is stripped entirely.
         let mut ro = Vec::new();
-        append_mcp_tools_anthropic(&entries, permission::PermissionMode::ReadOnly, &mut ro);
+        append_mcp_tools_anthropic(&entries, permission::SandboxPolicy::ReadOnly, &mut ro);
         assert_eq!(ro.len(), 1);
         assert_eq!(ro[0]["name"], "mcp_memory_search_nodes");
     }

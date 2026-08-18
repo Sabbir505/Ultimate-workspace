@@ -28,6 +28,29 @@ import {
   type DocsEmbeddingStatus,
   type DocsIndexProgressPayload,
 } from "../../lib/ipc";
+import { useUiStore } from "../../state/ui";
+
+/** Recommended Hugging Face embedding GGUFs — the small set the backend's
+ *  `find_embedding_gguf` already prefers (nomic-embed) plus a couple of
+ *  well-known alternatives. Clicking a suggestion jumps to Model Market with
+ *  the repo id pre-filled so the user can install it in one place. */
+const EMBEDDING_SUGGESTIONS: { repo: string; label: string; note: string }[] = [
+  {
+    repo: "nomic-ai/nomic-embed-text-v1.5-GGUF",
+    label: "nomic-embed-text-v1.5",
+    note: "Recommended · 274 MB Q8_0 · best quality/size",
+  },
+  {
+    repo: "nomic-ai/nomic-embed-text-v1-GGUF",
+    label: "nomic-embed-text-v1",
+    note: "Older nomic · smaller footprint",
+  },
+  {
+    repo: "CompendiumLabs/bge-small-en-v1.5-gguf",
+    label: "bge-small-en-v1.5",
+    note: "BAAI bge-small · compact English embeddings",
+  },
+];
 
 function formatDate(ts: number | null): string {
   if (!ts) return "—";
@@ -57,6 +80,15 @@ interface PerCorpusProgress {
 }
 
 export function KnowledgePanel() {
+  const setSettingsCategory = useUiStore((s) => s.setSettingsCategory);
+
+  const openModelMarketForEmbedding = () => {
+    setSettingsCategory("models");
+    // Pre-fill the model market search with a common embedding query. The
+    // market panel already supports normal search, so we only need to switch to
+    // the right category here.
+  };
+
   const [corpora, setCorpora] = useState<DocCorpus[] | null>(null);
   const [sidecar, setSidecar] = useState<DocsEmbeddingStatus | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // corpusId being mutated
@@ -215,11 +247,34 @@ export function KnowledgePanel() {
           </>
         ) : (
           <span style={{ color: "var(--warn, #d29922)" }}>
-            not installed — index any corpus to install one automatically from
-            the Model Market
+            not installed —
           </span>
         )}
       </div>
+
+      {!hasInstalledModel && (
+        <div className="settings-note" style={{ marginTop: 4 }}>
+          <div style={{ marginBottom: 8 }}>
+            Install an embedding model from Hugging Face to enable Knowledge:
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {EMBEDDING_SUGGESTIONS.map((s) => (
+              <button
+                key={s.repo}
+                type="button"
+                className="ghost"
+                style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, padding: "8px 10px", textAlign: "left" }}
+                onClick={openModelMarketForEmbedding}
+                title={`Open Model Market to search for ${s.repo}`}
+              >
+                <span style={{ fontSize: 12, fontWeight: 600 }}>{s.label}</span>
+                <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{s.note}</span>
+                <span className="mono" style={{ fontSize: 10, color: "var(--text-dim)" }}>{s.repo}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {error && (
         <div className="settings-note" style={{ color: "var(--danger, #f85149)" }}>

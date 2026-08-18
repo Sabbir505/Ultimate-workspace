@@ -382,23 +382,28 @@ pub fn update_chat_session_provider(
 }
 
 /// Update a chat session's permission posture. Per-session; new sessions
-/// start at `"manual"`. Valid values: `"read_only"` | `"manual"` |
-/// `"auto_edit"` | `"full_auto"`. Honored by the built-in chat tool loops and
-/// by headless Claude Code sessions (via `--permission-prompt-tool stdio`);
-/// Kimi/OpenCode headless have no approval channel and always run full-auto.
+/// Update a chat session's dual sandbox + approval policies. `sandbox` is
+/// `"read_only"` | `"workspace_write"`; `approval` is `"on_request"` |
+/// `"auto_edit"` | `"full_access"`. The legacy `permission_mode` column is
+/// also updated (derived from the dual policies) for backward compat.
 #[tauri::command]
-pub fn update_chat_session_permission_mode(
+pub fn update_chat_session_policies(
     chat_session_id: String,
-    mode: String,
+    sandbox: String,
+    approval: String,
     db: State<DbState>,
 ) -> CmdResult<()> {
-    // Validate against the known modes so a bogus value can't be persisted.
-    let mode = match mode.as_str() {
-        "read_only" | "manual" | "auto_edit" | "full_auto" => mode,
-        other => return Err(format!("unknown permission_mode: {other}")),
+    let sandbox = match sandbox.as_str() {
+        "read_only" | "workspace_write" => sandbox,
+        other => return Err(format!("unknown sandbox_policy: {other}")),
+    };
+    let approval = match approval.as_str() {
+        "on_request" | "auto_edit" | "full_access" => approval,
+        other => return Err(format!("unknown approval_policy: {other}")),
     };
     let conn = db.0.lock();
-    db::update_chat_session_permission_mode(&conn, &chat_session_id, &mode).map_err(|e| e.to_string())
+    db::update_chat_session_policies(&conn, &chat_session_id, &sandbox, &approval)
+        .map_err(|e| e.to_string())
 }
 
 /// Update a chat session's watch-mode pacing override. Per-session; new sessions
@@ -1241,16 +1246,21 @@ pub async fn send_chat_message(
         && (force_research.unwrap_or(false) || crate::chat::is_research_request(&content));
     let content = format!("{content}{extra_text}");
     let chat_mgr = &chat_state.0;
-    // 1. Look up the session — provider/model/permission-mode for this turn.
-    let (provider_str, model_str, permission_mode) = {
+    // 1. Look up the session — provider/model/permission policies for this turn.
+    let (provider_str, model_str, sandbox_str, approval_str) = {
         let conn = db.0.lock();
         let cs = db::get_chat_session(&conn, &chat_session_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "chat session not found".to_string())?;
-        (cs.provider, cs.model, cs.permission_mode)
+        (
+            cs.provider,
+            cs.model,
+            cs.sandbox_policy,
+            cs.approval_policy,
+        )
     };
-    // Unknown/legacy values fail closed to Manual (the safe default).
-    let permission_mode = crate::chat::permission::PermissionMode::from_db(&permission_mode);
+    let sandbox = crate::chat::permission::SandboxPolicy::from_db(&sandbox_str);
+    let approval = crate::chat::permission::ApprovalPolicy::from_db(&approval_str);
 
     // Connectors available to this conversation. Per-session rows
     // (chat_session_connectors, written by the old "@"-attach flow) are still
@@ -1608,7 +1618,7 @@ pub async fn send_chat_message(
                     mcp_tools: std::sync::Arc::new(Vec::new()),
                     fs_rules: Vec::new(),
                 };
-                let specs = crate::chat::tools::openai_tool_specs(&caps, crate::chat::permission::PermissionMode::FullAuto);
+                let specs = crate::chat::tools::openai_tool_specs(&caps, crate::chat::permission::SandboxPolicy::WorkspaceWrite);
                 let json = serde_json::to_string(&specs).unwrap_or_default();
                 // Cached (B1): the schema JSON is constant until tool flags
                 // change, so turns 2..N skip this /tokenize round-trip.
@@ -1844,7 +1854,8 @@ pub async fn send_chat_message(
         effort,
         tools_on,
         code_exec_enabled.unwrap_or(false),
-        permission_mode,
+        sandbox,
+        approval,
         fs_roots,
         connector_ids,
         system,
@@ -2977,7 +2988,7 @@ pub async fn count_context_breakdown(
         mcp_tools: std::sync::Arc::new(Vec::new()),
         fs_rules: Vec::new(),
     };
-    let tool_specs_json = serde_json::to_string(&crate::chat::tools::openai_tool_specs(&caps, crate::chat::permission::PermissionMode::FullAuto))
+    let tool_specs_json = serde_json::to_string(&crate::chat::tools::openai_tool_specs(&caps, crate::chat::permission::SandboxPolicy::WorkspaceWrite))
         .unwrap_or_default();
     let tool_specs_tokens = crate::chat::compaction::count_json_tokens(&client, base_url, &tool_specs_json).await.unwrap_or(0);
 

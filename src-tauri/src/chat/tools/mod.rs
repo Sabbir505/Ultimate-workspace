@@ -648,10 +648,10 @@ pub async fn execute_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::permission::PermissionMode;
+    use super::super::permission::SandboxPolicy;
 
-    fn openai_names(caps: &ToolCaps, mode: PermissionMode) -> Vec<String> {
-        openai_tool_specs(caps, mode)
+    fn openai_names(caps: &ToolCaps, sandbox: SandboxPolicy) -> Vec<String> {
+        openai_tool_specs(caps, sandbox)
             .iter()
             .map(|s| s["function"]["name"].as_str().unwrap().to_string())
             .collect()
@@ -659,12 +659,12 @@ mod tests {
 
     #[test]
     fn openai_spec_lists_safe_tools() {
-        let names = openai_names(&ToolCaps::default(), PermissionMode::Manual);
+        let names = openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
         assert!(names.contains(&WEB_SEARCH.to_string()));
         assert!(names.contains(&GENERATE_FILE.to_string()));
         assert!(names.contains(&FETCH_URL.to_string()));
         assert!(!names.contains(&RUN_CODE.to_string()));
-        let specs = openai_tool_specs(&ToolCaps::default(), PermissionMode::Manual);
+        let specs = openai_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
         assert_eq!(specs[0]["type"], "function");
         assert!(specs[0]["function"]["parameters"]["properties"]["query"].is_object());
     }
@@ -672,13 +672,13 @@ mod tests {
     #[test]
     fn generate_diagram_listed_as_safe_tool() {
         assert!(
-            openai_names(&ToolCaps::default(), PermissionMode::Manual)
+            openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite)
                 .contains(&GENERATE_DIAGRAM.to_string())
         );
-        let a = anthropic_tool_specs(&ToolCaps::default(), PermissionMode::Manual);
+        let a = anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
         assert!(a.iter().any(|s| s["name"] == GENERATE_DIAGRAM));
         // The diagram tool must expose filename + html args.
-        let binding = openai_tool_specs(&ToolCaps::default(), PermissionMode::Manual);
+        let binding = openai_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
         let spec = &binding
             .iter()
             .find(|s| s["function"]["name"] == GENERATE_DIAGRAM)
@@ -727,7 +727,7 @@ mod tests {
 
     #[test]
     fn browser_read_is_listed_in_openai_spec_with_parameters() {
-        let specs = openai_tool_specs(&ToolCaps::default(), PermissionMode::Manual);
+        let specs = openai_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
         let read_spec = specs
             .iter()
             .find(|s| s["function"]["name"] == BROWSER_READ)
@@ -739,7 +739,7 @@ mod tests {
 
     #[test]
     fn browser_read_is_listed_in_anthropic_spec_with_parameters() {
-        let specs = anthropic_tool_specs(&ToolCaps::default(), PermissionMode::Manual);
+        let specs = anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
         let read_spec = specs
             .iter()
             .find(|s| s["name"] == BROWSER_READ)
@@ -752,13 +752,13 @@ mod tests {
     #[test]
     fn ledger_tools_listed_in_both_specs() {
         // The three source-ledger tools are always on (state tools, not gated
-        // by permission mode) and must appear in both provider specs.
-        for mode in [PermissionMode::Manual, PermissionMode::ReadOnly] {
-            let o = openai_names(&ToolCaps::default(), mode);
-            assert!(o.contains(&ADD_SOURCE_NOTE.to_string()), "openai {mode:?}: add_source_note missing");
+        // by sandbox) and must appear in both provider specs.
+        for sandbox in [SandboxPolicy::WorkspaceWrite, SandboxPolicy::ReadOnly] {
+            let o = openai_names(&ToolCaps::default(), sandbox);
+            assert!(o.contains(&ADD_SOURCE_NOTE.to_string()), "openai {sandbox:?}: add_source_note missing");
             assert!(o.contains(&GET_SOURCE_LEDGER.to_string()));
             assert!(o.contains(&RESET_SOURCE_LEDGER.to_string()));
-            let a = anthropic_tool_specs(&ToolCaps::default(), mode);
+            let a = anthropic_tool_specs(&ToolCaps::default(), sandbox);
             let an: Vec<&str> = a.iter().map(|s| s["name"].as_str().unwrap()).collect();
             assert!(an.contains(&ADD_SOURCE_NOTE));
             assert!(an.contains(&GET_SOURCE_LEDGER));
@@ -769,30 +769,30 @@ mod tests {
 
     #[test]
     fn run_code_gated_behind_capability() {
-        assert!(!openai_names(&ToolCaps::default(), PermissionMode::Manual).contains(&RUN_CODE.to_string()));
-        assert!(openai_names(&ToolCaps { code_exec: true, ..Default::default() }, PermissionMode::Manual).contains(&RUN_CODE.to_string()));
+        assert!(!openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite).contains(&RUN_CODE.to_string()));
+        assert!(openai_names(&ToolCaps { code_exec: true, ..Default::default() }, SandboxPolicy::WorkspaceWrite).contains(&RUN_CODE.to_string()));
     }
 
     #[test]
     fn search_docs_gated_behind_local_docs_capability() {
         // Off by default (no corpus indexed / no sidecar).
         let off = ToolCaps::default();
-        assert!(!openai_names(&off, PermissionMode::Manual).contains(&SEARCH_DOCS.to_string()));
+        assert!(!openai_names(&off, SandboxPolicy::WorkspaceWrite).contains(&SEARCH_DOCS.to_string()));
         assert!(
-            !anthropic_tool_specs(&off, PermissionMode::Manual)
+            !anthropic_tool_specs(&off, SandboxPolicy::WorkspaceWrite)
                 .iter()
                 .any(|s| s["name"] == SEARCH_DOCS)
         );
         // On when the local-docs capability is set.
         let on = ToolCaps { local_docs: true, ..Default::default() };
-        assert!(openai_names(&on, PermissionMode::Manual).contains(&SEARCH_DOCS.to_string()));
+        assert!(openai_names(&on, SandboxPolicy::WorkspaceWrite).contains(&SEARCH_DOCS.to_string()));
         assert!(
-            anthropic_tool_specs(&on, PermissionMode::Manual)
+            anthropic_tool_specs(&on, SandboxPolicy::WorkspaceWrite)
                 .iter()
                 .any(|s| s["name"] == SEARCH_DOCS)
         );
         // The spec requires query and exposes top_k.
-        let spec_value = openai_tool_specs(&on, PermissionMode::Manual);
+        let spec_value = openai_tool_specs(&on, SandboxPolicy::WorkspaceWrite);
         let spec = spec_value
             .iter()
             .find(|s| s["function"]["name"] == SEARCH_DOCS)
@@ -804,7 +804,7 @@ mod tests {
 
     #[test]
     fn open_url_listed_as_safe_tool() {
-        assert!(openai_names(&ToolCaps::default(), PermissionMode::Manual).contains(&OPEN_URL.to_string()));
+        assert!(openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite).contains(&OPEN_URL.to_string()));
     }
 
     #[test]
@@ -824,7 +824,7 @@ mod tests {
 
     #[test]
     fn anthropic_spec_lists_safe_tools() {
-        let specs = anthropic_tool_specs(&ToolCaps::default(), PermissionMode::Manual);
+        let specs = anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
         let names: Vec<&str> = specs.iter().map(|s| s["name"].as_str().unwrap()).collect();
         assert!(names.contains(&WEB_SEARCH));
         assert!(names.contains(&FETCH_URL));
@@ -898,9 +898,9 @@ mod tests {
         );
         assert!(out.artifact.is_none());
         // The read-only tool must be surfaced in both provider specs.
-        let o = openai_names(&ToolCaps::default(), PermissionMode::Manual);
+        let o = openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
         assert!(o.contains(&LIST_SKILLS.to_string()));
-        let a = anthropic_tool_specs(&ToolCaps::default(), PermissionMode::Manual);
+        let a = anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
         assert!(a.iter().any(|s| s["name"] == LIST_SKILLS));
     }
 
@@ -911,7 +911,7 @@ mod tests {
         // The acceptance test: under read_only, write_file/edit_file/delete_file/
         // move_file/copy_file must be ABSENT from the tool schema (schema-level
         // exclusion, not a UI block) — the model literally cannot invoke them.
-        let names = openai_names(&ToolCaps::default(), PermissionMode::ReadOnly);
+        let names = openai_names(&ToolCaps::default(), SandboxPolicy::ReadOnly);
         assert!(!names.contains(&WRITE_FILE.to_string()), "write_file must be absent under read_only");
         assert!(!names.contains(&EDIT_FILE.to_string()));
         assert!(!names.contains(&DELETE_FILE.to_string()));
@@ -925,14 +925,14 @@ mod tests {
 
     #[test]
     fn manual_mode_includes_mutating_fs_tools() {
-        let names = openai_names(&ToolCaps::default(), PermissionMode::Manual);
+        let names = openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
         assert!(names.contains(&WRITE_FILE.to_string()));
         assert!(names.contains(&DELETE_FILE.to_string()));
     }
 
     #[test]
     fn anthropic_read_only_also_strips_mutating_fs_tools() {
-        let specs = anthropic_tool_specs(&ToolCaps::default(), PermissionMode::ReadOnly);
+        let specs = anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::ReadOnly);
         let names: Vec<&str> = specs.iter().map(|s| s["name"].as_str().unwrap()).collect();
         assert!(!names.contains(&WRITE_FILE));
         assert!(names.contains(&READ_FILE));
@@ -942,14 +942,14 @@ mod tests {
 
     #[test]
     fn system_tools_listed_in_openai_specs() {
-        let names = openai_names(&ToolCaps::default(), PermissionMode::Manual);
+        let names = openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
         assert!(names.contains(&DOWNLOAD_FILE.to_string()));
         assert!(names.contains(&DOWNLOAD_PROGRESS.to_string()));
         assert!(names.contains(&RUN_SHELL.to_string()));
         assert!(names.contains(&GET_TASK_STATUS.to_string()));
         assert!(names.contains(&CANCEL_TASK.to_string()));
         // The download tool must expose url + dest_path args.
-        let specs = openai_tool_specs(&ToolCaps::default(), PermissionMode::Manual);
+        let specs = openai_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
         let spec = specs
             .iter()
             .find(|s| s["function"]["name"] == DOWNLOAD_FILE)
@@ -962,7 +962,7 @@ mod tests {
 
     #[test]
     fn system_tools_listed_in_anthropic_specs() {
-        let specs = anthropic_tool_specs(&ToolCaps::default(), PermissionMode::Manual);
+        let specs = anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
         let names: Vec<&str> = specs.iter().map(|s| s["name"].as_str().unwrap()).collect();
         assert!(names.contains(&DOWNLOAD_FILE));
         assert!(names.contains(&RUN_SHELL));
@@ -973,7 +973,7 @@ mod tests {
     fn read_only_strips_mutating_system_tools_but_keeps_tracking() {
         // read_only must drop download_file + run_shell from the schema
         // (like write_file) while keeping the read-only tracking tools.
-        let names = openai_names(&ToolCaps::default(), PermissionMode::ReadOnly);
+        let names = openai_names(&ToolCaps::default(), SandboxPolicy::ReadOnly);
         assert!(!names.contains(&DOWNLOAD_FILE.to_string()), "download_file must be absent under read_only");
         assert!(!names.contains(&RUN_SHELL.to_string()), "run_shell must be absent under read_only");
         assert!(names.contains(&DOWNLOAD_PROGRESS.to_string()));

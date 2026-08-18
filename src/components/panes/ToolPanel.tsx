@@ -140,13 +140,10 @@ export function ToolPanel() {
     if (ui.activeTabId && ui.openTabs.some((t) => t.instanceId === ui.activeTabId && t.kind === "artifact")) {
       return;
     }
-    const canvasInstance = ui.openTabs.find((t) => t.kind === "canvas");
-    if (canvasInstance) {
-      ui.activateTab(canvasInstance.instanceId);
-    } else {
-      ui.addTab("canvas");
-    }
-    ui.setToolPanelCollapsed(false);
+    // openCanvasTab dedupes: activates an existing canvas tab or creates one.
+    // The old find-then-addTab path could race under StrictMode double-fire
+    // and stack duplicate canvas tabs.
+    ui.openCanvasTab();
   }, [activePreviewPath]);
 
   // Auto-open content when a tab is selected while empty — the Terminal and

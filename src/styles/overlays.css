@@ -135,6 +135,57 @@ table.kv th {
   padding-right: 16px;
   overflow-y: auto;
 }
+/* Sticky search input at the top of the settings nav (VS Code / Raycast pattern).
+ * Stays pinned while the grouped sections scroll beneath it. */
+.settings-search {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  padding: 5px 8px;
+  margin-bottom: 2px;
+}
+.settings-search svg {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.settings-search input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+}
+.settings-search input::placeholder {
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+.settings-search-clear {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+.settings-search-clear:hover {
+  color: var(--text);
+}
+.settings-nav-empty {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 8px 6px;
+  opacity: 0.7;
+}
 .settings-nav-section {
   display: flex;
   flex-direction: column;

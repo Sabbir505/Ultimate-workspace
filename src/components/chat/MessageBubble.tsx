@@ -16,7 +16,7 @@ import rehypeKatex from "rehype-katex";
 // NOTE: katex.min.css is imported at app entry (src/main.tsx) so this file
 // does NOT re-import it — see PERFORMANCE_AUDIT.md C8. Doing it twice would
 // ship two copies in the lazy MessageBubble chunk.
-import type { ChatMessage } from "../../lib/ipc";
+import type { ChatMessage, ChatPerfPayload } from "../../lib/ipc";
 import { readArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { useChatStore } from "../../state/chat";
@@ -88,6 +88,9 @@ interface Props {
   /** Numeric message id, emitted as `data-msg-id` on the root bubble so the
    *  TurnNavigator can scroll to it. Omitted on the live streaming bubble. */
   msgId?: number;
+  /** Live perf snapshot (elapsedMs, etc.) from `chat:perf` for the streaming
+   *  bubble — used to show "Working for Xs" while the turn is in flight. */
+  livePerf?: ChatPerfPayload | null;
 }
 
 // --- Inline SVG icons (Claude-style, stroke-based, currentColor). ---
@@ -849,8 +852,7 @@ function formatDuration(sec: number): string {
 function FilesChangedSummary({ files }: { files: { path: string; edit: EditPayload }[] }) {
   const [open, setOpen] = useState(false);
   const setDiffPanelFile = useUiStore((s) => s.setDiffPanelFile);
-  const setToolPanelTab = useUiStore((s) => s.setToolPanelTab);
-  const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
+  const openFilesTab = useUiStore((s) => s.openFilesTab);
   const projects = useProjectsStore((s) => s.projects);
   const selectedProjectId = useProjectsStore((s) => s.selectedProjectId);
   const cwd = projects.find((p) => p.id === selectedProjectId)?.path ?? null;
@@ -865,10 +867,14 @@ function FilesChangedSummary({ files }: { files: { path: string; edit: EditPaylo
     totalDels += dels;
   }
 
+  // Open the working-tree diff for `path` in the right-side tool panel.
+  // `openFilesTab` activates (or creates) the singleton "files" tab instance
+  // and expands the panel — the old `setToolPanelTab("files")` call only set
+  // a string field the renderer ignored, so the panel stayed on whatever tab
+  // was active and the diff never appeared.
   const review = (path: string) => {
     setDiffPanelFile(path, cwd);
-    setToolPanelTab("files");
-    setToolPanelCollapsed(false);
+    openFilesTab();
   };
 
   return (
@@ -1256,6 +1262,16 @@ function groupSegments(segments: Segment[]): Block[] {
     }
     if (seg.type === "tool") {
       started = true;
+      // A "result" kind block is the captured output of the preceding shell
+      // command — merge it INTO that step instead of creating a separate
+      // "Output" row, so expanding the shell command reveals its output.
+      if (seg.data?.kind === "result" && steps.length > 0) {
+        const prev = steps[steps.length - 1];
+        if (prev.data?.kind === "code" && !prev.data.result) {
+          prev.data.result = seg.data.result;
+          continue;
+        }
+      }
       const step: ActivityStep = {
         data: seg.data,
         done: seg.done,
@@ -1265,6 +1281,11 @@ function groupSegments(segments: Segment[]): Block[] {
       if (seg.data?.kind === "edit" && seg.data.path && seg.data.edit) {
         flushSteps();
         blocks.push({ kind: "diff", step });
+      } else if (seg.data?.kind === "result") {
+        // A result that didn't merge (no preceding shell step, or the
+        // preceding step already has a result) — keep it as its own row so
+        // the output is never lost.
+        steps.push(step);
       } else {
         steps.push(step);
       }
@@ -1322,6 +1343,7 @@ function MessageBubbleInner({
   artifacts,
   onPreviewArtifact,
   msgId,
+  livePerf,
 }: Props) {
   const isUser = message.role === "user";
   // Inline edit-to-fork state: when the user clicks Edit on a user bubble, we
@@ -1402,30 +1424,36 @@ function MessageBubbleInner({
   // is the model's intro shown above it. A think-only turn (no tool/diff
   // blocks) keeps the old flat layout — standalone ThinkingBlock disclosures,
   // no "Worked" summary row (documented in groupSegments).
-  let firstProcess = -1;
-  let lastProcess = -1;
+  //
+  // IMPORTANT: Thinking blocks are rendered OUTSIDE the ProcessSummary
+  // ("toolbox") — they are separate disclosures like the old flat layout.
+  // Only activity (tool calls) and diff (file edits) live inside the collapsible
+  // ProcessSummary so the "Worked for Xs" row summarizes tool work only.
+  let firstTool = -1;
+  let lastTool = -1;
   let hasToolBlocks = false;
   if (blocks) {
     for (let i = 0; i < blocks.length; i++) {
       const k = blocks[i].kind;
-      if (k === "activity" || k === "diff") hasToolBlocks = true;
-      if (k === "think" || k === "activity" || k === "diff") {
-        if (firstProcess === -1) firstProcess = i;
-        lastProcess = i;
+      if (k === "activity" || k === "diff") {
+        hasToolBlocks = true;
+        if (firstTool === -1) firstTool = i;
+        lastTool = i;
       }
     }
   }
-  const hasProcess = firstProcess !== -1 && hasToolBlocks;
+  const hasProcess = firstTool !== -1 && hasToolBlocks;
 
   // Aggregate process-level state: is anything still live, how many tool steps
   // ran, what's the current action while streaming, and which files changed.
+  // Only activity/diff blocks contribute — thinking is separate.
   let processLive = false;
   let processStepCount = 0;
   let liveLabel = "Working…";
   const processToolSteps: ActivityStep[] = [];
   const fileChanges: { path: string; edit: EditPayload }[] = [];
   if (hasProcess && blocks) {
-    for (let i = firstProcess; i <= lastProcess; i++) {
+    for (let i = firstTool; i <= lastTool; i++) {
       const b = blocks[i];
       if (b.kind === "activity") {
         for (const s of b.group.steps) {
@@ -1437,17 +1465,11 @@ function MessageBubbleInner({
         processStepCount++;
         processToolSteps.push({ data: b.step.data, done: b.step.done });
         if (!b.step.done) processLive = true;
-      } else if (b.kind === "think" && !b.done) {
-        processLive = true;
       }
     }
     // Live label = the most recent in-flight action (Cursor-style).
-    for (let i = lastProcess; i >= firstProcess; i--) {
+    for (let i = lastTool; i >= firstTool; i--) {
       const b = blocks[i];
-      if (b.kind === "think" && !b.done) {
-        liveLabel = "Thinking…";
-        break;
-      }
       if (b.kind === "diff" && !b.step.done) {
         liveLabel = `${stepLabel(b.step.data)}…`;
         break;
@@ -1469,15 +1491,21 @@ function MessageBubbleInner({
       }
     }
   }
-  // The collapsed row's label: live action while streaming, "Worked for Xs"
-  // when we have a duration, else a legacy one-line summary of the tool steps.
+  // The collapsed row's label: live action while streaming, "Working for Xs"
+  // while we have livePerf.elapsedMs, "Worked for Xs" when completed with a
+  // duration, else a legacy one-line summary of the tool steps.
   const fallbackSummary =
     processToolSteps.length > 0 ? summarizeGroup(processToolSteps) : "";
+  const liveElapsedSec = live && livePerf?.elapsedMs != null
+    ? Math.floor(livePerf.elapsedMs / 1000)
+    : null;
   const processLabel = processLive
     ? liveLabel
-    : message.durationSec != null
-      ? `Worked for ${formatDuration(message.durationSec)}`
-      : (fallbackSummary || "Worked");
+    : liveElapsedSec != null
+      ? `Working for ${formatDuration(liveElapsedSec)}`
+      : message.durationSec != null
+        ? `Worked for ${formatDuration(message.durationSec)}`
+        : (fallbackSummary || "Worked");
 
   // Detect if this assistant message contains a plan section
   const planSection = !isUser ? detectPlan(message.content) : null;
@@ -1523,36 +1551,87 @@ function MessageBubbleInner({
                 <Markdown content={cleanContent} onPreviewArtifact={onPreviewArtifact} />
               )
             : hasProcess
-            ? (
-              <>
-                {/* Leading intro text renders above the process row. */}
-                {blocks!
-                  .slice(0, firstProcess)
-                  .map((b, i) =>
-                    b.kind === "text" && b.text.trim().length > 0 ? (
-                      <Markdown key={`lead:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
-                    ) : null,
-                  )}
-                <ProcessSummary
-                  live={processLive}
-                  label={processLabel}
-                  stepCount={processStepCount}
-                >
-                  {blocks!
-                    .slice(firstProcess, lastProcess + 1)
-                    .map((b, i) => renderProcessBlock(b, i, onPreviewArtifact))}
-                </ProcessSummary>
-                {/* Trailing synthesized answer renders below the process row. */}
-                {blocks!
-                  .slice(lastProcess + 1)
-                  .map((b, i) =>
-                    b.kind === "text" && b.text.trim().length > 0 ? (
-                      <Markdown key={`trail:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
-                    ) : null,
-                  )}
-                {fileChanges.length > 0 && <FilesChangedSummary files={fileChanges} />}
-              </>
-            )
+            ? (() => {
+                // With tool activity: render thinking blocks OUTSIDE the ProcessSummary.
+                // Structure: [leading text] [thinking before tools] [ProcessSummary with tools]
+                // [thinking between tools] [trailing text] [thinking after tools] [FilesChangedSummary]
+                if (!blocks) return null;
+                const beforeTools = blocks.slice(0, firstTool);
+                const toolRegion = blocks.slice(firstTool, lastTool + 1);
+                const afterTools = blocks.slice(lastTool + 1);
+
+                // Split toolRegion into alternating thinking and activity/diff segments
+                const thinkingBefore: Block[] = [];
+                const activityBlocks: Block[] = [];
+                const thinkingBetween: Block[] = [];
+                const thinkingAfter: Block[] = [];
+
+                let currentThinking: Block[] = [];
+                for (const b of toolRegion) {
+                  if (b.kind === "think") {
+                    currentThinking.push(b);
+                  } else {
+                    // activity or diff
+                    if (activityBlocks.length === 0) {
+                      // First activity/diff block — preceding thinking goes to thinkingBefore
+                      thinkingBefore.push(...currentThinking);
+                    } else {
+                      // Subsequent activity/diff — preceding thinking goes to thinkingBetween
+                      thinkingBetween.push(...currentThinking);
+                    }
+                    activityBlocks.push(b);
+                    currentThinking = [];
+                  }
+                }
+                // Any remaining thinking after the last tool goes to thinkingAfter
+                thinkingAfter.push(...currentThinking);
+
+                return (
+                  <>
+                    {/* Leading intro text renders above the process row. */}
+                    {beforeTools.map((b, i) =>
+                      b.kind === "text" && b.text.trim().length > 0 ? (
+                        <Markdown key={`lead:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
+                      ) : null,
+                    )}
+
+                    {/* Thinking blocks BEFORE any tool activity — standalone disclosures above toolbox. */}
+                    {thinkingBefore.map((b, i) =>
+                      b.kind === "think" ? renderProcessBlock(b, i, onPreviewArtifact) : null,
+                    )}
+
+                    {/* The collapsible tool summary (activity + diff only). */}
+                    {activityBlocks.length > 0 && (
+                      <ProcessSummary
+                        live={processLive}
+                        label={processLabel}
+                        stepCount={processStepCount}
+                      >
+                        {activityBlocks.map((b, i) => renderProcessBlock(b, i, onPreviewArtifact))}
+                      </ProcessSummary>
+                    )}
+
+                    {/* Thinking blocks BETWEEN tool activities — standalone disclosures. */}
+                    {thinkingBetween.map((b, i) =>
+                      b.kind === "think" ? renderProcessBlock(b, i, onPreviewArtifact) : null,
+                    )}
+
+                    {/* Trailing synthesized answer renders below the process row. */}
+                    {afterTools.map((b, i) =>
+                      b.kind === "text" && b.text.trim().length > 0 ? (
+                        <Markdown key={`trail:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
+                      ) : null,
+                    )}
+
+                    {/* Thinking blocks AFTER all tool activity — standalone disclosures. */}
+                    {thinkingAfter.map((b, i) =>
+                      b.kind === "think" ? renderProcessBlock(b, i, onPreviewArtifact) : null,
+                    )}
+
+                    {fileChanges.length > 0 && <FilesChangedSummary files={fileChanges} />}
+                  </>
+                );
+              })()
             /* No tool/diff activity (pure answer or think-only turn): flat
              * layout — markdown text and standalone thinking disclosures. */
             : blocks!.map((b, i) =>
@@ -1581,8 +1660,9 @@ function MessageBubbleInner({
 // ---- Plan detection & banner ----
 
 const PLAN_PATTERNS = [
-  /^#+\s*(Plan|Planning|Approach|Strategy|Steps|Implementation Plan)/im,
-  /^(?:Here(?:'s| is) (?:my |the |a )?plan)/im,
+  /^#+\s*(Plan|Planning|Approach|Strategy|Implementation Plan)\b/im,
+  /^#+\s*Steps\s+(?:to|for|of)\b/im,
+  /^(?:Here(?:'s| is) (?:my |the |a )?plan\b)/im,
   /^(?:Let me (?:plan|think about|outline|break down))/im,
   /^(?:I(?:'ll| will) (?:plan|break|outline|do the following))/im,
   /^(?:My plan (?:is|:))/im,
@@ -1593,6 +1673,19 @@ interface PlanInfo { title: string; summary: string; full: string; }
 function detectPlan(content: string): PlanInfo | null {
   const cleaned = content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
   if (cleaned.length < 50) return null;
+  // Avoid false positives on directory listings / file trees: a bare file tree
+  // has many short lines (paths) but few words. Require the candidate region
+  // to have at least 4 prose lines (≥ 4 words each) to qualify as a plan.
+  const hasProseBody = (text: string): boolean => {
+    const lines = text.split("\n").filter((l) => {
+      const t = l.trim();
+      if (!t) return false;
+      // Skip headings, list markers, code fences, table pipes.
+      if (/^[#>\-*`|]/.test(t)) return false;
+      return t.split(/\s+/).length >= 4;
+    });
+    return lines.length >= 4;
+  };
 
   for (const pattern of PLAN_PATTERNS) {
     const m = pattern.exec(cleaned);
@@ -1603,6 +1696,7 @@ function detectPlan(content: string): PlanInfo | null {
       const full = nextSection !== -1
         ? after.slice(0, m[0].length + nextSection).trim()
         : after.trim();
+      if (!hasProseBody(full)) continue; // likely a file listing, not a plan
       const title = after.split("\n")[0].replace(/^#+\s*/, "").replace(/[*_]/g, "").trim().slice(0, 60);
       // First 2-3 lines as summary
       const lines = full.split("\n").filter((l) => l.trim());
@@ -1616,13 +1710,11 @@ function detectPlan(content: string): PlanInfo | null {
 function PlanBanner({ title, summary, full }: PlanInfo) {
   const [open, setOpen] = useState(false);
   const setPlanCanvas = useUiStore((s) => s.setPlanCanvas);
-  const setToolPanelTab = useUiStore((s) => s.setToolPanelTab);
-  const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
+  const openCanvasTab = useUiStore((s) => s.openCanvasTab);
 
   const openInCanvas = () => {
     setPlanCanvas(full, title);
-    setToolPanelTab("canvas");
-    setToolPanelCollapsed(false);
+    openCanvasTab();
   };
 
   return (

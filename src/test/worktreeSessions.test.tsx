@@ -252,8 +252,8 @@ describe("WorktreeNudgeBanner (migration nudge)", () => {
 
     expect(await screen.findByText(/isolated worktrees/i)).toBeTruthy();
 
-    // Dismiss persists the KV flag.
-    const dismiss = screen.getByRole("button", { name: "Dismiss notification" });
+    // Dismiss persists the KV flag — the "Got it" button is one dismiss path.
+    const dismiss = screen.getByRole("button", { name: "Got it" });
     dismiss.click();
     await waitFor(() => expect(setSettingMock).toHaveBeenCalledWith("worktrees.nudgeSeen", "1"));
   });

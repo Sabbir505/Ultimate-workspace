@@ -35,7 +35,7 @@ import {
   updateChatSessionModel,
   updateChatSessionProvider,
   updateChatSessionTitle,
-  updateChatSessionPermissionMode,
+  updateChatSessionPolicies,
   updateChatSessionWatchMode,
   resolveToolAction,
   ensureChatSessionWorktree,
@@ -151,23 +151,72 @@ function markManuallyRenamed(sid: string) {
   capMap(manuallyRenamed, SET_CAP);
 }
 
-/** Sessions in which the user has already confirmed the full_auto modal this
- *  app run — the one-time confirmation isn't re-shown per session. (The mode
- *  itself persists in the DB; this set only suppresses re-prompting.) */
-const fullAutoConfirmed = new Set<string>();
+/** Sessions in which the user has already confirmed the full_access approval
+ *  modal this app run — the one-time confirmation isn't re-shown per session.
+ *  (The policy itself persists in the DB; this set only suppresses
+ *  re-prompting.) */
+const fullAccessConfirmed = new Set<string>();
 
-function markFullAutoConfirmed(sid: string) {
-  fullAutoConfirmed.add(sid);
-  if (fullAutoConfirmed.size > SET_CAP) {
-    fullAutoConfirmed.delete(fullAutoConfirmed.values().next().value as string);
+function markFullAccessConfirmed(sid: string) {
+  fullAccessConfirmed.add(sid);
+  if (fullAccessConfirmed.size > SET_CAP) {
+    fullAccessConfirmed.delete(fullAccessConfirmed.values().next().value as string);
   }
 }
+
+/** Derive the legacy PermissionMode string from the dual policies — used only
+ *  to keep `permissionMode` in sync on the client for components still reading
+ *  the old field. The backend derives the same value when persisting. */
+export const policiesToPermissionMode = (
+  sandbox: SandboxPolicy,
+  approval: ApprovalPolicy,
+): PermissionMode => {
+  if (sandbox === "read_only") return "read_only";
+  switch (approval) {
+    case "on_request":
+      return "manual";
+    case "auto_edit":
+      return "auto_edit";
+    case "full_access":
+      return "full_auto";
+    default:
+      return "manual";
+  }
+};
 
 /** Watch-mode pacing for browser actions. "on" | "off". */
 export type WatchMode = "on" | "off";
 
+/** Per-session sandbox scope. "read_only" hides all mutating tools. */
+export type SandboxPolicy = "read_only" | "workspace_write";
+
+/** Per-session approval posture. "on_request" gates every mutating tool; "auto_edit"
+ *  auto-runs writes/edits but gates deletes/moves/copies; "full_access" bypasses
+ *  prompts entirely. */
+export type ApprovalPolicy = "on_request" | "auto_edit" | "full_access";
+
+/** Compatibility mapping from legacy permissionMode to dual policies (used by
+ *  db migration and by UI elements that still show the legacy mode name). */
+export const permissionModeToPolicies = (
+  mode: "read_only" | "manual" | "auto_edit" | "full_auto"
+): { sandbox: SandboxPolicy; approval: ApprovalPolicy } => {
+  switch (mode) {
+    case "read_only":
+      return { sandbox: "read_only", approval: "on_request" };
+    case "manual":
+      return { sandbox: "workspace_write", approval: "on_request" };
+    case "auto_edit":
+      return { sandbox: "workspace_write", approval: "auto_edit" };
+    case "full_auto":
+      return { sandbox: "workspace_write", approval: "full_access" };
+    default:
+      return { sandbox: "workspace_write", approval: "on_request" };
+  }
+};
+
 /** Tool permission mode for chat sessions. */
 export type PermissionMode = "read_only" | "manual" | "auto_edit" | "full_auto";
+
 
 /** A pending tool-approval card, one per chat session (the tool loop — or
  *  the Claude Code can_use_tool control request — pauses until it resolves). */
@@ -341,8 +390,8 @@ function clearSessionState(s: ChatState, chatSessionId: string): Partial<ChatSta
     checkpointsByMessage,
     streamingChatSessionId:
       s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
-    fullAutoConfirmingFor:
-      s.fullAutoConfirmingFor === chatSessionId ? null : s.fullAutoConfirmingFor,
+    fullAccessConfirmingFor:
+      s.fullAccessConfirmingFor === chatSessionId ? null : s.fullAccessConfirmingFor,
   };
 }
 
@@ -397,8 +446,9 @@ export interface ChatState {
   /** Pending tool-approval cards, one per chat session id. Set by
    *  `chat:approval-request`, cleared by resolve/`chat:approval-resolved`. */
   pendingApprovals: Record<string, PendingApproval>;
-  /** Session id the full_auto confirmation modal is open for (null = none). */
-  fullAutoConfirmingFor: string | null;
+  /** Session id the full_access approval confirmation modal is open for
+   *  (null = none). */
+  fullAccessConfirmingFor: string | null;
   /** Artifacts produced by the in-flight turn, keyed by session, until the
    *  assistant message is persisted and they can be attributed to it. */
   pendingArtifacts: Record<string, ChatArtifact[]>;
@@ -562,14 +612,18 @@ export interface ChatState {
   /** Set a session's watch-mode pacing override. on/off = per-session override;
    *  null clears the override so the session inherits the global setting. */
   setSessionWatchMode: (chatSessionId: string, mode: WatchMode | null) => Promise<void>;
-  /** Set a session's permission posture. Switching INTO full_auto opens the
-   *  one-time confirmation modal instead (returns false); other modes apply
-   *  immediately (returns true). */
-  setSessionPermissionMode: (chatSessionId: string, mode: PermissionMode) => Promise<boolean>;
-  /** Confirm the full_auto switch from the modal (persists + applies). */
-  confirmFullAuto: (chatSessionId: string) => Promise<void>;
-  /** Dismiss the full_auto confirmation modal without switching. */
-  cancelFullAutoConfirm: () => void;
+  /** Set a session's sandbox + approval policies. Switching INTO
+   *  full_access approval opens the one-time confirmation modal instead
+   *  (returns false); other combinations apply immediately (returns true). */
+  setSessionPolicies: (
+    chatSessionId: string,
+    sandbox: SandboxPolicy,
+    approval: ApprovalPolicy,
+  ) => Promise<boolean>;
+  /** Confirm the full_access approval switch from the modal (persists + applies). */
+  confirmFullAccess: (chatSessionId: string) => Promise<void>;
+  /** Dismiss the full_access confirmation modal without switching. */
+  cancelFullAccessConfirm: () => void;
   /** Resolve the session's pending approval card (Approve/Deny). */
   resolveApproval: (chatSessionId: string, approved: boolean) => Promise<void>;
   saveApiKey: (provider: string, key: string, baseUrl?: string, model?: string) => Promise<void>;
@@ -648,7 +702,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   artifactsByMessage: {},
   checkpointsByMessage: {},
   pendingApprovals: {},
-  fullAutoConfirmingFor: null,
+  fullAccessConfirmingFor: null,
   pendingArtifacts: {},
   previewArtifacts: [],
   activePreviewPath: null,
@@ -1602,36 +1656,51 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
-  setSessionPermissionMode: async (chatSessionId, mode) => {
-    // Switching INTO full_auto opens a one-time confirmation modal first
-    // (per session — `fullAutoConfirmed` suppresses re-prompting within the
-    // same app run). All other transitions apply immediately.
-    if (mode === "full_auto" && !fullAutoConfirmed.has(chatSessionId)) {
-      set({ fullAutoConfirmingFor: chatSessionId });
+  setSessionPolicies: async (chatSessionId, sandbox, approval) => {
+    // Switching INTO full_access approval opens a one-time confirmation modal
+    // first (per session — `fullAccessConfirmed` suppresses re-prompting within
+    // the same app run). All other transitions apply immediately.
+    if (approval === "full_access" && !fullAccessConfirmed.has(chatSessionId)) {
+      set({ fullAccessConfirmingFor: chatSessionId });
       return false;
     }
-    await updateChatSessionPermissionMode(chatSessionId, mode);
+    await updateChatSessionPolicies(chatSessionId, sandbox, approval);
     set((s) => ({
       sessions: s.sessions.map((sess) =>
-        sess.id === chatSessionId ? { ...sess, permissionMode: mode } : sess,
+        sess.id === chatSessionId
+          ? {
+              ...sess,
+              sandboxPolicy: sandbox,
+              approvalPolicy: approval,
+              // Legacy field kept in sync for components still reading it.
+              permissionMode: policiesToPermissionMode(sandbox, approval),
+            }
+          : sess,
       ),
-      fullAutoConfirmingFor: null,
+      fullAccessConfirmingFor: null,
     }));
     return true;
   },
 
-  confirmFullAuto: async (chatSessionId) => {
-    markFullAutoConfirmed(chatSessionId);
-    await updateChatSessionPermissionMode(chatSessionId, "full_auto");
+  confirmFullAccess: async (chatSessionId) => {
+    markFullAccessConfirmed(chatSessionId);
+    await updateChatSessionPolicies(chatSessionId, "workspace_write", "full_access");
     set((s) => ({
       sessions: s.sessions.map((sess) =>
-        sess.id === chatSessionId ? { ...sess, permissionMode: "full_auto" } : sess,
+        sess.id === chatSessionId
+          ? {
+              ...sess,
+              sandboxPolicy: "workspace_write",
+              approvalPolicy: "full_access",
+              permissionMode: "full_auto",
+            }
+          : sess,
       ),
-      fullAutoConfirmingFor: null,
+      fullAccessConfirmingFor: null,
     }));
   },
 
-  cancelFullAutoConfirm: () => set({ fullAutoConfirmingFor: null }),
+  cancelFullAccessConfirm: () => set({ fullAccessConfirmingFor: null }),
 
   resolveApproval: async (chatSessionId, approved) => {
     const pending = get().pendingApprovals[chatSessionId];

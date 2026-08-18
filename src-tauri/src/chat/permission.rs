@@ -1,26 +1,28 @@
 //! Per-session permission posture for filesystem tool calls.
 //!
 //! This module is the **single** place that decides, for a given chat
-//! session's `PermissionMode`, whether a filesystem tool call runs straight
-//! away or must pause for a per-action approval card. Every filesystem tool
-//! handler routes through [`check_permission`] — the delete-always-gated rule
-//! and the read-only exclusion live here, not duplicated across tools.
+//! session's [`SandboxPolicy`] + [`ApprovalPolicy`], whether a filesystem
+//! tool call runs straight away or must pause for a per-action approval
+//! card. Every filesystem tool handler routes through [`check_permission`].
 //!
-//! The four modes mirror Claude Code's permission modes and Codex's
-//! Suggest/Auto-Edit/Full-Auto modes:
+//! Two orthogonal dimensions (mirrors Codex's sandbox/approval split):
 //!
-//! | Mode        | Reads | Writes/Edits      | Move/Copy          | Delete                        |
-//! |-------------|-------|-------------------|--------------------|-------------------------------|
-//! | `read_only` | run   | (tool absent)     | (tool absent)      | (tool absent)                 |
-//! | `manual`    | run   | approve each      | approve each       | approve each                  |
-//! | `auto_edit` | run   | run in roots      | approve (gated)    | approve (gated)               |
-//! | `full_auto` | run   | run in roots      | run in roots       | run in roots (gated outside)  |
+//! **SandboxPolicy** — which tools are *visible* to the model:
+//! | Sandbox          | Reads | Writes/Edits | Move/Copy | Delete | Shell |
+//! |------------------|-------|--------------|-----------|--------|-------|
+//! | `read_only`      | yes   | (absent)     | (absent)  | (absent)| (absent) |
+//! | `workspace_write`| yes   | yes          | yes       | yes    | yes   |
 //!
-//! `read_only` filtering happens earlier (the mutating tools are stripped
-//! from the tool schema before the model sees them — see `tools.rs`), so
-//! [`check_permission`] only ever runs for tools that are actually present.
-//! It is still defensive: a mutating tool reaching it under `read_only`
-//! (which shouldn't happen) is treated as `NeedsApproval`, never `AutoRun`.
+//! **ApprovalPolicy** — when a visible tool *pauses* for approval:
+//! | Approval     | Writes/Edits      | Move/Copy          | Delete                        | Shell      |
+//! |--------------|-------------------|--------------------|-------------------------------|------------|
+//! | `on_request` | approve each      | approve each       | approve each                  | approve    |
+//! | `auto_edit`  | run in roots      | approve (gated)    | approve (gated)               | approve    |
+//! | `full_access`| run in roots      | run in roots       | run in roots (gated outside)  | run        |
+//!
+//! Legacy `PermissionMode` values map to presets:
+//! `read_only`→(ReadOnly, OnRequest), `manual`→(WorkspaceWrite, OnRequest),
+//! `auto_edit`→(WorkspaceWrite, AutoEdit), `full_auto`→(WorkspaceWrite, FullAccess).
 
 use serde::{Deserialize, Serialize};
 
@@ -29,27 +31,104 @@ use super::tools::{
     WRITE_FILE,
 };
 
-/// A session's default posture for filesystem tool calls. Stored on the
-/// `chat_sessions.permission_mode` column (per-session, not global) and read
-/// at the start of every tool-enabled turn. New sessions start at `Manual`.
+/// Sandbox scope: which tools are *visible* to the model (what it can do).
+/// Stored on the `chat_sessions.sandbox_policy` column (per-session, not
+/// global). Mutating tools are stripped from the tool schema under
+/// `ReadOnly` before the model sees them — see `tools::specs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxPolicy {
+    /// Only read-only tools: `list_directory`, `read_file`, `search_files`.
+    /// Mutating tools are absent from the tool schema entirely.
+    ReadOnly,
+    /// All filesystem tools visible. Writes/edits/moves/copies/deletes/shell
+    /// are present; their execution is governed by [`ApprovalPolicy`].
+    /// A hard `path_within_scope` gate still blocks writes outside granted
+    /// roots regardless of approval level.
+    WorkspaceWrite,
+}
+
+impl SandboxPolicy {
+    pub fn from_db(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "read_only" => SandboxPolicy::ReadOnly,
+            _ => SandboxPolicy::WorkspaceWrite, // "workspace_write", "", unknown
+        }
+    }
+
+    pub fn as_db(self) -> &'static str {
+        match self {
+            SandboxPolicy::ReadOnly => "read_only",
+            SandboxPolicy::WorkspaceWrite => "workspace_write",
+        }
+    }
+
+    /// Whether mutating tools should appear in the tool schema under this
+    /// sandbox. Used by `tools::specs` to decide whether to include
+    /// write/edit/delete/move/copy/download_file/run_shell.
+    pub fn allows_mutating_tools(self) -> bool {
+        !matches!(self, SandboxPolicy::ReadOnly)
+    }
+}
+
+impl Default for SandboxPolicy {
+    fn default() -> Self {
+        SandboxPolicy::WorkspaceWrite
+    }
+}
+
+/// Approval posture: when a visible tool *pauses* for a per-action card.
+/// Stored on the `chat_sessions.approval_policy` column (per-session).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalPolicy {
+    /// Every mutating action pauses for approval (the safe default). New
+    /// sessions start here. Equivalent to the legacy `manual` posture.
+    OnRequest,
+    /// Writes/edits within granted roots auto-run; delete, move and copy
+    /// still require per-action approval. Equivalent to legacy `auto_edit`.
+    AutoEdit,
+    /// Reads, writes, edits, copies, moves, deletes within granted roots,
+    /// and native shell commands all auto-run. Outside granted roots,
+    /// mutating calls still gate. The one-time Full Access modal is the
+    /// explicit user consent. Equivalent to legacy `full_auto`.
+    FullAccess,
+}
+
+impl ApprovalPolicy {
+    pub fn from_db(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto_edit" => ApprovalPolicy::AutoEdit,
+            "full_access" => ApprovalPolicy::FullAccess,
+            _ => ApprovalPolicy::OnRequest, // "on_request", "", unknown
+        }
+    }
+
+    pub fn as_db(self) -> &'static str {
+        match self {
+            ApprovalPolicy::OnRequest => "on_request",
+            ApprovalPolicy::AutoEdit => "auto_edit",
+            ApprovalPolicy::FullAccess => "full_access",
+        }
+    }
+}
+
+impl Default for ApprovalPolicy {
+    fn default() -> Self {
+        ApprovalPolicy::OnRequest
+    }
+}
+
+/// Legacy single-dimension mode. Retained only to map old DB rows (where
+/// `sandbox_policy` / `approval_policy` columns are absent) into the new
+/// dual-policy model via [`PermissionMode::to_policies`]. Not used in any
+/// decision path after migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {
-    /// Filesystem tools restricted to reads (`list_directory`, `read_file`,
-    /// `search_files`). Mutating tools are absent from the tool schema.
     ReadOnly,
-    /// All filesystem tools available; every mutating action pauses for a
-    /// per-action approval card. The default for every new chat session.
     Manual,
-    /// Reads and writes/edits within granted roots auto-run; delete, move and
-    /// copy still require per-action approval.
     AutoEdit,
-    /// Reads, writes, edits, copies and moves within granted roots auto-run,
-    /// as do native `run_shell` commands and deletes within granted roots.
-    /// Outside the granted roots, mutating calls still gate. FullAuto is the
-    /// only mode where shell/delete auto-run — the user explicitly confirmed
-    /// the one-time Full Auto modal to get exactly that behavior (bug report
-    /// #2: asking for approval on every shell call made the mode useless).
     FullAuto,
 }
 
@@ -66,13 +145,15 @@ impl PermissionMode {
         }
     }
 
-    /// The string persisted in the `permission_mode` column.
-    pub fn as_db(self) -> &'static str {
+    /// Map a legacy mode into the new dual-policy model. Used during
+    /// migration to backfill `sandbox_policy` + `approval_policy` columns
+    /// from the old `permission_mode` value.
+    pub fn to_policies(self) -> (SandboxPolicy, ApprovalPolicy) {
         match self {
-            PermissionMode::ReadOnly => "read_only",
-            PermissionMode::Manual => "manual",
-            PermissionMode::AutoEdit => "auto_edit",
-            PermissionMode::FullAuto => "full_auto",
+            PermissionMode::ReadOnly => (SandboxPolicy::ReadOnly, ApprovalPolicy::OnRequest),
+            PermissionMode::Manual => (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::OnRequest),
+            PermissionMode::AutoEdit => (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::AutoEdit),
+            PermissionMode::FullAuto => (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::FullAccess),
         }
     }
 }
@@ -159,26 +240,41 @@ pub fn is_system_tool(name: &str) -> bool {
 
 /// The permission decision for a system tool call. See the module comment
 /// above for the posture of each tool.
-pub fn check_system_permission(mode: PermissionMode, tool: &str) -> PermissionDecision {
+pub fn check_system_permission(
+    sandbox: SandboxPolicy,
+    approval: ApprovalPolicy,
+    tool: &str,
+) -> PermissionDecision {
     match tool {
-        // Tracking/cancelling tools — benign, auto-run in every mode.
+        // Tracking/cancelling tools — benign, auto-run in every posture.
         DOWNLOAD_PROGRESS | GET_TASK_STATUS | CANCEL_TASK => PermissionDecision::AutoRun,
         // Subagent delegation — auto-run; it's a model-level sub-turn, not a
         // shell/filesystem action.
         TASK => PermissionDecision::AutoRun,
-        // Native shell execution: gated in every mode EXCEPT full_auto —
-        // the one-time Full Auto modal is the explicit user consent that
+        // Native shell execution: gated in every posture EXCEPT full_access —
+        // the one-time Full Access modal is the explicit user consent that
         // shell commands may run without per-action cards (Claude Code's
         // bypassPermissions / Codex full-access work the same way).
-        RUN_SHELL => match mode {
-            PermissionMode::FullAuto => PermissionDecision::AutoRun,
+        RUN_SHELL => match approval {
+            ApprovalPolicy::FullAccess => PermissionDecision::AutoRun,
             _ => PermissionDecision::NeedsApproval,
         },
-        // Downloads write to disk; follow the connector-write posture.
-        DOWNLOAD_FILE => match mode {
-            PermissionMode::ReadOnly | PermissionMode::Manual => PermissionDecision::NeedsApproval,
-            PermissionMode::AutoEdit | PermissionMode::FullAuto => PermissionDecision::AutoRun,
-        },
+        // Downloads write to disk; follow the connector-write posture:
+        // auto-run under AutoEdit and FullAccess, gated under OnRequest.
+        // Under ReadOnly (sandbox-level), downloads are absent from the
+        // schema, but if one reaches here it is never auto-run.
+        DOWNLOAD_FILE => {
+            if !sandbox.allows_mutating_tools() {
+                PermissionDecision::NeedsApproval
+            } else {
+                match approval {
+                    ApprovalPolicy::OnRequest => PermissionDecision::NeedsApproval,
+                    ApprovalPolicy::AutoEdit | ApprovalPolicy::FullAccess => {
+                        PermissionDecision::AutoRun
+                    }
+                }
+            }
+        }
         _ => PermissionDecision::AutoRun,
     }
 }
@@ -191,32 +287,40 @@ pub fn check_system_permission(mode: PermissionMode, tool: &str) -> PermissionDe
 /// granted root for the auto-run modes. `granted_roots` is the per-session
 /// set of directory roots the user has already approved writing into.
 ///
-/// Hard rules enforced here (not in UI copy):
-/// - **Delete is gated in every mode except `full_auto`** — and even there
-///   only within granted roots. No other mode auto-runs a delete.
-/// - **`read_only` never auto-runs a mutating tool** — mutating tools reaching
-///   here under read-only is a bug (they should have been filtered from the
-///   schema), but it is treated as `NeedsApproval` rather than executing.
+/// Hard rules enforced here:
+/// - **Delete is gated under every approval level except `full_access`** —
+///   and even there only within granted roots. No other level auto-runs a
+///   delete.
+/// - **`read_only` sandbox never auto-runs a mutating tool** — mutating
+///   tools reaching here under read-only is a bug (they should have been
+///   filtered from the schema), but it is treated as `NeedsApproval`.
 /// - Reads (`list_directory` / `read_file` / `search_files`) auto-run in
-///   every mode.
+///   every posture.
 pub fn check_permission(
-    mode: PermissionMode,
+    sandbox: SandboxPolicy,
+    approval: ApprovalPolicy,
     tool: &str,
     path: &str,
     granted_roots: &[String],
 ) -> PermissionDecision {
-    // Reads always run, in every mode.
+    // Reads always run, in every posture.
     if matches!(tool, LIST_DIRECTORY | READ_FILE | SEARCH_FILES) {
         return PermissionDecision::AutoRun;
     }
 
-    // Delete: gated under read_only/manual/auto_edit. Under full_auto it
+    // ReadOnly sandbox: mutating tools shouldn't reach here (stripped from
+    // schema), but defensively gate if they do.
+    if !sandbox.allows_mutating_tools() {
+        return PermissionDecision::NeedsApproval;
+    }
+
+    // Delete: gated under OnRequest and AutoEdit. Under FullAccess it
     // auto-runs ONLY within granted roots (the user consented via the
-    // one-time Full Auto modal); outside the roots it still gates so a
+    // one-time Full Access modal); outside the roots it still gates so a
     // stray delete of e.g. C:\Windows\… never runs silently.
     if tool == DELETE_FILE {
-        return match mode {
-            PermissionMode::FullAuto => {
+        return match approval {
+            ApprovalPolicy::FullAccess => {
                 if path_within_granted_roots(path, granted_roots) {
                     PermissionDecision::AutoRun
                 } else {
@@ -227,34 +331,31 @@ pub fn check_permission(
         };
     }
 
-    // move/copy: gated under read_only/manual/auto_edit (the destructive-ish
-    // carve-out). Only full_auto auto-runs them — and only within granted roots.
+    // move/copy: gated under OnRequest and AutoEdit (the destructive-ish
+    // carve-out). Only FullAccess auto-runs them — and only within roots.
     if tool == MOVE_FILE || tool == COPY_FILE {
-        return match mode {
-            PermissionMode::FullAuto => {
+        return match approval {
+            ApprovalPolicy::FullAccess => {
                 if path_within_granted_roots(path, granted_roots) {
                     PermissionDecision::AutoRun
                 } else {
                     PermissionDecision::NeedsApproval
                 }
             }
-            // read_only / manual / auto_edit all gate move/copy.
+            // OnRequest / AutoEdit both gate move/copy.
             _ => PermissionDecision::NeedsApproval,
         };
     }
 
-    // write_file / edit_file: gated under read_only/manual; auto-run within
-    // granted roots under auto_edit and full_auto.
+    // write_file / edit_file: gated under OnRequest; auto-run within granted
+    // roots under AutoEdit and FullAccess.
     if is_mutating_fs_tool(tool) {
-        return match mode {
-            // Mutating tools shouldn't reach here under read-only (they're
-            // filtered from the schema), but if one does, never auto-run.
-            PermissionMode::ReadOnly => PermissionDecision::NeedsApproval,
-            // Manual approves every mutating action.
-            PermissionMode::Manual => PermissionDecision::NeedsApproval,
-            // Auto-edit / full-auto auto-run writes/edits WITHIN granted
+        return match approval {
+            // Every mutating action pauses.
+            ApprovalPolicy::OnRequest => PermissionDecision::NeedsApproval,
+            // Auto-edit / full-access auto-run writes/edits WITHIN granted
             // roots; outside granted roots, still gate them.
-            PermissionMode::AutoEdit | PermissionMode::FullAuto => {
+            ApprovalPolicy::AutoEdit | ApprovalPolicy::FullAccess => {
                 if path_within_granted_roots(path, granted_roots) {
                     PermissionDecision::AutoRun
                 } else {
@@ -297,8 +398,9 @@ pub enum ConnectorToolKind {
     /// Search / read / list / query — no mutation of the connected account.
     Read,
     /// Create / update / delete / insert / move / archive — mutates the
-    /// connected account. Gated per the session's permission mode: approval
-    /// under `read_only`/`manual`, auto-run under `auto_edit`/`full_auto`.
+    /// connected account. Gated per the session's approval policy: approval
+    /// under `OnRequest` (or `ReadOnly` sandbox), auto-run under
+    /// `AutoEdit`/`FullAccess`.
     Write,
 }
 
@@ -360,22 +462,30 @@ pub fn classify_connector_tool(name: &str, description: Option<&str>) -> Connect
     ConnectorToolKind::Write
 }
 
-/// The connector permission check. Reads auto-run in every mode. Writes follow
-/// the session's permission mode — the same posture as filesystem writes:
-/// `read_only` never auto-runs (Write tools are also filtered from the schema),
-/// `manual` asks for per-action approval, `auto_edit`/`full_auto` auto-run.
+/// The connector permission check. Reads auto-run in every posture. Writes
+/// follow the session's approval policy — the same posture as filesystem
+/// writes: `ReadOnly` sandbox never auto-runs (Write tools are also filtered
+/// from the schema), `OnRequest` asks for per-action approval,
+/// `AutoEdit`/`FullAccess` auto-run.
 pub fn check_connector_permission(
-    mode: PermissionMode,
+    sandbox: SandboxPolicy,
+    approval: ApprovalPolicy,
     kind: ConnectorToolKind,
 ) -> PermissionDecision {
     match kind {
         ConnectorToolKind::Read => PermissionDecision::AutoRun,
-        ConnectorToolKind::Write => match mode {
-            PermissionMode::ReadOnly | PermissionMode::Manual => {
+        ConnectorToolKind::Write => {
+            if !sandbox.allows_mutating_tools() {
                 PermissionDecision::NeedsApproval
+            } else {
+                match approval {
+                    ApprovalPolicy::OnRequest => PermissionDecision::NeedsApproval,
+                    ApprovalPolicy::AutoEdit | ApprovalPolicy::FullAccess => {
+                        PermissionDecision::AutoRun
+                    }
+                }
             }
-            PermissionMode::AutoEdit | PermissionMode::FullAuto => PermissionDecision::AutoRun,
-        },
+        }
     }
 }
 
@@ -651,26 +761,26 @@ mod tests {
 
     #[test]
     fn reads_auto_run_in_every_mode() {
-        for mode in [
-            PermissionMode::ReadOnly,
-            PermissionMode::Manual,
-            PermissionMode::AutoEdit,
-            PermissionMode::FullAuto,
+        for (sandbox, approval) in [
+            (SandboxPolicy::ReadOnly, ApprovalPolicy::OnRequest),
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::OnRequest),
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::AutoEdit),
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::FullAccess),
         ] {
             assert_eq!(
-                check_permission(mode, READ_FILE, "C:/projects/alpha/notes.md", &roots()),
+                check_permission(sandbox, approval, READ_FILE, "C:/projects/alpha/notes.md", &roots()),
                 PermissionDecision::AutoRun,
-                "read_file should auto-run under {mode:?}"
+                "read_file should auto-run under {sandbox:?} + {approval:?}"
             );
             assert_eq!(
-                check_permission(mode, LIST_DIRECTORY, "C:/projects/alpha", &roots()),
+                check_permission(sandbox, approval, LIST_DIRECTORY, "C:/projects/alpha", &roots()),
                 PermissionDecision::AutoRun,
-                "list_directory should auto-run under {mode:?}"
+                "list_directory should auto-run under {sandbox:?} + {approval:?}"
             );
             assert_eq!(
-                check_permission(mode, SEARCH_FILES, "C:/projects/alpha", &roots()),
+                check_permission(sandbox, approval, SEARCH_FILES, "C:/projects/alpha", &roots()),
                 PermissionDecision::AutoRun,
-                "search_files should auto-run under {mode:?}"
+                "search_files should auto-run under {sandbox:?} + {approval:?}"
             );
         }
     }
@@ -734,10 +844,11 @@ mod tests {
 
     #[test]
     fn delete_auto_runs_under_full_auto_within_roots_but_gates_outside() {
-        // Full Auto (explicitly confirmed via the one-time modal) auto-runs
+        // Full Access (explicitly confirmed via the one-time modal) auto-runs
         // deletes inside granted roots…
         let d = check_permission(
-            PermissionMode::FullAuto,
+            SandboxPolicy::WorkspaceWrite,
+            ApprovalPolicy::FullAccess,
             DELETE_FILE,
             "C:/projects/alpha/throwaway.txt",
             &roots(),
@@ -746,7 +857,8 @@ mod tests {
         // …and still gates them outside the roots.
         assert_eq!(
             check_permission(
-                PermissionMode::FullAuto,
+                SandboxPolicy::WorkspaceWrite,
+                ApprovalPolicy::FullAccess,
                 DELETE_FILE,
                 "C:/elsewhere/throwaway.txt",
                 &roots()
@@ -757,15 +869,17 @@ mod tests {
 
     #[test]
     fn delete_is_gated_under_every_other_mode() {
-        for mode in [
-            PermissionMode::ReadOnly,
-            PermissionMode::Manual,
-            PermissionMode::AutoEdit,
+        // ReadOnly gates via sandbox; Manual (OnRequest) and AutoEdit gate
+        // via approval. None of these auto-run a delete.
+        for (sandbox, approval) in [
+            (SandboxPolicy::ReadOnly, ApprovalPolicy::OnRequest),
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::OnRequest),
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::AutoEdit),
         ] {
             assert_eq!(
-                check_permission(mode, DELETE_FILE, "C:/projects/alpha/x", &roots()),
+                check_permission(sandbox, approval, DELETE_FILE, "C:/projects/alpha/x", &roots()),
                 PermissionDecision::NeedsApproval,
-                "delete must be gated under {mode:?}"
+                "delete must be gated under {sandbox:?} + {approval:?}"
             );
         }
     }
@@ -774,16 +888,19 @@ mod tests {
 
     #[test]
     fn manual_gates_writes_edits_moves_copies() {
+        // Manual maps to (WorkspaceWrite, OnRequest): every mutating action
+        // pauses for a per-action approval card.
         for tool in [WRITE_FILE, EDIT_FILE, MOVE_FILE, COPY_FILE] {
             assert_eq!(
                 check_permission(
-                    PermissionMode::Manual,
+                    SandboxPolicy::WorkspaceWrite,
+                    ApprovalPolicy::OnRequest,
                     tool,
                     "C:/projects/alpha/file",
                     &roots()
                 ),
                 PermissionDecision::NeedsApproval,
-                "{tool} should be gated under manual"
+                "{tool} should be gated under manual (on_request)"
             );
         }
     }
@@ -794,7 +911,8 @@ mod tests {
     fn auto_edit_auto_runs_write_within_granted_root() {
         assert_eq!(
             check_permission(
-                PermissionMode::AutoEdit,
+                SandboxPolicy::WorkspaceWrite,
+                ApprovalPolicy::AutoEdit,
                 WRITE_FILE,
                 "C:/projects/alpha/src/main.rs",
                 &roots()
@@ -803,7 +921,8 @@ mod tests {
         );
         assert_eq!(
             check_permission(
-                PermissionMode::FullAuto,
+                SandboxPolicy::WorkspaceWrite,
+                ApprovalPolicy::FullAccess,
                 WRITE_FILE,
                 "C:/projects/alpha/src/main.rs",
                 &roots()
@@ -816,19 +935,21 @@ mod tests {
     fn auto_edit_gates_write_outside_granted_root() {
         assert_eq!(
             check_permission(
-                PermissionMode::AutoEdit,
+                SandboxPolicy::WorkspaceWrite,
+                ApprovalPolicy::AutoEdit,
                 WRITE_FILE,
                 "C:/elsewhere/secret.txt",
                 &roots()
             ),
             PermissionDecision::NeedsApproval
         );
-        // Even full_auto gates a write OUTSIDE granted roots — the selector
+        // Even full_access gates a write OUTSIDE granted roots — the selector
         // only relaxes the default WITHIN already-granted roots; it never
         // expands what's reachable at all.
         assert_eq!(
             check_permission(
-                PermissionMode::FullAuto,
+                SandboxPolicy::WorkspaceWrite,
+                ApprovalPolicy::FullAccess,
                 WRITE_FILE,
                 "C:/elsewhere/secret.txt",
                 &roots()
@@ -845,7 +966,8 @@ mod tests {
         // (the schema filters it out first), but if it does it must NOT run.
         assert_eq!(
             check_permission(
-                PermissionMode::ReadOnly,
+                SandboxPolicy::ReadOnly,
+                ApprovalPolicy::OnRequest,
                 WRITE_FILE,
                 "C:/projects/alpha/file",
                 &roots()
@@ -854,7 +976,8 @@ mod tests {
         );
         assert_eq!(
             check_permission(
-                PermissionMode::ReadOnly,
+                SandboxPolicy::ReadOnly,
+                ApprovalPolicy::OnRequest,
                 EDIT_FILE,
                 "C:/projects/alpha/file",
                 &roots()
@@ -894,13 +1017,17 @@ mod tests {
 
     #[test]
     fn permission_mode_db_round_trip() {
-        for mode in [
-            PermissionMode::ReadOnly,
-            PermissionMode::Manual,
-            PermissionMode::AutoEdit,
-            PermissionMode::FullAuto,
+        // DB-only legacy compat shim: round-trip the old permission_mode
+        // string → PermissionMode (no mode-dependent check here). Legacy
+        // PermissionMode no longer carries `as_db`; map each variant to its
+        // canonical DB string explicitly to keep this a pure string test.
+        for (mode, db_str) in [
+            (PermissionMode::ReadOnly, "read_only"),
+            (PermissionMode::Manual, "manual"),
+            (PermissionMode::AutoEdit, "auto_edit"),
+            (PermissionMode::FullAuto, "full_auto"),
         ] {
-            assert_eq!(PermissionMode::from_db(mode.as_db()), mode);
+            assert_eq!(PermissionMode::from_db(db_str), mode);
         }
     }
 
@@ -1020,36 +1147,42 @@ mod tests {
     #[test]
     fn connector_write_follows_permission_mode() {
         // read_only / manual gate every connector write with a card; auto_edit
-        // and full_auto auto-run them (the account is already connected).
-        for mode in [PermissionMode::ReadOnly, PermissionMode::Manual] {
+        // and full_access auto-run them (the account is already connected).
+        for (sandbox, approval) in [
+            (SandboxPolicy::ReadOnly, ApprovalPolicy::OnRequest),
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::OnRequest),
+        ] {
             assert_eq!(
-                check_connector_permission(mode, ConnectorToolKind::Write),
+                check_connector_permission(sandbox, approval, ConnectorToolKind::Write),
                 PermissionDecision::NeedsApproval,
-                "connector write must be gated under {mode:?}"
+                "connector write must be gated under {sandbox:?} + {approval:?}"
             );
         }
-        for mode in [PermissionMode::AutoEdit, PermissionMode::FullAuto] {
+        for (sandbox, approval) in [
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::AutoEdit),
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::FullAccess),
+        ] {
             assert_eq!(
-                check_connector_permission(mode, ConnectorToolKind::Write),
+                check_connector_permission(sandbox, approval, ConnectorToolKind::Write),
                 PermissionDecision::AutoRun,
-                "connector write should auto-run under {mode:?}"
+                "connector write should auto-run under {sandbox:?} + {approval:?}"
             );
         }
     }
 
     #[test]
     fn connector_read_auto_runs_in_every_mode() {
-        // A "search my Notion for X" runs without friction in every mode.
-        for mode in [
-            PermissionMode::ReadOnly,
-            PermissionMode::Manual,
-            PermissionMode::AutoEdit,
-            PermissionMode::FullAuto,
+        // A "search my Notion for X" runs without friction in every posture.
+        for (sandbox, approval) in [
+            (SandboxPolicy::ReadOnly, ApprovalPolicy::OnRequest),
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::OnRequest),
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::AutoEdit),
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::FullAccess),
         ] {
             assert_eq!(
-                check_connector_permission(mode, ConnectorToolKind::Read),
+                check_connector_permission(sandbox, approval, ConnectorToolKind::Read),
                 PermissionDecision::AutoRun,
-                "connector read should auto-run under {mode:?}"
+                "connector read should auto-run under {sandbox:?} + {approval:?}"
             );
         }
     }
@@ -1062,7 +1195,8 @@ mod tests {
         for tool in [MOVE_FILE, COPY_FILE] {
             assert_eq!(
                 check_permission(
-                    PermissionMode::AutoEdit,
+                    SandboxPolicy::WorkspaceWrite,
+                    ApprovalPolicy::AutoEdit,
                     tool,
                     "C:/projects/alpha/file",
                     &roots()
@@ -1071,17 +1205,18 @@ mod tests {
                 "{tool} should be gated under auto_edit"
             );
         }
-        // But full_auto auto-runs move/copy/delete within granted roots.
+        // But full_access auto-runs move/copy/delete within granted roots.
         for tool in [MOVE_FILE, COPY_FILE] {
             assert_eq!(
                 check_permission(
-                    PermissionMode::FullAuto,
+                    SandboxPolicy::WorkspaceWrite,
+                    ApprovalPolicy::FullAccess,
                     tool,
                     "C:/projects/alpha/file",
                     &roots()
                 ),
                 PermissionDecision::AutoRun,
-                "{tool} should auto-run under full_auto within roots"
+                "{tool} should auto-run under full_access within roots"
             );
         }
     }
@@ -1090,42 +1225,52 @@ mod tests {
 
     #[test]
     fn run_shell_gated_except_full_auto() {
-        // Native code execution stays gated in every mode except full_auto —
-        // the one-time Full Auto modal is the explicit consent that shell
-        // commands run without per-action cards (bug report #2).
-        for mode in [
-            PermissionMode::ReadOnly,
-            PermissionMode::Manual,
-            PermissionMode::AutoEdit,
+        // Native code execution stays gated in every posture except full_access
+        // — the one-time Full Access modal is the explicit consent that shell
+        // commands run without per-action cards (bug report #2). Sandbox level
+        // (read_only vs workspace_write) does NOT relax this; only approval
+        // == FullAccess does, so a WorkspaceWrite + non-FullAccess pairing
+        // covers the gated cases.
+        for (sandbox, approval) in [
+            (SandboxPolicy::ReadOnly, ApprovalPolicy::OnRequest),
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::OnRequest),
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::AutoEdit),
         ] {
             assert_eq!(
-                check_system_permission(mode, RUN_SHELL),
+                check_system_permission(sandbox, approval, RUN_SHELL),
                 PermissionDecision::NeedsApproval,
-                "run_shell must be gated under {mode:?}"
+                "run_shell must be gated under {sandbox:?} + {approval:?}"
             );
         }
         assert_eq!(
-            check_system_permission(PermissionMode::FullAuto, RUN_SHELL),
+            check_system_permission(SandboxPolicy::WorkspaceWrite, ApprovalPolicy::FullAccess, RUN_SHELL),
             PermissionDecision::AutoRun
         );
     }
 
     #[test]
     fn download_file_follows_connector_write_posture() {
-        // Approval under read_only/manual; auto-run under auto_edit/full_auto
-        // (no granted-root scope — unrestricted filesystem access is the point).
-        for mode in [PermissionMode::ReadOnly, PermissionMode::Manual] {
+        // Approval under read_only/manual (ReadOnly sandbox or OnRequest
+        // approval); auto-run under auto_edit/full_access (no granted-root
+        // scope — unrestricted filesystem access is the point).
+        for (sandbox, approval) in [
+            (SandboxPolicy::ReadOnly, ApprovalPolicy::OnRequest),
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::OnRequest),
+        ] {
             assert_eq!(
-                check_system_permission(mode, DOWNLOAD_FILE),
+                check_system_permission(sandbox, approval, DOWNLOAD_FILE),
                 PermissionDecision::NeedsApproval,
-                "download_file must be gated under {mode:?}"
+                "download_file must be gated under {sandbox:?} + {approval:?}"
             );
         }
-        for mode in [PermissionMode::AutoEdit, PermissionMode::FullAuto] {
+        for (sandbox, approval) in [
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::AutoEdit),
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::FullAccess),
+        ] {
             assert_eq!(
-                check_system_permission(mode, DOWNLOAD_FILE),
+                check_system_permission(sandbox, approval, DOWNLOAD_FILE),
                 PermissionDecision::AutoRun,
-                "download_file should auto-run under {mode:?}"
+                "download_file should auto-run under {sandbox:?} + {approval:?}"
             );
         }
     }
@@ -1134,17 +1279,17 @@ mod tests {
     fn task_tracking_tools_auto_run_in_every_mode() {
         // download_progress / get_task_status / cancel_task are benign — they
         // only inspect or abort tasks the model itself started.
-        for mode in [
-            PermissionMode::ReadOnly,
-            PermissionMode::Manual,
-            PermissionMode::AutoEdit,
-            PermissionMode::FullAuto,
+        for (sandbox, approval) in [
+            (SandboxPolicy::ReadOnly, ApprovalPolicy::OnRequest),
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::OnRequest),
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::AutoEdit),
+            (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::FullAccess),
         ] {
             for tool in [DOWNLOAD_PROGRESS, GET_TASK_STATUS, CANCEL_TASK] {
                 assert_eq!(
-                    check_system_permission(mode, tool),
+                    check_system_permission(sandbox, approval, tool),
                     PermissionDecision::AutoRun,
-                    "{tool} should auto-run under {mode:?}"
+                    "{tool} should auto-run under {sandbox:?} + {approval:?}"
                 );
             }
         }

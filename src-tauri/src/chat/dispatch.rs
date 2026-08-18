@@ -609,13 +609,28 @@ async fn run_task_subagent(
         return "Error: Task requires a non-empty \"prompt\".".to_string();
     }
 
-    // Resolve the session's provider + model + key + base_url.
-    let (provider_str, model_str) = {
+    // Resolve the session's provider + model + key + base_url + project cwd.
+    let (provider_str, model_str, project_id) = {
         let db_state = app.state::<crate::DbState>();
         let conn = db_state.0.lock();
         match db::get_chat_session(&conn, sid) {
-            Ok(Some(cs)) => (cs.provider, cs.model),
+            Ok(Some(cs)) => (cs.provider, cs.model, cs.project_id),
             _ => return "Error: chat session not found.".to_string(),
+        }
+    };
+    // Resolve the project root (cwd) the subagent operates in, if any. The
+    // old system prompt was a generic one-liner with no cwd context — subagents
+    // labeled "edit"/"explore" had no idea which codebase they were in.
+    let project_path = {
+        if let Some(pid) = &project_id {
+            let db_state = app.state::<crate::DbState>();
+            let conn = db_state.0.lock();
+            db::get_project(&conn, pid)
+                .ok()
+                .flatten()
+                .map(|p| p.path)
+        } else {
+            None
         }
     };
     let api_key = {
@@ -655,6 +670,29 @@ async fn run_task_subagent(
         model_str
     };
 
+    // Build a role-aware system prompt. The `role` (subagent_type) enum is now
+    // reflected in the instructions instead of being ignored, and the project
+    // cwd is injected so the subagent knows which codebase it is operating in.
+    // The subagent has NO tools — it returns a self-contained answer/plan that
+    // the caller (main agent) can act on. Stating this explicitly prevents the
+    // subagent from hallucinating tool calls it can't actually make.
+    let role_instructions = match role.as_str() {
+        "explore" => "Your job is to explore the codebase and report findings: file paths, key symbols, and how things connect. Do not propose edits.",
+        "edit" | "refactor" => "Your job is to produce the concrete edits required (full file contents or unified diffs). The caller will apply them. Be precise about file paths.",
+        "analyze" => "Your job is to analyze the described code/behavior and report root cause, risks, and a recommendation. Do not edit.",
+        "research" => "Your job is to research the topic and report a concise summary with citations/references where applicable.",
+        "test" => "Your job is to specify tests (cases + expected outcomes, or test code) for the described behavior. Be specific.",
+        "write" => "Your job is to write the requested content (docs, config, code) in full.",
+        _ => "Complete the task concisely.",
+    };
+    let cwd_line = project_path
+        .as_deref()
+        .map(|p| format!("You are operating in the project at: {p}"))
+        .unwrap_or_else(|| "No project root is bound to this task.".to_string());
+    let system_prompt = format!(
+        "You are a focused subagent spawned by the main assistant. {role_instructions}\n{cwd_line}\nYou do NOT have access to tools — return a self-contained textual answer the main assistant can act on."
+    );
+
     // Generate a subagent id and emit the spawn event.
     let sub_id = format!("sub-{}", crate::db::now_ts());
     let _ = app.emit(
@@ -682,7 +720,7 @@ async fn run_task_subagent(
             "model": model,
             "max_tokens": 4096,
             "stream": true,
-            "system": "You are a focused subagent. Complete the task concisely.",
+            "system": system_prompt,
             "messages": [{"role": "user", "content": prompt}],
         });
         stream_subagent_sse(
@@ -702,7 +740,7 @@ async fn run_task_subagent(
             "stream": true,
             "stream_options": {"include_usage": true},
             "messages": [
-                {"role": "system", "content": "You are a focused subagent. Complete the task concisely."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
         });
@@ -886,7 +924,8 @@ pub(crate) async fn run_tool(
     client: &reqwest::Client,
     artifacts_dir: &std::path::Path,
     caps: &tools::ToolCaps,
-    mode: permission::PermissionMode,
+    sandbox: permission::SandboxPolicy,
+    approval: permission::ApprovalPolicy,
     mgr: &Arc<ChatManager>,
     app: &AppHandle,
     sid: &str,
@@ -921,7 +960,7 @@ pub(crate) async fn run_tool(
     // auto-run under auto_edit/full_auto); Reads auto-run. This reuses the
     // SAME approval oneshot as filesystem tools — no parallel gating mechanism.
     if let Some((idx, kind)) = crate::connectors::find_tool(&caps.attached_connectors, name) {
-        let decision = permission::check_connector_permission(mode, kind);
+        let decision = permission::check_connector_permission(sandbox, approval, kind);
         if matches!(decision, permission::PermissionDecision::NeedsApproval) {
             return run_gated_connector_tool(
                 &caps.attached_connectors,
@@ -945,7 +984,7 @@ pub(crate) async fn run_tool(
     // read_only/manual — and the same approval oneshot, so there is exactly
     // one gating UX for every remote tool.
     if let Some((_, entry)) = crate::mcp_gallery::find_tool(&caps.mcp_tools, name) {
-        let decision = permission::check_connector_permission(mode, entry.kind);
+        let decision = permission::check_connector_permission(sandbox, approval, entry.kind);
         if matches!(decision, permission::PermissionDecision::NeedsApproval) {
             return run_gated_mcp_tool(mgr, app, sid, entry, args).await;
         }
@@ -959,7 +998,7 @@ pub(crate) async fn run_tool(
     // task starts — the approval card is the only guard on what a download
     // writes to disk, so it stays meaningful.
     if permission::is_system_tool(name) {
-        let decision = permission::check_system_permission(mode, name);
+        let decision = permission::check_system_permission(sandbox, approval, name);
         // download_file's dest_path can be any absolute path the model chooses;
         // a real download writes to disk the same way write_file does, so
         // enforce the same `fs_roots` containment as the mutating FS tools.
@@ -1003,7 +1042,7 @@ pub(crate) async fn run_tool(
             if permission::any_rule_allows(&caps.fs_rules, name, &target) {
                 permission::PermissionDecision::AutoRun
             } else {
-                permission::check_permission(mode, name, &target, &caps.fs_roots)
+                permission::check_permission(sandbox, approval, name, &target, &caps.fs_roots)
             };
         if matches!(decision, permission::PermissionDecision::NeedsApproval) {
             return run_gated_fs_tool(client, artifacts_dir, caps, mgr, app, sid, name, args)

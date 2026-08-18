@@ -162,17 +162,38 @@ async fn openai_stream_round(
     // chunk once it proves not to be one (classic incremental-scan carry).
     let mut carry = String::new();
 
-    'outer: while let Some(chunk) = stream.next().await {
+    'outer: while let Some(chunk) = {
+        // Watchdog: 60s with no bytes from the provider means the connection
+        // stalled (half-open proxy, OpenRouter routing hang, upstream idle).
+        // reqwest's interactive client has no overall timeout, so without
+        // this guard a stalled stream blocks forever — the frontend's
+        // `streaming[chatSessionId]` entry never clears and the stop button
+        // spins indefinitely. A timeout here returns Err → chat:error.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            stream.next(),
+        ).await {
+            Ok(Some(chunk)) => Some(chunk),
+            Ok(None) => None,
+            Err(_elapsed) => {
+                return Err("stream stalled: no data received for 60s".to_string());
+            }
+        }
+    } {
         let chunk = chunk.map_err(|e| format!("stream read error: {e}"))?;
         pending.push_str(&String::from_utf8_lossy(&chunk));
         while let Some(nl) = pending.find('\n') {
             let line: String = pending.drain(..=nl).collect();
             let line = line.trim_end();
-            let data = match line.strip_prefix("data: ") {
+            // Tolerate `data:[DONE]` (no space) and trailing `\r` from some
+            // OpenAI-compatible aggregators (OpenRouter, vLLM) — a strict
+            // `strip_prefix("data: ")` match used to skip these and never
+            // break, hanging the turn until TCP EOF.
+            let data = match line.strip_prefix("data:").map(|s| s.trim_start()) {
                 Some(d) => d,
                 None => continue,
             };
-            if data == "[DONE]" {
+            if data == "[DONE]" || data == "[DONE]\r" || data.trim() == "[DONE]" {
                 break 'outer;
             }
             let v: Value = match serde_json::from_str(data) {
@@ -298,6 +319,12 @@ async fn openai_stream_round(
                         calls[idx].2.push_str(a);
                     }
                 }
+            }
+            // OpenAI/OpenRouter-compatible streams sometimes omit a final
+            // `data: [DONE]` but do include `choices[0].finish_reason = "stop"`.
+            // Treat that as terminal too, so the tool loop doesn't wait for EOF.
+            if v.pointer("/choices/0/finish_reason").and_then(|x| x.as_str()) == Some("stop") {
+                break 'outer;
             }
         }
     }
@@ -616,7 +643,8 @@ pub(crate) async fn run_openai_tool_loop(
     api_key: &str,
     req: &ChatRequest,
     caps: &tools::ToolCaps,
-    mode: permission::PermissionMode,
+    sandbox: permission::SandboxPolicy,
+    approval: permission::ApprovalPolicy,
     mgr: &Arc<ChatManager>,
     sid: &str,
     app: &AppHandle,
@@ -624,7 +652,7 @@ pub(crate) async fn run_openai_tool_loop(
     perf: crate::chat::turn_perf::TurnPerf,
 ) -> Result<(String, Option<ChatUsage>), String> {
     let url = format!("{base}/v1/chat/completions");
-    let tool_specs = tools::openai_tool_specs(caps, mode);
+    let tool_specs = tools::openai_tool_specs(caps, sandbox);
     let art_dir = artifacts_dir(app);
     let cap = if research_mode {
         RESEARCH_MAX_TOOL_ITERS
@@ -789,7 +817,7 @@ pub(crate) async fn run_openai_tool_loop(
                 let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
                 emit_token(app, sid, &open, &mut full);
                 perf.begin_tool();
-                let result = run_tool(client, &art_dir, caps, mode, mgr, app, sid, &name, &args).await;
+                let result = run_tool(client, &art_dir, caps, sandbox, approval, mgr, app, sid, &name, &args).await;
                 perf.end_tool();
                 if block.ends_with("</tool>") {
                     emit_token(app, sid, "</tool>", &mut full);
@@ -840,7 +868,8 @@ pub(crate) async fn run_anthropic_tool_loop(
     api_key: &str,
     req: &ChatRequest,
     caps: &tools::ToolCaps,
-    mode: permission::PermissionMode,
+    sandbox: permission::SandboxPolicy,
+    approval: permission::ApprovalPolicy,
     mgr: &Arc<ChatManager>,
     sid: &str,
     app: &AppHandle,
@@ -848,7 +877,7 @@ pub(crate) async fn run_anthropic_tool_loop(
     perf: crate::chat::turn_perf::TurnPerf,
 ) -> Result<(String, Option<ChatUsage>), String> {
     let url = format!("{base}/v1/messages");
-    let tool_specs = tools::anthropic_tool_specs(caps, mode);
+    let tool_specs = tools::anthropic_tool_specs(caps, sandbox);
     let art_dir = artifacts_dir(app);
     let cap = if research_mode {
         RESEARCH_MAX_TOOL_ITERS
@@ -925,7 +954,7 @@ pub(crate) async fn run_anthropic_tool_loop(
                 let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
                 emit_token(app, sid, &open, &mut full);
                 perf.begin_tool();
-                let result = run_tool(client, &art_dir, caps, mode, mgr, app, sid, &name, &args).await;
+                let result = run_tool(client, &art_dir, caps, sandbox, approval, mgr, app, sid, &name, &args).await;
                 perf.end_tool();
                 if block.ends_with("</tool>") {
                     emit_token(app, sid, "</tool>", &mut full);

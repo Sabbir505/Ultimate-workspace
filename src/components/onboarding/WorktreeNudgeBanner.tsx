@@ -1,11 +1,12 @@
-// Worktree-per-session migration nudge (roadmap P0 §3.1.1): a one-time,
-// dismissible banner shown to users who already have chats — NEW chats now
-// get their own isolated git worktree, and existing chats can be moved with
-// the per-chat toggle. Dismiss persists via the `worktrees.nudgeSeen` KV so
-// it only appears once.
+// Worktree-per-session migration nudge (roadmap P0 §3.1.1): a one-time
+// MODAL shown to users who already have chats — NEW chats now get their own
+// isolated git worktree, and existing chats can be moved with the per-chat
+// toggle. Dismiss persists via the `worktrees.nudgeSeen` KV so it only
+// appears once per install.
 import { useEffect, useState } from "react";
 import { getSetting, setSetting } from "../../lib/ipc";
 import { useChatStore } from "../../state/chat";
+import { Modal } from "../common/Modal";
 
 export function WorktreeNudgeBanner() {
   const [dismissed, setDismissed] = useState(false);
@@ -36,7 +37,7 @@ export function WorktreeNudgeBanner() {
   const dismiss = () => {
     setDismissed(true);
     void setSetting("worktrees.nudgeSeen", "1").catch(() => {
-      /* best-effort: worst case the banner returns next launch */
+      /* best-effort: worst case the modal returns next launch */
     });
   };
 
@@ -46,36 +47,30 @@ export function WorktreeNudgeBanner() {
   const canIsolate = !!activeSession?.projectId;
 
   return (
-    <div className="onboarding-banner">
-      <button
-        className="onboarding-banner-close"
-        onClick={dismiss}
-        title="Dismiss"
-        aria-label="Dismiss notification"
-      >
-        ×
-      </button>
-      <strong>Chats now run in isolated worktrees</strong>
-      <div className="hint">
+    <Modal
+      title="Chats now run in isolated worktrees"
+      onClose={dismiss}
+      actions={
+        <>
+          {canIsolate && (
+            <button
+              onClick={() => {
+                void toggleSessionWorktree(activeSession!.id);
+                dismiss();
+              }}
+            >
+              Isolate this chat
+            </button>
+          )}
+          <button onClick={dismiss}>Got it</button>
+        </>
+      }
+    >
+      <p>
         New chats get their own git worktree (branch <code>conduit/&lt;id&gt;</code>), so agents
         never collide in the same working tree. Existing chats can be moved with the 🪵/⛓ toggle
         in the sidebar or the ⛓ chip beside the composer's folder notch.
-      </div>
-      {canIsolate && (
-        <div>
-          <button
-            onClick={() => {
-              void toggleSessionWorktree(activeSession!.id);
-              dismiss();
-            }}
-          >
-            Isolate this chat
-          </button>
-        </div>
-      )}
-      <div>
-        <button onClick={dismiss}>Got it</button>
-      </div>
-    </div>
+      </p>
+    </Modal>
   );
 }

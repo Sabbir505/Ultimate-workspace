@@ -126,6 +126,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_session_agent(conn)?;
     migrate_chat_session_project_id(conn)?;
     migrate_chat_session_permission_mode(conn)?;
+    migrate_chat_session_policies(conn)?;
     migrate_chat_session_worktree(conn)?;
     migrate_artifacts_message_id(conn)?;
     migrate_chat_messages_superseded(conn)?;
@@ -181,7 +182,39 @@ fn migrate_chat_session_permission_mode(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
-/// Add the `worktree_path` column to `chat_sessions` on databases created
+/// Add the `sandbox_policy` and `approval_policy` columns to `chat_sessions`,
+/// backfilling them from the legacy `permission_mode` column. The legacy
+/// column is preserved (not dropped) for rollback safety.
+fn migrate_chat_session_policies(conn: &Connection) -> DbResult<()> {
+    for col in ["sandbox_policy", "approval_policy"] {
+        let sql = format!("ALTER TABLE chat_sessions ADD COLUMN {col} TEXT");
+        if let Err(e) = conn.execute(&sql, []) {
+            if !e.to_string().contains("duplicate column name") {
+                return Err(e);
+            }
+        }
+    }
+    // Backfill from legacy permission_mode using the preset mapping table.
+    // Rows where the new columns are NULL (i.e. just added) get the derived
+    // preset; rows that already have values (re-run of migration) are left
+    // alone.
+    conn.execute_batch(
+        "UPDATE chat_sessions SET sandbox_policy = CASE permission_mode
+                WHEN 'read_only' THEN 'read_only'
+                ELSE 'workspace_write'
+             END,
+             approval_policy = CASE permission_mode
+                WHEN 'auto_edit' THEN 'auto_edit'
+                WHEN 'full_auto' THEN 'full_access'
+                WHEN 'read_only' THEN 'on_request'
+                ELSE 'on_request'
+             END
+         WHERE sandbox_policy IS NULL OR approval_policy IS NULL",
+    )?;
+    Ok(())
+}
+
+
 /// before the worktree-per-session feature (roadmap P0 §3.1.1). NULL = the
 /// chat works in its bound project's working tree; a path = the chat's
 /// isolated git worktree (branch `conduit/<id>`, a sibling of the project).
@@ -507,7 +540,11 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           unread INTEGER NOT NULL DEFAULT 0,
           watch_mode TEXT,
           agent TEXT,
-          project_id TEXT REFERENCES projects(id) ON DELETE SET NULL
+          project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+          permission_mode TEXT,
+          worktree_path TEXT,
+          sandbox_policy TEXT,
+          approval_policy TEXT
         );
 
         CREATE TABLE IF NOT EXISTS chat_messages (
@@ -769,7 +806,7 @@ pub use chat::{
     set_chat_session_project, set_chat_session_starred, set_chat_session_unread,
     set_chat_session_worktree,
     touch_chat_session, update_chat_session_agent, update_chat_session_model,
-    update_chat_session_permission_mode, update_chat_session_provider,
+    update_chat_session_permission_mode, update_chat_session_policies, update_chat_session_provider,
     update_chat_session_title, update_chat_session_watch_mode,
 };
 

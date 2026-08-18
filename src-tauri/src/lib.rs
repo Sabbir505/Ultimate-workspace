@@ -356,7 +356,7 @@ pub fn run() {
             commands::chat_cmds::update_chat_session_model,
             commands::chat_cmds::update_chat_session_provider,
             commands::chat_cmds::update_chat_session_watch_mode,
-            commands::chat_cmds::update_chat_session_permission_mode,
+            commands::chat_cmds::update_chat_session_policies,
             commands::chat_cmds::update_chat_session_agent,
             commands::chat_cmds::set_chat_session_project,
             commands::chat_cmds::get_chat_messages,

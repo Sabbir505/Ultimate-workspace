@@ -36,6 +36,16 @@ fn map_chat_session(row: &rusqlite::Row) -> rusqlite::Result<ChatSession> {
             .get::<_, Option<String>>("permission_mode")?
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "manual".to_string()),
+        // New dual-policy columns. Falls back to the legacy-mode-derived
+        // preset when the column is absent (old DB rows pre-migration).
+        sandbox_policy: row
+            .get::<_, Option<String>>("sandbox_policy")?
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "workspace_write".to_string()),
+        approval_policy: row
+            .get::<_, Option<String>>("approval_policy")?
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "on_request".to_string()),
     })
 }
 
@@ -83,8 +93,8 @@ pub fn create_chat_session(
     let now = now_ts();
     let id = new_id();
     conn.execute(
-        "INSERT INTO chat_sessions (id, title, provider, model, created_at, last_active_at, watch_mode, project_id, permission_mode)
-         VALUES (?1, NULL, ?2, ?3, ?4, ?4, NULL, ?5, 'manual')",
+        "INSERT INTO chat_sessions (id, title, provider, model, created_at, last_active_at, watch_mode, project_id, permission_mode, sandbox_policy, approval_policy)
+         VALUES (?1, NULL, ?2, ?3, ?4, ?4, NULL, ?5, 'manual', 'workspace_write', 'on_request')",
         params![id, provider, model, now, project_id],
     )?;
     conn.query_row(
@@ -237,9 +247,9 @@ pub fn update_chat_session_provider(
 
 /// Update a session's watch-mode pacing override (`"on"` | `"off"` | None).
 /// None clears the override so the session falls back to the global setting.
-/// Update a session's permission posture
-/// (`read_only` | `manual` | `auto_edit` | `full_auto`). Persisted per-session
-/// so reopening a chat restores its last mode; new sessions start at `manual`.
+/// Update a session's legacy permission posture
+/// (`read_only` | `manual` | `auto_edit` | `full_auto`). Superseded by
+/// `update_chat_session_policies`; retained for export/import compat.
 pub fn update_chat_session_permission_mode(
     conn: &Connection,
     chat_session_id: &str,
@@ -248,6 +258,30 @@ pub fn update_chat_session_permission_mode(
     conn.execute(
         "UPDATE chat_sessions SET permission_mode = ?2 WHERE id = ?1",
         params![chat_session_id, mode],
+    )?;
+    Ok(())
+}
+
+/// Update a session's dual sandbox + approval policies atomically.
+/// `sandbox` is `read_only` | `workspace_write`; `approval` is `on_request`
+/// | `auto_edit` | `full_access`. Also writes the legacy `permission_mode`
+/// column for backward compat (derived from the dual policies).
+pub fn update_chat_session_policies(
+    conn: &Connection,
+    chat_session_id: &str,
+    sandbox: &str,
+    approval: &str,
+) -> DbResult<()> {
+    let legacy = match (sandbox, approval) {
+        ("read_only", _) => "read_only",
+        ("workspace_write", "on_request") => "manual",
+        ("workspace_write", "auto_edit") => "auto_edit",
+        ("workspace_write", "full_access") => "full_auto",
+        _ => "manual",
+    };
+    conn.execute(
+        "UPDATE chat_sessions SET sandbox_policy = ?2, approval_policy = ?3, permission_mode = ?4 WHERE id = ?1",
+        params![chat_session_id, sandbox, approval, legacy],
     )?;
     Ok(())
 }

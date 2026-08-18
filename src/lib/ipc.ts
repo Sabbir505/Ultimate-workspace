@@ -558,9 +558,16 @@ export interface ChatSession {
    *  isolated git worktree (sibling of the project, branch `conduit/<id>`),
    *  which becomes its working dir for sends/spawns/diffs. */
   worktreePath?: string | null;
-  /** Per-session permission posture: "read_only" | "manual" | "auto_edit" |
-   *  "full_auto". Defaults to "manual" server-side. */
+  /** Legacy per-session permission posture — superseded by the dual
+   *  sandbox/approval policies below. Retained for backward compat. */
   permissionMode?: string;
+  /** Per-session sandbox scope: "read_only" | "workspace_write". Decides
+   *  which tools are visible to the model. Defaults to "workspace_write". */
+  sandboxPolicy?: string;
+  /** Per-session approval posture: "on_request" | "auto_edit" |
+   *  "full_access". Decides when visible tools pause for approval.
+   *  Defaults to "on_request". */
+  approvalPolicy?: string;
 }
 
 export interface ChatMessageRecord {
@@ -613,6 +620,9 @@ export interface ChatMessage {
    *  `completedAt - startedAt`. Absent for the live streaming bubble, for
    *  user/system rows, and for legacy rows with no recorded window. */
   durationSec?: number;
+  /** Live perf snapshot (elapsedMs, etc.) from `chat:perf` for the streaming
+   *  bubble — used to show "Working for Xs" while the turn is in flight. */
+  livePerf?: ChatPerfPayload | null;
   /** Live attachment objects (with image base64) for the optimistic just-sent
    *  message, so image cards get a real thumbnail before the backend persists.
    *  Persisted messages carry attachments as text markers inside `content`
@@ -1102,17 +1112,18 @@ export const updateChatSessionWatchMode = (
   mode: "on" | "off" | null,
 ) =>
   safeInvoke<void>("update_chat_session_watch_mode", { chatSessionId, mode });
-/** Update a chat session's permission posture
- *  (`read_only` | `manual` | `auto_edit` | `full_auto`). Per-session; new
- *  sessions start at `manual`. Honored by the built-in chat tool loops and by
- *  headless Claude Code sessions; Kimi/OpenCode headless always run full-auto.
- *  The frontend gates the switch to `full_auto` behind a one-time
- *  confirmation modal before calling this. */
-export const updateChatSessionPermissionMode = (
+/** Update a chat session's dual sandbox + approval policies. `sandbox` is
+ *  "read_only" | "workspace_write"; `approval` is "on_request" | "auto_edit"
+ *  | "full_access". The legacy permission_mode column is also updated
+ *  (derived from the dual policies) for backward compat. The frontend gates
+ *  the switch to "full_access" approval behind a one-time confirmation modal
+ *  before calling this. */
+export const updateChatSessionPolicies = (
   chatSessionId: string,
-  mode: "read_only" | "manual" | "auto_edit" | "full_auto",
+  sandbox: "read_only" | "workspace_write",
+  approval: "on_request" | "auto_edit" | "full_access",
 ) =>
-  safeInvoke<void>("update_chat_session_permission_mode", { chatSessionId, mode });
+  safeInvoke<void>("update_chat_session_policies", { chatSessionId, sandbox, approval });
 /** Update a chat session's agent selection from the composer's agent-then-model
  *  selector. `"builtin"` | `"local"` | `"harness:<id>"` | null (clears the
  *  selection — back to the locked fresh-chat state). Persisted per session;

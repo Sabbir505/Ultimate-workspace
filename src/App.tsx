@@ -26,6 +26,8 @@ import { Sidebar } from "./components/sidebar/Sidebar";
 import { PanelIcon } from "./components/common/PanelIcon";
 import { ModelDownloadIndicator } from "./components/settings/ModelDownloadIndicator";
 import { ChatView } from "./components/chat/ChatView";
+import { FolderNotch, GitHubNotch } from "./components/chat/ChatComposer";
+import { useChatStore } from "./state/chat";
 import { GitToolsSidebar } from "./components/chat/GitToolsSidebar";
 const CommandPalette = lazy(() => import("./components/command-palette/CommandPalette").then((m) => ({ default: m.CommandPalette })));
 import { useChatEvents } from "./hooks/useChatEvents";
@@ -71,6 +73,13 @@ export default function App() {
     gitPromptProjectId ? s.projects.find((p) => p.id === gitPromptProjectId) ?? null : null,
   );
   const markGitRepo = useProjectsStore((s) => s.markGitRepo);
+  // Chat header contents: the active session's title + the project/branch
+  // chips (chat view only — the toolbar is shared across views).
+  const chatTitle = useChatStore((s) =>
+    s.activeChatSessionId
+      ? (s.sessions.find((x) => x.id === s.activeChatSessionId)?.title?.trim() || "New chat")
+      : null,
+  );
 
   // Pop-out chat window (roadmap #17): when the window is opened with
   // `?popout=chat&session=<id>`, render a standalone ChatView (no sidebar,
@@ -162,6 +171,17 @@ export default function App() {
             >
               <PanelIcon />
             </button>
+          )}
+          {activeView === "chat" && (
+            <>
+              {/* Plain text title — deliberately no pill/border so it reads
+                  as a label, not a control. */}
+              <span className="toolbar-chat-title" title={chatTitle ?? undefined}>
+                {chatTitle}
+              </span>
+              <FolderNotch />
+              <GitHubNotch />
+            </>
           )}
           <ModelDownloadIndicator />
           <span className="spacer" />

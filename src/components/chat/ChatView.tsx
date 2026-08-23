@@ -31,9 +31,10 @@ const MessageBubble = lazy(() => import("./MessageBubble").then((m) => ({ defaul
 // edit-tool call. None of these appear on the empty welcome screen.
 const TaskProgressCard = lazy(() => import("./TaskProgressCard").then((m) => ({ default: m.TaskProgressCard })));
 const ArtifactProposalCard = lazy(() => import("./ArtifactProposalCard").then((m) => ({ default: m.ArtifactProposalCard })));
-import { listChatModels, listHarnessModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, deleteEmptyChatSessions, getLocalModelOverrides, setLocalModelOverrides, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance } from "../../lib/ipc";
+import { listHarnessModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, deleteEmptyChatSessions, getLocalModelOverrides, setLocalModelOverrides, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance } from "../../lib/ipc";
 import { harnessModelCatalog } from "../../lib/harnessModels";
 import { setChatScrollToMessage } from "../../lib/chatScroll";
+import type { AgentModelSelection } from "./AgentModelPicker";
 import { TurnNavigator } from "./TurnNavigator";
 import { useContextMeter } from "../../hooks/useContextMeter";
 import { GitToolsSidebar } from "./GitToolsSidebar";
@@ -73,26 +74,6 @@ const WELCOME_PROMPTS: Array<{ title: string; sub: string }> = [
   { title: "Write code", sub: "Build a script, fix a bug, or refactor" },
   { title: "Research a topic", sub: "Gather and synthesize sources" },
 ];
-
-/** Dedupe model ids case-insensitively — some providers return the same model
- *  in mixed case ("GPT-4o" and "gpt-4o"); first occurrence wins. Blanks dropped. */
-function dedupeModelIds(ids: string[]): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const id of ids) {
-    const key = id.trim().toLowerCase();
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(id);
-  }
-  return out;
-}
-
-/** Case-insensitive membership check for model id lists. */
-function includesModelId(ids: string[], id: string): boolean {
-  const key = id.trim().toLowerCase();
-  return ids.some((i) => i.trim().toLowerCase() === key);
-}
 
 export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {}) {
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
@@ -212,20 +193,10 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
     activeSession?.provider === "anthropic" ||
     activeSession?.provider === "anthropic_compatible" ||
     activeSession?.provider === "local_gguf";
-  // The provider whose cloud models the selector lists. For local_gguf
-  // sessions that's the configured cloud provider (so the user can switch
-  // back); for any other session it's the session's own provider. Only the
-  // compatible providers + OpenRouter have a `/v1/models` endpoint to list.
-  const cloudProvider = isLocal
-    ? config?.provider && config.provider !== "local_gguf"
-      ? config.provider
-      : null
-    : (activeSession?.provider ?? null);
-  const cloudCompatible =
-    cloudProvider === "anthropic_compatible" ||
-    cloudProvider === "openai_compatible" ||
-    cloudProvider === "openrouter";
-  const [models, setModels] = useState<string[]>([]);
+  // Scanned local GGUF records — resolve picks from the combined picker into
+  // spawnable sidecars, and `resolvedModel` into name/filename form. The
+  // picker itself fetches every agent's/model list (harness config, provider
+  // /v1/models, local scan) directly.
   const [localModels, setLocalModels] = useState<GgufModel[]>([]);
   const [localLoading, setLocalLoading] = useState(false);
   // id of the running local-model sidecar, or null if none. Drives the ⏏
@@ -253,40 +224,19 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   useEffect(() => {
     void refreshLocalOverrides();
   }, [refreshLocalOverrides]);
-  // The active session's local model record, when it resolves in the scan —
-  // gates the inline Advanced runtime editor and provides its spawn args.
-  const activeLocal = useMemo(
-    () =>
-      isLocal && activeSession?.model
-        ? localModels.find((m) => (m.name || m.filename) === activeSession.model) ?? null
-        : null,
-    [isLocal, activeSession?.model, localModels],
-  );
-  /** Slider-ctx merge for one-off spawns: the composer ctx slider wins over
-   *  the persisted ctx when set; no slider → undefined lets the backend load
-   *  the persisted blob itself (incl. last-good ngl). */
-  const ovrWithCtx = useCallback(
-    (id: string): LlamaOverrides | undefined =>
-      localCtx ? { ...(localOverridesMapRef.current[id] ?? {}), ctx: localCtx } : undefined,
-    [localCtx],
-  );
-
-  // Fetch the cloud model list (uses the stored key and base URL from
-  // Settings). Refetched when the listed provider changes.
-  useEffect(() => {
-    setModels([]);
-    if (!cloudProvider || !cloudCompatible) return;
-    let stale = false;
-    void listChatModels(cloudProvider).then((list) => {
-      if (!stale && list) setModels(dedupeModelIds(list.map((m) => m.id)));
-    });
-    return () => {
-      stale = true;
-    };
-  }, [cloudProvider, cloudCompatible, activeChatSessionId]);
+  /** Per-model persisted overrides keyed by the picker's row id
+   *  (name/filename) — seeds the gear panel drafts. */
+  const localOverridesByName = useMemo(() => {
+    const out: Record<string, LlamaOverrides> = {};
+    for (const m of localModels) {
+      const ov = localOverridesMap[m.id];
+      if (ov) out[m.name || m.filename] = ov;
+    }
+    return out;
+  }, [localModels, localOverridesMap]);
 
   // Scan local GGUF files (default locations + any persisted folders) for
-  // EVERY session — local models are offered in the selector regardless of
+  // EVERY session — local models are offered in the picker regardless of
   // the session's provider; picking one switches the session to local_gguf.
   useEffect(() => {
     let stale = false;
@@ -313,45 +263,9 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
     };
   }, [activeChatSessionId, localLoading, activeSession?.model]);
 
-  // Cloud ids for the selector, deduped case-insensitively. The session's
-  // current cloud model is always included, even if not in the endpoint list.
-  const cloudIds = (() => {
-    const ids = dedupeModelIds(models);
-    if (!isLocal && activeSession?.model && !includesModelId(ids, activeSession.model)) {
-      ids.unshift(activeSession.model);
-    }
-    return ids;
-  })();
-  // Local ids (scanned GGUF display names), same treatment for a local
-  // session's current model.
-  const localIds = (() => {
-    const ids = dedupeModelIds(localModels.map((m) => m.name || m.filename));
-    if (isLocal && activeSession?.model) {
-      // The session's stored local model can be keyed three ways depending on
-      // how it was set: the GGUF metadata `name`, the `filename`, OR the
-      // registry id-slug that start_local_model persists to
-      // chat.local_gguf.model (which seeds "New Chat"). If ANY of those match
-      // a scanned model, that model is already listed — don't prepend a stale
-      // second row (the "selected + non-selected duplicate" bug). Only prepend
-      // when the stored model is genuinely not in the scan (e.g. the file was
-      // removed from the scan folders but the session still references it).
-      const stored = activeSession.model.trim().toLowerCase();
-      const alreadyListed =
-        includesModelId(ids, activeSession.model) ||
-        localModels.some(
-          (m) =>
-            (m.id && m.id.toLowerCase() === stored) ||
-            (m.filename && m.filename.toLowerCase() === stored) ||
-            (m.name && m.name.toLowerCase() === stored),
-        );
-      if (!alreadyListed) ids.unshift(activeSession.model);
-    }
-    return ids;
-  })();
-
-  // The model id shown as "selected" in the selector. The session may store a
+  // The model id shown as "selected" in the picker. The session may store a
   // local model under its registry id-slug (persisted by start_local_model),
-  // but the selector lists local models by `name || filename`. Resolve the
+  // but the picker lists local models by `name || filename`. Resolve the
   // stored value to that same form so the right row gets the ✓ instead of no
   // row matching (or a stale slug row appearing alongside the real one).
   const resolvedModel = (() => {
@@ -408,6 +322,30 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
     ? (liveUsage.usedTokens ?? lastInputTokens)
     : lastInputTokens;
 
+  // Spawn/swap the local-model sidecar for a scanned GGUF record. Returns the
+  // error text on failure (surfaced by the callers via the chat error banner)
+  // or null on success. The caller decides what to persist — on failure the
+  // session must NOT be stomped to the failed model (the previous sidecar is
+  // the only thing a send could still hit). `overrides` (from the picker's
+  // per-model gear panel) wins; without it the backend loads the persisted
+  // overrides blob itself (incl. last-good ngl).
+  const spawnLocalModel = useCallback(
+    async (match: GgufModel, overrides?: LlamaOverrides): Promise<string | null> => {
+      setLocalLoading(true);
+      try {
+        await startLocalModel(match.id, match.path, match.mmprojPath, overrides);
+        return null;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn("start local model failed", msg);
+        return msg;
+      } finally {
+        setLocalLoading(false);
+      }
+    },
+    [],
+  );
+
   const handleModelChange = useCallback(
     async (model: string) => {
       if (!activeChatSessionId) return;
@@ -415,31 +353,11 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
       if (localMatch) {
         // Local model picked (in ANY session): spawn/swap the sidecar first
         // (start_local_model stops any existing one), then point the session
-        // at the local provider so subsequent sends hit its endpoint.
-        setLocalLoading(true);
-        let startErr: string | null = null;
-        try {
-          await startLocalModel(localMatch.id, localMatch.path, localMatch.mmprojPath, ovrWithCtx(localMatch.id));
-        } catch (err) {
-          // Keep the failure reason around so the user sees a meaningful
-          // error instead of a cryptic 400 on the NEXT send. Two important
-          // things to know:
-          //   1. We do NOT update the session model — the sidecar didn't
-          //      load, so the previous model (still in the registry) is
-          //      the only one a send could possibly hit. Stomping the
-          //      session to the failed model would orphan the session on
-          //      a dead endpoint and the user would see a 400.
-          //   2. We surface the error to the chat store's `error` field
-          //      so the same `chat-error` banner that handles provider
-          //      errors shows it. The error is also scrubbed via
-          //      `formatChatError` to strip the noisy llama.cpp startup
-          //      logs and keep just the salient reason (e.g. "unknown
-          //      model architecture: 'kimi-k3'").
-          startErr = err instanceof Error ? err.message : String(err);
-          console.warn("start local model failed", startErr);
-        } finally {
-          setLocalLoading(false);
-        }
+        // at the local provider so subsequent sends hit its endpoint. On
+        // failure the model is left untouched and the error is surfaced via
+        // the store's `error` field (the same `chat-error` banner provider
+        // errors use; formatChatError scrubs the noisy llama.cpp logs).
+        const startErr = await spawnLocalModel(localMatch);
         if (startErr) {
           useChatStore.setState({ error: startErr });
           return;
@@ -467,61 +385,51 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
       }
       void setSessionModel(activeChatSessionId, model);
     },
-    [activeChatSessionId, setSessionModel, setSessionProvider, isLocal, localModels, ovrWithCtx, config?.provider],
+    [activeChatSessionId, setSessionModel, setSessionProvider, isLocal, localModels, spawnLocalModel, config?.provider],
   );
 
-  // Apply context-size changes to a running local model: llama-server's -c is
-  // fixed at process start, so moving the slider reloads the model with the
-  // new value. Debounced so dragging doesn't respawn the server on every
-  // tick, and guarded so mounting/session switches don't trigger a reload.
-  const appliedCtxRef = useRef(localCtx);
-  useEffect(() => {
-    if (localCtx === appliedCtxRef.current) return;
-    if (!isLocal || !activeSession?.model) {
-      // No running local model — the value applies to the next start.
-      appliedCtxRef.current = localCtx;
-      return;
-    }
-    const model = activeSession.model;
-    const match = localModels.find((m) => (m.name || m.filename) === model);
-    if (!match) {
-      appliedCtxRef.current = localCtx;
-      return;
-    }
-    const t = setTimeout(() => {
-      appliedCtxRef.current = localCtx;
-      setLocalLoading(true);
-      startLocalModel(match.id, match.path, match.mmprojPath, ovrWithCtx(match.id))
-        .catch((err) => console.warn("restart local model with new ctx failed", err))
-        .finally(() => setLocalLoading(false));
-    }, 800);
-    return () => clearTimeout(t);
-  }, [localCtx, isLocal, activeSession?.model, localModels, ovrWithCtx]);
-
-  // "Apply & reload" from the composer's inline Advanced runtime editor:
-  // persist the draft into the overrides blob, then restart the sidecar with
-  // it (start_local_model records the fresh last-good ngl on success).
-  const handleApplyLocalOverrides = useCallback(
-    async (overrides: LlamaOverrides) => {
-      if (!activeLocal) return;
-      setLocalLoading(true);
+  // "Load model" from the picker's per-model gear panel: persist the drafted
+  // tweaks for that model, spawn the sidecar with them, then point the
+  // session at it. Works for ANY scanned local model (not just the active
+  // one) — loading a different model swaps the sidecar, same as picking it.
+  const handleLoadLocalModel = useCallback(
+    async (model: string, overrides: LlamaOverrides) => {
+      if (!activeChatSessionId) return;
+      const match = localModels.find((m) => (m.name || m.filename) === model);
+      if (!match) return;
+      const session = sessions.find((s) => s.id === activeChatSessionId);
+      // The gear flow loads a local model directly — make the session a
+      // "local" agent session FIRST (same as picking the model from the
+      // rail), or the chip keeps the old agent and never shows the Local
+      // label/spinner/model name.
+      if ((session?.agent ?? null) !== "local") {
+        await setSessionAgent(activeChatSessionId, "local");
+      }
+      // Persist first so the tweaks survive app restarts (and a later plain
+      // pick of this model reuses them via the persisted blob).
       try {
-        const next = { ...localOverridesMapRef.current, [activeLocal.id]: overrides };
+        const next = { ...localOverridesMapRef.current, [match.id]: overrides };
         await setLocalModelOverrides(JSON.stringify(next));
         localOverridesMapRef.current = next;
         setLocalOverridesMap(next);
-        await startLocalModel(activeLocal.id, activeLocal.path, activeLocal.mmprojPath, overrides);
-        const status = await localModelStatus();
-        setActiveLocalModelId(status?.modelId ?? null);
       } catch (err) {
-        useChatStore.setState({
-          error: err instanceof Error ? err.message : String(err),
-        });
-      } finally {
-        setLocalLoading(false);
+        console.warn("persist local overrides failed", err);
+      }
+      const startErr = await spawnLocalModel(match, overrides);
+      if (startErr) {
+        useChatStore.setState({ error: startErr });
+        return;
+      }
+      const status = await localModelStatus().catch(() => null);
+      if (status?.modelId) setActiveLocalModelId(status.modelId);
+      if (session?.provider !== "local_gguf") {
+        await setSessionProvider(activeChatSessionId, "local_gguf");
+      }
+      if (session?.model !== model) {
+        await setSessionModel(activeChatSessionId, model);
       }
     },
-    [activeLocal],
+    [activeChatSessionId, sessions, localModels, spawnLocalModel, setSessionAgent, setSessionProvider, setSessionModel],
   );
 
   // Eject the running local-model sidecar. Stops the llama-server process
@@ -548,15 +456,52 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
     }
   }, [activeLocalModelId, activeChatSessionId, setSessionModel]);
 
-  // Agent selection from the composer's agent chip. Persisted per session;
-  // "builtin"/"local" keep today's provider behavior (the model menu's cloud
-  // and local sections drive provider switches as before), a "harness:<id>"
-  // pick only records the agent + unlocks the per-harness model catalog.
-  const handleAgentChange = useCallback(
-    (agent: string) => {
-      if (activeChatSessionId) void setSessionAgent(activeChatSessionId, agent);
+  // Commit a selection from the composer's combined agent/model picker. The
+  // agent, provider, and model land TOGETHER so a session can never end up
+  // with one agent and another agent's model attached. Order matters:
+  //  1. agent first — leaving a harness/ACP session must kill its CLI
+  //     process (setSessionAgent does that);
+  //  2. local picks spawn/swap the llama-server sidecar before the session
+  //     is pointed at it (a failed spawn leaves the session untouched);
+  //  3. cloud/harness picks flip the provider when it changed, then the
+  //     model (a harness model change respawns the CLI via setSessionModel).
+  const handleAgentModelPick = useCallback(
+    async (sel: AgentModelSelection) => {
+      if (!activeChatSessionId) return;
+      const session = sessions.find((s) => s.id === activeChatSessionId);
+      if ((session?.agent ?? null) !== sel.agent) {
+        await setSessionAgent(activeChatSessionId, sel.agent);
+      }
+      // ACP agents decide their own model — the agent switch above is all.
+      if (sel.agent.startsWith("acp:")) return;
+      if (sel.provider === "local_gguf") {
+        const match = localModels.find((m) => (m.name || m.filename) === sel.model);
+        if (match) {
+          const startErr = await spawnLocalModel(match);
+          if (startErr) {
+            useChatStore.setState({ error: startErr });
+            return;
+          }
+        }
+        if (session?.provider !== "local_gguf") {
+          await setSessionProvider(activeChatSessionId, "local_gguf");
+        }
+      } else if (sel.provider && session?.provider !== sel.provider) {
+        await setSessionProvider(activeChatSessionId, sel.provider);
+      }
+      if (sel.model !== session?.model) {
+        await setSessionModel(activeChatSessionId, sel.model);
+      }
     },
-    [activeChatSessionId, setSessionAgent],
+    [
+      activeChatSessionId,
+      sessions,
+      localModels,
+      spawnLocalModel,
+      setSessionAgent,
+      setSessionProvider,
+      setSessionModel,
+    ],
   );
 
   // Permission posture: the approval card above the composer resolves the
@@ -1397,15 +1342,13 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         streaming={activeIsStreaming}
         disabled={false}
         model={activeChatSessionId ? (resolvedModel ?? "") : undefined}
-        models={harnessAgent ? harnessModels.map((m) => m.id) : acpAgent ? [] : cloudIds}
         modelLabels={
           harnessAgent
             ? Object.fromEntries(harnessModels.map((m) => [m.id, m.label]))
             : undefined
         }
-        modelEndpoint={harnessAgent ? (harnessCfg?.endpoint ?? null) : undefined}
         agent={activeChatSessionId ? (activeSession?.agent ?? null) : undefined}
-        onAgentChange={handleAgentChange}
+        onAgentModelPick={handleAgentModelPick}
         permissionMode={
           activeChatSessionId
             ? ((activeSession?.permissionMode as PermissionMode | undefined) ?? "manual")
@@ -1420,24 +1363,15 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
           (!harnessAgent && !acpAgent) || harnessAgent === "claude_code"
         }
         agentLoading={harnessAgent ? harnessLoading : false}
-        localModels={localIds}
         effort={effort}
         provider={activeSession?.provider}
         modelLoading={localLoading}
         localCtx={localCtx}
-        onModelChange={handleModelChange}
         onEffortChange={setEffort}
-        onLocalCtxChange={setLocalCtx}
         onEjectLocalModel={ejectLocalModel}
         localModelActive={isLocal && !!activeLocalModelId}
-        activeLocal={
-          activeLocal
-            ? { id: activeLocal.id, path: activeLocal.path, mmprojPath: activeLocal.mmprojPath }
-            : null
-        }
-        localOverrides={activeLocal ? localOverridesMap[activeLocal.id] : undefined}
-        onApplyLocalOverrides={handleApplyLocalOverrides}
-        applyingOverrides={localLoading}
+        localOverridesMap={localOverridesByName}
+        onLoadLocalModel={handleLoadLocalModel}
         usedTokens={usedTokens}
         liveMaxTokens={isLocal ? liveUsage.maxTokens : 0}
         thinking={thinking}

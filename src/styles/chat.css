@@ -283,6 +283,24 @@ div[data-index]:has(.chat-session-row.menu-open) {
   position: relative;
 }
 
+/* Chat header contents live in the app toolbar (chat title + project/branch
+   chips on the left, pane toggle on the right). The title is plain text —
+   no background or border — and the git chip's popover, built for the
+   composer (opened upward), must drop DOWN from the top toolbar. */
+.toolbar-chat-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-dim);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.toolbar .composer-notch-github-popover {
+  bottom: auto;
+  top: calc(100% + 4px);
+}
+
 /* Scrollable message list */
 .chat-messages {
   flex: 1;

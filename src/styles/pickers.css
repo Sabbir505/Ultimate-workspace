@@ -1,50 +1,6 @@
-/* pickers — Model/effort/agent selectors, local-model context slider, API keys panel, saved providers.
-   Split out of the old monolithic global.css (2026-08-15). Import order in
-   global.css preserves the original cascade — do not reorder imports. */
-/* Model + effort selector (chat composer) */
-.model-effort-menu {
-  position: relative;
-}
-.model-effort-trigger {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  font-size: 12px;
-  border: none;
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--text);
-  cursor: pointer;
-}
-.model-effort-trigger:hover {
-  background: var(--surface);
-}
-.model-effort-effort {
-  color: var(--text-dim);
-}
 .model-effort-chevron {
   color: var(--text-dim);
   font-size: 10px;
-}
-.model-effort-popup {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  right: 0;
-  min-width: 240px;
-  max-height: min(480px, calc(100vh - 32px));
-  overflow-y: auto;
-  padding: 5px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface-glass);
-  backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
-  box-shadow: var(--glass-rim), 0 10px 30px -10px rgba(0, 0, 0, 0.5);
-  /* Above ALL composer chrome — the permission-mode trigger and other footer
-     controls must never interleave with these rows (they used to sit at
-     z-index 60 under the footer's old z-index:2000 stacking context). */
-  z-index: 2100;
 }
 .model-effort-search {
   padding: 4px 4px 6px;
@@ -88,6 +44,8 @@
 }
 /* Custom-endpoint footnote in the model dropdown (CLI agent relay setups). */
 .model-effort-endpoint {
+  /* Pinned under the scrolling model list — never inside it. */
+  flex-shrink: 0;
   padding: 5px 10px;
   font-size: 10.5px;
   color: var(--text-dim);
@@ -95,6 +53,7 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
 .model-effort-item {
   display: flex;
@@ -189,36 +148,6 @@
   color: var(--text-dim);
   line-height: 1.4;
 }
-.model-effort-effort-row {
-  position: relative;
-}
-.model-effort-submenu {
-  position: absolute;
-  bottom: 0;
-  right: calc(100% + 8px);
-  min-width: 220px;
-  padding: 5px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface-glass);
-  backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
-  box-shadow: var(--glass-rim), 0 10px 30px -10px rgba(0, 0, 0, 0.5);
-}
-.model-effort-submenu-hint {
-  padding: 6px 10px;
-  font-size: 11px;
-  color: var(--text-dim);
-  line-height: 1.4;
-}
-.model-effort-badge {
-  margin-left: 8px;
-  padding: 1px 6px;
-  font-size: 10px;
-  border-radius: var(--radius-xs);
-  background: var(--surface-2);
-  color: var(--text-dim);
-}
 .model-effort-local-badge {
   margin-left: 6px;
   padding: 1px 5px;
@@ -229,38 +158,6 @@
   color: #fff;
   text-transform: uppercase;
   letter-spacing: 0.5px;
-}
-
-/* Eject button on the local-model pill. Sits next to the "Local" badge and
-   stops the running llama-server sidecar to free its VRAM. Inline SVG icon
-   (triangle + bar) so it stays consistent with the rest of the icon set. */
-.model-effort-eject {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-left: 4px;
-  padding: 2px;
-  width: 20px;
-  height: 20px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 50%;
-  background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
-  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
-}
-.model-effort-eject:hover {
-  background: rgba(220, 80, 80, 0.18);
-  border-color: rgba(220, 80, 80, 0.55);
-  color: #f4a3a3;
-}
-.model-effort-eject:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-.model-effort-eject:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
 }
 
 /* Agent selector chip + locked model chip (composer, mockup 02). Reuses the
@@ -320,7 +217,7 @@
   backdrop-filter: blur(20px) saturate(140%);
   -webkit-backdrop-filter: blur(20px) saturate(140%);
   box-shadow: var(--glass-rim), 0 10px 30px -10px rgba(0, 0, 0, 0.5);
-  /* Above ALL composer chrome — see .model-effort-popup. */
+  /* Above ALL composer chrome — see .agent-model-popup. */
   z-index: 2100;
 }
 .agent-item-name {
@@ -366,25 +263,231 @@
 .agent-status.on {
   color: var(--state-working);
 }
-/* Locked model chip — a low-profile inline chip on the bottom-right of the
-   composer footer, shown until an agent is picked. Solid hairline border
-   (no dash) so it reads as an inert state, not an error. */
-.model-chip-locked {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 8px;
-  font-size: 11px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-dim);
-  cursor: default;
-  user-select: none;
+
+/* ---- Combined agent + model picker (two-pane, mockup: icon rail left,
+   searchable model list right) ---- */
+/* Chip label — agent name · model name. */
+.agent-chip-label {
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-:root[data-theme="light"] .model-chip-locked {
-  border-color: rgba(0, 0, 0, 0.08);
-  background: rgba(0, 0, 0, 0.03);
+.agent-model-popup {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  display: flex;
+  /* Content-sized: the popup hugs the model list (effort sits right under
+     the rows) and only caps out — list scrolls — on long lists. */
+  height: auto;
+  max-height: min(300px, calc(100vh - 32px));
+  width: 240px;
+  /* Never overflow the window on narrow layouts; the panes shrink inside. */
+  max-width: min(240px, calc(100vw - 24px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: var(--glass-rim), 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+  /* Above ALL composer chrome — same rule as the popups it replaced. */
+  z-index: 2100;
+  overflow: hidden;
+}
+/* Icon-only rail (~50px). Tooltips/aria-labels carry the names; sections are
+   separated by hairline dividers instead of text labels. */
+.agent-model-rail {
+  width: 50px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  padding: 4px 5px;
+  border-right: 1px solid var(--border);
+}
+.agent-rail-divider {
+  height: 1px;
+  margin: 3px 2px;
+  background: var(--border);
+}
+.agent-rail-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 28px;
+  margin-bottom: 1px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.agent-rail-icon-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.agent-rail-icon-btn.rail-selected {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.agent-rail-icon-btn.disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.agent-rail-icon-btn.disabled:hover {
+  background: transparent;
+}
+.agent-rail-svg {
+  /* CSS fallback box (the per-brand inline style wins) — guarantees a sane
+     size even in a hypothetical style-less first frame. */
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+/* Glyph-drawn marks (monogram K/D…, the gear) pin to SYSTEM fonts on
+   purpose: the app's webfont loads from the network and swaps in ~2s after
+   a hard refresh, which visibly changed these glyphs' size/metrics
+   mid-flight. A stable system stack renders identically from frame one. */
+.agent-rail-monogram {
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+.agent-model-gear {
+  font-family: "Segoe UI Symbol", "Segoe UI", system-ui, sans-serif;
+}
+/* Brand tints — the two Anthropic-family marks keep their terracotta so
+   Claude/Anthropic read instantly; everything else is neutral currentColor. */
+.agent-icon-tint-claude {
+  color: #d97757;
+}
+.agent-rail-icon-btn.disabled .agent-icon-tint-claude {
+  color: inherit;
+}
+.agent-model-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* Model rows scroll inside the pane; the search header and effort footer stay
+   pinned. The old .model-effort-section max-height cap does NOT apply here —
+   the pane's flex chain (popup max-height → pane → list flex/min-height:0)
+   is the single scroll authority, so the list always uses the full pane
+   height and never double-clips. Bottom padding keeps the last row and the
+   "↦ via" endpoint footnote clear of the scroll edge. */
+.agent-model-list {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 8px;
+}
+.agent-model-list .model-effort-item {
+  flex-shrink: 0;
+  min-width: 0;
+}
+/* Long model ids ellipsize in the narrow pane (full id in the row title). */
+.agent-model-list .model-effort-item > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-effort-search {
+  flex-shrink: 0;
+}
+.agent-model-effort {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 8px 6px;
+  flex-shrink: 0;
+}
+/* Two rows: High/Low/Medium first, Default full-width second. Every option
+   has the SAME fixed height so the rows read as one consistent grid. */
+.agent-model-effort-row {
+  display: flex;
+  gap: 3px;
+}
+.agent-model-effort-opt {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 24px;
+  padding: 0;
+  font-size: 10.5px;
+  line-height: 1;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.agent-model-effort-opt:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.agent-model-effort-opt.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: 600;
+}
+.agent-model-effort-opt:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.agent-model-effort-opt.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: 600;
+}
+/* Retry link inside the pane error state. */
+.model-effort-retry {
+  margin-top: 6px;
+  padding: 3px 10px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.model-effort-retry:hover {
+  border-color: var(--accent);
+}
+/* Narrow windows: stack the panes vertically — the rail becomes a horizontal
+   icon strip above the model list. */
+@media (max-width: 560px) {
+  .agent-model-popup {
+    width: calc(100vw - 24px);
+    max-height: min(360px, calc(100vh - 32px));
+    flex-direction: column;
+  }
+  .agent-model-rail {
+    width: auto;
+    display: flex;
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+  .agent-rail-icon-btn {
+    width: 25px;
+    flex-shrink: 0;
+  }
+  .agent-rail-divider {
+    width: 1px;
+    height: auto;
+    margin: 5px 3px;
+    align-self: stretch;
+  }
 }
 /* Small inline spinner used while a local model is loading onto the GPU. */
 .local-spinner {
@@ -987,4 +1090,102 @@
 .api-provider-form .glass-select,
 .api-model-section .glass-select {
   width: 100%;
+}
+
+/* Per-model gear on local rows — opens the advanced runtime panel inline
+   under the row. Sits inside the row button (stopPropagation'd clicks). */
+.agent-model-gear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  font-size: 12px;
+  line-height: 1;
+  border-radius: var(--radius-xs);
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+.agent-model-gear:hover,
+.agent-model-gear.open {
+  background: var(--surface-2);
+  color: var(--text);
+}
+/* Advanced runtime settings sub-modal — opened by a local row's gear,
+   portaled to <body> above every composer/picker layer. */
+.agent-model-gear-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+.agent-model-gear-modal {
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(600px, calc(100vh - 48px));
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: var(--glass-rim), 0 18px 50px -12px rgba(0, 0, 0, 0.6);
+}
+.agent-model-gear-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.agent-model-gear-title {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-model-gear-close {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.agent-model-gear-close:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.agent-model-gear-body {
+  padding: 10px 14px 14px;
+  overflow-y: auto;
+}
+/* Hide the native number-input spinners (up/down arrows on hover) in the
+   runtime settings modal — same treatment the settings card uses. The
+   fields are still freely typable; Auto = cleared. */
+.agent-model-gear-body input[type="number"]::-webkit-outer-spin-button,
+.agent-model-gear-body input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.agent-model-gear-body input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.agent-model-gear-body .model-effort-llama-apply {
+  width: 100%;
+  margin-top: 10px;
 }

@@ -1,13 +1,14 @@
 // Chat composer, Claude-style: a single rounded card with the textarea on
-// top and a footer row below — "+" attach button on the left, model/effort
-// pill and a circular ↑ send button on the right.
+// top and a footer row below — "+" attach button on the left and a circular
+// ↑ send button on the right. Agent + model selection live in ONE combined
+// chip in the control bar below (AgentModelPicker): left rail of agents,
+// right pane of that agent's models with a search header.
 // Enter sends; Shift+Enter inserts a newline.
 // Attachments: images are sent as vision input, docx/pptx/xlsx/pdf and legacy
 // doc/ppt/xls are extracted to text server-side, and plain-text files are
 // inlined into the message.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ModelEffortMenu } from "./ModelEffortMenu";
-import { AgentMenu } from "./AgentMenu";
+import { AgentModelPicker, type AgentModelSelection } from "./AgentModelPicker";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { ArtifactTypeSelector } from "./ArtifactTypeSelector";
 import type { PermissionMode } from "../../state/chat";
@@ -195,7 +196,7 @@ const NO_QUEUED_MESSAGES: import("../../state/chat").QueuedChatMessage[] = [];
  *  selection when it's the same project. Hidden when neither resolves (no
  *  project selected). When the chat works in an isolated worktree a ⛓ chip
  *  sits beside the folder name — clicking it joins the main working tree. */
-function FolderNotch() {
+export function FolderNotch() {
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
   const override = useChatStore((s) =>
     s.activeChatSessionId ? s.cwdOverrides[s.activeChatSessionId] : undefined,
@@ -205,8 +206,6 @@ function FolderNotch() {
       ? s.sessions.find((x) => x.id === s.activeChatSessionId)?.worktreePath
       : undefined,
   );
-  const unbindProject = useChatStore((s) => s.unbindProject);
-  const selectProject = useProjectsStore((s) => s.selectProject);
   // The chat's own project binding wins over the global selection, so
   // switching chats shows each chat's project — not whichever project was
   // clicked last.
@@ -222,17 +221,6 @@ function FolderNotch() {
   // selected project without a per-chat binding is not enough.
   const hasExplicitBinding = !!(boundProjectId || override || worktreePath);
   if (!path || !activeChatSessionId || !hasExplicitBinding) return null;
-  const unbind = () => {
-    unbindProject(activeChatSessionId);
-    // "Come out of that project" also means the global sidebar selection —
-    // only when it's the very project this notch was showing (a chat bound
-    // to a different project keeps the global selection untouched).
-    const ps = useProjectsStore.getState();
-    const showing = boundProjectId ?? ps.selectedProjectId;
-    if (ps.selectedProjectId && ps.selectedProjectId === showing) {
-      selectProject(null);
-    }
-  };
   return (
     <div className="composer-notch-folder" title={path}>
       <FolderIcon />
@@ -251,15 +239,6 @@ function FolderNotch() {
           ⛓
         </button>
       )}
-      <button
-        type="button"
-        className="composer-notch-folder-clear"
-        title={`${override ? `Custom folder: ${override}\n` : ""}Click to leave this project`}
-        aria-label="Leave this project"
-        onClick={unbind}
-      >
-        ×
-      </button>
     </div>
   );
 }
@@ -268,7 +247,7 @@ function FolderNotch() {
  *  icon + the current branch name. Clicking it opens a small dropdown popover
  *  (right there at the composer) with the branch list, search, create, and git
  *  log — NOT the tool panel. Hidden when the project isn't a git repo. */
-function GitHubNotch() {
+export function GitHubNotch() {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
@@ -526,23 +505,21 @@ interface Props {
   /** Prefill the textarea (e.g. editing a prior message). Bumping `nonce`
    *  re-applies `text` even if the text is unchanged. */
   draft?: { text: string; nonce: number };
-  /** Model/effort selector state — selector is hidden when model is undefined. */
+  /** Combined agent+model selector state — the chip is hidden when model is
+   *  undefined (no active session). */
   model?: string;
-  models?: string[];
-  /** Optional id → display-label overrides for the model list (CLI-agent
-   *  catalog). Passed through to ModelEffortMenu. */
+  /** Optional id → display-label overrides for the active harness's model
+   *  catalog (CLI-agent labels). Passed through to AgentModelPicker. */
   modelLabels?: Record<string, string>;
-  /** Custom endpoint the selected CLI agent is pointed at (discovered from
-   *  the CLI's own config) — shown in the model dropdown so relay/custom
-   *  setups are visible. Passed through to ModelEffortMenu. */
-  modelEndpoint?: string | null;
-  /** Per-session agent selection ("builtin" | "local" | "harness:<id>").
-   *  undefined = no active session (agent chip hidden); null = session active
-   *  but no agent picked yet — the model chip renders locked and Send stays
-   *  disabled until the user chooses one (mockup 02, state A). */
+  /** Per-session agent selection ("builtin" | "local" | "harness:<id>" |
+   *  "acp:<id>"). undefined = no active session (chip hidden); null = session
+   *  active but no agent picked yet — Send stays disabled until the user
+   *  chooses one from the picker. */
   agent?: string | null;
-  onAgentChange?: (agent: string) => void;
-  /** Spinner on the agent chip while a harness's config/models load. */
+  /** Commit a selection from the combined agent/model picker (agent +
+   *  provider + model together). */
+  onAgentModelPick: (sel: AgentModelSelection) => void;
+  /** Spinner on the chip while a harness's config/models load. */
   agentLoading?: boolean;
   /** Per-session permission posture. The selector renders only when BOTH
    *  this and onPermissionModeChange are set AND permissionModeSupported —
@@ -551,31 +528,26 @@ interface Props {
   permissionMode?: PermissionMode;
   onPermissionModeChange?: (mode: PermissionMode) => void;
   permissionModeSupported?: boolean;
-  /** Scanned local GGUF display names, shown as a "Local models" section in
-   *  the selector regardless of the session's provider. */
-  localModels?: string[];
   effort?: string;
   provider?: string;
-  /** Local-model context size in tokens (0 = Auto); only used for local_gguf. */
+  /** Local-model context size in tokens (0 = Auto) — feeds the context meter. */
   localCtx?: number;
   /** True while a local model is loading onto the GPU (see ChatView). */
   modelLoading?: boolean;
-  onModelChange?: (model: string) => void;
   onEffortChange?: (effort: string) => void;
-  onLocalCtxChange?: (ctx: number) => void;
   /** Eject the running local-model sidecar and free its VRAM. Wired by
    *  ChatView only when the local_gguf provider has a live sidecar. */
   onEjectLocalModel?: () => void;
-  /** True when a local-model sidecar is currently running — the model pill
-   *  shows an ⏏ button when this is set. Defaults to false. */
+  /** True when a local-model sidecar is currently running — the picker's
+   *  Local pane shows an ⏏ row when this is set. Defaults to false. */
   localModelActive?: boolean;
-  /** Active local model's spawn record + persisted runtime overrides, and
-   *  the Apply handler — threaded to ModelEffortMenu's inline Advanced
-   *  runtime settings editor. */
-  activeLocal?: { id: string; path: string; mmprojPath?: string | null } | null;
-  localOverrides?: LlamaOverrides;
-  onApplyLocalOverrides?: (overrides: LlamaOverrides) => Promise<void> | void;
-  applyingOverrides?: boolean;
+  /** Per-model persisted llama-server overrides, keyed by the picker's local
+   *  row id (name/filename) — seeds the gear panel drafts. */
+  localOverridesMap?: Record<string, LlamaOverrides>;
+  /** "Load model" from the picker's per-model gear panel: persist the
+   *  drafted tweaks, spawn the sidecar with them, and point the session at
+   *  that model. */
+  onLoadLocalModel?: (model: string, overrides: LlamaOverrides) => void;
   /** Per-session extended-thinking toggle. `null` (default) lets the provider
    *  decide; `true` / `false` forces it. Hidden entirely when the active
    *  provider is one that doesn't expose thinking (e.g. plain OpenAI). */
@@ -600,29 +572,22 @@ export function ChatComposer({
   disabled,
   draft,
   model,
-  models,
   modelLabels,
-  modelEndpoint,
   agent,
-  onAgentChange,
+  onAgentModelPick,
   agentLoading,
   permissionMode,
   onPermissionModeChange,
   permissionModeSupported = true,
-  localModels,
   effort,
   provider,
   localCtx,
   modelLoading,
-  onModelChange,
   onEffortChange,
-  onLocalCtxChange,
   onEjectLocalModel,
   localModelActive,
-  activeLocal,
-  localOverrides,
-  onApplyLocalOverrides,
-  applyingOverrides,
+  localOverridesMap,
+  onLoadLocalModel,
   usedTokens,
   liveMaxTokens,
   thinking,
@@ -1022,10 +987,12 @@ export function ChatComposer({
   }, []);
 
   // A model must be explicitly chosen before sending (no default model).
-  const needsModel = model !== undefined && !model.trim();
-  // No agent picked for the session yet: model chip is locked and Send stays
-  // disabled so a message can never go to the wrong backend (mockup 02,
-  // state A). `agent === undefined` means no active session — hidden entirely.
+  // ACP agents pick their own model — an empty model must not block Send.
+  const needsModel =
+    model !== undefined && !model.trim() && !(agent ?? "").startsWith("acp:");
+  // No agent picked for the session yet: Send stays disabled so a message
+  // can never go to the wrong backend (mockup 02, state A). `agent ===
+  // undefined` means no active session — chip hidden entirely.
   const agentLocked = agent === null;
 
   // --- Conversational Artifact Creation (Phase 1) ---
@@ -1199,10 +1166,13 @@ if (e.key === "Enter" || e.key === "Tab") {
   );
 
   const isEmpty = !content.trim() && attachments.length === 0;
-  const showSelector = model !== undefined && onModelChange && onEffortChange;
-  // The agent chip shows whenever there's an active session (agent !==
-  // undefined), including the locked no-agent state.
-  const showAgentSelector = agent !== undefined && onAgentChange;
+  // The combined agent/model chip shows whenever there's an active session
+  // (agent !== undefined), including the no-agent-picked state.
+  const showAgentSelector = agent !== undefined && !!onAgentModelPick;
+  // The footer row only exists when something visible lives in it (research
+  // chip, attach error, needs-model hint) — otherwise it's an empty strip
+  // between the textarea and the control bar.
+  const showFooterRow = forceResearch || !!attachError || (!agentLocked && needsModel);
   // The permission-mode selector shows for sessions whose runtime honors it
   // (builtin/local + Claude Code harness).
   const showModeSelector =
@@ -1216,102 +1186,8 @@ if (e.key === "Enter" || e.key === "Tab") {
 
   return (
     <div className="chat-composer">
-      {queuedMessages.length > 0 && (
-        <div className="composer-queue" aria-label="Queued messages">
-          <button
-            type="button"
-            className="composer-queue-header"
-            onClick={() => setQueueExpanded((v) => !v)}
-            aria-expanded={queueExpanded}
-          >
-            <span className="composer-queue-chevron" aria-hidden="true">
-              {queueExpanded ? "▾" : "▸"}
-            </span>
-            Queued ({queuedMessages.length})
-          </button>
-          {queueExpanded &&
-            queuedMessages.map((m, i) => (
-              <div className="composer-queue-item" key={m.id}>
-                <span className="composer-queue-index">{i + 1}</span>
-                <span className="composer-queue-text" title={m.content}>
-                  {m.content ||
-                    `${m.attachments?.length ?? 0} attachment${(m.attachments?.length ?? 0) === 1 ? "" : "s"}`}
-                </span>
-                <button
-                  type="button"
-                  className="composer-queue-remove"
-                  title="Remove from queue"
-                  aria-label="Remove from queue"
-                  onClick={() =>
-                    activeChatSessionId && removeQueuedMessage(activeChatSessionId, m.id)
-                  }
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-        </div>
-      )}
-      <div className={`chat-composer-card${modeGlowClass}`}>
-        {attachments.length > 0 && (
-          <div className="composer-attachments">
-            {attachments.map((a) => (
-              <AttachmentCard
-                // name+size: two different files can share a name.
-                key={`${a.name}:${a.size ?? 0}`}
-                attachment={a}
-                onRemove={() =>
-                  setAttachments((prev) =>
-                    prev.filter((p) => !(p.name === a.name && (p.size ?? -1) === (a.size ?? -1))),
-                  )
-                }
-              />
-            ))}
-          </div>
-        )}
-        <div className="composer-slash-wrap">
-          {slashOpen && slashFiltered.length > 0 && (
-            <div className="composer-slash-menu" role="listbox" aria-label="Commands">
-              {slashFiltered.map((item, i) => {
-                const key = item.kind === "template" ? item.trigger : item.slug;
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    role="option"
-                    aria-selected={i === slashIndex}
-                    className={`composer-slash-item${i === slashIndex ? " active" : ""}`}
-                    // onMouseDown + preventDefault keeps textarea focus.
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      applySlashItem(item);
-                    }}
-                    onMouseEnter={() => setSlashIndex(i)}
-                  >
-                    <span className="composer-slash-cmd">
-                      {item.kind === "template" ? `/${item.trigger}` : `/${item.slug}`}
-                    </span>
-                    <span className="composer-slash-name">{item.name}</span>
-                    {item.description && (
-                      <span className="composer-slash-desc">{item.description}</span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          <textarea
-            ref={textareaRef}
-            className="chat-composer-textarea"
-            placeholder={agentLocked ? "Ask anything, or select an agent to customize performance…" : "Write a message…  type / for skills"}
-            value={content}
-            onChange={(e) => setContent(e.target.value)}
-            onKeyDown={handleKeyDown}
-            rows={1}
-            disabled={disabled}
-          />
-        </div>
-        <div className="chat-composer-footer">
+          {/* hidden file input + anchored pickers (moved out of the
+               conditional footer so they stay mounted wherever it renders) */}
           <input
             ref={fileInputRef}
             type="file"
@@ -1322,107 +1198,6 @@ if (e.key === "Enter" || e.key === "Tab") {
               e.target.value = "";
             }}
           />
-          <div className="composer-attach-wrap" ref={attachMenuRef}>
-            <button
-              type="button"
-              className="composer-attach-btn"
-              title="Add files or research"
-              aria-label="Add files or research"
-              aria-expanded={attachMenuOpen}
-              onClick={() => setAttachMenuOpen((o) => !o)}
-            >
-              +
-            </button>
-            {attachMenuOpen && (
-              <div className="composer-attach-menu" role="menu">
-                <button
-                  type="button"
-                  className="composer-attach-menu-item"
-                  role="menuitem"
-                  onClick={() => {
-                    setAttachMenuOpen(false);
-                    fileInputRef.current?.click();
-                  }}
-                >
-                  <AttachmentIcon />
-                  <span>Add files or photos</span>
-                </button>
-                <button
-                  type="button"
-                  className="composer-attach-menu-item"
-                  role="menuitem"
-                  onClick={() => {
-                    setAttachMenuOpen(false);
-                    void listPromptTemplates().then((t) => {
-                      setPromptTemplates(t);
-                      setTemplatePickerOpen(true);
-                    });
-                  }}
-                >
-                  <span className="composer-attach-menu-icon">𝈟</span>
-                  <span>Insert prompt template…</span>
-                </button>
-                <button
-                  type="button"
-                  className="composer-attach-menu-item"
-                  role="menuitem"
-                  onClick={() => {
-                    setAttachMenuOpen(false);
-                    setBroadcastOpen(true);
-                  }}
-                >
-                  <span className="composer-attach-menu-icon">⇶</span>
-                  <span>Broadcast to chats…</span>
-                </button>
-                <button
-                  type="button"
-                  className="composer-attach-menu-item"
-                  role="menuitem"
-                  onClick={() => {
-                    setAttachMenuOpen(false);
-                    void pickWorkingFolder();
-                  }}
-                >
-                  <FolderIcon />
-                  <span>Choose working folder…</span>
-                </button>
-                <button
-                  type="button"
-                  className="composer-attach-menu-item"
-                  role="menuitem"
-                  aria-pressed={forceResearch}
-                  onClick={() => {
-                    setForceResearch((v) => !v);
-                    setAttachMenuOpen(false);
-                    textareaRef.current?.focus();
-                  }}
-                >
-                  <ResearchIcon />
-                  <span>
-                    {forceResearch ? "Research mode on — tap again to turn off" : "Research a topic"}
-                  </span>
-                </button>
-                {thinkingSupported && onThinkingChange && (
-                  <button
-                    type="button"
-                    className="composer-attach-menu-item"
-                    role="menuitem"
-                    aria-pressed={thinking === true}
-                    onClick={() => {
-                      const next: boolean | null =
-                        thinking === null ? true : thinking === true ? false : null;
-                      onThinkingChange(next);
-                      setAttachMenuOpen(false);
-                      textareaRef.current?.focus();
-                    }}
-                  >
-                    <ThinkingIcon on={thinking === true} />
-                    <span>{thinking === true ? "Thinking on" : "Thinking off"}</span>
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
           {templatePickerOpen && (
             <div className="composer-template-picker">
               <div className="composer-template-picker-head">
@@ -1546,6 +1321,103 @@ if (e.key === "Enter" || e.key === "Tab") {
               </div>
             </div>
           )}
+      {queuedMessages.length > 0 && (
+        <div className="composer-queue" aria-label="Queued messages">
+          <button
+            type="button"
+            className="composer-queue-header"
+            onClick={() => setQueueExpanded((v) => !v)}
+            aria-expanded={queueExpanded}
+          >
+            <span className="composer-queue-chevron" aria-hidden="true">
+              {queueExpanded ? "▾" : "▸"}
+            </span>
+            Queued ({queuedMessages.length})
+          </button>
+          {queueExpanded &&
+            queuedMessages.map((m, i) => (
+              <div className="composer-queue-item" key={m.id}>
+                <span className="composer-queue-index">{i + 1}</span>
+                <span className="composer-queue-text" title={m.content}>
+                  {m.content ||
+                    `${m.attachments?.length ?? 0} attachment${(m.attachments?.length ?? 0) === 1 ? "" : "s"}`}
+                </span>
+                <button
+                  type="button"
+                  className="composer-queue-remove"
+                  title="Remove from queue"
+                  aria-label="Remove from queue"
+                  onClick={() =>
+                    activeChatSessionId && removeQueuedMessage(activeChatSessionId, m.id)
+                  }
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+        </div>
+      )}
+      <div className={`chat-composer-card${modeGlowClass}`}>
+        {attachments.length > 0 && (
+          <div className="composer-attachments">
+            {attachments.map((a) => (
+              <AttachmentCard
+                // name+size: two different files can share a name.
+                key={`${a.name}:${a.size ?? 0}`}
+                attachment={a}
+                onRemove={() =>
+                  setAttachments((prev) =>
+                    prev.filter((p) => !(p.name === a.name && (p.size ?? -1) === (a.size ?? -1))),
+                  )
+                }
+              />
+            ))}
+          </div>
+        )}
+        <div className="composer-slash-wrap">
+          {slashOpen && slashFiltered.length > 0 && (
+            <div className="composer-slash-menu" role="listbox" aria-label="Commands">
+              {slashFiltered.map((item, i) => {
+                const key = item.kind === "template" ? item.trigger : item.slug;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    role="option"
+                    aria-selected={i === slashIndex}
+                    className={`composer-slash-item${i === slashIndex ? " active" : ""}`}
+                    // onMouseDown + preventDefault keeps textarea focus.
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      applySlashItem(item);
+                    }}
+                    onMouseEnter={() => setSlashIndex(i)}
+                  >
+                    <span className="composer-slash-cmd">
+                      {item.kind === "template" ? `/${item.trigger}` : `/${item.slug}`}
+                    </span>
+                    <span className="composer-slash-name">{item.name}</span>
+                    {item.description && (
+                      <span className="composer-slash-desc">{item.description}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <textarea
+            ref={textareaRef}
+            className="chat-composer-textarea"
+            placeholder={agentLocked ? "Ask anything, or select an agent to customize performance…" : "Write a message…  type / for skills"}
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            onKeyDown={handleKeyDown}
+            rows={1}
+            disabled={disabled}
+          />
+        </div>
+        {showFooterRow && (
+        <div className="chat-composer-footer">
           {forceResearch && (
             <button
               type="button"
@@ -1556,6 +1428,135 @@ if (e.key === "Enter" || e.key === "Tab") {
               <ResearchIcon /> Research
             </button>
           )}
+          {attachError && <span className="composer-attach-error">{attachError}</span>}
+          {!attachError && !agentLocked && needsModel && (
+            <span className="composer-model-hint">Select a model to start</span>
+          )}
+          <div className="composer-footer-spacer" />
+        </div>
+        )}
+        <div className="composer-control-bar" role="toolbar" aria-label="Composer controls">
+          <div className="composer-attach-wrap" ref={attachMenuRef}>
+            <button
+              type="button"
+              className="composer-attach-btn"
+              title="Add files or research"
+              aria-label="Add files or research"
+              aria-expanded={attachMenuOpen}
+              onClick={() => setAttachMenuOpen((o) => !o)}
+            >
+              +
+            </button>
+            {attachMenuOpen && (
+              <div className="composer-attach-menu" role="menu">
+                <button
+                  type="button"
+                  className="composer-attach-menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setAttachMenuOpen(false);
+                    fileInputRef.current?.click();
+                  }}
+                >
+                  <AttachmentIcon />
+                  <span>Add files or photos</span>
+                </button>
+                <button
+                  type="button"
+                  className="composer-attach-menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setAttachMenuOpen(false);
+                    void listPromptTemplates().then((t) => {
+                      setPromptTemplates(t);
+                      setTemplatePickerOpen(true);
+                    });
+                  }}
+                >
+                  <span className="composer-attach-menu-icon">𝈟</span>
+                  <span>Insert prompt template…</span>
+                </button>
+                <button
+                  type="button"
+                  className="composer-attach-menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setAttachMenuOpen(false);
+                    setBroadcastOpen(true);
+                  }}
+                >
+                  <span className="composer-attach-menu-icon">⇶</span>
+                  <span>Broadcast to chats…</span>
+                </button>
+                <button
+                  type="button"
+                  className="composer-attach-menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setAttachMenuOpen(false);
+                    void pickWorkingFolder();
+                  }}
+                >
+                  <FolderIcon />
+                  <span>Choose working folder…</span>
+                </button>
+                <button
+                  type="button"
+                  className="composer-attach-menu-item"
+                  role="menuitem"
+                  aria-pressed={forceResearch}
+                  onClick={() => {
+                    setForceResearch((v) => !v);
+                    setAttachMenuOpen(false);
+                    textareaRef.current?.focus();
+                  }}
+                >
+                  <ResearchIcon />
+                  <span>
+                    {forceResearch ? "Research mode on — tap again to turn off" : "Research a topic"}
+                  </span>
+                </button>
+                {thinkingSupported && onThinkingChange && (
+                  <button
+                    type="button"
+                    className="composer-attach-menu-item"
+                    role="menuitem"
+                    aria-pressed={thinking === true}
+                    onClick={() => {
+                      const next: boolean | null =
+                        thinking === null ? true : thinking === true ? false : null;
+                      onThinkingChange(next);
+                      setAttachMenuOpen(false);
+                      textareaRef.current?.focus();
+                    }}
+                  >
+                    <ThinkingIcon on={thinking === true} />
+                    <span>{thinking === true ? "Thinking on" : "Thinking off"}</span>
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+          {showAgentSelector && <span className="composer-control-vdiv" aria-hidden="true" />}
+          {showAgentSelector && (
+            <div className="composer-control-chip composer-control-agent">
+              <AgentModelPicker
+                agent={agent}
+                model={model ?? ""}
+                provider={provider}
+                modelLabels={modelLabels}
+                loading={agentLoading || modelLoading}
+                onPick={onAgentModelPick}
+                effort={effort}
+                onEffortChange={onEffortChange}
+                onEjectLocalModel={onEjectLocalModel}
+                localModelActive={localModelActive}
+                localOverridesMap={localOverridesMap}
+                onLoadLocalModel={onLoadLocalModel}
+              />
+            </div>
+          )}
+          {showModeSelector && <span className="composer-control-vdiv" aria-hidden="true" />}
           {showModeSelector && (
             <PermissionModeMenu
               mode={permissionMode!}
@@ -1563,38 +1564,8 @@ if (e.key === "Enter" || e.key === "Tab") {
               variant="inline"
             />
           )}
-          {attachError && <span className="composer-attach-error">{attachError}</span>}
-          {!attachError && !agentLocked && needsModel && (
-            <span className="composer-model-hint">Select a model to start</span>
-          )}
-          <div className="composer-footer-spacer" />
-          {showSelector && agentLocked && (
-            <span className="model-chip-locked" title="Pick an agent to unlock the model list">
-              🔒 Model locked — pick agent
-            </span>
-          )}
-          {showSelector && !agentLocked && (
-            <ModelEffortMenu
-              model={model}
-              models={models ?? []}
-              labels={modelLabels}
-              endpoint={modelEndpoint ?? null}
-              localModels={localModels ?? []}
-              effort={effort ?? ""}
-              provider={provider}
-              modelLoading={modelLoading}
-              localCtx={localCtx}
-              onModelChange={onModelChange}
-              onEffortChange={onEffortChange}
-              onLocalCtxChange={onLocalCtxChange}
-              onEjectLocalModel={onEjectLocalModel}
-              localModelActive={localModelActive}
-              activeLocal={activeLocal}
-              localOverrides={localOverrides}
-              onApplyLocalOverrides={onApplyLocalOverrides}
-              applyingOverrides={applyingOverrides}
-            />
-          )}
+          <div className="composer-control-spacer" />
+
           <div className="composer-send-wrap">
             {streaming ? (
               <button
@@ -1633,16 +1604,6 @@ if (e.key === "Enter" || e.key === "Tab") {
               {transcribing ? <span className="composer-mic-spinner" /> : recording ? <span className="composer-mic-stop" /> : <MicIcon />}
             </button>
           </div>
-        </div>
-        <div className="composer-control-bar" role="toolbar" aria-label="Composer controls">
-          {showAgentSelector && (
-            <div className="composer-control-chip composer-control-agent">
-              <AgentMenu agent={agent} onAgentChange={onAgentChange!} loading={agentLoading} />
-            </div>
-          )}
-          <FolderNotch />
-          <GitHubNotch />
-          <div className="composer-control-spacer" />
         </div>
         <ComposerMetrics
           chatSessionId={activeChatSessionId}

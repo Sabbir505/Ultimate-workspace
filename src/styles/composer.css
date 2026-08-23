@@ -120,9 +120,6 @@
    renders as an italic pill followed by a single space (the row gap), e.g.
    "@notion  <typed text>". Chips are composer-only — click to remove. */
 
-
-
-
 .chat-composer-textarea::placeholder {
   color: var(--text-dim);
   opacity: 0.7;
@@ -234,9 +231,7 @@
 
 /* Styled tooltip that appears on hover */
 
-
 /* Little arrow pointing down to the circle */
-
 
 .context-meter-circle:hover .context-meter-tooltip {
   opacity: 1;
@@ -489,20 +484,30 @@
 .composer-control-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 2px;
   padding: 4px 2px 2px;
   position: relative;
 }
 .composer-control-spacer {
   flex: 1;
 }
-/* Frosted glass control pills. The inner notch components (AgentMenu,
-   FolderNotch, GitHubNotch) render their own content; this wrapper gives them
-   the pill surface. */
+/* Hairline vertical divider between the + / agent / permission controls. */
+.composer-control-vdiv {
+  width: 1px;
+  height: 14px;
+  margin: 0 3px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+/* Frosted glass control pills. The inner notch components (FolderNotch,
+   GitHubNotch) render their own content; this wrapper gives them the pill
+   surface. The notches live in the chat-view header now — same pill there. */
 .composer-control-bar .composer-notch-agent,
 .composer-control-bar .composer-notch-folder,
 .composer-control-bar .composer-notch-github,
-.composer-control-bar .composer-control-chip {
+.composer-control-bar .composer-control-chip,
+.toolbar .composer-notch-folder,
+.toolbar .composer-notch-github {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -520,14 +525,18 @@
 :root[data-theme="light"] .composer-control-bar .composer-notch-agent,
 :root[data-theme="light"] .composer-control-bar .composer-notch-folder,
 :root[data-theme="light"] .composer-control-bar .composer-notch-github,
-:root[data-theme="light"] .composer-control-bar .composer-control-chip {
+:root[data-theme="light"] .composer-control-bar .composer-control-chip,
+:root[data-theme="light"] .toolbar .composer-notch-folder,
+:root[data-theme="light"] .toolbar .composer-notch-github {
   background: rgba(0, 0, 0, 0.05);
   border-color: rgba(0, 0, 0, 0.08);
 }
 .composer-control-bar .composer-notch-agent:hover,
 .composer-control-bar .composer-notch-folder:hover,
 .composer-control-bar .composer-notch-github:hover,
-.composer-control-bar .composer-control-chip:hover {
+.composer-control-bar .composer-control-chip:hover,
+.toolbar .composer-notch-folder:hover,
+.toolbar .composer-notch-github:hover {
   background: rgba(255, 255, 255, 0.1);
   border-color: rgba(255, 255, 255, 0.16);
   color: var(--text);
@@ -535,9 +544,24 @@
 :root[data-theme="light"] .composer-control-bar .composer-notch-agent:hover,
 :root[data-theme="light"] .composer-control-bar .composer-notch-folder:hover,
 :root[data-theme="light"] .composer-control-bar .composer-notch-github:hover,
-:root[data-theme="light"] .composer-control-bar .composer-control-chip:hover {
+:root[data-theme="light"] .composer-control-bar .composer-control-chip:hover,
+:root[data-theme="light"] .toolbar .composer-notch-folder:hover,
+:root[data-theme="light"] .toolbar .composer-notch-github:hover {
   background: rgba(0, 0, 0, 0.1);
   border-color: rgba(0, 0, 0, 0.16);
+}
+/* The agent selector chip renders FLAT — transparent background and border in
+   every state (rest/hover/open). Only its dropdown keeps the glass surface;
+   the chip itself is text + dot + chevron, like the permission chip. */
+.composer-control-bar .composer-control-chip.composer-control-agent,
+.composer-control-bar .composer-control-chip.composer-control-agent:hover {
+  background: transparent;
+  border-color: transparent;
+}
+:root[data-theme="light"] .composer-control-bar .composer-control-chip.composer-control-agent,
+:root[data-theme="light"] .composer-control-bar .composer-control-chip.composer-control-agent:hover {
+  background: transparent;
+  border-color: transparent;
 }
 
 /* Telemetry HUD — a status bar docked to the bottom border of the composer
@@ -702,24 +726,6 @@
   white-space: nowrap;
   color: var(--text);
 }
-.composer-notch-folder-clear {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 13px;
-  line-height: 1;
-  cursor: pointer;
-  /* The × appears on hover so the notch reads as a passive chip at rest. */
-  opacity: 0;
-  transition: opacity 0.12s ease;
-}
 /* Isolated-worktree chip inside the folder notch (roadmap P0 §3.1.1) —
  * always visible; clicking it joins the main working tree. */
 .composer-notch-worktree {
@@ -739,15 +745,6 @@
 }
 .composer-notch-worktree:hover {
   background: var(--bg-tint);
-}
-.composer-notch-folder:hover .composer-notch-folder-clear,
-.composer-notch-folder-clear:focus-visible {
-  opacity: 1;
-}
-.composer-notch-folder-clear:hover {
-  background: var(--surface-2);
-  color: var(--text);
-  opacity: 1;
 }
 
 /* Message queue — messages stacked while a turn is running, shown above the
@@ -851,7 +848,6 @@
 .composer-research-chip:hover {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
 }
-
 
 .composer-tools-btn.active {
   background: color-mix(in srgb, var(--accent) 16%, transparent);
@@ -1086,7 +1082,7 @@
   margin: 12px 0;
 }
 
-/* --- Filesystem permission-mode selector (matches ModelEffortMenu) --- */
+/* --- Filesystem permission-mode selector (matches the picker item styles) --- */
 /* NOTE: no z-index on this root. It used to carry z-index: 2000, creating a
    permanent stacking context that painted the whole footer ABOVE the agent /
    model dropdowns (z-index: 60) wherever their geometry intersected the
@@ -1117,26 +1113,15 @@
 .permission-mode-trigger.inline {
   border: none;
   background: transparent;
+  /* Kill the global button skin's glass rim too — without this the
+     box-shadow reads as a faint rounded border around the flat chip. */
+  box-shadow: none;
   padding: 4px 8px;
 }
+/* Flat in every state — transparent background/border on hover too; only the
+   popup keeps its surface. */
 .permission-mode-trigger.inline:hover {
-  background: var(--surface-2);
-}
-.permission-mode-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--text-dim);
-  flex-shrink: 0;
-}
-/* Per-mode accent on the dot + trigger border so the active posture is visible
-   at a glance, even before opening the menu. */
-.permission-mode-trigger.mode-read_only .permission-mode-dot { background: #6b7280; }
-.permission-mode-trigger.mode-manual .permission-mode-dot { background: var(--text-dim); }
-.permission-mode-trigger.mode-auto_edit .permission-mode-dot { background: #d4a017; }
-.permission-mode-trigger.mode-full_auto .permission-mode-dot {
-  background: var(--danger);
-  box-shadow: 0 0 0 2px rgba(214, 69, 69, 0.2);
+  background: transparent;
 }
 .permission-mode-chevron {
   color: var(--text-dim);
@@ -1145,7 +1130,10 @@
 .permission-mode-popup {
   position: absolute;
   bottom: calc(100% + 6px);
-  right: 0;
+  /* Left-aligned with the trigger — the chip sits on the LEFT of the control
+     bar, so the popup should grow rightward from it (the JS clamp in
+     PermissionModeMenu still shifts it if it would overflow the viewport). */
+  left: 0;
   min-width: 280px;
   max-width: calc(100vw - 16px);
   max-height: min(420px, calc(100vh - 32px));

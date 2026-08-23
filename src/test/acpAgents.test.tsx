@@ -1,11 +1,12 @@
 // ACP client support (roadmap #20): the user-defined agent editor
-// (AcpAgentsPanel), the composer agent menu's ACP section (AgentMenu), and
-// store routing — acp:<id> sessions must flow through sendAgentChatMessage /
-// cancelAgentChatMessage exactly like harness:<id> ones (agent_sessions.rs
-// owns both). One static ipc mock covers all three surfaces.
+// (AcpAgentsPanel), the composer's combined agent/model picker ACP section
+// (AgentModelPicker), and store routing — acp:<id> sessions must flow through
+// sendAgentChatMessage / cancelAgentChatMessage exactly like harness:<id>
+// ones (agent_sessions.rs owns both). One static ipc mock covers all three
+// surfaces.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { AgentMenu } from "../components/chat/AgentMenu";
+import { AgentModelPicker } from "../components/chat/AgentModelPicker";
 import { AcpAgentsPanel } from "../components/settings/AcpAgentsPanel";
 import { useChatStore } from "../state/chat";
 
@@ -21,6 +22,9 @@ vi.mock("../lib/ipc", () => ({
   saveAcpAgentDefs: (...a: unknown[]) => saveAcpAgentDefsMock(...a),
   listHarnesses: (...a: unknown[]) => listHarnessesMock(...a),
   listAcpAgents: (...a: unknown[]) => listAcpAgentsMock(...a),
+  listHarnessModels: vi.fn().mockResolvedValue(null),
+  listChatModels: vi.fn().mockResolvedValue([]),
+  scanLocalModels: vi.fn().mockResolvedValue([]),
   sendAgentChatMessage: (...a: unknown[]) => sendAgentChatMessageMock(...a),
   cancelAgentChatMessage: (...a: unknown[]) => cancelAgentChatMessageMock(...a),
   sendChatMessage: vi.fn(),
@@ -115,37 +119,39 @@ describe("AcpAgentsPanel", () => {
   });
 });
 
-describe("AgentMenu ACP section", () => {
+describe("AgentModelPicker ACP section", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     listHarnessesMock.mockResolvedValue([]);
   });
   afterEach(cleanup);
 
-  it("lists installed ACP agents and selects one as acp:<id>", async () => {
+  it("lists installed ACP agents and commits one as acp:<id>", async () => {
     listAcpAgentsMock.mockResolvedValue([
       { id: "zed", displayName: "Zed", installed: true },
       { id: "devin", displayName: "Devin", installed: false },
     ]);
-    const onAgentChange = vi.fn();
-    render(<AgentMenu agent={null} onAgentChange={onAgentChange} />);
+    const onPick = vi.fn();
+    render(<AgentModelPicker agent={null} model="" onPick={onPick} />);
     fireEvent.click(screen.getByText(/Select agent/));
-    // Section label + both entries render; Devin dimmed/disabled.
-    expect(await screen.findByText("Agents · ACP")).toBeTruthy();
-    const zed = await screen.findByText("Zed");
+    // The rail is icon-only — entries are found by their accessible names
+    // (the tooltip text). Devin is dimmed/disabled.
+    const zed = await screen.findByRole("tab", { name: "Zed" });
     expect(zed).toBeTruthy();
-    const devin = screen.getByText("Devin");
-    expect(devin.closest("button")?.disabled).toBe(true);
+    const devin = screen.getByRole("tab", { name: "Devin" });
+    expect((devin as HTMLButtonElement).disabled).toBe(true);
+    // Rail click drives the right pane; the Default row commits the pick.
     fireEvent.click(zed);
-    expect(onAgentChange).toHaveBeenCalledWith("acp:zed");
+    fireEvent.click(await screen.findByText(/the agent picks its own model/i));
+    expect(onPick).toHaveBeenCalledWith({ agent: "acp:zed", provider: null, model: "" });
   });
 
   it("hides the ACP section when no agents are registered", async () => {
     listAcpAgentsMock.mockResolvedValue([]);
-    render(<AgentMenu agent={null} onAgentChange={() => {}} />);
+    render(<AgentModelPicker agent={null} model="" onPick={() => {}} />);
     fireEvent.click(screen.getByText(/Select agent/));
     await waitFor(() => expect(listAcpAgentsMock).toHaveBeenCalled());
-    expect(screen.queryByText("Agents · ACP")).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Zed" })).toBeNull();
   });
 });
 

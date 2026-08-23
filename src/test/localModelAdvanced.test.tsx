@@ -1,17 +1,17 @@
 // Local-model runtime tweaks (roadmap P0 §4.1):
 //   1. LlamaAdvancedFields renders the full LM Studio-style field set and
 //      patches edits through onChange (incl. the last-good indicator).
-//   2. Composer integration: the model menu's Advanced section seeds a draft
-//      from the persisted overrides, Apply & reload passes the merged draft
-//      (disabled while clean), and closing the menu discards an unapplied
-//      draft.
+//   2. Picker integration: each local model row carries a gear that opens a
+//      sub-modal with the full tweak set (incl. Context); the draft seeds
+//      from the persisted overrides, "Load model" passes the merged draft,
+//      and closing the sub-modal discards an unapplied draft.
 //   3. LocalModelBanner: shows for model-less installs with a VRAM hint,
 //      deep-links to Settings → Local Models → market, hides once the
 //      onboarded KV is set or models exist, and dismissal persists the KV.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-// jsdom doesn't implement scrollIntoView (used by ModelEffortMenu's
+// jsdom doesn't implement scrollIntoView (used by AgentModelPicker's
 // keyboard-nav effect) — stub it like permissionModeMenu.test does.
 if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
@@ -33,11 +33,11 @@ vi.mock("../lib/ipc", async (importOriginal) => {
   };
 });
 
-import { ModelEffortMenu } from "../components/chat/ModelEffortMenu";
+import { AgentModelPicker } from "../components/chat/AgentModelPicker";
 import { LlamaAdvancedFields } from "../components/chat/LlamaAdvancedFields";
 import { LocalModelBanner } from "../components/onboarding/LocalModelBanner";
 import { useUiStore } from "../state/ui";
-import type { LlamaOverrides } from "../lib/ipc";
+import type { GgufModel, LlamaOverrides } from "../lib/ipc";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -100,86 +100,98 @@ describe("LlamaAdvancedFields", () => {
   });
 });
 
-describe("ModelEffortMenu inline Advanced runtime settings", () => {
-  const openAdvanced = async () => {
-    const trigger = document.querySelector<HTMLElement>(".model-effort-trigger")!;
-    fireEvent.click(trigger);
-    fireEvent.click(screen.getByText("Effort"));
-    fireEvent.click(screen.getByText("⚙ Advanced runtime settings"));
-    await waitFor(() => {
-      expect(document.querySelector(".model-effort-llama")).not.toBeNull();
+describe("AgentModelPicker per-model gear sub-modal", () => {
+  const LOCAL_MODEL = {
+    id: "gguf-1",
+    path: "D:/m.gguf",
+    filename: "my-model.gguf",
+    name: "my-model",
+    sizeBytes: 1,
+    architecture: null,
+    paramCountLabel: null,
+    quantization: null,
+    memoryClass: "fits",
+    source: "folder",
+    hasVision: false,
+    mmprojPath: null,
+  } as unknown as GgufModel;
+
+  const openGear = async () => {
+    // Only toggle the chip when the picker popup isn't already open (the
+    // gear sub-modal closes independently of the picker).
+    if (!document.querySelector(".agent-model-popup")) {
+      fireEvent.click(document.querySelector<HTMLElement>(".agent-chip")!);
+    }
+    const gear = await screen.findByRole("button", {
+      name: /advanced settings for my-model/i,
     });
-    return document.querySelector<HTMLElement>(".model-effort-llama")!;
+    fireEvent.click(gear);
+    await waitFor(() => {
+      expect(document.querySelector(".agent-model-gear-modal")).not.toBeNull();
+    });
+    return document.querySelector<HTMLElement>(".agent-model-gear-modal")!;
   };
 
-  const renderMenu = (persisted: LlamaOverrides, apply: (o: LlamaOverrides) => Promise<void>) =>
+  const renderPicker = (persisted: LlamaOverrides, load: (m: string, o: LlamaOverrides) => void) =>
     render(
-      <ModelEffortMenu
+      <AgentModelPicker
+        agent="local"
         model="my-model"
-        models={[]}
-        localModels={["my-model"]}
-        effort=""
         provider="local_gguf"
-        activeLocal={{ id: "gguf-1", path: "D:/m.gguf", mmprojPath: null }}
-        localOverrides={persisted}
-        onApplyLocalOverrides={apply}
-        onModelChange={() => {}}
-        onEffortChange={() => {}}
+        onPick={() => {}}
+        localOverridesMap={{ "my-model": persisted }}
+        onLoadLocalModel={load}
       />,
     );
 
-  it("seeds the draft from persisted overrides; Apply & reload passes the merged draft", async () => {
-    const apply = vi.fn().mockResolvedValue(undefined);
-    renderMenu({ flashAttn: true, lastGoodNgl: 30 }, apply);
+  it("seeds the draft from persisted overrides; Load model passes the merged draft", async () => {
+    scanLocalModelsMock.mockResolvedValue([LOCAL_MODEL]);
+    const load = vi.fn();
+    renderPicker({ flashAttn: true, lastGoodNgl: 30 }, load);
 
-    const adv = await openAdvanced();
-    const applyBtn = adv.querySelector<HTMLButtonElement>(".model-effort-llama-apply")!;
-    // Clean draft → Apply disabled.
-    expect(applyBtn.disabled).toBe(true);
+    const modal = await openGear();
+    const loadBtn = modal.querySelector<HTMLButtonElement>(".model-effort-llama-apply")!;
 
-    const gpuInput = adv.querySelector<HTMLInputElement>('input[type="number"]')!;
+    const gpuInput = modal.querySelector<HTMLInputElement>('input[type="number"]')!;
     // No ngl in the persisted entry → the field starts empty.
     expect(gpuInput.value).toBe("");
     fireEvent.change(gpuInput, { target: { value: "40" } });
-    expect(applyBtn.disabled).toBe(false);
-    fireEvent.click(applyBtn);
+    fireEvent.click(loadBtn);
 
-    await waitFor(() => {
-      expect(apply).toHaveBeenCalledWith({ flashAttn: true, lastGoodNgl: 30, ngl: 40 });
-    });
+    expect(load).toHaveBeenCalledWith("my-model", { flashAttn: true, lastGoodNgl: 30, ngl: 40 });
   });
 
-  it("closing the menu discards an unapplied draft", async () => {
-    const apply = vi.fn().mockResolvedValue(undefined);
-    renderMenu({ lastGoodNgl: 30 }, apply);
+  it("closing the sub-modal discards an unapplied draft", async () => {
+    scanLocalModelsMock.mockResolvedValue([LOCAL_MODEL]);
+    const load = vi.fn();
+    renderPicker({ lastGoodNgl: 30 }, load);
 
-    let adv = await openAdvanced();
-    const gpuInput = adv.querySelector<HTMLInputElement>('input[type="number"]')!;
+    let modal = await openGear();
+    const gpuInput = modal.querySelector<HTMLInputElement>('input[type="number"]')!;
     fireEvent.change(gpuInput, { target: { value: "40" } });
 
-    // Close the whole menu, then reopen — the draft must be gone.
-    fireEvent.click(document.querySelector<HTMLElement>(".model-effort-trigger")!);
-    adv = await openAdvanced();
-    const gpuAfter = adv.querySelector<HTMLInputElement>('input[type="number"]')!;
+    // Close the sub-modal, then reopen — the draft must be gone.
+    fireEvent.click(modal.querySelector<HTMLButtonElement>(".agent-model-gear-close")!);
+    modal = await openGear();
+    const gpuAfter = modal.querySelector<HTMLInputElement>('input[type="number"]')!;
     // Draft discarded on close — the field is empty again.
     expect(gpuAfter.value).toBe("");
-    expect(apply).not.toHaveBeenCalled();
+    expect(load).not.toHaveBeenCalled();
   });
 
-  it("hides the Advanced section for cloud providers or unresolved models", () => {
+  it("shows no gear on cloud sessions", () => {
+    scanLocalModelsMock.mockResolvedValue([LOCAL_MODEL]);
     render(
-      <ModelEffortMenu
+      <AgentModelPicker
+        agent="builtin"
         model="gpt-x"
-        models={["gpt-x"]}
-        effort=""
         provider="openai"
-        onModelChange={() => {}}
-        onEffortChange={() => {}}
+        onPick={() => {}}
+        onLoadLocalModel={() => {}}
       />,
     );
-    fireEvent.click(document.querySelector<HTMLElement>(".model-effort-trigger")!);
-    fireEvent.click(screen.getByText("Effort"));
-    expect(document.querySelector(".model-effort-llama")).toBeNull();
+    fireEvent.click(document.querySelector<HTMLElement>(".agent-chip")!);
+    expect(screen.queryByTitle(/Advanced runtime settings/i)).toBeNull();
   });
 });
 

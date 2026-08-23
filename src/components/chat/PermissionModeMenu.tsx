@@ -143,7 +143,6 @@ export function PermissionModeMenu({ mode, onModeChange, variant = "pill" }: Pro
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        <span className="permission-mode-dot" aria-hidden="true" />
         <span className="permission-mode-label">{label}</span>
         <span className="permission-mode-chevron" aria-hidden="true">▾</span>
       </button>

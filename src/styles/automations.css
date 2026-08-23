@@ -10,11 +10,18 @@
   flex-direction: column;
   background: var(--surface);
   color: var(--text);
+  /* Size container for the @container rules below: the tool side-panel shares
+     a flex row with this view, so our real width shrinks when it opens even
+     though the viewport doesn't move — viewport @media queries can't see that. */
+  container-type: inline-size;
+  container-name: automations-view;
 }
 .automations-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -22,6 +29,7 @@
 .automations-header-left {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
 }
 .automations-header-left h1 {
@@ -42,6 +50,7 @@
 .automations-header-metrics {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
 }
 .automations-header-badge strong {
@@ -397,6 +406,9 @@
 .automation-detail-runs {
   flex: 1;
   overflow-y: auto;
+  /* The runs table's nowrap columns set a min width wider than a squeezed
+     pane — scroll sideways instead of clipping/overflowing the layout. */
+  overflow-x: auto;
   min-height: 0;
 }
 
@@ -644,20 +656,44 @@
 }
 .automations-notify-check input { accent-color: var(--accent, #60a5fa); margin: 0; }
 
-/* ---------- Responsive behavior for narrow screens ---------- */
-@media (max-width: 1100px) {
+/* ---------- Responsive behavior ----------
+   Container queries against .automations-view (NOT @media): the tool
+   side-panel shares the flex row with this view, so available width changes
+   without the viewport moving. Querying our own inline size keeps the
+   master-detail split usable whether the squeeze comes from a small window
+   or from the side panel being open. */
+
+/* Keep chip labels on one line — at narrow widths "Run while closed" used to
+   wrap vertically inside its pill. */
+.automations-rwc span,
+.automations-header-right .automations-btn {
+  white-space: nowrap;
+}
+
+@container automations-view (max-width: 1100px) {
   .automations-list-pane {
     width: 240px;
   }
 }
 
-@media (max-width: 900px) {
+@container automations-view (max-width: 900px) {
   .automations-list-pane {
     width: 200px;
   }
+  /* Tighter gutters buy readable text back once the pane is squeezed. */
+  .automation-detail-header,
+  .automation-detail-controls,
+  .automation-detail-schedule {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+  .automation-detail-banner {
+    margin-left: 16px;
+    margin-right: 16px;
+  }
 }
 
-@media (max-width: 760px) {
+@container automations-view (max-width: 760px) {
   .automations-list-pane {
     width: 160px;
   }
@@ -669,10 +705,35 @@
   }
   .automations-list-row-meta {
     font-size: 10px;
+    padding-left: 0;
+  }
+  .automation-detail-title-row {
+    flex-wrap: wrap;
+  }
+  .automation-detail-title-row h2 {
+    font-size: 17px;
+  }
+  .automation-detail-meta {
+    flex-wrap: wrap;
+  }
+  /* Failure banner: let the "Run again" CTA drop under the copy instead of
+     crushing the text into one-word columns. */
+  .automation-detail-banner {
+    flex-wrap: wrap;
+  }
+  /* Schedule value + cron code can share-break onto two lines. */
+  .automation-detail-schedule-value {
+    flex-wrap: wrap;
+  }
+  /* Create/edit form: single-column fields read better than half-width
+     selects/inputs when the pane is this narrow. */
+  .automation-form-row,
+  .automation-form-row-3 {
+    grid-template-columns: 1fr;
   }
 }
 
-@media (max-width: 600px) {
+@container automations-view (max-width: 600px) {
   .automations-list-pane {
     width: 140px;
   }

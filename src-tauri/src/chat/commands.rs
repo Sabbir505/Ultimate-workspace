@@ -2547,16 +2547,20 @@ pub async fn list_chat_models(
     use reqwest;
 
     // Resolve base_url: prefer the passed argument, then the stored setting.
-    // OpenRouter has a fixed endpoint, so it falls back to its default base.
+    // The fixed-endpoint providers (native anthropic/openai, OpenRouter) fall
+    // back to their default bases so the agent picker can list their models
+    // without a stored base_url.
     let base = match base_url {
         Some(url) if !url.trim().is_empty() => url,
         _ => {
             let conn = db.0.lock();
             db::get_setting(&conn, &format!("chat.{provider}.base_url"))
                 .map_err(|e| e.to_string())?
-                .or_else(|| {
-                    (provider == "openrouter")
-                        .then(|| OpenRouterProvider::DEFAULT_BASE.to_string())
+                .or_else(|| match provider.as_str() {
+                    "openrouter" => Some(OpenRouterProvider::DEFAULT_BASE.to_string()),
+                    "anthropic" => Some(AnthropicProvider::DEFAULT_BASE.to_string()),
+                    "openai" => Some(OpenAIProvider::DEFAULT_BASE.to_string()),
+                    _ => None,
                 })
                 .ok_or_else(|| "base_url is required for compatible providers".to_string())?
         }
@@ -2578,8 +2582,10 @@ pub async fn list_chat_models(
     let req = client.get(&url);
 
     let req = match provider.as_str() {
-        "anthropic_compatible" => req.header("x-api-key", key),
-        "openai_compatible" | "openrouter" => {
+        "anthropic" | "anthropic_compatible" => req
+            .header("x-api-key", &key)
+            .header("anthropic-version", "2023-06-01"),
+        "openai" | "openai_compatible" | "openrouter" => {
             req.header("Authorization", format!("Bearer {key}"))
         }
         _ => return Err("list_chat_models only supports compatible providers".to_string()),

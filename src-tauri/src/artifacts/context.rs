@@ -230,7 +230,27 @@ async fn get_llm_context(db: &State<'_, DbState>, chat_session_id: &str) -> Resu
     let cs = crate::db::get_chat_session(&conn, chat_session_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "chat session not found".to_string())?;
-    
+
+    // Harness/ACP-agent sessions: the provider/model columns don't name an
+    // HTTP API (model holds a CLI alias like "sonnet"; there may be no key for
+    // the stale provider). Route generation through the CLI itself — the
+    // generator dispatches on this "harness:<id>" provider string.
+    if let Some(agent) = cs.agent.as_deref() {
+        if agent.starts_with("harness:") {
+            return Ok(LlmContext {
+                provider: agent.to_string(),
+                model: cs.model,
+                api_key: String::new(),
+                base_url: None,
+            });
+        }
+        if agent.starts_with("acp:") {
+            return Err(
+                "/create isn't available for ACP agents yet — switch the chat to a built-in, local, or CLI harness agent.".to_string(),
+            );
+        }
+    }
+
     let api_key = crate::secrets::get_chat_api_key(&conn, &cs.provider).unwrap_or_default();
     // Match chat/dispatch.rs exactly: filter out empty/whitespace base_urls so
     // they fall through to the provider default (e.g. https://api.openai.com).
@@ -240,10 +260,34 @@ async fn get_llm_context(db: &State<'_, DbState>, chat_session_id: &str) -> Resu
         .ok()
         .flatten()
         .filter(|b| !b.trim().is_empty());
-    
+
+    // local_gguf: mirror the send path's model resolution — the session's
+    // model column carries the GGUF display name ("DeepSeek R1 …"), which
+    // llama-server rejects with HTTP 400; the server only accepts the model
+    // it was started with (the `chat.local_gguf.model` setting, written by
+    // the sidecar start).
+    let model = if cs.provider == "local_gguf" {
+        crate::db::get_setting(&conn, "chat.local_gguf.model")
+            .ok()
+            .flatten()
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| cs.model.clone())
+    } else {
+        cs.model.clone()
+    };
+
+    // The base_url is written when the llama-server sidecar starts; without a
+    // running server every request would fail with a connection error — fail
+    // fast with an actionable message instead.
+    if cs.provider == "local_gguf" && base_url.is_none() {
+        return Err(
+            "The local model isn't running — start it from the model menu, then try /create again.".to_string(),
+        );
+    }
+
     Ok(LlmContext {
         provider: cs.provider,
-        model: cs.model,
+        model,
         api_key,
         base_url,
     })

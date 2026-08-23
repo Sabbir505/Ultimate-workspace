@@ -253,6 +253,14 @@ async fn call_llm_structured(
     json_schema: &Value,
 ) -> Result<ArtifactSpec, String> {
     let client = Client::new();
+
+    // Harness-agent sessions ("harness:<id>" rides in `provider` from
+    // get_llm_context) have no HTTP endpoint — generation runs through the
+    // CLI itself with a blocking one-shot turn.
+    if llm.provider.starts_with("harness:") {
+        return call_harness_structured(llm, system_prompt, user_prompt, json_schema).await;
+    }
+
     let is_anthropic = matches!(llm.provider.as_str(), "anthropic" | "anthropic_compatible");
 
     if is_anthropic {
@@ -260,6 +268,50 @@ async fn call_llm_structured(
     } else {
         call_openai_structured(&client, llm, system_prompt, user_prompt, json_schema).await
     }
+}
+
+/// Generate through a harness CLI (claude/kimi/opencode): one blocking
+/// self-contained turn whose prompt embeds the system prompt, user prompt,
+/// and schema; the final text is parsed with the same fence-stripping rules
+/// as the HTTP paths.
+async fn call_harness_structured(
+    llm: &LlmContext,
+    system_prompt: &str,
+    user_prompt: &str,
+    json_schema: &Value,
+) -> Result<ArtifactSpec, String> {
+    let harness_id = llm.provider.strip_prefix("harness:").unwrap_or_default();
+    let prompt = format!(
+        "{}\n\n{}\n\nOutput ONLY valid JSON matching this schema. Do NOT include markdown fences or any other text:\n{}",
+        system_prompt,
+        user_prompt,
+        serde_json::to_string_pretty(json_schema).unwrap()
+    );
+    let text = crate::agent_sessions::harness_oneshot_text(harness_id, &llm.model, &prompt, None).await?;
+    parse_spec_from_text(&text)
+}
+
+/// Strip markdown fences the model may have wrapped the JSON in, then parse
+/// into an `ArtifactSpec`. Shared by the HTTP and harness paths — identical
+/// parsing rules regardless of where the text came from.
+fn parse_spec_from_text(content: &str) -> Result<ArtifactSpec, String> {
+    let json_str = content.trim();
+    let json_str = if json_str.starts_with("```") {
+        json_str
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim()
+    } else {
+        json_str
+    };
+    serde_json::from_str(json_str).map_err(|e| {
+        format!(
+            "Failed to parse LLM output as ArtifactSpec: {} (content: {})",
+            e,
+            &content[..content.len().min(300)]
+        )
+    })
 }
 
 /// Call OpenAI-compatible API. Uses prompt-based JSON instead of response_format
@@ -278,7 +330,16 @@ async fn call_openai_structured(
     user_prompt: &str,
     json_schema: &Value,
 ) -> Result<ArtifactSpec, String> {
-    let base = llm.base_url.as_deref().unwrap_or("https://api.openai.com");
+    // Default bases mirror the chat send path (providers.rs): OpenRouter
+    // sessions typically carry NO base_url setting — falling back to
+    // api.openai.com would send an OpenRouter key to OpenAI and 401.
+    let base = llm.base_url.clone().unwrap_or_else(|| {
+        if llm.provider == "openrouter" {
+            "https://openrouter.ai/api".to_string()
+        } else {
+            "https://api.openai.com".to_string()
+        }
+    });
     let url = format!("{base}/v1/chat/completions");
 
     // Append schema instructions to the user prompt (prompt-based JSON)
@@ -324,27 +385,7 @@ async fn call_openai_structured(
         .as_str()
         .ok_or_else(|| format!("Missing content in response (raw: {})", &raw[..raw.len().min(200)]))?;
 
-    // Strip markdown fences if the LLM wrapped the JSON in ```json ... ```
-    let json_str = content.trim();
-    let json_str = if json_str.starts_with("```") {
-        json_str
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim()
-    } else {
-        json_str
-    };
-
-    let spec: ArtifactSpec = serde_json::from_str(json_str).map_err(|e| {
-        format!(
-            "Failed to parse LLM output as ArtifactSpec: {} (content: {})",
-            e,
-            &content[..content.len().min(300)]
-        )
-    })?;
-
-    Ok(spec)
+    parse_spec_from_text(content)
 }
 
 /// Call Anthropic API with prompt-based JSON structured output.
@@ -403,25 +444,33 @@ async fn call_anthropic_structured(
         .as_str()
         .ok_or_else(|| format!("Missing content in Anthropic response (raw: {})", &raw[..raw.len().min(500)]))?;
 
-    // Strip markdown fences if present
-    let json_str = content.trim();
-    let json_str = if json_str.starts_with("```") {
-        json_str
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim()
-    } else {
-        json_str
-    };
+    parse_spec_from_text(content)
+}
 
-    let spec: ArtifactSpec = serde_json::from_str(json_str).map_err(|e| {
-        format!(
-            "Failed to parse Anthropic LLM output as ArtifactSpec: {} (content: {})",
-            e,
-            &content[..content.len().min(600)]
-        )
-    })?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    Ok(spec)
+    /// The fence-stripper must recover a spec from both fenced and bare JSON,
+    /// and reject garbage with an error that includes the offending content
+    /// (all three provider paths share this parser).
+    #[test]
+    fn parse_spec_from_text_handles_fences_and_errors() {
+        let spec = parse_spec_from_text("{\"type\":\"skill\",\"name\":\"N\",\"description\":\"D\",\"instructions\":\"I\"}")
+            .expect("bare json parses");
+        match spec {
+            ArtifactSpec::Skill(s) => {
+                assert_eq!(s.name, "N");
+                assert_eq!(s.instructions, "I");
+            }
+            other => panic!("expected skill, got {other:?}"),
+        }
+
+        let fenced = "```json\n{\"type\":\"skill\",\"name\":\"N\",\"description\":\"D\",\"instructions\":\"I\"}\n```";
+        assert!(matches!(parse_spec_from_text(fenced), Ok(ArtifactSpec::Skill(_))));
+
+        let err = parse_spec_from_text("not json at all").unwrap_err();
+        assert!(err.contains("Failed to parse LLM output as ArtifactSpec"));
+        assert!(err.contains("not json at all"));
+    }
 }

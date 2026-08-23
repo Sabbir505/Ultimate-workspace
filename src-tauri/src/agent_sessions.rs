@@ -3337,6 +3337,216 @@ pub fn run_one_shot(
     }
 }
 
+/// Wall-clock bound for [`harness_oneshot_text`]. Generation prompts are
+/// self-contained (no tools to wait on), so a CLI that hasn't answered in
+/// three minutes is wedged, not working.
+const ONESHOT_GEN_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Blocking one-shot TEXT generation through a harness CLI — the artifact
+/// generator's backend for `harness:<id>` chat sessions, whose provider/model
+/// columns name a CLI, not an HTTP API. Self-contained prompt in, final text
+/// out: no chat session, no events, no resume, no tool markers. Runs the
+/// blocking process I/O on `spawn_blocking` so async command callers stay free.
+pub(crate) async fn harness_oneshot_text(
+    harness_id: &str,
+    model: &str,
+    prompt: &str,
+    cwd: Option<&str>,
+) -> Result<String, String> {
+    let harness = harness_id.to_string();
+    let model = model.to_string();
+    let prompt = prompt.to_string();
+    let cwd = cwd.map(|c| c.to_string());
+    tokio::task::spawn_blocking(move || harness_oneshot_blocking(&harness, &model, &prompt, cwd.as_deref()))
+        .await
+        .map_err(|e| format!("generation task failed: {e}"))?
+}
+
+fn harness_oneshot_blocking(
+    harness_id: &str,
+    model: &str,
+    prompt: &str,
+    cwd: Option<&str>,
+) -> Result<String, String> {
+    // Claude uses plain `--output-format json`: one result object whose
+    // `.result` field IS the final text (unlike stream-json, where the final
+    // text is assembled from text deltas and the `result` event only closes
+    // the turn). Kimi/OpenCode reuse the per-turn turn_spec transport — the
+    // untrusted prompt never rides a cmd.exe command line (M12) — with their
+    // stream events accumulated in `parse_oneshot_text` below.
+    let (spec, prompt_env, prompt_via_stdin) = match harness_id {
+        "claude_code" => {
+            let mut args: Vec<String> = vec![
+                "-p".into(),
+                "--output-format".into(),
+                "json".into(),
+                "--dangerously-skip-permissions".into(),
+            ];
+            if !model.is_empty() {
+                args.push("--model".into());
+                args.push(claude_model_alias(model));
+            }
+            (
+                resolve_for_spawn(&CommandSpec { program: "claude".into(), args }),
+                None,
+                true,
+            )
+        }
+        "kimi_code" => {
+            let mut flags: Vec<String> = vec!["--output-format".into(), "stream-json".into()];
+            if !model.is_empty() {
+                flags.push("-m".into());
+                flags.push(model.into());
+            }
+            let (spec, env) = crate::harness_adapters::turn_spec(
+                crate::harness_adapters::TurnHarness::Kimi,
+                prompt,
+                flags,
+            );
+            (spec, env, false)
+        }
+        "opencode" => {
+            let mut flags: Vec<String> = Vec::new();
+            if !model.is_empty() {
+                flags.push("-m".into());
+                flags.push(model.into());
+            }
+            let (spec, env) = crate::harness_adapters::turn_spec(
+                crate::harness_adapters::TurnHarness::OpenCode,
+                prompt,
+                flags,
+            );
+            (spec, env, false)
+        }
+        other => return Err(format!("unsupported harness for generation: {other}")),
+    };
+
+    let mut cmd = Command::new(&spec.program);
+    cmd.args(&spec.args)
+        .stdin(if prompt_via_stdin { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some((k, v)) = &prompt_env {
+        cmd.env(k, v);
+    }
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    no_console_window(&mut cmd);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn {harness_id} CLI: {e} (is it installed?)"))?;
+
+    if prompt_via_stdin {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "failed to open CLI stdin".to_string())?;
+        use std::io::Write as _;
+        stdin
+            .write_all(prompt.as_bytes())
+            .and_then(|_| stdin.flush())
+            .map_err(|e| format!("failed to write prompt to CLI stdin: {e}"))?;
+        // stdin drops here → EOF tells the CLI the prompt is complete.
+    }
+
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "failed to capture CLI stdout".to_string())?;
+    // Reader thread collects stdout to EOF; recv below joins it implicitly.
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        use std::io::Read as _;
+        let _ = stdout.read_to_string(&mut buf);
+        let _ = tx.send(buf);
+    });
+
+    // Poll-wait with a deadline; a hung CLI is killed at the bound instead of
+    // wedging the async command forever (same posture as run_one_shot).
+    let deadline = std::time::Instant::now() + ONESHOT_GEN_TIMEOUT;
+    loop {
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(_) => break,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{harness_id} generation timed out after {}s",
+                    ONESHOT_GEN_TIMEOUT.as_secs()
+                ));
+            }
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+    let raw = rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| format!("{harness_id} closed without producing output"))?;
+
+    let text = parse_oneshot_text(harness_id, &raw)?;
+    if text.trim().is_empty() {
+        return Err(format!("{harness_id} returned an empty response (raw: {})", &raw[..raw.len().min(200)]));
+    }
+    Ok(text)
+}
+
+/// Extract the final assistant text from a one-shot CLI's raw stdout.
+/// Claude (plain json): `.result` off the single result object. Kimi
+/// (stream-json): concatenation of assistant `content` strings — mirrors
+/// handle_kimi_event's text path, minus tool markers (a generation prompt
+/// must not call tools, and markers would corrupt the expected JSON).
+/// OpenCode (run-mode json events): text parts carry FULL snapshots, so only
+/// each part's new suffix is appended — mirrors handle_opencode_event.
+fn parse_oneshot_text(harness_id: &str, raw: &str) -> Result<String, String> {
+    let head = |n: usize| &raw[..raw.len().min(n)];
+    match harness_id {
+        "claude_code" => {
+            let v: Value = serde_json::from_str(raw.trim())
+                .map_err(|e| format!("unparseable claude output: {e} (raw: {})", head(200)))?;
+            if v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false) {
+                let msg = v
+                    .get("result")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("generation failed");
+                return Err(format!("claude code: {msg}"));
+            }
+            v.get("result")
+                .and_then(|r| r.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| format!("claude output missing `result` (raw: {})", head(200)))
+        }
+        "kimi_code" => {
+            let mut full = String::new();
+            for line in raw.lines() {
+                let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+                if v.get("role").and_then(|r| r.as_str()) == Some("assistant") {
+                    if let Some(text) = v.get("content").and_then(|c| c.as_str()) {
+                        full.push_str(text);
+                    }
+                }
+            }
+            Ok(full)
+        }
+        _ => {
+            let mut full = String::new();
+            let mut last_text = String::new();
+            for line in raw.lines() {
+                let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+                if v.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    if let Some(text) = v.pointer("/part/text").and_then(|t| t.as_str()) {
+                        let suffix = text.strip_prefix(last_text.as_str()).unwrap_or(text);
+                        full.push_str(suffix);
+                        last_text.clear();
+                        last_text.push_str(text);
+                    }
+                }
+            }
+            Ok(full)
+        }
+    }
+}
+
 /// Build the spawn spec for a one-shot turn on any harness. Always full-auto
 /// (--dangerously-skip-permissions for claude, --auto for opencode — no
 /// permission selector is surfaced or consulted in the UI, so all CLI turns
@@ -3893,6 +4103,34 @@ fn no_console_window(cmd: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_oneshot_text_extracts_each_cli_shape() {
+        // Claude `--output-format json`: final text lives in `.result`.
+        let claude = r#"{"type":"result","subtype":"success","result":"{\"type\":\"skill\"}","is_error":false}"#;
+        assert_eq!(parse_oneshot_text("claude_code", claude).unwrap(), "{\"type\":\"skill\"}");
+        // is_error=true surfaces the message instead of the text.
+        let err = r#"{"type":"result","subtype":"error_max_turns","result":"hit turn cap","is_error":true}"#;
+        assert!(parse_oneshot_text("claude_code", err).unwrap_err().contains("hit turn cap"));
+
+        // Kimi stream-json: assistant content strings concatenate; non-assistant
+        // roles and tool_calls blocks are ignored.
+        let kimi = concat!(
+            r#"{"role":"user","content":"gen"}"#, "\n",
+            r#"{"role":"assistant","content":"{\"type\":"}"#, "\n",
+            r#"{"role":"assistant","content":"\"loop\"}"}"#, "\n",
+        );
+        assert_eq!(parse_oneshot_text("kimi_code", kimi).unwrap(), "{\"type\":\"loop\"}");
+
+        // OpenCode run-mode events: text parts carry FULL snapshots — only the
+        // new suffix of each part may be appended or the JSON duplicates.
+        let oc = concat!(
+            r#"{"type":"step-start"}"#, "\n",
+            r#"{"type":"text","part":{"text":"{\"type\":"}}"#, "\n",
+            r#"{"type":"text","part":{"text":"{\"type\":\"skill\"}"}}"#, "\n",
+        );
+        assert_eq!(parse_oneshot_text("opencode", oc).unwrap(), "{\"type\":\"skill\"}");
+    }
 
     #[test]
     fn sanitize_attachment_name_blocks_traversal_and_weird_chars() {

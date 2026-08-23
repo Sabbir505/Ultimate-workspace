@@ -54,9 +54,12 @@ fn connector_opencode_entry(s: &HarnessMcpServer) -> Value {
     v
 }
 
-/// Environment preamble + Conduit core system prompt + skill catalog.
-/// Provider-specific parts of the built-in chat prompt are excluded — the
-/// CLI has its own provider personality.
+/// Environment preamble + skill catalog + browser workflow for harness CLIs.
+/// The built-in chat's CORE prompt (identity/communication/tool-routing text
+/// in `chat::prompts`) is intentionally NOT included — the CLI ships its own
+/// provider personality and behavioral guidance; only the Conduit-specific
+/// environment (project path, artifacts dir, conduit-tools, browser pane)
+/// is additive information the CLI can't know on its own.
 pub fn build_instructions_md(project_path: &str, artifacts_dir: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     // Project-less sessions get a bundle too (connectors + conduit-tools) —
@@ -192,12 +195,19 @@ pub fn build_tools_mcp_json(
 /// delivered to Claude Code / Kimi (which have explicit flags) but NOT to
 /// OpenCode via config; OpenCode still gets the conduit-tools MCP server and
 /// the permission section, so document/diagram generation works there too.
+///
+/// `approval` mirrors the chat-session approval policy. The allow-all
+/// permission block is emitted ONLY for unattended runs (`full_access`, or
+/// `None` — the headless historical default): interactive PTY panes pass
+/// `on_request`, which OMITS the block so OpenCode's own TUI accept/deny
+/// prompts stay in charge instead of silently auto-approving edits.
 pub fn build_opencode_tools_config(
     mcp_binary_path: &str,
     project_id: &str,
     ws_port: u16,
     auth_token: &str,
     connectors: &[HarnessMcpServer],
+    approval: Option<&str>,
 ) -> Value {
     let server = |name: &str| {
         json!({
@@ -230,15 +240,16 @@ pub fn build_opencode_tools_config(
     // artifacts dir would hang the turn forever on "reading file". Composer
     // attachments live outside the cwd by design, so this allow is what makes
     // harness attachment viewing work at all.
-    json!({
-        "mcp": mcp,
-        "permission": {
+    let mut v = json!({ "mcp": mcp });
+    if approval.unwrap_or("full_access") == "full_access" {
+        v["permission"] = json!({
             "edit": "allow",
             "bash": "allow",
             "webfetch": "allow",
             "external_directory": "allow"
-        }
-    })
+        });
+    }
+    v
 }
 
 pub struct HarnessBundlePaths {
@@ -342,7 +353,7 @@ pub fn write_bundle(
             &paths.kimi_mcp,
             serde_json::to_string_pretty(&kimi_mcp).unwrap_or_default(),
         );
-        let oc = build_opencode_tools_config(&bin_str, project_id, ws_port, token, connectors);
+        let oc = build_opencode_tools_config(&bin_str, project_id, ws_port, token, connectors, approval);
         write_or_none(
             &paths.opencode_config,
             serde_json::to_string_pretty(&oc).unwrap_or_default(),
@@ -515,7 +526,8 @@ mod tests {
 
     #[test]
     fn opencode_config_has_mcp_permission() {
-        let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok-abc", &[]);
+        // None approval = headless historical default → full-auto block present.
+        let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok-abc", &[], None);
         assert!(v["mcp"]["conduit-browser"]["type"] == "local");
         assert!(v["mcp"]["conduit-tools"]["type"] == "local");
         assert_eq!(v["mcp"]["conduit-browser"]["environment"]["CONDUIT_MCP_AUTH_TOKEN"], "tok-abc");
@@ -536,7 +548,7 @@ mod tests {
             url: "https://api.githubcopilot.com/mcp/".into(),
             bearer_token: Some("gho_x".into()),
         }];
-        let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok", &connectors);
+        let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok", &connectors, None);
         assert_eq!(v["mcp"]["github"]["type"], "remote");
         assert_eq!(v["mcp"]["github"]["url"], "https://api.githubcopilot.com/mcp/");
         assert_eq!(v["mcp"]["github"]["headers"]["Authorization"], "Bearer gho_x");
@@ -544,6 +556,19 @@ mod tests {
         // flow when the baked-in token expires.
         assert_eq!(v["mcp"]["github"]["oauth"], false);
         assert!(v["mcp"]["conduit-tools"]["type"] == "local");
+    }
+
+    #[test]
+    fn opencode_config_interactive_omits_permission_block() {
+        // Interactive PTY panes pass on_request: the allow-all block must be
+        // omitted so the TUI's own prompts decide; auto_edit likewise (it
+        // maps to per-edit prompting, not silent allow).
+        for approval in ["on_request", "auto_edit"] {
+            let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok-abc", &[], Some(approval));
+            assert!(v["permission"].is_null(), "{approval} must not auto-approve");
+            // MCP servers are unaffected by the approval policy.
+            assert!(v["mcp"]["conduit-tools"]["type"] == "local");
+        }
     }
 
     #[test]

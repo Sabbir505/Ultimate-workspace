@@ -1,6 +1,6 @@
 # Conduit — AI Context Document
 
-**Last verified:** 2026-08-16
+**Last verified:** 2026-08-23
 **Branch:** `master`
 **Working tree:** Auto-updater (Tauri plugin-updater + GitHub Releases + `UpdateBanner`), bundled Python runtime (`chat/python_runtime.rs` staged by `scripts/fetch-bundled-python.mjs`), local model support (GGUF via llama.cpp sidecar + Hugging Face market), OAuth connectors (Notion / GitHub / Google / Gmail / Kiwi), workspace save/restore, mobile relay, headless CLI chat (Claude Code / Kimi Code / OpenCode via `agent_sessions.rs` with the per-project harness bundle from `harness_bundle.rs`), and the **automations** scheduler (cron-fired headless one-shot turns, `automations.rs` + `db/automations.rs`) are all in place. Doc set is consolidated under `AI CONTEXT/`. Recent shape: chat backend split into focused submodules (`chat/{mod,prompts,proto,dispatch,streaming}.rs`) and chat tools into `chat/tools/{mod,specs,search,generate,fs,search_content}.rs`; per-session permission modes are wired end-to-end (`ff0b812f`) — `PermissionModeMenu` in the composer, `ApprovalCard`/`FullAutoConfirmModal` (`ApprovalFlow.tsx`), the approval-rules engine, and a Claude Code `can_use_tool` stdio relay — alongside the `AgentMenu` (composer agent selector) and the `DiffCard` inline review component.
 
@@ -10,14 +10,16 @@ This document is the single source of truth for AI assistants working on this co
 
 ## 1. What Conduit Is
 
-A local-first, multi-pane desktop shell for AI coding agents. It does **not** implement its own agent loop — it orchestrates existing CLI binaries inside pseudo-terminals, and adds a separate direct-HTTP LLM "Chat" tab.
+A local-first desktop shell for AI coding agents with ONE unified chat surface (the old separate Dev/Chat tabs were removed in the single-mode layout rework, `d39d5a25`). It does **not** implement its own agent loop for harness CLIs — it orchestrates existing CLI binaries, and adds a direct-HTTP LLM chat backend for the built-in/local agents.
 
-**Two interaction surfaces:**
+**One main surface (`ChatView`), fed by three chat backends plus interactive PTY panes in the right-side ToolPanel:**
 
-| Surface | Mechanism | Key events |
-|---|---|---|
-| **Dev tab** (Agent panes) | Spawn harness CLIs in PTYs, resume by session ID | `pty:output`, `pty:state`, `pty:exit`, `session:harness-id`, `cost:updated`, `browser:url_detected` |
-| **Chat tab** (Direct LLM) | HTTP/SSE to Anthropic/OpenAI/OpenRouter/compatible providers; tool calling | `chat:token`, `chat:done`, `chat:error`, `chat:artifact`, `chat:open-browser` |
+| Surface | Chat session `agent` value | Mechanism | Key events |
+|---|---|---|---|
+| Built-in cloud chat | `"builtin"` | HTTP/SSE to Anthropic/OpenAI/OpenRouter/compatible providers; tool loop | `chat:token`, `chat:done`, `chat:error`, `chat:artifact`, `chat:open-browser` |
+| Local GGUF | `"local"` | llama.cpp sidecar (OpenAI wire format) | same |
+| Headless harness CLI | `"harness:<id>"` | persistent `claude -p` stream-json process / per-turn `kimi` / `opencode run` (`agent_sessions.rs`) | same, plus `chat:approval-request` |
+| Interactive harness pane | n/a (`sessions` table) | Sidebar session row → PTY spawn, resume by session ID; terminal renders in the ToolPanel's Terminal tab | `pty:output`, `pty:state`, `pty:exit`, `session:harness-id`, `cost:updated`, `browser:url_detected` |
 
 **Stack:** Tauri v2 (Rust) + React 18/TypeScript + Zustand + xterm.js + SQLite (rusqlite) + window-vibrancy (acrylic on Win, frosted on macOS)
 
@@ -132,7 +134,7 @@ Updater:             check_for_update, download_and_install_update
 | Kimi Code | `kimi` | bare | `--session <id>` | TUI regex + `~/.kimi-code/session_index.jsonl` |
 | OpenCode | `opencode` | bare | `-s <id>` | TUI regex only (no filesystem probe) |
 
-- **Per-project bundle (`harness_bundle.rs`):** every CLI session runs against a Conduit-owned config bundle written under `<app_data>/harness/<safe-project-id>/`. Never touches the user's `.claude/` / `opencode.json` (so hand-maintained configs are not clobbered). The bundle covers Claude (`instructions.md`, `settings.json` whose permission posture maps the chat session's `permission_mode` — `full_auto`→`bypassPermissions`, `auto_edit`→`acceptEdits`, else `default` — plus an `mcp__conduit-tools__*`/`Bash(git:*)` allow list, `mcp.json` registering `conduit-browser` + `conduit-tools` sidecars), Kimi (`agent.md` with frontmatter, `mcp.json`), and OpenCode (`opencode.json` with the `mcp` + `permission` sections; `OPENCODE_CONFIG` env var on spawn). Spawn-arg helpers `claude_bundle_args` / `kimi_bundle_args` / `opencode_bundle_args` add `--append-system-prompt-file`, `--settings`, `--mcp-config`, `--allowedTools` (Claude), `--mcp-config-file`, `--agent-file` (skipped on resume — kimi forbids it with `--session`), `--add-dir` (Kimi), or rely on the env var (OpenCode).
+- **Per-project bundle (`harness_bundle.rs`):** every CLI session — headless chat (`agent_sessions.rs`) AND interactive PTY panes (`spawn_agent_session` in `commands/pty_cmds.rs`) — runs against a Conduit-owned config bundle written under `<app_data>/harness/<safe-project-id>/`. Never touches the user's `.claude/` / `opencode.json` (so hand-maintained configs are not clobbered). The bundle covers Claude (`instructions.md` = environment preamble + skill catalog + browser workflow — NOT the built-in chat's CORE prompt, the CLI keeps its own provider personality; `settings.json`; `mcp.json` registering `conduit-browser` + `conduit-tools` sidecars), Kimi (`agent.md` with frontmatter, same instructions body, `mcp.json`), and OpenCode (`opencode.json` with the `mcp` section and a `permission` section only for full-auto/headless runs; `OPENCODE_CONFIG` env var on spawn). Permission posture: headless chat maps the session's dual policies (`sandbox_policy` + `approval_policy` — `full_access` approval → `bypassPermissions`, `auto_edit` → `acceptEdits`, `on_request`/unknown → `default`, fail-closed; `read_only` sandbox forces `default`) plus an `mcp__conduit-tools__*`/`Bash(git:*)` allow list; interactive PTY panes always spawn with `workspace_write`/`on_request` so the CLI's native TUI prompts stay in charge (no silent bypass), and OpenCode's allow-all permission block is omitted unless approval is `full_access`. Spawn-arg helpers `claude_bundle_args` / `kimi_bundle_args` / `opencode_bundle_args` add `--append-system-prompt-file`, `--settings`, `--mcp-config`, `--allowedTools` (Claude), `--mcp-config-file`, `--agent-file` (skipped on resume — kimi forbids it with `--session`), `--add-dir` (Kimi), or rely on the env var (OpenCode). Bundle write failure degrades to the legacy browser-only MCP config (`browser_mcp_register.rs`). Note: automations one-shots (`run_one_shot` / `run_one_shot_chat`) do NOT use the bundle or the CORE prompt — they carry only the user's custom `assistant.systemPrompt`.
 - **Harness config discovery (`harness_config.rs`):** reads each CLI's own settings file (`~/.claude/settings.json` for `ANTHROPIC_BASE_URL` + `ANTHROPIC_DEFAULT_<ALIAS>_MODEL(_NAME)` remaps, `~/.kimi-code/config.toml` for `default_model` + `[providers.*]` + `[models.*]`, `~/.config/opencode/opencode.json` for `model` + `provider.<id>.options.baseURL` + `provider.<id>.models`) and merges with `opencode models` live registry output. Returns `HarnessModelConfig { defaultModel, endpoint, models[] }` with per-model `source` = `"config"` | `"cli"` | `"builtin"`. Empty/failed reads fall back to the static catalog in `src/lib/harnessModels.ts`.
 
 - **Headless CLI chat (`agent_sessions.rs`):** chat sessions whose `agent` is `"harness:<id>"` are backed by real CLI processes (instead of the built-in chat's HTTP calls). Two spawn styles, normalized onto the SAME `chat:token`/`chat:done`/`chat:error`/`chat:artifact` events the built-in chat emits:
@@ -227,8 +229,8 @@ Updater:             check_for_update, download_and_install_update
 ### 3.1 Entry (`main.tsx` → `App.tsx`)
 
 - Bootstrap loads: `settingsStore.load()` → `projectsStore.loadAll()` → `skillsStore.load()` → `ensureDefaultSkills()` → `wireUpdaterEvents()` + `updaterStore.check()` (also re-checks every 4h via `setInterval`)
-- **Active views:** `"grid"` (Dev panes), `"chat"` (Chat), `"settings"`, `"skills"`, `"cost"`
-- **Sidebar modes:** `"projects"` (Dev) / `"chats"` (Chat)
+- **Active views:** `"chat"` (the single main surface), `"settings"`, `"skills"`, `"cost"`, `"automations"`
+- **Sidebar:** one unified column — New Chat, Artifacts, Connectors, Projects (each with nested session rows that open interactive harness panes in the ToolPanel's Terminal tab), Chat history, footer links
 - Hooks registered: `useTheme`, `useKeybindings`, `usePtyEvents`, `useChatEvents`, `useGitStatusPolling`
 
 ### 3.2 State (Zustand)
@@ -249,17 +251,18 @@ Updater:             check_for_update, download_and_install_update
 
 **Spotlight logic** (pure functions in `state/spotlight.ts`): `activeTerminalId` (override wins, else recency), `cycleTerminalId`, `activeTerminalPair` (top+bottom), `cycleTerminalPair`.
 
-**Tool panel** (`ToolPanel.tsx`, mounted in `App.tsx`): a collapsible right-side column with `terminal | browser | files | canvas` tabs. Every tab's content stays mounted (display:none when not active) so xterm + pty + native browser webviews keep running. Width is persisted in the `ui` store; left-edge drag handle doubles as the chat|panel splitter. The Canvas tab is the new home for artifact previews (multi-tab browser-style, each preview kept mounted for instant switching).
+**Tool panel** (`ToolPanel.tsx`, mounted in `App.tsx`): a collapsible right-side column with `terminal | browser | files | pulls | canvas | agents` tabs. Every tab's content stays mounted (display:none when not active) so xterm + pty + native browser webviews keep running. Width is persisted in the `ui` store; left-edge drag handle doubles as the chat|panel splitter. The Canvas tab is the new home for artifact previews (multi-tab browser-style, each preview kept mounted for instant switching).
 
 ### 3.3 Panes (`components/panes/`)
 
-- **PaneGrid.tsx** — terminal-only multi-pane grid (2-col CSS); memoized `PaneFrame`; hidden terminals stay mounted `display:none` (per §6.5, never kill on blur). Also exports `DormantBrowsers` (a container of minimized/collapsed browser panes kept alive via the `visible=false` webview flag).
+> The old 2-column `PaneGrid` / Dev-tab grid was removed with the single-mode layout. Terminal + browser panes now render in single slots inside the ToolPanel, one visible pane per tab with a switcher dropdown.
+
+- **PaneFrame.tsx** — shared frame that mounts a terminal (`TerminalPane`) or browser (`BrowserPane`) pane; hidden panes stay mounted `display:none` (per §6.5, never kill on blur). Also exports `DormantBrowsers` (minimized/collapsed browser panes kept alive via the `visible=false` webview flag).
 - **TerminalPane.tsx** — xterm with transparent bg (glass shows through), theme-aware, copy/paste (Ctrl+Shift+C/V), font zoom (Ctrl+scroll), `focusEpoch` re-focus, resume-on-exit overlay. ResizeObserver + debounced refit (50ms).
 - **BrowserPane.tsx** — native webview path (bounds tracking + occlusion via `browserOcclusion.ts`) + iframe fallback. Per-tab history, 8s load timeout. Tab bar + URL bar.
-- **DevDiffPanel.tsx** — the Dev-tab Files panel (changed-files list + per-file diff + "Send PR" button). Embedded in the ToolPanel's Files tab.
-- **ToolPanel.tsx** — right-side collapsible terminal | browser | files | canvas column (see §3.2).
-- **BroadcastBar.tsx** — literal text fan-out to selected terminals (no skill expansion).
-- **PaneDiffOverlay.tsx** — full-pane diff view used from the Dev tab.
+- **DevDiffPanel.tsx** — the Files panel (changed-files list + per-file diff + "Send PR" button). Embedded in the ToolPanel's Files tab.
+- **ToolPanel.tsx** — right-side collapsible terminal | browser | files | pulls | canvas | agents column (see §3.2).
+- **BranchPanel.tsx / ProgressPanel.tsx / PullsPanel.tsx / SubagentPanel.tsx** — Git branch view, download/run progress, PR list, and the live subagent token stream panel (Agents tab).
 
 ### 3.4 Chat UI (`components/chat/`)
 
@@ -283,7 +286,7 @@ Updater:             check_for_update, download_and_install_update
 
 ### 3.5 Sidebar & Overlays
 
-- **Sidebar.tsx** — Dev mode (projects + sessions) / Chat mode (new chat + artifact library + session rows). Footer toggles Skills/Cost/Settings/Automations.
+- **Sidebar.tsx** — unified single-mode column: New Chat, Artifacts, Connectors, Projects (nested session rows open interactive harness panes in the ToolPanel's Terminal tab), Chat history. Footer toggles Skills/Cost/Settings/Automations.
 - **ProjectItem.tsx** — Git status badge, inline rename, session list, harness chooser, context menu (new session, new worktree, peek diff, settings, rename, remove).
 - **SessionRow.tsx** — Live state dot, auto title, harness badge, relative time, delete.
 - **ProjectSettingsPanel.tsx** — per-project quick actions + secrets editor.
@@ -402,7 +405,7 @@ From BUILD_LOG.md and source inspection:
 | Mobile relay | `src-tauri/src/mobile/relay.rs`, `src-tauri/src/mobile/commands.rs` |
 | Frontend entry | `src/main.tsx`, `src/App.tsx` |
 | State stores | `src/state/{projects,panes,chat,artifacts,skills,settings,ui,updater,spotlight,connector,localModel,automations}.ts` |
-| Pane components | `src/components/panes/{PaneGrid,TerminalPane,BrowserPane,BroadcastBar,DevDiffPanel,ToolPanel,PaneDiffOverlay}.tsx` |
+| Pane components | `src/components/panes/{PaneFrame,TerminalPane,BrowserPane,DevDiffPanel,ToolPanel,BranchPanel,ProgressPanel,PullsPanel,SubagentPanel}.tsx` |
 | Chat components | `src/components/chat/{ChatView,ChatComposer,AgentMenu,MessageAttachments,MessageBubble,MermaidDiagram,InlineDiagram,JsxPreview,ArtifactPreviewPane,ArtifactsMenu,ArtifactExportMenu,ModelEffortMenu,ChatSessionRow,DiffCard,ContextMeter,TaskProgressCard}.tsx` |
 | Automations components | `src/components/automations/{AutomationsView,AutomationRunTable}.tsx` |
 | Sidebar | `src/components/sidebar/{Sidebar,ProjectItem,SessionRow,ArtifactLibrary,ProjectSettingsPanel,ConnectorGrid}.tsx` |

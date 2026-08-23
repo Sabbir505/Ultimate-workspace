@@ -1367,19 +1367,10 @@ fn previewable_ext(path: &str) -> bool {
     )
 }
 
-/// Resolve (writing if needed) the per-project `.mcp.json` registering the
-/// conduit-browser MCP server — same helper pty_cmds.rs uses for Dev-tab PTY
-/// sessions. Returns None (silently skipping browser tools for the turn) when
-/// no project is selected, the MCP binary isn't present, or the write fails:
-/// registration failure must never fail the turn.
-fn resolve_mcp_config(app: &AppHandle, project_id: Option<&str>) -> Option<std::path::PathBuf> {
-    let data_dir = app.path().app_data_dir().ok()?;
-    browser_mcp_register::write_mcp_config(&data_dir, project_id?, BROWSER_MCP_PORT)
-}
-
-/// Same, but OpenCode-format: opencode has no `--mcp-config` flag — it reads
-/// MCP servers from an opencode.json "mcp" section, pointed at via the
-/// OPENCODE_CONFIG env var on the spawn.
+/// Same as pty_cmds' browser-only `.mcp.json`, but OpenCode-format: opencode
+/// has no `--mcp-config` flag — it reads MCP servers from an opencode.json
+/// "mcp" section, pointed at via the OPENCODE_CONFIG env var on the spawn.
+/// Legacy fallback for per-turn spawns when the full bundle failed to write.
 fn resolve_opencode_config(app: &AppHandle, project_id: Option<&str>) -> Option<std::path::PathBuf> {
     let data_dir = app.path().app_data_dir().ok()?;
     browser_mcp_register::write_opencode_config(&data_dir, project_id?, BROWSER_MCP_PORT)
@@ -1388,7 +1379,7 @@ fn resolve_opencode_config(app: &AppHandle, project_id: Option<&str>) -> Option<
 /// The artifacts dir the bundle should advertise: the spawn dir when set
 /// (it IS the CLI's workspace), else the configured artifacts dir, else the
 /// Documents/Conduit default — mirroring `spawn_dir`.
-fn artifacts_dir_for_bundle(app: &AppHandle, cwd: Option<&str>) -> String {
+pub(crate) fn artifacts_dir_for_bundle(app: &AppHandle, cwd: Option<&str>) -> String {
     if let Some(c) = cwd { return c.to_string(); }
     crate::chat::dispatch::artifacts_dir(app).to_string_lossy().into_owned()
 }
@@ -1405,7 +1396,9 @@ const NO_PROJECT_BUNDLE_SLUG: &str = "_no_project";
 /// fails — bundle failure must never fail the turn (same contract as the old
 /// resolve_mcp_config). `connectors` are merged into the bundle's MCP configs
 /// as remote servers (tokens already refreshed by the command layer).
-fn resolve_harness_bundle(
+/// Shared by the headless chat paths here and the interactive PTY spawn in
+/// `commands::pty_cmds`.
+pub(crate) fn resolve_harness_bundle(
     app: &AppHandle,
     project_id: Option<&str>,
     cwd: Option<&str>,

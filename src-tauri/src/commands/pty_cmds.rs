@@ -68,25 +68,57 @@ pub fn spawn_agent_session(
         None => adapter.spawn_new_command(),
     };
 
-    // Register the conduit-browser-mcp server for agent sessions so the
-    // harness can drive the in-app browser pane. Writes a Conduit-owned
-    // config (never the project cwd) and surfaces it per harness: claude
-    // `--mcp-config`, kimi `--mcp-config-file`, opencode via the
-    // OPENCODE_CONFIG env var (no CLI flag) (Task #6).
+    // Conduit-owned bundle: instructions (environment preamble + skill
+    // catalog + browser workflow, appended to the CLI's own prompt), settings,
+    // and BOTH MCP servers (browser + tools) — the same bundle the headless
+    // chat paths use. Interactive panes run with on_request approval: the user
+    // is watching the TUI and answers Claude Code's native prompts; only the
+    // conduit MCP tools + git are pre-allowed. OpenCode gets no full-auto
+    // permission block for the same reason (its TUI prompts stay in charge).
+    // Bundle failure degrades to the legacy browser-only MCP config below.
+    let cwd_opt = Some(cwd.as_str());
+    let artifacts_dir = crate::agent_sessions::artifacts_dir_for_bundle(&app, cwd_opt);
+    let bundle = crate::agent_sessions::resolve_harness_bundle(
+        &app,
+        Some(&project.id),
+        cwd_opt,
+        artifacts_dir.clone(),
+        &[],
+        Some("workspace_write"),
+        Some("on_request"),
+    );
     let mut extra_env: Vec<(String, String)> = vec![];
     match session.harness.as_str() {
         "claude_code" => {
-            if let Some(cfg_path) = resolve_mcp_config(&app, &project.id) {
+            if let Some(b) = &bundle {
+                spec.args
+                    .extend(crate::harness_bundle::claude_bundle_args(b, &artifacts_dir));
+            } else if let Some(cfg_path) = resolve_mcp_config(&app, &project.id) {
                 append_config_flag(&mut spec, "--mcp-config", &cfg_path);
             }
         }
         "kimi_code" => {
-            if let Some(cfg_path) = resolve_mcp_config(&app, &project.id) {
+            // --agent-file only on a fresh session (kimi rejects it with
+            // --session); kimi_bundle_args applies that via the resume flag.
+            let resume = session.harness_session_id.is_some();
+            if let Some(b) = &bundle {
+                spec.args
+                    .extend(crate::harness_bundle::kimi_bundle_args(b, &artifacts_dir, resume));
+            } else if let Some(cfg_path) = resolve_mcp_config(&app, &project.id) {
                 append_config_flag(&mut spec, "--mcp-config-file", &cfg_path);
             }
         }
         "opencode" => {
-            if let Some(cfg_path) = resolve_opencode_config(&app, &project.id) {
+            // No instructions delivery mechanism exists for OpenCode (no
+            // config key; AGENTS.md is user-controlled) — the bundle still
+            // brings conduit-tools + browser MCP without full-auto perms.
+            // Legacy path only applies when the bundle failed to write.
+            let cfg = bundle
+                .as_ref()
+                .map(|b| b.opencode_config.clone())
+                .filter(|p| p.exists())
+                .or_else(|| resolve_opencode_config(&app, &project.id));
+            if let Some(cfg_path) = cfg {
                 extra_env.push((
                     "OPENCODE_CONFIG".to_string(),
                     cfg_path.to_string_lossy().replace('\\', "/"),

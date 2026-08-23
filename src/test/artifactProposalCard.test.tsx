@@ -3,6 +3,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import {
   parseCreateCommand,
   isBareCreateCommand,
+  detectArtifactIntent,
 } from "../components/chat/ChatComposer";
 import { ArtifactProposalCard } from "../components/chat/ArtifactProposalCard";
 
@@ -73,6 +74,41 @@ describe("isBareCreateCommand", () => {
     expect(isBareCreateCommand("/create skill foo")).toBe(false);
     expect(isBareCreateCommand("/create-artifact")).toBe(true);
     expect(isBareCreateCommand("hello")).toBe(false);
+  });
+});
+
+describe("detectArtifactIntent (natural language)", () => {
+  it("keeps the legacy exact triggers working", () => {
+    expect(detectArtifactIntent("turn this into a skill")).toEqual({ type: "skill", instruction: "turn this into a skill" });
+    expect(detectArtifactIntent("Can you create a loop for this?")).toEqual({ type: "loop", instruction: "Can you create a loop for this?" });
+    expect(detectArtifactIntent("schedule this")).toEqual({ type: "automation", instruction: "schedule this" });
+  });
+
+  it("matches conversation-distill requests — the Save As replacement", () => {
+    expect(detectArtifactIntent("analyze our chat and come up with a skill we can use later")?.type).toBe("skill");
+    expect(detectArtifactIntent("turn this conversation into an automation")).toEqual({
+      type: "automation",
+      instruction: "turn this conversation into an automation",
+    });
+    expect(detectArtifactIntent("make a prompt template from this conversation")?.type).toBe("prompt_template");
+    expect(detectArtifactIntent("distill our discussion into a loop")?.type).toBe("loop");
+  });
+
+  it("matches 'come up with a <type>' without a conversation reference", () => {
+    expect(detectArtifactIntent("come up with a skill for reviewing PRs")?.type).toBe("skill");
+    expect(detectArtifactIntent("come up with an automation for daily reports")?.type).toBe("automation");
+  });
+
+  it("lets questions about artifacts through to the model", () => {
+    expect(detectArtifactIntent("how do I create a skill in Claude?")).toBeNull();
+    expect(detectArtifactIntent("what is a loop artifact?")).toBeNull();
+  });
+
+  it("does not hijack ordinary chat that merely mentions a type word", () => {
+    expect(detectArtifactIntent("the skill system in this app is neat")).toBeNull();
+    expect(detectArtifactIntent("my automation professor assigned homework")).toBeNull();
+    // A type word alone with no creation verb or conversation reference.
+    expect(detectArtifactIntent("skills")).toBeNull();
   });
 });
 

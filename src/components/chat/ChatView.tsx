@@ -31,7 +31,7 @@ const MessageBubble = lazy(() => import("./MessageBubble").then((m) => ({ defaul
 // edit-tool call. None of these appear on the empty welcome screen.
 const TaskProgressCard = lazy(() => import("./TaskProgressCard").then((m) => ({ default: m.TaskProgressCard })));
 const ArtifactProposalCard = lazy(() => import("./ArtifactProposalCard").then((m) => ({ default: m.ArtifactProposalCard })));
-import { listChatModels, listHarnessModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, deleteEmptyChatSessions, getLocalModelOverrides, setLocalModelOverrides, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, saveArtifact, searchArtifacts, updateArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance } from "../../lib/ipc";
+import { listChatModels, listHarnessModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, deleteEmptyChatSessions, getLocalModelOverrides, setLocalModelOverrides, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance } from "../../lib/ipc";
 import { harnessModelCatalog } from "../../lib/harnessModels";
 import { setChatScrollToMessage } from "../../lib/chatScroll";
 import { TurnNavigator } from "./TurnNavigator";
@@ -159,15 +159,6 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   const [harnessCfg, setHarnessCfg] = useState<HarnessModelConfig | null>(null);
   const [harnessLoading, setHarnessLoading] = useState(false);
 
-  // Phase 2/3: Save As menu + search/update modal state
-  const [saveAsMenuOpen, setSaveAsMenuOpen] = useState(false);
-  const [artifactSearchOpen, setArtifactSearchOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<Array<{ id: string; name: string; description: string; artifactType: string; createdAt: number }>>([]);
-  const [searching, setSearching] = useState(false);
-  const [diffModal, setDiffModal] = useState<{ artifactId: string; artifactType: string; name: string; diff: string } | null>(null);
-  const saveAsMenuRef = useRef<HTMLDivElement | null>(null);
-
   // Discover the CLI's configured models/endpoint whenever the agent changes.
   // The agent chip shows a spinner while this runs (live CLI queries like
   // `opencode models` can take a second or two).
@@ -190,17 +181,6 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
       cancelled = true;
     };
   }, [harnessAgent]);
-
-  // Close Save As menu when clicking outside the menu container
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (saveAsMenuRef.current && !saveAsMenuRef.current.contains(event.target as Node)) {
-        setSaveAsMenuOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [saveAsMenuOpen]);
 
   // Config-discovered models first, then static-catalog entries the config
   // didn't mention (e.g. built-in aliases a stock setup still accepts).
@@ -990,79 +970,6 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
     }
   }, [activeChatSessionId, updateArtifactProposal, getArtifactProposals, pushToast]);
 
-  // Phase 2: Save the current conversation as an artifact (skill/loop/prompt/automation).
-  // Triggered from a "Save As" button — generates a proposal from conversation
-  // context and immediately creates it (skipping the preview card).
-  const handleSaveConversationAs = useCallback(async (artifactType: string) => {
-    if (!activeChatSessionId) return;
-    setSaveAsMenuOpen(false);
-    try {
-      const result = await saveArtifact({
-        chatSessionId: activeChatSessionId,
-        userMessage: `Save this conversation as a ${artifactType}`,
-      });
-      pushToast("success", `Saved as ${artifactType}: ${result.name}`);
-    } catch (err) {
-      pushToast("error", `Failed to save conversation: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }, [activeChatSessionId]);
-
-  // Phase 3: Update an existing artifact via chat. Called when the user
-  // selects an existing artifact from search results and provides a new spec.
-  const handleUpdateExistingArtifact = useCallback(async (
-    artifactId: string,
-    artifactType: string,
-    newSpec: ArtifactSpec,
-  ) => {
-    try {
-      const result = await updateArtifact(artifactId, artifactType, newSpec);
-      setDiffModal({
-        artifactId: result.artifactId,
-        artifactType: result.artifactType,
-        name: result.name,
-        diff: result.diff,
-      });
-      return result;
-    } catch (err) {
-      pushToast("error", `Failed to update artifact: ${err instanceof Error ? err.message : String(err)}`);
-      return null;
-    }
-  }, []);
-
-  // Phase 2: Search existing artifacts by name (for retrieval before generation).
-  const handleSearchArtifacts = useCallback(async (query: string, artifactType?: string) => {
-    try {
-      const results = await searchArtifacts(query, artifactType);
-      return results;
-    } catch (err) {
-      pushToast("error", `Search failed: ${err instanceof Error ? err.message : String(err)}`);
-      return [];
-    }
-  }, []);
-
-  // Phase 2: Run a search when the user submits a query in the search modal.
-  const handleSearchSubmit = useCallback(async () => {
-    if (!searchQuery.trim()) return;
-    setSearching(true);
-    try {
-      const results = await searchArtifacts(searchQuery.trim());
-      setSearchResults(results);
-    } catch (err) {
-      pushToast("error", `Search failed: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setSearching(false);
-    }
-  }, [searchQuery]);
-
-  // Phase 3: Apply the update from the diff modal's "Apply" button.
-  const handleApplyUpdate = useCallback(async () => {
-    if (!diffModal) return;
-    // The update was already applied on the backend — the modal just showed the diff.
-    // Close the modal after the user confirms.
-    setDiffModal(null);
-    pushToast("success", `Updated: ${diffModal.name}`);
-  }, [diffModal]);
-
   // Delete a single message from the active chat. The store handles local
   // state and the backend round-trip; we just feed it the message id from
   // the rendered bubble. Skipped on the live streaming bubble (no id yet).
@@ -1359,8 +1266,6 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
                         superseded={item.superseded}
                         segmentStart={item.segmentStart}
                         livePerf={item.livePerf}
-                        onSaveAsArtifact={item.key === lastAssistantKey ? (() => setSaveAsMenuOpen(true)) : undefined}
-                        onFindUpdateArtifact={item.key === lastAssistantKey ? (() => setArtifactSearchOpen(true)) : undefined}
                       />
                     )}
                   </Suspense>
@@ -1546,160 +1451,6 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         />
       )}
 
-      {/* Phase 2: Save As dropdown — floating menu (opened from chip on last assistant message) */}
-      {saveAsMenuOpen && (
-        <div className="artifact-saveas-overlay" ref={(el) => { saveAsMenuRef.current = el; }}>
-          <div className="artifact-saveas-menu">
-            <button type="button" role="menuitem" onClick={() => void handleSaveConversationAs("skill")}>
-              <span className="artifact-menu-icon">⚡</span>
-              <div>
-                <div className="artifact-menu-label">Skill</div>
-                <div className="artifact-menu-desc">Reusable prompt + instructions</div>
-              </div>
-            </button>
-            <button type="button" role="menuitem" onClick={() => void handleSaveConversationAs("loop")}>
-              <span className="artifact-menu-icon">🔁</span>
-              <div>
-                <div className="artifact-menu-label">Loop</div>
-                <div className="artifact-menu-desc">Goal-driven iterative workflow</div>
-              </div>
-            </button>
-            <button type="button" role="menuitem" onClick={() => void handleSaveConversationAs("prompt")}>
-              <span className="artifact-menu-icon">📝</span>
-              <div>
-                <div className="artifact-menu-label">Prompt Template</div>
-                <div className="artifact-menu-desc">Parameterized prompt</div>
-              </div>
-            </button>
-            <button type="button" role="menuitem" onClick={() => void handleSaveConversationAs("automation")}>
-              <span className="artifact-menu-icon">⚙️</span>
-              <div>
-                <div className="artifact-menu-label">Automation</div>
-                <div className="artifact-menu-desc">Scheduled or triggered workflow</div>
-              </div>
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Phase 2: Search existing artifacts modal */}
-      {artifactSearchOpen && (
-        <div className="artifact-search-modal-overlay" onClick={() => setArtifactSearchOpen(false)}>
-          <div className="artifact-search-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="artifact-search-modal-header">
-              <h3>Find &amp; Update Artifacts</h3>
-              <button
-                type="button"
-                className="artifact-search-modal-close"
-                onClick={() => setArtifactSearchOpen(false)}
-                aria-label="Close"
-              >
-                ×
-              </button>
-            </div>
-            <div className="artifact-search-input-row">
-              <input
-                type="text"
-                placeholder="Search by name or description…"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") void handleSearchSubmit();
-                }}
-                autoFocus
-              />
-              <button
-                type="button"
-                className="artifact-search-go"
-                onClick={() => void handleSearchSubmit()}
-                disabled={searching || !searchQuery.trim()}
-              >
-                {searching ? "Searching…" : "Search"}
-              </button>
-            </div>
-            <div className="artifact-search-results">
-              {searchResults.length === 0 ? (
-                <div className="artifact-search-empty">
-                  {searchQuery.trim() ? "No artifacts found. Try a different search." : "Type a search query to find existing artifacts."}
-                </div>
-              ) : (
-                searchResults.map((r) => (
-                  <div key={r.id} className="artifact-search-result-item">
-                    <div className="artifact-search-result-info">
-                      <div className="artifact-search-result-name">{r.name}</div>
-                      <div className="artifact-search-result-meta">
-                        <span className={`artifact-type-badge artifact-type-${r.artifactType}`}>{r.artifactType}</span>
-                        <span className="artifact-search-result-desc">{r.description}</span>
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      className="artifact-search-result-update"
-                      onClick={() => {
-                        setArtifactSearchOpen(false);
-                        // The update flow: user types an update instruction in chat.
-                        // The backend intent classifier detects "update <name>" and
-                        // routes to update_artifact_cmd, which returns a diff.
-                        setDraft({ text: `Update ${r.name}: `, nonce: Date.now() });
-                      }}
-                      title={`Start an update for ${r.name}`}
-                    >
-                      Update
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Phase 3: Diff preview modal */}
-      {diffModal && (
-        <div className="artifact-diff-modal-overlay" onClick={() => setDiffModal(null)}>
-          <div className="artifact-diff-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="artifact-diff-modal-header">
-              <h3>Update Preview: {diffModal.name}</h3>
-              <button
-                type="button"
-                className="artifact-diff-modal-close"
-                onClick={() => setDiffModal(null)}
-                aria-label="Close"
-              >
-                ×
-              </button>
-            </div>
-            <div className="artifact-diff-modal-body">
-              <div className="artifact-diff-modal-type">
-                <span className={`artifact-type-badge artifact-type-${diffModal.artifactType}`}>{diffModal.artifactType}</span>
-              </div>
-              {diffModal.diff === "No changes detected" ? (
-                <div className="artifact-diff-no-changes">
-                  No changes detected — the update produced identical content.
-                </div>
-              ) : (
-                <pre className="artifact-diff-content">{diffModal.diff}</pre>
-              )}
-            </div>
-            <div className="artifact-diff-modal-footer">
-              <button
-                type="button"
-                className="artifact-diff-btn-cancel"
-                onClick={() => setDiffModal(null)}
-              >
-                Discard
-              </button>
-              <button
-                type="button"
-                className="artifact-diff-btn-apply"
-                onClick={() => void handleApplyUpdate()}
-              >
-                Apply Update
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
     </div>
   );

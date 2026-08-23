@@ -64,6 +64,62 @@ export const isBareCreateCommand = (text: string): boolean => {
   return t === "/create" || t === "/create artifact" || t === "/create artifect" || t === "/create-artifact";
 };
 
+/**
+ * Natural-language artifact-intent detection — the replacement for the old
+ * per-message "Save As" / "Find & Update" chips. Matches two shapes:
+ *
+ * 1. Legacy exact phrases ("turn this into a skill", "create a loop",
+ *    "schedule this", …) — kept verbatim so existing phrasings behave the same.
+ * 2. Conversation-distill requests: an artifact-type keyword PLUS a reference
+ *    to the chat/conversation PLUS a creation verb — e.g. "analyze our chat and
+ *    come up with a skill we can reuse" or "turn this conversation into an
+ *    automation". The triple match keeps ordinary messages flowing to the
+ *    model. "Come up with a/an <type>" is unambiguous enough to match alone.
+ *
+ * Questions about artifacts ("how do I create a skill in Claude?") never
+ * trigger — they must reach the model.
+ */
+export const detectArtifactIntent = (msg: string): { type: ArtifactType; instruction: string } | null => {
+  const lower = msg.toLowerCase();
+
+  if (/\b(how (do|can|to|does)|what('s| is)|explain)\b/.test(lower)) return null;
+
+  // 1. Legacy exact triggers, verbatim.
+  const legacy: Array<[RegExp, ArtifactType]> = [
+    [/turn this into a skill|save this as a skill|create a skill/, "skill"],
+    [/turn this into a loop|make this run until|create a loop/, "loop"],
+    [/save this as a prompt|turn this into a prompt template|create a prompt template/, "prompt_template"],
+    [/make this run every|create an automation|schedule this/, "automation"],
+  ];
+  for (const [re, type] of legacy) {
+    if (re.test(lower)) return { type, instruction: msg };
+  }
+
+  // 2. Type keyword — plural forms included ("come up with some skills").
+  const type: ArtifactType | null = /prompt\s*template/.test(lower)
+    ? "prompt_template"
+    : /\bskills?\b/.test(lower)
+      ? "skill"
+      : /\bloop\b/.test(lower)
+        ? "loop"
+        : /\bautomations?\b|\bautomate\b/.test(lower)
+          ? "automation"
+          : null;
+  if (!type) return null;
+
+  // "Come up with a skill" is an unambiguous creation ask on its own.
+  const typeWord = type === "prompt_template" ? "prompt ?template" : type;
+  if (new RegExp(`come up with (a |an |some )?${typeWord}`).test(lower)) {
+    return { type, instruction: msg };
+  }
+
+  const conversationRef = /\b(our|this|the) (chat|conversation|thread|discussion)\b/.test(lower);
+  const creationVerb = /\b(come up with|create|make|build|turn|save|derive|extract|distill|summarize)\b/.test(lower);
+  if (conversationRef && creationVerb) return { type, instruction: msg };
+
+  return null;
+};
+
 // Attachment kinds map to the backend `ChatAttachmentInput`: images go to the
 // model as vision input, docs are text-extracted server-side, text is inlined.
 export interface ChatAttachment {
@@ -976,22 +1032,8 @@ export function ChatComposer({
   // Cheap deterministic detection of natural-language "create artifact" intent.
   // Mirrors the backend `detect_obvious_intent` — no LLM call needed for
   // obvious phrases like "turn this into a skill".
-  const detectArtifactIntent = useCallback((msg: string): { type: ArtifactType; instruction: string } | null => {
-    const lower = msg.toLowerCase();
-    if (lower.includes("turn this into a skill") || lower.includes("save this as a skill") || lower.includes("create a skill")) {
-      return { type: "skill", instruction: msg };
-    }
-    if (lower.includes("turn this into a loop") || lower.includes("make this run until") || lower.includes("create a loop")) {
-      return { type: "loop", instruction: msg };
-    }
-    if (lower.includes("save this as a prompt") || lower.includes("turn this into a prompt template") || lower.includes("create a prompt template")) {
-      return { type: "prompt_template", instruction: msg };
-    }
-    if (lower.includes("make this run every") || lower.includes("create an automation") || lower.includes("schedule this")) {
-      return { type: "automation", instruction: msg };
-    }
-    return null;
-  }, []);
+  // Natural-language artifact detection lives at module level
+  // (detectArtifactIntent) so it stays pure and unit-testable.
 
   // Persist the command-only message first, then generate the proposal. This
   // creates one real timeline user row without starting a normal chat turn.

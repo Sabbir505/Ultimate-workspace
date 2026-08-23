@@ -19,6 +19,49 @@ interface Props {
   loading?: boolean;
 }
 
+/** Module-level status cache (stale-while-revalidate). The backend probes
+ *  each CLI with `--version` (spawning real processes), so a cold fetch can
+ *  take seconds; caching here means reopening the menu paints instantly from
+ *  the last-known statuses while a background refresh updates them. Also
+ *  prefetched once per app run as soon as the composer mounts, so by the
+ *  time the user first clicks the chip the rows are usually already there. */
+let agentStatusCache: {
+  harnesses: HarnessStatus[];
+  acpAgents: AcpAgentStatus[];
+} | null = null;
+
+function fetchAgentStatuses(
+  onDone: (harnesses: HarnessStatus[], acpAgents: AcpAgentStatus[]) => void,
+): () => void {
+  let stale = false;
+  void listHarnesses()
+    .then((list) => {
+      if (!stale && list) setCached(list, undefined);
+    })
+    .catch(() => {
+      /* probe failures keep whatever is cached */
+    });
+  void listAcpAgents()
+    .then((list) => {
+      if (!stale && list) setCached(undefined, list);
+    })
+    .catch(() => {
+      /* probe failures keep whatever is cached */
+    });
+  function setCached(h?: HarnessStatus[], a?: AcpAgentStatus[]) {
+    agentStatusCache = {
+      harnesses: h ?? agentStatusCache?.harnesses ?? [],
+      acpAgents: a ?? agentStatusCache?.acpAgents ?? [],
+    };
+    if (agentStatusCache.harnesses.length > 0 || agentStatusCache.acpAgents.length > 0 || h || a) {
+      onDone(agentStatusCache.harnesses, agentStatusCache.acpAgents);
+    }
+  }
+  return () => {
+    stale = true;
+  };
+}
+
 /** Parse "harness:<id>" → the harness id; null for builtin/local/none. */
 function harnessIdOf(agent: string | null | undefined): string | null {
   return agent?.startsWith("harness:") ? agent.slice("harness:".length) : null;
@@ -31,24 +74,31 @@ function acpIdOf(agent: string | null | undefined): string | null {
 
 export function AgentMenu({ agent, onAgentChange, loading }: Props) {
   const [open, setOpen] = useState(false);
-  const [harnesses, setHarnesses] = useState<HarnessStatus[]>([]);
-  const [acpAgents, setAcpAgents] = useState<AcpAgentStatus[]>([]);
+  // Seeded from the module cache so an open paints last-known rows instantly;
+  // the effect below refreshes in the background.
+  const [harnesses, setHarnesses] = useState<HarnessStatus[]>(() => agentStatusCache?.harnesses ?? []);
+  const [acpAgents, setAcpAgents] = useState<AcpAgentStatus[]>(() => agentStatusCache?.acpAgents ?? []);
   const rootRef = useRef<HTMLDivElement>(null);
 
-  // Refresh the install status every time the menu opens so a CLI installed
-  // mid-session shows up without an app restart.
+  // Prefetch once per app run as soon as the composer mounts — warms the
+  // cache before the user's first click so the menu opens populated.
+  useEffect(() => {
+    if (agentStatusCache) return;
+    return fetchAgentStatuses((h, a) => {
+      setHarnesses(h);
+      setAcpAgents(a);
+    });
+  }, []);
+
+  // Refresh the statuses every time the menu opens so a CLI installed
+  // mid-session shows up without an app restart. The popup renders from
+  // cached state immediately; this only updates it.
   useEffect(() => {
     if (!open) return;
-    let stale = false;
-    void listHarnesses().then((list) => {
-      if (!stale && list) setHarnesses(list);
+    return fetchAgentStatuses((h, a) => {
+      setHarnesses(h);
+      setAcpAgents(a);
     });
-    void listAcpAgents().then((list) => {
-      if (!stale && list) setAcpAgents(list);
-    });
-    return () => {
-      stale = true;
-    };
   }, [open]);
 
   // Close on outside pointer.
@@ -85,8 +135,11 @@ export function AgentMenu({ agent, onAgentChange, loading }: Props) {
         className={`agent-chip${selectedName ? " selected" : ""}`}
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        title="Select agent"
+        aria-haspopup="menu"
       >
+        {/* No title tooltip: the label already reads "Select agent", and the
+            native hover tooltip rendered as a stray white box that looked
+            like a second ghost button under the cursor. */}
         {selectedName ? (
           <>
             {loading ? (

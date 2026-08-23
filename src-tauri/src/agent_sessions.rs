@@ -10,16 +10,25 @@
 //!   --verbose --include-partial-messages`. Each turn is a JSON line on
 //!   stdin; token deltas arrive via `stream_event` wrappers and the turn
 //!   closes with a `result` event carrying usage + cost.
-//! - **kimi_code / opencode** — one process per turn:
+//! - **opencode** — one persistent server per chat:
+//!   `opencode serve --hostname 127.0.0.1 --port <free>` driven over its
+//!   HTTP API. A long-lived SSE subscription on `/event` streams text /
+//!   reasoning / tool parts live (same `<tool>` marker encoding as the
+//!   other CLIs); each turn POSTs `/session/<id>/message`, whose response
+//!   resolves exactly when the turn completes and carries usage + cost.
+//!   The server boots once per chat instead of once per turn, so warm
+//!   turns stream immediately — no per-message cold start, matching the
+//!   claude_code UX.
+//! - **kimi_code** — one process per turn:
 //!   `kimi -p <prompt> --output-format stream-json [-m model] [--session id]`
-//!   `opencode run <prompt> --format json [-m provider/model] [-s id]`
 //!   The CLI's own session id (from the first turn's output) is passed back
 //!   on later turns so the conversation continues; process exit closes the
 //!   turn. The id is kept in memory AND persisted to app_settings
 //!   (`agent.cli_session_id.<harness>.<sid>`), so multi-turn context survives
 //!   cancels (which keep the entry, only killing the process tree) and app
-//!   restarts. claude_code captures its `session_id` from result events the
-//!   same way and passes `--resume` when the persistent process is respawned.
+//!   restarts. claude_code captures its `session_id` from result events and
+//!   passes `--resume` on respawn; opencode persists its server-side session
+//!   id and POSTs to it again after a respawn.
 //!
 //! Tool calls are encoded as `<tool>{json}</tool>` markers inline in the
 //! token stream — the exact format MessageBubble / DiffCard and the history
@@ -35,7 +44,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -88,6 +97,24 @@ struct AgentChild {
     /// ACP: id of the in-flight `session/request`, for a best-effort
     /// `request/cancel` notification before the process tree is killed.
     acp_request_id: Arc<Mutex<Option<u64>>>,
+    // ---- OpenCode persistent server (`opencode serve`) state ----
+    /// Base URL of this chat's server ("http://127.0.0.1:<port>"). Some only
+    /// for opencode sessions; cleared whenever the child is killed so the
+    /// next send respawns instead of POSTing into a dead server.
+    oc_base_url: Option<String>,
+    /// Accumulated reply text, shared between the SSE reader thread (which
+    /// appends streamed suffixes) and the per-turn thread that calls
+    /// finish_turn (which clears it — see finish_turn).
+    oc_full: Arc<Mutex<String>>,
+    /// Whether a `<think>` block is currently open in oc_full. The reader
+    /// toggles it on reasoning/text transitions; the turn thread force-closes
+    /// a dangling block at turn end so it can't render open forever.
+    oc_in_think: Arc<Mutex<bool>>,
+    /// Millis epoch of the last SSE event, updated by the reader. The turn
+    /// thread waits for a quiet gap before finish_turn so the final snapshot
+    /// events always land inside the persisted reply (the POST resolves when
+    /// the turn completes, which can race its last SSE flush).
+    oc_last_event_ms: Arc<AtomicU64>,
 }
 
 impl AgentSessionManager {
@@ -99,6 +126,10 @@ impl AgentSessionManager {
 
     /// Send one user turn. The harness id comes from the chat session's
     /// `agent` field ("harness:<id>"), passed by the command layer.
+    /// `attach_prompt` is the CLI-facing appendix built by
+    /// `prepare_agent_attachments` (attachment file paths + extracted text) —
+    /// appended to what the CLI sees but NOT part of the persisted user
+    /// message, which keeps only the compact display markers.
     /// `connectors` is the command layer's snapshot of connected connectors
     /// (tokens already refreshed), merged into the spawn's MCP config.
     pub fn send(
@@ -107,13 +138,16 @@ impl AgentSessionManager {
         db: &DbState,
         chat_session_id: &str,
         content: &str,
+        attach_prompt: &str,
         harness: &str,
         model: &str,
         cwd: Option<&str>,
         project_id: Option<&str>,
         connectors: &[crate::connectors::HarnessMcpServer],
     ) -> Result<(), String> {
-        let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
+        // Poison-recoverable: a panic in a prior send must not wedge every
+        // future send behind a permanently-poisoned lock.
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         let entry = sessions
             .entry(chat_session_id.to_string())
             .or_insert_with(|| {
@@ -137,6 +171,10 @@ impl AgentSessionManager {
                     stdin: Arc::new(Mutex::new(None)),
                     acp_pending: Arc::new(Mutex::new(None)),
                     acp_request_id: Arc::new(Mutex::new(None)),
+                    oc_base_url: None,
+                    oc_full: Arc::new(Mutex::new(String::new())),
+                    oc_in_think: Arc::new(Mutex::new(false)),
+                    oc_last_event_ms: Arc::new(AtomicU64::new(0)),
                 }
             });
         // Harness switch on an existing chat: kill the old CLI's process and
@@ -173,15 +211,22 @@ impl AgentSessionManager {
         // user set one, it goes first, separated from their message by a blank
         // line. The original content is persisted to the DB without the prefix
         // (the system prompt is separate config, not part of the message).
+        // The attachment appendix goes LAST — after the persona and the typed
+        // text — so file paths/text read as an addendum to the user's words.
         let effective = {
             let conn = db.0.lock();
             let custom: Option<String> =
                 crate::db::get_setting(&conn, "assistant.systemPrompt").ok().flatten();
-            match custom {
+            let base = match custom {
                 Some(sp) if !sp.trim().is_empty() => {
                     format!("{sp}\n\n---\n\n{content}")
                 }
                 _ => content.to_string(),
+            };
+            if attach_prompt.is_empty() {
+                base
+            } else {
+                format!("{base}{attach_prompt}")
             }
         };
 
@@ -196,7 +241,7 @@ impl AgentSessionManager {
         match harness {
             "claude_code" => send_claude_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, connectors),
             "kimi_code" => spawn_per_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, PerTurn::Kimi, connectors),
-            "opencode" => spawn_per_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, PerTurn::OpenCode, connectors),
+            "opencode" => send_opencode_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, connectors),
             s if s.starts_with("acp:") => {
                 send_acp_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, &s[4..])
             }
@@ -380,6 +425,148 @@ fn persist_cli_session_id(
         let conn = db.0.lock();
         let _ = crate::db::set_setting(&conn, &cli_session_key(harness, sid), &id);
     }
+}
+
+// ---------------------------------------------------------------- attachments
+
+/// Turn composer attachments into a prompt appendix for harness turns.
+///
+/// Unlike the built-in chat (which sends images as vision content parts over
+/// HTTP), CLI harnesses receive plain text on stdin — so binary attachments
+/// are materialized to disk under `<artifacts>/chat-attachments/<session>/`
+/// and referenced by absolute path: the harness's own file-reading tools open
+/// them natively, images included (claude/kimi/opencode Read all handle png/
+/// jpg/pdf). The caller folds the extracted document text into the persisted
+/// message itself (via `chat::commands::process_attachments`), so this
+/// appendix stays tiny — just the paths — and never duplicates it.
+///
+/// Returns the appendix to append to the turn's prompt — empty when there is
+/// nothing usable. Plain-text attachments need no disk round-trip (their
+/// contents ride along in the message body like any other provider).
+pub(crate) fn prepare_agent_attachments(
+    app: &AppHandle,
+    chat_session_id: &str,
+    attachments: &[crate::types::ChatAttachmentInput],
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let millis = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    for (idx, a) in attachments.iter().enumerate() {
+        // Only binary kinds hit the disk; "text" is already inline upstream.
+        if !matches!(a.kind.as_str(), "image" | "doc") {
+            continue;
+        }
+        let Some(bytes) = a.data.as_deref().and_then(decode_attachment_b64) else {
+            continue;
+        };
+        match write_agent_attachment_file(app, chat_session_id, &a.name, idx, millis, &bytes) {
+            Some(path) => {
+                let desc = match a.kind.as_str() {
+                    "image" => format!(
+                        "image ({}); view it with your file/image reading tool",
+                        a.media_type.clone().unwrap_or_else(|| "image".into())
+                    ),
+                    _ => format!(
+                        "original {} file — the message above carries its extracted text; \
+                         read this copy directly for figures/layout or anything the \
+                         extraction missed",
+                        a.format.clone().unwrap_or_else(|| "document".into())
+                    ),
+                };
+                lines.push(format!("- `{}` — {desc}", path.display()));
+            }
+            // Disk write failed — say so instead of silently dropping.
+            None => lines.push(format!(
+                "- {} — could not be saved to disk for this turn.",
+                a.name
+            )),
+        }
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    let count = lines.len();
+    format!(
+        "\n\n---\n\n## Attached files\nThe user attached file(s) with this message:\n{}\nRead every attached file above before answering.",
+        lines.join("\n")
+    )
+}
+
+/// Base64-decode an attachment payload (no `data:` prefix), tolerating junk.
+fn decode_attachment_b64(data: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(data).ok()
+}
+
+/// Sanitize an attachment filename for safe use inside the attachments dir:
+/// separators and control/odd characters become `_`, hidden-dot stems are
+/// flattened, length is capped with the extension preserved. A name made of
+/// nothing safe collapses to `file`.
+fn sanitize_attachment_name(name: &str) -> String {
+    const MAX_STEM: usize = 60;
+    let stem_ext = name.rsplit_once('.');
+    let sanitize_part =
+        |s: &str| -> String {
+            let mapped: String = s
+                .chars()
+                .map(|c| {
+                    if c.is_alphanumeric() || matches!(c, '-' | '_') {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            // Collapse runs of separators so "my report (final)" reads
+            // my_report_final instead of my_report__final_.
+            let mut collapsed = String::with_capacity(mapped.len());
+            for c in mapped.chars() {
+                if c == '_' && collapsed.ends_with('_') {
+                    continue;
+                }
+                collapsed.push(c);
+            }
+            collapsed.trim_matches('_').to_string()
+        };
+    let (stem, ext) = match stem_ext {
+        Some((stem, ext)) => (sanitize_part(stem), Some(sanitize_part(ext))),
+        None => (sanitize_part(name), None),
+    };
+    let mut stem = stem.trim_matches('.').to_string();
+    if stem.is_empty() {
+        stem = "file".into();
+    }
+    if stem.chars().count() > MAX_STEM {
+        stem = stem.chars().take(MAX_STEM).collect();
+    }
+    match ext.filter(|e| !e.is_empty()) {
+        Some(ext) => format!("{stem}.{ext}"),
+        None => stem,
+    }
+}
+
+/// Write one attachment's bytes under
+/// `<artifacts>/chat-attachments/<session>/<millis>_<idx>_<name>` — unique
+/// per file within a turn (idx) and across turns (millis), so re-sending the
+/// same filename never clobbers an earlier copy the CLI may still reference.
+/// Returns the absolute path on success.
+fn write_agent_attachment_file(
+    app: &AppHandle,
+    chat_session_id: &str,
+    name: &str,
+    idx: usize,
+    millis: u128,
+    bytes: &[u8],
+) -> Option<std::path::PathBuf> {
+    let dir = crate::chat::dispatch::artifacts_dir(app)
+        .join("chat-attachments")
+        .join(sanitize_attachment_name(chat_session_id));
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{millis}_{idx:02}_{}", sanitize_attachment_name(name)));
+    std::fs::write(&path, bytes).ok()?;
+    Some(path)
 }
 
 // ---------------------------------------------------------------- claude_code
@@ -1744,7 +1931,9 @@ fn read_claude_stream(
 
 // ------------------------------------------------------ per-turn CLIs (kimi/opencode)
 
-/// Which per-turn CLI a spawn targets.
+/// Which per-turn CLI a spawn targets. OpenCode normally runs as the
+/// persistent server (see send_opencode_turn); `PerTurn::OpenCode` survives
+/// only as the degraded fallback when `opencode serve` cannot be started.
 enum PerTurn {
     Kimi,
     OpenCode,
@@ -1878,20 +2067,17 @@ fn spawn_per_turn(
     entry.turn_in_flight.store(true, Ordering::SeqCst);
     entry.child = Some(child);
 
-    // Emit a "starting" status so the UI shows immediate activity.
-    // OpenCode/Kimi have a 60-90s cold start (config load, provider auth,
-    // session creation) before the first JSON event arrives — without this
-    // the user sees a stuck spinner and assumes the harness is broken.
+    // Emit a "starting" status so the UI shows immediate activity. Kimi only:
+    // OpenCode runs as the persistent server (no per-turn notice), and its
+    // degraded fallback shares this spawn path — a flash there read as noise.
     // Cleared by the first real `chat:token` event (frontend onToken clears
     // chatStatus for the session) or by `chat:done`/`chat:error`.
-    let harness_name = match kind {
-        PerTurn::Kimi => "Kimi",
-        PerTurn::OpenCode => "OpenCode",
-    };
-    let _ = app.emit(
-        "chat:status",
-        json!({ "chatSessionId": sid, "reason": "harness_starting", "message": format!("{harness_name} is starting up…") }),
-    );
+    if matches!(kind, PerTurn::Kimi) {
+        let _ = app.emit(
+            "chat:status",
+            json!({ "chatSessionId": sid, "reason": "harness_starting", "message": "Kimi is starting up…" }),
+        );
+    }
 
     // Fresh per-turn cancel flag: a reader thread from a cancelled turn must
     // keep seeing `true` even after the next send replaces the entry's flag.
@@ -1939,8 +2125,10 @@ fn read_per_turn_stream(
     let started_at = crate::db::now_ts();
     // OpenCode buffers deltas internally in `run` mode: each "text" event
     // carries the FULL snapshot of its part so far, not a delta. Track the
-    // last snapshot so only the new suffix is emitted/persisted.
+    // last snapshots so only the new suffix is emitted/persisted.
     let mut last_text = String::new();
+    let mut last_reasoning = String::new();
+    let mut in_think = false;
     let mut input: Option<i64> = None;
     let mut output: Option<i64> = None;
     let mut cost: Option<f64> = None;
@@ -1967,7 +2155,7 @@ fn read_per_turn_stream(
         if is_kimi {
             handle_kimi_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut tools);
         } else {
-            handle_opencode_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut cost, &mut last_text, &mut tools);
+            handle_opencode_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut cost, &mut last_text, &mut last_reasoning, &mut in_think, &mut tools);
         }
     }
     // Process exit closes the turn. Persist any captured CLI session id so
@@ -1980,6 +2168,779 @@ fn read_per_turn_stream(
         full.clear();
     } else {
         finish_turn(app, db, sid, &mut full, input, output, cost, &mut watches, started_at);
+    }
+}
+
+// ------------------------------------------------- persistent OpenCode server
+
+/// Send one user turn to this chat's persistent `opencode serve` process.
+///
+/// Unlike the per-turn `opencode run` spawn — which paid a CLI cold start on
+/// EVERY message (the "OpenCode is starting up…" notice each time) — the
+/// server boots once per chat and stays up: turns POST to its HTTP API while
+/// a long-lived SSE subscription streams text/reasoning/tool parts live.
+/// Warm turns start streaming immediately, matching claude_code's UX. The
+/// opencode session id lives server-side, so context survives respawns
+/// (cancel, model change, app restart) exactly like the old `-s <id>` resume.
+fn send_opencode_turn(
+    app: &AppHandle,
+    db: &DbState,
+    sid: &str,
+    content: &str,
+    entry: &mut AgentChild,
+    cwd: Option<&str>,
+    project_id: Option<&str>,
+    connectors: &[crate::connectors::HarnessMcpServer],
+) -> Result<(), String> {
+    // Reuse a healthy server; respawn a dead one. The persisted opencode
+    // session id keeps the conversation continuous across respawns.
+    let alive = entry
+        .oc_base_url
+        .as_deref()
+        .map(opencode_server_alive)
+        .unwrap_or(false);
+    let mut fell_back = false;
+    if entry.child.is_none() || !alive {
+        if let Some(mut old) = entry.child.take() {
+            kill_child_tree(&mut old);
+        }
+        entry.oc_base_url = None;
+        // No cold-start notice on purpose: the persistent server boots in
+        // ~1s and the first token lands right after; a status flash on every
+        // respawn read as noise.
+        match spawn_opencode_server(
+            app,
+            db,
+            sid,
+            cwd,
+            project_id,
+            connectors,
+            Arc::clone(&entry.cli_session_id),
+            Arc::clone(&entry.oc_full),
+            Arc::clone(&entry.oc_in_think),
+            Arc::clone(&entry.oc_last_event_ms),
+        ) {
+            Ok((child, base_url)) => {
+                entry.child = Some(child);
+                entry.oc_base_url = Some(base_url);
+            }
+            Err(e) => {
+                // Degraded mode: legacy one-shot `opencode run` per turn.
+                eprintln!("[agent] opencode server unavailable ({e}); falling back to per-turn run");
+                fell_back = true;
+            }
+        }
+    }
+    if fell_back {
+        return spawn_per_turn(app, db, sid, content, entry, cwd, project_id, PerTurn::OpenCode, connectors);
+    }
+    let base_url = entry
+        .oc_base_url
+        .clone()
+        .ok_or_else(|| "opencode server url missing".to_string())?;
+
+    // Resolve or create the server-side session id INSIDE the turn thread —
+    // it (and every other opencode HTTP call) must never run inline here:
+    // this function executes on the tokio runtime (async command), where a
+    // nested block_on panics and would poison the sessions lock.
+    let model_body = split_opencode_model(&entry.model);
+
+    // Set turn_in_flight BEFORE spawning the turn thread (mirrors
+    // send_claude_turn): the thread may observe completion before send returns.
+    entry.turn_in_flight.store(true, Ordering::SeqCst);
+    // Fresh per-turn cancel flag (same contract as every other path: a
+    // cancelled turn's thread must keep seeing `true` even after the next
+    // send replaces the entry's flag).
+    let cancelled = Arc::new(AtomicBool::new(false));
+    entry.cancelled = Arc::clone(&cancelled);
+
+    let app2 = app.clone();
+    let db2 = DbState(Arc::clone(&db.0));
+    let sid2 = sid.to_string();
+    let content2 = content.to_string();
+    let base2 = base_url.clone();
+    let session_cell = Arc::clone(&entry.cli_session_id);
+    let in_flight2 = Arc::clone(&entry.turn_in_flight);
+    let full_cell = Arc::clone(&entry.oc_full);
+    let think_cell = Arc::clone(&entry.oc_in_think);
+    let quiet_cell = Arc::clone(&entry.oc_last_event_ms);
+    let cancelled2 = Arc::clone(&cancelled);
+    let watch_dirs = turn_watch_dirs(cwd, &db.0);
+    let started_at = crate::db::now_ts();
+    std::thread::spawn(move || {
+        // Live TTFT / tok/s for this turn; finish_turn unregisters, the
+        // guard's drop is the backstop.
+        let _perf =
+            crate::chat::turn_perf::register(&sid2, crate::chat::turn_perf::TurnPerf::new_headless(&sid2));
+        let mut watches: Vec<DirWatch> = watch_dirs.into_iter().map(DirWatch::new).collect();
+
+        // Resolve or create the server-side session id (resume across
+        // restarts). Plain thread → block_on inside the HTTP call is legal.
+        let oc_sid2 = match session_cell.lock().ok().and_then(|g| g.clone()) {
+            Some(id) => id,
+            None => match opencode_create_session(&base2) {
+                Ok(id) => {
+                    if let Ok(mut g) = session_cell.lock() {
+                        *g = Some(id.clone());
+                    }
+                    persist_cli_session_id(&db2, "opencode", &sid2, &session_cell);
+                    id
+                }
+                Err(e) => {
+                    in_flight2.store(false, Ordering::SeqCst);
+                    emit_error(Some(&app2), &sid2, &format!("OpenCode session create failed: {e}"));
+                    return;
+                }
+            },
+        };
+
+        match opencode_post_message(&base2, &oc_sid2, model_body, &content2) {
+            Ok((input, output, cost)) => {
+                // The POST resolves when the turn completes but can race its
+                // last SSE flush — wait for a reader-quiet gap so the final
+                // text snapshot is inside `full` before persisting.
+                wait_for_reader_quiet(&quiet_cell, Duration::from_millis(2500));
+                close_opencode_think(Some(&app2), &sid2, &think_cell, &full_cell);
+                let mut full = full_cell.lock().unwrap_or_else(|e| e.into_inner());
+                finish_turn(
+                    Some(&app2),
+                    &db2,
+                    &sid2,
+                    &mut full,
+                    input,
+                    output,
+                    cost,
+                    &mut watches,
+                    started_at,
+                );
+            }
+            Err(e) => {
+                // cancel() kills the server → the POST fails too; only the
+                // cancel path may have reported (it already emitted done).
+                if !cancelled2.load(Ordering::SeqCst) {
+                    close_opencode_think(Some(&app2), &sid2, &think_cell, &full_cell);
+                    {
+                        // Discard the partial reply, like claude's error path.
+                        let mut full = full_cell.lock().unwrap_or_else(|e| e.into_inner());
+                        full.clear();
+                    }
+                    emit_error(Some(&app2), &sid2, &format!("OpenCode turn failed: {e}"));
+                } else {
+                    // Cancelled: refresh nothing — each turn snapshots its own
+                    // watch baselines, so dropping these is correct.
+                    drop(watches);
+                }
+            }
+        }
+        in_flight2.store(false, Ordering::SeqCst);
+    });
+    Ok(())
+}
+
+/// Force-close a dangling `<think>` block left open by an interrupted
+/// reasoning stream so it can't render open forever (mirrors read_claude_stream).
+fn close_opencode_think(
+    app: Option<&AppHandle>,
+    sid: &str,
+    think_cell: &Arc<Mutex<bool>>,
+    full_cell: &Arc<Mutex<String>>,
+) {
+    let was_open = {
+        let mut t = think_cell.lock().unwrap_or_else(|e| e.into_inner());
+        let was = *t;
+        *t = false;
+        was
+    };
+    if was_open {
+        let mut full = full_cell.lock().unwrap_or_else(|e| e.into_inner());
+        full.push_str("</think>");
+        emit_token(app, sid, "</think>");
+    }
+}
+
+/// Spawn one `opencode serve` child for this chat, wait for its HTTP surface
+/// to answer, then start the long-lived SSE reader. Returns child + base URL.
+#[allow(clippy::too_many_arguments)]
+fn spawn_opencode_server(
+    app: &AppHandle,
+    db: &DbState,
+    sid: &str,
+    cwd: Option<&str>,
+    project_id: Option<&str>,
+    connectors: &[crate::connectors::HarnessMcpServer],
+    session_cell: Arc<Mutex<Option<String>>>,
+    full_cell: Arc<Mutex<String>>,
+    think_cell: Arc<Mutex<bool>>,
+    last_event_ms: Arc<AtomicU64>,
+) -> Result<(Child, String), String> {
+    let port = opencode_free_port().ok_or("no free TCP port for opencode server")?;
+    let base_url = format!("http://127.0.0.1:{port}");
+
+    // Same MCP registration contract as every other opencode spawn: point
+    // OPENCODE_CONFIG at the Conduit-owned bundle config (browser + tools +
+    // connectors). Failure degrades to the legacy browser-only config.
+    let bundle = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd), connectors, None, None);
+    let legacy_cfg = if bundle.is_none() {
+        resolve_opencode_config(app, project_id)
+    } else {
+        None
+    };
+
+    let mut cmd = Command::new("opencode");
+    cmd.args(["serve", "--hostname", "127.0.0.1", "--port", &port.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(cfg) = bundle
+        .as_ref()
+        .map(|b| b.opencode_config.clone())
+        .filter(|p| p.exists())
+        .or(legacy_cfg)
+    {
+        cmd.env("OPENCODE_CONFIG", cfg);
+    }
+    // Serve from the workspace dir so relative tool paths land in the project.
+    let watch_dirs = turn_watch_dirs(cwd, &db.0);
+    if let Some(dir) = watch_dirs.first() {
+        cmd.current_dir(dir);
+    }
+    no_console_window(&mut cmd);
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn opencode serve: {e}"))?;
+
+    if !opencode_wait_ready(&base_url, Duration::from_secs(20)) {
+        let mut c = child;
+        kill_child_tree(&mut c);
+        return Err(format!("opencode server not ready at {base_url}"));
+    }
+
+    // Long-lived SSE subscription covering EVERY turn this server handles.
+    let app2 = app.clone();
+    let sid2 = sid.to_string();
+    std::thread::Builder::new()
+        .name(format!("oc-sse-{port}"))
+        .spawn(move || {
+            read_opencode_server_events(
+                Some(&app2),
+                &sid2,
+                format!("http://127.0.0.1:{port}"),
+                session_cell,
+                full_cell,
+                think_cell,
+                last_event_ms,
+            );
+        })
+        .map_err(|e| format!("failed to spawn opencode SSE reader: {e}"))?;
+
+    Ok((child, base_url))
+}
+
+/// Cheap liveness probe: is anything accepting TCP on the server's port?
+fn opencode_server_alive(base_url: &str) -> bool {
+    match base_url.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) {
+        Some(port) => std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            Duration::from_millis(250),
+        )
+        .is_ok(),
+        None => false,
+    }
+}
+
+/// Grab an ephemeral free port (bind :0, read, release). Small TOCTOU window
+/// before the server binds — acceptable on loopback.
+fn opencode_free_port() -> Option<u16> {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .ok()?
+        .local_addr()
+        .ok()
+        .map(|a| a.port())
+}
+
+/// Poll the server's TCP listener until it accepts (or the budget runs out),
+/// then give the HTTP router a short grace period. Pure socket probe — no
+/// tokio, safe to call from the async-command thread.
+fn opencode_wait_ready(base_url: &str, budget: Duration) -> bool {
+    let Some(port) = base_url.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) else {
+        return false;
+    };
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let deadline = std::time::Instant::now() + budget;
+    while std::time::Instant::now() < deadline {
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok() {
+            std::thread::sleep(Duration::from_millis(250));
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    false
+}
+
+/// Create a fresh session on the server; returns its id (`ses_…`).
+fn opencode_create_session(base_url: &str) -> Result<String, String> {
+    tauri::async_runtime::block_on(async {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| format!("http client: {e}"))?;
+        let resp = client
+            .post(format!("{base_url}/session"))
+            .json(&json!({}))
+            .send()
+            .await
+            .map_err(|e| format!("session create failed: {e}"))?;
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!("session create HTTP {status}: {}", truncate_output(&body)));
+        }
+        let v: Value = serde_json::from_str(&body).map_err(|e| format!("session parse: {e}"))?;
+        v.get("id")
+            .and_then(|i| i.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| "session create returned no id".to_string())
+    })
+}
+
+/// Split Conduit's "provider/model" id into OpenCode's message-body shape.
+/// Empty/unparseable models stay None → server uses its configured default.
+fn split_opencode_model(model: &str) -> Option<Value> {
+    let (provider, name) = model.split_once('/')?;
+    if provider.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some(json!({ "providerID": provider, "modelID": name }))
+}
+
+/// POST one turn. Resolves when the TURN completes (the endpoint blocks until
+/// then) and carries final usage + cost; streaming arrives via SSE meanwhile.
+fn opencode_post_message(
+    base_url: &str,
+    oc_sid: &str,
+    model: Option<Value>,
+    content: &str,
+) -> Result<(Option<i64>, Option<i64>, Option<f64>), String> {
+    tauri::async_runtime::block_on(async {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            // Turns can legitimately run long; only absurd hangs should fail.
+            .timeout(Duration::from_secs(30 * 60))
+            .build()
+            .map_err(|e| format!("http client: {e}"))?;
+        let mut body = json!({ "parts": [ { "type": "text", "text": content } ] });
+        if let Some(m) = model {
+            body["model"] = m;
+        }
+        let resp = client
+            .post(format!("{base_url}/session/{oc_sid}/message"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("message post failed: {e}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!("HTTP {status}: {}", truncate_output(&text)));
+        }
+        let v: Value =
+            serde_json::from_str(&text).map_err(|e| format!("message response parse: {e}"))?;
+        let info = v.get("info").cloned().unwrap_or(json!({}));
+        let input = info.pointer("/tokens/input").and_then(|t| t.as_i64());
+        let output = info.pointer("/tokens/output").and_then(|t| t.as_i64());
+        let cost = info.get("cost").and_then(|c| c.as_f64());
+        Ok((input, output, cost))
+    })
+}
+
+/// Block until the SSE reader has been idle ~150ms (bounded), so the turn
+/// thread never persists before the reader flushed its final snapshots.
+fn wait_for_reader_quiet(last_event_ms: &AtomicU64, max_wait: Duration) {
+    let deadline = std::time::Instant::now() + max_wait;
+    while std::time::Instant::now() < deadline {
+        let last = last_event_ms.load(Ordering::Relaxed);
+        let now = now_ms_u64();
+        if last != 0 && now.saturating_sub(last) >= 150 {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn now_ms_u64() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Long-lived SSE consumer for one `opencode serve` child: maps
+/// `message.part.updated` events onto the SAME handler the per-turn JSON
+/// stream used, so tokens/tool markers/thinking blocks render identically.
+/// Exits silently when the connection drops — turn errors are reported by
+/// the turn thread via its failed POST.
+fn read_opencode_server_events(
+    app: Option<&AppHandle>,
+    sid: &str,
+    base_url: String,
+    session_cell: Arc<Mutex<Option<String>>>,
+    full_cell: Arc<Mutex<String>>,
+    think_cell: Arc<Mutex<bool>>,
+    last_event_ms: Arc<AtomicU64>,
+) {
+    use futures_util::StreamExt;
+
+    let _ = tauri::async_runtime::block_on(async move {
+        let client = match reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            // No overall timeout: SSE lives as long as the server does.
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let resp = match client
+            .get(format!("{base_url}/event"))
+            .header("accept", "text/event-stream")
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r,
+            _ => return,
+        };
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+        let mut last_text = String::new();
+        let mut last_reasoning = String::new();
+        let mut tools = ToolTracker::new();
+        // part id → 1 = live-call card sent, 2 = finished/self-contained.
+        let mut tool_states: HashMap<String, u8> = HashMap::new();
+        // message id → role ("user"/"assistant"): the server streams part
+        // updates for BOTH messages, and only the assistant's are the reply.
+        let mut roles: HashMap<String, String> = HashMap::new();
+        // part id → kind ("text"/"reasoning"/"tool"): token-level
+        // `message.part.delta` events only name the part id + field, so this
+        // map routes each delta onto the right stream.
+        let mut part_kinds: HashMap<String, String> = HashMap::new();
+        // The part id each snapshot baseline (last_text / last_reasoning)
+        // currently tracks. Baselines are PER PART — a turn can hold several
+        // text parts (text → tool → text), and carrying the flat baseline
+        // across parts would duplicate the new part's final snapshot.
+        let mut cur_text_part = String::new();
+        let mut cur_reasoning_part = String::new();
+        while let Some(chunk) = stream.next().await {
+            let bytes = match chunk {
+                Ok(b) => b,
+                Err(_) => break,
+            };
+            buf.push_str(&String::from_utf8_lossy(&bytes));
+            // Guard against a pathological flood without newlines.
+            if buf.len() > 4 * 1024 * 1024 {
+                buf.clear();
+                continue;
+            }
+            while let Some(pos) = buf.find('\n') {
+                let line: String = buf.drain(..=pos).collect();
+                let line = line.trim_end_matches(['\n', '\r']);
+                if let Some(data) = line.strip_prefix("data:") {
+                    handle_opencode_sse_data(
+                        app,
+                        sid,
+                        data.trim(),
+                        &session_cell,
+                        &full_cell,
+                        &think_cell,
+                        &last_event_ms,
+                        &mut last_text,
+                        &mut last_reasoning,
+                        &mut tools,
+                        &mut tool_states,
+                        &mut roles,
+                        &mut part_kinds,
+                        &mut cur_text_part,
+                        &mut cur_reasoning_part,
+                    );
+                }
+            }
+        }
+    });
+}
+
+/// Parse one SSE `data:` payload and route it onto the shared buffers.
+#[allow(clippy::too_many_arguments)]
+fn handle_opencode_sse_data(
+    app: Option<&AppHandle>,
+    sid: &str,
+    data: &str,
+    session_cell: &Arc<Mutex<Option<String>>>,
+    full_cell: &Arc<Mutex<String>>,
+    think_cell: &Arc<Mutex<bool>>,
+    last_event_ms: &AtomicU64,
+    last_text: &mut String,
+    last_reasoning: &mut String,
+    tools: &mut ToolTracker,
+    tool_states: &mut HashMap<String, u8>,
+    roles: &mut HashMap<String, String>,
+    part_kinds: &mut HashMap<String, String>,
+    cur_text_part: &mut String,
+    cur_reasoning_part: &mut String,
+) {
+    let Ok(v) = serde_json::from_str::<Value>(data) else {
+        return;
+    };
+    last_event_ms.store(now_ms_u64(), Ordering::Relaxed);
+
+    // message.updated announces each message's id + role BEFORE its parts
+    // stream — remember it so user-message parts can be filtered below.
+    if v.get("type").and_then(|t| t.as_str()) == Some("message.updated") {
+        if let (Some(id), Some(role)) = (
+            v.pointer("/properties/info/id").and_then(|s| s.as_str()),
+            v.pointer("/properties/info/role").and_then(|s| s.as_str()),
+        ) {
+            roles.insert(id.to_string(), role.to_string());
+        }
+        return;
+    }
+
+    // Token-level delta (verified shape):
+    // {"type":"message.part.delta","properties":{"sessionID","messageID",
+    //  "partID","field":"text","delta":" The"}} — a pure increment for one
+    // part. This is what makes warm turns stream live; `message.part.updated`
+    // only fires per completed segment as reconciliation.
+    if v.get("type").and_then(|t| t.as_str()) == Some("message.part.delta") {
+        // Session filter.
+        if let Some(ev_sid) = v.pointer("/properties/sessionID").and_then(|s| s.as_str()) {
+            let want = session_cell.lock().ok().and_then(|g| g.clone());
+            if let Some(want) = want {
+                if want != ev_sid {
+                    return;
+                }
+            }
+        }
+        // Role filter (user messages never stream deltas, but be safe).
+        if let Some(mid) = v.pointer("/properties/messageID").and_then(|m| m.as_str()) {
+            if roles.get(mid).map(|r| r != "assistant").unwrap_or(false) {
+                return;
+            }
+        }
+        let Some(delta) = v.pointer("/properties/delta").and_then(|d| d.as_str()) else {
+            return;
+        };
+        if delta.is_empty() {
+            return;
+        }
+        // Route by the part's known kind; fall back to the event's field.
+        let pid = v.pointer("/properties/partID").and_then(|p| p.as_str()).unwrap_or("");
+        let field = v.pointer("/properties/field").and_then(|f| f.as_str()).unwrap_or("text");
+        let kind = part_kinds
+            .get(pid)
+            .cloned()
+            .unwrap_or_else(|| field.to_string());
+        match kind.as_str() {
+            "reasoning" | "thinking" => {
+                // A new reasoning part restarts its snapshot baseline.
+                if pid != cur_reasoning_part.as_str() {
+                    *cur_reasoning_part = pid.to_string();
+                    last_reasoning.clear();
+                }
+                // Open a fresh thinking block if none is open.
+                let need_open = {
+                    let mut t = think_cell.lock().unwrap_or_else(|e| e.into_inner());
+                    if *t {
+                        false
+                    } else {
+                        *t = true;
+                        true
+                    }
+                };
+                if need_open {
+                    let mut full = full_cell.lock().unwrap_or_else(|e| e.into_inner());
+                    full.push_str("<think>");
+                    emit_token(app, sid, "<think>");
+                }
+                last_reasoning.push_str(delta);
+                let mut full = full_cell.lock().unwrap_or_else(|e| e.into_inner());
+                full.push_str(delta);
+                emit_token(app, sid, delta);
+            }
+            "text" => {
+                // A new text part restarts its snapshot baseline.
+                if pid != cur_text_part.as_str() {
+                    *cur_text_part = pid.to_string();
+                    last_text.clear();
+                }
+                // Text after reasoning closes the thinking block first.
+                let was_open = {
+                    let mut t = think_cell.lock().unwrap_or_else(|e| e.into_inner());
+                    let was = *t;
+                    *t = false;
+                    was
+                };
+                if was_open {
+                    last_reasoning.clear();
+                    let mut full = full_cell.lock().unwrap_or_else(|e| e.into_inner());
+                    full.push_str("</think>");
+                    emit_token(app, sid, "</think>");
+                }
+                // Keep the baseline in lockstep so the reconciling full
+                // snapshot at segment end computes an empty suffix.
+                last_text.push_str(delta);
+                let mut full = full_cell.lock().unwrap_or_else(|e| e.into_inner());
+                full.push_str(delta);
+                emit_token(app, sid, delta);
+            }
+            // Tool parts stream no text deltas worth rendering — cards are
+            // driven by the state machine on updated events.
+            _ => {}
+        }
+        return;
+    }
+
+    if v.get("type").and_then(|t| t.as_str()) != Some("message.part.updated") {
+        return;
+    }
+    // One serve process per chat session: ignore other sessions' traffic.
+    let want = session_cell.lock().ok().and_then(|g| g.clone());
+    if let (Some(want), Some(ev_sid)) = (
+        want,
+        v.pointer("/properties/sessionID").and_then(|s| s.as_str()),
+    ) {
+        if want != ev_sid {
+            return;
+        }
+    }
+    let Some(part) = v.pointer("/properties/part") else {
+        return;
+    };
+    // Only ASSISTANT parts are the reply. The server also streams part
+    // updates for the USER message (the prompt echo, incl. injected
+    // instructions) — without this filter they'd render at the top of every
+    // assistant bubble. Unknown ids default to rendering (lenient): observed
+    // ordering always delivers message.updated first.
+    if let Some(mid) = part.get("messageID").and_then(|m| m.as_str()) {
+        if roles.get(mid).map(|r| r != "assistant").unwrap_or(false) {
+            return;
+        }
+    }
+    match part.get("type").and_then(|t| t.as_str()) {
+        Some("text") | Some("reasoning") => {
+            let kind = part.get("type").and_then(|t| t.as_str()).unwrap_or("text");
+            // Remember this part's kind so its token deltas route here.
+            let pid = part.get("id").and_then(|p| p.as_str()).unwrap_or("");
+            part_kinds.insert(pid.to_string(), kind.to_string());
+            // Baselines are per part: a new part id restarts its baseline so
+            // the reconciling snapshot computes an empty suffix (deltas may
+            // have already streamed this part's content).
+            if kind == "text" {
+                if pid != cur_text_part.as_str() {
+                    *cur_text_part = pid.to_string();
+                    last_text.clear();
+                }
+            } else if pid != cur_reasoning_part.as_str() {
+                *cur_reasoning_part = pid.to_string();
+                last_reasoning.clear();
+            }
+            // Normalize onto the shape handle_opencode_event already parses
+            // (full snapshot of the part's text; suffix logic inside).
+            let event = json!({ "type": kind, "part": { "text": part.get("text") } });
+            let mut full = full_cell.lock().unwrap_or_else(|e| e.into_inner());
+            let mut in_think = think_cell.lock().unwrap_or_else(|e| e.into_inner());
+            let mut input: Option<i64> = None;
+            let mut output: Option<i64> = None;
+            let mut cost: Option<f64> = None;
+            handle_opencode_event(
+                app,
+                sid,
+                &event,
+                &mut full,
+                session_cell,
+                &mut input,
+                &mut output,
+                &mut cost,
+                last_text,
+                last_reasoning,
+                &mut in_think,
+                tools,
+            );
+        }
+        Some("tool") => {
+            // Deltas for tool parts are ignored — cards are state-machine driven.
+            if let Some(pid) = part.get("id").and_then(|p| p.as_str()) {
+                part_kinds.insert(pid.to_string(), "tool".to_string());
+            }
+            emit_opencode_tool(
+                app, sid, part, full_cell, think_cell, tools, tool_states,
+            );
+        }
+        // step-start/step-finish carry no renderable payload here — usage and
+        // cost come from the POST response — so they're intentionally ignored.
+        _ => {}
+    }
+}
+
+/// Handle one server tool part across its status transitions: pending/running
+/// → live `<tool>` card immediately; completed/error → attach the result.
+/// Parts that arrive already-finished use the self-contained call+output
+/// marker (identical to what the per-turn JSON stream emitted).
+fn emit_opencode_tool(
+    app: Option<&AppHandle>,
+    sid: &str,
+    part: &Value,
+    full_cell: &Arc<Mutex<String>>,
+    think_cell: &Arc<Mutex<bool>>,
+    tools: &mut ToolTracker,
+    tool_states: &mut HashMap<String, u8>,
+) {
+    let pid = match part.get("id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => format!("seq-{}", tools.seq),
+    };
+    let name = part.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
+    let state = part.get("state").cloned().unwrap_or(json!({}));
+    let status = state.get("status").and_then(|s| s.as_str()).unwrap_or("");
+    let inp = state.get("input").cloned().unwrap_or(json!({}));
+    let done = matches!(status, "completed" | "error");
+
+    // Plan-step progress flows through every update (dedup'd UI-side).
+    emit_todowrite_steps(app, sid, name, &inp);
+
+    let seen = tool_states.get(&pid).copied().unwrap_or(0);
+    if seen == 0 {
+        // A tool call ends any open thinking block (keeps markers outside it).
+        close_opencode_think(app, sid, think_cell, full_cell);
+        let value = tool_meta_generic(name, &inp);
+        let marker = if done {
+            let out = state.get("output").and_then(|o| o.as_str());
+            let err = state.get("error").and_then(|e| e.as_str());
+            tools.tool_use_with_output(name, value, out, err)
+        } else if name.eq_ignore_ascii_case("Task") || name.eq_ignore_ascii_case("task") {
+            let role = inp.get("subagent_type").and_then(|v| v.as_str()).unwrap_or("agent");
+            let task = inp.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let prompt = inp.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+            tools.subagent_use(name, value, app, sid, role, task, prompt)
+        } else {
+            tools.tool_use(name, vec![value])
+        };
+        {
+            let mut full = full_cell.lock().unwrap_or_else(|e| e.into_inner());
+            full.push_str(&marker);
+        }
+        emit_token(app, sid, &marker);
+        tool_states.insert(pid, if done { 2 } else { 1 });
+    } else if seen == 1 && done {
+        // Attach the completed output to the live card queued earlier.
+        let text = state
+            .get("output")
+            .and_then(|o| o.as_str())
+            .or_else(|| state.get("error").and_then(|e| e.as_str()))
+            .unwrap_or(if status == "error" { "tool failed" } else { "" });
+        if let Some(marker) = tools.tool_result(text, status == "error", app, sid) {
+            let mut full = full_cell.lock().unwrap_or_else(|e| e.into_inner());
+            full.push_str(&marker);
+            emit_token(app, sid, &marker);
+        }
+        tool_states.insert(pid, 2);
     }
 }
 
@@ -2067,7 +3028,30 @@ fn handle_kimi_event(
     }
 }
 
-/// OpenCode `--format json` events. (Shapes verified against `opencode run`.)
+/// Parse TodoWrite input and emit structured plan-step progress events so
+/// the frontend tracks individual task items (shared by the per-turn and
+/// persistent-server OpenCode paths).
+fn emit_todowrite_steps(app: Option<&AppHandle>, sid: &str, name: &str, inp: &Value) {
+    if !name.eq_ignore_ascii_case("TodoWrite") {
+        return;
+    }
+    if let Some(todos) = inp.get("todos").and_then(|v| v.as_array()) {
+        for todo in todos {
+            let content = todo.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let status = todo.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+            if !content.is_empty() {
+                if let Some(app_handle) = app {
+                    crate::chat::tasks::emit_plan_step_progress(
+                        app_handle, sid, content, status, None, None::<&str>,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// OpenCode `--format json` events. (Shapes verified against `opencode run`
+/// and the `opencode serve` SSE stream — both normalize onto these shapes.)
 fn handle_opencode_event(
     app: Option<&AppHandle>,
     sid: &str,
@@ -2078,6 +3062,8 @@ fn handle_opencode_event(
     output: &mut Option<i64>,
     cost: &mut Option<f64>,
     last_text: &mut String,
+    last_reasoning: &mut String,
+    in_think: &mut bool,
     tools: &mut ToolTracker,
 ) {
     match v.get("type").and_then(|t| t.as_str()) {
@@ -2089,6 +3075,15 @@ fn handle_opencode_event(
         // whole snapshot to `full` would duplicate it in the persisted
         // message.)
         Some("text") => {
+            // Text after reasoning closes the thinking block — same contract
+            // as claude's stream reader (an unclosed <think> would swallow
+            // the answer into the collapsible block).
+            if *in_think {
+                full.push_str("</think>");
+                emit_token(app, sid, "</think>");
+                *in_think = false;
+                last_reasoning.clear();
+            }
             if let Some(text) = v.pointer("/part/text").and_then(|t| t.as_str()) {
                 let suffix = text.strip_prefix(last_text.as_str()).unwrap_or(text);
                 if !suffix.is_empty() {
@@ -2099,33 +3094,35 @@ fn handle_opencode_event(
                 last_text.push_str(text);
             }
         }
+        // {"type":"reasoning","part":{"text":…}} — thinking part (server
+        // SSE). Same full-snapshot-suffix rule as text; wrapped in
+        // <think>…</think> so the frontend shows a live collapsible block.
+        Some("reasoning") => {
+            if let Some(text) = v.pointer("/part/text").and_then(|t| t.as_str()) {
+                if !*in_think {
+                    full.push_str("<think>");
+                    emit_token(app, sid, "<think>");
+                    *in_think = true;
+                    last_reasoning.clear();
+                }
+                let suffix = text.strip_prefix(last_reasoning.as_str()).unwrap_or(text);
+                if !suffix.is_empty() {
+                    full.push_str(suffix);
+                    emit_token(app, sid, suffix);
+                }
+                last_reasoning.clear();
+                last_reasoning.push_str(text);
+            }
+        }
         // {"type":"tool_use","part":{"tool":…,"state":{"input":…}}}
         Some("tool_use") => {
             let part = v.get("part").cloned().unwrap_or(json!({}));
             let name = part.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
             let inp = part.pointer("/state/input").cloned().unwrap_or(json!({}));
-            // Parse TodoWrite JSON to emit structured plan-step progress events.
-            // This lets the frontend track individual task items with status
-            // instead of seeing a generic "Updating task list" marker.
-            if name.eq_ignore_ascii_case("TodoWrite") {
-                if let Some(todos) = inp.get("todos").and_then(|v| v.as_array()) {
-                    for todo in todos {
-                        let content = todo.get("content")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let status = todo.get("status")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("pending");
-                        if !content.is_empty() {
-                            if let Some(app_handle) = app {
-                                crate::chat::tasks::emit_plan_step_progress(
-                                    app_handle, sid, content, status, None, None::<&str>,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+            // TodoWrite JSON emits structured plan-step progress so the
+            // frontend tracks individual task items instead of a generic
+            // "Updating task list" marker.
+            emit_todowrite_steps(app, sid, name, &inp);
             let value = tool_meta_generic(name, &inp);
             if name.eq_ignore_ascii_case("Task") || name.eq_ignore_ascii_case("task") {
                 // Subagent Task: extract role/task/prompt and emit a spawn event.
@@ -2191,6 +3188,10 @@ pub fn run_one_shot(
     harness: &str,
     model: &str,
     cwd: Option<&str>,
+    // Hard time limit for the turn. `None` waits forever (interactive use);
+    // scheduled automations always pass a bound so a hung CLI can't wedge
+    // the automation's overlap guards and silently kill its schedule.
+    max_duration: Option<Duration>,
 ) -> Result<(), String> {
     {
         let conn = db.lock();
@@ -2295,6 +3296,15 @@ pub fn run_one_shot(
     // Poll-wait WITHOUT holding the child lock across the wait: the app-exit
     // handler must be able to lock + kill this child while we block (M13) —
     // holding it would deadlock the exit path against the running turn.
+    //
+    // `max_duration` bounds the turn: a CLI that hangs (waiting on a stalled
+    // network pipe, a hidden interactive prompt, …) used to block this thread
+    // FOREVER, which kept the automation's overlap guards (RUNNING set + lock
+    // file) held forever — every later scheduled tick read as "already
+    // running" and the automation silently stopped firing until the app
+    // restarted. On expiry we kill the process tree; the blocking wait then
+    // unblocks, the reader hits EOF, and the caller finalizes with an error.
+    let deadline = max_duration.map(|d| std::time::Instant::now() + d);
     let wait = loop {
         {
             let mut guard = match child.lock() {
@@ -2311,6 +3321,14 @@ pub fn run_one_shot(
                 Ok(None) => {}
                 Err(e) => break Err(e),
             }
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                kill_child_tree(&mut guard);
+                let msg = format!(
+                    "turn exceeded its {}s time limit and was killed",
+                    max_duration.unwrap_or_default().as_secs()
+                );
+                break Err(std::io::Error::new(std::io::ErrorKind::TimedOut, msg));
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     };
@@ -2321,6 +3339,7 @@ pub fn run_one_shot(
     match wait {
         Ok(status) if status.success() => Ok(()),
         Ok(status) => Err(format!("{} exited with {status}", spec.program)),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Err(e.to_string()),
         Err(e) => Err(format!("failed to wait on {}: {e}", spec.program)),
     }
 }
@@ -2880,6 +3899,42 @@ fn no_console_window(cmd: &mut Command) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_attachment_name_blocks_traversal_and_weird_chars() {
+        // Path separators / traversal attempts collapse to safe components.
+        assert_eq!(sanitize_attachment_name("..\\..\\evil.png"), "evil.png");
+        // Traversal segments become inert text (".." stems collapse to the
+        // "file" fallback); whatever comes out must never contain separators.
+        let got = sanitize_attachment_name("../../etc/passwd");
+        assert_eq!(got, "file.etc_passwd");
+        assert!(!got.contains('/') && !got.contains('\\') && !got.starts_with('.'));
+        assert_eq!(sanitize_attachment_name("my report (final).pdf"), "my_report_final.pdf");
+        // Inner dots count as separators too ("Report v2.docx"-style names
+        // stay readable enough) — only the LAST dot's extension survives verbatim.
+        assert_eq!(sanitize_attachment_name("a.b.c.docx"), "a_b_c.docx");
+        // Hidden/dot-only names and empty stems fall back (ext still kept).
+        assert_eq!(sanitize_attachment_name(".gitignore"), "file.gitignore");
+        assert_eq!(sanitize_attachment_name("..."), "file");
+        assert_eq!(sanitize_attachment_name(""), "file");
+        // Long names keep the extension, cap the stem.
+        let long = format!("{}.pdf", "x".repeat(100));
+        let got = sanitize_attachment_name(&long);
+        assert_eq!(got.chars().count(), 60 + 4);
+        assert!(got.ends_with(".pdf"));
+    }
+
+    #[test]
+    fn decode_attachment_b64_rejects_junk() {
+        assert_eq!(
+            decode_attachment_b64("aGVsbG8="),
+            Some(b"hello".to_vec())
+        );
+        assert_eq!(decode_attachment_b64("not base64 !!!"), None);
+        assert_eq!(decode_attachment_b64(""), Some(Vec::new()));
+    }
+
     #[test]
     fn can_use_tool_response_shapes() {
         let input = json!({"file_path": "C:/x.txt", "content": "hi"});
@@ -2937,11 +3992,13 @@ mod tests {
         let cell = Arc::new(Mutex::new(None));
         let mut full = String::new();
         let mut last = String::new();
+        let mut last_reasoning = String::new();
+        let mut in_think = false;
         let (mut input, mut output, mut cost) = (None, None, None);
         let mut tools = ToolTracker::new();
         let ev = |t: &str| json!({ "type": "text", "part": { "text": t } });
         let mut feed = |v: &Value, full: &mut String, last: &mut String| {
-            handle_opencode_event(None, "s", v, full, &cell, &mut input, &mut output, &mut cost, last, &mut tools);
+            handle_opencode_event(None, "s", v, full, &cell, &mut input, &mut output, &mut cost, last, &mut last_reasoning, &mut in_think, &mut tools);
         };
         feed(&ev("Hello"), &mut full, &mut last);
         feed(&ev("Hello, world"), &mut full, &mut last);
@@ -2951,6 +4008,238 @@ mod tests {
         // A snapshot that doesn't extend the previous one is a new part.
         feed(&ev("Next part"), &mut full, &mut last);
         assert_eq!(full, "Hello, world!Next part");
+    }
+
+    #[test]
+    fn opencode_reasoning_wraps_in_think_and_text_closes_it() {
+        let cell = Arc::new(Mutex::new(None));
+        let mut full = String::new();
+        let (mut input, mut output, mut cost) = (None, None, None);
+        let mut last_text = String::new();
+        let mut last_reasoning = String::new();
+        let mut in_think = false;
+        let mut tools = ToolTracker::new();
+        let mut feed = |v: &Value,
+                        full: &mut String,
+                        last_text: &mut String,
+                        last_reasoning: &mut String,
+                        in_think: &mut bool| {
+            handle_opencode_event(None, "s", v, full, &cell, &mut input, &mut output, &mut cost, last_text, last_reasoning, in_think, &mut tools);
+        };
+        // Reasoning snapshots stream as suffixes inside one <think> block.
+        feed(&json!({ "type": "reasoning", "part": { "text": "Think" } }), &mut full, &mut last_text, &mut last_reasoning, &mut in_think);
+        assert!(in_think);
+        feed(&json!({ "type": "reasoning", "part": { "text": "Thinking…" } }), &mut full, &mut last_text, &mut last_reasoning, &mut in_think);
+        assert_eq!(full, "<think>Thinking…");
+        // The first real text part closes the block before appending.
+        feed(&json!({ "type": "text", "part": { "text": "Answer" } }), &mut full, &mut last_text, &mut last_reasoning, &mut in_think);
+        assert!(!in_think);
+        assert_eq!(full, "<think>Thinking…</think>Answer");
+    }
+
+    #[test]
+    fn opencode_server_tool_transitions_dedup_markers() {
+        let full_cell = Arc::new(Mutex::new(String::new()));
+        let think_cell = Arc::new(Mutex::new(false));
+        let mut tools = ToolTracker::new();
+        let mut states: HashMap<String, u8> = HashMap::new();
+
+        let running = json!({
+            "id": "prt_1", "type": "tool", "tool": "bash",
+            "state": { "status": "running", "input": { "command": "ls" } }
+        });
+        emit_opencode_tool(None, "s", &running, &full_cell, &think_cell, &mut tools, &mut states);
+        {
+            let f = full_cell.lock().unwrap();
+            // Exactly ONE call card while running — repeated updates dedup.
+            assert_eq!(f.matches("<tool>").count(), 1);
+            assert!(f.contains("ls"));
+            assert!(!f.contains("\"kind\":\"result\""));
+        }
+
+        let completed = json!({
+            "id": "prt_1", "type": "tool", "tool": "bash",
+            "state": { "status": "completed", "input": { "command": "ls" }, "output": "file.txt" }
+        });
+        emit_opencode_tool(None, "s", &completed, &full_cell, &think_cell, &mut tools, &mut states);
+        {
+            let f = full_cell.lock().unwrap();
+            // Result marker attached exactly once for the shell step.
+            assert_eq!(f.matches("\"kind\":\"result\"").count() + f.matches("\"kind\": \"result\"").count(), 1);
+        }
+
+        // A late duplicate completion must not attach another result.
+        emit_opencode_tool(None, "s", &completed, &full_cell, &think_cell, &mut tools, &mut states);
+        {
+            let f = full_cell.lock().unwrap();
+            assert_eq!(f.matches("\"kind\":\"result\"").count() + f.matches("\"kind\": \"result\"").count(), 1);
+        }
+
+        // A tool that arrives already-finished is self-contained.
+        let done = json!({
+            "id": "prt_2", "type": "tool", "tool": "bash",
+            "state": { "status": "completed", "input": { "command": "pwd" }, "output": "/tmp" }
+        });
+        emit_opencode_tool(None, "s", &done, &full_cell, &think_cell, &mut tools, &mut states);
+        {
+            let f = full_cell.lock().unwrap();
+            assert_eq!(f.matches("\"kind\":\"result\"").count() + f.matches("\"kind\": \"result\"").count(), 2);
+        }
+    }
+
+    #[test]
+    fn opencode_sse_data_routes_parts_and_filters_sessions() {
+        let session_cell = Arc::new(Mutex::new(Some("ses_mine".to_string())));
+        let full_cell = Arc::new(Mutex::new(String::new()));
+        let think_cell = Arc::new(Mutex::new(false));
+        let quiet = Arc::new(AtomicU64::new(0));
+        let mut last_text = String::new();
+        let mut last_reasoning = String::new();
+        let mut tools = ToolTracker::new();
+        let mut states: HashMap<String, u8> = HashMap::new();
+        let mut roles: HashMap<String, String> = HashMap::new();
+        let mut part_kinds: HashMap<String, String> = HashMap::new();
+        let mut cur_text_part = String::new();
+        let mut cur_reasoning_part = String::new();
+        let mut feed = |data: &str,
+                        last_text: &mut String,
+                        last_reasoning: &mut String,
+                        tools: &mut ToolTracker,
+                        states: &mut HashMap<String, u8>,
+                        roles: &mut HashMap<String, String>,
+                        part_kinds: &mut HashMap<String, String>,
+                        cur_text_part: &mut String,
+                        cur_reasoning_part: &mut String| {
+            handle_opencode_sse_data(
+                None,
+                "s",
+                data,
+                &session_cell,
+                &full_cell,
+                &think_cell,
+                &quiet,
+                last_text,
+                last_reasoning,
+                tools,
+                states,
+                roles,
+                part_kinds,
+                cur_text_part,
+                cur_reasoning_part,
+            );
+        };
+
+        // NOTE: the reader strips the `data:` prefix before calling us, so
+        // these payloads are bare JSON.
+
+        // message.updated first (observed server ordering), then the USER
+        // prompt echo — which must NOT land in the reply buffer.
+        feed(
+            r#"{"type":"message.updated","properties":{"info":{"id":"msg_u","role":"user"}}}"#,
+            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
+            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+        );
+        feed(
+            r#"{"type":"message.part.updated","properties":{"sessionID":"ses_mine","messageID":"msg_u","part":{"type":"text","text":"tell me a story","messageID":"msg_u"}}}"#,
+            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
+            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+        );
+        assert!(
+            full_cell.lock().unwrap().is_empty(),
+            "user-message parts must be filtered from the reply"
+        );
+
+        feed(
+            r#"{"type":"message.updated","properties":{"info":{"id":"msg_a","role":"assistant"}}}"#,
+            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
+            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+        );
+
+        // Live streaming path: empty snapshot announces the reasoning part,
+        // token deltas stream in, final snapshot reconciles to no-op.
+        feed(
+            r#"{"type":"message.part.updated","properties":{"sessionID":"ses_mine","part":{"id":"prt_r1","type":"reasoning","text":"","messageID":"msg_a"}}}"#,
+            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
+            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+        );
+        assert_eq!(*full_cell.lock().unwrap(), "<think>");
+        for d in ["Thi", "nking", "…"] {
+            let payload = format!(
+                r#"{{"type":"message.part.delta","properties":{{"sessionID":"ses_mine","messageID":"msg_a","partID":"prt_r1","field":"text","delta":"{d}"}}}}"#
+            );
+            feed(&payload, &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
+                &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part);
+        }
+        assert_eq!(*full_cell.lock().unwrap(), "<think>Thinking…");
+        // Final full snapshot for the reasoning part reconciles to a no-op.
+        feed(
+            r#"{"type":"message.part.updated","properties":{"sessionID":"ses_mine","part":{"id":"prt_r1","type":"reasoning","text":"Thinking…","messageID":"msg_a"}}}"#,
+            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
+            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+        );
+        assert_eq!(*full_cell.lock().unwrap(), "<think>Thinking…");
+
+        // Text part: empty snapshot closes the think block, then deltas.
+        feed(
+            r#"{"type":"message.part.updated","properties":{"sessionID":"ses_mine","part":{"id":"prt_t1","type":"text","text":"","messageID":"msg_a"}}}"#,
+            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
+            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+        );
+        assert_eq!(*full_cell.lock().unwrap(), "<think>Thinking…</think>");
+        for d in ["H", "i"] {
+            let payload = format!(
+                r#"{{"type":"message.part.delta","properties":{{"sessionID":"ses_mine","messageID":"msg_a","partID":"prt_t1","field":"text","delta":"{d}"}}}}"#
+            );
+            feed(&payload, &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
+                &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part);
+        }
+        feed(
+            r#"{"type":"message.part.updated","properties":{"sessionID":"ses_mine","part":{"id":"prt_t1","type":"text","text":"Hi","messageID":"msg_a"}}}"#,
+            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
+            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+        );
+        assert_eq!(*full_cell.lock().unwrap(), "<think>Thinking…</think>Hi");
+
+        // A SECOND text part (e.g. after tool calls) must not duplicate its
+        // snapshot against the previous part's flat baseline.
+        feed(
+            r#"{"type":"message.part.updated","properties":{"sessionID":"ses_mine","part":{"id":"prt_t2","type":"text","text":"more","messageID":"msg_a"}}}"#,
+            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
+            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+        );
+        assert_eq!(*full_cell.lock().unwrap(), "<think>Thinking…</think>Himore");
+
+        // Other sessions' traffic stays filtered.
+        feed(
+            r#"{"type":"message.part.updated","properties":{"sessionID":"ses_other","part":{"id":"prt_x","type":"text","text":"IGNORED","messageID":"msg_x"}}}"#,
+            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
+            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+        );
+        assert_eq!(*full_cell.lock().unwrap(), "<think>Thinking…</think>Himore");
+
+        // Non-part events are ignored but still bump the quiet timestamp.
+        quiet.store(0, Ordering::Relaxed);
+        feed(
+            r#"{"type":"session.status","properties":{"status":{"type":"busy"}}}"#,
+            &mut last_text, &mut last_reasoning, &mut tools, &mut states, &mut roles,
+            &mut part_kinds, &mut cur_text_part, &mut cur_reasoning_part,
+        );
+        assert!(quiet.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn opencode_model_split_variants() {
+        let m = split_opencode_model("sharkai/glm-5.2").unwrap();
+        assert_eq!(m["providerID"], "sharkai");
+        assert_eq!(m["modelID"], "glm-5.2");
+        // Provider ids may contain slashes? OpenCode's format is provider/id
+        // with the FIRST slash separating; model ids never contain slashes.
+        let m = split_opencode_model("a/b/c");
+        assert!(m.is_some());
+        assert!(split_opencode_model("").is_none());
+        assert!(split_opencode_model("nomodel").is_none());
+        assert!(split_opencode_model("/x").is_none());
+        assert!(split_opencode_model("x/").is_none());
     }
 
     /// The dir diff reports NEW and MODIFIED files with previewable

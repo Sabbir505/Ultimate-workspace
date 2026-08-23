@@ -2,7 +2,7 @@
 // `colors` override map), preview them with swatches, apply one on top of the
 // base light/dark theme, and export/delete. The active overlay persists in
 // the settings store; useTheme() applies it to <html>.
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useSettingsStore } from "../../state/settings";
 import {
   CORE_THEME_TOKENS,
@@ -11,7 +11,28 @@ import {
   themeSwatchColors,
   type CustomTheme,
 } from "../../lib/themes";
-import { readFileText, toastError, toastSuccess } from "../../lib/ipc";
+import { toastError, toastSuccess } from "../../lib/ipc";
+import { Plus, Download, Trash2, FileCode, Copy } from "lucide-react";
+
+const JSON_TEMPLATE = `{
+  "name": "My Theme",
+  "base": "dark",
+  "colors": {
+    "bg-tint": "#0d0d0d",
+    "surface": "#161616",
+    "surface-2": "#1e1e1e",
+    "surface-3": "#2a2a2a",
+    "text": "#e4e4e4",
+    "text-dim": "#a0a0a0",
+    "accent": "#6e706f",
+    "accent-soft": "rgba(110,112,111,0.16)",
+    "border": "#2a2a2a",
+    "border-strong": "#3a3a3a",
+    "state-working": "#4caf50",
+    "state-waiting": "#ff9800",
+    "state-error": "#f44336"
+  }
+}`;
 
 export function ThemeGalleryPanel() {
   const customThemes = useSettingsStore((s) => s.customThemes);
@@ -21,19 +42,30 @@ export function ThemeGalleryPanel() {
   const deleteCustomTheme = useSettingsStore((s) => s.deleteCustomTheme);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showTokenDocs, setShowTokenDocs] = useState(false);
+  const [copiedTemplate, setCopiedTemplate] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const importTheme = async () => {
+  const importTheme = useCallback(async () => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
     setError(null);
     setBusy(true);
     try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const picked = await open({
-        filters: [{ name: "Theme JSON", extensions: ["json"] }],
-        multiple: false,
+      let raw = "";
+      await new Promise<void>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          raw = String(event.target?.result ?? "");
+          resolve();
+        };
+        reader.onerror = (e) => reject(new Error(`File read failed`));
+        reader.readAsText(file);
       });
-      // `open` resolves null on cancel (or an array when multiple: true).
-      if (!picked || typeof picked !== "string") return;
-      const raw = await readFileText(picked);
       if (!raw) {
         setError("Could not read the selected file.");
         return;
@@ -49,6 +81,7 @@ export function ThemeGalleryPanel() {
       setError(`Import failed: ${String(err)}`);
     } finally {
       setBusy(false);
+      if (e.target) e.target.value = "";
     }
   };
 
@@ -73,91 +106,140 @@ export function ThemeGalleryPanel() {
     deleteCustomTheme(theme.id);
   };
 
+  const copyTemplate = async () => {
+    try {
+      await navigator.clipboard.writeText(JSON_TEMPLATE);
+      setCopiedTemplate(true);
+      setTimeout(() => setCopiedTemplate(false), 2000);
+    } catch {
+      toastError("Failed to copy template");
+    }
+  };
+
+  const openTokensCss = () => {
+    window.open("https://github.com/your-repo/blob/main/src/styles/tokens.css", "_blank");
+  };
+
   return (
     <div className="settings-form">
       <div className="panel-head">
         <h3>Custom themes</h3>
+        <span className="panel-count">{customThemes.length} theme{customThemes.length !== 1 ? "s" : ""}</span>
       </div>
-      <p className="settings-note">
-        A theme is a JSON file with a <code>name</code> and a <code>colors</code> map that
-        restyles the app on top of the built-in Light/Dark palette. Tokens you don't set
-        fall back to the built-in theme; an optional <code>base: "light" | "dark"</code>{" "}
-        pins which scope it sits on. Pick the base mode above, then click a card to apply it.
+
+      <p className="settings-section-hint" style={{ marginBottom: 16 }}>
+        A theme is a JSON file with a <code>name</code>, optional <code>base: "light" | "dark"</code>, and a <code>colors</code> map that restyles the app on top of the built-in palette. Tokens you don't set fall back to the built-in theme.
       </p>
 
       {error && (
-        <div className="settings-note" style={{ color: "var(--danger, #f85149)" }}>
+        <div className="settings-note" style={{ color: "var(--danger, #f85149)", marginBottom: 12 }}>
           {error}
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "10px 0" }}>
-        <button className="primary" onClick={() => void importTheme()} disabled={busy}>
-          Import theme…
-        </button>
+      {/* Import dropzone card */}
+      <div className="theme-gallery-grid">
+        <label className="theme-import-card" htmlFor="theme-import">
+          <input
+            id="theme-import"
+            ref={fileInputRef}
+            type="file"
+            accept=".json"
+            hidden
+            onChange={handleFileSelect}
+          />
+          <div className="theme-import-icon">
+            <Plus size={24} strokeWidth={1.5} />
+          </div>
+          <div className="theme-import-text">
+            <strong>Import JSON theme</strong>
+            <span>Drag & drop or click to select a .json file</span>
+          </div>
+        </label>
+
+        {customThemes.map((t) => {
+          const active = t.id === customThemeId;
+          const sw = themeSwatchColors(t);
+          return (
+            <div
+              key={t.id}
+              className={`theme-card${active ? " active" : ""}`}
+              onClick={() => setCustomTheme(active ? null : t.id)}
+              title={active ? "Click to deselect" : "Apply this theme"}
+            >
+              <div className="theme-card-swatches">
+                <span style={{ background: sw.bg }} title="bg-tint" />
+                <span style={{ background: sw.surface }} title="surface" />
+                <span style={{ background: sw.text }} title="text" />
+                <span style={{ background: sw.accent }} title="accent" />
+              </div>
+              <div className="theme-card-name">
+                {t.name}
+                {t.base && <span className="theme-card-base">{t.base}</span>}
+              </div>
+              <div className="theme-card-actions">
+                <button
+                  className="ghost"
+                  onClick={(e) => { e.stopPropagation(); void exportTheme(t); }}
+                  title="Export theme"
+                >
+                  <Download size={14} strokeWidth={1.8} />
+                </button>
+                <button
+                  className="ghost"
+                  style={{ color: "var(--danger, #f85149)" }}
+                  onClick={(e) => { e.stopPropagation(); removeTheme(t); }}
+                  title="Delete theme"
+                >
+                  <Trash2 size={14} strokeWidth={1.8} />
+                </button>
+              </div>
+            </div>
+          );
+        })}
       </div>
 
-      {customThemes.length === 0 ? (
-        <div className="empty-reserved">
-          <div className="empty-text">No custom themes yet. Import a JSON file to add one.</div>
-        </div>
-      ) : (
-        <div className="theme-gallery">
-          {customThemes.map((t) => {
-            const active = t.id === customThemeId;
-            const sw = themeSwatchColors(t);
-            return (
-              <div
-                key={t.id}
-                className={`theme-card${active ? " active" : ""}`}
-                onClick={() => setCustomTheme(active ? null : t.id)}
-                title={active ? "Click to deselect" : "Apply this theme"}
-              >
-                <div className="theme-card-swatches">
-                  <span style={{ background: sw.bg }} />
-                  <span style={{ background: sw.surface }} />
-                  <span style={{ background: sw.text }} />
-                  <span style={{ background: sw.accent }} />
-                </div>
-                <div className="theme-card-name">
-                  {t.name}
-                  {t.base && <span className="theme-card-base">{t.base}</span>}
-                </div>
-                <div className="theme-card-actions">
-                  <button
-                    className="ghost"
-                    onClick={(e) => { e.stopPropagation(); void exportTheme(t); }}
-                  >
-                    Export
-                  </button>
-                  <button
-                    className="ghost"
-                    style={{ color: "var(--danger, #f85149)" }}
-                    onClick={(e) => { e.stopPropagation(); removeTheme(t); }}
-                  >
-                    Delete
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
+      {/* Token documentation accordion */}
+      <details className="theme-token-docs" open={showTokenDocs}>
+        <summary className="theme-token-docs-summary" onClick={() => setShowTokenDocs((v) => !v)}>
+          <span className="theme-token-docs-icon">ℹ️</span>
+          <span>How custom themes work</span>
+          <span className="theme-token-docs-chevron" />
+        </summary>
+        <div className="theme-token-docs-content">
+          <div className="theme-token-docs-header">
+            <p>
+              Themes override a subset of the <strong>core CSS variables</strong> defined in
+              <code>src/styles/tokens.css</code>. Any token you omit falls back to the
+              built-in Light/Dark palette (whichever matches your <code>base</code> mode).
+            </p>
+            <div className="theme-token-docs-actions">
+              <button className="ghost" onClick={copyTemplate} title="Copy JSON template to clipboard">
+                <Copy size={14} strokeWidth={1.8} />
+                {copiedTemplate ? "Copied!" : "Copy template"}
+              </button>
+              <button className="ghost" onClick={openTokensCss} title="View all tokens on GitHub">
+                <FileCode size={14} strokeWidth={1.8} />
+                View tokens.css
+              </button>
+            </div>
+          </div>
 
-      <details className="theme-token-hint">
-        <summary>Which tokens can a theme set?</summary>
-        <div className="theme-token-list">
-          {CORE_THEME_TOKENS.map(({ token, label }) => (
-            <code key={token} className="theme-token-chip">
-              {token} <span>{label}</span>
-            </code>
-          ))}
+          <div className="theme-token-grid">
+            {CORE_THEME_TOKENS.map(({ token, label }) => (
+              <code key={token} className="theme-token-chip" title={label}>
+                <span className="theme-token-name">--{token}</span>
+                <span className="theme-token-label">{label}</span>
+              </code>
+            ))}
+          </div>
+
+          <p className="theme-token-note">
+            The full surface also includes the editor, sidebar, activity/status bar, tab,
+            input, button, scrollbar, tooltip and <code>syntax-*</code> token families —
+            see <code>src/styles/tokens.css</code>. Unknown keys in an imported file are ignored.
+          </p>
         </div>
-        <p style={{ margin: "8px 0 0", fontSize: 11 }}>
-          The full surface also includes the editor, sidebar, activity/status bar, tab,
-          input, button, scrollbar, tooltip and <code>syntax-*</code> token families —
-          see <code>src/styles/tokens.css</code>. Unknown keys in an imported file are ignored.
-        </p>
       </details>
     </div>
   );

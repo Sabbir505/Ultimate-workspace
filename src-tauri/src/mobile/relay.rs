@@ -1986,8 +1986,15 @@ pub async fn warm_up_local_model(
         let conn = app.state::<crate::DbState>().inner().0.lock();
         crate::chat::local_models::load_overrides(&conn, model_name)
     };
+    // Pre-read the llama-server path (must not hold the lock across await).
+    let user_llama_path = {
+        let conn = app.state::<crate::DbState>().inner().0.lock();
+        crate::db::get_setting(&conn, crate::chat::local_models::LLAMA_SERVER_PATH_KEY)
+            .ok()
+            .flatten()
+    };
     let result = local_state
-        .start(model_name.to_string(), model_path, None, Some(&overrides))
+        .start(model_name.to_string(), model_path, None, Some(&overrides), user_llama_path)
         .await
         .map_err(|e| format!("failed to start local model: {e}"))?;
     {

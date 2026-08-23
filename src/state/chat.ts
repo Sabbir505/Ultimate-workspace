@@ -57,6 +57,8 @@ import {
   type SubagentTokenPayload,
   type SubagentDonePayload,
 } from "../lib/ipc";
+export type { ArtifactProposal } from "../lib/ipc";
+import type { ArtifactProposal } from "../lib/ipc";
 import { generateSessionTitle } from "../lib/sessionTitle";
 import { tailCodePoints } from "../lib/safeSlice";
 import { openArtifactInBrowserPane } from "../lib/sessionLauncher";
@@ -456,6 +458,9 @@ export interface ChatState {
   previewArtifacts: ChatArtifact[];
   /** Path of the focused Canvas tab (null = no tab focused). */
   activePreviewPath: string | null;
+  /** Artifact proposals from conversational creation, per chat session.
+   *  States: "generating" | "ready" | "editing" | "created" | "rejected" */
+  artifactProposals: Record<string, { id: string; proposal: ArtifactProposal; state: "generating" | "ready" | "editing" | "created" | "rejected" }[]>;
   /** Background chat tasks (download_file / run_shell) with live progress,
    *  keyed by chat session id → task id → latest snapshot. */
   tasks: Record<string, Record<string, ChatTaskProgress>>;
@@ -609,6 +614,16 @@ export interface ChatState {
   /** Close one Canvas tab (default: the focused one). Closing the focused tab
    *  activates its neighbor. */
   closePreviewArtifact: (path?: string) => void;
+  /** Add an artifact proposal for a chat session (starts in "generating" state). */
+  addArtifactProposal: (chatSessionId: string, proposal: ArtifactProposal) => void;
+  /** Update an artifact proposal's state or proposal data. */
+  updateArtifactProposal: (chatSessionId: string, proposalId: string, updates: Partial<{ proposal: ArtifactProposal; state: "generating" | "ready" | "editing" | "created" | "rejected" }>) => void;
+  /** Remove an artifact proposal from a chat session. */
+  removeArtifactProposal: (chatSessionId: string, proposalId: string) => void;
+  /** Get artifact proposals for a chat session. */
+  getArtifactProposals: (chatSessionId: string) => { id: string; proposal: ArtifactProposal; state: "generating" | "ready" | "editing" | "created" | "rejected" }[];
+  /** Open the appropriate editor tab for an artifact proposal and prefill the form. */
+  editArtifactProposal: (chatSessionId: string, proposalId: string, proposal: ArtifactProposal) => void;
   /** Set a session's watch-mode pacing override. on/off = per-session override;
    *  null clears the override so the session inherits the global setting. */
   setSessionWatchMode: (chatSessionId: string, mode: WatchMode | null) => Promise<void>;
@@ -706,6 +721,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingArtifacts: {},
   previewArtifacts: [],
   activePreviewPath: null,
+  artifactProposals: {},
   tasks: {},
   planSteps: {},
   subagents: {},
@@ -1410,6 +1426,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // Feeds the conduit-browser MCP registration (CONDUIT_PROJECT_ID) so
           // browser auto-open is scoped to the selected project.
           projects.selectedProjectId ?? undefined,
+          // Attachments ride along: the backend folds display markers +
+          // extracted doc text into the persisted message and saves image/
+          // doc bytes to disk paths the CLI's own file tools can open.
+          attachments ?? undefined,
         );
       } catch (err) {
         console.error('[agent] sendAgentChatMessage failed:', err);
@@ -1646,6 +1666,107 @@ export const useChatStore = create<ChatState>((set, get) => ({
           : s.activePreviewPath;
       return { previewArtifacts: next, activePreviewPath };
     }),
+
+  addArtifactProposal: (chatSessionId, proposal) =>
+    set((s) => ({
+      artifactProposals: {
+        ...s.artifactProposals,
+        [chatSessionId]: [
+          ...(s.artifactProposals[chatSessionId] ?? []),
+          { id: proposal.id, proposal, state: "generating" as const },
+        ],
+      },
+    })),
+
+  updateArtifactProposal: (chatSessionId, proposalId, updates) => {
+      // If the proposal was replaced, update the wrapper ID to match
+      // so subsequent handlers find the correct entry by the same ID.
+      // This stabilizes the ID across regenerations and prevents
+      // "handler finds nothing" bugs when backend returns a new proposal.id.
+      return set((s) => {
+        const proposals = s.artifactProposals[chatSessionId] ?? [];
+        let idx = proposals.findIndex((p) => p.id === proposalId);
+        // If not found by wrapper ID, try finding by proposal.id (backend ID)
+        const replacementProposal = updates.proposal;
+        if (idx < 0 && replacementProposal) {
+          idx = proposals.findIndex((p) => p.proposal.id === replacementProposal.id);
+        }
+        if (idx < 0) return s;
+        const oldEntry = proposals[idx];
+        let updated: typeof oldEntry;
+        if (updates.proposal) {
+          // Proposal was replaced — keep the old wrapper.id stable (it is the card's action key),
+          // only swap the proposal.payload. This ensures the card's `proposalId` prop still
+          // matches the wrapper ID, and all handlers work correctly.
+          updated = {
+            id: oldEntry.id, // stable wrapper ID (card's action key)
+            proposal: updates.proposal,
+            state: updates.state ?? oldEntry.state,
+          };
+        } else {
+          updated = { ...oldEntry, ...updates };
+        }
+        return {
+          artifactProposals: {
+            ...s.artifactProposals,
+            [chatSessionId]: [
+              ...proposals.slice(0, idx),
+              updated,
+              ...proposals.slice(idx + 1),
+            ],
+          },
+        };
+      });
+    },
+
+  removeArtifactProposal: (chatSessionId, proposalId) =>
+    set((s) => {
+      const proposals = s.artifactProposals[chatSessionId] ?? [];
+      const filtered = proposals.filter((p) => p.id !== proposalId);
+      if (filtered.length === proposals.length) return s;
+      return {
+        artifactProposals: {
+          ...s.artifactProposals,
+          [chatSessionId]: filtered,
+        },
+      };
+    }),
+
+  getArtifactProposals: (chatSessionId) => {
+    return get().artifactProposals[chatSessionId] ?? [];
+  },
+
+  editArtifactProposal: (chatSessionId, proposalId, proposal) => {
+    const { artifactType, spec } = proposal;
+    const ui = useUiStore.getState();
+    // Set the pending form data that SkillsLibrary/AutomationsView will read on mount.
+    // Carry the session/proposal IDs so the editor can reset the card's `editing`
+    // state back to `ready` after consuming the data — otherwise the card stays
+    // stuck on "Opening in editor…" when the user navigates back to chat.
+    ui.setPendingArtifactFormData({ artifactType, spec, chatSessionId, proposalId });
+    // Update proposal state
+    set((s) => ({
+      artifactProposals: {
+        ...s.artifactProposals,
+        [chatSessionId]: (s.artifactProposals[chatSessionId] ?? []).map((p) =>
+          p.id === proposalId ? { ...p, state: "editing" as const } : p
+        ),
+      },
+    }));
+    // Navigate to the appropriate editor
+    switch (artifactType) {
+      case "skill":
+      case "loop":
+        ui.setActiveView("skills");
+        break;
+      case "prompt_template":
+        ui.setActiveView("skills");
+        break;
+      case "automation":
+        ui.setActiveView("automations");
+        break;
+    }
+  },
 
   setSessionWatchMode: async (chatSessionId, mode) => {
     await updateChatSessionWatchMode(chatSessionId, mode);

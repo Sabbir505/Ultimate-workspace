@@ -12,7 +12,7 @@
 // is running AND (b) at least one enabled corpus has indexed chunks — both
 // computed per turn into ToolCaps.local_docs in chat/mod.rs.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   docsAddCorpus,
@@ -24,11 +24,21 @@ import {
   docsEmbeddingStatus,
   onDocsIndexProgress,
   onDocsCorpusUpdated,
+  cancelModelDownload,
+  fetchModelCatalog,
+  fetchModelFileSizes,
+  getGpuVram,
+  onModelDownloadProgress,
+  startModelDownload,
+  toastError,
+  toastSuccess,
+  type CatalogEntry,
   type DocCorpus,
   type DocsEmbeddingStatus,
   type DocsIndexProgressPayload,
+  type DownloadProgress,
 } from "../../lib/ipc";
-import { useUiStore } from "../../state/ui";
+import { Modal } from "../common/Modal";
 
 /** Recommended Hugging Face embedding GGUFs — the small set the backend's
  *  `find_embedding_gguf` already prefers (nomic-embed) plus a couple of
@@ -38,7 +48,7 @@ const EMBEDDING_SUGGESTIONS: { repo: string; label: string; note: string }[] = [
   {
     repo: "nomic-ai/nomic-embed-text-v1.5-GGUF",
     label: "nomic-embed-text-v1.5",
-    note: "Recommended · 274 MB Q8_0 · best quality/size",
+    note: "Recommended · best quality/size",
   },
   {
     repo: "nomic-ai/nomic-embed-text-v1-GGUF",
@@ -62,6 +72,32 @@ function formatDate(ts: number | null): string {
   });
 }
 
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(v >= 10 ? 0 : 1)} ${units[i]}`;
+}
+
+function fitClass(sizeBytes: number, budget: number): "fits" | "tight" | "too_large" {
+  if (!budget) return "tight";
+  const r = sizeBytes / budget;
+  if (r < 0.5) return "fits";
+  if (r < 0.8) return "tight";
+  return "too_large";
+}
+
+interface PerDownloadState {
+  state: DownloadProgress["state"];
+  downloaded: number;
+  total: number | null;
+}
+
 function shortName(path: string): string {
   // Show the last path segment only if the full path is too long; otherwise
   // keep the full path so users can disambiguate sibling corpora.
@@ -80,26 +116,108 @@ interface PerCorpusProgress {
 }
 
 export function KnowledgePanel() {
-  const setSettingsCategory = useUiStore((s) => s.setSettingsCategory);
-
-  const openModelMarketForEmbedding = () => {
-    setSettingsCategory("models");
-    // Pre-fill the model market search with a common embedding query. The
-    // market panel already supports normal search, so we only need to switch to
-    // the right category here.
-  };
-
   const [corpora, setCorpora] = useState<DocCorpus[] | null>(null);
   const [sidecar, setSidecar] = useState<DocsEmbeddingStatus | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // corpusId being mutated
   const [progress, setProgress] = useState<Record<string, PerCorpusProgress>>({});
   const [error, setError] = useState<string | null>(null);
 
+  // --- Embedding suggestions → real catalog entries → detail modal + install.
+  // Per-suggestion catalog: real HF entries (filename/size/sha/downloadUrl)
+  // fetched by exact repo id so Download uses the same pipeline as the Model
+  // Market. `selected` = chosen quant variant; `detailOpen` shows the sheet.
+  const [suggestions, setSuggestions] = useState<
+    Record<string, { entries: CatalogEntry[]; selected: CatalogEntry | null; loading: boolean }>
+  >({});
+  const [detailRepo, setDetailRepo] = useState<string | null>(null);
+  const [downloads, setDownloads] = useState<Record<string, PerDownloadState>>({});
+  // Memory budget for the fit dot (same heuristic as the market).
+  const [memoryBudget, setMemoryBudget] = useState(16 * 1024 * 1024 * 1024);
+
   const refresh = () => {
     void docsListCorpora().then((c) => c && setCorpora(c));
     void docsEmbeddingStatus().then((s) => setSidecar(s));
   };
   useEffect(refresh, []);
+
+  // Fetch the real catalog entries for each suggested repo once, and probe
+  // VRAM for the fit dots. Only useful when no model is installed yet.
+  useEffect(() => {
+    let stale = false;
+    void getGpuVram().then((gpu) => {
+      if (!stale && gpu?.totalVramBytes && gpu.totalVramBytes > 0) {
+        setMemoryBudget(gpu.totalVramBytes);
+      }
+    });
+    for (const s of EMBEDDING_SUGGESTIONS) {
+      setSuggestions((prev) =>
+        prev[s.repo] ? prev : { ...prev, [s.repo]: { entries: [], selected: null, loading: true } },
+      );
+      void fetchModelCatalog({ query: s.repo, sort: "downloads", limit: 12 })
+        .then(async (res) => {
+          if (stale) return;
+          let entries = (res?.entries ?? []).filter((e) => e.repoId === s.repo && e.sizeBytes > 0);
+          // The catalog listing carries ESTIMATED sizes (HF's models API has no
+          // per-file sizes); correct them from the repo tree endpoint.
+          try {
+            const sizes = await fetchModelFileSizes(s.repo);
+            if (stale || !sizes) return;
+            entries = entries.map((e) =>
+              sizes[e.filename] ? { ...e, sizeBytes: sizes[e.filename] } : e,
+            );
+          } catch {
+            /* estimates are fine as a fallback */
+          }
+          // Prefer the smallest sensible default (Q8_0 first — the backend
+          // recommendation note — then smallest overall).
+          const q8 = entries.find((e) => (e.quantization ?? "").toUpperCase().includes("Q8"));
+          const best = q8 ?? [...entries].sort((a, b) => a.sizeBytes - b.sizeBytes)[0] ?? null;
+          setSuggestions((prev) => ({
+            ...prev,
+            [s.repo]: { entries, selected: best, loading: false },
+          }));
+        })
+        .catch(() => {
+          if (!stale) {
+            setSuggestions((prev) => ({ ...prev, [s.repo]: { entries: [], selected: null, loading: false } }));
+          }
+        });
+    }
+    return () => {
+      stale = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Mirror the market's progress stream: live bars in the detail sheet, and a
+  // status refresh on completion (the downloaded file lands in the models dir,
+  // where find_embedding_gguf picks it up for indexing automatically).
+  useEffect(() => {
+    let stale = false;
+    let unlisten: (() => void) | null = null;
+    void onModelDownloadProgress((p) => {
+      if (stale) return;
+      setDownloads((prev) => ({
+        ...prev,
+        [p.id]: { state: p.state, downloaded: p.downloadedBytes, total: p.totalBytes ?? null },
+      }));
+      if (p.state === "done") {
+        toastSuccess("Embedding model installed");
+        refresh();
+      }
+      if (p.state === "error" && p.error) {
+        toastError("Embedding model download failed", p.error);
+      }
+    }).then((u) => {
+      if (stale) u();
+      else unlisten = u;
+    });
+    return () => {
+      stale = true;
+      unlisten?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Stream indexing progress + corpus-row updates.
   useEffect(() => {
@@ -208,6 +326,25 @@ export function KnowledgePanel() {
   const hasCorpora = (corpora ?? []).length > 0;
   const hasInstalledModel = !!sidecar?.modelPath;
 
+  // A suggestion counts as installed when the discovered embedding model's
+  // path contains its repo-name fragment ("nomic-embed-text-v1.5", …).
+  const isSuggestionInstalled = (repo: string): boolean => {
+    if (!sidecar?.modelPath) return false;
+    const fragment = repo.split("/").pop()?.replace(/-gguf$/i, "").toLowerCase() ?? "";
+    return fragment.length > 0 && sidecar.modelPath.toLowerCase().includes(fragment);
+  };
+
+  const handleDownloadEmbedding = (entry: CatalogEntry) => {
+    void startModelDownload({
+      id: entry.id,
+      repoId: entry.repoId,
+      filename: entry.filename,
+      downloadUrl: entry.downloadUrl,
+      expectedSha256: entry.sha256,
+      destDir: undefined, // configured models dir — find_embedding_gguf scans it
+    }).catch((err) => toastError(`Couldn't start download: ${entry.filename}`, err));
+  };
+
   return (
     <div className="settings-form">
       <div className="panel-head">
@@ -258,20 +395,39 @@ export function KnowledgePanel() {
             Install an embedding model from Hugging Face to enable Knowledge:
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {EMBEDDING_SUGGESTIONS.map((s) => (
-              <button
-                key={s.repo}
-                type="button"
-                className="ghost"
-                style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, padding: "8px 10px", textAlign: "left" }}
-                onClick={openModelMarketForEmbedding}
-                title={`Open Model Market to search for ${s.repo}`}
-              >
-                <span style={{ fontSize: 12, fontWeight: 600 }}>{s.label}</span>
-                <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{s.note}</span>
-                <span className="mono" style={{ fontSize: 10, color: "var(--text-dim)" }}>{s.repo}</span>
-              </button>
-            ))}
+            {EMBEDDING_SUGGESTIONS.map((s) => {
+              const sug = suggestions[s.repo];
+              const sel = sug?.selected ?? null;
+              const installed = isSuggestionInstalled(s.repo);
+              const dl = sel ? downloads[sel.id] : undefined;
+              const active = !!dl && dl.state !== "done" && dl.state !== "cancelled" && dl.state !== "error";
+              const pct = dl?.total ? Math.min(100, Math.round((dl.downloaded / dl.total) * 100)) : null;
+              return (
+                <button
+                  key={s.repo}
+                  type="button"
+                  className="ghost knowledge-suggestion"
+                  onClick={() => setDetailRepo(s.repo)}
+                  title={`View details for ${s.repo}`}
+                >
+                  <span className="knowledge-suggestion-main">
+                    <span style={{ fontSize: 12, fontWeight: 600 }}>{s.label}</span>
+                    <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{s.note}</span>
+                  </span>
+                  {installed ? (
+                    <span className="fit-badge fits" style={{ flexShrink: 0 }}>✓ Installed</span>
+                ) : active ? (
+                    <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>
+                      {pct !== null ? `${pct}%` : "downloading…"}
+                    </span>
+                  ) : sel || sug?.loading ? (
+                    <span className="knowledge-suggestion-size mono">
+                      {sug?.loading ? "…" : formatBytes(sel!.sizeBytes)}
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
@@ -380,6 +536,118 @@ export function KnowledgePanel() {
           })}
         </div>
       )}
+
+      {/* Embedding-model detail sheet — same visual language as the Model
+          Market's detail page: hero, quant variant rows with fit dots, and a
+          download action fed by the shared download-progress stream. */}
+      {(() => {
+        const meta = EMBEDDING_SUGGESTIONS.find((s) => s.repo === detailRepo);
+        if (!meta) return null;
+        const sug = suggestions[meta.repo];
+        const sel = sug?.selected ?? null;
+        const installed = isSuggestionInstalled(meta.repo);
+        const dl = sel ? downloads[sel.id] : undefined;
+        const active = !!dl && dl.state !== "done" && dl.state !== "cancelled" && dl.state !== "error";
+        const done = dl?.state === "done" || installed;
+        const pct = dl?.total ? Math.min(100, Math.round((dl.downloaded / dl.total) * 100)) : null;
+        const variants = [...(sug?.entries ?? [])].sort((a, b) => a.sizeBytes - b.sizeBytes);
+        return (
+          <Modal
+            title={meta.label}
+            onClose={() => setDetailRepo(null)}
+            actions={
+              done ? (
+                <div className="model-card-status done" style={{ margin: 0, flex: 1, textAlign: "center" }}>
+                  ✓ Installed — ready for indexing
+                </div>
+              ) : active ? (
+                <button
+                  className="ghost"
+                  onClick={() => sel && void cancelModelDownload(sel.id)}
+                  style={{ flex: 1 }}
+                >
+                  Cancel download{pct !== null ? ` (${pct}%)` : ""}
+                </button>
+              ) : (
+                <button
+                  className="primary cta-strong"
+                  style={{ flex: 1 }}
+                  disabled={!sel || sug?.loading}
+                  onClick={() => sel && handleDownloadEmbedding(sel)}
+                >
+                  {sel ? `Download (${formatBytes(sel.sizeBytes)})` : "Loading…"}
+                </button>
+              )
+            }
+          >
+            <div className="model-detail-modal">
+              <div className="model-detail-hero">
+                <div className="model-detail-avatar-lg">E</div>
+                <div>
+                  <div className="model-detail-repo">{meta.repo}</div>
+                  <div className="model-detail-stats">
+                    <span>{meta.note}</span>
+                  </div>
+                </div>
+              </div>
+              <p className="model-detail-desc">
+                Embedding model for the Knowledge Base. After download it is detected
+                automatically and used to index your corpora.
+              </p>
+              {variants.length > 0 && (
+                <div className="model-detail-quants">
+                  <span className="model-detail-quants-label">Variant — pick a quantization</span>
+                  <div className="model-detail-quant-list">
+                    {variants.map((e) => {
+                      const fc = fitClass(e.sizeBytes, memoryBudget);
+                      const selected = sel?.filename === e.filename;
+                      const eDl = downloads[e.id];
+                      const eActive = !!eDl && eDl.state !== "done" && eDl.state !== "cancelled" && eDl.state !== "error";
+                      return (
+                        <button
+                          key={e.filename}
+                          type="button"
+                          className={`model-detail-quant-row${selected ? " active" : ""}`}
+                          onClick={() =>
+                            setSuggestions((prev) => ({
+                              ...prev,
+                              [meta.repo]: { entries: variants, selected: e, loading: false },
+                            }))
+                          }
+                        >
+                          <span
+                            className={`fit-dot ${fc}`}
+                            title={fc === "fits" ? "Fits memory" : fc === "tight" ? "Tight fit" : "Too large"}
+                          />
+                          <span className="q-label">{e.quantization || formatBytes(e.sizeBytes)}</span>
+                          <span className="q-size">{formatBytes(e.sizeBytes)}</span>
+                          {installed && <span className="fit-badge fits">✓ Installed</span>}
+                          {!installed && eActive && (
+                            <span style={{ fontSize: 10, color: "var(--text-dim)" }}>downloading…</span>
+                          )}
+                          {selected && !installed && !eActive && <span className="q-check">✓</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              {active && (
+                <div className="model-market-grid">
+                  <div className="model-card-progress" style={{ padding: 0 }}>
+                    <div className="model-card-progress-bar">
+                      <div className="model-card-progress-fill" style={{ width: `${pct ?? 0}%` }} />
+                    </div>
+                    <div className="model-card-progress-info">
+                      <span>{pct !== null ? `${pct}% · ` : ""}{formatBytes(dl?.downloaded ?? 0)}{dl?.total ? ` / ${formatBytes(dl.total)}` : ""}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </Modal>
+        );
+      })()}
     </div>
   );
 }

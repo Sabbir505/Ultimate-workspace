@@ -91,6 +91,10 @@ interface Props {
   /** Live perf snapshot (elapsedMs, etc.) from `chat:perf` for the streaming
    *  bubble — used to show "Working for Xs" while the turn is in flight. */
   livePerf?: ChatPerfPayload | null;
+  /** Called when the user clicks a Save As chip on a finished assistant message. */
+  onSaveAsArtifact?: () => void;
+  /** Called when the user clicks Find & Update on a finished assistant message. */
+  onFindUpdateArtifact?: () => void;
 }
 
 // --- Inline SVG icons (Claude-style, stroke-based, currentColor). ---
@@ -427,19 +431,32 @@ function parseSegments(content: string): Segment[] {
 }
 
 function ThinkingBlock({ thinking, done }: { thinking: string; done: boolean }) {
-  const [open, setOpen] = useState(false);
+  // Expanded while streaming (live), collapsed once the turn finishes.
+  const [open, setOpen] = useState(!done);
+  // Auto-collapse when the turn completes — but only if the user hasn't
+  // manually toggled it.
+  const [userToggled, setUserToggled] = useState(false);
+  useEffect(() => {
+    if (done && !userToggled) setOpen(false);
+  }, [done, userToggled]);
+
+  const toggle = () => {
+    setUserToggled(true);
+    setOpen((o) => !o);
+  };
+
   return (
     <div className={`chat-thinking${done ? "" : " live"}`}>
       <button
         className="chat-thinking-toggle"
-        onClick={() => setOpen((o) => !o)}
+        onClick={toggle}
         title={open ? "Hide thinking" : "Show thinking"}
       >
-        <span className="chat-thinking-icon">›</span>
+        <span className={`chat-thinking-icon${open ? " open" : ""}`}>›</span>
         {done ? "Thinking" : "Thinking…"}
       </button>
       {open && (
-        <div className="chat-thinking-body" onClick={() => setOpen(false)}>
+        <div className="chat-thinking-body">
           {thinking}
         </div>
       )}
@@ -764,11 +781,24 @@ function ProcessSummary({
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  // Auto-expand during streaming so the user sees live tool activity;
+  // auto-collapse when the turn finishes (unless user toggled manually).
+  const [userToggled, setUserToggled] = useState(false);
+  useEffect(() => {
+    if (live && !userToggled) setOpen(true);
+    else if (!live && !userToggled) setOpen(false);
+  }, [live, userToggled]);
+
+  const toggle = () => {
+    setUserToggled(true);
+    setOpen((o) => !o);
+  };
+
   return (
     <div className={`chat-process${live ? " live" : ""}`}>
       <button
         className="chat-process-toggle"
-        onClick={() => setOpen((o) => !o)}
+        onClick={toggle}
         title={open ? "Hide process" : "Show what was done"}
       >
         <span className="chat-process-icon" aria-hidden="true">
@@ -1344,6 +1374,8 @@ function MessageBubbleInner({
   onPreviewArtifact,
   msgId,
   livePerf,
+  onSaveAsArtifact,
+  onFindUpdateArtifact,
 }: Props) {
   const isUser = message.role === "user";
   // Inline edit-to-fork state: when the user clicks Edit on a user bubble, we
@@ -1525,6 +1557,13 @@ function MessageBubbleInner({
           {planSection && (
             <PlanBanner title={planSection.title} summary={planSection.summary} full={planSection.full} />
           )}
+          {!isUser && (
+            <div className="assistant-message-header">
+              {processLive
+                ? (liveElapsedSec != null ? `Working for ${formatDuration(liveElapsedSec)}` : "Working")
+                : (message.durationSec != null ? `Worked for ${formatDuration(message.durationSec)}` : null)}
+            </div>
+          )}
           {editing && isUser ? (
             <div className="message-edit-editor">
               <textarea
@@ -1541,7 +1580,7 @@ function MessageBubbleInner({
                 <button type="button" className="ghost" onClick={() => setEditing(false)}>
                   Cancel
                 </button>
-                <button type="button" className="primary" onClick={submitEdit}>
+                <button type="button" className="message-edit-save" onClick={submitEdit}>
                   Save &amp; Submit
                 </button>
               </div>
@@ -1644,6 +1683,39 @@ function MessageBubbleInner({
         )}
         {!isUser && msgCheckpoints.length > 0 && <CheckpointChip checkpoints={msgCheckpoints} />}
       </div>
+      {!live && !isUser && (onSaveAsArtifact || onFindUpdateArtifact) && (
+        <div className="artifact-action-chips">
+          {onSaveAsArtifact && (
+            <button
+              type="button"
+              className="artifact-action-chip"
+              onClick={onSaveAsArtifact}
+              title="Save conversation as a reusable artifact"
+            >
+              <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+                <polyline points="17 21 17 13 7 13 7 21" />
+                <polyline points="7 3 7 8 15 8" />
+              </svg>
+              <span>Save As</span>
+            </button>
+          )}
+          {onFindUpdateArtifact && (
+            <button
+              type="button"
+              className="artifact-action-chip"
+              onClick={onFindUpdateArtifact}
+              title="Search existing artifacts to update"
+            >
+              <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="8" />
+                <line x1="21" y1="21" x2="16.65" y2="16.65" />
+              </svg>
+              <span>Find &amp; Update</span>
+            </button>
+          )}
+        </div>
+      )}
       {!live && (
         <MessageActions
           content={plainText || message.content}

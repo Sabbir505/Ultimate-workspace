@@ -5,13 +5,19 @@ use crate::installed_skills::{self, AvailableSkill, InstalledSkill};
 type CmdResult<T> = Result<T, String>;
 
 #[tauri::command]
-pub fn list_installed_skills() -> CmdResult<Vec<InstalledSkill>> {
-    Ok(installed_skills::list_installed("skills"))
+pub async fn list_installed_skills() -> CmdResult<Vec<InstalledSkill>> {
+    // Directory scan over every skill root (home + plugin caches) — keep it
+    // off the main thread so opening the Skills Library never blocks the UI.
+    tauri::async_runtime::spawn_blocking(|| installed_skills::list_installed("skills"))
+        .await
+        .map_err(|e| format!("skill scan join failed: {e}"))
 }
 
 #[tauri::command]
-pub fn list_installed_loops() -> CmdResult<Vec<InstalledSkill>> {
-    Ok(installed_skills::list_installed("loops"))
+pub async fn list_installed_loops() -> CmdResult<Vec<InstalledSkill>> {
+    tauri::async_runtime::spawn_blocking(|| installed_skills::list_installed("loops"))
+        .await
+        .map_err(|e| format!("loop scan join failed: {e}"))
 }
 
 /// Every skill the chat `/` menu can offer: on-disk harness skills merged with

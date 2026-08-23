@@ -50,6 +50,43 @@ pub fn list_chat_sessions(db: State<DbState>) -> CmdResult<Vec<ChatSession>> {
     db::list_chat_sessions(&conn).map_err(|e| e.to_string())
 }
 
+/// Persist a command-only user message without starting an LLM turn.
+///
+/// Artifact commands are real timeline events, but they must not be sent
+/// through `send_chat_message` (which would create an unwanted assistant
+/// response). Returning the inserted row gives the frontend a stable message
+/// id to anchor the proposal card to.
+#[tauri::command]
+pub fn persist_chat_command_message(
+    chat_session_id: String,
+    content: String,
+    db: State<DbState>,
+) -> CmdResult<ChatMessageRecord> {
+    let conn = db.0.lock();
+    db::add_chat_message(
+        &conn,
+        &chat_session_id,
+        "user",
+        &content,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// Full-text search across chat message content + session titles (powers the
 /// command palette "Chats" section).
 #[tauri::command]
@@ -1419,12 +1456,20 @@ pub async fn send_chat_message(
                             let conn = db.0.lock();
                             local_models::load_overrides(&conn, &warm_model_id)
                         };
+                        // Pre-read the llama-server path (must not hold the lock across await).
+                        let warm_llama_path = {
+                            let conn = db.0.lock();
+                            crate::db::get_setting(&conn, local_models::LLAMA_SERVER_PATH_KEY)
+                                .ok()
+                                .flatten()
+                        };
                         match local
                             .start(
                                 warm_model_id,
                                 &g.path,
                                 g.mmproj_path.as_deref(),
                                 Some(&warm_overrides),
+                                warm_llama_path,
                             )
                             .await
                         {
@@ -2717,9 +2762,16 @@ pub async fn start_local_model(
             local_models::load_overrides(&conn, &model_id)
         }
     };
+    // Pre-read the llama-server path (must not hold the lock across await).
+    let user_llama_path = {
+        let conn = db.0.lock();
+        crate::db::get_setting(&conn, local_models::LLAMA_SERVER_PATH_KEY)
+            .ok()
+            .flatten()
+    };
     let started = local
         .0
-        .start(model_id, &path, mmproj_path.as_deref(), Some(&ovr))
+        .start(model_id, &path, mmproj_path.as_deref(), Some(&ovr), user_llama_path)
         .await?;
 
     // Persist the base_url + model for the send path (chat.local_gguf.*).
@@ -2764,6 +2816,159 @@ pub fn local_model_status(
         n_gpu_layers: a.n_gpu_layers,
         base_url: a.base_url,
     }))
+}
+
+/// Get the user-configured llama-server path (if any). Written by the
+/// "One-click path setup" button in the Local Models settings panel.
+#[tauri::command]
+pub fn get_llama_server_path(db: State<'_, DbState>) -> CmdResult<LlamaServerPathResult> {
+    let conn = db.0.lock();
+    let path_opt = db::get_setting(&conn, local_models::LLAMA_SERVER_PATH_KEY).unwrap_or(None);
+    Ok(LlamaServerPathResult { path: path_opt })
+}
+
+/// Result wrapper for llama-server path queries
+#[derive(Debug, serde::Serialize)]
+pub struct LlamaServerPathResult {
+    pub path: Option<String>,
+}
+
+/// Set the user-configured llama-server path. Returns success with the
+/// new path, or an error if the path is invalid (binary not found).
+#[tauri::command]
+pub async fn set_llama_server_path(
+    path: String,
+    db: State<'_, DbState>,
+) -> CmdResult<String> {
+    // Validate: check if the path is a file or a directory with llama-server inside.
+    let p = std::path::Path::new(&path);
+    let bin_name = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+    let valid = if p.is_file() {
+        true
+    } else if cfg!(windows) && p.with_extension("exe").is_file() {
+        // On Windows, try adding .exe extension
+        true
+    } else if p.is_dir() && p.join(bin_name).is_file() {
+        // Directory containing the binary
+        true
+    } else {
+        false
+    };
+    if !valid {
+        return Err(format!(
+            "Path '{}' is not a valid llama-server binary or directory containing it. \
+             On Windows, try '{}llama-server.exe' or '{}'\\llama.cpp\\build\\bin\\llama-server.exe",
+            path.trim_end_matches("/\\"),
+            path.trim_end_matches("/\\"),
+            path.trim_end_matches("/\\")
+        ));
+    }
+
+    // Store the path as-is (could be a file or directory).
+    let conn = db.0.lock();
+    db::set_setting(&conn, local_models::LLAMA_SERVER_PATH_KEY, &path)
+        .map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+/// Detect and set common llama-server installation paths. Returns the
+/// detected path or null if none found. Used by "one-click setup".
+#[tauri::command]
+pub fn detect_llama_server_path(db: State<'_, DbState>) -> CmdResult<LlamaServerPathResult> {
+    // Check if already configured via the UI
+    let conn = db.0.lock();
+    if let Some(path) = db::get_setting(&conn, local_models::LLAMA_SERVER_PATH_KEY).unwrap_or(None) {
+        if !path.is_empty() {
+            return Ok(LlamaServerPathResult { path: Some(path) });
+        }
+    }
+
+    let bin_name = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+
+    // 1. Check LLAMA_SERVER_PATH environment variable (highest priority)
+    if let Ok(env_path) = std::env::var("LLAMA_SERVER_PATH") {
+        let p = std::path::Path::new(&env_path);
+        if p.is_file() || p.with_extension("exe").is_file() || p.is_dir() && p.join(bin_name).is_file() {
+            return Ok(LlamaServerPathResult { path: Some(env_path) });
+        }
+    }
+
+if cfg!(windows) {
+        // On Windows, scan all drive letters (A-Z) for the source build.
+        // Check both the MSVC multi-config layout and the single-config one,
+        // plus common flat-drop layouts like legacy CUDA builds (llama-cuda).
+        for drive_letter in b'A'..=b'Z' {
+            let drive = drive_letter as char;
+            // Source builds (MSVC config)
+            for rel in [r"\llama.cpp\build\bin\Release", r"\llama.cpp\build\bin"] {
+                let candidate = format!("{drive}:{rel}\\{bin_name}");
+                if std::path::Path::new(&candidate).is_file() {
+                    return Ok(LlamaServerPathResult { path: Some(candidate) });
+                }
+            }
+            // Legacy CUDA drop / flat layouts
+            for folder in ["llama-cuda", "llamacpp", "llama.cpp", "llama"] {
+                let candidate = format!("{drive}:\\{folder}\\{bin_name}");
+                if std::path::Path::new(&candidate).is_file() {
+                    return Ok(LlamaServerPathResult { path: Some(candidate)});
+                }
+            }
+        }
+        // Also check common alternative locations
+        for alt in [
+            r"C:\Program Files\llama.cpp\bin\llama-server.exe",
+        ] {
+            if std::path::Path::new(alt).is_file() {
+                return Ok(LlamaServerPathResult { path: Some(alt.to_string()) });
+            }
+        }
+        // Check if llama-server is on PATH (Windows)
+        let output = std::process::Command::new(bin_name)
+            .arg("--version")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output();
+        if let Ok(out) = output {
+            if out.status.success() {
+                return Ok(LlamaServerPathResult { path: Some(bin_name.to_string()) });
+            }
+        }
+    } else {
+        // Unix: similar check for common locations
+        let path_output = if let Ok(path) = std::env::var("PATH") {
+            for dir in path.split(':') {
+                let candidate = format!("{}/{}", dir, bin_name);
+                if std::path::Path::new(&candidate).is_file() {
+                    return Ok(LlamaServerPathResult { path: Some(bin_name.to_string()) });
+                }
+            }
+            None
+        } else {
+            None
+        };
+
+        for candidate in [
+            "/usr/local/bin/llama-server",
+            "/opt/llama.cpp/build/bin/llama-server",
+            "/usr/bin/llama-server",
+            "/opt/homebrew/bin/llama-server",
+            "/usr/local/opt/llama.cpp/bin/llama-server",
+        ] {
+            let p = std::path::Path::new(candidate);
+            if p.is_file() {
+                return Ok(LlamaServerPathResult { path: Some(candidate.to_string()) });
+            }
+            if p.is_dir() && p.join(bin_name).is_file() {
+                return Ok(LlamaServerPathResult { path: Some(candidate.to_string()) });
+            }
+        }
+        // If PATH lookup succeeded, return the binary name
+        if let Some(()) = path_output {
+            return Ok(LlamaServerPathResult { path: Some(bin_name.to_string()) });
+        }
+    }
+
+    Ok(LlamaServerPathResult { path: None })
 }
 
 /// Live context-window usage for the active local-model session. Asks the

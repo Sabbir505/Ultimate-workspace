@@ -14,6 +14,10 @@
 //!   run (or creation), so an automation that was due while the app was
 //!   closed fires exactly once on the next tick — not once per missed slot.
 //!
+//! A run is also hard-bounded by MAX_RUN_SECS: an unattended turn that hangs
+//! used to hold the overlap guards forever, which read as a permanently
+//! "running" automation that silently stopped triggering.
+//!
 //! Running while Conduit itself is closed is the `conduit-automation` binary's
 //! job (bin/conduit_automation.rs) — it reuses the same `launch_run` path,
 //! so a Windows Task Scheduler entry is the only piece left to add.
@@ -30,12 +34,20 @@ use tauri::AppHandle;
 
 use crate::agent_sessions;
 use crate::db::{
-    self, create_chat_session, finish_run, list_automations, record_run, record_status,
-    start_run, update_chat_session_agent, update_chat_session_title, Automation,
+    self, create_chat_session, finish_run, get_chat_session, list_automations, record_run,
+    record_status, set_automation_chat_session, start_run, update_chat_session_agent,
+    update_chat_session_title, Automation,
 };
 
 /// Automation ids with a run currently in flight (the overlap guard).
 static RUNNING: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+/// Hard time limit for one automation turn (2h). Generous enough for long
+/// agent runs, tight enough that a hung CLI can't hold the overlap guards
+/// past a couple of schedule slots — before this bound existed, one wedged
+/// turn made the automation look "already running" to every later tick and
+/// it silently stopped firing until the app restarted.
+const MAX_RUN_SECS: u64 = 2 * 60 * 60;
 
 /// Start the background tick loop (called once from the app setup hook).
 pub fn start(app: AppHandle, db: Arc<Mutex<Connection>>) {
@@ -108,7 +120,7 @@ pub fn validate_schedule(expr: &str) -> Result<(), String> {
 }
 
 /// The next fire time (unix ts) strictly after `after_ts`, in local time.
-fn next_fire(expr: &str, after_ts: i64) -> Option<i64> {
+pub fn next_fire(expr: &str, after_ts: i64) -> Option<i64> {
     let sched = parse_schedule(expr).ok()?;
     let after = chrono::DateTime::from_timestamp(after_ts, 0)?.with_timezone(&chrono::Local);
     sched.after(&after).next().map(|dt| dt.timestamp())
@@ -294,25 +306,51 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
     }
 
     // Bind (once) the chat session that doubles as this automation's run log.
+    // The stored pointer is re-validated on every run: if the session row is
+    // gone (user deleted the run-log chat, or the empty-session sweeper took
+    // it before its first message), reusing the dead id would fail the turn
+    // with "FOREIGN KEY constraint failed" on chat_messages — recreate a
+    // fresh session and rebind it immediately instead.
     let chat_session_id = {
         let conn = db.lock();
-        match &automation.chat_session_id {
-            Some(id) => id.clone(),
-            None => {
-                let cs = match create_chat_session(&conn, &automation.harness, &automation.model, None) {
-                    Ok(cs) => cs,
-                    Err(e) => {
-                        let msg = e.to_string();
-                        drop(conn);
-                        release_guards(&automation.id, &lock_path);
-                        return Err(msg);
-                    }
-                };
-                let agent = format!("harness:{}", automation.harness);
-                let _ = update_chat_session_agent(&conn, &cs.id, Some(&agent));
-                let _ = update_chat_session_title(&conn, &cs.id, &format!("⚙ {}", automation.name));
-                cs.id
+        let stored_alive = match &automation.chat_session_id {
+            Some(id) => match get_chat_session(&conn, id) {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(e) => {
+                    let msg = e.to_string();
+                    drop(conn);
+                    release_guards(&automation.id, &lock_path);
+                    return Err(msg);
+                }
+            },
+            None => false,
+        };
+        if stored_alive {
+            automation.chat_session_id.clone().unwrap()
+        } else {
+            if automation.chat_session_id.is_some() {
+                eprintln!(
+                    "[automations] run-log chat session {:?} of {} is gone — recreating it",
+                    automation.chat_session_id, automation.id
+                );
             }
+            let cs = match create_chat_session(&conn, &automation.harness, &automation.model, None) {
+                Ok(cs) => cs,
+                Err(e) => {
+                    let msg = e.to_string();
+                    drop(conn);
+                    release_guards(&automation.id, &lock_path);
+                    return Err(msg);
+                }
+            };
+            let agent = format!("harness:{}", automation.harness);
+            let _ = update_chat_session_agent(&conn, &cs.id, Some(&agent));
+            let _ = update_chat_session_title(&conn, &cs.id, &format!("⚙ {}", automation.name));
+            // Rebind NOW rather than at finalize: a crash between here and
+            // finalize must not leave the row pointing at the dead session.
+            let _ = set_automation_chat_session(&conn, &automation.id, Some(&cs.id));
+            cs.id
         }
     };
     // Record the run for the UI's "Past runs" list (automation_runs).
@@ -347,6 +385,13 @@ fn lock_file_path(conn: &Connection, automation_id: &str) -> Option<std::path::P
 
 /// The turn itself: one blocking headless shot at full-auto permission
 /// (unattended turns can't answer prompts).
+///
+/// Hard-bounded by MAX_RUN_SECS: an unattended CLI turn that hangs (stalled
+/// network, hidden interactive prompt) used to hold the overlap guards
+/// forever — every later tick read as "already running" and the automation
+/// silently stopped triggering until the app restarted. The kill unblocks the
+/// run thread, `finalize` records the timeout as the run's status, and the
+/// schedule resumes on its next slot.
 fn execute(
     app: Option<&AppHandle>,
     db: &Arc<Mutex<Connection>>,
@@ -366,6 +411,7 @@ fn execute(
                 &automation.harness,
                 &automation.model,
                 if automation.cwd.is_empty() { None } else { Some(automation.cwd.as_str()) },
+                Some(Duration::from_secs(MAX_RUN_SECS)),
             )
         }
         _ => {
@@ -681,6 +727,14 @@ mod tests {
         let next = next_fire("*/15 * * * *", after).unwrap();
         assert!(next > after);
         assert!(next <= after + 15 * 60 + 1);
+
+        // Strictly-after semantics: querying again from the previous answer
+        // always advances to the following slot (powers the UI "Next run").
+        let next2 = next_fire("*/15 * * * *", next).unwrap();
+        assert!(next2 > next);
+        // Daily-at-time picks the next occurrence, even a day out.
+        let daily = next_fire("45 9 * * *", after).unwrap();
+        assert!(daily > after && daily <= after + 24 * 3600 + 60);
     }
 
     #[test]
@@ -765,6 +819,57 @@ mod tests {
         assert!(msg.contains("Content-Type: text/plain; charset=\"UTF-8\""));
         assert!(msg.contains("provider exploded"));
         assert!(msg.contains("Automation: nightly 🌙"));
+    }
+
+    #[test]
+    fn prepare_recreates_a_deleted_run_log_session() {
+        // Regression: when automations.chat_session_id pointed at a chat row
+        // that had been deleted, the run died on INSERT into chat_messages
+        // with "FOREIGN KEY constraint failed". Prepare must detect the
+        // dangling id, create a fresh session, and rebind it.
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        let db = Arc::new(Mutex::new(conn));
+
+        let automation = {
+            let conn = db.lock();
+            let a = crate::db::create_automation(
+                &conn,
+                &crate::db::AutomationInput {
+                    name: "nightly".into(),
+                    prompt: "p".into(),
+                    harness: "claude_code".into(),
+                    model: None,
+                    cwd: None,
+                    schedule: "* * * * *".into(),
+                    enabled: Some(true),
+                },
+            )
+            .unwrap();
+            // Simulate the run-log session having been deleted elsewhere.
+            crate::db::set_automation_chat_session(&conn, &a.id, Some("ghost-session")).unwrap();
+            crate::db::get_automation(&conn, &a.id).unwrap().unwrap()
+        };
+
+        let prepared =
+            prepare_run_inner(&db, &automation, RunSource::Manual, 0).unwrap().expect("run prepared");
+        assert_ne!(prepared.chat_session_id, "ghost-session", "dangling id must be replaced");
+        {
+            let conn = db.lock();
+            assert!(
+                crate::db::get_chat_session(&conn, &prepared.chat_session_id)
+                    .unwrap()
+                    .is_some(),
+                "replacement session must exist"
+            );
+            let reloaded = crate::db::get_automation(&conn, &automation.id).unwrap().unwrap();
+            assert_eq!(
+                reloaded.chat_session_id.as_deref(),
+                Some(prepared.chat_session_id.as_str()),
+                "row must be rebound immediately, not at finalize"
+            );
+        }
+        release_guards(&automation.id, &None);
     }
 
     #[test]

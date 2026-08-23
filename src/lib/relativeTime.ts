@@ -12,3 +12,19 @@ export function relativeTime(epochSeconds: number, nowSeconds = Math.floor(Date.
   if (months < 12) return `${months}mo ago`;
   return `${Math.floor(months / 12)}y ago`;
 }
+
+/** Ultra-compact variant ("now", "22m", "5h", "3d") for the quiet projects
+ *  list, where the timestamp is secondary chrome on every row. */
+export function shortRelativeTime(epochSeconds: number, nowSeconds = Math.floor(Date.now() / 1000)): string {
+  const delta = Math.max(0, nowSeconds - epochSeconds);
+  if (delta < 60) return "now";
+  const minutes = Math.floor(delta / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo`;
+  return `${Math.floor(months / 12)}y`;
+}

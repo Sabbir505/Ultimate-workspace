@@ -77,47 +77,24 @@ pub fn build_instructions_md(project_path: &str, artifacts_dir: &str) -> String 
     if let Some(catalog) = crate::chat::prompts::available_skills_segment() {
         parts.push(catalog);
     }
+    // Browser section stays behavioral only: the MCP `tools/list` response
+    // already delivers each tool's name/params/description to the CLI, so
+    // restating them here is duplicate tokens. What the schemas can't carry —
+    // the observe→act loop, triage policy, and routing decisions — stays.
     parts.push(format!(
         "## In-app browser pane\n\
-         You have full control of the visible in-app browser pane via the `conduit-browser` \
-         MCP server. This is NOT an external browser — it is a real webview embedded in the \
-         Conduit window, and every action you take is visible on screen in real time (cursor \
-         movement, typing, click ripples, highlights). You are NOT limited to a terminal.\n\n\
-         ### Browser MCP tools (prefix: `mcp__conduit-browser__`)\n\
-         - `navigate(url, pane_id?)` — Navigate the pane to a URL. Auto-opens a pane if none \
-         exists for the project. Use this (not `open_url` or `fetch_url`) when the user asks \
-         to open a website, browse, or interact with a web page.\n\
-         - `read_page(mode?, pane_id?)` — Read the current page. Modes: `interactive` \
-         (default — returns accessibility tree with roles, labels, form state, element refs \
-         for clicking/typing), `content` (readability-stripped article text), `full` (raw \
-         HTML/text), `summary` (~1500 chars + headings for triage), `section` (extract under \
-         a CSS selector or heading). Always call this after navigation before acting.\n\
-         - `click(selector_or_description, pane_id?)` — Click an element by CSS selector or \
-         by visible text/aria-label/placeholder description.\n\
-         - `type_text(selector_or_description, text, pane_id?)` — Type text into an input. \
-         Dispatches per-keystroke events so React/Vue controlled inputs work.\n\
-         - `scroll(direction, pane_id?)` — Scroll up or down by one viewport step.\n\
-         - `wait_for(condition, target?, pane_id?)` — Wait for `navigation` (URL change), \
-         `selector` (element exists), or `network_idle` (page settled).\n\n\
-         ### Workflow for browser tasks\n\
-         1. `navigate(url)` to load the page.\n\
-         2. `read_page(mode: \"interactive\")` to get the element tree with refs.\n\
-         3. `click` or `type_text` using a selector or description from the read.\n\
-         4. `wait_for(\"navigation\")` if the action triggers a page change.\n\
-         5. `read_page` again to see the new state. Refs expire after navigation.\n\n\
-         ### When to use which tool\n\
-         - **Browse / search / research / social media / E2E test** → `navigate` + \
-         `read_page` + `click`/`type_text`/`scroll` + `wait_for`. The pane is visible, so \
-         the user watches every action live.\n\
-         - **Just fetch a page's text silently** → `fetch_url(url)`. No visual feedback, \
-         faster for pure content extraction. Use only when the user doesn't need to see the \
-         page.\n\
-         - **Open a URL in the built-in browser pane** → `navigate(url)` (MCP) or `open_url(url)` (built-in tool). Both open in the in-app pane where you can interact with the page. Always prefer these over fetch_url when the user should see the page.
-
-\
-         You are a GUI-capable agent, not a headless CLI. When the user asks you to browse, \
-         search, test a web app, or interact with a website, use the browser MCP tools — \
-         never say you can't because you're in a terminal."
+         You control the visible in-app browser pane via the `conduit-browser` MCP server \
+         (tools prefixed `mcp__conduit-browser__`). You are a GUI-capable agent, not a headless \
+         CLI — when the user asks you to browse, search, test a web app, or interact with a \
+         site, use these tools; never say you can't because you're in a terminal. Every action \
+         is visible on screen in real time.\n\n\
+         Workflow: `navigate(url)` → `read_page(mode:\"interactive\")` for the element tree → \
+         `click`/`type_text` by selector or description → `wait_for(\"navigation\")` if the page \
+         changed → `read_page` again (refs expire after navigation).\n\n\
+         Routing: browse/research/E2E-test → navigate + read_page + click/type_text + wait_for. \
+         Silent text-only fetch the user needn't watch → `fetch_url`. Opening a site for the \
+         user → `navigate` (or the built-in `open_url`) — always prefer these over fetch_url \
+         when the user should see the page."
     ));
     parts.join("\n\n")
 }
@@ -240,11 +217,26 @@ pub fn build_opencode_tools_config(
     for c in connectors {
         mcp[c.name.clone()] = connector_opencode_entry(c);
     }
+    // Permission values MUST be OpenCode's rule shape ("allow"/"ask"/"deny"
+    // strings or pattern→string maps) — Claude-Code-style arrays fail
+    // validation and make every `opencode run` exit instantly with
+    // "Configuration is invalid". Full-auto here: headless runs have no
+    // approval channel (matches the `--auto` spawn flag).
+    //
+    // `external_directory` MUST be allowed too: opencode's read/glob/grep
+    // tools route every path outside the session's working directory through
+    // a `permission:"external_directory"` ask (Tool.assertExternalDirectory).
+    // Headless there is nobody to answer it, so an attachment saved under the
+    // artifacts dir would hang the turn forever on "reading file". Composer
+    // attachments live outside the cwd by design, so this allow is what makes
+    // harness attachment viewing work at all.
     json!({
         "mcp": mcp,
         "permission": {
-            "allow": ["mcp__conduit-tools"],
-            "edit": ["*"]
+            "edit": "allow",
+            "bash": "allow",
+            "webfetch": "allow",
+            "external_directory": "allow"
         }
     })
 }
@@ -527,8 +519,14 @@ mod tests {
         assert!(v["mcp"]["conduit-browser"]["type"] == "local");
         assert!(v["mcp"]["conduit-tools"]["type"] == "local");
         assert_eq!(v["mcp"]["conduit-browser"]["environment"]["CONDUIT_MCP_AUTH_TOKEN"], "tok-abc");
-        assert!(v["permission"]["allow"].as_array().unwrap().iter().any(|x| x == "mcp__conduit-tools"));
-        assert!(v["permission"]["edit"].as_array().unwrap().iter().any(|x| x == "*"));
+        // Values must be OpenCode rule strings — arrays fail config
+        // validation and the CLI exits before running the turn.
+        assert_eq!(v["permission"]["edit"], "allow");
+        assert_eq!(v["permission"]["bash"], "allow");
+        assert_eq!(v["permission"]["webfetch"], "allow");
+        // Without this, reads of attachment files outside the session cwd
+        // hang forever on an unanswerable external_directory permission ask.
+        assert_eq!(v["permission"]["external_directory"], "allow");
     }
 
     #[test]

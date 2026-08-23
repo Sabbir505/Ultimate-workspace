@@ -3,6 +3,7 @@
 //! side (Tauri maps snake_case Rust params <-> camelCase JS automatically).
 
 pub mod agent_cmds;
+pub mod artifact_cmds;
 pub mod automation_cmds;
 pub mod browser_cmds;
 pub mod chat_cmds;

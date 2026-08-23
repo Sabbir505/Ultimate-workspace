@@ -123,3 +123,14 @@ pub fn count_automation_runs(
     let conn = db.0.lock();
     db::count_runs_for(&conn, &automation_id).map_err(|e| e.to_string())
 }
+
+/// Next fire time (unix seconds, local time) for a cron schedule — strictly
+/// after `after` (default: now). Powers the UI's "Next run" display; the
+/// same math the scheduler uses for due-ness, so the UI can't drift from
+/// what will actually fire.
+#[tauri::command]
+pub fn automation_next_fire(schedule: String, after: Option<i64>) -> Result<Option<i64>, String> {
+    automations::validate_schedule(&schedule)?;
+    let after = after.unwrap_or_else(crate::db::now_ts);
+    Ok(automations::next_fire(&schedule, after))
+}

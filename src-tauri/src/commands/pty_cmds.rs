@@ -1,18 +1,44 @@
 //! Pty and harness commands (CONTRACT.md "PTY" + "Harnesses").
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
+use once_cell::sync::Lazy;
 use tauri::{AppHandle, Manager, State};
 
 use crate::browser::BROWSER_MCP_PORT;
 use crate::browser_mcp_register;
 use crate::db;
-use crate::harness_adapters::{all_adapters, get_adapter, CommandSpec};
+use crate::harness_adapters::{all_adapters, get_adapter, resolve_for_spawn, CommandSpec};
 use crate::secrets;
 use crate::types::HarnessStatus;
 use crate::{DbState, PtyState};
 
 type CmdResult<T> = Result<T, String>;
+
+/// Cached `list_harnesses` probe results — see `list_harnesses`. Install
+/// status flips only through install_harness (which bumps this via its longer
+/// TTL expiry) or manual npm installs, so 30s staleness is invisible.
+static HARNESS_STATUS_CACHE: Lazy<Mutex<Option<(Instant, Vec<HarnessStatus>)>>> =
+    Lazy::new(|| Mutex::new(None));
+const HARNESS_STATUS_TTL: Duration = Duration::from_secs(30);
+
+fn harness_status_cache_get() -> Option<Vec<HarnessStatus>> {
+    let guard = HARNESS_STATUS_CACHE.lock().ok()?;
+    let (at, list) = guard.as_ref()?;
+    if at.elapsed() < HARNESS_STATUS_TTL {
+        Some(list.clone())
+    } else {
+        None
+    }
+}
+
+fn harness_status_cache_store(list: Vec<HarnessStatus>) {
+    if let Ok(mut guard) = HARNESS_STATUS_CACHE.lock() {
+        *guard = Some((Instant::now(), list));
+    }
+}
 
 /// Spawns the harness bound to an existing session record: the resume command
 /// when a harness session id is already known, otherwise a fresh interactive
@@ -221,15 +247,30 @@ pub fn pane_memory(pane_id: String, pty: State<PtyState>) -> CmdResult<u64> {
 }
 
 #[tauri::command]
-pub fn list_harnesses() -> CmdResult<Vec<HarnessStatus>> {
-    Ok(all_adapters()
-        .into_iter()
-        .map(|a| HarnessStatus {
-            id: a.id().to_string(),
-            display_name: a.display_name().to_string(),
-            installed: a.is_installed(),
-        })
-        .collect())
+pub async fn list_harnesses() -> CmdResult<Vec<HarnessStatus>> {
+    // Each install probe spawns the CLI with `--version` and polls for up to
+    // 5s per binary. This command used to be sync, so every agent-menu open
+    // froze the whole window while ~5 node CLIs cold-started. Two fixes:
+    //   1. async command → probes run off the main thread,
+    //   2. 30s TTL cache → repeated opens cost nothing (install status only
+    //      changes via install_harness / manual npm, well over TTL apart).
+    if let Some(list) = harness_status_cache_get() {
+        return Ok(list);
+    }
+    let probed = tauri::async_runtime::spawn_blocking(|| {
+        all_adapters()
+            .into_iter()
+            .map(|a| HarnessStatus {
+                id: a.id().to_string(),
+                display_name: a.display_name().to_string(),
+                installed: a.is_installed(),
+            })
+            .collect::<Vec<HarnessStatus>>()
+    })
+    .await
+    .map_err(|e| format!("harness probe join failed: {e}"))?;
+    harness_status_cache_store(probed.clone());
+    Ok(probed)
 }
 
 /// Spawns the harness's login flow in the given pane (PRD §9 onboarding).
@@ -247,6 +288,73 @@ pub fn run_harness_login(
     }
     let spec = adapter.login_command();
     pty.0.spawn(&pane_id, None, Some(adapter), Path::new(&cwd), &spec, vec![])
+}
+
+/// The npm package that installs each harness CLI (one-click Install in the
+/// Harnesses settings panel). Verified upstream names:
+/// claude → @anthropic-ai/claude-code, kimi → @moonshot-ai/kimi-code,
+/// opencode → opencode-ai.
+fn harness_npm_package(harness_id: &str) -> Option<&'static str> {
+    match harness_id {
+        "claude_code" => Some("@anthropic-ai/claude-code"),
+        "kimi_code" => Some("@moonshot-ai/kimi-code"),
+        "opencode" => Some("opencode-ai"),
+        _ => None,
+    }
+}
+
+/// One-click harness install: `npm install -g <package>` for the requested
+/// harness. Long-running (npm can take a minute+) so this is async with a
+/// 5-minute ceiling; the frontend re-probes install status afterwards.
+#[tauri::command]
+pub async fn install_harness(harness_id: String) -> CmdResult<String> {
+    let package = harness_npm_package(&harness_id)
+        .ok_or_else(|| format!("unknown harness: {harness_id}"))?;
+    let spec = resolve_for_spawn(&CommandSpec::new("npm", &["install", "-g", package]));
+    let mut cmd = tokio::process::Command::new(&spec.program);
+    cmd.args(&spec.args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    // Suppress the console-window flash a GUI app gets when shelling out on
+    // Windows (same pattern as codeexec/pygen; tokio exposes the inherent
+    // creation_flags method).
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output())
+        .await
+        .map_err(|_| format!(
+            "installing {package} timed out after 5 minutes — check your network / npm registry",
+        ))?
+        .map_err(|e| format!("failed to run npm (is Node.js installed?): {e}"))?;
+    if output.status.success() {
+        // The install flipped the probe result — drop the cached statuses so
+        // the frontend's immediate re-probe sees "installed" instead of a
+        // stale entry from the 30s TTL window.
+        if let Ok(mut guard) = HARNESS_STATUS_CACHE.lock() {
+            *guard = None;
+        }
+        Ok(format!("Installed {package}"))
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail: String = stderr
+            .lines()
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        Err(format!(
+            "npm install -g {package} failed:\n{}",
+            if tail.trim().is_empty() { "unknown npm error" } else { tail.trim() },
+        ))
+    }
 }
 
 /// Register a typed `Channel<Vec<u8>>` for raw PTY output on this pane. The

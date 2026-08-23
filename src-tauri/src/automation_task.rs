@@ -90,22 +90,50 @@ fn automation_binary_path_from(dir: &std::path::Path) -> Option<PathBuf> {
     None
 }
 
-/// The `/TR` argument for the scheduled task: quoted binary + run-due.
-fn task_run_command(binary: &std::path::Path) -> String {
-    format!("\"{}\" run-due", binary.display())
+/// The `/TR` argument for the scheduled task: run the automation binary
+/// through a VBS wrapper that calls `Run(..., 0)` (window style 0 = hidden)
+/// so no window ever appears — Task Scheduler fires this every minute.
+fn task_run_command(vbs: &std::path::Path) -> String {
+    format!("wscript.exe //B //Nologo \"{}\"", vbs.display())
+}
+
+/// Path to the VBS wrapper inside the app data directory.
+fn vbs_wrapper_path(app_data_dir: &std::path::Path) -> std::path::PathBuf {
+    app_data_dir.join("conduit-automation-wrapper.vbs")
+}
+
+/// Contents of the hidden VBScript wrapper: runs `<binary> run-due` invisibly.
+///
+/// conduit-automation is a GUI-subsystem binary on Windows
+/// (`windows_subsystem = "windows"`, see src/bin/conduit_automation.rs), so
+/// the OS never allocates a console for it and `Run(..., 0)` hides it
+/// outright. Earlier revisions routed through powershell's `-WindowStyle
+/// Hidden`, but that still flashed a terminal every minute tick: the console
+/// host shows the window before PowerShell parses the flag.
+fn vbs_wrapper_contents(binary: &std::path::Path) -> String {
+    // In VBScript, double quotes inside a string literal are escaped as "".
+    // The quoted binary path (spaces safe) is followed by the run-due arg:
+    //   sh.Run """C:\path\conduit-automation.exe"" run-due", 0, False
+    format!(
+        "' Conduit automation wrapper – runs the headless runner invisibly.\r\n\
+         ' (GUI-subsystem binary: no console window is ever allocated.)\r\n\
+         Set sh = CreateObject(\"WScript.Shell\")\r\n\
+         sh.Run \"\"\"{}\"\" run-due\", 0, False\r\n",
+        binary.display()
+    )
 }
 
 /// schtasks argument vector for creating (or overwriting) the global task.
 /// `/SC MINUTE /MO 1` = every minute, the finest granularity Task Scheduler
 /// offers — exact cron fidelity comes from run-due's own due-math. Runs as
 /// the current user in logged-on sessions; no elevation.
-fn create_args(binary: &std::path::Path) -> Vec<String> {
+fn create_args(vbs: &std::path::Path) -> Vec<String> {
     vec![
         "/Create".into(),
         "/TN".into(),
         TASK_NAME.into(),
         "/TR".into(),
-        task_run_command(binary),
+        task_run_command(vbs),
         "/SC".into(),
         "MINUTE".into(),
         "/MO".into(),
@@ -162,7 +190,7 @@ pub fn get_run_while_closed() -> Result<bool, String> {
 
 /// Register or unregister the global run-due task.
 #[tauri::command]
-pub fn set_run_while_closed(enabled: bool) -> Result<(), String> {
+pub fn set_run_while_closed(enabled: bool, app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(not(target_os = "windows"))]
     {
         let _ = enabled;
@@ -178,7 +206,19 @@ pub fn set_run_while_closed(enabled: bool) -> Result<(), String> {
         let binary = automation_binary_path().ok_or_else(|| {
             "conduit-automation binary not found next to the app — reinstall or run a full build".to_string()
         })?;
-        run_schtasks(&create_args(&binary))?;
+        // Write the hidden-window VBS wrapper next to the app's data. Task
+        // Scheduler fires it every minute; the binary is GUI-subsystem so
+        // `Run(..., 0, False)` keeps it fully invisible (a console exe would
+        // flash a terminal on every tick).
+        let data_dir = tauri::Manager::path(&app)
+            .app_data_dir()
+            .map_err(|e| format!("no app data dir: {e}"))?;
+        std::fs::create_dir_all(&data_dir)
+            .map_err(|e| format!("failed to create app data dir: {e}"))?;
+        let vbs = vbs_wrapper_path(&data_dir);
+        std::fs::write(&vbs, vbs_wrapper_contents(&binary))
+            .map_err(|e| format!("failed to write VBS wrapper: {e}"))?;
+        run_schtasks(&create_args(&vbs))?;
         Ok(())
     }
 }
@@ -213,7 +253,7 @@ mod tests {
 
     #[test]
     fn create_args_shape() {
-        let args = create_args(std::path::Path::new("C:\\app\\conduit-automation.exe"));
+        let args = create_args(std::path::Path::new("C:\\app\\conduit-automation-wrapper.vbs"));
         assert_eq!(args[0], "/Create");
         assert!(args.windows(2).any(|w| w == ["/TN", TASK_NAME]));
         assert!(args.windows(2).any(|w| w == ["/SC", "MINUTE"]));
@@ -223,10 +263,22 @@ mod tests {
             .find(|w| w[0] == "/TR")
             .map(|w| w[1].clone())
             .expect("/TR present");
-        // The binary path is quoted (spaces in install dirs) and the
-        // subcommand follows the closing quote.
-        assert_eq!(tr, "\"C:\\app\\conduit-automation.exe\" run-due");
+        // The task runs the VBS wrapper through wscript (hidden window) —
+        // a console exe would flash a terminal on every minute tick.
+        assert_eq!(tr, "wscript.exe //B //Nologo \"C:\\app\\conduit-automation-wrapper.vbs\"");
         assert!(args.iter().any(|a| a == "/F"));
+    }
+
+    #[test]
+    fn vbs_wrapper_runs_binary_directly_hidden_without_waiting() {
+        let contents = vbs_wrapper_contents(std::path::Path::new("C:\\app dir\\conduit-automation.exe"));
+        // The GUI-subsystem binary is invoked directly (no powershell layer —
+        // its console flashed before -WindowStyle Hidden landed), quoted for
+        // spaces, and Run uses window style 0 + don't-wait False.
+        assert!(
+            contents.contains("sh.Run \"\"\"C:\\app dir\\conduit-automation.exe\"\" run-due\", 0, False"),
+            "unexpected wrapper body: {contents}"
+        );
     }
 
     #[test]

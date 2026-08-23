@@ -15,6 +15,7 @@ mod acp;
 mod acp_agents;
 mod automation_task;
 pub mod automations;
+pub mod artifacts;
 mod chat;
 mod commands;
 mod connectors;
@@ -241,6 +242,7 @@ pub fn run() {
             commands::pty_cmds::kill_pty,
             commands::pty_cmds::pane_memory,
             commands::pty_cmds::list_harnesses,
+            commands::pty_cmds::install_harness,
             commands::pty_cmds::run_harness_login,
             commands::pty_cmds::pty_subscribe,
             // native browser panes (child webviews)
@@ -301,6 +303,16 @@ pub fn run() {
             automation_task::test_automation_webhook,
             commands::automation_cmds::list_automation_runs,
             commands::automation_cmds::count_automation_runs,
+            commands::automation_cmds::automation_next_fire,
+            // artifact generation (conversational creation)
+            commands::artifact_cmds::generate_artifact_cmd,
+            commands::artifact_cmds::validate_artifact_cmd,
+            commands::artifact_cmds::create_artifact_cmd,
+            commands::artifact_cmds::regenerate_artifact_cmd,
+            commands::artifact_cmds::save_artifact_cmd,
+            commands::artifact_cmds::search_artifacts_cmd,
+            commands::artifact_cmds::update_artifact_cmd,
+            commands::artifact_cmds::get_artifact_context_cmd,
             // settings / skills / quick actions / secrets / cost / misc
             commands::data::get_setting,
             commands::data::set_setting,
@@ -338,6 +350,7 @@ pub fn run() {
             commands::skills_cmds::list_chat_skills,
             // chat mode
             commands::chat_cmds::list_chat_sessions,
+            commands::chat_cmds::persist_chat_command_message,
             commands::chat_cmds::search_chat_messages,
             commands::chat_cmds::list_chat_checkpoints,
             commands::chat_cmds::restore_chat_checkpoint,
@@ -388,6 +401,9 @@ pub fn run() {
             commands::chat_cmds::start_local_model,
             commands::chat_cmds::stop_local_model,
             commands::chat_cmds::local_model_status,
+            commands::chat_cmds::get_llama_server_path,
+            commands::chat_cmds::set_llama_server_path,
+            commands::chat_cmds::detect_llama_server_path,
             commands::chat_cmds::count_context_tokens,
             commands::chat_cmds::count_context_breakdown,
             // connectors (OAuth + remote MCP): Settings → Connectors + per-chat attach
@@ -410,6 +426,7 @@ pub fn run() {
             mobile::commands::tailscale_login,
             // local model market (Hugging Face browse + download)
             commands::local_model_market::fetch_model_catalog,
+            commands::local_model_market::fetch_model_file_sizes,
             commands::local_model_market::get_gpu_vram,
             commands::local_model_market::get_market_settings,
             commands::local_model_market::set_models_directory,

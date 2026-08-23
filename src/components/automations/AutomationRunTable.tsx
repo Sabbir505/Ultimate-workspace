@@ -9,12 +9,15 @@ import {
   Zap,
 } from "lucide-react";
 import type { AutomationRun } from "../../lib/ipc";
+import { friendlyRunError, isFailureStatus } from "./shared";
 
 function formatDuration(startSec: number, endSec: number | null): string {
   if (!endSec) return "—";
   const diff = endSec - startSec;
-  if (diff < 60) return `${diff}s`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ${diff % 60}s`;
+  // Failures can finish in well under a second; "0s" reads as broken.
+  if (diff < 1) return "<1s";
+  if (diff < 60) return `${Math.floor(diff)}s`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ${Math.floor(diff % 60)}s`;
   return `${Math.floor(diff / 3600)}h ${Math.floor((diff % 3600) / 60)}m`;
 }
 
@@ -132,6 +135,10 @@ export function AutomationRunTable({
           <tbody className="divide-y divide-gray-200 dark:divide-white/20">
             {runs.map((r) => {
               const badge = statusBadge(r.status);
+              const failed = isFailureStatus(r.status);
+              // Raw error text stays in the tooltip; the cell shows the
+              // plain-language translation so users can act on it.
+              const friendly = failed ? friendlyRunError(r.summary || r.status) : null;
               return (
                 <tr
                   key={r.id}
@@ -157,7 +164,7 @@ export function AutomationRunTable({
                     className="px-3 py-2 text-gray-700 dark:text-slate-200 text-xs max-w-[280px] truncate"
                     title={r.summary}
                   >
-                    {r.summary || (r.status === "running" ? "In progress…" : "—")}
+                    {friendly ? friendly.text : (r.summary || (r.status === "running" ? "In progress…" : "—"))}
                   </td>
                   <td className="px-3 py-2 text-right">
                     {r.chatSessionId ? (

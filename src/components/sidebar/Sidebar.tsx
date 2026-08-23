@@ -1,7 +1,7 @@
-// Sidebar (§5): unified single-mode layout — New Chat, Artifacts, Connectors,
+﻿// Sidebar (Â§5): unified single-mode layout â€” New Chat, Artifacts, Connectors,
 // Automations (stub), Projects, Chat history, then footer links to Settings /
 // Skills Library / Cost Dashboard. Handles the "Add Project" first-launch flow
-// (§4.1) — the not-a-git-repo prompt itself renders at the App top level
+// (Â§4.1) â€” the not-a-git-repo prompt itself renders at the App top level
 // (App.tsx) so it centers on screen like the other modals.
 //
 // Visual style: white / frosted glass (light) with a matching dark variant.
@@ -26,8 +26,6 @@ import {
   Search,
   Settings,
   CalendarClock,
-  ChevronDown,
-  ChevronRight,
   X,
   QrCode,
 } from "lucide-react";
@@ -38,12 +36,15 @@ import { useArtifactsStore } from "../../state/artifacts";
 import { ArtifactLibrary } from "./ArtifactLibrary";
 import { ChatSessionRowMemo as ChatSessionRow, type ChatSessionRowData } from "../chat/ChatSessionRow";
 import { PanelIcon } from "../common/PanelIcon";
-import { relativeTime } from "../../lib/relativeTime";
+import { relativeTime, shortRelativeTime } from "../../lib/relativeTime";
 import { UpdateButton } from "./UpdateButton";
 import { seedFakeUpdate, SHOW_FAKE_UPDATE } from "../../state/updater";
 
 export function Sidebar() {
   const [projectsCollapsed, setProjectsCollapsed] = useState(true);
+  // Quiet projects list: show a capped set and reveal the rest on demand.
+  const visibleProjectCount = 6;
+  const [showAllProjects, setShowAllProjects] = useState(false);
   const projects = useProjectsStore((s) => s.projects);
   const loaded = useProjectsStore((s) => s.loaded);
   const addProjectAtPath = useProjectsStore((s) => s.addProjectAtPath);
@@ -78,7 +79,7 @@ export function Sidebar() {
   // Artifacts count
   const artifactItems = useArtifactsStore((s) => s.items);
 
-  // ── Pairing QR modal (sidebar footer quick access) ─────────────────────
+  // â”€â”€ Pairing QR modal (sidebar footer quick access) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [pairingModalOpen, setPairingModalOpen] = useState(false);
   const [pairingInfo, setPairingInfo] = useState<MobilePairingInfo | null>(null);
   const [pairingQr, setPairingQr] = useState<string>("");
@@ -89,7 +90,7 @@ export function Sidebar() {
     try {
       const info = await getMobilePairingInfo();
       setPairingInfo(info);
-      // Prefer: tailnet direct (no HTTPS serve needed) → HTTPS serve → local USB bridge.
+      // Prefer: tailnet direct (no HTTPS serve needed) â†’ HTTPS serve â†’ local USB bridge.
       const url = info?.tailnetUrl ?? info?.tailscaleUrl ?? info?.localUrl ?? "";
       if (url) {
         const { default: QRCode } = await import("qrcode");
@@ -141,7 +142,7 @@ export function Sidebar() {
 
   const handleProjectClick = useCallback(
     (projectId: string) => {
-      // Only toggle expansion — do NOT select the project here.
+      // Only toggle expansion â€” do NOT select the project here.
       // Selecting triggers the project-store subscription which rebinds
       // the active chat to this project, stealing it from its original
       // project. Project selection happens implicitly when the user clicks
@@ -166,7 +167,7 @@ export function Sidebar() {
   );
 
   // Remove a project from the sidebar. The backend cascade also deletes every
-  // chat nested under it, so confirm first — this is destructive.
+  // chat nested under it, so confirm first â€” this is destructive.
   const handleRemoveProject = useCallback(
     (projectId: string, projectName: string) => {
       const ok = window.confirm(
@@ -287,7 +288,7 @@ export function Sidebar() {
   }, [chatSessions]);
 
   // PERF (PERFORMANCE_AUDIT.md mi27/F5): virtualize the flat chat-history
-  // list — 100+ sessions used to mount 100+ ChatSessionRow subtrees (each
+  // list â€” 100+ sessions used to mount 100+ ChatSessionRow subtrees (each
   // with hover action buttons + context menu wiring), making sidebar scroll
   // stutter. Rows self-measure via measureElement.
   const chatListRef = useRef<HTMLDivElement>(null);
@@ -300,7 +301,7 @@ export function Sidebar() {
 
   return (
     <aside className="flex flex-col h-full bg-white/95 dark:bg-[#141414] backdrop-blur-xl border-r border-gray-200 dark:border-white/20 overflow-hidden select-none">
-      {/* ── Consolidated Header: branding + search + collapse in one block ── */}
+      {/* â”€â”€ Consolidated Header: branding + search + collapse in one block â”€â”€ */}
       <div data-tauri-drag-region className="p-3 border-b border-gray-200 dark:border-white/20">
         {/* Branding */}
         <div className="flex items-center justify-between mb-2">
@@ -330,10 +331,10 @@ export function Sidebar() {
         </div>
       </div>
 
-      {/* ── Pinned upper block (non-scrolling) ──────────────────────────── */}
+      {/* â”€â”€ Pinned upper block (non-scrolling) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div className="flex-shrink-0">
         {/* Global Views: Artifacts pill + Schedule button (automations) */}
-        <div className="flex flex-col gap-1 p-2">
+        <div className="flex flex-col gap-1 px-2 pt-2 pb-0">
           <ArtifactLibrary />
           <div className="chat-new-btn-row">
             <button
@@ -350,28 +351,21 @@ export function Sidebar() {
           </div>
         </div>
 
-        {/* Projects Tree */}
-        <div className="px-3 py-2">
-          <div className="flex items-center justify-between mb-1.5">
+        {/* Projects */}
+        <div className="px-2 py-1.5">
+          {/* Same geometry as the Artifacts/Schedule rows: full-width pill
+              label + trailing "+" so hover/active fills identically. */}
+          <div className="sidebar-section-header flex items-center gap-1 mb-1">
             <button
               type="button"
               onClick={() => setProjectsCollapsed((c) => !c)}
-              className="flex items-center gap-1 text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-slate-300 hover:text-gray-900 dark:hover:text-white transition-colors bg-transparent border-none p-0"
+              className="sidebar-section-label"
               title={projectsCollapsed ? "Expand projects" : "Collapse projects"}
               aria-expanded={!projectsCollapsed}
               aria-controls="projects-list"
             >
-              {projectsCollapsed ? (
-                <ChevronRight size={11} strokeWidth={2.2} />
-              ) : (
-                <ChevronDown size={11} strokeWidth={2.2} />
-              )}
+              <Folder size={14} strokeWidth={1.8} className="sidebar-section-label-icon" />
               Projects
-              {projects.length > 0 && (
-                <span className="ml-1 text-[10px] font-normal normal-case tracking-normal text-gray-400 dark:text-slate-400">
-                  {projects.length}
-                </span>
-              )}
             </button>
             <button
               onClick={() => void addProject()}
@@ -382,8 +376,13 @@ export function Sidebar() {
               <Plus size={13} strokeWidth={2} />
             </button>
           </div>
-          {!projectsCollapsed && (
-            <div id="projects-list">
+          {/* Always-mounted collapse wrapper: the grid-rows 0frâ†’1fr transition
+              animates smoothly without measuring content height. */}
+          <div
+            className={`sidebar-projects-collapse${projectsCollapsed ? "" : " open"}`}
+            aria-hidden={projectsCollapsed}
+          >
+            <div id="projects-list" className="sidebar-projects-collapse-inner">
               {loaded && projects.length === 0 ? (
                 <div className="flex flex-col items-center gap-2 py-4 px-2 rounded-lg bg-gray-50 dark:bg-white/10 border border-gray-200 dark:border-white/20">
                   <Folder size={20} className="text-gray-400 dark:text-slate-300" strokeWidth={1.5} />
@@ -397,7 +396,13 @@ export function Sidebar() {
                 </div>
               ) : (
                 <div className="flex flex-col gap-0.5 sidebar-projects-scroll">
-                  {projects.map((project) => {
+                  {/* Quiet list, like a launcher: cap the visible projects and
+                      reveal the rest via "Show more" instead of scrolling a
+                      long nested tree. */}
+                  {(showAllProjects || projects.length <= visibleProjectCount
+                    ? projects
+                    : projects.slice(0, visibleProjectCount)
+                  ).map((project) => {
                     // Default to expanded: a missing key means "expanded".
                     // Only an explicit `false` collapses the project.
                     const isExpanded = expanded[project.id] !== false;
@@ -417,13 +422,6 @@ export function Sidebar() {
                           title={project.path}
                           className={`sidebar-project-row ${project.id === selectedProjectId ? "is-selected" : ""}`}
                         >
-                          <span className="sidebar-project-caret">
-                            {isExpanded ? (
-                              <ChevronDown size={12} strokeWidth={2.2} />
-                            ) : (
-                              <ChevronRight size={12} strokeWidth={2.2} />
-                            )}
-                          </span>
                           <Folder size={14} strokeWidth={1.7} className="sidebar-project-folder" />
                           <span className="sidebar-project-name">{project.name}</span>
                           {/* Hover-only actions: new chat for this project (+)
@@ -453,9 +451,6 @@ export function Sidebar() {
                               <X size={14} strokeWidth={2} />
                             </button>
                           </span>
-                          {projectChats.length > 0 && (
-                            <span className="sidebar-project-count">{projectChats.length}</span>
-                          )}
                         </div>
                         {isExpanded && projectChats.length > 0 && (
                           <div className="sidebar-project-chats">
@@ -477,19 +472,22 @@ export function Sidebar() {
                                   className={`sidebar-project-chat-row ${active ? "is-active" : ""} ${c.unread ? "is-unread" : ""}`}
                                   title={c.title}
                                 >
-                                  <span className="sidebar-project-chat-status">
-                                    {working ? (
-                                      <span className="sidebar-project-chat-working" />
-                                    ) : c.starred ? (
-                                      <span className="sidebar-project-chat-star">★</span>
-                                    ) : c.unread ? (
-                                      <span className="sidebar-project-chat-unread-dot" />
-                                    ) : (
-                                      <MessageSquare size={12} strokeWidth={1.6} className="sidebar-project-chat-icon" />
-                                    )}
-                                  </span>
+                                  {/* Quiet rows: no icon while idle â€” the
+                                      status slot only appears when there is
+                                      something to say (running/star/unread). */}
+                                  {(working || c.starred || c.unread) && (
+                                    <span className="sidebar-project-chat-status">
+                                      {working ? (
+                                        <span className="sidebar-project-chat-working" />
+                                      ) : c.starred ? (
+                                        <span className="sidebar-project-chat-star">â˜…</span>
+                                      ) : (
+                                        <span className="sidebar-project-chat-unread-dot" />
+                                      )}
+                                    </span>
+                                  )}
                                   <span className="sidebar-project-chat-title">{c.title}</span>
-                                  <span className="sidebar-project-chat-time">{relativeTime(c.lastActiveAt)}</span>
+                                  <span className="sidebar-project-chat-time">{shortRelativeTime(c.lastActiveAt)}</span>
                                   {project.isGitRepo && (
                                     <button
                                       onClick={(e) => {
@@ -506,7 +504,7 @@ export function Sidebar() {
                                         c.worktreePath ? "Join main working tree" : "Isolate in worktree"
                                       }
                                     >
-                                      {c.worktreePath ? "⛓" : "🪵"}
+                                      {c.worktreePath ? "â›“" : "ðŸªµ"}
                                     </button>
                                   )}
                                 </div>
@@ -517,24 +515,31 @@ export function Sidebar() {
                       </div>
                     );
                   })}
-                </div>
-              )}
+                  {projects.length > visibleProjectCount && (
+                    <button
+                      type="button"
+                      className="sidebar-projects-more"
+                      onClick={() => setShowAllProjects((v) => !v)}
+                    >
+                      {showAllProjects ? "Show less" : "Show more"}
+                    </button>
+                  )}
+                 </div>
+               )}
             </div>
-          )}
+          </div>
         </div>
       </div>
 
-      {/* ── Recent History ─────────────────────────────────────────────── */}
+      {/* â”€â”€ Recent History â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {/* Label stays pinned; only the chat list below scrolls. */}
-      <div className="px-3 pt-2 pb-1 flex-shrink-0">
-        <div className="flex items-center justify-between mb-1">
-          <div className="flex items-center gap-1.5">
-            <MessageSquare size={11} strokeWidth={1.8} className="text-gray-400 dark:text-slate-300" />
-            <span className="text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-slate-300">
+      <div className="px-2 pt-0.5 pb-1 flex-shrink-0">
+          <div className="sidebar-section-header flex items-center gap-1 mb-1">
+            <span className="sidebar-section-label">
+              <MessageSquare size={14} strokeWidth={1.8} className="sidebar-section-label-icon" />
               Chat History
             </span>
-          </div>
-          {/* New Chat — same "+" affordance as the Projects header */}
+          {/* New Chat â€” same "+" affordance as the Projects header */}
           <button
             onClick={handleNewChat}
             className="p-2 rounded-md bg-transparent border border-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white transition-all duration-150 active:scale-95"
@@ -545,7 +550,7 @@ export function Sidebar() {
           </button>
         </div>
       </div>
-      {/* ── Scrolling chat list ─────────────────────────────────────────── */}
+      {/* â”€â”€ Scrolling chat list â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div className="flex-1 overflow-y-auto sidebar-thin-scroll min-h-0" ref={chatListRef}>
         {chatRowData.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-6 px-3">
@@ -593,7 +598,7 @@ export function Sidebar() {
         )}
       </div>
 
-      {/* ── Pinned Footer ───────────────────────────────────────────────── */}
+      {/* â”€â”€ Pinned Footer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div className="flex-shrink-0 flex flex-row justify-center gap-2 p-2 border-t border-gray-200 dark:border-white/20">
         <button
           className={`p-2 rounded-lg transition-all duration-150 active:scale-95 ${
@@ -645,7 +650,7 @@ export function Sidebar() {
         </button>
       </div>
 
-      {/* ── Pairing QR modal (sidebar quick access) ──────────────────────
+      {/* â”€â”€ Pairing QR modal (sidebar quick access) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
           Rendered via portal to document.body so it overlays the entire app
           (the sidebar's backdrop-blur creates its own containing block,
           which would trap a position:fixed overlay inside the rail). */}
@@ -660,7 +665,7 @@ export function Sidebar() {
                 </button>
               </div>
               {pairingLoading ? (
-                <p className="muted" style={{ fontSize: 12 }}>Loading…</p>
+                <p className="muted" style={{ fontSize: 12 }}>Loadingâ€¦</p>
               ) : pairingInfo?.running && pairingQr ? (
                 <>
                   <div className="pairing-modal-qr">
@@ -680,7 +685,7 @@ export function Sidebar() {
                 </>
               ) : (
                 <p className="muted" style={{ fontSize: 12 }}>
-                  Relay is not running. Open Settings → Remote to start it.
+                  Relay is not running. Open Settings â†’ Remote to start it.
                 </p>
               )}
             </div>

@@ -4,6 +4,7 @@
 // schedule display, and a "Past Runs" table.
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertTriangle,
   CalendarClock,
   Bell,
   CheckCircle2,
@@ -23,6 +24,7 @@ import {
   Zap,
 } from "lucide-react";
 import {
+  automationNextFire,
   getRunWhileClosed,
   getSetting,
   listAutomationRuns,
@@ -45,6 +47,13 @@ import { useProjectsStore } from "../../state/projects";
 import { useSettingsStore } from "../../state/settings";
 import { useUiStore } from "../../state/ui";
 import { useChatStore } from "../../state/chat";
+import {
+  AUTOMATION_STATE_META,
+  automationState,
+  friendlyRunError,
+  isFailureStatus,
+  type AutomationStateKey,
+} from "./shared";
 
 const AutomationRunTable = lazy(() =>
   import("./AutomationRunTable").then((m) => ({ default: m.AutomationRunTable }))
@@ -140,6 +149,25 @@ function relativeTime(ts: number | null): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
+/** "Today at 6:30 PM" / "Tomorrow at …" / "Friday at …" / "Aug 29 at …". */
+function formatNextFire(ts: number): string {
+  const d = new Date(ts * 1000);
+  const now = new Date();
+  const time = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const day = (date: Date) => date.toDateString();
+  const tomorrow = new Date(now);
+  tomorrow.setDate(now.getDate() + 1);
+  if (day(d) === day(now)) return `Today at ${time}`;
+  if (day(d) === day(tomorrow)) return `Tomorrow at ${time}`;
+  const daysOut = Math.round((d.setHours(12, 0, 0, 0) - now.setHours(12, 0, 0, 0)) / 86400000);
+  if (daysOut < 7) {
+    const weekday = new Date(ts * 1000).toLocaleDateString(undefined, { weekday: "long" });
+    return `${weekday} at ${time}`;
+  }
+  const date = new Date(ts * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return `${date} at ${time}`;
+}
+
 function statusColor(status: string | null): string {
   if (status === "ok") return "var(--green, #4caf7d)";
   if (status === "skipped") return "var(--yellow, #f0ad4e)";
@@ -164,7 +192,9 @@ export function AutomationsView() {
   const automations = useAutomationsStore((s) => s.automations);
   const loaded = useAutomationsStore((s) => s.loaded);
   const load = useAutomationsStore((s) => s.load);
+  const runningNow = useAutomationsStore((s) => s.runningNow);
   const setActiveView = useUiStore((s) => s.setActiveView);
+  const pendingArtifactFormData = useUiStore((s) => s.pendingArtifactFormData);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showNewForm, setShowNewForm] = useState(false);
 
@@ -178,6 +208,15 @@ export function AutomationsView() {
     }
   }, [loaded, automations, selectedId, showNewForm]);
 
+  // The parent owns only visibility. AutomationForm consumes and clears the
+  // payload after applying the fields, then resets the originating card.
+  useEffect(() => {
+    if (pendingArtifactFormData?.artifactType === "automation") {
+      setShowNewForm(true);
+      setSelectedId(null);
+    }
+  }, [pendingArtifactFormData]);
+
   const selected = automations.find((a) => a.id === selectedId) ?? null;
   const editingId = selectedId?.startsWith(EDIT_PREFIX)
     ? selectedId.slice(EDIT_PREFIX.length)
@@ -186,12 +225,13 @@ export function AutomationsView() {
     ? automations.find((a) => a.id === editingId) ?? null
     : null;
 
-  const totalRuns = useMemo(
-    () => automations.reduce((acc, a) => acc + (a.lastRunAt ? 1 : 0), 0),
-    [automations],
+  const stateOf = useCallback(
+    (a: Automation) => automationState(a, !!runningNow[a.id]),
+    [runningNow],
   );
-  const okCount = automations.filter((a) => a.lastStatus === "ok").length;
   const activeCount = automations.filter((a) => a.enabled).length;
+  const healthyCount = automations.filter((a) => stateOf(a) === "healthy").length;
+  const failingCount = automations.filter((a) => stateOf(a) === "failing").length;
 
   return (
     <div className="automations-view">
@@ -200,9 +240,22 @@ export function AutomationsView() {
         <div className="automations-header-left">
           <CalendarClock size={20} strokeWidth={1.8} />
           <h1>Automations</h1>
-          {loaded && (
-            <span className="automations-header-badge">
-              {activeCount}/{automations.length} active
+          {loaded && automations.length > 0 && (
+            <span className="automations-header-metrics">
+              <span className="automations-header-badge">
+                <strong>{automations.length}</strong> total
+              </span>
+              <span className="automations-header-badge">
+                <strong>{activeCount}</strong> active
+              </span>
+              <span className="automations-header-badge healthy">
+                <strong>{healthyCount}</strong> healthy
+              </span>
+              {failingCount > 0 && (
+                <span className="automations-header-badge failing">
+                  <strong>{failingCount}</strong> failing
+                </span>
+              )}
             </span>
           )}
         </div>
@@ -225,26 +278,6 @@ export function AutomationsView() {
           </button>
         </div>
       </div>
-
-      {/* Stats bar */}
-      {loaded && automations.length > 0 && (
-        <div className="automations-stats">
-          <div className="automations-stat">
-            <span className="automations-stat-value">{automations.length}</span>
-            <span className="automations-stat-label">Total</span>
-          </div>
-          <div className="automations-stat">
-            <span className="automations-stat-value">{activeCount}</span>
-            <span className="automations-stat-label">Active</span>
-          </div>
-          <div className="automations-stat">
-            <span className="automations-stat-value" style={{ color: "var(--green, #4caf7d)" }}>
-              {okCount}
-            </span>
-            <span className="automations-stat-label">Healthy</span>
-          </div>
-        </div>
-      )}
 
       {/* Body */}
       {loaded && automations.length === 0 && !showNewForm ? (
@@ -275,6 +308,7 @@ export function AutomationsView() {
             <div className="automations-list-scroll">
               {automations.map((a) => {
                 const isSelected = a.id === selectedId && !showNewForm && !editingId;
+                const state = stateOf(a);
                 return (
                   <button
                     key={a.id}
@@ -282,10 +316,12 @@ export function AutomationsView() {
                     className={`automations-list-row${isSelected ? " selected" : ""}`}
                   >
                     <div className="automations-list-row-top">
-                      {a.enabled ? (
-                        <PlayCircle size={14} strokeWidth={2} className="automations-list-status running" />
-                      ) : (
+                      {!a.enabled ? (
                         <XCircle size={14} strokeWidth={2} className="automations-list-status paused" />
+                      ) : state === "failing" ? (
+                        <AlertTriangle size={14} strokeWidth={2} className="automations-list-status failing" />
+                      ) : (
+                        <PlayCircle size={14} strokeWidth={2} className="automations-list-status running" />
                       )}
                       <span className="automations-list-name">{a.name}</span>
                     </div>
@@ -293,11 +329,18 @@ export function AutomationsView() {
                       <span>{scheduleLabel(a.schedule)}</span>
                       <span>·</span>
                       <span>{relativeTime(a.lastRunAt)}</span>
-                      {a.lastStatus && (
+                      {state === "failing" ? (
+                        // Label instead of the dot — a bare red dot plus the
+                        // word "Failing" said the same thing twice.
+                        <>
+                          <span>·</span>
+                          <span className="automations-list-failing">Failing</span>
+                        </>
+                      ) : (
                         <span
                           className="automations-list-dot"
-                          style={{ background: statusColor(a.lastStatus) }}
-                          title={statusLabel(a.lastStatus)}
+                          style={{ background: AUTOMATION_STATE_META[state].color }}
+                          title={AUTOMATION_STATE_META[state].label}
                         />
                       )}
                     </div>
@@ -529,6 +572,8 @@ function AutomationDetail({
   const [runs, setRuns] = useState<AutomationRun[]>([]);
   const [runsLoading, setRunsLoading] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
+  const [promptExpanded, setPromptExpanded] = useState(false);
+  const [nextRunAt, setNextRunAt] = useState<number | null | undefined>(undefined);
 
   const refreshRuns = useCallback(async () => {
     setRunsLoading(true);
@@ -552,6 +597,36 @@ function AutomationDetail({
   useEffect(() => {
     if (runningNow[automation.id]) void refreshRuns();
   }, [runningNow, automation.id, refreshRuns]);
+
+  // Next scheduled fire — same math the scheduler uses for due-ness, so the
+  // display can't drift from what will actually run. Recomputed when the
+  // schedule changes and every minute (the "Today/Tomorrow" framing ages).
+  useEffect(() => {
+    if (!automation.enabled) { setNextRunAt(undefined); return; }
+    let cancelled = false;
+    const fetchNext = () => {
+      void automationNextFire(automation.schedule)
+        .then((t) => { if (!cancelled) setNextRunAt(t ?? null); })
+        .catch(() => { if (!cancelled) setNextRunAt(null); });
+    };
+    fetchNext();
+    const interval = window.setInterval(fetchNext, 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [automation.enabled, automation.id, automation.schedule]);
+
+  // How many most-recent runs failed with the exact same error — powers the
+  // "failed N times in a row" banner copy.
+  const consecutiveFailures = useMemo(() => {
+    let n = 0;
+    for (const r of runs) {
+      if (r.status === automation.lastStatus) n++;
+      else break;
+    }
+    return n;
+  }, [runs, automation.lastStatus]);
 
   const handleRunNow = useCallback(async () => {
     setRunError(null);
@@ -593,15 +668,46 @@ function AutomationDetail({
       <div className="automation-detail-header">
         <div className="automation-detail-title-row">
           <h2>{automation.name}</h2>
-          <span className={`automation-status-pill ${automation.enabled ? "enabled" : "paused"}`}>
-            {automation.enabled ? (
-              <><Power size={11} strokeWidth={2.5} /> Active</>
-            ) : (
-              <><Pause size={11} strokeWidth={2.5} /> Paused</>
-            )}
-          </span>
+          {(() => {
+            const state = automationState(automation, !!runningNow[automation.id]);
+            const meta = AUTOMATION_STATE_META[state];
+            const icon =
+              state === "healthy" ? <CheckCircle2 size={11} strokeWidth={2.5} /> :
+              state === "failing" ? <XCircle size={11} strokeWidth={2.5} /> :
+              state === "running" ? <Loader2 size={11} strokeWidth={2.5} className="animate-spin" /> :
+              state === "paused" ? <Pause size={11} strokeWidth={2.5} /> :
+              <Hourglass size={11} strokeWidth={2.5} />;
+            return (
+              <span
+                className={`automation-status-pill ${state}`}
+                title={meta.label}
+                style={state === "never" ? undefined : { color: meta.color }}
+              >
+                {icon} {meta.label}
+              </span>
+            );
+          })()}
         </div>
-        <p className="automation-detail-prompt">{automation.prompt}</p>
+        {(() => {
+          // Long prompts are collapsed to 3 lines — the prompt is config,
+          // not prose, and shouldn't push the schedule/runs below the fold.
+          if (automation.prompt.length <= 220) {
+            return <p className="automation-detail-prompt">{automation.prompt}</p>;
+          }
+          return (
+            <>
+              <p className={`automation-detail-prompt${promptExpanded ? "" : " collapsed"}`}>
+                {automation.prompt}
+              </p>
+              <button
+                className="automation-detail-prompt-toggle"
+                onClick={() => setPromptExpanded((e) => !e)}
+              >
+                {promptExpanded ? "Show less" : "Show more"}
+              </button>
+            </>
+          );
+        })()}
         <div className="automation-detail-meta">
           <span>{AGENT_OPTIONS.find((a) => a.id === automation.harness)?.label ?? automation.harness}</span>
           {automation.model && <><span>·</span><span>{automation.model}</span></>}
@@ -654,6 +760,41 @@ function AutomationDetail({
         <div className="automation-detail-error">{runError}</div>
       )}
 
+      {/* Failure banner — surfaces the last run's outcome without making the
+          user scan the runs table; raw errors are translated to plain
+          language with a suggested next step. */}
+      {isFailureStatus(automation.lastStatus) && !runError && (() => {
+        const friendly = friendlyRunError(automation.lastStatus!);
+        return (
+          <div className="automation-detail-banner">
+            <AlertTriangle size={15} strokeWidth={2} className="automation-detail-banner-icon" />
+            <div className="automation-detail-banner-text">
+              <strong>
+                Last run failed
+                {consecutiveFailures > 1 ? ` — ${consecutiveFailures}× in a row` : ""}
+              </strong>
+              <span>
+                {friendly.text}
+                {friendly.hint ? ` ${friendly.hint}` : ""}
+              </span>
+            </div>
+            {automation.enabled && (
+              <button
+                onClick={() => void handleRunNow()}
+                disabled={!!runningNow[automation.id]}
+                className="automations-btn automation-detail-banner-action"
+              >
+                {runningNow[automation.id] ? (
+                  <><Loader2 size={13} strokeWidth={2} className="animate-spin" /> Running…</>
+                ) : (
+                  <><Play size={13} strokeWidth={2} /> Run again</>
+                )}
+              </button>
+            )}
+          </div>
+        );
+      })()}
+
       {/* Schedule card */}
       <div className="automation-detail-schedule">
         <div className="automation-detail-schedule-label">SCHEDULE</div>
@@ -662,6 +803,9 @@ function AutomationDetail({
           <code className="automation-detail-schedule-cron">{automation.schedule}</code>
         </div>
         <div className="automation-detail-schedule-info">
+          {automation.enabled && nextRunAt != null && (
+            <>Next run: {formatNextFire(nextRunAt)}<br /></>
+          )}
           Last run: {relativeTime(automation.lastRunAt)}
           {automation.lastStatus && (
             <span style={{ color: statusColor(automation.lastStatus), marginLeft: 8 }}>
@@ -706,6 +850,8 @@ function AutomationForm({
   const update = useAutomationsStore((s) => s.update);
   const projects = useProjectsStore((s) => s.projects);
   const settingsLoaded = useSettingsStore((s) => s.loaded);
+  const pendingArtifactFormData = useUiStore((s) => s.pendingArtifactFormData);
+  const setPendingArtifactFormData = useUiStore((s) => s.setPendingArtifactFormData);
 
   const [name, setName] = useState(automation?.name ?? "");
   const [prompt, setPrompt] = useState(automation?.prompt ?? "");
@@ -737,6 +883,29 @@ function AutomationForm({
   const [saving, setSaving] = useState(false);
   const nameRef = useRef<HTMLInputElement>(null);
 
+  // Set form data — called by conversational artifact creation when "Edit" is clicked
+  // on an automation proposal card. The spec provides the artifact name,
+  // description, and trigger/schedule to pre-fill the form.
+  const setAutomationFormData = useCallback((spec: any) => {
+    setName(spec.name || "");
+    setPrompt(spec.description || "");
+    if (spec.trigger?.schedule) {
+      setScheduleChoice(spec.trigger.schedule);
+    }
+  }, []);
+
+  // Consume pending form data from conversational artifact creation
+  useEffect(() => {
+    if (pendingArtifactFormData && pendingArtifactFormData.artifactType === "automation") {
+      const { chatSessionId, proposalId } = pendingArtifactFormData;
+      setAutomationFormData(pendingArtifactFormData.spec);
+      setPendingArtifactFormData(null);
+      if (chatSessionId && proposalId) {
+        useChatStore.getState().updateArtifactProposal(chatSessionId, proposalId, { state: "ready" });
+      }
+    }
+  }, [pendingArtifactFormData, setAutomationFormData, setPendingArtifactFormData]);
+
   const agent = AGENT_OPTIONS.find((a) => a.id === agentId);
   const isHarness = agent?.group === "harness";
   const isApi = agent?.group === "api";
@@ -754,8 +923,9 @@ function AutomationForm({
           if (!cancelled && cfg) {
             const list = cfg.models.map((m) => ({ id: m.id, label: m.label }));
             setAvailableModels(list);
-            // Auto-select default if none picked
-            if (!model && cfg.defaultModel) setModel(cfg.defaultModel);
+            // No auto-select: Model is optional and empty means "harness
+            // default". Pre-pinning a model made users unknowingly override
+            // whatever the harness is configured with.
           }
         } else if (isApi) {
           const list = await listChatModels(agentId);
@@ -788,6 +958,22 @@ function AutomationForm({
     () => name.trim() !== "" && prompt.trim() !== "" && schedule !== "",
     [name, prompt, schedule],
   );
+
+  // Live "next run" preview for the chosen schedule (debounced — recomputed
+  // on every keystroke of a custom time would otherwise spam the backend).
+  // Falls back to the static human-readable label if the query fails.
+  const [previewNextAt, setPreviewNextAt] = useState<number | null>(null);
+  useEffect(() => {
+    if (!schedule) { setPreviewNextAt(null); return; }
+    let cancelled = false;
+    setPreviewNextAt(null);
+    const handle = window.setTimeout(() => {
+      void automationNextFire(schedule)
+        .then((t) => { if (!cancelled && t) setPreviewNextAt(t); })
+        .catch(() => {});
+    }, 250);
+    return () => { cancelled = true; window.clearTimeout(handle); };
+  }, [schedule]);
 
   const save = async () => {
     const input: AutomationInput = {
@@ -880,7 +1066,7 @@ function AutomationForm({
             <label>Model <span className="automation-form-optional">(optional)</span></label>
             {availableModels.length > 0 ? (
               <select value={model} onChange={(e) => setModel(e.target.value)}>
-                <option value="">{isHarness ? "Harness default" : isLocal ? "Auto-detect" : "Select a model"}</option>
+                <option value="">{isHarness ? "Harness default" : isLocal ? "Auto-detect" : "Provider default"}</option>
                 {availableModels.map((m) => (
                   <option key={m.id} value={m.id}>{m.label}</option>
                 ))}
@@ -889,7 +1075,7 @@ function AutomationForm({
               <input
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                placeholder={modelsLoading ? "Loading models…" : isHarness ? "Harness default" : "Enter model name"}
+                placeholder={modelsLoading ? "Loading models…" : isHarness ? "Harness default" : "Provider default"}
                 disabled={modelsLoading}
               />
             )}
@@ -948,12 +1134,20 @@ function AutomationForm({
 
         {schedule && (
           <p className="automation-form-schedule-preview">
-            {scheduleChoice === "custom" ? "→ " : ""}
-            Runs: {scheduleLabel(schedule)}
+            {previewNextAt != null ? (
+              <>Next run: <strong>{formatNextFire(previewNextAt)}</strong></>
+            ) : (
+              <>Runs: {scheduleLabel(schedule)}</>
+            )}
+            {scheduleChoice === "custom" && (
+              <>
+                {" "}<code className="automation-form-cron">{schedule}</code>
+              </>
+            )}
           </p>
         )}
 
-        <p className="automation-form-hint">
+        <p className="automation-form-hint warning">
           Automations run unattended with full-auto permissions. They fire while
           Conduit is open — or anytime once "Run while closed" is on. Results
           land in a dedicated chat named after this automation.

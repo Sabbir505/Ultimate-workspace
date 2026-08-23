@@ -443,6 +443,15 @@ impl LocalModelRegistry {
 /// the backend after a successful start.
 pub const OVERRIDES_KEY: &str = "localModels.overrides";
 
+/// App-settings key holding a user-configured absolute path to the
+/// `llama-server` binary (or its containing directory). When set, the
+/// resolution chain checks this BEFORE the bundled sidecar, the env var,
+/// PATH, and the built-in candidate list. Lets the Local Models settings
+/// panel offer a "one-click path setup" for the default Windows source
+/// build at `C:\llama.cpp\build\bin\llama-server.exe` without forcing
+/// users to set an env var or edit their PATH.
+pub const LLAMA_SERVER_PATH_KEY: &str = "localModels.llamaServerPath";
+
 /// Per-model llama-server runtime overrides — the LM Studio "runtime
 /// settings" analog. `None` everywhere means "auto". `last_good_ngl` is
 /// never user-set: the backend records the GPU-layer count of the last
@@ -599,6 +608,7 @@ impl LocalModelRegistry {
         gguf_path: &str,
         mmproj_path: Option<&str>,
         overrides: Option<&LlamaOverrides>,
+        user_llama_server_path: Option<String>,
     ) -> Result<StartedModel, String> {
         // Stop any running chat sidecar.
         self.stop_kind(SidecarKind::Chat).await;
@@ -606,10 +616,12 @@ impl LocalModelRegistry {
         // Resolve llama-server binary (and its directory — on Windows the
         // process must run with the binary's dir as CWD so it can load sibling
         // DLLs like llama-server-impl.dll; otherwise spawn fails with
-        // 0xC0000135 STATUS_DLL_NOT_FOUND).
-        let resolved = resolve_llama_server_binary()?;
+        // 0xC0000135 STATUS_DLL_NOT_FOUND). The caller pre-reads the
+        // user-configured path (`localModels.llamaServerPath`, written by the
+        // settings panel's "one-click path setup") because the DB connection
+        // must not be locked across this await.
+        let resolved = resolve_llama_server_binary(user_llama_server_path.as_deref())?;
         let bin = &resolved.path;
-
         // Pick a free port.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -959,7 +971,7 @@ impl LocalModelRegistry {
     pub async fn start_embedding(&self, gguf_path: &str) -> Result<StartedModel, String> {
         self.stop_kind(SidecarKind::Embedding).await;
 
-        let resolved = resolve_llama_server_binary()?;
+        let resolved = resolve_llama_server_binary(None)?;
         let bin = &resolved.path;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1189,13 +1201,32 @@ struct ResolvedBinary {
     dir: PathBuf,
 }
 
-fn resolve_llama_server_binary() -> Result<ResolvedBinary, String> {
+fn resolve_llama_server_binary(user_path: Option<&str>) -> Result<ResolvedBinary, String> {
     let to_resolved = |p: PathBuf| -> ResolvedBinary {
         let dir = p.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
         ResolvedBinary { path: p.to_string_lossy().to_string(), dir }
     };
 
-    // 0. Bundled sidecar (highest priority). The `llama-server-<triple>`
+    // 0. User-configured path from settings (e.g. "one-click path setup").
+    //    Checked first so users can override everything else.
+    if let Some(path_str) = user_path {
+        let p = Path::new(path_str);
+        let bin_name = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+        let resolved_file = if p.is_file() {
+            Some(p.to_path_buf())
+        } else if cfg!(windows) && p.with_extension("exe").is_file() {
+            Some(p.with_extension("exe"))
+        } else if p.is_dir() && p.join(bin_name).is_file() {
+            Some(p.join(bin_name))
+        } else {
+            None
+        };
+        if let Some(file) = resolved_file {
+            return Ok(to_resolved(file));
+        }
+    }
+
+    // 1. Bundled sidecar (highest priority). The `llama-server-<triple>`
     //    launcher Tauri stages as an externalBin, with the sibling .so /
     //    .dll / .dylib files in the same dir (from bundle.resources). The
     //    launcher uses RUNPATH $ORIGIN to find them, so the dir returned

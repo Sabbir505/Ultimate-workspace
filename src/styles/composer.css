@@ -61,30 +61,35 @@
   flex-direction: column;
   gap: 4px;
   padding: 10px 12px 8px;
-  border: 1px solid var(--border);
-  border-bottom: none;
-  /* Round only the top — the bottom is square so the notch bar below it
-     (which carries the 0 0 16px 16px rounding) meets its full-width edge with
-     no corner gap. */
-  border-radius: 16px 16px 0 0;
-  background: var(--surface-glass);
-  backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
-  box-shadow: var(--glass-rim), 0 6px 24px -12px rgba(0, 0, 0, 0.45);
+  /* Glassmorphism: translucent body + blur + hairline border. The card is now
+     fully rounded (no external notch bar), so all four corners use 16px. */
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
   position: relative;
   overflow: visible;
   transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
 }
-.chat-composer-card:focus-within {
-  border-color: var(--accent);
-  box-shadow: var(--glass-rim), 0 0 0 3px var(--accent-soft);
+/* Light theme: mirror the sheens with dark values over a light backdrop. */
+:root[data-theme="light"] .chat-composer-card {
+  border-color: rgba(0, 0, 0, 0.08);
+  background: rgba(0, 0, 0, 0.03);
 }
-/* When the textarea is focused, the notch bar below the composer should share
-   the same accent border + accent-soft ring so the whole composer reads as a
-   single focused unit (not just the card). */
-.chat-composer:has(.chat-composer-textarea:focus) .composer-context-meter-wrap {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft), 0 6px 24px -12px rgba(0, 0, 0, 0.45);
+.chat-composer-card:focus-within {
+  /* Focus brightens the border + adds an ambient accent glow. */
+  border-color: rgba(255, 255, 255, 0.2);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4), 0 0 24px -4px var(--accent-glow);
+}
+:root[data-theme="light"] .chat-composer-card:focus-within {
+  border-color: rgba(0, 0, 0, 0.2);
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-composer-card {
+    transition: none;
+  }
 }
 .chat-composer-textarea,
 .chat-composer-textarea:focus {
@@ -138,9 +143,75 @@
 
 .composer-send-wrap {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
-  gap: 2px;
+  gap: 6px;
+}
+
+/* Mic/record button — sits beside the send button in the same row. Small
+   circular button with a frosted surface; pulses red while recording. */
+.composer-mic-btn {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-dim);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease), color 0.15s var(--ease);
+}
+.composer-mic-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: var(--text);
+}
+.composer-mic-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.composer-mic-btn.recording {
+  background: rgba(214, 69, 69, 0.15);
+  border-color: var(--danger, #d64545);
+  color: var(--danger, #d64545);
+  animation: mic-pulse 1.4s ease-in-out infinite;
+}
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(214, 69, 69, 0.3); }
+  50% { box-shadow: 0 0 0 4px rgba(214, 69, 69, 0); }
+}
+:root[data-theme="light"] .composer-mic-btn {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+:root[data-theme="light"] .composer-mic-btn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.1);
+  border-color: rgba(0, 0, 0, 0.16);
+}
+
+/* Mic button inner states: spinner for transcribing, stop square for recording. */
+.composer-mic-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: mic-spin 0.7s linear infinite;
+}
+.composer-mic-stop {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: currentColor;
+}
+@keyframes mic-spin {
+  to { transform: rotate(360deg); }
 }
 
 /* Context-window meter: a small circular ring positioned below the send
@@ -412,42 +483,108 @@
 .composer-attach-menu-item .connector-toggle:not(.on) {
   display: none;
 }
-.composer-context-meter-wrap {
+/* Control bar — a horizontal toolbar inside the composer card carrying the
+   agent / workspace / branch pills. Frosted glass pills with a hairline inner
+   border, left-aligned with a flex spacer pushing any right-side content away. */
+.composer-control-bar {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 10px;
+  padding: 4px 2px 2px;
   position: relative;
-  margin-top: 0;
-  /* Unify agent / folder / github / context-meter into a single notch bar
-     that visually hangs off the bottom of the composer card. */
-  background: var(--surface-glass);
-  backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
-  border: 1px solid var(--border);
-  border-top: none;
-  border-radius: 0 0 16px 16px;
-  box-shadow: 0 6px 24px -12px rgba(0, 0, 0, 0.45);
+}
+.composer-control-spacer {
+  flex: 1;
+}
+/* Frosted glass control pills. The inner notch components (AgentMenu,
+   FolderNotch, GitHubNotch) render their own content; this wrapper gives them
+   the pill surface. */
+.composer-control-bar .composer-notch-agent,
+.composer-control-bar .composer-notch-folder,
+.composer-control-bar .composer-notch-github,
+.composer-control-bar .composer-control-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+:root[data-theme="light"] .composer-control-bar .composer-notch-agent,
+:root[data-theme="light"] .composer-control-bar .composer-notch-folder,
+:root[data-theme="light"] .composer-control-bar .composer-notch-github,
+:root[data-theme="light"] .composer-control-bar .composer-control-chip {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+.composer-control-bar .composer-notch-agent:hover,
+.composer-control-bar .composer-notch-folder:hover,
+.composer-control-bar .composer-notch-github:hover,
+.composer-control-bar .composer-control-chip:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: var(--text);
+}
+:root[data-theme="light"] .composer-control-bar .composer-notch-agent:hover,
+:root[data-theme="light"] .composer-control-bar .composer-notch-folder:hover,
+:root[data-theme="light"] .composer-control-bar .composer-notch-github:hover,
+:root[data-theme="light"] .composer-control-bar .composer-control-chip:hover {
+  background: rgba(0, 0, 0, 0.1);
+  border-color: rgba(0, 0, 0, 0.16);
 }
 
-/* Perf metrics row directly below the context-meter notch: a plain-text strip
-   (no background/border of its own — matches the user's "no background color,
-   just the text" request). Tight, dim, evenly spaced. */
-.composer-metrics-row {
+/* Telemetry HUD — a status bar docked to the bottom border of the composer
+   card. Monospace keys/values, separated from the prompt input by a 1px top
+   border. Idle metrics are muted; active/streaming ones switch to high-contrast
+   accent tones (green for cache, cyan for speed). Each chip has a hover
+   tooltip with a metric breakdown. */
+.composer-metrics-row.is-hud {
   display: flex;
   align-items: center;
-  justify-content: center;
-  flex-wrap: wrap;
-  gap: 6px 16px;
-  padding: 4px 2px 0;
+  flex-wrap: nowrap;
+  gap: 6px 14px;
+  padding: 6px 2px 2px;
+  margin: 4px -2px 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 11px;
   color: var(--text-dim);
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  overflow: visible;
+}
+:root[data-theme="light"] .composer-metrics-row.is-hud {
+  border-top-color: rgba(0, 0, 0, 0.08);
+}
+/* Chips group — left side, wraps when too many. */
+.composer-metrics-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+/* Context meter — right-aligned at the end of the HUD row. */
+.composer-metrics-context-wrap {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 .composer-metrics-chip {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 5px;
   white-space: nowrap;
+  cursor: help;
 }
 .composer-metrics-chip-dot {
   width: 5px;
@@ -479,6 +616,14 @@
   color: var(--text);
   font-weight: 500;
 }
+/* Tone-based value colors for active metrics. */
+.composer-metrics-chip.tone-cache .composer-metrics-chip-value {
+  color: var(--state-working, #4ec9b0);
+}
+.composer-metrics-chip.tone-speed .composer-metrics-chip-value,
+.composer-metrics-chip.tone-tokens .composer-metrics-chip-value {
+  color: var(--accent, #88C0D0);
+}
 /* The always-present placeholder set (no data yet). Same silhouette, dimmed
    so it reads as inert rather than as a broken live readout. */
 .composer-metrics-row.is-empty .composer-metrics-chip-value {
@@ -491,9 +636,51 @@
 .composer-metrics-row.is-empty .composer-metrics-chip-label {
   opacity: 0.7;
 }
+/* Hover tooltip — a small floating panel below the chip. Hidden by default,
+   revealed on hover. Consistent with the .context-meter-tooltip pattern. */
+.composer-metrics-tooltip {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%) scale(0.96);
+  z-index: 30;
+  max-width: 240px;
+  padding: 6px 10px;
+  font-family: var(--font-ui, sans-serif);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.4;
+  text-transform: none;
+  letter-spacing: normal;
+  text-align: center;
+  color: var(--text);
+  background: var(--surface, #1a1a1a);
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: var(--radius-xs, 6px);
+  box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.15s var(--ease), transform 0.15s var(--ease);
+}
+.composer-metrics-chip:hover .composer-metrics-tooltip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) scale(1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-metrics-tooltip {
+    transition: none;
+  }
+  .composer-metrics-chip:hover .composer-metrics-tooltip {
+    transform: translateX(-50%);
+  }
+}
 
-/* The inner notch chips no longer carry their own notch surface — they sit
-   directly on the unified bar background, so surface/border are removed. */
+/* Base notch chip layout — positioning/sizing for the inner content of agent
+   and folder pills. The pill surface (bg/border/radius) is applied by the
+   .composer-control-bar scope above; these base rules only carry layout so the
+   children (icon, name, clear button) align correctly. */
 .composer-notch-agent,
 .composer-notch-folder {
   position: relative;
@@ -503,12 +690,6 @@
   max-width: 260px;
   margin-left: 0;
   margin-top: 0;
-  padding: 2px 6px;
-  border: none;
-  border-radius: 0;
-  background: transparent;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
   color: var(--text-dim);
   font-size: 12px;
 }
@@ -906,6 +1087,12 @@
 }
 
 /* --- Filesystem permission-mode selector (matches ModelEffortMenu) --- */
+/* NOTE: no z-index on this root. It used to carry z-index: 2000, creating a
+   permanent stacking context that painted the whole footer ABOVE the agent /
+   model dropdowns (z-index: 60) wherever their geometry intersected the
+   footer — the menu rows ("Local model") visually interleaved with the
+   permission trigger's text ("Manual"). Only the open popup needs to stack
+   high; see .permission-mode-popup below. */
 .permission-mode-menu {
   position: relative;
 }
@@ -961,6 +1148,8 @@
   right: 0;
   min-width: 280px;
   max-width: calc(100vw - 16px);
+  max-height: min(420px, calc(100vh - 32px));
+  overflow-y: auto;
   padding: 5px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -968,7 +1157,7 @@
   backdrop-filter: blur(20px) saturate(140%);
   -webkit-backdrop-filter: blur(20px) saturate(140%);
   box-shadow: var(--glass-rim), 0 10px 30px -10px rgba(0, 0, 0, 0.5);
-  z-index: 60;
+  z-index: 2100;
 }
 .permission-mode-hint {
   padding: 6px 10px;

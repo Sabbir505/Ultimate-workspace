@@ -157,7 +157,7 @@ describe("send cwd resolution prefers the worktree", () => {
     await useChatStore.getState().sendMessage("run tests");
 
     expect(sendAgentChatMessageMock).toHaveBeenCalledWith(
-      "s1", "run tests", "claude_code", "m", "D:/proj/p1-conduit-abc", undefined,
+      "s1", "run tests", "claude_code", "m", "D:/proj/p1-conduit-abc", undefined, undefined,
     );
   });
 
@@ -174,7 +174,7 @@ describe("send cwd resolution prefers the worktree", () => {
     await useChatStore.getState().sendMessage("run tests");
 
     expect(sendAgentChatMessageMock).toHaveBeenCalledWith(
-      "s1", "run tests", "claude_code", "m", "D:/custom", undefined,
+      "s1", "run tests", "claude_code", "m", "D:/custom", undefined, undefined,
     );
   });
 

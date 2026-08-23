@@ -113,14 +113,13 @@ export function AcpAgentsPanel() {
         <h3>ACP agents</h3>
       </div>
       <p className="settings-note">
-        ACP (Agent Client Protocol) lets Zed/Devin-ecosystem agents talk to Conduit over
-        stdio. <strong>Zed</strong> and <strong>Devin</strong> are built in; add your own
-        agent here when its binary exposes an ACP server. The command must be on PATH
-        (or an absolute path) — npm-installed <code>.cmd</code> shims are resolved like
-        the harness CLIs. A user entry with the same id overrides the built-in one.
+        ACP agents speak the Agent Client Protocol over stdio (Zed/Devin ecosystem).
+        <strong> Zed</strong> and <strong>Devin</strong> are built in — add your own here.
+        The command must be on PATH (or an absolute path); a user entry with the same id
+        overrides a built-in one.
       </p>
 
-      {note && <div className="settings-note">{note}</div>}
+      {note && <div className="settings-note acp-note-ok">{note}</div>}
       {error && (
         <div className="settings-note" style={{ color: "var(--danger, #f85149)" }}>
           {error}
@@ -128,52 +127,70 @@ export function AcpAgentsPanel() {
       )}
 
       {/* Agent editor */}
-      <div className="settings-form-row" style={{ alignItems: "flex-start" }}>
-        <label className="settings-form-label">{editingId ? "Edit" : "New"} ACP agent</label>
-        <div className="settings-form-control" style={{ flexDirection: "column", alignItems: "stretch", gap: 8 }}>
-          <div style={{ display: "flex", gap: 8 }}>
+      <div className="acp-editor">
+        <div className="acp-editor-title">
+          {editingId ? `Edit agent — ${draftId}` : "New ACP agent"}
+        </div>
+        <div className="acp-grid">
+          <label className="acp-field">
+            <span>Id</span>
             <input
               type="text"
               value={draftId}
-              placeholder="id (e.g. my-agent)"
+              placeholder="my-agent"
               onChange={(e) => setDraftId(e.target.value)}
               disabled={!!editingId}
             />
+          </label>
+          <label className="acp-field">
+            <span>Display name</span>
             <input
               type="text"
               value={draftName}
-              placeholder="Display name"
+              placeholder="My Agent"
               onChange={(e) => setDraftName(e.target.value)}
             />
-          </div>
-          <input
-            type="text"
-            value={draftCommand}
-            placeholder="Command on PATH, e.g. zed"
-            onChange={(e) => setDraftCommand(e.target.value)}
-          />
-          <input
-            type="text"
-            value={draftArgs}
-            placeholder="Args (space/comma separated), e.g. --stdio"
-            onChange={(e) => setDraftArgs(e.target.value)}
-          />
-          <textarea
-            rows={2}
-            value={draftEnv}
-            placeholder="Env vars, one KEY=VALUE per line (optional)"
-            onChange={(e) => setDraftEnv(e.target.value)}
-          />
-          <div style={{ display: "flex", gap: 8 }}>
-            <button className="primary" onClick={() => void saveDraft()} disabled={busy}>
-              {editingId ? "Save changes" : "Add agent"}
+          </label>
+          <label className="acp-field acp-span2">
+            <span>Command</span>
+            <input
+              type="text"
+              value={draftCommand}
+              placeholder="On PATH or absolute, e.g. zed"
+              onChange={(e) => setDraftCommand(e.target.value)}
+            />
+          </label>
+          <label className="acp-field acp-span2">
+            <span>Arguments</span>
+            <input
+              type="text"
+              value={draftArgs}
+              placeholder="Space/comma separated, e.g. --stdio"
+              onChange={(e) => setDraftArgs(e.target.value)}
+            />
+          </label>
+          <label className="acp-field acp-span2">
+            <span>Environment variables (optional)</span>
+            <textarea
+              rows={2}
+              value={draftEnv}
+              placeholder={"KEY=VALUE, one per line"}
+              onChange={(e) => setDraftEnv(e.target.value)}
+            />
+          </label>
+        </div>
+        <div className="acp-actions">
+          {editingId && (
+            <button
+              className="ghost"
+              onClick={() => { setEditingId(null); setDraftId(""); setDraftName(""); setDraftCommand(""); setDraftArgs(""); setDraftEnv(""); }}
+            >
+              Cancel
             </button>
-            {editingId && (
-              <button className="ghost" onClick={() => { setEditingId(null); setDraftId(""); setDraftName(""); setDraftCommand(""); setDraftArgs(""); setDraftEnv(""); }}>
-                Cancel
-              </button>
-            )}
-          </div>
+          )}
+          <button className="primary cta-strong" onClick={() => void saveDraft()} disabled={busy}>
+            {editingId ? "Save changes" : "Add agent"}
+          </button>
         </div>
       </div>
 
@@ -183,21 +200,21 @@ export function AcpAgentsPanel() {
           <div className="empty-text">No custom agents yet. Add one above.</div>
         </div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+        <div className="acp-list">
           {agents.map((a) => (
-            <div key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-sm, 6px)" }}>
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ fontSize: 12, fontWeight: 600 }}>
+            <div key={a.id} className="acp-list-row">
+              <div className="acp-list-info">
+                <div className="acp-list-name">
                   {a.displayName}
-                  <span style={{ color: "var(--text-dim)", fontWeight: 400 }}> · {a.id}</span>
+                  <span> · {a.id}</span>
                 </div>
-                <div className="mono" style={{ fontSize: 11, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <div className="acp-list-cmd mono">
                   {a.command} {a.args.join(" ")}
                 </div>
               </div>
-              <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+              <div className="acp-list-actions">
                 <button className="ghost" onClick={() => startEdit(a)}>Edit</button>
-                <button className="ghost" style={{ color: "var(--danger, #f85149)" }} onClick={() => void removeAgent(a.id)}>Remove</button>
+                <button className="ghost acp-remove" onClick={() => void removeAgent(a.id)}>Remove</button>
               </div>
             </div>
           ))}

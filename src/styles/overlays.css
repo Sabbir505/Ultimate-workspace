@@ -419,6 +419,202 @@ table.kv th {
   min-height: 140px;
   position: relative;
 }
+
+/* --- Dense local-model rows (My Models redesign) --- */
+.local-info-callout {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--state-working);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+.local-model-search {
+  margin-bottom: 8px;
+}
+.local-model-search input {
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text);
+  font-size: 12.5px;
+}
+.local-model-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.local-model-item {
+  display: flex;
+  flex-direction: column;
+}
+.local-model-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 14px;
+  min-height: 64px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.local-model-row:hover { border-color: var(--border-strong, var(--border)); }
+.local-model-row.running {
+  border-color: color-mix(in srgb, var(--state-working) 45%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--state-working) 22%, transparent);
+}
+.local-model-row-main {
+  flex: 1;
+  min-width: 0;
+}
+.local-model-row-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.local-model-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+.local-model-row-meta .model-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.local-model-row-meta .model-tag.vision {
+  background: rgba(108, 92, 231, 0.1);
+  color: #a78bfa;
+  border-color: transparent;
+}
+.running-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--state-working);
+  background: color-mix(in srgb, var(--state-working) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--state-working) 35%, transparent);
+  border-radius: 99px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+.row-error {
+  color: var(--danger);
+  font-size: 11px;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.local-model-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.local-use-btn {
+  padding: 5px 16px !important;
+  width: auto !important;
+  font-size: 12px;
+  border-radius: 7px;
+}
+.local-stop-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--danger);
+}
+.row-menu-wrap { position: relative; }
+.row-menu-btn {
+  padding: 4px 8px !important;
+  font-size: 14px;
+  line-height: 1;
+  letter-spacing: 1px;
+}
+.row-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 40;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.row-menu button {
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  font-size: 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+}
+.row-menu button:hover {
+  background: var(--surface-glass-2, rgba(255, 255, 255, 0.06));
+}
+.row-menu button.danger-menu { color: var(--danger); }
+.local-row-advanced {
+  padding: 8px 14px 14px 35px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 10px 10px;
+  margin: -4px 0 0;
+  padding-top: 10px;
+  background: var(--surface);
+}
+.local-row-advanced-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.local-row-advanced-head > span {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+.local-advanced-collapse {
+  padding: 2px 8px !important;
+  font-size: 11px;
+}
+.empty-ctas {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 12px;
+}
+.empty-ctas button { padding: 6px 14px; border-radius: 8px; font-size: 12.5px; }
+
 .local-model-card .model-card-head {
   display: flex;
   align-items: flex-start;

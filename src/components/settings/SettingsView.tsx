@@ -6,8 +6,10 @@
 // categories — or an empty harness list — does not reflow the modal.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel, getDataPaths, setChatDbDir, type DataPaths, getChatConfig, type ChatConfigPayload, exportProjectZip, importChatZip, toastError, toastSuccess, getLocalModelOverrides, setLocalModelOverrides, type LlamaOverrides } from "../../lib/ipc";
+import { invoke } from "@tauri-apps/api/core";
+import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel, getDataPaths, setChatDbDir, type DataPaths, getChatConfig, type ChatConfigPayload, exportProjectZip, importChatZip, toastError, toastSuccess, getLocalModelOverrides, setLocalModelOverrides, type LlamaOverrides, installHarness, getLlamaServerPath } from "../../lib/ipc";
 import { runLoginFlow } from "../../lib/sessionLauncher";
+import type { HarnessId } from "../../types";
 import { shortModelName } from "../../lib/modelLabel";
 import { useProjectsStore } from "../../state/projects";
 import { useSettingsStore, type ThemeSetting } from "../../state/settings";
@@ -15,11 +17,10 @@ import { useUiStore } from "../../state/ui";
 import { GlassSelect } from "../common/GlassSelect";
 import { useChatStore } from "../../state/chat";
 import { useArtifactsStore } from "../../state/artifacts";
-import { ModelMarket } from "./ModelMarket";
+import { ModelMarket, FitBadge } from "./ModelMarket";
 import { LlamaAdvancedFields } from "../chat/LlamaAdvancedFields";
 import { KnowledgePanel } from "./KnowledgePanel";
 import { PermissionRulesPanel } from "./PermissionRulesPanel";
-import { PromptTemplatesPanel } from "./PromptTemplatesPanel";
 import { ThemeGalleryPanel } from "./ThemeGalleryPanel";
 import { AcpAgentsPanel } from "./AcpAgentsPanel";
 import { McpGalleryPanel } from "./McpGalleryPanel";
@@ -39,13 +40,21 @@ import {
   GitBranch,
   Pencil,
   Trash2,
+  Eye,
+  EyeOff,
+  Plus,
   Library,
   Shield,
+  ShieldOff,
   Smartphone,
+  Bell,
+  Sparkles,
+  ChevronRight,
 } from "lucide-react";
 
 type Category =
   | "appearance"
+  | "notifications"
   | "assistant"
   | "pricing"
   | "harnesses"
@@ -61,6 +70,7 @@ type Category =
 
 const CATEGORY_KEYS: Category[] = [
   "appearance",
+  "notifications",
   "assistant",
   "pricing",
   "harnesses",
@@ -85,6 +95,7 @@ function SettingsNavIcon({ category }: { category: Category }) {
   const props = { size, strokeWidth: 1.8, "aria-hidden": true as const };
   switch (category) {
     case "appearance": return <Palette {...props} />;
+    case "notifications": return <Bell {...props} />;
     case "assistant": return <Bot {...props} />;
     case "apikeys": return <KeyRound {...props} />;
     case "localmodels": return <Cpu {...props} />;
@@ -115,7 +126,8 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
   {
     title: "General",
     items: [
-      { key: "appearance", label: "Appearance", sub: "Theme, notifications" },
+      { key: "appearance", label: "Appearance", sub: "Theme & colors" },
+      { key: "notifications", label: "Notifications", sub: "DND & sound" },
       { key: "assistant", label: "Assistant", sub: "System prompt & skills" },
     ],
   },
@@ -136,7 +148,7 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
   {
     title: "Workspace & Safety",
     items: [
-      { key: "git", label: "Commit message model", sub: "Utility model for auto-commits" },
+      { key: "git", label: "Version control", sub: "Commits · worktrees · checkpoints" },
       { key: "permissions", label: "Approval rules", sub: "Always-allow tool+glob" },
     ],
   },
@@ -172,19 +184,145 @@ const MODELS: Array<[string, string, string, string]> = [
   ["qwen3.7-plus", "Qwen 3.7 Plus", "0.4", "1.6"],
 ];
 
-export function SettingsView() {
-  const setActiveView = useUiStore((s) => s.setActiveView);
+/** iOS-style toggle switch — replaces checkboxes for system-level prefs. */
+function ToggleSwitch({ checked, onChange, id }: { checked: boolean; onChange: (v: boolean) => void; id?: string }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      id={id}
+      className={`settings-toggle${checked ? " on" : ""}`}
+      onClick={() => onChange(!checked)}
+    >
+      <span className="settings-toggle-thumb" />
+    </button>
+  );
+}
+
+/** Redesigned Appearance panel — visual theme cards, toggle switches, and
+ *  the custom theme gallery in one clean scroll. */
+function AppearancePanel() {
   const theme = useSettingsStore((s) => s.theme);
+  const setTheme = useSettingsStore((s) => s.setTheme);
+  const watchMode = useSettingsStore((s) => s.watchMode);
+  const setWatchMode = useSettingsStore((s) => s.setWatchMode);
+
+  const THEME_CARDS: Array<{ value: ThemeSetting; label: string; sub: string; preview: "dark" | "light" | "system" }> = [
+    { value: "dark", label: "Dark", sub: "Always dark", preview: "dark" },
+    { value: "light", label: "Light", sub: "Always light", preview: "light" },
+    { value: "system", label: "System", sub: "Match OS", preview: "system" },
+  ];
+
+  return (
+    <>
+      <div className="panel-head">
+        <h3>Appearance</h3>
+        <span className="panel-count">Theme & colors</span>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Theme mode</div>
+        <p className="settings-section-hint">Choose how the app looks. System follows your OS appearance setting.</p>
+        <div className="theme-card-grid">
+          {THEME_CARDS.map((t) => (
+            <button
+              key={t.value}
+              type="button"
+              className={`theme-preset-card${theme === t.value ? " active" : ""}`}
+              onClick={() => setTheme(t.value)}
+            >
+              <div className={`theme-preset-preview theme-preset-${t.preview}`}>
+                <div className="theme-preset-preview-sidebar" />
+                <div className="theme-preset-preview-main">
+                  <div className="theme-preset-preview-bar" />
+                  <div className="theme-preset-preview-line" />
+                  <div className="theme-preset-preview-line short" />
+                </div>
+              </div>
+              <div className="theme-preset-label">{t.label}</div>
+              <div className="theme-preset-sub">{t.sub}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Behavior</div>
+        <div className="settings-toggle-row">
+          <div className="settings-toggle-label">
+            <span className="settings-toggle-name">Watch mode</span>
+            <span className="settings-toggle-desc">Visual pacing for browser actions (~600ms delay) so you can follow what the agent is doing. Only applies when the browser pane is visible.</span>
+          </div>
+          <ToggleSwitch checked={watchMode} onChange={setWatchMode} />
+        </div>
+      </div>
+
+      {/* Custom theme import/export + gallery (roadmap #19). */}
+      <ThemeGalleryPanel />
+    </>
+  );
+}
+
+/** Notifications panel — DND and sound, moved out of Appearance for cleaner IA. */
+function NotificationsPanel() {
   const dnd = useSettingsStore((s) => s.dnd);
   const notifySound = useSettingsStore((s) => s.notifySound);
-  const watchMode = useSettingsStore((s) => s.watchMode);
-  const setTheme = useSettingsStore((s) => s.setTheme);
   const setDnd = useSettingsStore((s) => s.setDnd);
   const setNotifySound = useSettingsStore((s) => s.setNotifySound);
-  const setWatchMode = useSettingsStore((s) => s.setWatchMode);
+
+  return (
+    <>
+      <div className="panel-head">
+        <h3>Notifications</h3>
+        <span className="panel-count">DND & sound</span>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">System notifications</div>
+        <p className="settings-section-hint">Control how and when the app notifies you about agent activity.</p>
+
+        <div className="settings-toggle-row">
+          <div className="settings-toggle-label">
+            <span className="settings-toggle-name">Do Not Disturb</span>
+            <span className="settings-toggle-desc">Suppress OS notifications when agents finish. In-app badges still update so you can see results when you return.</span>
+          </div>
+          <ToggleSwitch checked={dnd} onChange={setDnd} />
+        </div>
+
+        <div className="settings-toggle-row">
+          <div className="settings-toggle-label">
+            <span className="settings-toggle-name">Notification sound</span>
+            <span className="settings-toggle-desc">Play a subtle chime when a PTY notification fires.</span>
+          </div>
+          <ToggleSwitch checked={notifySound} onChange={setNotifySound} />
+        </div>
+      </div>
+    </>
+  );
+}
+
+export function SettingsView() {
+  const setActiveView = useUiStore((s) => s.setActiveView);
   const harnesses = useProjectsStore((s) => s.harnesses);
   const projects = useProjectsStore((s) => s.projects);
   const refreshHarnesses = useProjectsStore((s) => s.refreshHarnesses);
+  // One-click harness install (Harnesses panel): the id currently running
+  // `npm install -g`, so its row button shows progress and stays disabled.
+  const [installingHarness, setInstallingHarness] = useState<string | null>(null);
+
+  const handleInstallHarness = async (id: HarnessId, displayName: string) => {
+    setInstallingHarness(id);
+    try {
+      await installHarness(id);
+      toastSuccess(`${displayName} installed`);
+    } catch (e) {
+      toastError(`Couldn't install ${displayName}`, String(e));
+    } finally {
+      setInstallingHarness(null);
+      void refreshHarnesses();
+    }
+  };
 
   // Category lives in the ui store so other views (sidebar "Manage
   // connectors") can deep-link into a specific Settings section; local state
@@ -302,69 +440,10 @@ export function SettingsView() {
             </nav>
 
             <div className="settings-panel">
-              {category === "appearance" && (
-                <>
-                  <div className="panel-head">
-                    <h3>Appearance</h3>
-                  </div>
-                  <div className="settings-form">
-                    <div className="settings-form-row">
-                      <label className="settings-form-label">Theme</label>
-                      <div className="settings-form-control">
-                        <GlassSelect<ThemeSetting>
-                          value={theme}
-                          options={[
-                            { value: "system", label: "System", hint: "match OS" },
-                            { value: "dark", label: "Dark" },
-                            { value: "light", label: "Light" },
-                          ]}
-                          onChange={(v) => setTheme(v)}
-                        />
-                      </div>
-                    </div>
-                    <div className="settings-form-row">
-                      <label className="settings-form-label">Do Not Disturb</label>
-                      <div className="settings-form-control">
-                        <label className="settings-checkbox-row">
-                          <input type="checkbox" checked={dnd} onChange={(e) => setDnd(e.target.checked)} />
-                          <span>Suppress OS notifications when agents finish (in-app badges still update)</span>
-                        </label>
-                      </div>
-                    </div>
-                    <div className="settings-form-row">
-                      <label className="settings-form-label">Notification sound</label>
-                      <div className="settings-form-control">
-                        <label className="settings-checkbox-row">
-                          <input
-                            type="checkbox"
-                            checked={notifySound}
-                            onChange={(e) => setNotifySound(e.target.checked)}
-                          />
-                          <span>Play a subtle chime when a PTY notification fires</span>
-                        </label>
-                      </div>
-                    </div>
-                    <div className="settings-form-row">
-                      <label className="settings-form-label">Watch mode</label>
-                      <div className="settings-form-control">
-                        <label className="settings-checkbox-row">
-                          <input type="checkbox" checked={watchMode} onChange={(e) => setWatchMode(e.target.checked)} />
-                          <span>Visual pacing for browser actions (~600ms delay) so you can follow what the agent is doing. Only applies when the browser pane is visible.</span>
-                        </label>
-                      </div>
-                    </div>
-                  </div>
-                  {/* Custom theme import/export + gallery (roadmap #19). */}
-                  <ThemeGalleryPanel />
-                </>
-              )}
+              {category === "appearance" && <AppearancePanel />}
+              {category === "notifications" && <NotificationsPanel />}
 
-              {category === "assistant" && (
-                <>
-                  <AssistantPanel />
-                  <PromptTemplatesPanel />
-                </>
-              )}
+              {category === "assistant" && <AssistantPanel />}
               {category === "git" && <GitPanel />}
 
               {category === "pricing" && (
@@ -426,12 +505,14 @@ export function SettingsView() {
                             <td>
                               {h.installed ? (
                                 <span style={{ color: "var(--state-working)" }}>installed</span>
+                              ) : installingHarness === h.id ? (
+                                <span style={{ color: "var(--state-waiting)" }}>installing…</span>
                               ) : (
-                                <span style={{ color: "var(--state-waiting)" }}>not installed</span>
+                                <span style={{ color: "var(--text-dim)" }}>not installed</span>
                               )}
                             </td>
                             <td style={{ textAlign: "right" }}>
-                              {h.installed && (
+                              {h.installed ? (
                                 <button
                                   onClick={() => {
                                     const cwd = projects[0]?.path ?? ".";
@@ -440,6 +521,15 @@ export function SettingsView() {
                                   }}
                                 >
                                   Run login
+                                </button>
+                              ) : (
+                                <button
+                                  className="primary cta-strong"
+                                  disabled={installingHarness !== null}
+                                  title={`Runs npm install -g to install ${h.displayName}`}
+                                  onClick={() => void handleInstallHarness(h.id, h.displayName)}
+                                >
+                                  {installingHarness === h.id ? "Installing…" : "Install"}
                                 </button>
                               )}
                             </td>
@@ -513,6 +603,16 @@ function LocalModelsPanel() {
   const overridesPersistTimer = useRef<number | null>(null);
   // Panel tabs: "models" = on-disk GGUF list, "market" = Hugging Face browser.
   const [tab, setTab] = useState<"models" | "market">("models");
+  // Dense-row UX state: name filter (shown past 8 models), per-row overflow
+  // menu, two-click delete confirmation, inline Advanced expansion, and the
+  // dismissible first-run info callout.
+  const [filter, setFilter] = useState("");
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [advancedFor, setAdvancedFor] = useState<string | null>(null);
+  const [infoDismissed, setInfoDismissed] = useState(true);
+  // llama-server path from settings (for one-click setup)
+  const [llamaServerPath, setLlamaServerPath] = useState<string | null>(null);
   // One-shot deep-link (local-model onboarding banner): open straight to the
   // market tab. Consumed on first boot of the panel.
   const openMarket = useUiStore((s) => s.localModelsOpenMarket);
@@ -523,6 +623,56 @@ function LocalModelsPanel() {
       setLocalModelsOpenMarket(false);
     }
   }, [openMarket, setLocalModelsOpenMarket]);
+
+  // Load the persisted llama-server path from settings
+  useEffect(() => {
+    void getLlamaServerPath()
+      .then((r) => setLlamaServerPath(r?.path ?? null))
+      .catch(() => setLlamaServerPath(null));
+  }, []);
+
+  // One-click setup: detect and set the llama-server path
+  const [settingPathLoading, setSettingPathLoading] = useState(false);
+  // Persist a picked/detected path, refresh the panel, and toast the result.
+  const applyLlamaServerPath = async (pathToUse: string) => {
+    await invoke("set_llama_server_path", { path: pathToUse });
+    setLlamaServerPath(pathToUse);
+    toastSuccess(`llama-server path set to: ${pathToUse}`);
+  };
+
+  const handleOneClickPathSetup = async () => {
+    setSettingPathLoading(true);
+    try {
+      // Try to detect a common installation path first (env var → drive scan
+      // for source builds + legacy flat drops like llama-cuda → PATH probe).
+      const detected = await invoke<{ path: string | null }>("detect_llama_server_path", {});
+      const pathToUse = detected.path;
+
+      if (pathToUse) {
+        await applyLlamaServerPath(pathToUse);
+      } else {
+        // Auto-detection failed: fall back to a native file picker so any
+        // non-standard install location can be pointed at manually.
+        const picked = await open({
+          directory: false,
+          multiple: false,
+          title: "Locate llama-server",
+          filters: [{ name: "llama-server", extensions: ["exe"] }],
+        });
+        if (typeof picked === "string" && picked) {
+          try {
+            await applyLlamaServerPath(picked);
+          } catch (setErr) {
+            toastError("Couldn't use that file", String(setErr));
+          }
+        }
+      }
+    } catch (err) {
+      toastError("Failed to set llama-server path", String(err));
+    } finally {
+      setSettingPathLoading(false);
+    }
+  };
 
   /** Update one model's overrides: patch state immediately, debounce the
    *  KV write so dragging/typing doesn't hammer the setting. */
@@ -595,6 +745,8 @@ function LocalModelsPanel() {
           /* corrupt — start empty */
         }
       }
+      const dismissed = await getSetting(K_LOCAL_INFO_DISMISSED);
+      if (!stale) setInfoDismissed(dismissed === "1");
       await runScan();
       if (!stale) {
         setLoaded(true);
@@ -688,6 +840,28 @@ function LocalModelsPanel() {
     }
   };
 
+  const performDelete = async (m: GgufModel) => {
+    try {
+      await deleteDownloadedModel(m.path);
+      await runScan();
+    } catch (e) {
+      console.warn("delete failed", e);
+      toastError(`Couldn't delete ${m.filename || m.id}`, String(e));
+    }
+  };
+
+  // Close the row overflow menu on any outside pointer press.
+  useEffect(() => {
+    if (!menuFor) return;
+    const close = (e: PointerEvent) => {
+      const t = e.target as Node | null;
+      if (t && t instanceof Element && t.closest(".row-menu-wrap")) return;
+      setMenuFor(null);
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, [menuFor]);
+
   const nothing =
     loaded && models.length === 0 && folders.length === 0 && !loading;
   // `nothing` is intentionally unused now — the empty state is rendered
@@ -710,11 +884,6 @@ function LocalModelsPanel() {
         <h3>Local Models</h3>
         {tab === "models" && (
           <div style={{ display: "flex", gap: 8 }}>
-            {active && (
-              <button className="ghost" style={{ padding: "2px 8px" }} onClick={handleStop}>
-                Stop server
-              </button>
-            )}
             <button
               className="ghost"
               style={{ padding: "2px 8px" }}
@@ -758,20 +927,75 @@ function LocalModelsPanel() {
         </button>
       </div>
 
+      {/* llama-server path setup section */}
+      {tab === "models" && (
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          padding: "12px 14px 8px 14px",
+          marginTop: 8,
+          borderTop: "1px solid var(--border)",
+          marginBottom: 12
+        }}>
+          <span style={{ fontSize: 13, color: "var(--text-dim)" }}>
+            llama-server: {llamaServerPath ? "Configured" : "Not set"}
+          </span>
+          {llamaServerPath && (
+            <span style={{
+              fontSize: 12,
+              padding: "2px 8px",
+              background: "var(--surface-2)",
+              borderRadius: 6,
+              color: "var(--text-dim)"
+            }}>
+              {llamaServerPath}
+            </span>
+          )}
+          <button
+            className="ghost"
+            style={{
+              padding: "4px 10px",
+              fontSize: 12,
+              borderRadius: 6,
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              marginLeft: "auto"
+            }}
+            onClick={handleOneClickPathSetup}
+            disabled={settingPathLoading}
+          >
+            {settingPathLoading ? (
+              <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <span className="local-spinner" /> Setting up…
+              </span>
+            ) : (
+              "One-click setup"
+            )}
+          </button>
+        </div>
+      )}
+
       {tab === "models" && (
       <>
-      <p className="estimate-note">
-        Llama-server must be installed separately (llama.cpp). Models are
-        scanned from ~/.lmstudio/models, ~/.cache/lm-studio/models, your
-        Downloads folder, Ollama, and any folder you add here.
-      </p>
-
-      {active && (
-        <div className="local-models-banner">
-          <span className="status-dot" />
+      {!infoDismissed && (
+        <div className="local-info-callout">
           <span>
-            Active: <strong>{active.modelId}</strong> on port {active.port}
+            Models are scanned from ~/.lmstudio/models, ~/.cache/lm-studio/models,
+            your Downloads folder, Ollama, and any folder you add. llama-server
+            (llama.cpp) must be installed separately.
           </span>
+          <button
+            className="ghost"
+            style={{ padding: "2px 8px", flexShrink: 0 }}
+            onClick={() => {
+              setInfoDismissed(true);
+              void setSetting(K_LOCAL_INFO_DISMISSED, "1");
+            }}
+          >
+            Got it
+          </button>
         </div>
       )}
 
@@ -796,150 +1020,176 @@ function LocalModelsPanel() {
         </div>
       )}
 
-      <div className="model-market-grid">
+      {models.length > 8 && (
+        <div className="local-model-search">
+          <input
+            type="text"
+            placeholder="Filter models…"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            spellCheck={false}
+          />
+        </div>
+      )}
+
+      <div className="local-model-rows">
         {models.length === 0 && !loading && !active && (
-          <div className="empty-reserved">
+          <div className="empty-reserved local-empty">
             <span className="empty-text">
-              No .gguf models found. Place them in the LM Studio models folder
-              (~/.lmstudio/models), your Downloads folder, or click "Add folder"
-              to scan a custom location. Or grab one from the Model Market tab.
+              No .gguf models found. Add a folder to scan, or grab one from the
+              Model Market.
             </span>
+            <div className="empty-ctas">
+              <button className="primary cta-strong" onClick={() => void handleAddFolder()}>
+                Add folder
+              </button>
+              <button onClick={() => setTab("market")}>Browse Model Market</button>
+            </div>
           </div>
         )}
 
-        {models.map((m) => {
-        const ram = classifyRam(m.sizeBytes);
-        const err = errors[m.id];
-        const isStarting = starting[m.id];
-        const isRunning = active?.modelId === m.id;
-        const displayName = shortModelName(m.name || m.filename);
-        return (
-          <div key={m.id} className={`local-model-card model-card${isRunning ? " running" : ""}`}>
-            <button
-              className="model-card-delete"
-              title="Delete this model file from disk"
-              aria-label="Delete model"
-              onClick={async () => {
-                if (!confirm(`Delete ${m.filename || m.id} from disk?`)) return;
-                try {
-                  await deleteDownloadedModel(m.path);
-                  await runScan();
-                } catch (e) {
-                  console.warn("delete failed", e);
-                }
-              }}
-            >
-              <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="3 6 5 6 21 6" />
-                <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" />
-                <path d="M10 11v6" />
-                <path d="M14 11v6" />
-                <path d="M9 6V4a2 2 0 012-2h2a2 2 0 012 2v2" />
-              </svg>
-            </button>
-            <div className="model-card-head">
-              <div className="model-info">
-                <div className="model-name" title={displayName}>{displayName}</div>
-                <div className="model-meta">
-                  <span>{m.architecture || m.source}</span>
-                  <span>·</span>
-                  <span>{humanSize(m.sizeBytes)}</span>
-                  {m.quantization && <span className="model-tag">{m.quantization}</span>}
-                  {m.paramCountLabel && <span className="model-tag">{m.paramCountLabel}</span>}
-                  {m.hasVision && <span className="model-tag vision">Vision</span>}
-                  <span className={`model-tag memory-status`} style={{ color: ram === "fits" ? "var(--green)" : ram === "tight" ? "var(--yellow)" : "var(--red)" }}>
-                    {ram === "fits" ? "Fits RAM" : ram === "tight" ? "Tight" : "Too large"}
-                  </span>
+        {(() => {
+          const q = filter.trim().toLowerCase();
+          const visible = q
+            ? models.filter((m) =>
+                `${m.name ?? ""} ${m.filename} ${m.architecture ?? ""} ${m.quantization ?? ""}`
+                  .toLowerCase()
+                  .includes(q),
+              )
+            : models;
+          return visible.map((m) => {
+          const ram: "fits" | "tight" | "too_large" = m.memoryClass ?? classifyRam(m.sizeBytes);
+          const err = errors[m.id];
+          const isStarting = starting[m.id];
+          const isRunning = active?.modelId === m.id;
+          const displayName = shortModelName(m.name || m.filename);
+          return (
+            <div key={m.id} className="local-model-item">
+              <div className={`local-model-row${isRunning ? " running" : ""}`}>
+                <span
+                  className={`fit-dot ${ram}`}
+                  title={ram === "fits" ? "Fits RAM" : ram === "tight" ? "Tight fit — may be slow" : "Too large for available RAM"}
+                />
+                <div className="local-model-row-main">
+                  <div className="local-model-row-name" title={m.filename}>{displayName}</div>
+                  <div className="local-model-row-meta">
+                    <span>{humanSize(m.sizeBytes)}</span>
+                    {m.quantization && <span className="model-tag">{m.quantization}</span>}
+                    {m.paramCountLabel && <span>{m.paramCountLabel}</span>}
+                    {m.hasVision && <span className="model-tag vision">Vision</span>}
+                    <FitBadge ram={ram} />
+                    {isRunning && (
+                      <span className="running-pill">● Running · port {active.port}</span>
+                    )}
+                    {err && <span className="row-error" title={err}>{err}</span>}
+                  </div>
+                </div>
+                <div className="local-model-row-actions">
+                  {isRunning ? (
+                    <button
+                      className="ghost local-stop-btn"
+                      onClick={() => void handleStop()}
+                      disabled={loading}
+                    >
+                      Stop
+                    </button>
+                  ) : (
+                    <button
+                      className="primary cta-strong local-use-btn"
+                      onClick={() => void handleUseModel(m)}
+                      disabled={isStarting || loading || ram === "too_large"}
+                      title={ram === "too_large" ? "Model exceeds available RAM" : undefined}
+                    >
+                      {isStarting ? "Starting…" : "Use"}
+                    </button>
+                  )}
+                  <div className="row-menu-wrap">
+                    <button
+                      className="ghost row-menu-btn"
+                      aria-label="More actions"
+                      onClick={() => setMenuFor(menuFor === m.id ? null : m.id)}
+                    >
+                      ⋯
+                    </button>
+                    {menuFor === m.id && (
+                      <div className="row-menu" role="menu">
+                        <button
+                          role="menuitem"
+                          onClick={() => {
+                            setAdvancedFor(advancedFor === m.id ? null : m.id);
+                            setMenuFor(null);
+                          }}
+                        >
+                          Advanced…
+                        </button>
+                        <button
+                          role="menuitem"
+                          className="danger-menu"
+                          onClick={() => {
+                            if (confirmId !== m.id) {
+                              setConfirmId(m.id);
+                              window.setTimeout(
+                                () => setConfirmId((c) => (c === m.id ? null : c)),
+                                3000,
+                              );
+                              return;
+                            }
+                            setConfirmId(null);
+                            setMenuFor(null);
+                            void performDelete(m);
+                          }}
+                        >
+                          {confirmId === m.id ? "Click again to delete" : "Delete from disk…"}
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
 
-            {isStarting && (
-              <div className="model-card-progress">
-                <div className="model-card-progress-bar">
-                  <div className="model-card-progress-fill" style={{ width: "0%" }} />
+              {advancedFor === m.id && (
+                <div className="local-row-advanced">
+                  <div className="local-row-advanced-head">
+                    <span>Advanced settings</span>
+                    <button
+                      className="ghost local-advanced-collapse"
+                      onClick={() => setAdvancedFor(null)}
+                    >
+                      Collapse ▴
+                    </button>
+                  </div>
+                  <LlamaAdvancedFields
+                    overrides={overridesMap[m.id] ?? {}}
+                    onChange={(next) => setModelOverrides(m.id, next)}
+                  />
+                  {isRunning && (
+                    <button
+                      className="ghost"
+                      style={{ padding: "3px 10px", alignSelf: "flex-start" }}
+                      disabled={starting[m.id]}
+                      title="Persist these settings and reload the running model with them"
+                      onClick={() => {
+                        // Flush the debounced persist immediately, then restart.
+                        if (overridesPersistTimer.current) window.clearTimeout(overridesPersistTimer.current);
+                        void setLocalModelOverrides(JSON.stringify(overridesMapRef.current));
+                        setStarting((prev) => ({ ...prev, [m.id]: true }));
+                        void startLocalModel(m.id, m.path, m.mmprojPath, overridesMapRef.current[m.id])
+                          .then(() => refreshStatus())
+                          .catch((err2) =>
+                            setErrors((prev) => ({ ...prev, [m.id]: String(err2) })),
+                          )
+                          .finally(() => setStarting((prev) => ({ ...prev, [m.id]: false })));
+                      }}
+                    >
+                      {starting[m.id] ? "Restarting…" : "↻ Restart with new settings"}
+                    </button>
+                  )}
                 </div>
-                <div className="model-card-progress-info">
-                  <span>Starting llama-server and loading model…</span>
-                </div>
-              </div>
-            )}
-
-            {isRunning && (
-              <div className="model-card-status done">
-                Running on port {active.port} · Ready to use
-                {active.nGpuLayers > 0
-                  ? ` · ${active.nGpuLayers} layer${active.nGpuLayers === 1 ? "" : "s"} on GPU`
-                  : active.nGpuLayers === 0
-                    ? " · CPU only"
-                    : ""}
-              </div>
-            )}
-
-            {err && (
-              <div className="model-card-status error">{err}</div>
-            )}
-
-            <div className="model-card-actions">
-              {isRunning ? (
-                <button
-                  className="primary danger"
-                  onClick={() => void handleStop()}
-                  disabled={loading}
-                >
-                  Stop server
-                </button>
-              ) : (
-                <button
-                  className="primary"
-                  onClick={() => void handleUseModel(m)}
-                  disabled={isStarting || loading || ram === "too_large"}
-                >
-                  {isStarting ? "Starting…" : "Use this model"}
-                </button>
               )}
             </div>
-
-            {ram !== "fits" && (
-              <div className="model-card-desc">
-                {ram === "tight" ? "⚠️ May run slowly with current RAM" : "❌ Requires more RAM than available"}
-              </div>
-            )}
-
-            <details className="model-advanced">
-              <summary>Advanced</summary>
-              <div className="model-advanced-fields">
-                <LlamaAdvancedFields
-                  overrides={overridesMap[m.id] ?? {}}
-                  onChange={(next) => setModelOverrides(m.id, next)}
-                />
-                {active?.modelId === m.id && (
-                  <button
-                    className="ghost"
-                    style={{ padding: "3px 10px", alignSelf: "flex-start" }}
-                    disabled={starting[m.id]}
-                    title="Persist these settings and reload the running model with them"
-                    onClick={() => {
-                      // Flush the debounced persist immediately, then restart.
-                      if (overridesPersistTimer.current) window.clearTimeout(overridesPersistTimer.current);
-                      void setLocalModelOverrides(JSON.stringify(overridesMapRef.current));
-                      setStarting((prev) => ({ ...prev, [m.id]: true }));
-                      void startLocalModel(m.id, m.path, m.mmprojPath, overridesMapRef.current[m.id])
-                        .then(() => refreshStatus())
-                        .catch((err) =>
-                          setErrors((prev) => ({ ...prev, [m.id]: String(err) })),
-                        )
-                        .finally(() => setStarting((prev) => ({ ...prev, [m.id]: false })));
-                    }}
-                  >
-                    {starting[m.id] ? "Restarting…" : "↻ Restart with new settings"}
-                  </button>
-                )}
-              </div>
-            </details>
-          </div>
-        );
-      })}
+          );
+          });
+        })()}
       </div>
       <details className="model-advanced local-compaction-advanced">
         <summary>Compaction (advanced)</summary>
@@ -1008,18 +1258,32 @@ const K_SYSTEM_PROMPT = "assistant.systemPrompt";
 const K_COMMIT_PROVIDER = "commitMessage.provider";
 const K_COMMIT_MODEL = "commitMessage.model";
 const K_LOCAL_FOLDERS = "localModels.folders";
+const K_LOCAL_INFO_DISMISSED = "localModels.infoDismissed";
 
 /** Assistant panel: the custom system prompt only. Skills live on disk in the
  *  harness skill directories and are managed via the Skills Library modal
  *  (surfaced in the chat `/` menu and injected on `/slug` invocation) — there
  *  is no per-assistant skill config here. */
+const PROMPT_PRESETS: { label: string; text: string }[] = [
+  {
+    label: "Concise replies",
+    text: "Keep answers short and direct. Lead with the answer; skip preamble, filler and restating the question.",
+  },
+  {
+    label: "Senior reviewer",
+    text: "Act as a senior engineer reviewing my work. Flag bugs and edge cases first, then suggest the simplest correct fix.",
+  },
+  {
+    label: "Plain English",
+    text: "Always respond in English. Prefer plain language over jargon and explain any term of art on first use.",
+  },
+];
+
 function AssistantPanel() {
   const [systemPrompt, setSystemPrompt] = useState("");
   const [loaded, setLoaded] = useState(false);
-  const [savedAt, setSavedAt] = useState<number | null>(null);
-  // false = row view, true = system prompt editor open.
-  // Since the Assistant section now only has the system prompt, start expanded.
-  const [detailOpen, setDetailOpen] = useState(true);
+  // idle → dirty (typing) → saving → saved. Drives the header status pill.
+  const [saveState, setSaveState] = useState<"idle" | "dirty" | "saving" | "saved">("idle");
 
   useEffect(() => {
     let stale = false;
@@ -1035,27 +1299,95 @@ function AssistantPanel() {
 
   // Debounce-persist the system prompt.
   useEffect(() => {
-    if (!loaded) return;
+    if (!loaded || saveState !== "dirty") return;
     const t = setTimeout(() => {
-      void setSetting(K_SYSTEM_PROMPT, systemPrompt);
-      setSavedAt(Date.now());
+      setSaveState("saving");
+      void setSetting(K_SYSTEM_PROMPT, systemPrompt).then(() => setSaveState("saved"));
     }, 500);
     return () => clearTimeout(t);
-  }, [systemPrompt, loaded]);
+  }, [systemPrompt, loaded, saveState]);
+
+  const hasPrompt = systemPrompt.trim().length > 0;
+
+  const edit = (text: string) => {
+    setSystemPrompt(text);
+    setSaveState("dirty");
+  };
 
   return (
     <>
       <div className="panel-head">
         <h3>Assistant</h3>
-        {savedAt && <span className="panel-count">saved ✓</span>}
+        <span className={`assistant-save-pill${saveState === "saved" ? " done" : ""}`}>
+          {saveState === "dirty" && "Saving…"}
+          {saveState === "saving" && "Saving…"}
+          {saveState === "saved" && "Saved ✓"}
+        </span>
       </div>
 
-      <div className="skills-section">
-        <SystemPromptDetail
-          content={systemPrompt}
-          onChange={setSystemPrompt}
-          onBack={() => setDetailOpen(false)}
+      <div className="assistant-card">
+        <div className="assistant-card-head">
+          <span className="assistant-card-icon">
+            <Sparkles size={18} strokeWidth={1.8} />
+          </span>
+          <div className="assistant-card-heading">
+            <div className="assistant-card-title-row">
+              <span className="assistant-card-title">Custom system prompt</span>
+              <span className={`assistant-status${hasPrompt ? " active" : ""}`}>
+                {hasPrompt ? "Active" : "Not set"}
+              </span>
+            </div>
+            <div className="assistant-card-sub">
+              Sent at the start of every chat turn to shape tone, format and behavior.
+            </div>
+          </div>
+          {hasPrompt && (
+            <button
+              type="button"
+              className="assistant-clear"
+              onClick={() => edit("")}
+              title="Remove the system prompt"
+            >
+              <Trash2 size={13} />
+              Reset
+            </button>
+          )}
+        </div>
+
+        <textarea
+          className="assistant-textarea"
+          value={systemPrompt}
+          onChange={(e) => edit(e.target.value)}
+          placeholder={
+            "e.g. You are a concise senior engineer. Answer directly, prefer minimal diffs, and call out risks before suggesting fixes."
+          }
+          rows={8}
+          spellCheck={false}
+          disabled={!loaded}
         />
+
+        <div className="assistant-card-foot">
+          {!hasPrompt ? (
+            <div className="assistant-presets">
+              <span className="assistant-presets-label">Quick start</span>
+              {PROMPT_PRESETS.map((p) => (
+                <button
+                  key={p.label}
+                  type="button"
+                  className="assistant-preset-chip"
+                  onClick={() => edit(p.text)}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <span />
+          )}
+          <span className="assistant-char-count">
+            {systemPrompt.length.toLocaleString()} characters
+          </span>
+        </div>
       </div>
     </>
   );
@@ -1113,16 +1445,16 @@ function GitPanel() {
   return (
     <>
       <div className="panel-head">
-        <h3>Commit message model</h3>
-        <span className="panel-count">Version control</span>
+        <h3>Version control</h3>
+        <span className="panel-count">Commits · worktrees · checkpoints</span>
       </div>
 
       <div className="settings-section">
         <div className="settings-section-title">Commit message model</div>
         <p className="settings-section-hint">
-          The model used to auto-generate commit messages in the commit modal. Pick a
-          small/fast model (e.g. <code>gpt-4o-mini</code>, <code>claude-haiku</code>) for
-          near-instant suggestions. Leave blank to use the active chat model.
+          Auto-generates commit messages in the commit modal. Pick a small/fast model
+          (<code>gpt-4o-mini</code>, <code>claude-haiku</code>) — leave blank to use the active
+          chat model.
         </p>
         <div className="settings-form-row settings-form-row-pair">
           <div className="settings-form-field">
@@ -1197,202 +1529,35 @@ function GitPanel() {
       <div className="settings-section">
         <div className="settings-section-title">Worktree-per-session isolation</div>
         <p className="settings-section-hint">
-          Every new chat bound to a git project gets its own isolated worktree (branch{" "}
-          <code>conduit/&lt;id&gt;</code>, a sibling folder), so agents never collide in the same
-          working tree. The worktree becomes the chat's working directory for sends, harness/ACP
-          spawns, checkpoints and diffs; deleting or unbinding the chat removes it best-effort (the
-          branch stays in the repo, so committed work is never lost). Turn off to keep new chats in
-          the project root — per-chat isolation stays available via the 🪵/⛓ toggle in the sidebar
-          and composer.
+          Each git-bound chat works in its own isolated worktree (branch{" "}
+          <code>conduit/&lt;id&gt;</code>), so agents never collide. Deleting a chat removes it
+          best-effort — committed work is never lost.
         </p>
-        <div className="settings-form-row">
-          <label className="settings-form-label">Default</label>
-          <div className="settings-form-control">
-            <label className="settings-checkbox-row">
-              <input
-                type="checkbox"
-                checked={worktreeDefault}
-                onChange={(e) => setWorktreeDefault(e.target.checked)}
-              />
-              <span>Isolate new chats in their own worktree</span>
-            </label>
+        <div className="settings-toggle-row">
+          <div className="settings-toggle-label">
+            <span className="settings-toggle-name">Isolate new chats by default</span>
           </div>
+          <ToggleSwitch checked={worktreeDefault} onChange={setWorktreeDefault} />
         </div>
       </div>
 
       <div className="settings-section">
         <div className="settings-section-title">Per-turn checkpoints</div>
         <p className="settings-section-hint">
-          Every turn that changes files gets a hidden git-ref snapshot
-          (<code>refs/conduit/checkpoints/…</code>) of the worktree, shown as a restore chip under
-          the assistant message. Restoring rolls the files back and — by default — trims the
-          conversation to that turn, with a safety snapshot of the pre-restore state kept for
-          one-click undo. Turn off to stop recording checkpoints entirely (existing snapshots stay
-          restorable).
+          Each file-changing turn gets a hidden git snapshot, shown as a restore chip under the
+          reply. Restoring rolls files back and trims the chat to that turn, with one-click undo.
         </p>
-        <div className="settings-form-row">
-          <label className="settings-form-label">Default</label>
-          <div className="settings-form-control">
-            <label className="settings-checkbox-row">
-              <input
-                type="checkbox"
-                checked={checkpointsEnabled}
-                onChange={(e) => setCheckpointsEnabled(e.target.checked)}
-              />
-              <span>Record a checkpoint after every turn</span>
-            </label>
+        <div className="settings-toggle-row">
+          <div className="settings-toggle-label">
+            <span className="settings-toggle-name">Record checkpoints by default</span>
           </div>
+          <ToggleSwitch checked={checkpointsEnabled} onChange={setCheckpointsEnabled} />
         </div>
       </div>
     </>
   );
 }
 
-
-/** System prompt detail view — styled like a skill detail but for the global
- *  system prompt that is sent on every turn. */
-function SystemPromptDetail({
-  content,
-  onChange,
-  onBack,
-}: {
-  content: string;
-  onChange: (text: string) => void;
-  onBack: () => void;
-}) {
-  return (
-    <div className="skill-detail">
-      <div className="skill-detail-head">
-        <button type="button" className="skill-detail-back" onClick={onBack} aria-label="Back to assistant">
-          <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-            <line x1="19" y1="12" x2="5" y2="12" />
-            <polyline points="12 19 5 12 12 5" />
-          </svg>
-          <span>Assistant</span>
-        </button>
-      </div>
-
-      <div className="skill-detail-meta">
-        <div className="skill-detail-title-row">
-          <span className="skill-detail-name" style={{ fontSize: 16, fontWeight: 600 }}>
-            <span style={{ marginRight: 8 }}>⚙</span>
-            Custom system prompt
-          </span>
-        </div>
-        <div className="skill-detail-sub">Sent on every chat turn</div>
-      </div>
-
-      <div className="skill-detail-content">
-        <label className="skill-detail-label">System prompt</label>
-        <textarea
-          className="assistant-textarea"
-          value={content}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder="e.g. You are a concise, senior technical writer…"
-          rows={32}
-        />
-      </div>
-    </div>
-  );
-}
-
-/** Compact summary grid of all providers that have a saved key, shown at
- *  the top of the API Keys panel. Clicking a card selects that provider in
- *  the form below. */
-function SavedProvidersGrid({
-  saved,
-  activeProvider,
-  onPick,
-  onEdit,
-  onDelete,
-}: {
-  saved: Record<string, ChatConfigPayload> | null;
-  activeProvider: ChatProvider;
-  onPick: (p: ChatProvider) => void;
-  onEdit: (p: ChatProvider) => void;
-  onDelete: (p: ChatProvider) => void;
-}) {
-  const LABELS: Record<string, string> = {
-    anthropic: "Anthropic",
-    openai: "OpenAI",
-    openrouter: "OpenRouter",
-    anthropic_compatible: "Anthropic Compatible",
-    openai_compatible: "OpenAI Compatible",
-  };
-  if (!saved) return <div className="hint">Loading providers…</div>;
-  const entries = Object.entries(saved).filter(
-    ([, cfg]) => cfg.hasKey,
-  );
-  if (entries.length === 0)
-    return (
-      <div className="hint" style={{ marginBottom: 12 }}>
-        No API keys saved yet — pick a provider and enter a key above.
-      </div>
-    );
-  return (
-    <div className="saved-providers-grid" style={{ marginBottom: 12 }}>
-      {entries.map(([id, cfg]) => {
-        const isActive = id === activeProvider;
-        const isCompatible =
-          id === "anthropic_compatible" || id === "openai_compatible";
-        return (
-          <button
-            key={id}
-            type="button"
-            className={`saved-provider-card ${isActive ? "active" : ""}`}
-            onClick={() => onPick(id as ChatProvider)}
-          >
-            <div className="saved-provider-name-row">
-              <span className="saved-provider-name">{LABELS[id]}</span>
-              <span className="saved-provider-actions">
-                <button
-                  type="button"
-                  className="saved-provider-icon"
-                  title="Edit"
-                  aria-label={`Edit ${LABELS[id]}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onEdit(id as ChatProvider);
-                  }}
-                >
-                  <Pencil size={13} />
-                </button>
-                <button
-                  type="button"
-                  className="saved-provider-icon danger"
-                  title="Delete"
-                  aria-label={`Delete ${LABELS[id]}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete(id as ChatProvider);
-                  }}
-                >
-                  <Trash2 size={13} />
-                </button>
-              </span>
-            </div>
-            <div className="saved-provider-meta">
-              {isCompatible && cfg.baseUrl && (
-                <span
-                  className="saved-provider-url"
-                  title={cfg.baseUrl}
-                >
-                  {cfg.baseUrl.length > 36
-                    ? cfg.baseUrl.slice(0, 33) + "…"
-                    : cfg.baseUrl}
-                </span>
-              )}
-            </div>
-            <div className="saved-provider-key">
-              <span className="key-dot" aria-label="API key present" />
-              Key saved
-            </div>
-          </button>
-        );
-      })}
-    </div>
-  );
-}
 
 /** API Keys panel: provider selector, key input with show/hide, base URL
  *  (for compatible providers), model input, Save + Clear buttons.
@@ -1414,9 +1579,11 @@ function ApiKeysPanel() {
   const [model, setModel] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
+  const formDirtyRef = useRef(false);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [fetchedModels, setFetchedModels] = useState<Array<{ id: string; object: string; created: number; ownedBy: string }>>([]);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [addingNew, setAddingNew] = useState(false);
 
   // Saved-providers summary: fetched once on mount, refreshed after save/clear.
   const [savedProviders, setSavedProviders] = useState<
@@ -1470,11 +1637,14 @@ function ApiKeysPanel() {
   }, [canFetchModels, isCompatible, baseUrl, apiKey, hasExistingKey, provider]);
 
   // When config arrives (bootstrap or after save/clear), pre-fill fields
-  // for the currently selected provider.
+  // for the currently selected provider. Skip if the user has already
+  // typed something — otherwise late config loads overwrite their input.
   useEffect(() => {
     if (config?.provider === provider) {
-      setBaseUrl(config.baseUrl ?? "");
-      setModel(config.model ?? "");
+      if (!formDirtyRef.current) {
+        setBaseUrl(config.baseUrl ?? "");
+        setModel(config.model ?? "");
+      }
     }
   }, [config, provider]);
 
@@ -1486,6 +1656,8 @@ function ApiKeysPanel() {
     setApiKey("");
     setFetchedModels([]);
     setFetchError(null);
+    setAddingNew(false);
+    formDirtyRef.current = false; // fresh provider — allow config pre-fill
     void loadConfigFn(v);
   };
 
@@ -1523,6 +1695,7 @@ function ApiKeysPanel() {
       );
       // Clear the API key field after successful save (security)
       setApiKey("");
+      setAddingNew(false);
       setFetchError("Saved successfully!");
       setTimeout(() => setFetchError(null), 3000);
       await refreshSavedProviders();
@@ -1554,151 +1727,222 @@ function ApiKeysPanel() {
       ? `••••• (enter a new key to replace, or leave blank to keep)`
       : "sk-…";
 
+  const PROVIDERS: Array<{ id: ChatProvider; label: string; short: string; description: string }> = [
+    { id: "anthropic", label: "Anthropic", short: "A", description: "Anthropic messages API" },
+    { id: "openai", label: "OpenAI", short: "O", description: "OpenAI chat completions" },
+    { id: "openrouter", label: "OpenRouter", short: "R", description: "Access multiple model providers" },
+    { id: "anthropic_compatible", label: "Anthropic Compatible", short: "A/", description: "Custom Anthropic-compatible endpoint" },
+    { id: "openai_compatible", label: "OpenAI Compatible", short: "O/", description: "Custom OpenAI-compatible endpoint" },
+  ];
+  const selectedProvider = PROVIDERS.find((item) => item.id === provider) ?? PROVIDERS[0];
+  const selectedConfig = savedProviders?.[provider];
+  const savedModel = selectedConfig?.model || model;
+  const endpoint = isCompatible
+    ? baseUrl || selectedConfig?.baseUrl || "Custom endpoint"
+    : isOpenRouter
+      ? "https://openrouter.ai/api"
+      : "Provider-managed endpoint";
+
+  const clearSelectedProvider = async () => {
+    await handleClear();
+  };
+
   return (
-    <>
-      <div className="panel-head">
-        <h3>Chat API Keys</h3>
+    <div className="api-settings">
+      <div className="api-settings-head">
+        <div>
+          <h3>API providers</h3>
+          <p>Connect model providers and choose which models appear in chat.</p>
+        </div>
+        <span className="api-settings-count">{savedProviders ? Object.values(savedProviders).filter((cfg) => cfg.hasKey).length : 0} connected</span>
       </div>
-      <SavedProvidersGrid
-        saved={savedProviders}
-        activeProvider={provider}
-        onPick={(p) => onProviderChange(p)}
-        onEdit={(p) => onProviderChange(p)}
-        onDelete={async (p) => {
-          // Delete = same as clear (removes the key from the keychain +
-          // clears stored base URL/model). If we're deleting the currently
-          // selected provider, also reset the form fields.
-          await clearApiKeyFn(p);
-          if (p === provider) {
-            setApiKey("");
-            setBaseUrl("");
-            setModel("");
-            setFetchedModels([]);
-            setFetchError(null);
-            await loadConfigFn(p);
-          }
-          await refreshSavedProviders();
-        }}
-      />
-      <div className="form-row">
-        <label>Provider</label>
-        <GlassSelect<ChatProvider>
-          value={provider}
-          options={[
-            { value: "anthropic", label: "Anthropic" },
-            { value: "openai", label: "OpenAI" },
-            { value: "openrouter", label: "OpenRouter" },
-            { value: "anthropic_compatible", label: "Anthropic Compatible" },
-            { value: "openai_compatible", label: "OpenAI Compatible" },
-          ]}
-          onChange={(v) => onProviderChange(v)}
-        />
-      </div>
-      <div className="form-row">
-        <label>API Key</label>
-        <input
-          type={showKey ? "text" : "password"}
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-          placeholder={keyPlaceholder}
-          style={{ flex: 1 }}
-        />
-        <button
-          className="ghost"
-          style={{ padding: "5px 8px" }}
-          onClick={() => setShowKey((v) => !v)}
-          title={showKey ? "Hide key" : "Show key"}
-        >
-          {showKey ? "🙈" : "👁"}
-        </button>
-      </div>
-      {isCompatible && (
-        <div className="form-row">
-          <label>Base URL</label>
-          <input
-            type="text"
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder="https://api.example.com/v1"
-            style={{ flex: 1 }}
-          />
+      <div className="api-settings-shell">
+        <aside className="api-provider-rail" aria-label="API providers">
+          <div className="api-provider-rail-items">
+            {PROVIDERS.map((item) => {
+              const isSelected = item.id === provider;
+              const isSaved = Boolean(savedProviders?.[item.id]?.hasKey);
+              return (
+                <div key={item.id} className={`api-provider-item${isSelected ? " selected" : ""}`}>
+                  <button
+                    type="button"
+                    className="api-provider-select"
+                    aria-current={isSelected ? "page" : undefined}
+                    aria-label={`Select ${item.label}`}
+                    onClick={() => onProviderChange(item.id)}
+                  >
+                    <span className="api-provider-mark" aria-hidden="true">{item.short}</span>
+                    <span className="api-provider-item-label">{item.label}</span>
+                    <span className={`api-provider-status${isSaved ? " connected" : ""}`} aria-label={isSaved ? "Connected" : "Not connected"} />
+                  </button>
+                  {isSaved && (
+                    <button
+                      type="button"
+                      className="api-provider-delete"
+                      aria-label={`Remove ${item.label}`}
+                      title={`Remove ${item.label}`}
+                      onClick={() => {
+                        void clearApiKeyFn(item.id).then(async () => {
+                          if (item.id === provider) {
+                            setApiKey("");
+                            setBaseUrl("");
+                            setModel("");
+                            setFetchedModels([]);
+                            setFetchError(null);
+                            await loadConfigFn(item.id);
+                          }
+                          await refreshSavedProviders();
+                        });
+                      }}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
           <button
-            className="ghost"
-            style={{ padding: "5px 12px", whiteSpace: "nowrap" }}
-            onClick={handleFetchModels}
-            disabled={fetchingModels || !baseUrl.trim()}
+            type="button"
+            className="api-provider-add"
+            aria-label="Add a new provider"
+            onClick={() => {
+              const firstUnconfigured = PROVIDERS.find((item) => !savedProviders?.[item.id]?.hasKey);
+              const target = firstUnconfigured ?? PROVIDERS[0];
+              setProvider(target.id);
+              setApiKey("");
+              setBaseUrl("");
+              setModel("");
+              setFetchedModels([]);
+              setFetchError(null);
+              setAddingNew(true);
+              formDirtyRef.current = false;
+              void loadConfigFn(target.id);
+            }}
           >
-            {fetchingModels ? "Fetching…" : "Fetch Models"}
+            <Plus size={16} />
+            <span>New provider</span>
           </button>
-        </div>
-      )}
-      {isOpenRouter && (
-        <div className="form-row">
-          <label />
-          <span className="hint" style={{ flex: 1 }}>
-            Uses OpenRouter's endpoint (https://openrouter.ai/api). Save your
-            key, then fetch the model catalogue.
-          </span>
-          <button
-            className="ghost"
-            style={{ padding: "5px 12px", whiteSpace: "nowrap" }}
-            onClick={handleFetchModels}
-            disabled={fetchingModels || (!apiKey.trim() && !hasExistingKey)}
-          >
-            {fetchingModels ? "Fetching…" : "Fetch Models"}
-          </button>
-        </div>
-      )}
-      {fetchError && (
-        <div className="form-row">
-          <label />
-          <span style={{ color: "var(--state-error)", fontSize: 12 }}>
-            {fetchError}
-            <button
-              className="ghost"
-              style={{ padding: "2px 8px", marginLeft: 8, fontSize: 12 }}
-              onClick={() => {
-                setFetchError(null);
-                setFetchedModels([]);
-              }}
-            >
-              Use manual input
-            </button>
-          </span>
-        </div>
-      )}
-      {fetchedModels.length > 0 && (
-        <div className="form-row">
-          <label>Model</label>
-          <GlassSelect<string>
-            value={model}
-            options={fetchedModels.map((m) => ({ value: m.id, label: m.id }))}
-            onChange={(v) => setModel(v)}
-          />
-        </div>
-      )}
-      {fetchedModels.length === 0 && (
-        <div className="form-row">
-          <label>Model</label>
-          <input
-            type="text"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder="e.g. claude-sonnet-5"
-            style={{ flex: 1 }}
-          />
-        </div>
-      )}
-      <div className="form-row" style={{ marginTop: 4 }}>
-        <label />
-        <button className="primary" onClick={handleSave} disabled={!canSave || saving}>
-          {saving ? "Saving…" : "Save"}
-        </button>
-        <button onClick={handleClear} disabled={!apiKey && !config?.provider}>
-          Clear
-        </button>
+        </aside>
+
+        <section className="api-provider-detail" aria-labelledby="api-provider-title">
+          <div className="api-provider-detail-head">
+            <div className="api-provider-title-wrap">
+              <span className="api-provider-large-mark" aria-hidden="true">{selectedProvider.short}</span>
+              <div>
+                <div className="api-provider-title-row">
+                  <h4 id="api-provider-title">{addingNew ? "New provider" : selectedProvider.label}</h4>
+                  {!addingNew && (
+                    <span className={`api-connection-badge${hasExistingKey ? " connected" : ""}`}>
+                      <span className="api-connection-dot" />
+                      {hasExistingKey ? "Connected" : "Not connected"}
+                    </span>
+                  )}
+                </div>
+                <p>{addingNew ? "Choose a provider type, enter your API key, and fetch available models." : selectedProvider.description}</p>
+              </div>
+            </div>
+            {!addingNew && hasExistingKey && (
+              <button type="button" className="api-icon-button danger" aria-label={`Remove ${selectedProvider.label}`} title={`Remove ${selectedProvider.label}`} onClick={() => void clearSelectedProvider()}>
+                <Trash2 size={16} />
+              </button>
+            )}
+          </div>
+
+          {!addingNew && hasExistingKey && (
+            <div className="api-connection-summary">
+              <div>
+                <span className="api-summary-label">Endpoint</span>
+                <strong title={endpoint}>{endpoint}</strong>
+              </div>
+              <div>
+                <span className="api-summary-label">Selected model</span>
+                <strong>{savedModel || "No model selected"}</strong>
+              </div>
+            </div>
+          )}
+
+          <div className="api-provider-form">
+            <div className="api-form-section-head">
+              <div>
+                <h5>{addingNew || !hasExistingKey ? "Add provider" : "Connection details"}</h5>
+                <p>{addingNew || !hasExistingKey ? "Configure a provider to use its models in chat." : "Update the endpoint, key, or default model."}</p>
+              </div>
+            </div>
+            <div className="api-form-field">
+              <label htmlFor="api-key-provider">Provider</label>
+              <GlassSelect<ChatProvider>
+                value={provider}
+                options={PROVIDERS.map((item) => ({ value: item.id, label: item.label }))}
+                onChange={(v) => {
+                  if (addingNew) {
+                    setProvider(v);
+                    setApiKey("");
+                    setBaseUrl("");
+                    setModel("");
+                    setFetchedModels([]);
+                    setFetchError(null);
+                    formDirtyRef.current = false;
+                    void loadConfigFn(v);
+                  } else {
+                    onProviderChange(v);
+                  }
+                }}
+                aria-label="Provider"
+              />
+            </div>
+            <div className="api-form-field">
+              <label htmlFor="api-key-input">API key</label>
+              <div className="api-input-with-action">
+                <input id="api-key-input" type={showKey ? "text" : "password"} value={apiKey} onChange={(e) => { formDirtyRef.current = true; setApiKey(e.target.value); }} placeholder={keyPlaceholder} />
+                <button type="button" className="api-input-action" onClick={() => setShowKey((v) => !v)} title={showKey ? "Hide key" : "Show key"} aria-label={showKey ? "Hide API key" : "Show API key"}>
+                  {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+            </div>
+            {isCompatible && (
+              <div className="api-form-field">
+                <label htmlFor="api-base-url">Base URL</label>
+                <div className="api-input-with-action">
+                  <input id="api-base-url" type="url" value={baseUrl} onChange={(e) => { formDirtyRef.current = true; setBaseUrl(e.target.value); }} placeholder="https://api.example.com/v1" />
+                  <button type="button" className="api-fetch-button" onClick={handleFetchModels} disabled={fetchingModels || !baseUrl.trim()}>{fetchingModels ? "Fetching…" : "Fetch models"}</button>
+                </div>
+              </div>
+            )}
+            {isOpenRouter && (
+              <div className="api-inline-note">
+                <span>OpenRouter uses its hosted API endpoint.</span>
+                <button type="button" className="api-fetch-button" onClick={handleFetchModels} disabled={fetchingModels || (!apiKey.trim() && !hasExistingKey)}>{fetchingModels ? "Fetching…" : "Fetch models"}</button>
+              </div>
+            )}
+            {fetchError && (
+              <div className="api-form-feedback" role="status">
+                <span>{fetchError}</span>
+                <button type="button" className="api-text-button" onClick={() => { setFetchError(null); setFetchedModels([]); }}>Use manual input</button>
+              </div>
+            )}
+            <div className="api-model-section">
+              <div className="api-model-section-head">
+                <label htmlFor="api-model-input">Model</label>
+                {fetchedModels.length > 0 && <span>{fetchedModels.length} available</span>}
+              </div>
+              {fetchedModels.length > 0 ? (
+                <GlassSelect<string> value={model} options={fetchedModels.map((m) => ({ value: m.id, label: m.id }))} onChange={(v) => { formDirtyRef.current = true; setModel(v); }} aria-label="Model" />
+              ) : (
+                <input id="api-model-input" type="text" value={model} onChange={(e) => { formDirtyRef.current = true; setModel(e.target.value); }} placeholder="e.g. claude-sonnet-5" />
+              )}
+              <div className="api-model-actions">
+                <button type="button" className="api-add-model-button" onClick={() => document.getElementById("api-model-input")?.focus()}><Plus size={15} /> Add model</button>
+              </div>
+            </div>
+            <div className="api-form-actions">
+              <button type="button" className="primary" onClick={handleSave} disabled={!canSave || saving}>{saving ? "Saving…" : (addingNew || !hasExistingKey) ? "Add provider" : "Save changes"}</button>
+              <button type="button" onClick={() => void clearSelectedProvider()} disabled={!apiKey && !config?.provider}>Clear</button>
+            </div>
+          </div>
+        </section>
       </div>
-    </>
+    </div>
   );
 }
 
@@ -1800,106 +2044,122 @@ function ConnectorsPanel() {
   }, [connectors]);
 
   const openFam = modalFamily ? (families.find((f) => f.family === modalFamily) ?? null) : null;
+  const totalConnectors = connectors?.length ?? 0;
+  const connectedTotal = (connectors ?? []).filter(
+    (c) => c.status.connected && !c.status.expired,
+  ).length;
 
   return (
     <>
       <div className="panel-head">
         <h3>Connectors</h3>
+        {totalConnectors > 0 && (
+          <span className="panel-count">
+            {connectedTotal}/{totalConnectors} connected
+          </span>
+        )}
       </div>
-      <p className="estimate-note">
-        Connect a third-party account once and its tools (search, read, create,
-        send) become available in every conversation automatically — the model
-        picks the right connector when a task needs it. Read actions always
-        auto-run; write/create/delete/send actions follow the conversation&apos;s
-        approval mode (card in Manual / Read Only, auto-run in Auto-Edit and
-        Full Auto).
-      </p>
-      <div className="skill-list">
+
+      <div className="conn-info-card">
+        <Shield className="conn-info-icon" size={18} />
+        <div>
+          <div className="conn-info-title">Connect third-party accounts</div>
+          <div className="conn-info-body">
+            After connecting, the model can use tools like search, read, create, and send on your
+            behalf. Read actions run automatically; write/create/delete/send follow the conversation&apos;s
+            approval mode.
+          </div>
+        </div>
+      </div>
+
+      <div className="conn-grid">
         {families.map((f) => {
           const connectedCount = f.members.filter(
-            (c) => c.status.connected && !c.status.expired
+            (c) => c.status.connected && !c.status.expired,
           ).length;
           const allConnected = connectedCount === f.members.length;
-          const familyLabel =
-            connectedCount === 0
-              ? "Not connected"
-              : allConnected
-                ? `All ${f.members.length} connected`
-                : `${connectedCount} of ${f.members.length} connected`;
           const single = f.members.length === 1;
-          const isConnecting =
-            connecting === f.family || (single && connecting === f.members[0].id);
+          const isConnecting = connecting === f.family || (single && connecting === f.members[0].id);
           const connect = () =>
             single ? handleConnect(f.members[0].id) : handleConnectFamily(f.family);
           const openModal = () => setModalFamily(f.family);
+          const familyLabel = allConnected
+            ? `All ${f.members.length} connected`
+            : connectedCount > 0
+              ? `${connectedCount} of ${f.members.length} connected`
+              : "Not connected";
           return (
-            <div className="skill-card connector-card connector-family-card" key={f.family}>
-              <div
-                className="connector-card-main connector-family-head"
-                role="button"
-                tabIndex={0}
+            <div className={`conn-family-card${allConnected ? " done" : ""}`} key={f.family}>
+              <button
+                type="button"
+                className="conn-family-head"
                 onClick={openModal}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    openModal();
-                  }
-                }}
-                title={single ? undefined : "Click to view every product"}
+                title={single ? undefined : "View every product"}
               >
-                <div className="connector-card-icon connector-family-icon">
-                  <FamilyIcon family={f.family} size={40} />
-                </div>
-                <div className="connector-card-info">
-                  <div className="connector-card-title-row">
-                    <strong className="connector-card-title">{f.name}</strong>
-                  </div>
-                  {f.members.length > 1 && (
-                    <div className="connector-member-chips">
-                      {f.members.slice(0, 4).map((c) => {
-                        const on = c.status.connected && !c.status.expired;
-                        return (
-                          <span
-                            className={`connector-member-chip${on ? "" : " off"}`}
-                            key={c.id}
-                            title={c.displayName}
-                          >
-                            {ConnectorIcon({ id: c.id, size: 16 }) ?? (
-                              <span className="connector-fallback-icon">{c.icon}</span>
-                            )}
-                          </span>
-                        );
-                      })}
-                      {f.members.length > 4 && (
-                        <span className="connector-more">+{f.members.length - 4} more</span>
-                      )}
-                    </div>
+                <span className="conn-family-icon">
+                  <FamilyIcon family={f.family} size={30} />
+                </span>
+                <span className="conn-family-meta">
+                  <strong className="conn-family-title">{f.name}</strong>
+                  <span
+                    className={`conn-family-count${connectedCount > 0 ? (allConnected ? " on" : " partial") : ""}`}
+                  >
+                    {familyLabel}
+                  </span>
+                </span>
+                {!single && (
+                  <ChevronRight className="conn-family-chevron" size={15} aria-hidden />
+                )}
+              </button>
+
+              {f.members.length > 1 && (
+                <div className="conn-member-chips">
+                  {f.members.slice(0, 6).map((c) => {
+                    const on = c.status.connected && !c.status.expired;
+                    return (
+                      <span
+                        className={`conn-member-chip${on ? "" : " off"}`}
+                        key={c.id}
+                        title={`${c.displayName}${on ? "" : " — not connected"}`}
+                      >
+                        {ConnectorIcon({ id: c.id, size: 13 }) ?? (
+                          <span className="conn-fallback-icon">{c.icon}</span>
+                        )}
+                      </span>
+                    );
+                  })}
+                  {f.members.length > 6 && (
+                    <span className="conn-more">+{f.members.length - 6}</span>
                   )}
                 </div>
-                <div className="connector-family-side">
-                  <span className="connector-family-count">{familyLabel}</span>
-                  {!allConnected && (
-                    <button
-                      className="primary"
-                      disabled={isConnecting}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        connect();
-                      }}
-                    >
-                      {isConnecting ? "Authorizing…" : single ? "Connect" : "Connect all"}
-                    </button>
-                  )}
-                </div>
-              </div>
-              {note?.id === f.family && (
-                <div className="connector-note connector-family-note">{note.text}</div>
               )}
+
+              <div className="conn-family-foot">
+                {allConnected ? (
+                  <span className="conn-all-done">✓ Connected</span>
+                ) : (
+                  <button
+                    type="button"
+                    className="primary conn-connect-btn"
+                    disabled={isConnecting}
+                    onClick={connect}
+                  >
+                    {isConnecting ? "Authorizing…" : single ? "Connect" : "Connect all"}
+                  </button>
+                )}
+              </div>
+
+              {note?.id === f.family && <div className="conn-note">{note.text}</div>}
             </div>
           );
         })}
-        {(connectors ?? []).length === 0 && (
-          <div className="empty-reserved">No connectors available.</div>
+        {totalConnectors === 0 && (
+          <div className="empty-reserved conn-empty">
+            <ShieldOff className="empty-icon" size={22} />
+            <div className="empty-text">
+              No connectors available yet.
+            </div>
+          </div>
         )}
       </div>
       {openFam && (
@@ -1913,7 +2173,7 @@ function ConnectorsPanel() {
               ? "One OAuth consent covers every product below — use the card's Connect all, or manage each connection here."
               : "Manage this connection."}
           </p>
-          <div className="connector-modal-list">
+          <div className="conn-modal-list">
             {openFam.members.map((c) => {
               const st = c.status;
               const statusLabel = st.connected && st.expired ? "Token expired" : "Not connected";
@@ -1921,26 +2181,26 @@ function ConnectorsPanel() {
               const isBusy = busy === c.id;
               const canConnect = openFam.members.length === 1;
               return (
-                <div className="connector-sub-row" key={c.id}>
-                  <div className="connector-sub-icon">
+                <div className="conn-sub-row" key={c.id}>
+                  <div className="conn-sub-icon">
                     {ConnectorIcon({ id: c.id, size: 20 }) ?? (
-                      <span className="connector-fallback-icon">{c.icon}</span>
+                      <span className="conn-fallback-icon">{c.icon}</span>
                     )}
                   </div>
-                  <div className="connector-card-info">
-                    <div className="connector-card-title-row">
-                      <strong className="connector-card-title">{c.displayName}</strong>
+                  <div className="conn-card-info">
+                    <div className="conn-card-title-row">
+                      <strong className="conn-card-title">{c.displayName}</strong>
                       {(!st.connected || st.expired) && (
                         <span
-                          className={`connector-status${st.expired ? " expired" : ""}${st.connected ? " ok" : ""}`}
+                          className={`conn-status${st.expired ? " expired" : ""}${st.connected ? " ok" : ""}`}
                         >
                           {statusLabel}
                         </span>
                       )}
                     </div>
-                    {note?.id === c.id && <div className="connector-note">{note.text}</div>}
+                    {note?.id === c.id && <div className="conn-note">{note.text}</div>}
                   </div>
-                  <div className="connector-sub-action">
+                  <div className="conn-sub-action">
                     {st.connected ? (
                       <button
                         className="ghost"
@@ -1963,7 +2223,7 @@ function ConnectorsPanel() {
               );
             })}
             {note?.id === modalFamily && (
-              <div className="connector-note">{note.text}</div>
+              <div className="conn-note">{note.text}</div>
             )}
           </div>
         </Modal>
@@ -2134,93 +2394,91 @@ function DataPanel() {
     <div className="settings-form">
       <div className="panel-head">
         <h3>Data</h3>
+        <span className="panel-count">Backup · storage · cleanup</span>
       </div>
 
       {note && <div className="settings-note">{note}</div>}
 
       {/* Backup / Restore — roadmap #7 local-first backup story */}
-      <div className="settings-form-row" style={{ alignItems: "flex-start" }}>
-        <label className="settings-form-label">Backup</label>
-        <div className="settings-form-control" style={{ flexDirection: "column", alignItems: "stretch", gap: 8 }}>
-          <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
-            Export a project's chats (messages + artifacts) to a <code>.zip</code>,
-            or restore a previous backup. Imported chats are added fresh — an
-            existing chat is never overwritten.
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <select
-              value={selectedProjectForBackup ?? ""}
-              onChange={(e) => setSelectedProjectForBackup(e.target.value || null)}
-              style={{ maxWidth: 220 }}
-            >
-              <option value="">Select project…</option>
-              {(backupProjects ?? []).map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-            <button
-              className="ghost"
-              onClick={() => void handleBackupProject()}
-              disabled={backupBusy !== null || !selectedProjectForBackup}
-            >
-              {backupBusy === "backup" ? "Exporting…" : "Back up project"}
-            </button>
-            <button className="ghost" onClick={() => void handleRestore()} disabled={backupBusy === "restore"}>
-              {backupBusy === "restore" ? "Restoring…" : "Restore from backup"}
-            </button>
-          </div>
+      <div className="settings-section">
+        <div className="settings-section-title">Backup</div>
+        <p className="settings-section-hint">
+          Export a project's chats to a <code>.zip</code>, or restore a previous backup.
+          Imported chats are added fresh — nothing is overwritten.
+        </p>
+        <div className="data-backup-row">
+          <select
+            value={selectedProjectForBackup ?? ""}
+            onChange={(e) => setSelectedProjectForBackup(e.target.value || null)}
+          >
+            <option value="">Select project…</option>
+            {(backupProjects ?? []).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <button
+            className="primary cta-strong"
+            onClick={() => void handleBackupProject()}
+            disabled={backupBusy !== null || !selectedProjectForBackup}
+            title={selectedProjectForBackup ? undefined : "Pick a project first"}
+          >
+            {backupBusy === "backup" ? "Exporting…" : "Back up"}
+          </button>
+          <button className="ghost" onClick={() => void handleRestore()} disabled={backupBusy === "restore"}>
+            {backupBusy === "restore" ? "Restoring…" : "Restore from backup"}
+          </button>
         </div>
       </div>
 
-      {/* Chat database location */}
-      <div className="settings-form-row" style={{ alignItems: "flex-start" }}>
-        <label className="settings-form-label">Chats (database)</label>
-        <div className="settings-form-control" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
-          <div className="mono" style={{ fontSize: 12, wordBreak: "break-all" }}>
-            {paths?.chatDbPath ?? "…"}
-            {paths ? ` (${fmtSize(paths.chatDbSize)})` : ""}
+      {/* Storage locations */}
+      <div className="settings-section">
+        <div className="settings-section-title">Storage</div>
+        <div className="data-path-card">
+          <div className="data-path-info">
+            <div className="data-path-name">Chats (database)</div>
+            <div className="data-path-value mono">
+              {paths?.chatDbPath ?? "…"}
+              {paths ? ` · ${fmtSize(paths.chatDbSize)}` : ""}
+            </div>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div className="data-path-actions">
             <button className="ghost" onClick={pickDbDir} disabled={busy}>
               Change…
             </button>
             <button className="ghost" onClick={resetDbDir} disabled={busy}>
-              Reset to default
+              Reset
             </button>
           </div>
         </div>
-      </div>
-
-      {/* Artifacts location */}
-      <div className="settings-form-row" style={{ alignItems: "flex-start" }}>
-        <label className="settings-form-label">Artifacts</label>
-        <div className="settings-form-control" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
-          <div className="mono" style={{ fontSize: 12, wordBreak: "break-all" }}>
-            {paths?.artifactsDir ?? "…"}
-            {paths ? ` (${fmtSize(paths.artifactsSize)})` : ""}
+        <div className="data-path-card">
+          <div className="data-path-info">
+            <div className="data-path-name">Artifacts</div>
+            <div className="data-path-value mono">
+              {paths?.artifactsDir ?? "…"}
+              {paths ? ` · ${fmtSize(paths.artifactsSize)}` : ""}
+            </div>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div className="data-path-actions">
             <button className="ghost" onClick={pickArtifactsDir}>
               Change…
             </button>
             <button className="ghost" onClick={resetArtifactsDir}>
-              Reset to default
+              Reset
             </button>
           </div>
         </div>
       </div>
 
       {/* Delete */}
-      <div className="settings-form-row" style={{ alignItems: "flex-start" }}>
-        <label className="settings-form-label">Delete</label>
-        <div className="settings-form-control" style={{ flexDirection: "column", alignItems: "stretch", gap: 8 }}>
-          <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
-            Permanently delete all chat sessions and their messages, or all
-            generated artifacts. This cannot be undone.
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
+      <div className="settings-section">
+        <div className="settings-section-title">Danger zone</div>
+        <div className="data-danger">
+          <span className="data-danger-text">
+            Permanently delete all chat sessions or all generated artifacts. This cannot be undone.
+          </span>
+          <div className="data-danger-actions">
             <button className="danger" onClick={() => setConfirm("chats")} disabled={busy}>
               Delete all chats
             </button>

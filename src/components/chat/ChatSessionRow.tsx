@@ -51,6 +51,24 @@ export function ChatSessionRow({
   const menuBtnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const titleRef = useRef<HTMLDivElement>(null);
+  // True when the title is truncated — drives the hover marquee so users can
+  // read the full title without a tooltip round-trip.
+  const [titleOverflows, setTitleOverflows] = useState(false);
+
+  useEffect(() => {
+    const el = titleRef.current;
+    if (!el) return;
+    const check = () => {
+      const shift = Math.max(0, el.scrollWidth - el.clientWidth);
+      el.style.setProperty("--marquee-shift", `${shift}px`);
+      setTitleOverflows(shift > 2);
+    };
+    check();
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [session.title]);
 
   const truncated =
     session.lastMessage
@@ -138,7 +156,7 @@ export function ChatSessionRow({
   return (
     <div
       ref={rowRef}
-      className={`chat-session-row${active ? " active" : ""}${session.unread ? " unread" : ""}`}
+      className={`chat-session-row${active ? " active" : ""}${session.unread ? " unread" : ""}${menuOpen ? " menu-open" : ""}`}
       onClick={() => !editing && onSelect(session.id)}
       title={session.title}
     >
@@ -170,10 +188,15 @@ export function ChatSessionRow({
               }}
             />
           ) : (
-            <div className="chat-session-title">{session.title}</div>
+            <div ref={titleRef} className={`chat-session-title${titleOverflows ? " overflows" : ""}`}>
+              <span className="chat-session-title-text">{session.title}</span>
+            </div>
           )}
+          {/* Time and the ⋮ button share the same right slot: the time shows
+              at rest, the menu button fades in on hover (or while the menu is
+              open) in its place — no layout shift. */}
           <div className="chat-session-meta">
-            <span>{relativeTime(session.lastActiveAt)}</span>
+            <span className="chat-session-time">{relativeTime(session.lastActiveAt)}</span>
             {session.worktreePath && (
               <span
                 className="chat-session-worktree-badge"
@@ -182,22 +205,21 @@ export function ChatSessionRow({
                 ⛓
               </span>
             )}
+            <button
+              ref={menuBtnRef}
+              className="ghost chat-session-menu-btn"
+              onClick={openMenu}
+              title="Chat options"
+              aria-label="Chat options"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+            >
+              ⋮
+            </button>
           </div>
         </div>
         {truncated && <span className="chat-session-preview">{truncated}</span>}
       </div>
-
-      <button
-        ref={menuBtnRef}
-        className="ghost chat-session-menu-btn"
-        onClick={openMenu}
-        title="Chat options"
-        aria-label="Chat options"
-        aria-haspopup="menu"
-        aria-expanded={menuOpen}
-      >
-        ⋮
-      </button>
 
       {menuOpen && (
         <div

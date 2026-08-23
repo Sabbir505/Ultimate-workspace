@@ -36,6 +36,18 @@ import { Modal } from "../common/Modal";
 
 type SortKey = ModelSort;
 
+// Session-wide cache of real per-repo GGUF sizes fetched from HF's tree
+// endpoint. The catalog listing only carries estimates (the models API has no
+// per-sibling sizes), so we correct the visible page lazily: one small HTTP
+// call per repo, capped concurrency, cached for the app session.
+const fileSizeCache = new Map<string, Record<string, number>>();
+
+// Client-side pseudo-entry in the sort dropdown: filters out models that
+// exceed the detected memory budget and orders the rest smallest-first.
+// The backend fetch still uses "trending" — the filter/sort is local.
+const FITS_SORT = "fits";
+type UiSortKey = SortKey | typeof FITS_SORT;
+
 const SORT_LABELS: Record<SortKey, string> = {
   trending: "Trending",
   downloads: "Most downloaded",
@@ -78,7 +90,11 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
   const [settings, setSettings] = useState<MarketSettings | null>(null);
   const [entries, setEntries] = useState<CatalogEntry[]>([]);
   const [query, setQuery] = useState("");
-  const [sort, setSort] = useState<SortKey>("trending");
+  const [uiSort, setUiSort] = useState<UiSortKey>("trending");
+  // Backend-facing sort: the "fits" pseudo-entry fetches with "trending" and
+  // does its filtering/sorting client-side below.
+  const sort: SortKey = uiSort === FITS_SORT ? "trending" : uiSort;
+  const hideOversized = uiSort === FITS_SORT;
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tokenInput, setTokenInput] = useState("");
@@ -229,9 +245,9 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
     void doFetch(query, sort);
   };
 
-  const onSortChange = (s: SortKey) => {
-    setSort(s);
-    void doFetch(query, s);
+  const onSortChange = (s: UiSortKey) => {
+    setUiSort(s);
+    void doFetch(query, s === FITS_SORT ? "trending" : s);
   };
 
   const onPickDir = async () => {
@@ -307,8 +323,8 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
           <label>
             <span>Sort</span>
             <select
-              value={sort}
-              onChange={(e) => onSortChange(e.target.value as SortKey)}
+              value={uiSort}
+              onChange={(e) => onSortChange(e.target.value as UiSortKey)}
               disabled={loading}
             >
               {(Object.keys(SORT_LABELS) as SortKey[]).map((k) => (
@@ -316,52 +332,61 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
                   {SORT_LABELS[k]}
                 </option>
               ))}
+              <option value={FITS_SORT}>Fits my hardware</option>
             </select>
           </label>
         </div>
       </div>
 
-      <div className="model-market-settings">
-        <div className="model-market-row">
-          <span className="model-market-label">Download to</span>
-          <code className="model-market-path" title={settings?.modelsDir ?? ""}>
-            {settings?.modelsDir ?? settings?.defaultModelsDir ?? "—"}
-          </code>
-          <button className="ghost" onClick={() => void onPickDir()}>
-            Change…
-          </button>
+      <details className="model-market-settings">
+        <summary>
+          <span className="model-market-summary-path" title={settings?.modelsDir ?? ""}>
+            Downloads → {settings?.modelsDir ?? settings?.defaultModelsDir ?? "—"}
+          </span>
+          {settings?.hasHuggingFaceToken && <span className="model-market-badge">HF token</span>}
+        </summary>
+        <div className="model-market-settings-body">
+          <div className="model-market-row">
+            <span className="model-market-label">Download to</span>
+            <code className="model-market-path" title={settings?.modelsDir ?? ""}>
+              {settings?.modelsDir ?? settings?.defaultModelsDir ?? "—"}
+            </code>
+            <button className="ghost" onClick={() => void onPickDir()}>
+              Change…
+            </button>
+          </div>
+          <div className="model-market-row">
+            <span className="model-market-label">Hugging Face token</span>
+            {settings?.hasHuggingFaceToken ? (
+              <>
+                <span className="model-market-badge">Configured</span>
+                <button className="ghost" onClick={() => void onClearToken()}>
+                  Clear
+                </button>
+              </>
+            ) : (
+              <>
+                <input
+                  type="password"
+                  placeholder="hf_… (optional — needed for gated models)"
+                  value={tokenInput}
+                  onChange={(e) => {
+                    setTokenInput(e.target.value);
+                    setTokenDirty(true);
+                  }}
+                />
+                <button
+                  className="ghost"
+                  onClick={() => void onSaveToken()}
+                  disabled={!tokenDirty || !tokenInput.trim()}
+                >
+                  Save
+                </button>
+              </>
+            )}
+          </div>
         </div>
-        <div className="model-market-row">
-          <span className="model-market-label">Hugging Face token</span>
-          {settings?.hasHuggingFaceToken ? (
-            <>
-              <span className="model-market-badge">Configured</span>
-              <button className="ghost" onClick={() => void onClearToken()}>
-                Clear
-              </button>
-            </>
-          ) : (
-            <>
-              <input
-                type="password"
-                placeholder="hf_… (optional — needed for gated models)"
-                value={tokenInput}
-                onChange={(e) => {
-                  setTokenInput(e.target.value);
-                  setTokenDirty(true);
-                }}
-              />
-              <button
-                className="ghost"
-                onClick={() => void onSaveToken()}
-                disabled={!tokenDirty || !tokenInput.trim()}
-              >
-                Save
-              </button>
-            </>
-          )}
-        </div>
-      </div>
+      </details>
 
       {loadError && (
         <div className="model-market-error">
@@ -409,7 +434,12 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
               if (aQ4 !== bQ4) return aQ4 ? a : b;
               return (b.sizeBytes || 0) > (a.sizeBytes || 0) ? b : a;
             });
+            if (hideOversized && ramClass(best.sizeBytes, memoryBudget) === "too_large") continue;
             deduped.push(best);
+          }
+          // "Fits my hardware": most comfortable fits (smallest) first.
+          if (hideOversized) {
+            deduped.sort((a, b) => (a.sizeBytes || 0) - (b.sizeBytes || 0));
           }
           return deduped.map((e) => {
             const isDownloaded = localModels?.some((m) =>
@@ -528,6 +558,21 @@ function fmtDate(iso: string | null | undefined): string {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+type RamFit = "fits" | "tight" | "too_large";
+
+/** The hero hardware-fit signal shared by both market cards and My Models
+ *  rows: ✓ Fits / ! Tight / ✕ Too large, tinted with the --fit-* tokens. */
+export function FitBadge({ ram }: { ram: RamFit }) {
+  const label = ram === "fits" ? "Fits" : ram === "tight" ? "Tight fit" : "Too large";
+  const icon = ram === "fits" ? "✓" : ram === "tight" ? "!" : "✕";
+  return (
+    <span className={`fit-badge ${ram}`} title={label}>
+      <span aria-hidden>{icon}</span>
+      {label}
+    </span>
+  );
+}
+
 export function ModelCard({ entry, download, totalRam, vramBytes, gpuName, isDownloaded, availableQuants, onAction }: ModelCardProps) {
   const [detailOpen, setDetailOpen] = useState(false);
   const [selectedQuantEntry, setSelectedQuantEntry] = useState<CatalogEntry>(entry);
@@ -545,8 +590,6 @@ export function ModelCard({ entry, download, totalRam, vramBytes, gpuName, isDow
     ? vramClass(vramReq, vramBytes!)
     : ramClass(activeEntry.sizeBytes, totalRam);
   const recommended = usingVram && ram === "fits" && vramByteRatio(vramReq, vramBytes!) < 0.7;
-  const ramLabel = ram === "fits" ? "Fits" : ram === "tight" ? "Tight fit" : "Too large";
-  const ramColor = ram === "fits" ? "var(--green)" : ram === "tight" ? "var(--yellow)" : "var(--red)";
   const state = download?.state;
   const pct = download?.total && download.total > 0
     ? Math.min(100, Math.round((download.downloaded / download.total) * 100))
@@ -569,6 +612,11 @@ export function ModelCard({ entry, download, totalRam, vramBytes, gpuName, isDow
   const pipelineTag = tags.find((t) => ["text-generation", "feature-extraction", "text-to-image", "automatic-speech-recognition", "image-text-to-text", "text-classification", "token-classification", "question-answering", "translation", "summarization", "fill-mask", "sentence-similarity", "image-classification", "object-detection", "image-segmentation", "text-to-speech", "visual-question-answering", "document-question-answering"].includes(t));
   const library = tags.find((t) => ["transformers", "sentence-transformers", "diffusers", "gguf", "mlx", "transformers.js", "llama.cpp"].includes(t));
   const baseModel = tags.find((t) => t.startsWith("base_model:"))?.replace("base_model:", "");
+  // Everything already surfaced in the strip, plus arxiv citation noise,
+  // is dropped from the modal's tag row.
+  const extraTags = tags.filter(
+    (t) => !t.startsWith("arxiv:") && t !== pipelineTag && t !== library && !t.startsWith("base_model:"),
+  );
 
   return (
     <>
@@ -599,7 +647,8 @@ export function ModelCard({ entry, download, totalRam, vramBytes, gpuName, isDow
           </div>
         </div>
 
-        {/* Tags + quant selector */}
+        {/* Decision-relevant tags only — provenance (pipeline/library/base/
+            updated) moved to the detail modal to cut card noise. */}
         <div className="model-card-tags">
           {entry.paramsLabel && <span className="model-card-tag params">{entry.paramsLabel}</span>}
           {availableQuants.length > 1 ? (
@@ -629,13 +678,9 @@ export function ModelCard({ entry, download, totalRam, vramBytes, gpuName, isDow
             <span className="model-card-tag quant">{entry.quantization}</span>
           ) : null}
           <span className="model-card-tag size">{formatBytes(activeEntry.sizeBytes)}</span>
-          {pipelineTag && <span className="model-card-tag pipeline">{pipelineTag}</span>}
-          {library && <span className="model-card-tag library">{library}</span>}
-          {baseModel && <span className="model-card-tag base" title={baseModel}>Based on {baseModel.split("/").pop()}</span>}
           {entry.vision && <span className="model-card-tag vision">Vision</span>}
-          <span className="model-card-tag ram" style={{ color: ramColor, borderColor: ramColor }}>{ramLabel}</span>
+          <FitBadge ram={ram} />
           {recommended && <span className="model-card-tag recommended" title={`Fits ${gpuName || "your GPU"} with headroom`}>✓ Recommended</span>}
-          {fmtDate(entry.lastModified) && <span className="model-card-tag updated">Updated {fmtDate(entry.lastModified)}</span>}
         </div>
 
         {/* Description */}
@@ -664,7 +709,8 @@ export function ModelCard({ entry, download, totalRam, vramBytes, gpuName, isDow
               ✓ Already downloaded · Ready to use
             </div>
           ) : (
-            <button className="primary" onClick={(e) => { e.stopPropagation(); onAction(activeEntry); }} disabled={state === "starting" || state === "verifying"}>
+            <button className="primary cta-strong" onClick={(e) => { e.stopPropagation(); onAction(activeEntry); }} disabled={state === "starting" || state === "verifying"}>
+              {ram === "too_large" && !isActive ? "⚠ " : ""}
               {isActive ? `${pct ?? 0}%` : actionLabel}
             </button>
           )}
@@ -680,7 +726,8 @@ export function ModelCard({ entry, download, totalRam, vramBytes, gpuName, isDow
             isDownloaded && !isActive ? (
               <div className="model-card-status done" style={{ margin: 0, textAlign: "center", flex: 1 }}>✓ Already downloaded and ready</div>
             ) : (
-              <button className="primary" onClick={(e) => { onAction(activeEntry); setDetailOpen(false); }} disabled={state === "starting" || state === "verifying"}>
+              <button className="primary cta-strong" onClick={(e) => { onAction(activeEntry); setDetailOpen(false); }} disabled={state === "starting" || state === "verifying"}>
+                {ram === "too_large" ? "⚠ " : ""}
                 {actionLabel} ({formatBytes(activeEntry.sizeBytes)})
               </button>
             )
@@ -696,49 +743,54 @@ export function ModelCard({ entry, download, totalRam, vramBytes, gpuName, isDow
                   <span>♥ {entry.likes.toLocaleString()} likes</span>
                 </div>
               </div>
+              <FitBadge ram={ram} />
             </div>
             {entry.description && <p className="model-detail-desc">{entry.description}</p>}
+            {/* Compact stat strip replaces the old 9-tile grid so the
+                download action stays above the fold. */}
+            <div className="model-detail-strip">
+              {entry.paramsLabel && <span className="model-detail-pair"><span className="k">Params</span><span className="v">{entry.paramsLabel}</span></span>}
+              <span className="model-detail-pair"><span className="k">Size</span><span className="v mono">{formatBytes(activeEntry.sizeBytes)}</span></span>
+              {(activeEntry.quantization || entry.quantization) && <span className="model-detail-pair"><span className="k">Quant</span><span className="v mono">{activeEntry.quantization || entry.quantization}</span></span>}
+              {entry.license && <span className="model-detail-pair"><span className="k">License</span><span className="v">{entry.license}</span></span>}
+              {pipelineTag && <span className="model-detail-pair"><span className="k">Pipeline</span><span className="v">{pipelineTag}</span></span>}
+              {library && <span className="model-detail-pair"><span className="k">Library</span><span className="v">{library}</span></span>}
+              {baseModel && <span className="model-detail-pair"><span className="k">Base</span><span className="v">{baseModel.split("/").pop()}</span></span>}
+              {entry.lastModified && <span className="model-detail-pair"><span className="k">Updated</span><span className="v">{fmtDate(entry.lastModified)}</span></span>}
+            </div>
             {availableQuants.length > 1 && (
               <div className="model-detail-quants">
-                <span className="model-detail-quants-label">Quantization ({availableQuants.length}):</span>
-                <div className="model-detail-quants-list">
-                  {(quantsExpanded ? availableQuants : availableQuants.slice(0, 5)).map((q) => (
-                    <span
-                      key={q.entry.filename}
-                      className={`model-card-tag quant${q.entry.filename === activeEntry.filename ? " active" : ""}`}
-                      onClick={() => setSelectedQuantEntry(q.entry)}
-                      style={{ cursor: "pointer" }}
-                    >
-                      {q.label} ({formatBytes(q.entry.sizeBytes)})
-                    </span>
-                  ))}
-                  {availableQuants.length > 5 && (
-                    <span
-                      className="model-card-tag quant"
-                      onClick={() => setQuantsExpanded(!quantsExpanded)}
-                      style={{ cursor: "pointer" }}
-                    >
-                      {quantsExpanded ? "▲ less" : `+${availableQuants.length - 5} more`}
-                    </span>
-                  )}
+                <span className="model-detail-quants-label">Quantization — pick a variant ({availableQuants.length})</span>
+                <div className="model-detail-quant-list">
+                  {availableQuants.map((q) => {
+                    const qRam = usingVram
+                      ? vramClass(q.entry.sizeBytes * 1.12, vramBytes!)
+                      : ramClass(q.entry.sizeBytes, totalRam);
+                    const selected = q.entry.filename === activeEntry.filename;
+                    return (
+                      <button
+                        key={q.entry.filename}
+                        type="button"
+                        className={`model-detail-quant-row${selected ? " active" : ""}`}
+                        onClick={() => setSelectedQuantEntry(q.entry)}
+                      >
+                        <span className={`fit-dot ${qRam}`} title={qRam === "fits" ? "Fits" : qRam === "tight" ? "Tight fit" : "Too large"} />
+                        <span className="q-label">{q.label}</span>
+                        <span className="q-size">{formatBytes(q.entry.sizeBytes)}</span>
+                        {selected && <span className="q-check">✓</span>}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             )}
-            <div className="model-detail-grid">
-              <div className="model-detail-item"><span className="model-detail-item-label">Size</span><span className="model-detail-item-value mono">{formatBytes(activeEntry.sizeBytes)}</span></div>
-              <div className="model-detail-item"><span className="model-detail-item-label">Parameters</span><span className="model-detail-item-value">{entry.paramsLabel || "—"}</span></div>
-              <div className="model-detail-item"><span className="model-detail-item-label">Quantization</span><span className="model-detail-item-value">{entry.quantization || "—"}</span></div>
-              <div className="model-detail-item"><span className="model-detail-item-label">License</span><span className="model-detail-item-value">{entry.license || "—"}</span></div>
-              <div className="model-detail-item"><span className="model-detail-item-label">RAM Fit</span><span className="model-detail-item-value" style={{ color: ramColor }}>{ramLabel}</span></div>
-              <div className="model-detail-item"><span className="model-detail-item-label">Pipeline</span><span className="model-detail-item-value" style={{ textTransform: "capitalize" }}>{pipelineTag || "—"}</span></div>
-              <div className="model-detail-item"><span className="model-detail-item-label">Library</span><span className="model-detail-item-value">{library || "—"}</span></div>
-              <div className="model-detail-item"><span className="model-detail-item-label">Downloads</span><span className="model-detail-item-value">{fmtNum(entry.downloads)}</span></div>
-              <div className="model-detail-item"><span className="model-detail-item-label">Likes</span><span className="model-detail-item-value">{fmtNum(entry.likes)}</span></div>
-              {entry.lastModified && <div className="model-detail-item"><span className="model-detail-item-label">Updated</span><span className="model-detail-item-value">{fmtDate(entry.lastModified)}</span></div>}
-              {baseModel && <div className="model-detail-item"><span className="model-detail-item-label">Base Model</span><span className="model-detail-item-value">{baseModel}</span></div>}
-              {entry.vision && <div className="model-detail-item"><span className="model-detail-item-label">Vision</span><span className="model-detail-item-value" style={{ color: "#a78bfa" }}>✓ Multimodal</span></div>}
-              {tags.length > 0 && <div className="model-detail-item" style={{ gridColumn: "1 / -1" }}><span className="model-detail-item-label">Tags</span><span className="model-detail-item-value">{tags.slice(0, 10).join(", ")}</span></div>}
-            </div>
+            {extraTags.length > 0 && (
+              <div className="model-detail-tags">
+                {extraTags.slice(0, 8).map((t) => (
+                  <span key={t} className="model-card-tag">{t}</span>
+                ))}
+              </div>
+            )}
             {entry.sha256 && <div className="model-detail-sha">SHA-256: <code>{entry.sha256.slice(0, 32)}…</code></div>}
           </div>
         </Modal>

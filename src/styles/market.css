@@ -1,6 +1,57 @@
 /* market — Model market (HF browse/download), custom select dropdown, model cards + detail modal.
    Split out of the old monolithic global.css (2026-08-15). Import order in
    global.css preserves the original cascade — do not reorder imports. */
+/* --- Shared hardware-fit signal (market cards + My Models rows) --- */
+.fit-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 99px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.fit-badge.fits {
+  color: var(--fit-ok);
+  background: color-mix(in srgb, var(--fit-ok) 12%, transparent);
+  border-color: color-mix(in srgb, var(--fit-ok) 35%, transparent);
+}
+.fit-badge.tight {
+  color: var(--fit-tight);
+  background: color-mix(in srgb, var(--fit-tight) 12%, transparent);
+  border-color: color-mix(in srgb, var(--fit-tight) 35%, transparent);
+}
+.fit-badge.too_large {
+  color: var(--fit-bad);
+  background: color-mix(in srgb, var(--fit-bad) 12%, transparent);
+  border-color: color-mix(in srgb, var(--fit-bad) 35%, transparent);
+}
+.fit-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.fit-dot.fits { background: var(--fit-ok); }
+.fit-dot.tight { background: var(--fit-tight); }
+.fit-dot.too_large { background: var(--fit-bad); }
+
+/* High-contrast primary CTA: lifts the muted accent toward the theme's text
+   color, but mixed back toward the surface so it doesn't glare on dark. */
+button.primary.cta-strong {
+  background: color-mix(in srgb, var(--text) 78%, var(--surface));
+  border-color: transparent;
+  color: var(--surface);
+  box-shadow: none;
+}
+button.primary.cta-strong:hover {
+  background: color-mix(in srgb, var(--text) 88%, var(--surface));
+  box-shadow: none;
+}
+
 /* --- Model market (Hugging Face browse + download) --- */
 .model-market {
   display: flex;
@@ -106,13 +157,46 @@
   color-scheme: light;
 }
 .model-market-settings {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 10px 12px;
+  padding: 0;
   background: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: 10px;
+  overflow: hidden;
+}
+.model-market-settings summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.model-market-settings summary::-webkit-details-marker { display: none; }
+.model-market-settings summary::before {
+  content: "▸";
+  font-size: 9px;
+  transition: transform 0.15s var(--ease);
+}
+.model-market-settings[open] summary::before { transform: rotate(90deg); }
+.model-market-settings summary:hover { color: var(--text); }
+.model-market-summary-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+}
+.model-market-settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 12px 10px;
+  border-top: 1px solid var(--border);
 }
 .model-market-row {
   display: flex;
@@ -308,11 +392,6 @@
 }
 .model-market-grid .model-card-tag.size { font-family: var(--font-mono); }
 .model-market-grid .model-card-tag.vision { background: rgba(108,92,231,0.1); color: #a78bfa; border-color: transparent; }
-.model-market-grid .model-card-tag.ram { background: transparent; font-weight: 600; border: none; padding: 2px 4px; }
-.model-market-grid .model-card-tag.updated { color: var(--text-dim); border-color: transparent; font-style: italic; }
-.model-market-grid .model-card-tag.pipeline { background: rgba(46,204,113,0.08); color: #2ecc71; border-color: transparent; text-transform: capitalize; }
-.model-market-grid .model-card-tag.library { background: rgba(241,196,15,0.08); color: #f1c40f; border-color: transparent; font-size: 9px; }
-.model-market-grid .model-card-tag.base { background: rgba(52,152,219,0.08); color: #3498db; border-color: transparent; font-size: 9px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Description */
 .model-market-grid .model-card-desc {
@@ -383,37 +462,43 @@
   line-height: 1.6;
   margin: 0 0 14px;
 }
-.model-detail-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-.model-detail-item {
+/* Compact stat strip — one row of key·value pairs instead of a tile grid,
+   so the modal's download action stays above the fold. */
+.model-detail-strip {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px 10px;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  padding: 8px 12px;
   background: var(--bg-elevated);
   border-radius: 8px;
+  margin-bottom: 12px;
 }
-.model-detail-item-label {
+.model-detail-pair {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 11.5px;
+}
+.model-detail-pair .k {
+  color: var(--text-dim);
   font-size: 10px;
-  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--text-dim);
 }
-.model-detail-item-value {
-  font-size: 12px;
+.model-detail-pair .v {
   color: var(--text);
-  word-break: break-word;
-  overflow-wrap: break-word;
-  line-height: 1.4;
+  font-weight: 500;
 }
-.model-detail-item-value.mono {
+.model-detail-pair .v.mono {
   font-family: var(--font-mono);
   font-size: 11px;
+}
+.model-detail-hero .fit-badge { margin-left: auto; flex-shrink: 0; }
+.model-detail-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 10px;
 }
 .model-detail-quants {
   margin-bottom: 12px;
@@ -425,27 +510,50 @@
   margin-bottom: 6px;
   display: block;
 }
-.model-detail-quants-list {
+/* Per-quant selector rows: fit dot + label + size, so the size/fit tradeoff
+   is visible without leaving the modal. */
+.model-detail-quant-list {
   display: flex;
-  gap: 5px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
 }
-.model-detail-quants-list .model-card-tag.quant {
-  font-size: 11px;
-  padding: 3px 8px;
+.model-detail-quant-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 10px;
   border: 1px solid var(--border);
-  border-radius: 5px;
-  background: var(--bg-elevated);
-  font-family: var(--font-mono);
-  color: var(--text-dim);
-  white-space: nowrap;
-  display: inline-block;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
 }
-.model-detail-quants-list .model-card-tag.quant.active {
-  background: var(--accent);
-  color: #fff;
+.model-detail-quant-row:hover {
+  border-color: var(--border-strong, var(--border));
+  background: var(--surface-glass-2, transparent);
+}
+.model-detail-quant-row.active {
   border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.model-detail-quant-row .q-label {
+  font-family: var(--font-mono);
   font-weight: 600;
+  color: var(--text);
+}
+.model-detail-quant-row .q-size {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.model-detail-quant-row .q-check {
+  color: var(--accent-contrast, #fff);
+  font-weight: 700;
 }
 
 .model-detail-sha {

@@ -21,26 +21,22 @@ export const PERMISSION_MODES: ModeOption[] = [
   {
     value: "read_only",
     label: "Read Only",
-    description:
-      "Model can read files and search accounts, but cannot write/edit/delete — incl. connected accounts (Gmail, Notion).",
+    description: "Read files & search accounts only. No writes or connected-account actions.",
   },
   {
     value: "manual",
     label: "Manual Approval",
-    description:
-      "Every mutating action pauses for an approval card — files and connected accounts (send email, label changes). (Default)",
+    description: "Every mutating action pauses for approval. (Default)",
   },
   {
     value: "auto_edit",
     label: "Auto-Edit",
-    description:
-      "Reads & writes/edits in granted roots auto-run, as do connected-account actions. Delete/move/copy still gated.",
+    description: "Reads & writes in granted roots auto-run. Delete/move/copy still gated.",
   },
   {
     value: "full_auto",
     label: "Full Auto",
-    description:
-      "Everything auto-runs — files, shell commands and connected accounts. Writes/deletes outside granted roots still ask.",
+    description: "Everything auto-runs — files, shell, connected accounts.",
   },
 ];
 
@@ -161,7 +157,7 @@ export function PermissionModeMenu({ mode, onModeChange, variant = "pill" }: Pro
           onKeyDown={onKeyDown}
         >
           <div className="permission-mode-hint">
-            Approval posture for filesystem AND connected-account tool calls this turn.
+            Approval posture for tool calls this turn.
           </div>
           <div className="permission-mode-divider" />
           {PERMISSION_MODES.map((opt, i) => (

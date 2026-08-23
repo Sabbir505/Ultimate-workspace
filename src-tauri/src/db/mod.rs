@@ -848,8 +848,9 @@ pub use workspaces::{
 // automations (scheduled headless agent runs)
 pub use automations::{
     count_runs_for, create_automation, delete_automation, finish_run, get_automation,
-    list_automations, list_runs_for, record_run, record_status, set_automation_enabled,
-    start_run, update_automation, Automation, AutomationInput, AutomationRun,
+    list_automations, list_runs_for, record_run, record_status, set_automation_chat_session,
+    set_automation_enabled, start_run, update_automation, Automation, AutomationInput,
+    AutomationRun,
 };
 
 // ---- test helpers ----

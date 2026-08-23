@@ -98,6 +98,9 @@
   --accent-glow: rgba(110, 112, 111, 0.35);
   --accent-contrast: #ffffff;
   --danger: #ff7b72;
+  --fit-ok: #3fb950;
+  --fit-tight: #d29922;
+  --fit-bad: #f85149;
   --shadow: rgba(0, 0, 0, 0.45);
   --diff-add-bg: rgba(52, 209, 123, 0.06);
   --diff-del-bg: rgba(255, 123, 114, 0.06);
@@ -218,6 +221,9 @@
   --accent-glow: rgba(110, 112, 111, 0.28);
   --accent-contrast: #ffffff;
   --danger: #d64545;
+  --fit-ok: #1a7f37;
+  --fit-tight: #9a6700;
+  --fit-bad: #cf222e;
   --shadow: rgba(0, 0, 0, 0.08);
   --diff-add-bg: rgba(22, 163, 74, 0.05);
   --diff-del-bg: rgba(214, 69, 69, 0.05);

@@ -127,6 +127,26 @@ export interface UiState {
   updateModelDownload: (p: ModelDownloadProgress) => void;
 
   setActiveView: (view: ActiveView) => void;
+  /** Conversational artifact creation: form data to prefill when the editor opens.
+   *  This is a transient bridge between the proposal card "Edit" action and the
+   *  SkillsLibrary/AutomationsView forms. The `chatSessionId` / `proposalId`
+   *  let the editor reset the card's `editing` state back to `ready` once the
+   *  form is consumed — otherwise the card stays stuck on "Opening in editor…"
+   *  when the user navigates back to chat. */
+  pendingArtifactFormData: {
+    artifactType: string;
+    spec: unknown;
+    /** Originating chat session — used to reset the proposal card after consume. */
+    chatSessionId?: string;
+    /** Wrapper ID of the proposal being edited — used to reset it to `ready`. */
+    proposalId?: string;
+  } | null;
+  setPendingArtifactFormData: (data: {
+    artifactType: string;
+    spec: unknown;
+    chatSessionId?: string;
+    proposalId?: string;
+  } | null) => void;
   setPaletteOpen: (open: boolean) => void;
   togglePalette: () => void;
   openPeek: (peek: Omit<PeekState, "open">) => void;
@@ -206,6 +226,7 @@ const TOAST_TTL_MS: Record<ToastKind, number> = { error: 9000, info: 5000, succe
 
 export const useUiStore = create<UiState>((set) => ({
   activeView: "chat",
+  pendingArtifactFormData: null,
   paletteOpen: false,
   peek: { open: false, mode: "file", projectId: null, filePath: null, cwd: null },
   pendingReplace: null,
@@ -266,6 +287,7 @@ export const useUiStore = create<UiState>((set) => ({
     }),
 
   setActiveView: (activeView) => set({ activeView }),
+  setPendingArtifactFormData: (pendingArtifactFormData) => set({ pendingArtifactFormData }),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
   togglePalette: () => set((s) => ({ paletteOpen: !s.paletteOpen })),
   openPeek: (peek) => set({ peek: { ...peek, open: true } }),

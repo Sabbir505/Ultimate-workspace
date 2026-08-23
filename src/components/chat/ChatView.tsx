@@ -30,7 +30,8 @@ const MessageBubble = lazy(() => import("./MessageBubble").then((m) => ({ defaul
 // internal `import('mermaid')`); the diff card chunk downloads on first
 // edit-tool call. None of these appear on the empty welcome screen.
 const TaskProgressCard = lazy(() => import("./TaskProgressCard").then((m) => ({ default: m.TaskProgressCard })));
-import { listChatModels, listHarnessModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, deleteEmptyChatSessions, getLocalModelOverrides, setLocalModelOverrides, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides } from "../../lib/ipc";
+const ArtifactProposalCard = lazy(() => import("./ArtifactProposalCard").then((m) => ({ default: m.ArtifactProposalCard })));
+import { listChatModels, listHarnessModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, deleteEmptyChatSessions, getLocalModelOverrides, setLocalModelOverrides, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, saveArtifact, searchArtifacts, updateArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance } from "../../lib/ipc";
 import { harnessModelCatalog } from "../../lib/harnessModels";
 import { setChatScrollToMessage } from "../../lib/chatScroll";
 import { TurnNavigator } from "./TurnNavigator";
@@ -124,10 +125,17 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   const config = useChatStore((s) => s.config);
   const loadConfig = useChatStore((s) => s.loadConfig);
   const newChat = useChatStore((s) => s.newChat);
+  const pushToast = useUiStore((s) => s.pushToast);
   const artifacts = useChatStore((s) =>
     activeChatSessionId ? s.artifacts[activeChatSessionId] : undefined,
   );
   const artifactsByMessage = useChatStore((s) => s.artifactsByMessage);
+  const artifactProposalsBySession = useChatStore((s) => s.artifactProposals);
+  const addArtifactProposal = useChatStore((s) => s.addArtifactProposal);
+  const updateArtifactProposal = useChatStore((s) => s.updateArtifactProposal);
+  const removeArtifactProposal = useChatStore((s) => s.removeArtifactProposal);
+  const getArtifactProposals = useChatStore((s) => s.getArtifactProposals);
+  const editArtifactProposal = useChatStore((s) => s.editArtifactProposal);
   const sessionTasks = useChatStore((s) =>
     activeChatSessionId ? Object.values(s.tasks[activeChatSessionId] ?? {}) : [],
   );
@@ -151,6 +159,15 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   const [harnessCfg, setHarnessCfg] = useState<HarnessModelConfig | null>(null);
   const [harnessLoading, setHarnessLoading] = useState(false);
 
+  // Phase 2/3: Save As menu + search/update modal state
+  const [saveAsMenuOpen, setSaveAsMenuOpen] = useState(false);
+  const [artifactSearchOpen, setArtifactSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<Array<{ id: string; name: string; description: string; artifactType: string; createdAt: number }>>([]);
+  const [searching, setSearching] = useState(false);
+  const [diffModal, setDiffModal] = useState<{ artifactId: string; artifactType: string; name: string; diff: string } | null>(null);
+  const saveAsMenuRef = useRef<HTMLDivElement | null>(null);
+
   // Discover the CLI's configured models/endpoint whenever the agent changes.
   // The agent chip shows a spinner while this runs (live CLI queries like
   // `opencode models` can take a second or two).
@@ -173,6 +190,17 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
       cancelled = true;
     };
   }, [harnessAgent]);
+
+  // Close Save As menu when clicking outside the menu container
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (saveAsMenuRef.current && !saveAsMenuRef.current.contains(event.target as Node)) {
+        setSaveAsMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [saveAsMenuOpen]);
 
   // Config-discovered models first, then static-catalog entries the config
   // didn't mention (e.g. built-in aliases a stock setup still accepts).
@@ -583,6 +611,21 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   // reach the current values without stale closures.
   const itemsRef = useRef<Array<{ key: string; id?: number }>>([]);
   const virtualizerRef = useRef<{ scrollToIndex: (index: number, options?: { align?: "start" | "center" | "end" | "auto"; behavior?: "auto" | "smooth" }) => void } | null>(null);
+  // Currently-mounted virtual row elements by item key. Lets the structural-
+  // change effect re-measure just the visible rows (see the structureSig
+  // effect below) instead of wiping the whole measurement cache.
+  const rowElsRef = useRef<Map<string, HTMLDivElement>>(new Map());
+  // Last-known real height per row key. Rows whose ref-measure was skipped
+  // (the virtualizer skips element measures while its isScrolling flag is hot
+  // — and the auto-follow scrollTop writes keep it hot through every stream)
+  // keep their 160px estimate forever once they scroll out of the render
+  // window: ResizeObserver never fires without a later resize, so nothing
+  // corrects them. totalSize then under-counts real content height, and the
+  // absolutely-positioned rows overflow past it — the typing indicator (which
+  // sits right after totalSize) painted over earlier messages instead of
+  // following the newest turn. We record each mounted row's offsetHeight here
+  // and write it back into the virtualizer's size cache when the row unmounts.
+  const rowHeightsRef = useRef<Map<string, number>>(new Map());
 
   // Draft handed to the composer: bumping `nonce` re-prefills the textarea
   // (used by the per-message "Edit" action to load a message for resend).
@@ -653,8 +696,17 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
       container.scrollHeight - container.scrollTop - container.clientHeight;
     stickToBottomRef.current = distanceFromBottom < threshold;
 
+    // BUG FIX (jump-to-top on send): the prepend trigger used to fire on
+    // `scrollTop < 120` alone — but a chat pinned to the bottom whose content
+    // barely overflows ALSO sits at scrollTop < 120, so merely SENDING a
+    // message (whose scroll events land here) silently prepended up to 200
+    // estimated-tall rows above the viewport. The view suddenly showed the
+    // oldest page and the anchor restore raced the virtualizer's measuring
+    // cascade — reading as "the chat scrolled to the top". Only prepend when
+    // the user actually scrolled AWAY from the live edge.
     if (
       container.scrollTop < 120 &&
+      distanceFromBottom > threshold &&
       hasMoreHistory &&
       !loadingOlderRef.current &&
       activeChatSessionId
@@ -674,11 +726,21 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   }, [hasMoreHistory, activeChatSessionId, loadOlderMessages]);
 
   // Follow new messages / streaming tokens only while pinned to the bottom.
-  // Uses an instant jump (no smooth animation) so rapid streaming updates
-  // don't fight the user's own scrolling.
+  // Writes scrollTop directly instead of scrollIntoView: scrollIntoView also
+  // repositions every scrollable ANCESTOR and can be hijacked mid-flight by
+  // the virtualizer's own scroll corrections — both able to leave the list
+  // stranded away from (or above) the live edge during a send/stream burst.
   useEffect(() => {
-    if (stickToBottomRef.current) {
-      messagesEndRef.current?.scrollIntoView({ block: "end" });
+    const el = messagesContainerRef.current;
+    if (el && stickToBottomRef.current) {
+      const target = el.scrollHeight - el.clientHeight;
+      // Skip the write when already at the live edge: redundant scrollTop
+      // writes fire scroll events that keep the virtualizer's isScrolling
+      // flag hot, which makes its element-measure pass SKIP rows mounting
+      // mid-stream (the swapped-in persisted row after a turn ends).
+      if (Math.abs(el.scrollTop - target) > 1) {
+        el.scrollTop = target;
+      }
     }
   }, [messages, streaming]);
 
@@ -698,16 +760,29 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   useEffect(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
+    // Pinned to the live edge? Then after the card settles just slam to the
+    // bottom (the follow effect does the same) — computing a restore offset
+    // against a mid-layout snapshot is what let this effect fling the chat
+    // upward when it fired while content heights were still settling.
+    if (stickToBottomRef.current) {
+      const raf = requestAnimationFrame(() => {
+        const el = messagesContainerRef.current;
+        if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
+      });
+      return () => cancelAnimationFrame(raf);
+    }
     // Snapshot the relative scroll position (distance from bottom) before the
     // card's height change is reflected in the layout.
     const prevBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
-    let raf = requestAnimationFrame(() => {
+    const raf = requestAnimationFrame(() => {
       // After the card mounts/unmounts, restore the same distance-from-bottom
-      // so the chat content stays visually put.
+      // so the chat content stays visually put. Clamp into the valid range —
+      // a stale/negative target must never move scrollTop.
       const el = messagesContainerRef.current;
       if (!el) return;
-      el.scrollTop = el.scrollHeight - el.clientHeight - prevBottom;
+      const max = Math.max(0, el.scrollHeight - el.clientHeight);
+      el.scrollTop = Math.min(max, Math.max(0, el.scrollHeight - el.clientHeight - prevBottom));
     });
     return () => cancelAnimationFrame(raf);
   }, [approvalKey]);
@@ -784,6 +859,210 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
     void regenerate();
   }, [regenerate]);
 
+  // --- Conversational Artifact Creation (Phase 1) ---
+  // Handlers below use the card's `proposalId` (the wrapper ID in the store).
+  // The store's `updateArtifactProposal` keeps this ID stable across proposal
+  // replacements, so all handlers find the correct entry.
+
+  const handleRegenerateProposal = useCallback(async (proposalId: string, instruction?: string) => {
+    if (!activeChatSessionId) return;
+    const proposals = getArtifactProposals(activeChatSessionId);
+    const entry = proposals.find((p) => p.id === proposalId);
+    if (!entry) return;
+    updateArtifactProposal(activeChatSessionId, proposalId, { state: "generating" });
+    try {
+      // Prefer the original user instruction so the backend can re-classify it.
+      // Fall back to the proposal spec name for backwards compatibility.
+      const originalInstruction = entry.proposal.originalInstruction ?? "";
+      const userMessage = originalInstruction || (
+        entry.proposal.spec.type === "skill"
+          ? entry.proposal.spec.name ?? ""
+          : ""
+      );
+      const newProposal = await regenerateArtifact({
+        chatSessionId: activeChatSessionId,
+        userMessage,
+        additionalInstruction: instruction ?? "",
+        originalInstruction,
+        artifactType: entry.proposal.artifactType,
+      });
+      // Keep the wrapper ID stable by passing the same proposalId;
+      // updateArtifactProposal handles the ID sync internally.
+      updateArtifactProposal(activeChatSessionId, proposalId, {
+        proposal: { ...newProposal, originalInstruction },
+        state: "ready",
+      });
+    } catch (err) {
+      updateArtifactProposal(activeChatSessionId, proposalId, { state: "ready" });
+      pushToast("error", `Failed to regenerate artifact: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [activeChatSessionId, updateArtifactProposal, getArtifactProposals, pushToast]);
+  const handleEditProposal = useCallback((proposalId: string) => {
+    if (!activeChatSessionId) return;
+    const proposals = getArtifactProposals(activeChatSessionId);
+    const entry = proposals.find((p) => p.id === proposalId);
+    if (!entry) return;
+    void updateArtifactProposal(activeChatSessionId, proposalId, { state: "editing" });
+    // Navigate to the appropriate editor tab and pre-fill the form
+    editArtifactProposal(activeChatSessionId, proposalId, entry.proposal);
+  }, [activeChatSessionId, updateArtifactProposal, getArtifactProposals, editArtifactProposal]);
+const handleCreateProposal = useCallback(async (proposalId: string) => {
+    // The proposal card shows the "creating..." state. The card handler
+    // moves the proposal to `state: "created"` — a toast confirms it was
+    // created. The user's next turn (or /goal /loop) runs the artifact.
+    if (!activeChatSessionId) return;
+    const proposals = getArtifactProposals(activeChatSessionId);
+    const entry = proposals.find((p) => p.id === proposalId);
+    if (!entry) return;
+
+    updateArtifactProposal(activeChatSessionId, proposalId, { state: "created" });
+
+    try {
+      // Build provenance from the conversation
+      const provenance: ArtifactProvenance = {
+        source: "chat",
+        conversationId: activeChatSessionId,
+        sourceMessageIds: undefined, // Phase 2: add message selection
+        createdAt: Date.now(),
+        schemaVersion: 1,
+        generatorVersion: "artifact-generator-v1",
+      };
+
+      const result = await createArtifact({
+        spec: entry.proposal.spec,
+        provenance,
+      });
+
+      pushToast("success", `Artifact "${result.name}" created successfully`);
+    } catch (err) {
+      updateArtifactProposal(activeChatSessionId, proposalId, { state: "ready" });
+      pushToast("error", `Failed to create artifact: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [activeChatSessionId, updateArtifactProposal, getArtifactProposals, pushToast]);
+  const handleDismissProposal = useCallback((proposalId: string) => {
+    if (!activeChatSessionId) return;
+    void removeArtifactProposal(activeChatSessionId, proposalId);
+  }, [activeChatSessionId, removeArtifactProposal]);
+
+  /** Update a proposal's spec when the user picks a harness/model in the
+   *  AutomationAgentPicker. The store updates, causing the card to re-render
+   *  with the new selection so "Create" persists the user's choice. */
+  const handleUpdateArtifactSpec = useCallback((proposalId: string, spec: ArtifactSpec) => {
+    if (!activeChatSessionId) return;
+    const proposals = getArtifactProposals(activeChatSessionId);
+    const entry = proposals.find((p) => p.id === proposalId);
+    if (!entry) return;
+    updateArtifactProposal(activeChatSessionId, proposalId, {
+      proposal: { ...entry.proposal, spec },
+    });
+  }, [activeChatSessionId, updateArtifactProposal, getArtifactProposals]);
+
+  // Called by the card when the user fills missing fields (via MissingFieldsPrompt).
+  // We re-run generation with the filled fields as additional instruction so the
+  // backend produces a complete proposal.
+  const handleSubmitMissingFields = useCallback(async (proposalId: string, filledFields: Record<string, unknown>) => {
+    if (!activeChatSessionId) return;
+    const proposals = getArtifactProposals(activeChatSessionId);
+    const entry = proposals.find((p) => p.id === proposalId);
+    if (!entry) return;
+    updateArtifactProposal(activeChatSessionId, proposalId, { state: "generating" });
+    try {
+      const originalInstruction = entry.proposal.originalInstruction ?? (
+        entry.proposal.spec.type === "skill"
+          ? entry.proposal.spec.name ?? ""
+          : ""
+      );
+      const additionalInstruction = JSON.stringify(filledFields, null, 2);
+      const newProposal = await regenerateArtifact({
+        chatSessionId: activeChatSessionId,
+        userMessage: originalInstruction,
+        additionalInstruction,
+        originalInstruction,
+        artifactType: entry.proposal.artifactType,
+      });
+      updateArtifactProposal(activeChatSessionId, proposalId, {
+        proposal: { ...newProposal, originalInstruction },
+        state: "ready",
+      });
+    } catch (err) {
+      updateArtifactProposal(activeChatSessionId, proposalId, { state: "ready" });
+      pushToast("error", `Failed to apply fields: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [activeChatSessionId, updateArtifactProposal, getArtifactProposals, pushToast]);
+
+  // Phase 2: Save the current conversation as an artifact (skill/loop/prompt/automation).
+  // Triggered from a "Save As" button — generates a proposal from conversation
+  // context and immediately creates it (skipping the preview card).
+  const handleSaveConversationAs = useCallback(async (artifactType: string) => {
+    if (!activeChatSessionId) return;
+    setSaveAsMenuOpen(false);
+    try {
+      const result = await saveArtifact({
+        chatSessionId: activeChatSessionId,
+        userMessage: `Save this conversation as a ${artifactType}`,
+      });
+      pushToast("success", `Saved as ${artifactType}: ${result.name}`);
+    } catch (err) {
+      pushToast("error", `Failed to save conversation: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [activeChatSessionId]);
+
+  // Phase 3: Update an existing artifact via chat. Called when the user
+  // selects an existing artifact from search results and provides a new spec.
+  const handleUpdateExistingArtifact = useCallback(async (
+    artifactId: string,
+    artifactType: string,
+    newSpec: ArtifactSpec,
+  ) => {
+    try {
+      const result = await updateArtifact(artifactId, artifactType, newSpec);
+      setDiffModal({
+        artifactId: result.artifactId,
+        artifactType: result.artifactType,
+        name: result.name,
+        diff: result.diff,
+      });
+      return result;
+    } catch (err) {
+      pushToast("error", `Failed to update artifact: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }, []);
+
+  // Phase 2: Search existing artifacts by name (for retrieval before generation).
+  const handleSearchArtifacts = useCallback(async (query: string, artifactType?: string) => {
+    try {
+      const results = await searchArtifacts(query, artifactType);
+      return results;
+    } catch (err) {
+      pushToast("error", `Search failed: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
+  }, []);
+
+  // Phase 2: Run a search when the user submits a query in the search modal.
+  const handleSearchSubmit = useCallback(async () => {
+    if (!searchQuery.trim()) return;
+    setSearching(true);
+    try {
+      const results = await searchArtifacts(searchQuery.trim());
+      setSearchResults(results);
+    } catch (err) {
+      pushToast("error", `Search failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSearching(false);
+    }
+  }, [searchQuery]);
+
+  // Phase 3: Apply the update from the diff modal's "Apply" button.
+  const handleApplyUpdate = useCallback(async () => {
+    if (!diffModal) return;
+    // The update was already applied on the backend — the modal just showed the diff.
+    // Close the modal after the user confirms.
+    setDiffModal(null);
+    pushToast("success", `Updated: ${diffModal.name}`);
+  }, [diffModal]);
+
   // Delete a single message from the active chat. The store handles local
   // state and the backend round-trip; we just feed it the message id from
   // the rendered bubble. Skipped on the live streaming bubble (no id yet).
@@ -805,65 +1084,91 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   // streaming token / composer keystroke. The per-item onDelete closure is
   // created inside the memo too, so it stays reference-stable between
   // renders and doesn't break the memo either.
-  const items: Array<
-    ChatMessage & {
-      key: string;
-      id?: number;
-      live?: boolean;
-      onDelete?: () => void;
-      onEdit?: (newContent: string) => void;
-      superseded?: boolean;
-      segmentStart?: boolean;
-      livePerf?: ChatPerfPayload | null;
-    }
-  > = useMemo(() => {
-    const list: Array<
-      ChatMessage & {
-        key: string;
-        id?: number;
-        live?: boolean;
-        onDelete?: () => void;
-        onEdit?: (newContent: string) => void;
-        superseded?: boolean;
-        segmentStart?: boolean;
-        livePerf?: ChatPerfPayload | null;
-      }
-    > = messages.map((m, i) => {
-      const superseded = !!m.supersededBy;
-      // A retired segment begins when a superseded row follows an active one
-      // (chronological order). Renders the "— edited —" divider above it.
-      const prev = messages[i - 1];
-      const segmentStart = superseded && !prev?.supersededBy;
-      return {
+  type ProposalEntry = {
+    id: string;
+    proposal: ArtifactProposal;
+    state: "generating" | "ready" | "editing" | "created" | "rejected";
+  };
+  type TimelineItem = ChatMessage & {
+    key: string;
+    id?: number;
+    live?: boolean;
+    onDelete?: () => void;
+    onEdit?: (newContent: string) => void;
+    superseded?: boolean;
+    segmentStart?: boolean;
+    livePerf?: ChatPerfPayload | null;
+    proposalEntry?: ProposalEntry;
+    /** Pre-first-token "assistant is responding" row (TypingIndicator / statusNotice). */
+    typing?: boolean;
+  };
+  const items: TimelineItem[] = useMemo(() => {
+    const proposals = activeChatSessionId
+      ? artifactProposalsBySession[activeChatSessionId] ?? []
+      : [];
+    const list: TimelineItem[] = [];
+    messages.forEach((m, i) => {
+      const messageItem: TimelineItem = {
         role: m.role as "user" | "assistant" | "system",
         content: m.content,
         attachments: m.attachments,
-        // Assistant turns carry a worked-duration window; null/legacy rows omit it.
         durationSec:
           m.startedAt != null && m.completedAt != null
             ? m.completedAt - m.startedAt
             : undefined,
         key: `msg-${m.id}`,
         id: m.id,
-        superseded,
-        segmentStart,
+        superseded: !!m.supersededBy,
+        segmentStart: !!m.supersededBy && !messages[i - 1]?.supersededBy,
         onDelete: () => handleDelete(m.id),
         onEdit: m.role === "user" ? (newContent) => handleSubmitEdit(m.id, newContent) : undefined,
       };
+      list.push(messageItem);
+      // Anchor each artifact proposal directly after the command message that
+      // created it. This preserves normal chronological chat order instead of
+      // stacking every card in a footer below later messages.
+      for (const entry of proposals.filter((p) => p.proposal.sourceMessageId === m.id)) {
+        list.push({
+          role: "system",
+          content: "",
+          key: `proposal-${entry.id}`,
+          proposalEntry: entry,
+        });
+      }
     });
     // If streaming, append the live assistant bubble (no action bar while live).
+    // The key embeds session + current message count so each turn's live row is
+    // a NEW identity to the virtualizer — reusing a constant "streaming" key
+    // made it inherit the previous turn's cached row measurement, which painted
+    // the new reply at a stale offset (over the artifact proposal card).
     if (isStreaming) {
       list.push({
         role: "assistant",
         content: activeStream,
-        key: "streaming",
+        key: `streaming-${activeChatSessionId ?? "none"}-${messages.length}`,
         live: true,
         livePerf: livePerf[activeChatSessionId] ?? null,
       });
     }
+    // Pre-first-token indicator as a VIRTUALIZED ROW, not a flow sibling:
+    // when a send doesn't change the visible range, react-virtual skips the
+    // re-render that would refresh the sized container's inline height —
+    // the div kept a stale (short) height, rows overflowed past it, and a
+    // sibling indicator anchored to the div end rendered ~1400px ABOVE the
+    // newest message. As a row it shares translateY(vi.start) coordinates
+    // with the bubbles, so it always follows the newest one. The key embeds
+    // session + message count so each turn's indicator is a fresh identity
+    // to the measurement cache (same reasoning as the streaming key above).
+    if (waitingForFirstToken) {
+      list.push({
+        role: "assistant",
+        content: "",
+        key: `typing-${activeChatSessionId ?? "none"}-${messages.length}`,
+        typing: true,
+      });
+    }
     return list;
-  }, [messages, isStreaming, activeStream, handleDelete, handleSubmitEdit]);
-
+  }, [messages, activeChatSessionId, artifactProposalsBySession, isStreaming, activeStream, waitingForFirstToken, livePerf, handleDelete, handleSubmitEdit]);
   // PERF (PERFORMANCE_AUDIT.md F5): virtualize the message list — long
   // conversations used to mount EVERY MessageBubble (each re-parsing markdown
   // + katex), which made scroll janky and session-switch slow past a few
@@ -880,11 +1185,71 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   itemsRef.current = items;
   virtualizerRef.current = virtualizer;
 
+  // Structural changes to the timeline (proposal cards mounting or flipping
+  // generating→ready→created, the live-stream row attaching/detaching) swap
+  // large content inside measured rows. The ResizeObserver correction can lag
+  // a paint behind, leaving later rows translated to a stale offset.
+  //
+  // BUG FIX (message overlap): this used to call `virtualizer.measure()`,
+  // which wipes the ENTIRE item-size cache. Mounted rows are not re-read
+  // after the wipe (ResizeObserver only fires on real resizes; the ref
+  // callbacks don't re-run for already-mounted nodes), so every visible row
+  // fell back to the 160px estimate — any bubble taller than 160px then
+  // painted over its neighbour. This fired after EVERY completed turn, since
+  // the live row key (`streaming-sess-N`) swaps to the persisted key
+  // (`msg-N`). Instead, synchronously re-measure ONLY the mounted rows via
+  // measureElement(el): fresh offsetHeight per visible row, off-screen cached
+  // sizes preserved.
+  const structureSig = items
+    .map((i) => i.key + (i.proposalEntry ? `:${i.proposalEntry.state}` : ""))
+    .join("|");
+  useEffect(() => {
+    // Reconcile mounted rows whose real DOM height drifted from the
+    // virtualizer's cached size. The dangerous case: a row that mounts ALREADY
+    // at full height (the persisted row swapping in for the live-stream bubble)
+    // while isScrolling blocks the ref-measure — it then keeps its 160px
+    // estimate forever (ResizeObserver never fires without a later resize),
+    // totalSize under-counts, and anything after the spacer (typing indicator)
+    // paints over earlier messages. measureElement() short-circuits to the
+    // cache when called programmatically, so drop the stale entry first to
+    // force a fresh DOM read — only for rows that actually disagree.
+    //
+    // The pass runs one frame OUTSIDE the lifecycle: measureElement can make
+    // the virtualizer synchronously adjust scroll and flushSync a re-render
+    // (it does that whenever the list is pinned at the bottom), which inside
+    // an effect warns "flushSync was called from inside a lifecycle method".
+    const raf = requestAnimationFrame(() => {
+      // Structural view over the virtualizer: itemSizeCache / getMeasurements
+      // exist at runtime but are typed private in @tanstack/react-virtual 3.14.
+      const v = virtualizer as unknown as {
+        itemSizeCache?: Map<string, number>;
+        getMeasurements?: () => Array<{ size: number }>;
+        measureElement: (el: HTMLDivElement | null) => void;
+      };
+      const sizes = v.getMeasurements?.() ?? [];
+      rowElsRef.current.forEach((el, key) => {
+        if (!el.isConnected) return;
+        // Remember the real height while the row is mounted: this is the value
+        // we write back into the size cache when the row unmounts (a detached
+        // node reports offsetHeight 0, so it can't be read at detach time).
+        rowHeightsRef.current.set(key, el.offsetHeight);
+        const idx = items.findIndex((i) => i.key === key);
+        const m = idx >= 0 ? sizes[idx] : undefined;
+        if (!m || Math.abs(m.size - el.offsetHeight) <= 1) return;
+        v.itemSizeCache?.delete(key);
+        v.measureElement(el);
+        rowHeightsRef.current.set(key, el.offsetHeight);
+      });
+    });
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [structureSig, messages.length]);
+
   const hasItems = items.length > 0;
   // Regenerate applies to the most recent assistant message only.
   const lastAssistantKey = [...items]
     .reverse()
-    .find((i) => i.role === "assistant" && !i.live)?.key;
+    .find((i) => i.role === "assistant" && !i.live && !i.typing)?.key;
 
   return (
     <div className="chat-view-wrap">
@@ -906,7 +1271,43 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
                 <div
                   key={vi.key}
                   data-index={vi.index}
-                  ref={virtualizer.measureElement}
+                  ref={(el) => {
+                    // Track mounted rows for the structural remeasure effect,
+                    // then run the virtualizer's own measure/observe pass.
+                    const rowKey = String(vi.key);
+                    if (el) {
+                      rowElsRef.current.set(rowKey, el);
+                      if (el.offsetHeight > 0) {
+                        rowHeightsRef.current.set(rowKey, el.offsetHeight);
+                      }
+                    } else {
+                      rowElsRef.current.delete(rowKey);
+                      // Preserve this row's last real height in the
+                      // virtualizer's size cache. Without this, a row that
+                      // unmounts while its cached size is still the 160px
+                      // estimate (ref-measure skipped mid-scroll) poisons
+                      // totalSize forever: every later row renders at a stale,
+                      // too-small offset and the typing indicator / live edge
+                      // lands ON TOP of earlier messages instead of below the
+                      // newest one.
+                      const h = rowHeightsRef.current.get(rowKey);
+                      const v = virtualizer as unknown as {
+                        itemSizeCache?: Map<string, number>;
+                        itemSizeCacheVersion?: number;
+                        notify?: (sync: boolean) => void;
+                      };
+                      if (h != null && h > 0 && v.itemSizeCache?.get(rowKey) !== h) {
+                        v.itemSizeCache?.set(rowKey, h);
+                        // Mirror resizeItem: bump the measurement-cache
+                        // version (getMeasurements memoizes on it) and
+                        // notify so totalSize recomputes.
+                        if (v.itemSizeCacheVersion != null) v.itemSizeCacheVersion++;
+                        v.notify?.(false);
+                      }
+                      rowHeightsRef.current.delete(rowKey);
+                    }
+                    virtualizer.measureElement(el);
+                  }}
                   style={{
                     position: "absolute",
                     top: 0,
@@ -920,37 +1321,53 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
                   }}
                 >
                   <Suspense fallback={null}>
-                    <MessageBubble
-                      message={item}
-                      live={item.live}
-                      msgId={item.id}
-                      onEdit={item.role === "user" ? item.onEdit : undefined}
-                      onRepeat={
-                        item.role === "assistant" && item.key === lastAssistantKey
-                          ? handleRepeat
-                          : undefined
-                      }
-                      onDelete={!item.live ? item.onDelete : undefined}
-                      artifacts={item.id != null ? artifactsByMessage[item.id] : undefined}
-                      onPreviewArtifact={setPreviewArtifact}
-                      superseded={item.superseded}
-                      segmentStart={item.segmentStart}
-                      livePerf={item.livePerf}
-                    />
+                    {item.proposalEntry ? (
+                      <ArtifactProposalCard
+                        proposalId={item.proposalEntry.id}
+                        proposal={item.proposalEntry.proposal}
+                        state={item.proposalEntry.state}
+                        onRegenerate={handleRegenerateProposal}
+                        onEdit={handleEditProposal}
+                        onCreate={handleCreateProposal}
+                        onDismiss={handleDismissProposal}
+                        onSubmitMissingFields={handleSubmitMissingFields}
+                        onUpdateSpec={handleUpdateArtifactSpec}
+                      />
+                    ) : item.typing ? (
+                      statusNotice && statusNotice.message ? (
+                        <div className="chat-status-notice" role="status">
+                          <span className="local-spinner" aria-hidden="true" />
+                          <span>{statusNotice.message}</span>
+                        </div>
+                      ) : (
+                        <TypingIndicator />
+                      )
+                    ) : (
+                      <MessageBubble
+                        message={item}
+                        live={item.live}
+                        msgId={item.id}
+                        onEdit={item.role === "user" ? item.onEdit : undefined}
+                        onRepeat={
+                          item.role === "assistant" && item.key === lastAssistantKey
+                            ? handleRepeat
+                            : undefined
+                        }
+                        onDelete={!item.live ? item.onDelete : undefined}
+                        artifacts={item.id != null ? artifactsByMessage[item.id] : undefined}
+                        onPreviewArtifact={setPreviewArtifact}
+                        superseded={item.superseded}
+                        segmentStart={item.segmentStart}
+                        livePerf={item.livePerf}
+                        onSaveAsArtifact={item.key === lastAssistantKey ? (() => setSaveAsMenuOpen(true)) : undefined}
+                        onFindUpdateArtifact={item.key === lastAssistantKey ? (() => setArtifactSearchOpen(true)) : undefined}
+                      />
+                    )}
                   </Suspense>
                 </div>
               );
             })}
           </div>
-          {waitingForFirstToken &&
-            (statusNotice && statusNotice.message ? (
-              <div className="chat-status-notice" role="status">
-                <span className="local-spinner" aria-hidden="true" />
-                <span>{statusNotice.message}</span>
-              </div>
-            ) : (
-              <TypingIndicator />
-            ))}
           {sessionTasks.length > 0 && (
             <div className="chat-tasks">
               {sessionTasks.map((t) => (
@@ -958,6 +1375,26 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
                   <TaskProgressCard task={t} />
                 </Suspense>
               ))}
+            </div>
+          )}
+          {activeChatSessionId && (artifactProposalsBySession[activeChatSessionId]?.some((entry) => entry.proposal.sourceMessageId == null) ?? false) && (
+            <div className="artifact-proposals-container">
+              {(artifactProposalsBySession[activeChatSessionId] ?? [])
+                .filter((entry) => entry.proposal.sourceMessageId == null)
+                .map((entry) => (
+                  <Suspense key={entry.id} fallback={null}>
+                    <ArtifactProposalCard
+                      proposalId={entry.id}
+                      proposal={entry.proposal}
+                      state={entry.state as "generating" | "ready" | "editing" | "created" | "rejected"}
+                      onRegenerate={handleRegenerateProposal}
+                      onEdit={handleEditProposal}
+                      onCreate={handleCreateProposal}
+                      onDismiss={handleDismissProposal}
+                      onSubmitMissingFields={handleSubmitMissingFields}
+                    />
+                  </Suspense>
+                ))}
             </div>
           )}
           {error && (
@@ -1107,6 +1544,161 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
           onConfirm={() => void confirmFullAccess(fullAccessConfirmingFor!)}
           onCancel={cancelFullAccessConfirm}
         />
+      )}
+
+      {/* Phase 2: Save As dropdown — floating menu (opened from chip on last assistant message) */}
+      {saveAsMenuOpen && (
+        <div className="artifact-saveas-overlay" ref={(el) => { saveAsMenuRef.current = el; }}>
+          <div className="artifact-saveas-menu">
+            <button type="button" role="menuitem" onClick={() => void handleSaveConversationAs("skill")}>
+              <span className="artifact-menu-icon">⚡</span>
+              <div>
+                <div className="artifact-menu-label">Skill</div>
+                <div className="artifact-menu-desc">Reusable prompt + instructions</div>
+              </div>
+            </button>
+            <button type="button" role="menuitem" onClick={() => void handleSaveConversationAs("loop")}>
+              <span className="artifact-menu-icon">🔁</span>
+              <div>
+                <div className="artifact-menu-label">Loop</div>
+                <div className="artifact-menu-desc">Goal-driven iterative workflow</div>
+              </div>
+            </button>
+            <button type="button" role="menuitem" onClick={() => void handleSaveConversationAs("prompt")}>
+              <span className="artifact-menu-icon">📝</span>
+              <div>
+                <div className="artifact-menu-label">Prompt Template</div>
+                <div className="artifact-menu-desc">Parameterized prompt</div>
+              </div>
+            </button>
+            <button type="button" role="menuitem" onClick={() => void handleSaveConversationAs("automation")}>
+              <span className="artifact-menu-icon">⚙️</span>
+              <div>
+                <div className="artifact-menu-label">Automation</div>
+                <div className="artifact-menu-desc">Scheduled or triggered workflow</div>
+              </div>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Phase 2: Search existing artifacts modal */}
+      {artifactSearchOpen && (
+        <div className="artifact-search-modal-overlay" onClick={() => setArtifactSearchOpen(false)}>
+          <div className="artifact-search-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="artifact-search-modal-header">
+              <h3>Find &amp; Update Artifacts</h3>
+              <button
+                type="button"
+                className="artifact-search-modal-close"
+                onClick={() => setArtifactSearchOpen(false)}
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+            <div className="artifact-search-input-row">
+              <input
+                type="text"
+                placeholder="Search by name or description…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void handleSearchSubmit();
+                }}
+                autoFocus
+              />
+              <button
+                type="button"
+                className="artifact-search-go"
+                onClick={() => void handleSearchSubmit()}
+                disabled={searching || !searchQuery.trim()}
+              >
+                {searching ? "Searching…" : "Search"}
+              </button>
+            </div>
+            <div className="artifact-search-results">
+              {searchResults.length === 0 ? (
+                <div className="artifact-search-empty">
+                  {searchQuery.trim() ? "No artifacts found. Try a different search." : "Type a search query to find existing artifacts."}
+                </div>
+              ) : (
+                searchResults.map((r) => (
+                  <div key={r.id} className="artifact-search-result-item">
+                    <div className="artifact-search-result-info">
+                      <div className="artifact-search-result-name">{r.name}</div>
+                      <div className="artifact-search-result-meta">
+                        <span className={`artifact-type-badge artifact-type-${r.artifactType}`}>{r.artifactType}</span>
+                        <span className="artifact-search-result-desc">{r.description}</span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="artifact-search-result-update"
+                      onClick={() => {
+                        setArtifactSearchOpen(false);
+                        // The update flow: user types an update instruction in chat.
+                        // The backend intent classifier detects "update <name>" and
+                        // routes to update_artifact_cmd, which returns a diff.
+                        setDraft({ text: `Update ${r.name}: `, nonce: Date.now() });
+                      }}
+                      title={`Start an update for ${r.name}`}
+                    >
+                      Update
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Phase 3: Diff preview modal */}
+      {diffModal && (
+        <div className="artifact-diff-modal-overlay" onClick={() => setDiffModal(null)}>
+          <div className="artifact-diff-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="artifact-diff-modal-header">
+              <h3>Update Preview: {diffModal.name}</h3>
+              <button
+                type="button"
+                className="artifact-diff-modal-close"
+                onClick={() => setDiffModal(null)}
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+            <div className="artifact-diff-modal-body">
+              <div className="artifact-diff-modal-type">
+                <span className={`artifact-type-badge artifact-type-${diffModal.artifactType}`}>{diffModal.artifactType}</span>
+              </div>
+              {diffModal.diff === "No changes detected" ? (
+                <div className="artifact-diff-no-changes">
+                  No changes detected — the update produced identical content.
+                </div>
+              ) : (
+                <pre className="artifact-diff-content">{diffModal.diff}</pre>
+              )}
+            </div>
+            <div className="artifact-diff-modal-footer">
+              <button
+                type="button"
+                className="artifact-diff-btn-cancel"
+                onClick={() => setDiffModal(null)}
+              >
+                Discard
+              </button>
+              <button
+                type="button"
+                className="artifact-diff-btn-apply"
+                onClick={() => void handleApplyUpdate()}
+              >
+                Apply Update
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
     </div>

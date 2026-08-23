@@ -37,6 +37,13 @@ vi.mock("../lib/ipc", () => ({
   docsCancelIndex: (...a: unknown[]) => docsCancelIndexMock(...a),
   onDocsIndexProgress: (...a: unknown[]) => onDocsIndexProgressMock(...a),
   onDocsCorpusUpdated: (...a: unknown[]) => onDocsCorpusUpdatedMock(...a),
+  fetchModelCatalog: vi.fn().mockResolvedValue(null),
+  getGpuVram: vi.fn().mockResolvedValue(null),
+  onModelDownloadProgress: vi.fn().mockResolvedValue(() => {}),
+  startModelDownload: vi.fn().mockResolvedValue(undefined),
+  cancelModelDownload: vi.fn().mockResolvedValue(undefined),
+  toastError: vi.fn(),
+  toastSuccess: vi.fn(),
 }));
 
 // The panel calls confirm() before removing — spy it (fresh per test, so the
@@ -98,7 +105,7 @@ describe("KnowledgePanel", () => {
 
   it("warns when no embedding model is installed", async () => {
     await renderWithDefaults(null, { modelPath: null, running: false, baseUrl: null });
-    expect(screen.getByText(/embedding model/i)).toBeTruthy();
+    expect(screen.getAllByText(/embedding model/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/not installed/i)).toBeTruthy();
   });
 

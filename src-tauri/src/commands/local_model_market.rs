@@ -357,7 +357,17 @@ fn normalize_hf_model(m: HfModel) -> Vec<CatalogEntry> {
         .replace("_", " ")
         .replace("-", " ");
     let lower_all = m.id.to_ascii_lowercase();
-    let params = extract_params_label("", &lower_all);
+    // Params label: parsed from the repo id when possible ("7b" → "7B").
+    // Embedding repos (nomic/bge/gte) have no such token, and the estimate
+    // fallback's 7B default would inflate their sizes ~50x — so give those a
+    // realistic small-model default instead.
+    let params = extract_params_label("", &lower_all).or_else(|| {
+        if lower_all.contains("embed") || lower_all.contains("bge-") || lower_all.contains("gte-") {
+            Some("0.14B".to_string())
+        } else {
+            None
+        }
+    });
     // Vision signal at the repo level: tagged `multimodal`/`vision` OR the
     // repo id itself carries a vision cue (llava, qwen-vl, internvl, minicpm-v,
     // mmproj...). Many older vision repos don't add HF tags, so this is a
@@ -599,6 +609,47 @@ pub async fn fetch_model_catalog(
     };
     catalog_cache_put(cache_key, result.clone());
     Ok(result)
+}
+
+/// True file sizes for one repo's GGUFs, from HF's tree endpoint (the models
+/// listing API does NOT return per-sibling sizes — `bloob=true` and friends
+/// don't either — so estimates were shown instead). Returns filename → bytes
+/// for every `.gguf` in the repo. Used by the Knowledge suggestions to show
+/// real download sizes; the market keeps its estimate fallback for bulk
+/// listings where per-repo calls would be too many.
+#[tauri::command]
+pub async fn fetch_model_file_sizes(repo_id: String) -> CmdResult<std::collections::HashMap<String, u64>> {
+    let client = http_client();
+    let url = format!(
+        "https://huggingface.co/api/models/{}/tree/main?recursive=true",
+        urlencoding_lite(&repo_id)
+    );
+    let resp = build_hf_request(&client, &url, None)
+        .send()
+        .await
+        .map_err(|e| format!("HF tree request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("HF tree request failed: HTTP {}", resp.status()));
+    }
+    #[derive(Deserialize)]
+    struct TreeNode {
+        path: String,
+        #[serde(default)]
+        size: Option<u64>,
+    }
+    let nodes: Vec<TreeNode> = resp
+        .json()
+        .await
+        .map_err(|e| format!("HF tree response parse failed: {e}"))?;
+    let mut sizes = std::collections::HashMap::new();
+    for n in nodes {
+        if n.path.to_ascii_lowercase().ends_with(".gguf") {
+            if let Some(sz) = n.size.filter(|&s| s > 0) {
+                sizes.insert(n.path, sz);
+            }
+        }
+    }
+    Ok(sizes)
 }
 
 /// GPU VRAM info for the model-market size gate. Returns the largest dedicated

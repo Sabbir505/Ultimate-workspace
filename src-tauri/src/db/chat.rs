@@ -149,8 +149,15 @@ pub fn chat_worktree_paths(conn: &Connection, project_id: Option<&str>) -> DbRes
 }
 
 /// Delete every chat session bound to a project (and, via FK cascade, its
-/// messages). Used when a project is removed from the sidebar.
+/// messages). Used when a project is removed from the sidebar. Automation
+/// run-log pointers into those sessions are unbound first so no dangling
+/// `automations.chat_session_id` survives the bulk delete.
 pub fn delete_chat_sessions_for_project(conn: &Connection, project_id: &str) -> DbResult<usize> {
+    conn.execute(
+        "UPDATE automations SET chat_session_id = NULL
+          WHERE chat_session_id IN (SELECT id FROM chat_sessions WHERE project_id = ?1)",
+        params![project_id],
+    )?;
     let n = conn.execute(
         "DELETE FROM chat_sessions WHERE project_id = ?1",
         params![project_id],
@@ -168,6 +175,12 @@ pub fn get_chat_session(conn: &Connection, chat_session_id: &str) -> DbResult<Op
 }
 
 pub fn delete_chat_session(conn: &Connection, chat_session_id: &str) -> DbResult<()> {
+    // If this session is an automation's run log, unbind it so the next run
+    // recreates a fresh session instead of dying on the chat_messages FK.
+    conn.execute(
+        "UPDATE automations SET chat_session_id = NULL WHERE chat_session_id = ?1",
+        params![chat_session_id],
+    )?;
     // FK cascade handles chat_messages.
     conn.execute(
         "DELETE FROM chat_sessions WHERE id = ?1",
@@ -179,12 +192,17 @@ pub fn delete_chat_session(conn: &Connection, chat_session_id: &str) -> DbResult
 /// Delete every session that has no messages — the empty "Untitled" rows left
 /// behind when the app (or the user) closed a brand-new chat that was never
 /// typed into. `keep` protects the session the caller is about to select;
-/// starred sessions are never swept. Returns the number of rows deleted.
+/// starred sessions and sessions bound as an automation's run log are never
+/// swept (an automation's log is empty until its first turn writes to it, so
+/// sweeping it would leave a dangling `automations.chat_session_id` that
+/// fails the next run with "FOREIGN KEY constraint failed").
+/// Returns the number of rows deleted.
 pub fn delete_empty_chat_sessions(conn: &Connection, keep: Option<&str>) -> DbResult<usize> {
     let n = conn.execute(
         "DELETE FROM chat_sessions
          WHERE starred = 0
            AND id NOT IN (SELECT DISTINCT chat_session_id FROM chat_messages)
+           AND id NOT IN (SELECT chat_session_id FROM automations WHERE chat_session_id IS NOT NULL)
            AND (?1 IS NULL OR id <> ?1)",
         params![keep],
     )?;
@@ -701,6 +719,42 @@ pub fn search_chat_messages(
 mod tests {
     use rusqlite::Connection;
     use super::*;
+
+    #[test]
+    fn sweeper_skips_run_logs_and_delete_unbinds_automation_pointer() {
+        let conn = super::super::mem();
+
+        let automation = crate::db::create_automation(
+            &conn,
+            &crate::db::AutomationInput {
+                name: "nightly".into(),
+                prompt: "p".into(),
+                harness: "claude_code".into(),
+                model: None,
+                cwd: None,
+                schedule: "* * * * *".into(),
+                enabled: Some(true),
+            },
+        )
+        .unwrap();
+        // Bind a still-EMPTY session as the automation's run log.
+        let run_log = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        crate::db::set_automation_chat_session(&conn, &automation.id, Some(&run_log.id)).unwrap();
+        // A plain empty session beside it.
+        let plain = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+
+        // The sweep removes the plain empty chat but never the run log (it
+        // stays message-less until its first turn writes to it).
+        assert_eq!(delete_empty_chat_sessions(&conn, None).unwrap(), 1);
+        assert!(get_chat_session(&conn, &plain.id).unwrap().is_none());
+        assert!(get_chat_session(&conn, &run_log.id).unwrap().is_some());
+
+        // Deleting the run-log chat by hand unbinds the pointer instead of
+        // leaving automations.chat_session_id dangling.
+        delete_chat_session(&conn, &run_log.id).unwrap();
+        let reloaded = crate::db::get_automation(&conn, &automation.id).unwrap().unwrap();
+        assert_eq!(reloaded.chat_session_id, None);
+    }
 
     #[test]
     fn worktree_path_defaults_null_and_round_trips() {

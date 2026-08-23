@@ -33,12 +33,14 @@ export interface ParsedAttachment {
   thumbDataUri?: string;
 }
 
-/** A single combined regex matching any attachment marker, with three
+/** A single combined regex matching any attachment marker, with four
  *  alternatives captured positionally: group 1 = image name, group 2 =
- *  unreadable-doc name, group 3 = doc name, group 4 = doc body. Matched in one
- *  pass (matchAll) so attachments come out in document order regardless of kind. */
+ *  unreadable-doc name, group 3 = doc name, group 4 = doc body, group 5 =
+ *  bracketed file name (the optimistic pre-persist marker injected by
+ *  state/chat.ts). Matched in one pass (matchAll) so attachments come out in
+ *  document order regardless of kind. */
 const RE_ANY =
-  /(?:\n*\[Attached image: ([^\]]+)\]\n*)|(?:\n*\[Attached file ([^\]]+) could not be read as text\.\]\n*)|(?:\n*Attached file: (.+?)\n```(?:\r?\n)([\s\S]*?)\r?\n```)/g;
+  /(?:\n*\[Attached image: ([^\]]+)\]\n*)|(?:\n*\[Attached file ([^\]]+) could not be read as text\.\]\n*)|(?:\n*Attached file: (.+?)\n```(?:\r?\n)([\s\S]*?)\r?\n```)|(?:\n*\[Attached file: ([^\]]+)\]\n*)/g;
 
 function extOf(name: string): string {
   const dot = name.lastIndexOf(".");
@@ -96,6 +98,17 @@ export function parseAttachments(
         kind: ext && ["docx", "pptx", "xlsx", "pdf", "doc", "ppt", "xls"].includes(ext) ? "doc" : "text",
         badge: badgeFor(name, "doc"),
         preview: body.slice(0, 280),
+      });
+    } else if (m[5] != null) {
+      // [Attached file: NAME] — the optimistic marker (pre-persist). No
+      // extracted text yet; render as a plain file card.
+      const name = m[5].trim();
+      const ext = extOf(name);
+      attachments.push({
+        key: `pending-${i++}`,
+        name,
+        kind: ext && ["docx", "pptx", "xlsx", "pdf", "doc", "ppt", "xls"].includes(ext) ? "doc" : "text",
+        badge: badgeFor(name, "doc"),
       });
     }
   }

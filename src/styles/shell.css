@@ -160,6 +160,7 @@
   flex-direction: column;
   min-width: 0;
   position: relative;
+  z-index: 4;
 }
 
 .toolbar {
@@ -230,24 +231,17 @@
   color: var(--text);
 }
 
-/* ---- GitHub / branch pill beside the project pill (composer notch) ---- */
+/* ---- GitHub / branch pill beside the project pill (composer control bar) ---- */
+/* The pill surface is applied by the .composer-control-bar scope in
+   composer.css; these rules only carry the inner content layout. */
 .composer-notch-github {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
   max-width: 180px;
-  padding: 2px 8px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
   color: var(--text-dim);
   font-size: 12px;
-  cursor: pointer;
-  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+  transition: color 0.15s var(--ease);
 }
 .composer-notch-github:hover {
   color: var(--text);
-  background: var(--surface-2);
 }
 .composer-notch-github-name {
   overflow: hidden;

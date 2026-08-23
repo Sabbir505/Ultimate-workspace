@@ -332,13 +332,27 @@ pub fn get_cost_events(
 }
 
 #[tauri::command]
-pub fn get_cost_rollups(range_days: Option<u32>, db: State<DbState>) -> CmdResult<CostRollups> {
+pub async fn get_cost_rollups(
+    range_days: Option<u32>,
+    db: State<'_, DbState>,
+) -> CmdResult<CostRollups> {
     let days = match range_days.unwrap_or(30) {
         7 | 30 | 90 => range_days.unwrap_or(30),
         _ => 30,
     };
-    let conn = db.0.lock();
-    db::get_cost_rollups_v2(&conn, days).map_err(|e| e.to_string())
+    // The rollup aggregates every cost event in the window; on a long-lived
+    // DB that's a main-thread freeze each time the Usage view opens (this
+    // command used to be sync). Run it on the blocking pool with a cloned
+    // connection handle instead.
+    let conn_arc = db.0.clone();
+    let rollups = tauri::async_runtime::spawn_blocking(move || {
+        let conn = conn_arc.lock();
+        db::get_cost_rollups_v2(&conn, days)
+    })
+    .await
+    .map_err(|e| format!("cost rollup join failed: {e}"))?
+    .map_err(|e| e.to_string())?;
+    Ok(rollups)
 }
 
 // ---- export & file peek ----

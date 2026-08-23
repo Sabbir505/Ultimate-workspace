@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ModelEffortMenu } from "./ModelEffortMenu";
 import { AgentMenu } from "./AgentMenu";
 import { PermissionModeMenu } from "./PermissionModeMenu";
+import { ArtifactTypeSelector } from "./ArtifactTypeSelector";
 import type { PermissionMode } from "../../state/chat";
 import { ContextMeter } from "./ContextMeter";
 import { ComposerMetrics } from "./ComposerMetrics";
@@ -16,11 +17,52 @@ import { BranchDropdown } from "./BranchDropdown";
 import { useUiStore } from "../../state/ui";
 import { useChatStore } from "../../state/chat";
 import { useProjectsStore } from "../../state/projects";
-import { listChatSkills, listPromptTemplates, templateVariables, fillTemplate, transcribeAudio, toastError, toastInfo, type PromptTemplate, type LlamaOverrides } from "../../lib/ipc";
+import {
+  listChatSkills,
+  listPromptTemplates,
+  templateVariables,
+  fillTemplate,
+  transcribeAudio,
+  toastError,
+  toastInfo,
+  generateArtifact,
+  persistChatCommandMessage,
+  type PromptTemplate,
+  type LlamaOverrides,
+  type ArtifactType,
+  type GenerateArtifactRequest,
+} from "../../lib/ipc";
 
 const MAX_TEXT_BYTES = 512 * 1024;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
+
+// Parse `/create [artifact] [a|an] <type> [instruction]` or
+// `/create-artifact [type] [instruction]`. Returns `{ type, instruction }`
+// when a recognized artifact type follows, `null` otherwise.
+export const parseCreateCommand = (text: string): { type: ArtifactType; instruction: string } | null => {
+  const typeMap: Record<string, ArtifactType> = {
+    skill: "skill",
+    loop: "loop",
+    prompt: "prompt_template",
+    prompttemplate: "prompt_template",
+    automation: "automation",
+    workflow: "automation",
+  };
+  const pattern = /^\/(?:create-artifact|create)\s+(?:(?:artifact)\s+)?(?:a\s+|an\s+)?(skill|loop|prompt(?:[_ -]?template)?|automation|workflow)\b\s*(.*)$/i;
+  const match = pattern.exec(text);
+  if (!match) return null;
+  const key = match[1].toLowerCase().replace(/[\s_-]/g, "");
+  const type = typeMap[key];
+  return type ? { type, instruction: match[2] || "" } : null;
+};
+
+/** True when the input is a bare `/create`, `/create artifact`, or the user's
+ * typoed `/create artifect` with no recognized subtype. */
+export const isBareCreateCommand = (text: string): boolean => {
+  const t = text.trim().toLowerCase();
+  return t === "/create" || t === "/create artifact" || t === "/create artifect" || t === "/create-artifact";
+};
 
 // Attachment kinds map to the backend `ChatAttachmentInput`: images go to the
 // model as vision input, docs are text-extracted server-side, text is inlined.
@@ -119,7 +161,11 @@ function FolderNotch() {
     s.projectById(boundProjectId ?? s.selectedProjectId),
   );
   const path = override ?? worktreePath ?? project?.path ?? null;
-  if (!path || !activeChatSessionId) return null;
+  // Only show the folder chip when the chat has an explicit binding — either
+  // a per-session project, a custom CWD override, or a worktree. A globally
+  // selected project without a per-chat binding is not enough.
+  const hasExplicitBinding = !!(boundProjectId || override || worktreePath);
+  if (!path || !activeChatSessionId || !hasExplicitBinding) return null;
   const unbind = () => {
     unbindProject(activeChatSessionId);
     // "Come out of that project" also means the global sidebar selection —
@@ -169,11 +215,23 @@ function FolderNotch() {
 function GitHubNotch() {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
   const boundProjectId = useChatStore((s) =>
     s.activeChatSessionId ? s.sessionProjects[s.activeChatSessionId] : undefined,
   );
+  const override = useChatStore((s) =>
+    s.activeChatSessionId ? s.cwdOverrides[s.activeChatSessionId] : undefined,
+  );
+  const worktreePath = useChatStore((s) =>
+    s.activeChatSessionId
+      ? s.sessions.find((x) => x.id === s.activeChatSessionId)?.worktreePath
+      : undefined,
+  );
   const selectedProjectId = useProjectsStore((s) => s.selectedProjectId);
-  const projectId = boundProjectId ?? selectedProjectId;
+  // Only show the git chip when the chat has an explicit binding (same logic
+  // as FolderNotch) — not just a globally selected project.
+  const hasExplicitBinding = !!(boundProjectId || override || worktreePath);
+  const projectId = hasExplicitBinding ? (boundProjectId ?? selectedProjectId) : null;
   const gitStatus = useProjectsStore((s) =>
     projectId ? s.gitStatuses[projectId] : undefined,
   );
@@ -190,7 +248,7 @@ function GitHubNotch() {
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
 
-  if (!gitStatus?.isRepo || !gitStatus.branch) return null;
+  if (!gitStatus?.isRepo || !gitStatus.branch || !activeChatSessionId) return null;
   return (
     <div className="composer-notch-github-wrap" ref={wrapRef}>
       <button
@@ -259,6 +317,33 @@ function GitPullRequestIcon() {
       <path d="M6 8.5v7a4 4 0 0 0 4 4h5.5" />
       <path d="M18 8.5v7" />
       <circle cx="18" cy="6" r="2.5" />
+    </svg>
+  );
+}
+
+/** Whisper icon for voice recording — modern waveform style (Claude Code-like). */
+function MicIcon({ recording }: { recording?: boolean }) {
+  return (
+    <svg
+      width={15}
+      height={15}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      style={{ flexShrink: 0 }}
+    >
+      {/* Sound wave / whisper waveform */}
+      <path d="M12 2a10 10 0 0 1 10 10" opacity="0.3" />
+      <path d="M12 6a6 6 0 0 1 6 6" opacity="0.5" />
+      <path d="M12 10a2 2 0 0 1 2 2" />
+      <path d="M2 12h3" />
+      <path d="M2 18h3" />
+      <path d="M19 12h3" />
+      <path d="M19 18h3" />
     </svg>
   );
 }
@@ -541,6 +626,12 @@ export function ChatComposer({
     name: string;
     slug: string;
   }
+  // Unified slash-menu item: skills, prompt templates, or special commands
+  // like /create. Each kind handles selection differently.
+  type SlashItem =
+    | { kind: "skill"; name: string; slug: string; description?: string }
+    | { kind: "template"; name: string; trigger: string; description?: string }
+    | { kind: "command"; name: string; slug: string; description: string };
   const [slashSkills, setSlashSkills] = useState<SlashSkill[]>([]);
   const [slashIndex, setSlashIndex] = useState(0);
   // Prompt templates (roadmap #14): loaded alongside skills for the slash menu.
@@ -560,6 +651,9 @@ export function ChatComposer({
   const [transcribing, setTranscribing] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  // Artifact creation (Phase 1): /create command + type selector
+  const [createTypeOpen, setCreateTypeOpen] = useState(false);
+  const [createInstruction, setCreateInstruction] = useState("");
 
   // The popup is active while the whole content is a partial first token
   // starting with "/" (no space typed yet).
@@ -585,12 +679,63 @@ export function ChatComposer({
     };
   }, [slashOpen]);
 
+  // Static slash commands shown alongside skills/prompt templates. `/create`
+  // is included so it appears when typing `/`, and subtype-prefixed entries
+  // (`/create skill`, etc.) let the user pick the artifact type directly.
+  const staticSlashCommands: SlashItem[] = [
+    {
+      kind: "command",
+      name: "Create artifact",
+      slug: "create",
+      description: "Create a reusable skill / loop / prompt template / automation",
+    },
+    {
+      kind: "command",
+      name: "Create skill",
+      slug: "create skill",
+      description: "Generate a Reusable Skill artifact",
+    },
+    {
+      kind: "command",
+      name: "Create loop",
+      slug: "create loop",
+      description: "Generate a Goal Loop artifact",
+    },
+    {
+      kind: "command",
+      name: "Create prompt template",
+      slug: "create prompt template",
+      description: "Generate a Prompt Template artifact",
+    },
+    {
+      kind: "command",
+      name: "Create automation",
+      slug: "create automation",
+      description: "Generate a scheduled Automation artifact",
+    },
+  ];
+
+  // Every entry in the slash menu, normalized to the unified shape:
+  // skills, prompt templates (with an optional trigger), and static commands.
+  const allSlashItems: SlashItem[] = [
+    ...slashSkills.map((s) => ({ kind: "skill" as const, name: s.name, slug: s.slug })),
+    ...promptTemplates
+      .filter((t) => t.trigger && /\S/.test(t.trigger))
+      .map((t) => ({
+        kind: "template" as const,
+        name: t.name,
+        trigger: (t.trigger as string).replace(/^\/+/, ""),
+        description: `Prompt template: ${t.body.slice(0, 60) || ""}`,
+      })),
+    ...staticSlashCommands,
+  ];
+
   const slashFiltered = slashQuery !== null
-    ? slashSkills.filter(
-        (s) =>
-          s.slug.startsWith(slashQuery) ||
-          s.name.toLowerCase().includes(slashQuery),
-      )
+    ? allSlashItems.filter((it) => {
+        const key = ("slug" in it && it.slug) || ("trigger" in it && it.trigger) || "";
+        const label = it.name.toLowerCase();
+        return key.startsWith(slashQuery) || label.includes(slashQuery);
+      })
     : [];
 
   // Reset the highlight whenever the query changes.
@@ -621,6 +766,41 @@ export function ChatComposer({
       requestAnimationFrame(() => ta.setSelectionRange(-1, -1));
     }
   }, []);
+
+  // Handle a selected slash-menu item. Skills and create commands insert a
+  // slash token; prompt templates insert their body (or open variable fill).
+  const applySlashItem = useCallback((item: SlashItem) => {
+    if (item.kind === "command") {
+      if (item.slug === "create") {
+        setContent("");
+        setCreateInstruction("");
+        setCreateTypeOpen(true);
+      } else {
+        setContent(`/${item.slug} `);
+        const ta = textareaRef.current;
+        if (ta) {
+          ta.focus();
+          requestAnimationFrame(() => ta.setSelectionRange(item.slug.length + 2, item.slug.length + 2));
+        }
+      }
+      return;
+    }
+    if (item.kind === "template") {
+      const template = promptTemplates.find(
+        (t) => (t.trigger ?? "").replace(/^\/+/, "") === item.trigger,
+      );
+      if (!template) return;
+      const variables = templateVariables(template.body);
+      if (variables.length > 0) {
+        setFillingTemplate(template);
+        setFillValues({});
+      } else {
+        insertTemplateText(template.body);
+      }
+      return;
+    }
+    applySlashCommand(item.slug);
+  }, [applySlashCommand, insertTemplateText, promptTemplates]);
 
   // Voice recording (roadmap #16): start/stop MediaRecorder, then transcribe
   // the clip and insert the recognized text.
@@ -792,10 +972,131 @@ export function ChatComposer({
   // state A). `agent === undefined` means no active session — hidden entirely.
   const agentLocked = agent === null;
 
+  // --- Conversational Artifact Creation (Phase 1) ---
+  // Cheap deterministic detection of natural-language "create artifact" intent.
+  // Mirrors the backend `detect_obvious_intent` — no LLM call needed for
+  // obvious phrases like "turn this into a skill".
+  const detectArtifactIntent = useCallback((msg: string): { type: ArtifactType; instruction: string } | null => {
+    const lower = msg.toLowerCase();
+    if (lower.includes("turn this into a skill") || lower.includes("save this as a skill") || lower.includes("create a skill")) {
+      return { type: "skill", instruction: msg };
+    }
+    if (lower.includes("turn this into a loop") || lower.includes("make this run until") || lower.includes("create a loop")) {
+      return { type: "loop", instruction: msg };
+    }
+    if (lower.includes("save this as a prompt") || lower.includes("turn this into a prompt template") || lower.includes("create a prompt template")) {
+      return { type: "prompt_template", instruction: msg };
+    }
+    if (lower.includes("make this run every") || lower.includes("create an automation") || lower.includes("schedule this")) {
+      return { type: "automation", instruction: msg };
+    }
+    return null;
+  }, []);
+
+  // Persist the command-only message first, then generate the proposal. This
+  // creates one real timeline user row without starting a normal chat turn.
+  const triggerArtifactGeneration = useCallback(async (type: ArtifactType, instruction: string) => {
+    const sessionId = useChatStore.getState().activeChatSessionId;
+    if (!sessionId) {
+      toastError("No active chat session");
+      return;
+    }
+    const tempId = `temp-${Date.now()}`;
+    const commandText = `/create ${type === "prompt_template" ? "prompt template" : type} ${instruction}`.trim();
+    let sourceMessageId: number | undefined;
+    try {
+      const message = await persistChatCommandMessage(sessionId, commandText);
+      sourceMessageId = message?.id;
+      if (message && useChatStore.getState().activeChatSessionId === sessionId) {
+        useChatStore.setState((s) => ({
+          messages: [...s.messages, message],
+          messagesSessionId: sessionId,
+        }));
+      }
+    } catch (e) {
+      // Keep the proposal usable even if command-message persistence fails.
+      // The user still gets a visible card and an actionable error toast.
+      toastError("Failed to save artifact command", e);
+    }
+
+    useChatStore.getState().addArtifactProposal(sessionId, {
+      id: tempId,
+      artifactType: type,
+      spec: { type } as never,
+      confidence: 0,
+      missingFields: [],
+      assumptions: [],
+      originalInstruction: instruction,
+      sourceMessageId,
+    });
+    try {
+      const proposal = await generateArtifact({
+        chatSessionId: sessionId,
+        userMessage: instruction,
+        artifactType: type,
+      });
+      useChatStore.getState().updateArtifactProposal(sessionId, tempId, {
+        proposal: { ...proposal, originalInstruction: instruction, sourceMessageId },
+        state: "ready",
+      });
+    } catch (e) {
+      useChatStore.getState().removeArtifactProposal(sessionId, tempId);
+      toastError("Failed to generate artifact", e);
+    }
+  }, []);
+
   const handleSend = useCallback(() => {
     if (needsModel || agentLocked) return;
     const trimmed = content.trim();
     if (!trimmed && attachments.length === 0) return;
+
+    // --- /create slash command: deterministic route to artifact generation ---
+    const createCmd = parseCreateCommand(trimmed);
+    if (createCmd) {
+      // If the instruction is empty, open the type selector
+      if (!createCmd.instruction) {
+        setCreateTypeOpen(true);
+        setCreateInstruction("");
+        return;
+      }
+      // /create commands trigger artifact generation but do NOT start a normal
+      // chat turn. The artifact card renders inline below the composer (via
+      // ChatView's artifact-proposals-container) without a user message bubble.
+      // This prevents double-messages and keeps the flow clean: user types
+      // /create, sees proposal card, then continues conversation normally.
+      void triggerArtifactGeneration(createCmd.type, createCmd.instruction);
+      setContent("");
+      setAttachments([]);
+      setAttachError(null);
+      setForceResearch(false);
+      setAttachMenuOpen(false);
+      const ta = textareaRef.current;
+      if (ta) ta.style.height = "auto";
+      return;
+    }
+
+    // --- Bare `/create` or `/create artifact` with no subtype: open selector ---
+    if (isBareCreateCommand(trimmed)) {
+      setCreateTypeOpen(true);
+      setCreateInstruction("");
+      return;
+    }
+
+    // --- Natural language cheap filter: detect obvious "create artifact" phrases ---
+    const intent = detectArtifactIntent(trimmed);
+    if (intent) {
+      // Natural language "create a skill" etc. triggers artifact generation only.
+      void triggerArtifactGeneration(intent.type, intent.instruction);
+      setContent("");
+      setAttachments([]);
+      setAttachError(null);
+      setForceResearch(false);
+      setAttachMenuOpen(false);
+      const ta = textareaRef.current;
+      if (ta) ta.style.height = "auto";
+      return;
+    }
+
     onSend(trimmed, attachments, forceResearch || undefined);
     setContent("");
     setAttachments([]);
@@ -807,7 +1108,14 @@ export function ChatComposer({
     if (ta) {
       ta.style.height = "auto";
     }
-  }, [content, attachments, onSend, needsModel, agentLocked, forceResearch]);
+  }, [content, attachments, onSend, needsModel, agentLocked, forceResearch, detectArtifactIntent, triggerArtifactGeneration]);
+
+  // Handle ArtifactTypeSelector selection
+  const handleCreateTypeSelect = useCallback((type: ArtifactType, instruction?: string) => {
+    setCreateTypeOpen(false);
+    void triggerArtifactGeneration(type, instruction || createInstruction || "Generate a " + type);
+    setCreateInstruction("");
+  }, [createInstruction, triggerArtifactGeneration]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -823,11 +1131,12 @@ export function ChatComposer({
           setSlashIndex((i) => (i - 1 + slashFiltered.length) % slashFiltered.length);
           return;
         }
-        if (e.key === "Enter" || e.key === "Tab") {
-          e.preventDefault();
-          applySlashCommand(slashFiltered[Math.min(slashIndex, slashFiltered.length - 1)].slug);
-          return;
-        }
+if (e.key === "Enter" || e.key === "Tab") {
+            e.preventDefault();
+            const item = slashFiltered[Math.min(slashIndex, slashFiltered.length - 1)];
+            applySlashItem(item);
+            return;
+          }
         if (e.key === "Escape") {
           // The popup is derived from the text, so "close" = drop the token.
           e.preventDefault();
@@ -844,7 +1153,7 @@ export function ChatComposer({
         }
       }
     },
-    [disabled, needsModel, agentLocked, handleSend, slashOpen, slashFiltered, slashIndex, applySlashCommand],
+    [disabled, needsModel, agentLocked, handleSend, slashOpen, slashFiltered, slashIndex, applySlashItem],
   );
 
   const isEmpty = !content.trim() && attachments.length === 0;
@@ -920,31 +1229,39 @@ export function ChatComposer({
         )}
         <div className="composer-slash-wrap">
           {slashOpen && slashFiltered.length > 0 && (
-            <div className="composer-slash-menu" role="listbox" aria-label="Skills">
-              {slashFiltered.map((s, i) => (
-                <button
-                  key={s.slug}
-                  type="button"
-                  role="option"
-                  aria-selected={i === slashIndex}
-                  className={`composer-slash-item${i === slashIndex ? " active" : ""}`}
-                  // onMouseDown + preventDefault keeps textarea focus.
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    applySlashCommand(s.slug);
-                  }}
-                  onMouseEnter={() => setSlashIndex(i)}
-                >
-                  <span className="composer-slash-cmd">/{s.slug}</span>
-                  <span className="composer-slash-name">{s.name}</span>
-                </button>
-              ))}
+            <div className="composer-slash-menu" role="listbox" aria-label="Commands">
+              {slashFiltered.map((item, i) => {
+                const key = item.kind === "template" ? item.trigger : item.slug;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    role="option"
+                    aria-selected={i === slashIndex}
+                    className={`composer-slash-item${i === slashIndex ? " active" : ""}`}
+                    // onMouseDown + preventDefault keeps textarea focus.
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      applySlashItem(item);
+                    }}
+                    onMouseEnter={() => setSlashIndex(i)}
+                  >
+                    <span className="composer-slash-cmd">
+                      {item.kind === "template" ? `/${item.trigger}` : `/${item.slug}`}
+                    </span>
+                    <span className="composer-slash-name">{item.name}</span>
+                    {item.description && (
+                      <span className="composer-slash-desc">{item.description}</span>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           )}
           <textarea
             ref={textareaRef}
             className="chat-composer-textarea"
-            placeholder={agentLocked ? "Select an agent to start…" : "Write a message…  type / for skills"}
+            placeholder={agentLocked ? "Ask anything, or select an agent to customize performance…" : "Write a message…  type / for skills"}
             value={content}
             onChange={(e) => setContent(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -964,16 +1281,6 @@ export function ChatComposer({
             }}
           />
           <div className="composer-attach-wrap" ref={attachMenuRef}>
-            <button
-              type="button"
-              className={`composer-mic-btn${recording ? " recording" : ""}`}
-              title={recording ? "Stop recording" : transcribing ? "Transcribing…" : "Record voice"}
-              aria-label={recording ? "Stop recording" : "Record voice"}
-              disabled={transcribing}
-              onClick={() => void toggleRecording()}
-            >
-              {transcribing ? "…" : recording ? "◼" : "🎙"}
-            </button>
             <button
               type="button"
               className="composer-attach-btn"
@@ -1215,16 +1522,13 @@ export function ChatComposer({
             />
           )}
           {attachError && <span className="composer-attach-error">{attachError}</span>}
-          {!attachError && agentLocked && (
-            <span className="composer-model-hint">Select an agent to start</span>
-          )}
           {!attachError && !agentLocked && needsModel && (
             <span className="composer-model-hint">Select a model to start</span>
           )}
           <div className="composer-footer-spacer" />
           {showSelector && agentLocked && (
             <span className="model-chip-locked" title="Pick an agent to unlock the model list">
-              🔒 Model — pick an agent first
+              🔒 Model locked — pick agent
             </span>
           )}
           {showSelector && !agentLocked && (
@@ -1276,28 +1580,49 @@ export function ChatComposer({
                 ↑
               </button>
             )}
+            <button
+              type="button"
+              className={`composer-mic-btn${recording ? " recording" : ""}`}
+              title={recording ? "Stop recording" : transcribing ? "Transcribing…" : "Record voice"}
+              aria-label={recording ? "Stop recording" : "Record voice"}
+              disabled={transcribing}
+              onClick={() => void toggleRecording()}
+            >
+              {transcribing ? <span className="composer-mic-spinner" /> : recording ? <span className="composer-mic-stop" /> : <MicIcon />}
+            </button>
           </div>
         </div>
-      </div>
-      <div className="composer-context-meter-wrap">
-        {showAgentSelector && (
-          <div className="composer-notch-agent">
-            <AgentMenu agent={agent} onAgentChange={onAgentChange!} loading={agentLoading} />
-          </div>
-        )}
-        <FolderNotch />
-        <GitHubNotch />
-        <div className="composer-context-meter-spacer" />
-        <ContextMeter
-          usedTokens={usedTokens ?? null}
-          model={model}
-          isLocal={provider === "local_gguf"}
-          localCtx={localCtx}
-          liveMaxTokens={liveMaxTokens}
+        <div className="composer-control-bar" role="toolbar" aria-label="Composer controls">
+          {showAgentSelector && (
+            <div className="composer-control-chip composer-control-agent">
+              <AgentMenu agent={agent} onAgentChange={onAgentChange!} loading={agentLoading} />
+            </div>
+          )}
+          <FolderNotch />
+          <GitHubNotch />
+          <div className="composer-control-spacer" />
+        </div>
+        <ComposerMetrics
           chatSessionId={activeChatSessionId}
+          streaming={streaming}
+          variant="hud"
+          contextMeter={{
+            usedTokens: usedTokens ?? null,
+            model,
+            isLocal: provider === "local_gguf",
+            localCtx,
+            liveMaxTokens,
+            chatSessionId: activeChatSessionId,
+          }}
         />
       </div>
-      <ComposerMetrics chatSessionId={activeChatSessionId} streaming={streaming} />
+      {createTypeOpen && (
+        <ArtifactTypeSelector
+          onSelect={handleCreateTypeSelect}
+          onClose={() => setCreateTypeOpen(false)}
+          initialInstruction={createInstruction}
+        />
+      )}
     </div>
   );
 }

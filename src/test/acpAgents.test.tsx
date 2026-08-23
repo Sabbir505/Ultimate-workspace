@@ -70,11 +70,11 @@ describe("AcpAgentsPanel", () => {
   it("adds an agent, parsing args and env", async () => {
     listAcpAgentDefsMock.mockResolvedValue([]);
     render(<AcpAgentsPanel />);
-    fireEvent.change(screen.getByPlaceholderText(/id \(e\.g\. my-agent\)/), { target: { value: "mycool-agent" } });
-    fireEvent.change(screen.getByPlaceholderText("Display name"), { target: { value: "My Cool Agent" } });
-    fireEvent.change(screen.getByPlaceholderText(/Command on PATH/), { target: { value: "mycli" } });
-    fireEvent.change(screen.getByPlaceholderText(/Args/), { target: { value: "--stdio --verbose" } });
-    fireEvent.change(screen.getByPlaceholderText(/Env vars/), { target: { value: "TOKEN=abc\nREGION=us" } });
+    fireEvent.change(screen.getByPlaceholderText("my-agent"), { target: { value: "mycool-agent" } });
+    fireEvent.change(screen.getByPlaceholderText("My Agent"), { target: { value: "My Cool Agent" } });
+    fireEvent.change(screen.getByPlaceholderText(/On PATH or absolute/), { target: { value: "mycli" } });
+    fireEvent.change(screen.getByPlaceholderText(/Space\/comma separated/), { target: { value: "--stdio --verbose" } });
+    fireEvent.change(screen.getByPlaceholderText(/KEY=VALUE/), { target: { value: "TOKEN=abc\nREGION=us" } });
     fireEvent.click(screen.getByText("Add agent"));
     await waitFor(() => expect(saveAcpAgentDefsMock).toHaveBeenCalled());
     const saved = saveAcpAgentDefsMock.mock.calls[0][0];
@@ -90,15 +90,15 @@ describe("AcpAgentsPanel", () => {
     listAcpAgentDefsMock.mockResolvedValue([]);
     render(<AcpAgentsPanel />);
     // Bad id (uppercase/spaces) → error, nothing persisted.
-    fireEvent.change(screen.getByPlaceholderText(/id \(e\.g\. my-agent\)/), { target: { value: "My Agent" } });
-    fireEvent.change(screen.getByPlaceholderText("Display name"), { target: { value: "X" } });
-    fireEvent.change(screen.getByPlaceholderText(/Command on PATH/), { target: { value: "x" } });
+    fireEvent.change(screen.getByPlaceholderText("my-agent"), { target: { value: "My Agent" } });
+    fireEvent.change(screen.getByPlaceholderText("My Agent"), { target: { value: "X" } });
+    fireEvent.change(screen.getByPlaceholderText(/On PATH or absolute/), { target: { value: "x" } });
     fireEvent.click(screen.getByText("Add agent"));
     await waitFor(() => expect(screen.getByText(/may only contain lowercase/)).toBeTruthy());
     expect(saveAcpAgentDefsMock).not.toHaveBeenCalled();
     // Missing command → error.
-    fireEvent.change(screen.getByPlaceholderText(/id \(e\.g\. my-agent\)/), { target: { value: "ok-agent" } });
-    fireEvent.change(screen.getByPlaceholderText(/Command on PATH/), { target: { value: "" } });
+    fireEvent.change(screen.getByPlaceholderText("my-agent"), { target: { value: "ok-agent" } });
+    fireEvent.change(screen.getByPlaceholderText(/On PATH or absolute/), { target: { value: "" } });
     fireEvent.click(screen.getByText("Add agent"));
     await waitFor(() => expect(screen.getByText(/Display name and command are required/)).toBeTruthy());
     expect(saveAcpAgentDefsMock).not.toHaveBeenCalled();

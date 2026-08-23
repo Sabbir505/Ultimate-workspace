@@ -210,7 +210,12 @@ export const listenBrowserActivity = (
 // --- Harnesses ---
 export const listHarnesses = () => safeInvoke<HarnessStatus[] | null>("list_harnesses");
 export const runHarnessLogin = (paneId: string, harnessId: HarnessId, cwd: string) =>
-  safeInvoke<void>("run_harness_login", { paneId, harnessId, cwd });
+safeInvoke<void>("run_harness_login", { paneId, harnessId, cwd });
+/** One-click global npm install of a harness CLI (Harnesses settings panel).
+ *  Long-running — resolves with a confirmation line or rejects with the
+ *  npm stderr tail. Re-probe via listHarnesses() afterwards. */
+export const installHarness = (harnessId: HarnessId) =>
+safeInvoke<string>("install_harness", { harnessId });
 
 // --- ACP agents (roadmap #20) ---
 // ACP = Agent Client Protocol: JSON-RPC 2.0 over stdio, spoken by Zed/Devin-
@@ -787,6 +792,257 @@ export const deleteArtifact = (id: string) =>
 export const deleteAllArtifacts = () =>
   safeInvoke<number>("delete_all_artifacts", {});
 
+// --- Conversational Artifact Creation (Phase 1) ---
+
+export type ArtifactType = "skill" | "loop" | "prompt_template" | "automation";
+
+export type ArtifactAction = "create" | "save" | "update" | "none";
+
+export interface InputDefinition {
+  name: string;
+  type: string;
+  description: string;
+  required: boolean;
+  default?: string;
+}
+
+export interface OutputDefinition {
+  name: string;
+  type: string;
+  description: string;
+}
+
+export interface ModelConfig {
+  provider: string;
+  model: string;
+  temperature?: number;
+  maxTokens?: number;
+}
+
+export type PermissionPolicy = "read_only" | "workspace_write" | "full_access" | "unknown";
+
+export interface Example {
+  input: Record<string, string>;
+  output: string;
+}
+
+export interface SkillSpec {
+  name: string;
+  description: string;
+  instructions: string;
+  inputs: InputDefinition[];
+  outputs: OutputDefinition[];
+  tools?: string[];
+  model?: ModelConfig;
+  permissions?: PermissionPolicy;
+  examples?: Example[];
+}
+
+export interface LoopSpec {
+  name: string;
+  description: string;
+  objective: string;
+  inputs: InputDefinition[];
+  steps: WorkflowStep[];
+  iteration: IterationConfig;
+  outputs: OutputDefinition[];
+  permissions?: PermissionPolicy;
+}
+
+export interface WorkflowStep {
+  label: string;
+  action: string;
+  inputs?: Record<string, string>;
+  condition?: string;
+}
+
+export interface IterationConfig {
+  maxIterations: number;
+  stopCondition?: string;
+}
+
+export interface PromptVariable {
+  name: string;
+  type: string;
+  description: string;
+  required: boolean;
+  default?: string;
+}
+
+export interface PromptExample {
+  input: Record<string, string>;
+  output: string;
+}
+
+export interface PromptTemplateSpec {
+  name: string;
+  description: string;
+  template: string;
+  variables: PromptVariable[];
+  outputFormat?: string;
+  examples?: PromptExample[];
+}
+
+export interface AutomationTrigger {
+  kind: "schedule" | "event" | "webhook";
+  schedule?: string; // cron expression for schedule trigger
+}
+
+export interface AutomationSpec {
+  name: string;
+  description: string;
+  trigger: AutomationTrigger;
+  steps: WorkflowStep[];
+  /** The harness/agent to run (e.g. "claude_code", "opencode"). Present when user has chosen. */
+  harness?: string;
+  /** The model to use within the harness. Empty = harness's default. */
+  model?: string;
+  inputs?: InputDefinition[];
+  outputs?: OutputDefinition[];
+  permissions?: PermissionPolicy;
+  enabled: boolean;
+}
+
+export type ArtifactSpec =
+  | ({ type: "skill" } & SkillSpec)
+  | ({ type: "loop" } & LoopSpec)
+  | ({ type: "prompt_template" } & PromptTemplateSpec)
+  | ({ type: "automation" } & AutomationSpec);
+
+export interface ArtifactProvenance {
+  source: "manual" | "chat";
+  conversationId?: string;
+  sourceMessageIds?: number[];
+  createdAt: number;
+  schemaVersion: number;
+  generatorVersion: string;
+}
+
+export interface ArtifactProposal {
+  id: string;
+  artifactType: ArtifactType;
+  spec: ArtifactSpec;
+  confidence: number;
+  missingFields: string[];
+  assumptions: string[];
+  /** Original user instruction used to generate this proposal, retained for regeneration. */
+  originalInstruction?: string;
+  /** Persisted chat message id that triggered this proposal, when the frontend
+   *  persisted the command as a real DB row. Used to render the proposal card
+   *  inline next to the command bubble in the chat timeline. */
+  sourceMessageId?: number;
+}
+
+export interface ValidationResult {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+export interface CreatedArtifact {
+  id: string;
+  artifactType: ArtifactType;
+  name: string;
+}
+
+export interface GenerateArtifactRequest {
+  chatSessionId: string;
+  userMessage: string;
+  artifactType?: ArtifactType;
+  [key: string]: unknown;
+}
+
+export interface ValidateArtifactRequest {
+  proposal: ArtifactProposal;
+  [key: string]: unknown;
+}
+
+export interface CreateArtifactRequest {
+  spec: ArtifactSpec;
+  provenance: ArtifactProvenance;
+  [key: string]: unknown;
+}
+
+export interface RegenerateArtifactRequest {
+  chatSessionId: string;
+  userMessage: string;
+  additionalInstruction: string;
+  originalInstruction: string;
+  artifactType?: ArtifactType;
+  [key: string]: unknown;
+}
+
+export interface IntentDecision {
+  decision: "create_proposal" | "save_proposal" | "update_proposal" | "ask_clarification" | "normal_conversation";
+  intent?: ArtifactIntent;
+  message?: string;
+}
+
+export interface ArtifactIntent {
+  action: ArtifactAction;
+  artifactType?: ArtifactType;
+  instruction?: string;
+}
+
+export interface ArtifactSummary {
+  id: string;
+  name: string;
+  description: string;
+  artifactType: ArtifactType;
+  createdAt: number;
+}
+
+export interface ArtifactUpdateResult {
+  success: boolean;
+  artifactId: string;
+  artifactType: string;
+  name: string;
+  diff: string;
+}
+
+export interface ArtifactContextResponse {
+  availableTools: string[];
+  availableSkills: string[];
+  messages: { role: string; content: string }[];
+}
+
+export const persistChatCommandMessage = (chatSessionId: string, content: string) =>
+  safeInvoke<ChatMessageRecord>("persist_chat_command_message", { chatSessionId, content });
+
+export const generateArtifact = (request: GenerateArtifactRequest) =>
+  safeInvoke<ArtifactProposal>("generate_artifact_cmd", { request });
+
+export const validateArtifact = (request: ValidateArtifactRequest) =>
+  safeInvoke<ValidationResult>("validate_artifact_cmd", { request });
+
+export const createArtifact = (request: CreateArtifactRequest) =>
+  safeInvoke<CreatedArtifact>("create_artifact_cmd", { request });
+
+export const regenerateArtifact = (request: RegenerateArtifactRequest) =>
+  safeInvoke<ArtifactProposal>("regenerate_artifact_cmd", {
+    chatSessionId: request.chatSessionId,
+    userMessage: request.userMessage,
+    additionalInstruction: request.additionalInstruction,
+    originalInstruction: request.originalInstruction,
+    artifactType: request.artifactType,
+  });
+
+export const saveArtifact = (request: GenerateArtifactRequest) =>
+  safeInvoke<CreatedArtifact>("save_artifact_cmd", { request });
+
+export const searchArtifacts = (query: string, artifactType?: string) =>
+  safeInvoke<ArtifactSummary[]>("search_artifacts_cmd", { query, artifactType });
+
+export const updateArtifact = (artifactId: string, artifactType: string, newSpec: ArtifactSpec) =>
+  safeInvoke<ArtifactUpdateResult>("update_artifact_cmd", {
+    artifactId,
+    artifactType,
+    newSpec,
+  });
+
+export const getArtifactContext = (chatSessionId: string, includeMessages: boolean) =>
+  safeInvoke<ArtifactContextResponse>("get_artifact_context_cmd", { chatSessionId, includeMessages });
+
 /** Delete a single chat message (user or assistant) by id. No-op on the
  *  backend for unknown ids; the optimistic just-sent message (negative id)
  *  simply doesn't match anything server-side. The UI removes the bubble
@@ -985,6 +1241,10 @@ export const sendAgentChatMessage = (
   model?: string,
   cwd?: string,
   projectId?: string,
+  // Composer attachments, same payload the built-in chat takes. Display
+  // markers/extracted text are folded into the persisted message; image/doc
+  // bytes are saved to disk paths the CLI's own file tools can open.
+  attachments?: ChatAttachmentInput[],
 ) =>
   safeInvoke<void>("send_agent_chat_message", {
     chatSessionId,
@@ -993,6 +1253,7 @@ export const sendAgentChatMessage = (
     model: model ?? null,
     cwd: cwd ?? null,
     projectId: projectId ?? null,
+    attachments: attachments ?? null,
   });
 export const cancelAgentChatMessage = (chatSessionId: string) =>
   safeInvoke<void>("cancel_agent_chat_message", { chatSessionId });
@@ -1054,6 +1315,12 @@ export const setAutomationEnabled = (automationId: string, enabled: boolean) =>
   safeInvoke<void>("set_automation_enabled", { automationId, enabled });
 export const runAutomationNow = (automationId: string) =>
   safeInvoke<void>("run_automation_now", { automationId });
+
+/** Next fire time (unix seconds, local time) for a 5-field cron schedule,
+ *  strictly after now — same math the scheduler uses for due-ness.
+ *  Null when the schedule never fires again. */
+export const automationNextFire = (schedule: string) =>
+  safeInvoke<number | null>("automation_next_fire", { schedule });
 
 /** One past (or in-flight) run of an automation — backed by the
  *  automation_runs SQLite table. Used by the Automations view's
@@ -1269,6 +1536,21 @@ export const stopLocalModel = (modelId: string) =>
 
 export const localModelStatus = () =>
   safeInvoke<ActiveLocalModel | null>("local_model_status");
+
+/** Get the user-configured llama-server path (if any). Written by the
+ *  "One-click path setup" button in the Local Models settings panel. */
+export const getLlamaServerPath = () =>
+  safeInvoke<{ path: string | null }>("get_llama_server_path", {});
+
+/** Set the user-configured llama-server path. Returns success with the
+ *  new path, or an error if the path is invalid (binary not found). */
+export const setLlamaServerPath = (path: string) =>
+  safeInvoke<void>("set_llama_server_path", { path });
+
+/** Detect common llama-server installation paths. Returns the detected
+ *  path or `null` if none found. Used by "one-click path setup". */
+export const detectLlamaServerPath = () =>
+  safeInvoke<{ path: string | null }>("detect_llama_server_path", {});
 
 /** Live context-window usage for a local-model session, returned by
  *  `count_context_tokens`. `usedTokens` is null when no sidecar is running
@@ -1750,6 +2032,12 @@ export const fetchModelCatalog = (args: FetchCatalogArgs = {}) =>
     sort: args.sort ?? null,
     limit: args.limit ?? null,
   });
+
+/** Real per-file GGUF sizes for one repo (filename → bytes), from HF's tree
+ *  endpoint. The catalog listing API doesn't expose sibling sizes, so entries
+ *  there carry estimates; this corrects them for single-repo views. */
+export const fetchModelFileSizes = (repoId: string) =>
+  safeInvoke<Record<string, number>>("fetch_model_file_sizes", { repoId });
 
 /** GPU VRAM info for the model-market size gate. Null when no discrete GPU. */
 export interface GpuVramInfo {

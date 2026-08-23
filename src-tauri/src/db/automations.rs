@@ -61,7 +61,7 @@ pub struct AutomationRun {
 }
 
 /// Fields the create/edit form sends. Everything except id/timestamps.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AutomationInput {
     pub name: String,
@@ -194,6 +194,23 @@ pub fn record_run(
            chat_session_id = COALESCE(?4, chat_session_id)
          WHERE id = ?1",
         params![automation_id, now_ts(), status, chat_session_id],
+    )?;
+    Ok(())
+}
+
+/// Rebind (or clear with `None`) the automation's run-log chat session.
+/// Used when the stored session vanished (deleted by the user, swept as an
+/// empty chat) and the runner creates a fresh one — writing immediately, not
+/// waiting for finalize's record_run, keeps the pointer from dangling across
+/// a crash mid-run.
+pub fn set_automation_chat_session(
+    conn: &Connection,
+    automation_id: &str,
+    chat_session_id: Option<&str>,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE automations SET chat_session_id = ?2 WHERE id = ?1",
+        params![automation_id, chat_session_id],
     )?;
     Ok(())
 }

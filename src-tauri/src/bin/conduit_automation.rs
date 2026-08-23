@@ -18,6 +18,14 @@
 //!
 //! The DB lives at the same app-data location the GUI uses
 //! (<data_dir>/dev.conduit.app/conduit.db).
+//!
+//! Windows builds use the GUI subsystem (`windows_subsystem = "windows"`) so
+//! Task Scheduler ticks never allocate a console window (the old
+//! powershell-wrapper dance flashed a terminal every minute). When a human
+//! runs it from a real terminal we reattach to that parent console below, so
+//! `list`/error output still works interactively.
+
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -25,6 +33,58 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use conduit_lib::{automations, db};
+
+/// Reattach to the launching terminal after starting as a GUI-subsystem
+/// process. No-op when there's no parent console (Task Scheduler / wscript),
+/// which is exactly the silent-background case we want.
+#[cfg(windows)]
+fn attach_parent_console() {
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    const OPEN_EXISTING: u32 = 3;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+        fn SetStdHandle(n_std_handle: u32, h_handle: isize) -> i32;
+        fn CreateFileW(
+            lp_file_name: *const u16,
+            dw_desired_access: u32,
+            dw_share_mode: u32,
+            lp_security_attributes: isize,
+            dw_creation_disposition: u32,
+            dw_flags_and_attributes: u32,
+            h_template_file: isize,
+        ) -> isize;
+    }
+
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return; // no parent console — scheduled run, stay invisible
+        }
+        // Reopen the console device and point stdout/stderr at it before any
+        // print (Rust's std caches handles on first use). stdin isn't needed.
+        let name: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
+        let conout = CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            0,
+            OPEN_EXISTING,
+            0,
+            0,
+        );
+        if conout != -1 {
+            SetStdHandle(STD_OUTPUT_HANDLE, conout);
+            SetStdHandle(STD_ERROR_HANDLE, conout);
+        }
+    }
+}
 
 fn db_path() -> std::path::PathBuf {
     dirs::data_dir()
@@ -34,6 +94,9 @@ fn db_path() -> std::path::PathBuf {
 }
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    attach_parent_console();
+
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("run") => {

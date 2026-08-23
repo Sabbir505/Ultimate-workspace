@@ -136,9 +136,9 @@ describe("PermissionRulesPanel", () => {
     ]);
     render(<PermissionRulesPanel />);
     await waitFor(() =>
-      expect(screen.getByText(/delete_file on \*\*\/dist\/\*\*/)).toBeTruthy(),
+      expect(screen.getByText("**/dist/**")).toBeTruthy(),
     );
-    fireEvent.click(screen.getAllByText("Remove")[0]);
+    fireEvent.click(screen.getAllByTitle("Remove rule")[0]);
     await waitFor(() => expect(setPermissionsRulesMock).toHaveBeenCalled());
     const saved = setPermissionsRulesMock.mock.calls[0][0] as ApprovalRule[];
     expect(saved).toHaveLength(1);
@@ -155,7 +155,7 @@ describe("PermissionRulesPanel", () => {
     fireEvent.change(screen.getByPlaceholderText(/path glob/i), {
       target: { value: "**/dist/**" },
     });
-    fireEvent.click(screen.getByText("Add"));
+    fireEvent.click(screen.getByRole("button", { name: /add/i }));
     await waitFor(() => expect(setPermissionsRulesMock).toHaveBeenCalled());
     const saved = setPermissionsRulesMock.mock.calls[0][0] as ApprovalRule[];
     expect(saved).toHaveLength(1);
@@ -167,7 +167,7 @@ describe("PermissionRulesPanel", () => {
     getPermissionsRulesMock.mockResolvedValue([]);
     render(<PermissionRulesPanel />);
     await waitFor(() => expect(getPermissionsRulesMock).toHaveBeenCalled());
-    fireEvent.click(screen.getByText("Add"));
+    fireEvent.click(screen.getByRole("button", { name: /add/i }));
     await waitFor(() =>
       expect(screen.getByText(/enter a path pattern/i)).toBeTruthy(),
     );

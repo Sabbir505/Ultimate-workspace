@@ -19,6 +19,7 @@ import {
 } from "../../lib/ipc";
 import { useProjectsStore } from "../../state/projects";
 import { useSkillsStore } from "../../state/skills";
+import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import type { InstalledSkill, Skill } from "../../types";
 
@@ -26,7 +27,25 @@ type Tab = "skills" | "loops" | "templates";
 
 export function SkillsLibrary() {
   const setActiveView = useUiStore((s) => s.setActiveView);
+  const pendingArtifactFormData = useUiStore((s) => s.pendingArtifactFormData);
   const [tab, setTab] = useState<Tab>("skills");
+
+  // Select the tab for conversational artifact editing. The active child panel
+  // consumes and clears the payload after it has applied the form data.
+  useEffect(() => {
+    if (!pendingArtifactFormData) return;
+    switch (pendingArtifactFormData.artifactType) {
+      case "skill":
+        setTab("skills");
+        break;
+      case "loop":
+        setTab("loops");
+        break;
+      case "prompt_template":
+        setTab("templates");
+        break;
+    }
+  }, [pendingArtifactFormData]);
 
   return (
     <div className="view-overlay modal-centered" onPointerDown={(e) => e.target === e.currentTarget && setActiveView("chat")}>
@@ -78,6 +97,28 @@ function InstalledPanel({ kind }: { kind: "skill" | "loop" }) {
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
+  const pendingArtifactFormData = useUiStore((s) => s.pendingArtifactFormData);
+  const setPendingArtifactFormData = useUiStore((s) => s.setPendingArtifactFormData);
+
+  // Set form data — called by conversational artifact creation when "Edit" is clicked
+  const setFormData = useCallback((data: any) => {
+    setCreating(true);
+    setNewName(data.name);
+    setContent(data.content || data.instructions || "");
+    setSelected(null);
+  }, []);
+
+  // Consume pending form data when it becomes available
+  useEffect(() => {
+    if (pendingArtifactFormData && pendingArtifactFormData.artifactType === kind) {
+      const { chatSessionId, proposalId } = pendingArtifactFormData;
+      setFormData(pendingArtifactFormData.spec);
+      setPendingArtifactFormData(null);
+      if (chatSessionId && proposalId) {
+        useChatStore.getState().updateArtifactProposal(chatSessionId, proposalId, { state: "ready" });
+      }
+    }
+  }, [pendingArtifactFormData, kind, setFormData, setPendingArtifactFormData]);
 
   const reload = useCallback(async () => {
     const list =
@@ -301,6 +342,29 @@ function TemplatesPanel() {
   const [slash, setSlash] = useState("");
   const [content, setContent] = useState("");
   const [scope, setScope] = useState("global");
+  const pendingArtifactFormData = useUiStore((s) => s.pendingArtifactFormData);
+  const setPendingArtifactFormData = useUiStore((s) => s.setPendingArtifactFormData);
+
+  // Set form data — called by conversational artifact creation when "Edit" is clicked
+  const setTemplateFormData = useCallback((data: any) => {
+    setEditing(null);
+    setName(data.name);
+    setSlash(data.slashCommand || "");
+    setContent(data.content || data.template || "");
+    setScope("global");
+  }, []);
+
+  // Consume pending form data when it becomes available
+  useEffect(() => {
+    if (pendingArtifactFormData && pendingArtifactFormData.artifactType === "prompt_template") {
+      const { chatSessionId, proposalId } = pendingArtifactFormData;
+      setTemplateFormData(pendingArtifactFormData.spec);
+      setPendingArtifactFormData(null);
+      if (chatSessionId && proposalId) {
+        useChatStore.getState().updateArtifactProposal(chatSessionId, proposalId, { state: "ready" });
+      }
+    }
+  }, [pendingArtifactFormData, setTemplateFormData, setPendingArtifactFormData]);
 
   const reset = () => {
     setEditing(null);

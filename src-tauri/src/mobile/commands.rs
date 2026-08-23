@@ -82,10 +82,17 @@ pub struct MobilePairingInfo {
 
 /// Get the relay port + pairing token + Tailscale state. The token is read
 /// from `app_settings` (written by `start_relay` on every launch). When
-/// tailscale is logged in, its DNS name is used to construct the cross-network
-/// `wss://` URL.
+/// tailscale is logged in, its DNS name is used to construct the
+/// cross-network `wss://` URL.
+///
+/// The Tailscale probes each SPAWN the `tailscale` CLI (`status --json`,
+/// `serve status`) which can take hundreds of ms to seconds against a cold
+/// daemon. This used to be a sync command, so every open of the pairing QR
+/// modal froze the whole window on the main thread — and the modal re-probes
+/// every 3s while open. Now async with the probes off-thread; the fast DB /
+/// relay reads stay inline.
 #[tauri::command]
-pub fn get_mobile_pairing_info(
+pub async fn get_mobile_pairing_info(
     relay_state: State<'_, MobileRelayState>,
     db: State<'_, DbState>,
 ) -> CmdResult<MobilePairingInfo> {
@@ -101,14 +108,17 @@ pub fn get_mobile_pairing_info(
         (true, Some(p), Some(t)) => Some(format!("ws://127.0.0.1:{p}/#{t}")),
         _ => None,
     };
-    let ts = tailscale::status();
-    let serving = tailscale::serve_active();
+    let (ts, serving) = tauri::async_runtime::spawn_blocking(|| {
+        (tailscale::status(), tailscale::serve_active())
+    })
+    .await
+    .map_err(|e| format!("tailscale probe join failed: {e}"))?;
     let tailscale_url = match (serving, ts.installed, ts.logged_in, ts.dns_name.as_ref(), token.as_ref()) {
         (true, true, true, Some(dns), Some(t)) => Some(format!("{}#{}", tailscale::wss_url(dns), t)),
         _ => None,
     };
     // Tailnet URL: reachable from any device on the tailnet (which is
-    // encrypted by WireGuard). This works even when HTTPS serve is not
+    // encrypted via WireGuard). This works even when HTTPS serve is not
     // enabled on the tailnet, so it's the reliable cross-network path.
     let tailnet_url = match (running, port, ts.logged_in, ts.tailscale_ip.as_ref(), token.as_ref()) {
         (true, Some(p), true, Some(ip), Some(t)) => Some(format!("ws://{ip}:{p}/#{t}")),

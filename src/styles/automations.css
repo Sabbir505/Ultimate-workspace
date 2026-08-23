@@ -36,34 +36,27 @@
   border-radius: 100px;
   padding: 2px 10px;
 }
-.automations-header-right {
+/* Header metric chips — the totals live up here instead of eating a full
+   stats bar row below the header. */
+.automations-header-metrics {
   display: flex;
   align-items: center;
   gap: 6px;
 }
-
-/* Stats bar */
-.automations-stats {
-  display: flex;
-  gap: 24px;
-  padding: 12px 20px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.automations-stat {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.automations-stat-value {
-  font-size: 20px;
+.automations-header-badge strong {
   font-weight: 700;
+  color: var(--text);
 }
-.automations-stat-label {
-  font-size: 11px;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+.automations-header-badge.healthy strong { color: var(--green, #4caf7d); }
+.automations-header-badge.failing {
+  background: rgba(255, 107, 107, 0.1);
+  border-color: color-mix(in srgb, var(--red, #ff6b6b) 35%, transparent);
+}
+.automations-header-badge.failing strong { color: var(--red, #ff6b6b); }
+.automations-header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 /* Empty state */
@@ -142,6 +135,7 @@
 }
 .automations-list-status.running { color: var(--green, #4caf7d); flex-shrink: 0; }
 .automations-list-status.paused { color: var(--text-dim); flex-shrink: 0; }
+.automations-list-status.failing { color: var(--red, #ff6b6b); flex-shrink: 0; }
 .automations-list-name {
   font-size: 13px;
   font-weight: 500;
@@ -162,6 +156,10 @@
   height: 6px;
   border-radius: 50%;
   flex-shrink: 0;
+}
+.automations-list-failing {
+  color: var(--red, #ff6b6b);
+  font-weight: 600;
 }
 .automations-list-empty {
   padding: 24px;
@@ -233,6 +231,46 @@
   background: rgba(160, 160, 160, 0.15);
   color: var(--text-dim);
 }
+/* Unified state pills — one concept per automation instead of separate
+   enabled/dot/error signals. */
+.automation-status-pill.healthy {
+  background: rgba(76, 175, 125, 0.15);
+  color: var(--green, #4caf7d);
+}
+.automation-status-pill.failing {
+  background: rgba(255, 107, 107, 0.15);
+  color: var(--red, #ff6b6b);
+}
+.automation-status-pill.running {
+  background: rgba(33, 150, 243, 0.15);
+  color: var(--blue, #2196f3);
+}
+.automation-status-pill.never {
+  background: rgba(160, 160, 160, 0.12);
+  color: var(--text-dim);
+}
+/* Long stored prompts collapse to 3 lines so the schedule + run history
+   stay above the fold; the toggle expands to the full text. */
+.automation-detail-prompt.collapsed {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.automation-detail-prompt-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: -2px 0 6px;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent, #60a5fa);
+  cursor: pointer;
+}
+.automation-detail-prompt-toggle:hover {
+  text-decoration: underline;
+}
 .automation-detail-prompt {
   font-size: 13px;
   color: var(--text-dim);
@@ -272,6 +310,50 @@
   color: var(--red, #ff6b6b);
   background: rgba(255, 107, 107, 0.08);
   border-bottom: 1px solid var(--border);
+}
+/* Failure banner — plain-language outcome + recovery CTA. */
+.automation-detail-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 24px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(255, 107, 107, 0.08);
+  border: 1px solid color-mix(in srgb, var(--red, #ff6b6b) 30%, transparent);
+}
+.automation-detail-banner-icon {
+  color: var(--red, #ff6b6b);
+  flex-shrink: 0;
+}
+.automation-detail-banner-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.automation-detail-banner-text strong {
+  font-size: 12.5px;
+  color: var(--text);
+}
+.automation-detail-banner-text span {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+/* Compact danger-tinted action — the default outline button's bright border
+   visually shouted over the banner it lives in. */
+.automations-btn.automation-detail-banner-action {
+  flex-shrink: 0;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  background: transparent;
+  border-color: color-mix(in srgb, var(--red, #ff6b6b) 35%, transparent);
+  color: var(--text);
+}
+.automations-btn.automation-detail-banner-action:hover:not(:disabled) {
+  background: rgba(255, 107, 107, 0.12);
 }
 
 /* Schedule card */
@@ -465,11 +547,33 @@
   color: var(--text-dim);
   margin: 0;
 }
+.automation-form-schedule-preview strong {
+  color: var(--text);
+  font-weight: 600;
+}
+.automation-form-cron {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-left: 2px;
+}
 .automation-form-hint {
   font-size: 11px;
   color: var(--text-dim);
   margin: 0;
   line-height: 1.5;
+}
+/* The full-auto warning is safety-relevant copy — tint it so it reads as a
+   caution, not boilerplate. */
+.automation-form-hint.warning {
+  color: var(--yellow, #f0ad4e);
+  background: rgba(240, 173, 78, 0.07);
+  border-left: 2px solid rgba(240, 173, 78, 0.55);
+  padding: 6px 10px;
+  border-radius: 0 6px 6px 0;
 }
 .automation-form-error {
   font-size: 12px;

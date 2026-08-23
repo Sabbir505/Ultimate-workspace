@@ -797,7 +797,7 @@ function AutomationDetail({
 
       {/* Schedule card */}
       <div className="automation-detail-schedule">
-        <div className="automation-detail-schedule-label">SCHEDULE</div>
+        <div className="automation-detail-schedule-label">AUTOMATION</div>
         <div className="automation-detail-schedule-value">
           {scheduleLabel(automation.schedule)}
           <code className="automation-detail-schedule-cron">{automation.schedule}</code>

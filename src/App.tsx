@@ -56,6 +56,7 @@ const AutomationsView = lazy(() => import("./components/automations/AutomationsV
 
 export default function App() {
   const activeView = useUiStore((s) => s.activeView);
+  const setActiveView = useUiStore((s) => s.setActiveView);
   const pendingReplace = useUiStore((s) => s.pendingReplace);
   const setPendingReplace = useUiStore((s) => s.setPendingReplace);
   const setGitPromptProjectId = useUiStore((s) => s.setGitPromptProjectId);
@@ -64,6 +65,7 @@ export default function App() {
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
   const toolPanelCollapsed = useUiStore((s) => s.toolPanelCollapsed);
   const toggleToolPanel = useUiStore((s) => s.toggleToolPanel);
+  const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
   const gitPromptProjectId = useUiStore((s) => s.gitPromptProjectId);
   const gitPromptProject = useProjectsStore((s) =>
     gitPromptProjectId ? s.projects.find((p) => p.id === gitPromptProjectId) ?? null : null,
@@ -182,18 +184,23 @@ export default function App() {
 
         <LocalModelBanner />
 
-        {activeView === "chat" ? (
-          <div className="grid-wrap chat-grid-wrap">
-            <ChatView />
-            <Suspense fallback={null}>
-              <ToolPanel />
-            </Suspense>
-          </div>
-        ) : activeView === "automations" ? (
+{activeView === "chat" ? (
+        <div className="grid-wrap chat-grid-wrap">
+          <ChatView />
+          <Suspense fallback={null}>
+            <ToolPanel />
+          </Suspense>
+        </div>
+      ) : activeView === "automations" ? (
+        <div className="grid-wrap chat-grid-wrap">
           <Suspense fallback={null}>
             <AutomationsView />
           </Suspense>
-        ) : null}
+          <Suspense fallback={null}>
+            <ToolPanel />
+          </Suspense>
+        </div>
+      ) : null}
       </div>
 
       {/* Overlays — mounted lazily so the heaviest view (Settings) only

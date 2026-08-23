@@ -342,11 +342,11 @@ export function Sidebar() {
               onClick={() => setActiveView("automations")}
               className={`artifact-lib-title ${activeView === "automations" ? "is-active" : ""}`}
               style={{ width: "100%" }}
-              title="Schedule automated runs"
-              aria-label="Schedule automated runs"
+              title="Open automations"
+              aria-label="Open automations"
             >
               <CalendarClock size={14} strokeWidth={1.8} className="artifact-lib-title-icon" />
-              <span className="artifact-lib-title-label">Schedule</span>
+              <span className="artifact-lib-title-label">Automations</span>
             </button>
           </div>
         </div>

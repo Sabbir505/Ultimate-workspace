@@ -353,6 +353,7 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   const handleModelChange = useCallback(
     async (model: string) => {
       if (!activeChatSessionId) return;
+      if (localLoading) return;
       const localMatch = localModels.find((m) => (m.name || m.filename) === model);
       if (localMatch) {
         // Local model picked (in ANY session): spawn/swap the sidecar first
@@ -389,7 +390,7 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
       }
       void setSessionModel(activeChatSessionId, model);
     },
-    [activeChatSessionId, setSessionModel, setSessionProvider, isLocal, localModels, spawnLocalModel, config?.provider],
+    [activeChatSessionId, setSessionModel, setSessionProvider, isLocal, localModels, spawnLocalModel, config?.provider, localLoading],
   );
 
   // "Load model" from the picker's per-model gear panel: persist the drafted
@@ -399,6 +400,7 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   const handleLoadLocalModel = useCallback(
     async (model: string, overrides: LlamaOverrides) => {
       if (!activeChatSessionId) return;
+      if (localLoading) return;
       const match = localModels.find((m) => (m.name || m.filename) === model);
       if (!match) return;
       const session = sessions.find((s) => s.id === activeChatSessionId);
@@ -433,7 +435,7 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
         await setSessionModel(activeChatSessionId, model);
       }
     },
-    [activeChatSessionId, sessions, localModels, spawnLocalModel, setSessionAgent, setSessionProvider, setSessionModel],
+    [activeChatSessionId, sessions, localModels, spawnLocalModel, setSessionAgent, setSessionProvider, setSessionModel, localLoading],
   );
 
   // Eject the running local-model sidecar. Stops the llama-server process
@@ -472,6 +474,10 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   const handleAgentModelPick = useCallback(
     async (sel: AgentModelSelection) => {
       if (!activeChatSessionId) return;
+      // Guard against concurrent loads — avoid double-spawning if the user
+      // picks a local model from the agent/model picker while another spawn
+      // is already in flight.
+      if (sel.provider === "local_gguf" && localLoading) return;
       const session = sessions.find((s) => s.id === activeChatSessionId);
       if ((session?.agent ?? null) !== sel.agent) {
         await setSessionAgent(activeChatSessionId, sel.agent);
@@ -505,6 +511,7 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
       setSessionAgent,
       setSessionProvider,
       setSessionModel,
+      localLoading,
     ],
   );
 

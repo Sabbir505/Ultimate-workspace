@@ -7,6 +7,7 @@ import {
   setBudget,
   removeBudget,
   listProjects,
+  toastError,
   type BudgetConfig,
 } from "../../lib/ipc";
 import type { ProjectCostRollup } from "../../types";
@@ -25,17 +26,27 @@ export function BudgetPanel({ perProject }: Props) {
   const [projectNames, setProjectNames] = useState<Map<string, string>>(new Map());
 
   const refresh = useCallback(async () => {
-    const b = await listBudgets();
-    if (b) setBudgets(b);
+    try {
+      const b = await listBudgets();
+      if (b) setBudgets(b);
+    } catch {
+      toastError("Could not refresh budgets");
+    }
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
   useEffect(() => {
+    let cancelled = false;
     void (async () => {
-      const ps = await listProjects();
-      if (ps) setProjectNames(new Map(ps.map((p) => [p.id, p.name])));
+      try {
+        const ps = await listProjects();
+        if (!cancelled && ps) setProjectNames(new Map(ps.map((p) => [p.id, p.name])));
+      } catch {
+        if (!cancelled) toastError("Could not load project names");
+      }
     })();
+    return () => { cancelled = true; };
   }, []);
 
   const displayName = (id: string) => projectNames.get(id) ?? id.slice(0, 8);
@@ -48,6 +59,8 @@ export function BudgetPanel({ perProject }: Props) {
       await setBudget(projectId, val);
       await refresh();
       setEditing(null);
+    } catch (err) {
+      toastError("Failed to set budget", err);
     } finally { setBusy(null); }
   };
 

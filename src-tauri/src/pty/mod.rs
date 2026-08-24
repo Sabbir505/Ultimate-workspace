@@ -24,7 +24,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::db;
@@ -339,7 +339,7 @@ impl Pane {
     /// the model parsed from the session log when available (see price_for).
     fn record_usage(&self, app: &AppHandle, db: &SharedDb, usage: UsageInfo, model: Option<&str>) {
         let Some(session_id) = &self.session_id else { return };
-        let mut delta = {
+        let delta = {
             let mut last = self.last_usage.lock();
             let prev = *last;
             *last = Some(usage);
@@ -418,7 +418,7 @@ impl Pane {
         model: Option<&str>,
     ) {
         let Some(session_id) = &self.session_id else { return };
-        let mut delta = {
+        let delta = {
             // Own baseline (last_usage_on_disk), NOT the pty scraper's — the
             // pty path stores cache/reasoning as None and would zero our
             // cache deltas via the zip (Some(x).zip(None) → None).

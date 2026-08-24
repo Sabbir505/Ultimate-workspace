@@ -80,7 +80,7 @@ impl Default for WatcherState {
 /// is a no-op. Returns Ok even on install failure — a missed watcher is
 /// not fatal (the 8 s heartbeat in `refreshGitStatus` still keeps the
 /// UI eventually-correct, just less responsive).
-pub fn install(app: &AppHandle, db_state: &DbState, path: &Path) {
+pub fn install(app: &AppHandle, _db_state: &DbState, path: &Path) {
     // Canonicalize so the same physical path installed under two different
     // syntactic forms doesn't double-install.
     let canon = match path.canonicalize() {

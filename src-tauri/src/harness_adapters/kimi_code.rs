@@ -16,7 +16,7 @@ use super::{parse_usage_common, CommandSpec, HarnessAdapter, SessionUsage, Usage
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::SystemTime;
 
 pub struct KimiCodeAdapter;

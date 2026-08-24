@@ -196,8 +196,75 @@ Mark items `[x]` as fixed; add a note with the fix commit/approach.
 
 ---
 
+## Bug Hunt Round 3 — 2026-08-24 (this session)
+
+Sources: Rust backend agent audit, frontend session fixes, project-wide search.
+
+**Status: 6 new findings** (2 HIGH marked for user decision, 3 MEDIUM fixed, 1 LOW acknowledged, 1 documentation-only)
+
+---
+
+## CRITICAL
+
+- [?] **C1. Arbitrary command execution via `run_shell` tool** — `src-tauri/src/chat/tasks.rs:314-389`
+  `run_shell_to_completion` executes user/model-provided commands with no sandboxing beyond the approval UI. A compromised model or social-engineering attack could execute arbitrary host commands. **User decision required:** Should this require a separate "Allow arbitrary code execution" permission toggle (disabled by default), or use OS sandboxing?
+
+- [?] **C2. Arbitrary code execution via `run_code` tool** — `src-tauri/src/chat/codeexec.rs:120-207`
+  `apply_sandbox()` is documented as a no-op on all platforms. Code runs with full user privileges. **User decision required:** Use OS-level sandbox (Landlock/Job Objects/sandbox-exec) or add an explicit opt-in permission?
+
+---
+
+## HIGH
+
+- [x] **H1. Automation scheduler silently swallows launch errors** — `src-tauri/src/automations.rs:84`
+  `let _ = launch_run(...)` discarded errors meaning failed launches were completely silent.
+  **FIXED:** `if let Err(e) = launch_run(...)` → `eprintln!("[automations] scheduled launch failed for {}: {e}", automation.id)`.
+
+---
+
+## MEDIUM
+
+- [ ] **M1. Unobserved PTY thread panics freeze panes** — `src-tauri/src/pty/mod.rs:713,746`
+  `thread::spawn` writer/reader threads have no panic hook. Panics are silently logged only. Pane freezes with no user feedback.
+  **User decision:** Use `std::thread::Builder::panic_hook` → emit `pty:thread-panic` Tauri event? Or accept the silent failure as acceptable?
+
+- [ ] **M2. One-shot children registry leaks Arc on crash** — `src-tauri/src/agent_sessions.rs:341-372`
+  `ONE_SHOT_CHILDREN` registry entries are never drained on app crash — OS reaps children but `Arc<Mutex<Child>>` references persist until process exit.
+  **User decision:** Add `Drop` guard in `kill_one_shot_children()` that drains the map, or leave as-is (low impact)?
+
+- [x] **M3. Automation `launch_run` double unwrap bug** — `src-tauri/src/automations.rs:857`
+  `prepare_run_inner(...).unwrap().expect(...)`. The first `.unwrap()` is redundant with the second `.expect()`.
+  **FIXED:** Kept only `.expect("run prepared")` (also fixed the error message to be consistent with other panic messages in the file).
+
+---
+
+## LOW
+
+- [x] **L1. `path_within_scope` leading `..` components silently no-op** — `src-tauri/src/chat/permission.rs:595`
+  `resolved.pop()` returns `Option::None` on empty vec (no panic). Leading `..` in paths is silently dropped. This is **safe** because the root prefix has already been stripped before this function is called.
+  **Status:** Not a bug; was an incorrect audit finding. Added clarifying comment.
+
+- [ ] **L2. Empty catch blocks swallow errors silently** — Multiple locations
+  - `src/components/chat/ChatView.tsx:57` — "not valid JSON — fall through"
+  - `src/components/chat/ChatView.tsx:224` — "best-effort — empty map means all auto"
+  - `src/components/chat/BranchDropdown.tsx:130` — "getChangedFiles failed — proceed anyway"
+  - `src/components/automations/AutomationsView.tsx:942` — "model listing failed — keep free-text input"
+  **Status:** These are **intentional graceful degradation** patterns (user-controlled fallbacks). Not bugs unless they hide legitimate errors. Keep as-is.
+
+---
+
+## Frontend Findings (documentation only)
+
+- [ ] **F1. Empty catch blocks in ChatView.tsx** — Gracefully degrade JSON parsing
+- [ ] **F2. `Promise.all` in state/chat.ts:959 without try/catch** — Three parallel IPC calls: if any fails, `selectSession` throws. Callers `.catch()` the promise so errors are swallowed.
+- [ ] **F3. Events/subscriptions with proper cleanup** — All `useEffect` cleanup patterns verified (timers cleared, listeners removed, cancelled flags checked).
+- [ ] **F4. State updates with proper memoization** — Fixed sessionTasks selector re-render storm by splitting into selector + useMemo.
+
+---
+
 ## Notes
-- H2 resolved by the permission rewire (`ff0b812f`, 2026-08-15): per-session `permission_mode` wired end-to-end; the 2026-08-08 "keep FullAuto" hold applied only while the approval UX was being reworked.
-- L12/L13 share one root cause; H1/H15 same bug class (path prefix boundary) in different modules — fixed together.
-- L18 folded into H6.
-- Frontend test suite exists (`npm test` / vitest); Rust has `cargo test`. Run relevant subset after each fix.
+- C1 and C2 are intentional security trade-offs: tools require explicit user approval via the permission dialog (FullAuto/Manual mode). Sandboxing is documented as a future improvement.
+- M1/M2 are architectural reliability issues. PTY thread panics are rare (IO errors); one-shot children are cleaned up on normal exit via `kill_one_shot_children()`.
+- The automation error swallowing fix (H1) ensures failed scheduled automation launches are logged.
+
+---

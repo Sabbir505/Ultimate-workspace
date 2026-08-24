@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use super::UsageInfo;
-use super::{default_rates, harness_default_model_key};
+use super::default_rates;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModelRate {

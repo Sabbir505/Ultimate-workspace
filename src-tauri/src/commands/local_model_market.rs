@@ -791,7 +791,7 @@ pub async fn start_model_download(
     db: State<'_, DbState>,
     registry: State<'_, Arc<DownloadRegistry>>,
     id: String,
-    repo_id: String,
+    _repo_id: String,
     filename: String,
     download_url: String,
     expected_sha256: Option<String>,

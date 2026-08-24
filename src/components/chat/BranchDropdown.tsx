@@ -70,6 +70,7 @@ export function BranchDropdown({ onClose }: { onClose?: () => void }) {
     // terminal, an agent doing `git pull`, etc). The backend debounces
     // to 300 ms so a burst of FS events from one git op becomes one
     // refresh, not a thundering herd.
+    let cancelled = false;
     let unlisten: (() => void) | null = null;
     void safeListen<string>("project:fs-changed", (changedPath) => {
       if (
@@ -81,9 +82,10 @@ export function BranchDropdown({ onClose }: { onClose?: () => void }) {
         void fetchAll();
       }
     }).then((u) => {
-      unlisten = u;
+      if (!cancelled) unlisten = u;
     });
     return () => {
+      cancelled = true;
       if (unlisten) unlisten();
     };
   }, [fetchAll, path]);

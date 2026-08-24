@@ -39,7 +39,7 @@ export default defineConfig(async () => ({
     },
   },
   server: {
-    port: 1420,
+    port: 1500,
     strictPort: true,
     host: "localhost",
     watch: {

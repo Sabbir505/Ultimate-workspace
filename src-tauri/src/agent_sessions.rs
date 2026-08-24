@@ -487,7 +487,7 @@ pub(crate) fn prepare_agent_attachments(
     if lines.is_empty() {
         return String::new();
     }
-    let count = lines.len();
+    let _count = lines.len();
     format!(
         "\n\n---\n\n## Attached files\nThe user attached file(s) with this message:\n{}\nRead every attached file above before answering.",
         lines.join("\n")
@@ -708,7 +708,7 @@ fn send_acp_turn(
     content: &str,
     entry: &mut AgentChild,
     cwd: Option<&str>,
-    project_id: Option<&str>,
+    _project_id: Option<&str>,
     acp_id: &str,
 ) -> Result<(), String> {
     let agent = {
@@ -1487,7 +1487,7 @@ fn spawn_claude(
     if let Some(dir) = watch_dirs.first() {
         cmd.current_dir(dir);
     }
-    let mut watches: Vec<DirWatch> = watch_dirs.into_iter().map(DirWatch::new).collect();
+    let watches: Vec<DirWatch> = watch_dirs.into_iter().map(DirWatch::new).collect();
     no_console_window(&mut cmd);
     let mut child = cmd
         .spawn()
@@ -3774,7 +3774,7 @@ impl ToolTracker {
     }
     /// Wrap a subagent Task tool call: emits a `chat:subagent-spawn` event,
     /// injects an `id` into the marker, and records the slot as a subagent.
-    fn subagent_use(&mut self, name: &str, value: Value, app: Option<&AppHandle>, sid: &str, role: &str, task: &str, prompt: &str) -> String {
+    fn subagent_use(&mut self, _name: &str, value: Value, app: Option<&AppHandle>, sid: &str, role: &str, task: &str, prompt: &str) -> String {
         let id = self.seq;
         self.seq += 1;
         let sub_id = format!("sub-{id}");

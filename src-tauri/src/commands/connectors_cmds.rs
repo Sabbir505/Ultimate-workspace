@@ -9,7 +9,7 @@
 //! per-conversation opt-in.
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 // base64 0.22 exposes encode as a method on engines; the trait must be in
 // scope to call it (used for the Basic-auth header on the revoke call).
 use base64::Engine as _;

@@ -592,7 +592,7 @@ fn canonicalize(p: &str) -> String {
     let mut resolved: Vec<&str> = Vec::with_capacity(segments.len());
     for seg in segments {
         if seg == ".." {
-            resolved.pop(); // drop the parent
+            resolved.pop(); // safe: pop() returns Option; no panic on empty vec
         } else {
             resolved.push(seg);
         }

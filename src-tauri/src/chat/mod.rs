@@ -631,7 +631,7 @@ pub(crate) async fn compute_docs_retrieval(
     // guard held across an await would make the spawn future non-Send. The Arc
     // is Send+Sync (Connection is Send), so it clones cleanly into the closure.
     let db = Arc::clone(db);
-    let base_url_owned = base_url.to_string();
+    let _base_url_owned = base_url.to_string();
     let query_vec_owned = query_vec;
     let pinned_ids_owned: Vec<String> = pinned_ids.iter().cloned().collect();
     let hits = tokio::task::spawn_blocking(move || {

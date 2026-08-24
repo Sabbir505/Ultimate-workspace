@@ -336,6 +336,14 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   const [diffText, setDiffText] = useState<string | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
 
+  // Diff-review state must also be declared above early returns so hook order
+  // stays stable when the panel is hidden or collapsed.
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [reviewText, setReviewText] = useState<string | null>(null);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [wholeTreeReviewLoading, setWholeTreeReviewLoading] = useState(false);
+  const [wholeTreeReview, setWholeTreeReview] = useState<string | null>(null);
+
   // Watch for external diff requests (e.g. peek icon in branch-switch modal).
   const diffPanelFile = useUiStore((s) => s.diffPanelFile);
   const diffPanelCwd = useUiStore((s) => s.diffPanelCwd);
@@ -559,11 +567,7 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   // Diff-review state + callbacks. Whole-tree review and per-file review are
   // independent. Callbacks use getState() to read activeChatSessionId at call
   // time so they don't close over a stale value.
-  const [reviewLoading, setReviewLoading] = useState(false);
-  const [reviewText, setReviewText] = useState<string | null>(null);
-  const [reviewError, setReviewError] = useState<string | null>(null);
-  const [wholeTreeReviewLoading, setWholeTreeReviewLoading] = useState(false);
-  const [wholeTreeReview, setWholeTreeReview] = useState<string | null>(null);
+  // (State hooks are declared above the early returns to preserve hook order.)
 
   const reviewCurrentDiff = useCallback(async () => {
     if (!diffCwd || !selectedFile) return;

@@ -610,7 +610,7 @@ pub struct BranchInfo {
 /// Format: `%(refname:short)|%(objectname:short)|%(contents:subject)` per
 /// line, prefixed with `*` for the current branch and `remotes/` for remote.
 pub fn list_branches(path: &Path) -> Result<Vec<BranchInfo>, String> {
-    let format = "%(refname:short)|%(objectname:short)|%(contents:subject)";
+    let _format = "%(refname:short)|%(objectname:short)|%(contents:subject)";
     // Use --format with a marker for the current branch.
     let out = git_command(
         path,

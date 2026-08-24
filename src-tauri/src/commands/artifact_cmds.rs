@@ -6,10 +6,9 @@ use crate::artifacts::{
     IntentDecision,
 };
 use crate::artifacts::adapter::AdaptedArtifact;
-use crate::artifacts::context::{ArtifactGenerationContext, ChatMessage};
 use crate::artifacts::proposal::ArtifactAction;
 use crate::DbState;
-use crate::commands::skills_cmds::{create_installed_skill, save_installed_skill, list_installed_skills};
+use crate::commands::skills_cmds::{create_installed_skill, save_installed_skill};
 use crate::db::{create_skill, create_automation, update_skill, update_automation, list_skills, list_automations, get_automation};
 use tauri::State;
 
@@ -372,7 +371,7 @@ pub async fn update_artifact_cmd(
     let conn = db.0.lock();
     
     // Get current artifact for diff
-    let (current_spec, current_name) = match artifact_type.as_str() {
+    let (current_spec, _current_name) = match artifact_type.as_str() {
         "skill" | "loop" => {
             let skills = list_skills(&conn, None).map_err(|e| e.to_string())?;
             let skill = skills.iter().find(|s| s.id == artifact_id)
@@ -401,7 +400,7 @@ pub async fn update_artifact_cmd(
         "skill" | "loop" => {
             // Find the skill to update
             let skills = list_skills(&conn, None).map_err(|e| e.to_string())?;
-            if let Some(skill) = skills.iter().find(|s| s.id == artifact_id) {
+            if let Some(_skill) = skills.iter().find(|s| s.id == artifact_id) {
                 update_skill(
                     &conn,
                     &artifact_id,

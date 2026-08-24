@@ -4,10 +4,12 @@
 // tasks for the session.
 import { useChatStore } from "../../state/chat";
 
+const EMPTY_TASKS: Record<string, unknown> = {};
+
 export function ProgressPanel() {
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
-  const tasks = useChatStore((s) =>
-    activeChatSessionId ? s.tasks[activeChatSessionId] ?? {} : {},
+  const tasks = useChatStore(
+    (s) => (activeChatSessionId ? (s.tasks[activeChatSessionId] ?? EMPTY_TASKS) : EMPTY_TASKS),
   );
   const list = Object.values(tasks);
 

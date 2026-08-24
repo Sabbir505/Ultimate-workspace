@@ -1138,7 +1138,7 @@ pub fn get_chat_session_metrics(
         let _ = &mut uncached_in;
     }
 
-    let total_prompt = cache_read + cache_creation + input_sum.min(0).max(0);
+    let _total_prompt = cache_read + cache_creation + input_sum.min(0).max(0);
     // Cache-hit rate uses cache_read over the whole billed prompt corpus.
     // We don't know each turn's uncached-vs-inclusive split, so treat the
     // aggregate conservatively: hit = cache_read / max(1, cache_read +

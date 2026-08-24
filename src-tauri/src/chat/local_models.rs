@@ -494,7 +494,7 @@ pub struct LlamaOverrides {
 /// how `--n-gpu-layers` is handled by the ladder). Unknown kv-cache
 /// values are skipped rather than risking a bad flag.
 pub fn apply_overrides_args(args: &mut Vec<String>, o: &LlamaOverrides) {
-    let mut push = |flag: &str, val: String, args: &mut Vec<String>| {
+    let push = |flag: &str, val: String, args: &mut Vec<String>| {
         args.retain(|a| a != flag);
         args.push(flag.to_string());
         args.push(val);
@@ -1532,7 +1532,6 @@ fn query_free_vram_bytes() -> Option<u64> {
 #[cfg(windows)]
 pub fn query_total_vram_bytes() -> Option<(u64, String)> {
     use std::sync::OnceLock;
-    use windows::core::Interface;
     use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
 
     static DXGI: OnceLock<Option<(u64, String)>> = OnceLock::new();

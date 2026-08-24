@@ -598,9 +598,8 @@ async fn run_task_subagent(
     };
     use crate::secrets;
     use crate::types::{
-        SubagentDonePayload, SubagentSpawnPayload, SubagentTokenPayload,
+        SubagentDonePayload, SubagentSpawnPayload,
     };
-    use futures_util::StreamExt;
 
     let description = args.get("description").and_then(|v| v.as_str()).unwrap_or("").trim();
     let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("").trim();

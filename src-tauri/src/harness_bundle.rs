@@ -209,7 +209,7 @@ pub fn build_opencode_tools_config(
     connectors: &[HarnessMcpServer],
     approval: Option<&str>,
 ) -> Value {
-    let server = |name: &str| {
+    let server = |_name: &str| {
         json!({
             "type": "local",
             "command": [mcp_binary_path],
@@ -330,7 +330,7 @@ pub fn write_bundle(
         return None;
     }
 
-    let mut paths = HarnessBundlePaths {
+    let paths = HarnessBundlePaths {
         claude_instructions, claude_settings,
         claude_mcp: claude_dir.join("mcp.json"),
         kimi_agent,

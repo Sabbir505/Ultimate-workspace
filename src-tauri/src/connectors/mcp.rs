@@ -16,7 +16,6 @@
 //! `tools/list` response. That is the whole point of vendor-hosted remote MCP
 //! servers: Conduit does OAuth + plumbing, the vendor defines the tools.
 
-use std::time::Duration;
 
 use rmcp::model::{CallToolRequestParams, ClientInfo, ContentBlock, Implementation};
 use rmcp::service::RunningService;

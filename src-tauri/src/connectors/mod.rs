@@ -21,13 +21,8 @@ pub mod oauth;
 pub mod session;
 
 pub use config::{
-    Connector, ConnectorId, CONNECTORS, GITHUB, GITHUB_CALLBACK_PORT, GMAIL, GMAIL_CALLBACK_PORT,
-    GOOGLE_CALENDAR, GOOGLE_CALENDAR_CALLBACK_PORT, GOOGLE_CHAT, GOOGLE_CHAT_CALLBACK_PORT,
-    GOOGLE_DOCS, GOOGLE_DOCS_CALLBACK_PORT, GOOGLE_DRIVE, GOOGLE_DRIVE_CALLBACK_PORT,
-    GOOGLE_FAMILY_CALLBACK_PORT, GOOGLE_FAMILY_MEMBERS, GOOGLE_FAMILY_REDIRECT_URI, GOOGLE_PEOPLE,
-    GOOGLE_PEOPLE_CALLBACK_PORT, GOOGLE_SHEETS, GOOGLE_SHEETS_CALLBACK_PORT, GOOGLE_SLIDES,
-    GOOGLE_SLIDES_CALLBACK_PORT, KIWI, NOTION, NOTION_CALLBACK_PORT, connector_by_id,
+    Connector, CONNECTORS, connector_by_id,
     family_members, family_redirect_uri,
 };
-pub use session::{AttachedConnector, RemoteToolRef, connect_all, find_tool};
+pub use session::{AttachedConnector, connect_all, find_tool};
 pub use harness::{HarnessMcpServer, harness_mcp_servers};

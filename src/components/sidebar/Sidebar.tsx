@@ -63,7 +63,15 @@ export function Sidebar() {
   // Chat store
   const chatSessions = useChatStore((s) => s.sessions);
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
-  const chatStreaming = useChatStore((s) => s.streaming);
+  const chatStreaming = useChatStore(
+    useMemo((s) => {
+      if (!activeChatSessionId) return {};
+      const next: Record<string, string> = {};
+      const id = activeChatSessionId;
+      if (id in s.streaming) next[id] = s.streaming[id];
+      return next;
+    }, [activeChatSessionId]),
+  );
   const chatConfig = useChatStore((s) => s.config);
   const chatLoaded = useChatStore((s) => s.loaded);
   const selectSession = useChatStore((s) => s.selectSession);

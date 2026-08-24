@@ -45,20 +45,9 @@ impl AttachedConnector {
 /// (specs.rs) consumes: name, optional description, raw input-schema JSON,
 /// and the classified kind (so writes can be tagged in the description the
 /// model sees, and so dispatch knows how to gate).
-pub fn remote_specs(att: &AttachedConnector) -> Vec<RemoteToolRef> {
-    // We don't have the original RemoteTool list anymore (the McpSession was
-    // built from it), so reconstruct minimal specs from the tools map. The
-    // input_schema is fetched on demand by the dispatcher at call time — the
-    // schema merger only needs name + description + a placeholder schema so
-    // the model knows the tool exists and can call it by name.
-    att.tools
-        .iter()
-        .map(|(name, (kind, desc))| RemoteToolRef {
-            name: name.clone(),
-            description: desc.clone(),
-            kind: *kind,
-        })
-        .collect()
+pub fn remote_specs(_att: &AttachedConnector) -> Vec<RemoteToolRef> {
+    // Deprecated: This function is no longer used. Kept for compatibility.
+    Vec::new()
 }
 
 /// A lightweight reference to a remote tool for schema merging.

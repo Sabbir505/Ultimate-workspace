@@ -1625,10 +1625,12 @@ function MessageBubbleInner({
                     {beforeTools.map((b, i) =>
                       b.kind === "text" && b.text.trim().length > 0 ? (
                         <Markdown key={`lead:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
+                      ) : b.kind === "think" ? (
+                        renderProcessBlock(b, i, onPreviewArtifact)
                       ) : null,
                     )}
 
-                    {/* Thinking blocks BEFORE any tool activity — standalone disclosures above toolbox. */}
+                    {/* Thinking blocks BEFORE any tool activity that were extracted from toolRegion. */}
                     {thinkingBefore.map((b, i) =>
                       b.kind === "think" ? renderProcessBlock(b, i, onPreviewArtifact) : null,
                     )}

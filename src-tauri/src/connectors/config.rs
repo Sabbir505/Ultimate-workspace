@@ -6,7 +6,7 @@
 //! noted in BUILD_LOG.md) — the credential store, OAuth flow, MCP
 //! client, permission gating, and UI are all generic and driven off this.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 pub type ConnectorId = &'static str;
 

@@ -24,6 +24,10 @@ import { BranchDropdown } from "./BranchDropdown";
 import { CommitModal } from "./CommitModal";
 import { usePlanTracker } from "../../hooks/usePlanTracker";
 
+const EMPTY_TASKS: Record<string, unknown> = {};
+const EMPTY_STEPS: unknown[] = [];
+const EMPTY_SUBAGENTS: Record<string, unknown> = {};
+
 export function GitToolsSidebar() {
   const boundProjectId = useChatStore((s) =>
     s.activeChatSessionId ? s.sessionProjects[s.activeChatSessionId] : undefined,
@@ -33,13 +37,13 @@ export function GitToolsSidebar() {
   const projects = useProjectsStore((s) => s.projects);
   const gitStatuses = useProjectsStore((s) => s.gitStatuses);
   const tasks = useChatStore((s) =>
-    s.activeChatSessionId ? s.tasks[s.activeChatSessionId] ?? {} : {},
+    s.activeChatSessionId ? (s.tasks[s.activeChatSessionId] ?? EMPTY_TASKS) : EMPTY_TASKS,
   );
   const planSteps = useChatStore((s) =>
-    s.activeChatSessionId ? s.planSteps[s.activeChatSessionId] ?? [] : [],
+    s.activeChatSessionId ? (s.planSteps[s.activeChatSessionId] ?? EMPTY_STEPS) : EMPTY_STEPS,
   );
   const subagents = useChatStore((s) =>
-    s.activeChatSessionId ? s.subagents[s.activeChatSessionId] ?? {} : {},
+    s.activeChatSessionId ? (s.subagents[s.activeChatSessionId] ?? EMPTY_SUBAGENTS) : EMPTY_SUBAGENTS,
   );
 
   // Activate plan-step parsing and completion tracking

@@ -17,7 +17,7 @@
 
 use tauri::AppHandle;
 
-use crate::chat::permission::{self, ConnectorToolKind};
+use crate::chat::permission::ConnectorToolKind;
 use crate::connectors::gmail_api::FallbackTool;
 use crate::connectors::oauth::ensure_valid_access_token;
 

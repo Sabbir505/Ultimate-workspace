@@ -18,7 +18,7 @@
 use tauri::AppHandle;
 
 use base64::Engine as _; // for `.encode` on URL_SAFE_NO_PAD (base64 0.22)
-use crate::chat::permission::{self, ConnectorToolKind};
+use crate::chat::permission::ConnectorToolKind;
 use crate::connectors::oauth::ensure_valid_access_token;
 
 /// A fallback tool definition: name, model-facing description, and its

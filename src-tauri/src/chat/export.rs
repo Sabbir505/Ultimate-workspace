@@ -273,7 +273,7 @@ pub async fn export_chat_zip(
     dest: String,
 ) -> Result<(), String> {
     let db = db.0.clone();
-    let (manifest, zip_bytes) = {
+    let (_manifest, zip_bytes) = {
         let conn = db.lock();
         let session = crate::db::get_chat_session(&conn, &session_id)
             .map_err(|e| e.to_string())?
@@ -302,7 +302,7 @@ pub async fn export_project_zip(
     dest: String,
 ) -> Result<(), String> {
     let db = db.0.clone();
-    let (manifest, zip_bytes) = {
+    let (_manifest, zip_bytes) = {
         let conn = db.lock();
         let all = crate::db::list_chat_sessions(&conn).map_err(|e| e.to_string())?;
         let project_sessions: Vec<_> = all

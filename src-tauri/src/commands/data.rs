@@ -2,7 +2,7 @@
 //! commands (CONTRACT.md last section).
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tauri::{AppHandle, Manager, State};
 
@@ -152,7 +152,7 @@ pub async fn set_chat_db_dir(
 /// directory walk must not run on the main thread (a large artifacts folder
 /// would freeze the UI).
 #[tauri::command]
-pub async fn get_data_paths(app: AppHandle, db: State<'_, DbState>) -> CmdResult<DataPaths> {
+pub async fn get_data_paths(app: AppHandle, _db: State<'_, DbState>) -> CmdResult<DataPaths> {
     let db_path = crate::db::chat_db_path(&app).map_err(|e| e.to_string())?;
     let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
     let artifacts = crate::chat::dispatch::artifacts_dir(&app);

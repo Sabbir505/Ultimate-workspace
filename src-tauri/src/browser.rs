@@ -564,13 +564,13 @@ impl BrowserManager {
         &self,
         pane_id: &str,
         tab_id: &str,
-        url: &str,
+        _url: &str,
         rect: Rect,
     ) -> Result<BrowserPane, String> {
         let label = browser_label(pane_id, tab_id);
         let event_pane_id = pane_id.to_string();
         let event_tab_id = tab_id.to_string();
-        let app_for_emit = self.app.clone();
+        let _app_for_emit = self.app.clone();
 
         // --- Windows / macOS: child webview (existing path) ---
         #[cfg(any(windows, target_os = "macos"))]

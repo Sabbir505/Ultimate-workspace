@@ -81,7 +81,9 @@ fn tick(app: Option<&AppHandle>, db: &Arc<Mutex<Connection>>) {
             .collect::<Vec<_>>()
     };
     for automation in due {
-        let _ = launch_run(app, db, &automation, RunSource::Scheduled);
+        if let Err(e) = launch_run(app, db, &automation, RunSource::Scheduled) {
+            eprintln!("[automations] scheduled launch failed for {}: {e}", automation.id);
+        }
     }
 }
 
@@ -852,7 +854,7 @@ mod tests {
         };
 
         let prepared =
-            prepare_run_inner(&db, &automation, RunSource::Manual, 0).unwrap().expect("run prepared");
+            prepare_run_inner(&db, &automation, RunSource::Manual, 0).expect("run prepared");
         assert_ne!(prepared.chat_session_id, "ghost-session", "dangling id must be replaced");
         {
             let conn = db.lock();

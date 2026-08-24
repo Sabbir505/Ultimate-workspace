@@ -117,8 +117,12 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   const removeArtifactProposal = useChatStore((s) => s.removeArtifactProposal);
   const getArtifactProposals = useChatStore((s) => s.getArtifactProposals);
   const editArtifactProposal = useChatStore((s) => s.editArtifactProposal);
-  const sessionTasks = useChatStore((s) =>
-    activeChatSessionId ? Object.values(s.tasks[activeChatSessionId] ?? {}) : [],
+  const sessionTaskMap = useChatStore((s) =>
+    activeChatSessionId ? (s.tasks[activeChatSessionId] ?? {}) : null,
+  );
+  const sessionTasks = /*@__PURE__*/ useMemo(
+    () => (sessionTaskMap ? Object.values(sessionTaskMap) : []),
+    [sessionTaskMap],
   );
 
   const activeSession = sessions.find((s) => s.id === activeChatSessionId) ?? null;

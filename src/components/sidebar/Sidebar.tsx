@@ -64,7 +64,7 @@ export function Sidebar() {
   const chatSessions = useChatStore((s) => s.sessions);
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
   const chatStreaming = useChatStore(
-    useMemo((s) => {
+    useCallback((s) => {
       if (!activeChatSessionId) return {};
       const next: Record<string, string> = {};
       const id = activeChatSessionId;

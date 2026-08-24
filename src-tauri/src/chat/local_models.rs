@@ -700,6 +700,10 @@ impl LocalModelRegistry {
             "ggml_gallocr_reserve_n_impl",
             "CUDA_ERROR_OUT_OF_MEMORY",
             "out of memory",
+            "failed to fit params to free device memory",
+            "GGML_ASSERT",
+            "not enough memory",
+            "allocation failed",
         ];
 
         // Build the attempt ladder (deduped: a user/last-good ngl that is
@@ -844,6 +848,8 @@ impl LocalModelRegistry {
             };
 
             let is_oom = oom_markers.iter().any(|m| output.contains(m));
+            #[cfg(windows)]
+            let is_oom = is_oom || output.contains("0xC0000005");
             let is_last_attempt = attempt_idx + 1 == attempt_ngls.len();
 
             if is_oom && !is_last_attempt {
@@ -897,7 +903,12 @@ impl LocalModelRegistry {
 
     /// Stop a specific sidecar by model_id.
     pub async fn stop(&self, model_id: &str) {
-        let handle = self.handles.lock().remove(model_id);
+        // Remove the handle from the registry before awaiting kill/wait,
+        // so we don't hold a non-Send MutexGuard across an await point.
+        let handle = {
+            let mut handles = self.handles.lock();
+            handles.remove(model_id)
+        };
         if let Some(mut h) = handle {
             let _ = h.child.kill().await;
             let _ = h.child.wait().await;

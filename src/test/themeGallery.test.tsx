@@ -11,7 +11,17 @@ import { parseThemeJson, themeJson, KNOWN_THEME_TOKENS } from "../lib/themes";
 
 const getSettingMock = vi.fn();
 const setSettingMock = vi.fn();
-const readFileTextMock = vi.fn();
+const nordThemeJson = JSON.stringify({ name: "Nord", base: "dark", colors: { "bg-tint": "#2e3440", accent: "#88c0d0", bogus: "#000" } });
+
+async function importThemeViaInput(themeContent: string, fileName = "nord.json") {
+  const input = document.getElementById("theme-import") as HTMLInputElement | null;
+  if (!input) throw new Error("theme-import input missing");
+  const file = new File([themeContent], fileName, { type: "application/json" });
+  // In jsdom the FileList is read-only; define the property for this element only.
+  Object.defineProperty(input, "files", { value: [file], writable: false });
+  fireEvent.change(input);
+}
+
 
 vi.mock("../lib/ipc", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/ipc")>();
@@ -19,7 +29,6 @@ vi.mock("../lib/ipc", async (importOriginal) => {
     ...actual,
     getSetting: (...a: unknown[]) => getSettingMock(...a),
     setSetting: (...a: unknown[]) => setSettingMock(...a),
-    readFileText: (...a: unknown[]) => readFileTextMock(...a),
   };
 });
 
@@ -100,7 +109,6 @@ describe("ThemeGalleryPanel", () => {
     vi.clearAllMocks();
     getSettingMock.mockResolvedValue(null);
     setSettingMock.mockResolvedValue(undefined);
-    readFileTextMock.mockResolvedValue(null);
     openMock.mockResolvedValue(null);
     saveMock.mockResolvedValue(null);
     writeTextFileMock.mockResolvedValue(undefined);
@@ -109,16 +117,10 @@ describe("ThemeGalleryPanel", () => {
   afterEach(cleanup);
 
   it("imports a valid theme, persists it, and drops unknown tokens", async () => {
-    readFileTextMock.mockResolvedValue(
-      JSON.stringify({ name: "Nord", base: "dark", colors: { "bg-tint": "#2e3440", accent: "#88c0d0", bogus: "#000" } }),
-    );
-    openMock.mockResolvedValue("C:\\nord.json");
     render(<Harness />);
+    await importThemeViaInput(nordThemeJson);
 
-    fireEvent.click(screen.getByText(/Import theme/));
-    await screen.findByText(/Nord/);
-
-    expect(readFileTextMock).toHaveBeenCalledWith("C:\\nord.json");
+    expect(await screen.findByText(/Nord/)).toBeTruthy();
     const saved = setSettingMock.mock.calls.find((c) => c[0] === "themes.custom")?.[1];
     expect(saved).toBeTruthy();
     const themes = JSON.parse(saved);
@@ -128,24 +130,23 @@ describe("ThemeGalleryPanel", () => {
   });
 
   it("rejects invalid JSON with an error and persists nothing", async () => {
-    readFileTextMock.mockResolvedValue("{ not json");
-    openMock.mockResolvedValue("C:\\bad.json");
     render(<Harness />);
+    await importThemeViaInput("{ not json");
 
-    fireEvent.click(screen.getByText(/Import theme/));
-    await screen.findByText(/not valid JSON/);
+    expect(await screen.findByText(/not valid JSON/)).toBeTruthy();
     expect(setSettingMock).not.toHaveBeenCalledWith("themes.custom", expect.anything());
   });
 
   it("applies a selected theme to <html> (data-theme + custom properties)", async () => {
-    readFileTextMock.mockResolvedValue(
-      JSON.stringify({ name: "Nord", base: "dark", colors: { accent: "#88c0d0", text: "#eceff4" } }),
-    );
-    openMock.mockResolvedValue("C:\\nord.json");
+    const content = JSON.stringify({ name: "Nord", base: "dark", colors: { accent: "#88c0d0", text: "#eceff4" } });
     render(<Harness />);
+    await importThemeViaInput(content);
 
-    fireEvent.click(screen.getByText(/Import theme/));
-    fireEvent.click(await screen.findByText(/Nord/));
+    expect(await screen.findByText(/Nord/)).toBeTruthy();
+    // importCustomTheme adds the theme but doesn't select it — need to set active.
+    useSettingsStore.getState().setCustomTheme(
+      useSettingsStore.getState().customThemes.find((t) => t.name === "Nord")!.id,
+    );
 
     await waitFor(() => {
       expect(document.documentElement.dataset.theme).toBe("dark");
@@ -184,7 +185,7 @@ describe("ThemeGalleryPanel", () => {
     });
     render(<Harness />);
 
-    fireEvent.click(await screen.findByText("Delete"));
+    fireEvent.click(await screen.findByTitle("Delete theme"));
     await waitFor(() => {
       const saved = setSettingMock.mock.calls.find((c) => c[0] === "themes.custom")?.[1];
       expect(JSON.parse(saved)).toHaveLength(0);
@@ -202,7 +203,7 @@ describe("ThemeGalleryPanel", () => {
     saveMock.mockResolvedValue("C:\\out\\nord.json");
     render(<Harness />);
 
-    fireEvent.click(await screen.findByText("Export"));
+    fireEvent.click(await screen.findByTitle("Export theme"));
     await waitFor(() => expect(writeTextFileMock).toHaveBeenCalled());
     expect(writeTextFileMock.mock.calls[0][0]).toBe("C:\\out\\nord.json");
     const written = JSON.parse(writeTextFileMock.mock.calls[0][1]);

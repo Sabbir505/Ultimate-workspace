@@ -31,41 +31,49 @@ A local-first desktop shell for AI coding agents with ONE unified chat surface (
 
 - **Managed states:** `DbState` (SQLite behind `Mutex`), `PtyState` (`PtyManager`), `BrowserState` (`BrowserManager`), `ChatState` (`ChatManager`), `TaskState` (`chat::tasks::TaskManager`), `MobileRelayState`, `OAuthFlowsState`, `chat::local_models::LocalModelState`, `commands::local_model_market::DownloadRegistry`, `agent_sessions::AgentSessionState`
 - **Plugins:** dialog, notification, fs, opener, updater
-- **Boot sequence:** open `<app_data_dir>/conduit.db` → sweep expired artifacts (30-day retention) → register Python runtime resource dir → register all managed states → spawn mobile relay on a random localhost port → spawn loopback `browser_mcp::serve` WebSocket on `BROWSER_MCP_PORT` → start the `automations` scheduler (30s tick) → apply window vibrancy → register 134 commands
+- **Boot sequence:** open `<app_data_dir>/conduit.db` → sweep expired artifacts (30-day retention) → register Python runtime resource dir → register all managed states → spawn mobile relay on a random localhost port → spawn loopback `browser_mcp::serve` WebSocket on `BROWSER_MCP_PORT` → start the `automations` scheduler (30s tick) → apply window vibrancy → register **226 commands**
 - **Exit cleanup** (`ExitRequested` / `Exit`): `kill_all()` PTYs, `close_all()` browsers, `cancel_all()` chat streams, `agent_sessions::kill_all()`, `LocalModelState::stop_all()` (via `block_on`), `mobile::relay::stop_relay`
 
-### 2.2 Command Surface (134 registered in `lib.rs`)
+### 2.2 Command Surface (226 registered in `lib.rs`)
 
 ```
 Projects/sessions:   list_projects, add_project, remove_project, rename_project,
                      init_git_repo, list_sessions, create_session, update_session_title,
                      delete_session, touch_session, get_chat_db_path
 PTY/harnesses:       spawn_agent_session, spawn_shell, write_pty, resize_pty, kill_pty,
-                     list_harnesses, run_harness_login, pane_memory
+                     list_harnesses, run_harness_login, pane_memory, install_harness,
+                     pty_subscribe
 Browser:             browser_create, browser_navigate, browser_push_state, browser_action_result,
                      browser_go_back, browser_go_forward, browser_reload, browser_set_bounds,
                      browser_set_visible, browser_close, browser_close_pane,
                      browser_open_pane_result, browser_resolve_pane_result,
+                     browser_open_devtools,
                      register_browser_pane_project, unregister_browser_pane_project
 Git:                 get_git_status, create_worktree, get_git_diff,
-                     get_changed_files, get_git_file_diff
+                     get_changed_files, get_git_file_diff, checkout_git_branch,
+                     create_git_branch, delete_git_branch, get_git_log, get_remote_url,
+                     git_commit, git_push, install_git_watcher, list_git_branches,
+                     refresh_git_watchers, uninstall_git_watcher
 Automations:         list_automations, create_automation, update_automation,
                      delete_automation, set_automation_enabled, run_automation_now,
-                     list_automation_runs, count_automation_runs
+                     list_automation_runs, count_automation_runs, automation_next_fire,
+                     test_automation_webhook, get_run_while_closed, set_run_while_closed
 Settings/skills/etc: get_setting, set_setting, list_skills, create_skill, update_skill,
                      delete_skill, list_quick_actions, create_quick_action, update_quick_action,
                      delete_quick_action, set_secret, delete_secret, list_secret_keys,
-                     get_cost_events, get_cost_rollups, export_session_markdown, read_file_text
+                     get_cost_events, get_cost_rollups, export_session_markdown, read_file_text,
+                     get_data_paths, set_chat_db_dir, pop_out_chat
 Workspaces:          list_workspaces, save_workspace, delete_workspace
 Installed skills:    list_installed_skills, list_installed_loops, read_installed_skill,
                      save_installed_skill, create_installed_skill, delete_installed_skill,
-                     list_chat_skills
+                     list_chat_skills, make_installed_global
 Chat:                list_chat_sessions, create_chat_session, delete_chat_session,
                      delete_all_chat_sessions, delete_chat_message,
                      update_chat_session_title, generate_chat_title,
                      set_chat_session_starred, set_chat_session_unread,
                      update_chat_session_model, update_chat_session_provider,
                      update_chat_session_watch_mode, update_chat_session_agent,
+                     update_chat_session_policies, set_chat_session_project,
                      get_chat_messages, touch_chat_session,
                      send_chat_message, cancel_chat_message,
                      send_agent_chat_message, cancel_agent_chat_message,
@@ -74,17 +82,42 @@ Chat:                list_chat_sessions, create_chat_session, delete_chat_sessio
                      set_chat_api_key, delete_chat_api_key, get_chat_config,
                      list_chat_models, read_artifact_preview, download_artifact,
                      download_artifacts_zip, list_artifacts, list_chat_artifacts,
-                     delete_artifact, delete_all_artifacts, count_context_tokens
+                     delete_artifact, delete_all_artifacts, count_context_tokens,
+                     count_context_breakdown, generate_commit_message, generate_diff_review,
+                     supersede_chat_tail, persist_chat_command_message,
+                     persist_partial_chat_message, scan_local_models,
+                     start_local_model, stop_local_model, local_model_status,
+                     detect_llama_server_path, get_llama_server_path, set_llama_server_path,
+                     is_libreoffice_available, get_chat_session_metrics,
+                     restore_chat_checkpoint, list_chat_checkpoints, delete_empty_chat_sessions,
+                     search_chat_messages, create_artifact_cmd, update_artifact_cmd,
+                     save_artifact_cmd, generate_artifact_cmd, search_artifacts_cmd,
+                     validate_artifact_cmd, get_artifact_context_cmd, regenerate_artifact_cmd
 Local model:         scan_local_models, start_local_model, stop_local_model,
-                     local_model_status
+                     local_model_status, count_context_tokens
 Connectors:          list_connectors, connector_connect, connector_connect_family,
                      connector_disconnect, list_session_connectors, set_session_connectors
-Mobile relay:        start_mobile_relay, stop_mobile_relay, get_mobile_relay_status
+Mobile relay:        start_mobile_relay, stop_mobile_relay, get_mobile_relay_status,
+                     get_mobile_pairing_info, tailscale_login,
+                     tailscale_serve_enable, tailscale_serve_disable
 Local model market:  fetch_model_catalog, start_model_download, cancel_model_download,
                      download_mmproj, delete_downloaded_model, get_market_settings,
                      set_models_directory, pick_models_directory,
-                     set_hugging_face_token, clear_hugging_face_token
+                     set_hugging_face_token, clear_hugging_face_token, fetch_model_file_sizes,
+                     get_gpu_vram
+Docs index:          docs_list_corpora, docs_add_corpus, docs_remove_corpus,
+                     docs_start_index, docs_cancel_index, docs_set_corpus_enabled,
+                     docs_attached_corpus_ids, docs_attach_corpus_to_chat,
+                     docs_detach_corpus_from_chat, docs_embedding_status
+GitHub:              github_list_prs, github_get_pr, github_create_pr,
+                     github_draft_pr_text, github_pr_files, github_pr_checks,
+                     github_local_branches, github_submit_review
+ACP/agents:          list_acp_agents
 Updater:             check_for_update, download_and_install_update
+Speech:              transcribe_audio
+Worktree:            ensure_chat_session_worktree, set_chat_session_worktree
+Skills gallery:      mcp_gallery_list, mcp_gallery_install, mcp_gallery_remove,
+                     mcp_gallery_set_enabled, mcp_gallery_connect, mcp_gallery_disconnect
 ```
 
 ### 2.3 Events (backend → frontend)
@@ -105,16 +138,24 @@ Updater:             check_for_update, download_and_install_update
 | `chat:open-browser` | `{ chatSessionId, url }` | `chat/mod.rs` (from `open_url` tool) |
 | `chat:status` | `{ chatSessionId, status, reason? }` | `chat/streaming.rs` |
 | `chat:task-progress` | `{ chatSessionId, taskId, kind, status, detail? }` | `chat/streaming.rs` |
+| `chat:perf` | `{ chatSessionId, metrics }` | `chat/streaming.rs` |
 | `chat:approval-request` | `{ chatSessionId, pendingId, tool, summary, args }` | `chat/permission.rs` |
 | `chat:approval-resolved` | `{ chatSessionId, pendingId, approved }` | `chat/permission.rs` |
 | `browser:resolve-pane-request` | `{ reqId, projectId }` | `browser_mcp.rs` (MCP roundtrip) |
 | `browser:open-browser-request` | `{ reqId, projectId, url? }` | `browser_mcp.rs` (MCP roundtrip) |
+| `browser:activity` | `{ paneId, tabId }` | `browser.rs` (page load activity) |
 | `oauth:callback` | `{ connectorId, code, state }` | `connectors/mod.rs` |
 | `mobile:session_chat_event` | `{ sessionId, event }` | `mobile/mod.rs` |
 | `mobile:session_chat_owner` | `{ sessionId, ownerPaneId }` | `mobile/mod.rs` |
+| `mobile:pairing-token` | `{ token }` | `mobile/relay.rs` |
 | `local-model:download:progress` | `{ modelId, downloaded, total, status }` | `local_model_market.rs` |
 | `updater:progress` | `{ downloaded, total }` (`total` may be null) | `commands/updater_cmds.rs` (download stream) |
 | `updater:installed` | `{}` | `commands/updater_cmds.rs` (post-install, app restarts) |
+| `automation:run-finished` | `{ automationId, runId, status }` | `automations.rs` |
+| `project:fs-changed` | `{ path }` | `git_watcher.rs` |
+| `budget:alert` | `{ budgetId, remaining }` | `commands/budget.rs` |
+| `checkpoint:created` | `{ chatSessionId, checkpointId }` | `chat/commands.rs` |
+| `docs:corpus:updated` | `{ corpusId }` | `docs_index.rs` |
 
 ### 2.4 PTY Subsystem (`pty/mod.rs`)
 
@@ -164,6 +205,7 @@ Updater:             check_for_update, download_and_install_update
 - **Native child webviews** via `Window::add_child` (Windows/macOS only; Linux → iframe fallback)
 - **Label scheme:** `browser-{paneId}-tab-{tabId}`
 - **pushState monkey-patch:** injected JS wraps `history.pushState`/`replaceState` + `popstate`/`hashchange` → `browser_push_state`
+- **Devtools:** `browser_open_devtools` command opens the native devtools pane for a browser tab
 - **Agentic browser:** `read_page` uses a vendored Mozilla `readability.js` (Apache 2.0, v0.6.0, embedded via `include_str!`) to extract clean Markdown via the `bridge_extract.js` wrapper. Supports **four** modes: `full` (complete cleaned article), `summary_only` (headings + first ~1500 chars), `section` (CSS selector or heading text), and `interactive` (accessibility tree — full a11y records per element: role, aria-label, name, id, value, placeholder, checked, disabled, type, rect; no Readability run, markdown empty). Consent/cookie banners are auto-dismissed; lazy-loaded content is surfaced via a bounded scroll loop. Returns structured JSON (`ExtractedContent`) with `markdown`, `title`, `url`, `canonicalUrl`, `publishedDate`, `byline`, `failureReason`, and `elementRefs`. Interactive elements are tagged with `data-conduit-ref` for `browser_click`/`browser_type`. 15s timeout per eval; `ReadOpts` controls settle wait (default 1s) and max scroll steps (default 4).
 - **Agent-driven control (conduit-browser-mcp):** a standalone MCP server binary (`src/bin/conduit_browser_mcp.rs`, `[[bin]]` in Cargo.toml, does NOT link Tauri) speaks stdio JSON-RPC to a harness (Claude Code/Kimi Code) and forwards each `tools/call` over a **loopback WebSocket on fixed port 7681** (`BROWSER_MCP_PORT`) to `browser_mcp::serve` (spawned in `lib.rs` setup). Dispatch (`browser_mcp.rs`) runs against the real visible pane via `run_action_for_pane` / `read_page_for_pane` / `resolve_and_click` / `resolve_and_type` / `resolve_and_hover` / `evaluate_for_pane` / `history_for_pane` — the SAME eval bridge the chat tools use. **Browser ops (10):** navigate / read_page / click / type_text / scroll / wait_for / screenshot / history (back|forward) / hover / evaluate / click_and_wait, all with optional `pane_id`; plus **conduit tools (5):** generate_document / generate_diagram / generate_file / get_skill / list_skills. `click_and_wait` snaps the pre-click URL and polls for navigation/selector/network_idle in one round-trip; `evaluate` runs arbitrary page JS and returns a JSON-serialized value; `hover` dispatches real mouseover/mouseenter for `:hover` menus. Pane resolution: explicit pane_id → `pane_active_tab` → label; else `project_id` → `browser:resolve-pane-request` frontend roundtrip (max-`lastUsedAt` browser pane, 5s) → global active. Auto-open: `browser:open-browser-request` roundtrip. Per-project registration via `--mcp-config` (Claude Code; `browser_mcp_register.rs` writes to `<app_data_dir>/mcp/<id>.mcp.json` in `spawn_agent_session`). Frontend hook `useBrowserMcpEvents.ts`. Structured error codes: not_found/nav_failure/timeout/browser_unavailable/invalid_args/pane_not_found.
 - **Visual feedback layer:** `bridge_overlay.js` (injected after every nav + lazily per action) installs synthetic cursor/ripple/highlight/caret elements (all `data-conduit-overlay`, excluded from the a11y tagger). `click_js`/`type_js` return Promises: cursor tween (400ms) → highlight → ripple / per-keystroke typing (45ms±15ms with real keydown/keyup/input per char) → real action. `action_wrapper_js` is promise-aware (awaits a returned thenable) and applies watch-mode pacing (600ms) via a `__finish` helper — the tool result reports only after the visual+action chain resolves (race guard). Watch-mode: global `watchMode` setting + per-session nullable `watch_mode` column (mirrors `permission_mode`); backgrounded panes skip pacing (`pane_is_visible`).
@@ -171,7 +213,7 @@ Updater:             check_for_update, download_and_install_update
 
 ### 2.8 DB Schema (`db/mod.rs`)
 
-15 tables (3 new since the previous audit: `chat_messages.superseded_by` column added via `migrate_chat_messages_superseded`; the new `automations` and `automation_runs` tables):
+21 tables (6 new since the previous audit: `chat_checkpoints`, `automations`, `automation_runs`, `chat_source_notes`, `connector_credentials`, `chat_session_connectors`, `workspaces`, `doc_corpora`, `doc_files`, `doc_chunks`, `chat_documents`; plus new columns/migrations):
 
 | Table | Key columns |
 |---|---|
@@ -191,15 +233,60 @@ Updater:             check_for_update, download_and_install_update
 | `workspaces` | `id` PK, `project_id` FK, `name`, `data`, `created_at`, `updated_at` |
 | `automations` | `id` PK, `name`, `prompt`, `harness`, `model`, `cwd`, `schedule`, `enabled`, `last_run_at`, `last_status`, `chat_session_id`, `created_at` |
 | `automation_runs` | `id` PK, `automation_id` FK (CASCADE), `started_at`, `finished_at`, `status`, `summary`, `chat_session_id`, `source` (DEFAULT 'scheduled') |
+| `chat_checkpoints` | `id` PK, `chat_session_id` FK, `name`, `message_id`, `created_at` |
+| `doc_corpora` | `id` PK, `name`, `path`, `enabled`, `created_at` |
+| `doc_files` | `id` PK, `corpus_id` FK, `path`, `size`, `mtime`, `indexed_at` |
+| `doc_chunks` | `id` PK, `corpus_id` FK, `file_id` FK, `chunk_index`, `content`, `embedding` BLOB |
+| `chat_documents` | `id` PK, `chat_session_id` FK, `corpus_id` FK, `attached_at` |
 
-**Migrations:** `migrate_chat_session_flags` (adds `starred`/`unread`), `migrate_chat_session_watch_mode`, `migrate_chat_session_agent` (adds `agent`, backfills `local_gguf`→`"local"` / else→`"builtin"`), `migrate_chat_session_project_id`, `migrate_artifacts_message_id`, `migrate_chat_messages_superseded` (compaction pointer), `migrate_cost_v2`, `migrate_chat_messages_v2`, `migrate_chat_messages_started_completed` (adds `started_at`/`completed_at`), `migrate_chat_messages_perf` (adds `llm_time_ms`/`tool_time_ms`/`ttft_ms`/`tokens_per_second`), `migrate_unc_paths` (Win only, strips `\\?\` prefix).
+**Migrations:** `migrate_chat_session_flags` (adds `starred`/`unread`), `migrate_chat_session_watch_mode`, `migrate_chat_session_agent` (adds `agent`, backfills `local_gguf`→`"local"` / else→`"builtin"`), `migrate_chat_session_project_id`, `migrate_artifacts_message_id`, `migrate_chat_messages_superseded` (compaction pointer), `migrate_cost_v2`, `migrate_chat_messages_v2`, `migrate_chat_messages_started_completed` (adds `started_at`/`completed_at`), `migrate_chat_messages_perf` (adds `llm_time_ms`/`tool_time_ms`/`ttft_ms`/`tokens_per_second`), `migrate_unc_paths` (Win only, strips `\\?\` prefix), `migrate_chat_checkpoints`, `migrate_chat_documents`, `migrate_doc_corpora`.
 
 ### 2.9 Secrets (`secrets.rs`)
 
 - Windows/macOS: OS keychain via `keyring` crate
 - Linux: XOR-obfuscated SQLite fallback (documented deviation from PRD)
 
-### 2.10 Auto-Updater (`commands/updater_cmds.rs`)
+### 2.10 Automation Task Commands (`automation_task.rs`)
+
+- **Commands (3):** `get_run_while_closed`, `set_run_while_closed`, `test_automation_webhook`
+- Exposes automation task settings and webhook testing outside the main automation CRUD surface.
+
+### 2.11 Docs Index (`docs_index.rs`)
+
+- **Commands (10):** `docs_list_corpora`, `docs_add_corpus`, `docs_remove_corpus`, `docs_start_index`, `docs_cancel_index`, `docs_set_corpus_enabled`, `docs_attached_corpus_ids`, `docs_attach_corpus_to_chat`, `docs_detach_corpus_from_chat`, `docs_embedding_status`
+- Powers the document RAG feature: project docs are embedded and attached per-chat for retrieval-augmented generation.
+
+### 2.12 GitHub PR Commands (`github.rs`)
+
+- **Commands (8):** `github_list_prs`, `github_get_pr`, `github_create_pr`, `github_draft_pr_text`, `github_pr_files`, `github_pr_checks`, `github_local_branches`, `github_submit_review`
+- Wraps GitHub REST API for PR management inside the Dev panel.
+
+### 2.13 Mobile Relay Commands (`mobile/commands.rs`)
+
+- **Commands (7):** `start_mobile_relay`, `stop_mobile_relay`, `get_mobile_relay_status`, `get_mobile_pairing_info`, `tailscale_serve_enable`, `tailscale_serve_disable`, `tailscale_login`
+- Controls the local relay server, Tailscale integration, and mobile pairing flow.
+
+### 2.14 Speech Commands (`speech.rs`)
+
+- **Commands (1):** `transcribe_audio`
+- Speech-to-text for voice input.
+
+### 2.15 Worktree Commands (`worktree_cmds.rs`)
+
+- **Commands (2):** `ensure_chat_session_worktree`, `set_chat_session_worktree`
+- Creates and assigns git worktrees per chat session.
+
+### 2.16 MCP Gallery (`mcp_gallery.rs`)
+
+- **Commands (6):** `mcp_gallery_list`, `mcp_gallery_install`, `mcp_gallery_remove`, `mcp_gallery_set_enabled`, `mcp_gallery_connect`, `mcp_gallery_disconnect`
+- Manages bundled MCP server tools that agents can use.
+
+### 2.17 ACP Agents (`commands/agent_cmds.rs`)
+
+- **Commands (1):** `list_acp_agents`
+- Lists available ACP agents for the agent selector.
+
+### 2.18 Auto-Updater (`commands/updater_cmds.rs`)
 
 - **Plugin:** `tauri-plugin-updater` — configured in `tauri.conf.json` with a GitHub Releases endpoint and a baked-in public key for signature verification. Signing keypair lives at `.tauri/conduit-update.key` / `.key.pub` (gitignored).
 - **Commands (2):** `check_for_update` → `UpdateInfo { updateAvailable, version, notes, pubDate }` (GETs `latest.json`, semver compare; network failure treated as "no update"); `download_and_install_update` → downloads, verifies signature, installs; emits `updater:progress` during download and `updater:installed` when the verified package is on disk (app restarts automatically).

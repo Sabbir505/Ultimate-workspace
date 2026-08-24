@@ -11,7 +11,7 @@
 
 | Category | Finding | Status |
 |---|---|---|
-| Command count | `AI_CONTEXT.md` claimed 134 commands | **UPDATED** → 221 commands |
+| Command count | `AI_CONTEXT.md` claimed 134 commands | **UPDATED** → 226 commands |
 | Database tables | `AI_CONTEXT.md` listed 15 tables | **UPDATED** → 21 tables |
 | Test files | Listed 22 vitest files | **UPDATED** → 59 vitest files / 407 tests |
 | PTY output batching | C1 — `pty:output` event flood | **FIXED** — 16 ms coalescing buffer |

@@ -7,11 +7,14 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 const listBudgetsMock = vi.fn();
 const setBudgetMock = vi.fn();
 const removeBudgetMock = vi.fn();
+const listProjectsMock = vi.fn();
 
 vi.mock("../lib/ipc", () => ({
   listBudgets: (...a: unknown[]) => listBudgetsMock(...a),
   setBudget: (...a: unknown[]) => setBudgetMock(...a),
   removeBudget: (...a: unknown[]) => removeBudgetMock(...a),
+  listProjects: (...a: unknown[]) => listProjectsMock(...a),
+  toastError: () => {},
 }));
 
 import { BudgetPanel } from "../components/cost-dashboard/BudgetPanel";
@@ -30,6 +33,7 @@ describe("BudgetPanel", () => {
     listBudgetsMock.mockResolvedValue([]);
     setBudgetMock.mockResolvedValue([{ projectId: "p1", monthlyUsd: 50, thresholdPct: 100 }]);
     removeBudgetMock.mockResolvedValue(undefined);
+    listProjectsMock.mockResolvedValueOnce([{ id: "p1", name: "Test Project" }]);
   });
   afterEach(cleanup);
 

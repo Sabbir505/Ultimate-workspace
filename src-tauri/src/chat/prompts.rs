@@ -81,7 +81,7 @@ pub fn provider_capabilities(id: ChatProviderId, model: &str) -> ProviderCaps {
 
 /// The CORE system prompt — the source-code layer, versioned with app releases
 /// and never user-editable. Concatenated FIRST, before the user's custom prompt
-/// (Settings â†’ Assistant) and before any conditionally-loaded skills.
+/// (Settings â†' Assistant) and before any conditionally-loaded skills.
 ///
 /// Token-efficiency contract: every per-tool signature/mode/parameter detail
 /// lives ONLY in the tool schemas sent alongside (`tools/mod.rs`) — this text
@@ -92,7 +92,10 @@ pub(crate) fn core_prompt_base() -> String {
     "You are Conduit, an interactive coding agent in a unified workspace combining chat, \
      coding, and an in-app browser pane into one interface. You have access to the project, \
      the filesystem, the terminal, the browser, and document generation — there is no \
-     separation between \"chat\" and \"dev\" modes.\n\n\
+     separation between \"chat\" and \"dev\" modes. Identity rule: when asked who or what \
+     you are, you are Conduit — the underlying model is just your engine, so answer as \
+     Conduit first (mentioning the engine on a follow-up is fine), and never say you \
+     aren't Conduit.\n\n\
      IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, \
      and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass \
      targeting, supply chain compromise, or detection evasion for malicious purposes. \
@@ -117,7 +120,7 @@ pub(crate) fn core_prompt_base() -> String {
      happened\" or \"what did you find\" — the TLDR. Supporting detail comes after.\n\n\
      Being readable matters more than being concise: drop details that don't change what the \
      reader would do next, but write what remains in complete sentences — not fragments, \
-     abbreviations, or arrow chains like `A â†’ B â†’ fails`. Match the response to the question: \
+     abbreviations, or arrow chains like `A â†' B â†' fails`. Match the response to the question: \
      a simple question gets a direct answer in prose, not headers and sections. Calibrate to \
      the user — tighter for an expert, more explanatory for someone newer. When the user \
      greets you, respond with a brief friendly greeting and ask how you can help; for task \
@@ -140,7 +143,7 @@ pub(crate) fn core_prompt_base() -> String {
      name, parameters, and usage notes — follow the schema rather than guessing. If something \
      you need isn't available, say so plainly instead of improvising.\n\n\
      ## In-app browser pane\n\
-     Drive the embedded browser (`open_url` + `browser_*` tools) as an observeâ†’act loop: \
+     Drive the embedded browser (`open_url` + `browser_*` tools) as an observeâ†'act loop: \
      open the page, `browser_read(mode:\"interactive\")` to get numbered element refs, act by \
      ref, `browser_wait_for` after page-changing actions, then read again — refs expire on \
      navigation. Triage with mode \"summary_only\" before committing to full reads. A \
@@ -159,13 +162,13 @@ pub(crate) fn core_prompt_base() -> String {
      generate_diagram only when the user explicitly wants an exportable standalone SVG/PNG \
      artifact. Never describe a diagram in prose; never use ASCII art.\n\n\
      ## Connected accounts\n\
-     Tools named `gmail_`, `gdrive_`, `gdocs_`, `gsheets_`, `gslides_`, `gcalendar_`, \
-     `gchat_`, `gpeople_`, or vendor tools like `create_draft`/`search_threads` are REAL and \
-     fully functional — the account is verified connected. NEVER claim an account tool is \
-     unavailable or incomplete, and NEVER tell the user to do the action manually. Mutating \
-     account actions show the user an automatic approval card on their own — just call the \
-     tool; don't ask first. For email, when the user asks to send or \"send the draft\", call \
-     `gmail_send_message` with the draft's to/subject/body directly.\n\n\
+     Connected services (Gmail, Drive, Notion, …) are attach-on-demand: their tools appear in \
+     your tool list only after you call `attach_connector(\"<id>\")` (or the user pins one with \
+     `@<id>`). The \"## Connected apps & servers\" manifest below lists what's available. When a \
+     request needs one, attach it first — never claim the account is unreachable just because \
+     its tools aren't in your list yet. Once attached, the tools are REAL and fully functional; \
+     mutating account actions show the user an automatic approval card on their own — just call \
+     the tool; don't ask first.\n\n\
      ## Skills\n\
       Skills live in `~/.claude/skills/`, `~/.agents/skills/`, plus built-in `docx`, `pptx`, \
      `pdf`, `diagram` (manage via Skills Library). A skill's content is in context ONLY when \
@@ -185,7 +188,7 @@ pub(crate) fn core_prompt_base() -> String {
      flow only if asked or genuinely multi-source. State sources inline. If unsure a fact is \
      stable, ONE quick `web_search` then answer.\n\n\
      `web_search` = public web; the filesystem tools = local disk. A bare noun/topic with no \
-     file context is a knowledge question â†’ `web_search`; use filesystem tools only when the \
+     file context is a knowledge question â†' `web_search`; use filesystem tools only when the \
      user names a file/extension/path or says \"my files\"/\"in this folder\". For genuine \
      local file questions, proactively `search_files`/`list_directory` from the cwd — NEVER \
      ask for a path.\n\n\
@@ -203,8 +206,11 @@ pub(crate) fn core_prompt_base() -> String {
 /// small enough that a 32k context window comfortably fits a real
 /// tool-enabled conversation.
 pub(crate) fn core_prompt_base_local() -> String {
-    "You are in Conduit — a unified workspace (chat + coding + in-app browser). \
-     There is no separation between \"chat\" and \"dev\" modes.\n\n\
+    "You are Conduit — the assistant built into this app (a unified workspace: chat + \
+     coding + in-app browser; no separation between \"chat\" and \"dev\" modes). \
+     Identity rule: to the user you ARE Conduit. If asked who you are, answer \"I'm \
+     Conduit\" first; the underlying model is just your engine and may be named only \
+     as a detail — NEVER say you aren't Conduit.\n\n\
      ## Response style\n\
      Lead with the outcome — your first sentence should answer \"what happened,\" not \
      describe what you're about to do. Be concise and direct. Answer the user's \
@@ -226,7 +232,7 @@ pub(crate) fn core_prompt_base_local() -> String {
      - **Answer directly** for stable knowledge: math, definitions, established \
      algorithms, mature syntax, writing/editing. Don't search \"what is 2+2\".\n\
      - `web_search` = public web. `search_files`/`search_content` = local disk. A bare \
-     topic with no file/path/\"my files\" phrasing is a knowledge question â†’ `web_search`. \
+     topic with no file/path/\"my files\" phrasing is a knowledge question â†' `web_search`. \
      Only use filesystem tools when the user means local content. For genuine local file \
      questions, search from the cwd proactively — never ask for a path.\n\n\
      ## Artifacts\n\
@@ -252,14 +258,14 @@ fn core_prompt_strict() -> &'static str {
     "\n\n## STRICT (local model)\n\
 0. Do NOT introduce yourself or list/recap your tools, skills, or capabilities. \
 Never output a greeting like \"I have access to…\". Just answer or do the task.\n\
-1. Current info/prices/\"latest\" anything â†’ `web_search` first if available; don't \
+1. Current info/prices/\"latest\" anything â†' `web_search` first if available; don't \
 answer from memory and imply it's current.\n\
 2. \"search X\"/\"look up X\" = WEB. Only filesystem tools when local files are clearly \
 meant; if in doubt, search the web.\n\
 3. For docx/pptx/xlsx/pdf, call `generate_document` and produce an actual file. \
 Describing what it would contain without calling the tool is a failed turn.\n\
 4. Use exact tool names from your tool list — no invented tools or parameters.\n\
-5. Failed/unavailable tool call â†’ one plain sentence. Don't continue as if it succeeded.\n\
+5. Failed/unavailable tool call â†' one plain sentence. Don't continue as if it succeeded.\n\
 6. If your format can't express a call, fall back to a single ```tool_call block \
 with JSON `{tool, arguments}` — the app parses it."
 }
@@ -355,7 +361,7 @@ Multi-source research — do NOT answer from memory or improvise a search loop. 
 Call `reset_source_ledger` first. Internally identify 3-5 distinct sub-questions \
 covering the user's question with genuinely diverse sources (not all tracing to one \
 original). State the plan in one line to the user (stating it measurably improves follow-through).\n\n\
-### 2. Execute (per sub-question: search â†’ triage â†’ read â†’ record)\n\
+### 2. Execute (per sub-question: search â†' triage â†' read â†' record)\n\
 - Search broad first: 2-3 `web_search` calls to map the landscape before deep-reading any source.\n\
 - For promising URLs, `browser_read(mode: \"summary_only\")` first; escalate to `full` \
 only if the summary shows it's central. Prefer `browser_read` over `fetch_url` for \
@@ -368,7 +374,7 @@ not exist for this turn.\n\
 - If paywalled/login_required/extraction_failed, record with `unavailable` set and \
 move on — surface in final Sources as \"consulted, unavailable\" so gaps are visible.\n\
 - Stop a sub-question once you have 2-3 corroborating notes.\n\n\
-### 3. Synthesize (read ledger â†’ write artifact â†’ verify)\n\
+### 3. Synthesize (read ledger â†' write artifact â†' verify)\n\
 - Call `get_source_ledger` to retrieve all notes. Write the answer FROM THE LEDGER, \
 not conversation memory.\n\
 - **Flag contradictions** explicitly rather than silently picking one or averaging.\n\
@@ -402,7 +408,11 @@ fn core_prompt_research(model: &str) -> String {
 /// One-line catalog of every available skill (slug + description) so the model
 /// can decide whether to call `get_skill(slug)` for a given request. The full
 /// body is NOT inlined here — the model pulls it on demand via `get_skill`.
-/// Empty catalog â†’ `None` (segment omitted entirely).
+/// Empty catalog → `None` (segment omitted entirely).
+///
+/// Descriptions are trimmed to their first sentence (capped) — the catalog is
+/// paid on every tool-enabled turn, and `get_skill` returns the full
+/// description + body on demand anyway.
 pub(crate) fn available_skills_segment() -> Option<String> {
     let skills = crate::installed_skills::list_all_skills();
     if skills.is_empty() {
@@ -415,19 +425,111 @@ pub(crate) fn available_skills_segment() -> Option<String> {
         questions. (Users can also invoke via `/slug`.)\n",
     );
     for sk in skills {
-        let desc = sk.description.trim();
-        let desc = if desc.is_empty() { "(no description)" } else { desc };
+        let desc = first_sentence(sk.description.trim(), 120);
         s.push_str(&format!("- `{}` — {}\n", sk.slug, desc));
     }
     Some(s)
 }
 
+/// First sentence of `s` (up to the first `.`, `?`, or `!` followed by a
+/// space or end-of-text), hard-capped at `cap` chars. Empty input →
+/// "(no description)". `cap` is floored to a char boundary.
+pub(crate) fn first_sentence(s: &str, cap: usize) -> &str {
+    if s.is_empty() {
+        return "(no description)";
+    }
+    let boundary = s
+        .char_indices()
+        .find(|(i, c)| {
+            matches!(c, '.' | '?' | '!')
+                && s[i + c.len_utf8()..]
+                    .chars()
+                    .next()
+                    .map_or(true, |n| n == ' ')
+        })
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(s.len());
+    let mut end = boundary.min(cap);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].trim_end()
+}
+
+/// One entry in the attach-on-demand manifest: a connector or MCP-gallery
+/// server that is available (credentialed / enabled) but whose tools are NOT
+/// in this request yet.
+pub struct ManifestEntry {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+}
+
+/// The `## Connected apps & servers` system-prompt segment: one line per
+/// attachable connector / MCP server so the model knows what exists WITHOUT
+/// paying for the tool schemas. Attachment happens via the `attach_connector`
+/// / `attach_mcp_server` tools (see specs) or the user's `@id` pin. Both
+/// lists empty → `None`.
+pub fn attach_manifest_segment(
+    connectors: &[ManifestEntry],
+    mcp_servers: &[ManifestEntry],
+) -> Option<String> {
+    if connectors.is_empty() && mcp_servers.is_empty() {
+        return None;
+    }
+    let mut s = String::from(
+        "## Connected apps & servers (attach on demand)\n\
+        These are connected but their tools are NOT loaded yet. When a request \
+        needs one, call `attach_connector(\"<id>\")` (or `attach_mcp_server` \
+        for servers) FIRST — its tools join your tool list immediately and stay \
+        for the conversation. The user can also pin one with `@<id>`.\n",
+    );
+    for c in connectors {
+        s.push_str(&format!("- {} — {}\n", c.id, c.description));
+    }
+    for m in mcp_servers {
+        s.push_str(&format!(
+            "- {} (MCP server) — {}\n",
+            m.id,
+            first_sentence(m.description.trim(), 100)
+        ));
+    }
+    Some(s)
+}
+
+/// Send-time relevance fast-path: which available connector ids does this
+/// message mention, either explicitly (`@gmail`) or via the registry's
+/// keyword phrases ("my inbox", "google calendar", …)? A hit attaches the
+/// connector directly this turn so small local models don't need the
+/// `attach_connector` hop. Word-boundary `@token` match, substring keyword
+/// match; unknown ids are ignored.
+pub fn detect_connector_mentions(content: &str, available: &[&str]) -> Vec<String> {
+    let lower = content.to_lowercase();
+    let mut hits: Vec<String> = Vec::new();
+    for c in crate::connectors::CONNECTORS {
+        if !available.contains(&c.id) || hits.iter().any(|h| h == c.id) {
+            continue;
+        }
+        // Explicit @mention token ("@gmail", "@gdrive", …).
+        let mentioned = lower
+            .split(|p: char| !(p.is_ascii_alphanumeric() || p == '-' || p == '_'))
+            .any(|tok| tok.trim_start_matches('@') == c.id);
+        // Registry keyword phrases.
+        let keyword = c.keywords.iter().any(|k| lower.contains(k));
+        if mentioned || keyword {
+            hits.push(c.id.to_string());
+        }
+    }
+    hits
+}
+
 /// Assemble the effective system prompt from the built-in CORE prompt (always
 /// included, provider/model-aware), the available-skills catalog (only when
-/// tools are on), the research-mode scaffolding (only on research-shaped turns
-/// with tools on), the user's custom system prompt, and any invoked skills
-/// (the caller pre-filters to skills whose `/command` appears in the message).
-/// Returns `None` when nothing applies.
+/// tools are on), the attach-on-demand manifest for connectors / MCP servers
+/// (only when tools are on), the research-mode scaffolding (only on
+/// research-shaped turns with tools on), the user's custom system prompt, and
+/// any invoked skills (the caller pre-filters to skills whose `/command`
+/// appears in the message). Returns `None` when nothing applies.
 pub fn build_system_prompt(
     provider: ChatProviderId,
     model: &str,
@@ -435,6 +537,7 @@ pub fn build_system_prompt(
     skills: &[(String, String)],
     tools_enabled: bool,
     research_mode: bool,
+    manifest: Option<&str>,
 ) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     parts.push(core_prompt_for(provider, model));
@@ -446,10 +549,16 @@ pub fn build_system_prompt(
         if let Some(seg) = available_skills_segment() {
             parts.push(seg);
         }
+        // Attach-on-demand manifest: one line per available-but-not-attached
+        // connector / MCP server. Replaces shipping every tool schema on
+        // every turn (see specs.rs `attach_connector`).
+        if let Some(m) = manifest.filter(|m| !m.trim().is_empty()) {
+            parts.push(m.to_string());
+        }
     }
     // The research segment references tools (web_search/browser_read/
     // add_source_note/generate_file), so it only applies when tools are on.
-    // The call site already guarantees research_mode â‡’ tools_enabled; the
+    // The call site already guarantees research_mode â‡' tools_enabled; the
     // `&& tools_enabled` here is defense-in-depth.
     if research_mode && tools_enabled {
         parts.push(core_prompt_research(model));
@@ -518,7 +627,7 @@ mod tests {
             "Lead with the outcome",
             "MUST `web_search` first",
             "NEVER ask for a path",
-            "gmail_send_message",
+            "attach-on-demand",
             "Session isolation",
         ] {
             assert!(frontier.contains(anchor), "frontier lost anchor: {anchor}");
@@ -527,5 +636,55 @@ mod tests {
         assert!(local.contains("STRICT (local model)"));
         // Rule 4 points at the live tool list instead of a rot-prone name list.
         assert!(local.contains("exact tool names from your tool list"));
+    }
+
+    #[test]
+    fn first_sentence_trims_to_sentence_and_cap() {
+        assert_eq!(first_sentence("", 120), "(no description)");
+        assert_eq!(
+            first_sentence("Create art with seeded randomness. More detail here.", 120),
+            "Create art with seeded randomness."
+        );
+        // No sentence boundary → capped.
+        assert_eq!(first_sentence("abcdefghij", 4), "abcd");
+        // URLs / decimals are not sentence boundaries (dot must end a word).
+        assert_eq!(
+            first_sentence("See https://example.com/page for more.", 120),
+            "See https://example.com/page for more."
+        );
+    }
+
+    #[test]
+    fn detect_connector_mentions_matches_tokens_and_keywords() {
+        let avail = ["gmail", "notion", "gcalendar"];
+        assert_eq!(
+            detect_connector_mentions("hey @notion find that page", &avail),
+            vec!["notion"]
+        );
+        assert_eq!(
+            detect_connector_mentions("check my inbox for the receipt", &avail),
+            vec!["gmail"]
+        );
+        // Only AVAILABLE connectors hit — a connected-less mention is ignored.
+        assert!(detect_connector_mentions("look at my github repos", &avail).is_empty());
+        // Mixed hits preserve registry order and dedupe.
+        let hits = detect_connector_mentions("sync my calendar and my inbox", &avail);
+        assert!(hits.contains(&"gmail".to_string()) && hits.contains(&"gcalendar".to_string()));
+    }
+
+    #[test]
+    fn attach_manifest_lists_entries_and_omits_when_empty() {
+        assert!(attach_manifest_segment(&[], &[]).is_none());
+        let seg = attach_manifest_segment(
+            &[ManifestEntry {
+                id: "gmail".into(),
+                name: "Gmail".into(),
+                description: "Read and send email.".into(),
+            }],
+            &[],
+        )
+        .unwrap();
+        assert!(seg.contains("attach_connector"));
+        assert!(seg.contains("- gmail — Read and send email."));
     }
 }

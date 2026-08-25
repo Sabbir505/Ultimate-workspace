@@ -1385,6 +1385,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         onLoadLocalModel={handleLoadLocalModel}
         usedTokens={usedTokens}
         liveMaxTokens={isLocal ? liveUsage.maxTokens : 0}
+        chatSessionId={activeChatSessionId}
         thinking={thinking}
         onThinkingChange={setThinking}
         thinkingSupported={thinkingSupported}

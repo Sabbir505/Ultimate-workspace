@@ -13,6 +13,101 @@
 .composer-slash-wrap {
   position: relative;
 }
+/* Token pills (command + attached connectors) overlay the indented first
+   line of the textarea: the textarea's text-indent reserves exactly the
+   pills' measured width on LINE 1 ONLY, so the typed text wraps at full
+   column width from line 2 on. */
+.composer-token-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  /* 24px pill centered on the textarea's first line (line center ≈ 11.75px
+     from the wrap top → pill top ≈ 0). */
+  max-width: 100%;
+}
+.composer-token-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  font-size: 12px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.composer-token-pill:hover {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+.composer-token-command .composer-token-icon {
+  color: var(--accent);
+}
+.composer-token-icon {
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+.composer-token-label {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The remove button takes NO space at rest — it grows in smoothly on pill
+   hover (max-width transition, since `width: auto` can't animate). */
+.composer-token-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  max-width: 0;
+  margin-left: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    max-width 0.18s var(--ease),
+    margin-left 0.18s var(--ease),
+    opacity 0.18s var(--ease),
+    background 0.12s var(--ease),
+    color 0.12s var(--ease);
+}
+.composer-token-pill:hover .composer-token-remove,
+.composer-token-remove:focus-visible {
+  max-width: 14px;
+  margin-left: 1px;
+  opacity: 1;
+}
+.composer-token-remove:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--text);
+}
+:root[data-theme="light"] .composer-token-pill {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.12);
+}
+:root[data-theme="light"] .composer-token-pill:hover {
+  background: rgba(0, 0, 0, 0.08);
+  border-color: rgba(0, 0, 0, 0.18);
+}
+:root[data-theme="light"] .composer-token-remove:hover {
+  background: rgba(0, 0, 0, 0.12);
+}
+
 .composer-slash-menu {
   position: absolute;
   bottom: calc(100% + 6px);

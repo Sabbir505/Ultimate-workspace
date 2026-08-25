@@ -1858,6 +1858,11 @@ export const connectorDisconnect = (connectorId: string) =>
   safeInvoke<DisconnectOutcome>("connector_disconnect", { connectorId });
 export const setSessionConnectors = (chatSessionId: string, connectorIds: string[]) =>
   safeInvoke<void>("set_session_connectors", { chatSessionId, connectorIds });
+/** Attach-on-demand: append/remove ONE attachment (@-picker click / chip ×). */
+export const addSessionConnector = (chatSessionId: string, connectorId: string) =>
+  safeInvoke<void>("add_session_connector", { chatSessionId, connectorId });
+export const removeSessionConnector = (chatSessionId: string, connectorId: string) =>
+  safeInvoke<void>("remove_session_connector", { chatSessionId, connectorId });
 export const listSessionConnectors = (chatSessionId: string) =>
   safeInvoke<string[]>("list_session_connectors", { chatSessionId });
 export const listenOAuthCallback = (handler: (payload: OAuthCallbackPayload) => void) =>

@@ -854,7 +854,9 @@ mod tests {
         };
 
         let prepared =
-            prepare_run_inner(&db, &automation, RunSource::Manual, 0).expect("run prepared");
+            prepare_run_inner(&db, &automation, RunSource::Manual, 0)
+            .expect("run prepared")
+            .expect("prepared run");
         assert_ne!(prepared.chat_session_id, "ghost-session", "dangling id must be replaced");
         {
             let conn = db.lock();

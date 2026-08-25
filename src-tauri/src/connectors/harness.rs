@@ -28,25 +28,39 @@ pub struct HarnessMcpServer {
     pub bearer_token: Option<String>,
 }
 
-/// Snapshot every usable connector as a harness MCP server entry. Mirrors the
-/// chat-mode collection in `chat::commands::send_chat_message`: any connector
-/// with a credential row counts as connected, plus public connectors (no
-/// credentials needed). A connector whose token can't be refreshed is skipped
-/// with a log line — never fails the turn.
-pub async fn harness_mcp_servers(app: &AppHandle) -> Vec<HarnessMcpServer> {
+/// Snapshot the session's ATTACHED connectors as harness MCP server entries.
+/// Attach-on-demand parity with the built-in chat: only connectors attached to
+/// the conversation (`chat_session_connectors` rows — the composer's @-picker
+/// or a keyword mention) are registered; the CLIs have no mid-turn attach
+/// mechanism of their own, so their manifest equivalent is nothing at all.
+/// Rows are validated against the credential store + public connectors so a
+/// stale row (connector since disconnected) can't reach the config. A
+/// connector whose token can't be refreshed is skipped with a log line —
+/// never fails the turn.
+pub async fn harness_mcp_servers(
+    app: &AppHandle,
+    chat_session_id: &str,
+) -> Vec<HarnessMcpServer> {
     let db = app.state::<crate::DbState>();
     let mut ids: Vec<String> = {
         let conn = db.0.lock();
-        crate::db::list_connector_credential_rows(&conn)
+        // Connector rows only (`mcp:` rows have no harness meaning).
+        crate::db::list_chat_session_connectors(&conn, chat_session_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| !r.starts_with("mcp:"))
+            .collect()
+    };
+    // Keep only genuinely usable ids (credentialed or public).
+    {
+        let conn = db.0.lock();
+        let usable: Vec<String> = crate::db::list_connector_credential_rows(&conn)
             .unwrap_or_default()
             .into_iter()
             .map(|r| r.connector_id)
-            .collect()
-    };
-    for c in CONNECTORS {
-        if c.is_public() && !ids.iter().any(|i| i == c.id) {
-            ids.push(c.id.to_string());
-        }
+            .chain(CONNECTORS.iter().filter(|c| c.is_public()).map(|c| c.id.to_string()))
+            .collect();
+        ids.retain(|id| usable.iter().any(|u| u == id));
     }
 
     let mut out = Vec::new();

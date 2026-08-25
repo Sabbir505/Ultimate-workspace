@@ -279,3 +279,30 @@ pub fn list_session_connectors(
     let conn = db.0.lock();
     db::list_chat_session_connectors(&conn, &chat_session_id).map_err(|e| e.to_string())
 }
+
+/// Attach ONE connector / MCP server (`mcp:<id>` rows) to a session — the
+/// composer @-picker's click action. Append semantics (a replace here would
+/// drop every other attachment).
+#[tauri::command]
+pub fn add_session_connector(
+    chat_session_id: String,
+    connector_id: String,
+    db: State<DbState>,
+) -> CmdResult<()> {
+    let conn = db.0.lock();
+    db::add_chat_session_connector(&conn, &chat_session_id, &connector_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Detach one connector / MCP server from a session (the × on an attachment
+/// chip).
+#[tauri::command]
+pub fn remove_session_connector(
+    chat_session_id: String,
+    connector_id: String,
+    db: State<DbState>,
+) -> CmdResult<()> {
+    let conn = db.0.lock();
+    db::remove_chat_session_connector(&conn, &chat_session_id, &connector_id)
+        .map_err(|e| e.to_string())
+}

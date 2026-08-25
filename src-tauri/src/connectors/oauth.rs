@@ -1385,7 +1385,7 @@ mod tests {
 
     #[test]
     fn authorize_url_has_required_params() {
-        let c = crate::connectors::NOTION;
+        let c = crate::connectors::config::NOTION;
         let url = build_authorize_url(&c, "CLIENT_ID", "CHALLENGE", "STATE123", "http://127.0.0.1:9876/oauth/callback", c.scopes);
         assert!(url.starts_with(c.authorize_url));
         assert!(url.contains("client_id=CLIENT_ID"));
@@ -1399,7 +1399,7 @@ mod tests {
 
     #[test]
     fn gmail_authorize_url_has_google_params() {
-        let g = crate::connectors::GMAIL;
+        let g = crate::connectors::config::GMAIL;
         let url = build_authorize_url(&g, "CLIENT_ID", "CHALLENGE", "STATE123", "http://127.0.0.1:45124/oauth/callback", g.scopes);
         assert!(url.contains("access_type=offline")); // refresh token required
         assert!(url.contains("prompt=consent")); // re-consent every time
@@ -1412,9 +1412,9 @@ mod tests {
         // Every Google Workspace MCP connector must get the offline/consent
         // extras via `is_google()`, not a gmail-only id check.
         for c in [
-            crate::connectors::GOOGLE_DOCS,
-            crate::connectors::GOOGLE_CALENDAR,
-            crate::connectors::GOOGLE_DRIVE,
+            crate::connectors::config::GOOGLE_DOCS,
+            crate::connectors::config::GOOGLE_CALENDAR,
+            crate::connectors::config::GOOGLE_DRIVE,
         ] {
             let url = build_authorize_url(&c, "CLIENT_ID", "CHALLENGE", "STATE123", c.redirect_uri, c.scopes);
             assert!(url.contains("access_type=offline"), "{}", c.id);
@@ -1487,8 +1487,8 @@ mod tests {
         // callback server binds this exact port (Notion rejects dynamic
         // ports; strict string matching).
         assert_eq!(
-            loopback_callback_port(crate::connectors::NOTION.redirect_uri),
-            Some(crate::connectors::NOTION_CALLBACK_PORT)
+            loopback_callback_port(crate::connectors::config::NOTION.redirect_uri),
+            Some(crate::connectors::config::NOTION_CALLBACK_PORT)
         );
         assert_eq!(loopback_callback_port("http://127.0.0.1:9876/oauth/callback"), Some(9876));
         assert_eq!(loopback_callback_port("http://[::1]:9876/callback"), Some(9876));

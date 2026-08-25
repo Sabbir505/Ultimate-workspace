@@ -1139,7 +1139,7 @@ mod tests {
                 assert!(
                     matches!(
                         def.kind,
-                        permission::ConnectorToolKind::Read | permission::ConnectorToolKind::Write
+                        ConnectorToolKind::Read | ConnectorToolKind::Write
                     ),
                     "{} must carry an explicit kind",
                     def.name
@@ -1193,14 +1193,14 @@ mod tests {
                 if writes.contains(&def.name) {
                     assert_eq!(
                         def.kind,
-                        permission::ConnectorToolKind::Write,
+                        ConnectorToolKind::Write,
                         "{} must be Write",
                         def.name
                     );
                 } else {
                     assert_eq!(
                         def.kind,
-                        permission::ConnectorToolKind::Read,
+                        ConnectorToolKind::Read,
                         "{} must be Read",
                         def.name
                     );

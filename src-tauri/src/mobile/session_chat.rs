@@ -366,6 +366,7 @@ fn handle_send_chat_message(
         approval,
         Vec::new(),
         Vec::new(),
+        Vec::new(),
         None,
         messages,
         Arc::clone(db),

@@ -28,6 +28,15 @@ pub struct Connector {
     /// titled with the family's real brand logo, with the individual products
     /// as rows beneath it. Single-member families (Notion) render as one card.
     pub family: &'static str,
+    /// One-sentence capability summary. Shown in the system-prompt manifest so
+    /// the model can decide whether to attach this connector on demand
+    /// (`attach_connector`) — the full tool schemas are NOT sent until then.
+    pub description: &'static str,
+    /// Lowercase trigger phrases for the send-time relevance fast-path
+    /// (`chat::prompts::detect_connector_mentions`). Matched as word-boundary
+    /// substrings against the lowercased user message; a hit attaches the
+    /// connector without the model needing the `attach_connector` hop.
+    pub keywords: &'static [&'static str],
     /// OAuth 2.0 authorization endpoint (browser points here for login+consent).
     pub authorize_url: &'static str,
     /// Token exchange + refresh endpoint.
@@ -121,7 +130,7 @@ impl Connector {
 /// `Deserialize` is needed only for the test that round-trips the registry; the
 /// runtime path reads it as `Serialize` to send to the frontend.
 #[cfg(test)]
-impl<'de> Deserialize<'de> for Connector {
+impl<'de> serde::Deserialize<'de> for Connector {
     fn deserialize<D: serde::Deserializer<'de>>(_d: D) -> Result<Self, D::Error> {
         unreachable!("Connector is constructed statically, not deserialized")
     }
@@ -181,6 +190,8 @@ pub const NOTION: Connector = Connector {
     display_name: "Notion",
     icon: "📓",
     family: "notion",
+    description: "Search, read, create, and update pages, databases, and notes in the user's Notion workspace.",
+    keywords: &["notion", "my notes", "my pages", "notion page", "notion database"],
     // The remote MCP server at mcp.notion.com is itself an OAuth resource
     // server (RFC 8707) with its OWN authorization/token endpoints
     // (discovered via .well-known/oauth-authorization-server). The REST-API
@@ -253,6 +264,8 @@ pub const GMAIL: Connector = Connector {
     display_name: "Gmail",
     icon: "✉️",
     family: "google",
+    description: "Search, read, draft, send, and manage the user's Gmail email.",
+    keywords: &["gmail", "my email", "my inbox", "email thread", "draft an email", "send an email", "send email"],
     authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
     token_url: "https://oauth2.googleapis.com/token",
     client_id: env_or_empty!("GOOGLE_CLIENT_ID"),
@@ -308,6 +321,8 @@ pub const GOOGLE_DRIVE: Connector = Connector {
     display_name: "Google Drive",
     icon: "🗂️",
     family: "google",
+    description: "Search, read, and create files stored in the user's Google Drive.",
+    keywords: &["google drive", "my drive", "drive file", "gdrive"],
     authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
     token_url: "https://oauth2.googleapis.com/token",
     client_id: env_or_empty!("GOOGLE_CLIENT_ID"),
@@ -326,6 +341,8 @@ pub const GOOGLE_DOCS: Connector = Connector {
     display_name: "Google Docs",
     icon: "📝",
     family: "google",
+    description: "Read and edit text documents in Google Docs.",
+    keywords: &["google doc", "google docs", "gdoc"],
     authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
     token_url: "https://oauth2.googleapis.com/token",
     client_id: env_or_empty!("GOOGLE_CLIENT_ID"),
@@ -344,6 +361,8 @@ pub const GOOGLE_SHEETS: Connector = Connector {
     display_name: "Google Sheets",
     icon: "📊",
     family: "google",
+    description: "Read and edit spreadsheets in Google Sheets.",
+    keywords: &["google sheet", "google sheets", "gsheet", "spreadsheet in my"],
     authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
     token_url: "https://oauth2.googleapis.com/token",
     client_id: env_or_empty!("GOOGLE_CLIENT_ID"),
@@ -362,6 +381,8 @@ pub const GOOGLE_SLIDES: Connector = Connector {
     display_name: "Google Slides",
     icon: "📽️",
     family: "google",
+    description: "Read and edit presentations in Google Slides.",
+    keywords: &["google slide", "google slides", "gslide"],
     authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
     token_url: "https://oauth2.googleapis.com/token",
     client_id: env_or_empty!("GOOGLE_CLIENT_ID"),
@@ -380,6 +401,8 @@ pub const GOOGLE_CALENDAR: Connector = Connector {
     display_name: "Google Calendar",
     icon: "📅",
     family: "google",
+    description: "Read, create, update, and delete events and calendars in Google Calendar.",
+    keywords: &["google calendar", "my calendar", "calendar event", "my events", "my schedule", "my meetings", "gcal"],
     authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
     token_url: "https://oauth2.googleapis.com/token",
     client_id: env_or_empty!("GOOGLE_CLIENT_ID"),
@@ -399,6 +422,8 @@ pub const GOOGLE_CHAT: Connector = Connector {
     display_name: "Google Chat",
     icon: "💬",
     family: "google",
+    description: "Read and send messages in Google Chat spaces.",
+    keywords: &["google chat", "gchat", "chat space"],
     authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
     token_url: "https://oauth2.googleapis.com/token",
     client_id: env_or_empty!("GOOGLE_CLIENT_ID"),
@@ -418,6 +443,8 @@ pub const GOOGLE_PEOPLE: Connector = Connector {
     display_name: "Google People",
     icon: "👥",
     family: "google",
+    description: "Look up the user's Google contacts and directory profiles.",
+    keywords: &["my contacts", "google contacts", "contact info for", "directory"],
     authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
     token_url: "https://oauth2.googleapis.com/token",
     client_id: env_or_empty!("GOOGLE_CLIENT_ID"),
@@ -449,6 +476,8 @@ pub const KIWI: Connector = Connector {
     display_name: "Kiwi.com",
     icon: "🥝",
     family: "kiwi",
+    description: "Search flights and itineraries with booking links via Kiwi.com.",
+    keywords: &["kiwi", "flight search", "find flights", "flights from", "flights to", "cheapest flight", "plane ticket"],
     // No OAuth and no key: public endpoint — `is_public()` signals "no OAuth
     // flow" and `configured()` always returns true for it.
     authorize_url: "",
@@ -496,6 +525,8 @@ pub const GITHUB: Connector = Connector {
     display_name: "GitHub",
     icon: "🐙",
     family: "github",
+    description: "Access GitHub repositories, issues, pull requests, and code.",
+    keywords: &["github", "my pull request", "pull request on", "issue on github", "my repos", "github repo"],
     authorize_url: "https://github.com/login/oauth/authorize",
     token_url: "https://github.com/login/oauth/access_token",
     client_id: env_or_empty!("GITHUB_CLIENT_ID"),
@@ -539,6 +570,8 @@ pub const CANVA: Connector = Connector {
     display_name: "Canva",
     icon: "🎨",
     family: "canva",
+    description: "Create and edit designs, assets, and brand templates in Canva.",
+    keywords: &["canva", "canva design"],
     authorize_url: "https://mcp.canva.com/authorize",
     token_url: "https://mcp.canva.com/token",
     // Public client registered at runtime via `registration_url` — no static

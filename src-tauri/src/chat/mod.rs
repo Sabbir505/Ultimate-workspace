@@ -84,6 +84,21 @@ pub struct ChatManager {
     /// system prompt, model) so any transcript / prompt / model change
     /// invalidates. Entries are removed on session delete.
     context_token_cache: Mutex<HashMap<String, (String, u32)>>,
+    /// Attach-on-demand hand-off, keyed by chat session id. The dispatcher's
+    /// `attach_connector` / `attach_mcp_server` handlers push freshly
+    /// connected sources into the live turn's slot; the tool loops drain it
+    /// after each round and merge the new tools into the request so the very
+    /// next round can call them. One slot per session (one live turn per
+    /// session — `send` cancels any prior stream first).
+    late_attach: Mutex<HashMap<String, Arc<Mutex<LateAttach>>>>,
+}
+
+/// Sources attached mid-turn by the `attach_connector` / `attach_mcp_server`
+/// meta-tools, awaiting pickup by the turn's tool loop.
+#[derive(Default)]
+pub(crate) struct LateAttach {
+    pub connectors: Vec<crate::connectors::AttachedConnector>,
+    pub mcp: Vec<crate::mcp_gallery::McpToolEntry>,
 }
 
 impl ChatManager {
@@ -93,7 +108,26 @@ impl ChatManager {
             streams: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             context_token_cache: Mutex::new(HashMap::new()),
+            late_attach: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Register (or reset) the late-attach slot for a session's turn. Called
+    /// by `send` before the turn spawns; `clear_late_attach` on completion.
+    pub(crate) fn reset_late_attach(&self, sid: &str) -> Arc<Mutex<LateAttach>> {
+        let slot = Arc::new(Mutex::new(LateAttach::default()));
+        self.late_attach.lock().insert(sid.to_string(), Arc::clone(&slot));
+        slot
+    }
+
+    /// The live turn's late-attach slot, if a turn is running for `sid`.
+    pub(crate) fn late_attach_slot(&self, sid: &str) -> Option<Arc<Mutex<LateAttach>>> {
+        self.late_attach.lock().get(sid).map(Arc::clone)
+    }
+
+    /// Drop the slot when the turn ends (`send`'s spawn tail).
+    pub(crate) fn clear_late_attach(&self, sid: &str) {
+        self.late_attach.lock().remove(sid);
     }
 
     /// Look up a memoized token count for the given fingerprint.
@@ -198,6 +232,9 @@ impl ChatManager {
         // spawned turn; their remote tools are merged into the schema and
         // routed through the connector permission gate in dispatch.
         connector_ids: Vec<String>,
+        // MCP-gallery server ids (`mcp:<id>` session rows) attached to this
+        // conversation — same attach-on-demand contract as `connector_ids`.
+        mcp_server_ids: Vec<String>,
         system: Option<String>,
         messages: Vec<ChatMessage>,
         db: Arc<Mutex<Connection>>,
@@ -248,6 +285,7 @@ impl ChatManager {
         let client = self.client.clone();
         let sid = chat_session_id.clone();
         let pcaps = prompts::provider_capabilities(provider_id.clone(), &chat_req.model);
+        let local_model = matches!(provider_id, ChatProviderId::LocalGguf);
         // Local-docs search tool is exposed only when (a) the embedding
         // sidecar is already running for this turn, AND (b) at least one
         // enabled corpus has chunks indexed. Both are cheap DB/registry queries
@@ -280,16 +318,50 @@ impl ChatManager {
                 _ => Vec::new(),
             }
         };
-        let caps = tools::ToolCaps {
-            code_exec: code_exec_enabled,
-            fs_roots,
-            web_search: pcaps.native_web_search,
-            requires_local_sandbox: pcaps.requires_local_sandbox,
-            attached_connectors: Arc::new(Vec::new()),
-            local_docs,
-            mcp_tools: Arc::new(Vec::new()),
-            fs_rules,
+        let caps = {
+            // Attach-on-demand catalog: available-but-not-attached connectors
+            // and gallery servers. Drives the `attach_connector` /
+            // `attach_mcp_server` enum params — their full tool schemas join
+            // the request only after an attach (see dispatch + the loops'
+            // late-attach drain).
+            let attachable_c: Vec<(String, String)> = {
+                let db_state = app.state::<crate::DbState>();
+                let conn = db_state.0.lock();
+                let credentialed: Vec<String> = db::list_connector_credential_rows(&conn)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|r| r.connector_id)
+                    .collect();
+                crate::connectors::CONNECTORS
+                    .iter()
+                    .filter(|c| {
+                        (c.is_public() || credentialed.iter().any(|id| id == c.id))
+                            && !connector_ids.iter().any(|id| id == c.id)
+                    })
+                    .map(|c| (c.id.to_string(), c.display_name.to_string()))
+                    .collect()
+            };
+            let attachable_m: Vec<(String, String)> = crate::mcp_gallery::load_defs(&app)
+                .into_iter()
+                .filter(|d| d.enabled && !mcp_server_ids.iter().any(|id| *id == d.id))
+                .map(|d| (d.id, d.name))
+                .collect();
+            tools::ToolCaps {
+                code_exec: code_exec_enabled,
+                fs_roots,
+                web_search: pcaps.native_web_search,
+                requires_local_sandbox: pcaps.requires_local_sandbox,
+                attached_connectors: Arc::new(Vec::new()),
+                local_docs,
+                mcp_tools: Arc::new(Vec::new()),
+                fs_rules,
+                attachable_connectors: Arc::new(attachable_c),
+                attachable_mcp: Arc::new(attachable_m),
+                local_model,
+            }
         };
+        // Fresh late-attach slot for this turn (replaces any stale one).
+        self.reset_late_attach(&sid);
         let mgr = Arc::clone(self);
 
         let handle = tokio::spawn(async move {
@@ -335,10 +407,44 @@ impl ChatManager {
             // Sessions are cached across turns; a server that fails to
             // start is skipped without failing the turn.
             if tools_enabled {
-                let mcp_tools = crate::mcp_gallery::attach_enabled(&app).await;
+                let mcp_tools = crate::mcp_gallery::attach_filtered(&app, Some(&mcp_server_ids)).await;
                 if !mcp_tools.is_empty() {
                     caps.mcp_tools = Arc::new(mcp_tools);
                 }
+            }
+
+            // [prompt-audit]: per-source tool attachment feeding this turn's
+            // `tools` array — every attached tool ships its full vendor
+            // description, and the send path logs the serialized total.
+            if tools_enabled {
+                let conns: Vec<String> = caps
+                    .attached_connectors
+                    .iter()
+                    .map(|c| {
+                        let desc: usize = c
+                            .tools
+                            .values()
+                            .map(|(_, d)| d.as_ref().map(|s| s.len()).unwrap_or(0))
+                            .sum();
+                        format!("{}={} tools/{} desc chars", c.display_name, c.tools.len(), desc)
+                    })
+                    .collect();
+                let mut mcp: std::collections::BTreeMap<&str, (usize, usize)> =
+                    Default::default();
+                for e in caps.mcp_tools.iter() {
+                    let agg = mcp.entry(e.server_name.as_str()).or_default();
+                    agg.0 += 1;
+                    agg.1 += e.description.as_ref().map(|s| s.len()).unwrap_or(0);
+                }
+                let mcps: Vec<String> = mcp
+                    .iter()
+                    .map(|(name, (n, desc))| format!("{name}={n} tools/{desc} desc chars"))
+                    .collect();
+                eprintln!(
+                    "[prompt-audit] attached: connectors=[{}] mcp_servers=[{}]",
+                    conns.join(", "),
+                    mcps.join(", ")
+                );
             }
 
             // ── Per-turn local-docs auto-retrieval (§3.1.7) ─────────────────
@@ -376,12 +482,12 @@ impl ChatManager {
 
             let result = if tools_enabled && is_openai {
                 run_openai_tool_loop(
-                    &client, &tool_base, &api_key, &chat_req, &caps, sandbox, approval, &mgr, &sid, &app, research_mode, perf.clone(),
+                    &client, &tool_base, &api_key, &chat_req, caps, sandbox, approval, &mgr, &sid, &app, research_mode, perf.clone(),
                 )
                 .await
             } else if tools_enabled && is_anthropic {
                 run_anthropic_tool_loop(
-                    &client, &tool_base, &api_key, &chat_req, &caps, sandbox, approval, &mgr, &sid, &app, research_mode, perf.clone(),
+                    &client, &tool_base, &api_key, &chat_req, caps, sandbox, approval, &mgr, &sid, &app, research_mode, perf.clone(),
                 )
                 .await
             } else {
@@ -549,6 +655,10 @@ impl ChatManager {
             // removing unconditionally would clobber the newer stream's
             // handle and leave it uncancellable.
             mgr.remove_stream_if_current(&sid, tokio::task::id());
+            // Drop this turn's late-attach slot — anything the model attached
+            // mid-turn is already persisted to the session rows, so the next
+            // turn re-attaches through the normal send path.
+            mgr.clear_late_attach(&sid);
             // Clear the active per-turn perf accumulator so a later turn
             // starts fresh (and so `emit_token` stops recording to it).
             crate::chat::turn_perf::unregister(&sid);
@@ -983,6 +1093,74 @@ mod tests {
         assert!(is_research_request("Deep dive on CRDTs please"));
     }
 
+    /// 8k-token budget guard (attach-on-demand): a fresh tool-enabled turn
+    /// ships only core prompt + skills catalog + attach manifest + built-in
+    /// tool specs — no connector/MCP schemas until an attach. Char proxy:
+    /// the specs JSON measured ≈4.1 chars/token against llama-server's
+    /// /tokenize (description-dense JSON) and prompt prose ≈3.3, so the
+    /// assembled baseline must stay under ~30k chars to keep prompt_tokens
+    /// < 8k. The live `[prompt-audit]` logs are ground truth; a regression
+    /// here almost certainly re-inlined a schema or guide that every turn
+    /// pays for (see DOC_STYLE_GUIDE for the moved-out example).
+    #[test]
+    fn fresh_turn_baseline_under_8k_budget() {
+        let caps = tools::ToolCaps {
+            // Reflect a real fresh turn: attachable sources present → the
+            // attach meta-tools are advertised too.
+            attachable_connectors: std::sync::Arc::new(vec![
+                ("gmail".to_string(), "Gmail".to_string()),
+                ("notion".to_string(), "Notion".to_string()),
+            ]),
+            attachable_mcp: std::sync::Arc::new(vec![("fs".to_string(), "Filesystem".to_string())]),
+            ..tools::ToolCaps::default()
+        };
+        let sandbox = crate::chat::permission::SandboxPolicy::WorkspaceWrite;
+        let all_specs = tools::openai_tool_specs(&caps, sandbox);
+        let mut by_size: Vec<(usize, String)> = all_specs
+            .iter()
+            .map(|s| {
+                (
+                    serde_json::to_string(s).unwrap().len(),
+                    s.pointer("/function/name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("?")
+                        .to_string(),
+                )
+            })
+            .collect();
+        by_size.sort_by(|a, b| b.0.cmp(&a.0));
+        for (size, name) in by_size.iter().take(10) {
+            println!("[budget] {name}: {size} chars");
+        }
+        let specs = serde_json::to_string(&all_specs).unwrap();
+        let manifest = prompts::attach_manifest_segment(
+            &[prompts::ManifestEntry {
+                id: "gmail".into(),
+                name: "Gmail".into(),
+                description: "Read and send email.".into(),
+            }],
+            &[],
+        );
+        let system = build_system_prompt(
+            ChatProviderId::LocalGguf,
+            "llama-3.1-8b",
+            Some("always respond in english"),
+            &[],
+            true,
+            false,
+            manifest.as_deref(),
+        )
+        .unwrap();
+        let total = system.len() + specs.len();
+        println!(
+            "fresh-turn baseline: system {} + specs {} = {} chars",
+            system.len(),
+            specs.len(),
+            total
+        );
+        assert!(total < 30_000, "fresh-turn baseline over 8k budget: {total} chars");
+    }
+
     #[test]
     fn research_override_prefix_forces_research_mode() {
         // /research bypasses the single-fact guards even with no trigger phrase.
@@ -1017,6 +1195,7 @@ mod tests {
             &[],
             true,
             true,
+            None,
         )
         .unwrap();
         assert!(p.contains("Research mode (this turn)"));
@@ -1029,6 +1208,7 @@ mod tests {
             &[],
             true,
             false,
+            None,
         )
         .unwrap();
         assert!(!p.contains("Research mode (this turn)"));
@@ -1040,6 +1220,7 @@ mod tests {
             &[],
             false,
             true,
+            None,
         )
         .unwrap();
         assert!(!p.contains("Research mode (this turn)"));
@@ -1054,6 +1235,7 @@ mod tests {
             &[],
             true,
             true,
+            None,
         )
         .unwrap();
         assert!(p.contains("cap at 8 reads"));
@@ -1065,6 +1247,7 @@ mod tests {
             &[],
             true,
             true,
+            None,
         )
         .unwrap();
         assert!(!pf.contains("cap at 8 reads"));

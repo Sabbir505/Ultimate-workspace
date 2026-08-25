@@ -24,10 +24,11 @@ use crate::DbState;
 /// referenced by absolute path in a CLI-facing appendix, since harnesses
 /// take plain text on stdin — their own file tools open the originals.
 ///
-/// Connectors: every connector connected in Settings → Connectors (plus
-/// public ones) is registered into the spawn's MCP config as a remote
-/// server with a freshly-refreshed OAuth token, so harness sessions see
-/// the same connector tools the built-in chat does.
+/// Connectors: attach-on-demand parity with the built-in chat — only
+/// connectors attached to this conversation (composer @-picker / keyword
+/// mention) are registered into the spawn's MCP config as remote servers
+/// with freshly-refreshed OAuth tokens. A fresh harness turn therefore
+/// starts with no connector overhead at all.
 #[tauri::command]
 pub async fn send_agent_chat_message(
     app: AppHandle,
@@ -41,10 +42,11 @@ pub async fn send_agent_chat_message(
     project_id: Option<String>,
     attachments: Option<Vec<crate::types::ChatAttachmentInput>>,
 ) -> Result<(), String> {
-    // Snapshot connected connectors (refreshing OAuth tokens) BEFORE the
-    // sync spawn path — the CLIs only read static MCP config at startup, so
-    // this is the one place fresh tokens can reach them.
-    let connectors = crate::connectors::harness_mcp_servers(&app).await;
+    // Snapshot the session's attached connectors (refreshing OAuth tokens)
+    // BEFORE the sync spawn path — the CLIs only read static MCP config at
+    // startup, so this is the one place fresh tokens can reach them.
+    let connectors =
+        crate::connectors::harness_mcp_servers(&app, &chat_session_id).await;
     let (content, attach_prompt) = match &attachments {
         Some(list) if !list.is_empty() => {
             // Same display markers/extraction the built-in path persists

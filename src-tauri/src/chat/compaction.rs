@@ -45,6 +45,34 @@ pub const COMPACTED_PREFIX: &str = "[compacted context]";
 /// safer default. Tunable via `chat.local_gguf.compaction_threshold`.
 pub const DEFAULT_THRESHOLD: f64 = 0.75;
 
+/// Adaptive compaction threshold scaled by context size:
+/// - Small windows (< 8K) need earlier compaction → lower threshold (0.60)
+/// - Medium windows (8K–16K) use the default (0.75)
+/// - Large windows (> 16K) can afford to wait longer → higher threshold (0.85)
+/// This prevents small-context sessions from hitting the 400-error mid-turn
+/// while letting large-context sessions eke out more history before compacting.
+fn adaptive_compaction_threshold(n_ctx: u32, user_threshold: f64) -> f64 {
+    // Scale between 0.60 and 0.85 based on context size.
+    // Small ctx: linearly interpolate down to 0.60 at 4K.
+    // Large ctx: linearly interpolate up to 0.85 at 32K and above.
+    let scaled = if n_ctx <= 8192 {
+        // 0.60 at 4K, linearly increasing to 0.75 at 8K
+        0.60 + (n_ctx as f64 - 4096.0) / (8192.0 - 4096.0) * (0.75 - 0.60)
+    } else if n_ctx <= 16384 {
+        // 0.75 at 8K, linearly increasing to 0.80 at 16K
+        0.75 + (n_ctx as f64 - 8192.0) / (16384.0 - 8192.0) * (0.80 - 0.75)
+    } else {
+        // 0.80 at 16K, capping at 0.85 for 32K+
+        0.80_f64.min(0.85)
+    };
+    // Blend with user override: user threshold dominates if explicitly set.
+    if user_threshold == DEFAULT_THRESHOLD {
+        scaled
+    } else {
+        user_threshold
+    }
+}
+
 /// Default number of recent *exchanges* (1 exchange = user + assistant) pinned
 /// verbatim. Tunable via `chat.local_gguf.compaction_pin_exchanges`.
 pub const DEFAULT_PIN_EXCHANGES: usize = 6;
@@ -538,7 +566,7 @@ pub async fn maybe_compact(
         },
     };
 
-    let trigger = ((effective_ctx as f64) * cfg.threshold) as u32;
+    let trigger = ((effective_ctx as f64) * adaptive_compaction_threshold(n_ctx, cfg.threshold)) as u32;
     if tokens.saturating_add(RESPONSE_HEADROOM) < trigger {
         return Ok(CompactionOutcome::passthrough(wire_messages()));
     }

@@ -14,6 +14,10 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
     if caps.web_search {
         specs.push(openai_fn(WEB_SEARCH, WEB_SEARCH_DESC, web_search_parameters()));
     }
+    // Attach-on-demand meta-tools: advertised only while unattached sources
+    // remain, with their ids as the enum (see ToolCaps). Connector/MCP tool
+    // schemas join the request only AFTER an attach.
+    specs_attach_tools_openai(caps, &mut specs);
     specs.extend(vec![
         openai_fn(GENERATE_FILE, GENERATE_FILE_DESC, generate_file_parameters()),
         openai_fn(
@@ -72,8 +76,11 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
     // we don't store the full input schema per turn, we advertise a permissive
     // object schema and let the server validate. Write-kind tools get an
     // approval note in the description so the model knows each will be gated.
-    append_connector_tools_openai(&caps.attached_connectors, sandbox, &mut specs);
-    append_mcp_tools_openai(&caps.mcp_tools, sandbox, &mut specs);
+    // Vendor tool descriptions are unbounded; an attached source still pays
+    // per-tool on every round-trip, so cap hard (tighter for local models).
+    let desc_cap = if caps.local_model { 300 } else { 800 };
+    append_connector_tools_openai(&caps.attached_connectors, sandbox, &mut specs, desc_cap);
+    append_mcp_tools_openai(&caps.mcp_tools, sandbox, &mut specs, desc_cap);
     specs
 }
 
@@ -88,6 +95,57 @@ fn openai_fn(name: &str, description: &str, parameters: Value) -> Value {
     })
 }
 
+/// Enum-of-ids parameter for the attach meta-tools. `param` is the argument
+/// name ("connector_id" / "server_id").
+fn attach_source_parameters(param: &str, ids: &[(String, String)]) -> Value {
+    let enum_ids: Vec<&str> = ids.iter().map(|(id, _)| id.as_str()).collect();
+    json!({
+        "type": "object",
+        "properties": {
+            param: {
+                "type": "string",
+                "enum": enum_ids,
+                "description": "One id from the \"Connected apps & servers\" list in the system prompt.",
+            }
+        },
+        "required": [param],
+    })
+}
+
+fn specs_attach_tools_openai(caps: &ToolCaps, specs: &mut Vec<Value>) {
+    if !caps.attachable_connectors.is_empty() {
+        specs.push(openai_fn(
+            ATTACH_CONNECTOR,
+            ATTACH_CONNECTOR_DESC,
+            attach_source_parameters("connector_id", &caps.attachable_connectors),
+        ));
+    }
+    if !caps.attachable_mcp.is_empty() {
+        specs.push(openai_fn(
+            ATTACH_MCP_SERVER,
+            ATTACH_MCP_SERVER_DESC,
+            attach_source_parameters("server_id", &caps.attachable_mcp),
+        ));
+    }
+}
+
+fn specs_attach_tools_anthropic(caps: &ToolCaps, specs: &mut Vec<Value>) {
+    if !caps.attachable_connectors.is_empty() {
+        specs.push(anthropic_fn(
+            ATTACH_CONNECTOR,
+            ATTACH_CONNECTOR_DESC,
+            attach_source_parameters("connector_id", &caps.attachable_connectors),
+        ));
+    }
+    if !caps.attachable_mcp.is_empty() {
+        specs.push(anthropic_fn(
+            ATTACH_MCP_SERVER,
+            ATTACH_MCP_SERVER_DESC,
+            attach_source_parameters("server_id", &caps.attachable_mcp),
+        ));
+    }
+}
+
 /// Anthropic `tools` array (`{name, description, input_schema}` entries).
 /// Same read-only filtering as [`openai_tool_specs`].
 pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) -> Vec<Value> {
@@ -95,6 +153,8 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
     if caps.web_search {
         specs.push(anthropic_fn(WEB_SEARCH, WEB_SEARCH_DESC, web_search_parameters()));
     }
+    // Attach-on-demand meta-tools (mirror of the OpenAI builder's call).
+    specs_attach_tools_anthropic(caps, &mut specs);
     specs.extend(vec![
         anthropic_fn(GENERATE_FILE, GENERATE_FILE_DESC, generate_file_parameters()),
         anthropic_fn(
@@ -141,8 +201,9 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
     if caps.code_exec {
         specs.push(anthropic_fn(RUN_CODE, RUN_CODE_DESC, run_code_parameters()));
     }
-    append_connector_tools_anthropic(&caps.attached_connectors, sandbox, &mut specs);
-    append_mcp_tools_anthropic(&caps.mcp_tools, sandbox, &mut specs);
+    let desc_cap = if caps.local_model { 300 } else { 800 };
+    append_connector_tools_anthropic(&caps.attached_connectors, sandbox, &mut specs, desc_cap);
+    append_mcp_tools_anthropic(&caps.mcp_tools, sandbox, &mut specs, desc_cap);
     specs
 }
 
@@ -173,11 +234,9 @@ fn generate_file_parameters() -> Value {
         "properties": {
             "format": {
                 "type": "string",
-                "description": "The file format: a document format (pdf, docx, \
-                    pptx, xlsx, csv, md, txt, html, json) OR a source-code \
-                    language so the file gets the right extension (python, \
-                    javascript, typescript, jsx, tsx, java, c, cpp, csharp, go, \
-                    rust, ruby, php, swift, kotlin, sql, bash, yaml, css, …).",
+                "description": "Document format (pdf, docx, pptx, xlsx, csv, md, \
+                    txt, html, json) or a source-code language for the right \
+                    extension (python, rust, typescript, …).",
             },
             "filename": {
                 "type": "string",
@@ -213,11 +272,9 @@ fn generate_document_parameters() -> Value {
             "code": {
                 "type": "string",
                 "description": "Complete Python source that builds the document \
-                    and saves it to the CONDUIT_OUTPUT path. For docx/pptx \
-                    prefer `import conduit_docgen as cd` (pre-installed styled \
-                    toolkit); otherwise use python-docx / python-pptx / openpyxl \
-                    / reportlab directly. Produce a polished, themed result with \
-                    real content — not a plain text dump.",
+                    and saves it to the CONDUIT_OUTPUT path. Prefer \
+                    `import conduit_docgen as cd` (styled toolkit); style guide \
+                    arrives with the tool result.",
             }
         },
         "required": ["format", "filename", "code"],
@@ -288,19 +345,14 @@ fn browser_read_parameters() -> Value {
                 "type": "string",
                 "enum": ["full", "summary_only", "section"],
                 "default": "full",
-                "description": "Extraction mode: 'full' for complete cleaned article \
-                    (default), 'summary_only' for just headings + first ~1500 chars of \
-                    body (lightweight, for context-budget triage), 'section' to extract \
-                    only content under a given CSS selector or heading text."
+                "description": "'full' = complete cleaned article (default); \
+                    'summary_only' = headings + first ~1500 chars (cheap triage); \
+                    'section' = content under the given selector/heading."
             },
             "selector": {
                 "type": "string",
-                "description": "CSS selector or heading text (case-insensitive contains \
-                    match). Only used when mode='section'. If it looks like a CSS selector \
-                    (#id, .class, > child), the first matching element's subtree is \
-                    extracted; otherwise the first heading whose text contains it is \
-                    located and content is extracted from there to the next same-or-higher \
-                    level heading."
+                "description": "CSS selector (#id, .class) or heading text \
+                    (contains match). Only used when mode='section'."
             }
         },
         "additionalProperties": false
@@ -677,7 +729,11 @@ fn search_content_parameters() -> Value {
 // Write-kind tools' descriptions with an approval note so the model knows each
 // mutating call will be gated.
 
-fn connector_tool_description(att: &crate::connectors::AttachedConnector, name: &str) -> String {
+fn connector_tool_description(
+    att: &crate::connectors::AttachedConnector,
+    name: &str,
+    desc_cap: usize,
+) -> String {
     let kind = att.tools.get(name).map(|(k, _)| *k);
     let base = att
         .tools
@@ -695,8 +751,31 @@ fn connector_tool_description(att: &crate::connectors::AttachedConnector, name: 
     if base.is_empty() {
         format!("{header}{name}")
     } else {
-        format!("{header}{base}")
+        format!("{header}{}", truncate_desc(&base, desc_cap))
     }
+}
+
+/// Hard-cap a vendor tool description. Vendor descriptions are unbounded
+/// (Notion ships single descriptions of 8k chars); once a source is attached
+/// its per-tool line still ships on every round-trip of every turn, so the
+/// local tier especially needs a tight cap.
+fn truncate_desc(s: &str, cap: usize) -> String {
+    if s.chars().count() <= cap {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(cap).collect();
+    let trimmed = trimmed_char_boundary(&cut);
+    format!("{trimmed}…")
+}
+
+/// Floor a char-count cut to a byte boundary without pulling in
+/// `str::floor_char_boundary` (still unstable).
+fn trimmed_char_boundary(s: &str) -> &str {
+    let mut end = s.len();
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 fn permissive_params() -> Value {
@@ -708,6 +787,7 @@ fn append_connector_tools_openai(
     attached: &[crate::connectors::AttachedConnector],
     sandbox: permission::SandboxPolicy,
     specs: &mut Vec<Value>,
+    desc_cap: usize,
 ) {
     for att in attached {
         for name in att.tools.keys() {
@@ -720,7 +800,7 @@ fn append_connector_tools_openai(
             {
                 continue;
             }
-            let description = connector_tool_description(att, name);
+            let description = connector_tool_description(att, name, desc_cap);
             specs.push(openai_fn(name, &description, permissive_params()));
         }
     }
@@ -730,6 +810,7 @@ fn append_connector_tools_anthropic(
     attached: &[crate::connectors::AttachedConnector],
     sandbox: permission::SandboxPolicy,
     specs: &mut Vec<Value>,
+    desc_cap: usize,
 ) {
     for att in attached {
         for name in att.tools.keys() {
@@ -739,7 +820,7 @@ fn append_connector_tools_anthropic(
             {
                 continue;
             }
-            let description = connector_tool_description(att, name);
+            let description = connector_tool_description(att, name, desc_cap);
             specs.push(anthropic_fn(name, &description, permissive_params()));
         }
     }
@@ -752,7 +833,7 @@ fn append_connector_tools_anthropic(
 // (`mcp_<server>_<tool>`) so two servers can expose the same raw tool name
 // without colliding with each other or the built-ins.
 
-fn mcp_tool_description(entry: &crate::mcp_gallery::McpToolEntry) -> String {
+fn mcp_tool_description(entry: &crate::mcp_gallery::McpToolEntry, desc_cap: usize) -> String {
     let header = format!(
         "[{} MCP server{}] ",
         entry.server_name,
@@ -762,7 +843,7 @@ fn mcp_tool_description(entry: &crate::mcp_gallery::McpToolEntry) -> String {
         }
     );
     match &entry.description {
-        Some(d) if !d.is_empty() => format!("{header}{d}"),
+        Some(d) if !d.is_empty() => format!("{header}{}", truncate_desc(d, desc_cap)),
         _ => format!("{header}{}", entry.raw_name),
     }
 }
@@ -771,6 +852,7 @@ pub(crate) fn append_mcp_tools_openai(
     entries: &[crate::mcp_gallery::McpToolEntry],
     sandbox: permission::SandboxPolicy,
     specs: &mut Vec<Value>,
+    desc_cap: usize,
 ) {
     for entry in entries {
         if !sandbox.allows_mutating_tools()
@@ -780,7 +862,7 @@ pub(crate) fn append_mcp_tools_openai(
         }
         specs.push(openai_fn(
             &entry.wire_name,
-            &mcp_tool_description(entry),
+            &mcp_tool_description(entry, desc_cap),
             permissive_params(),
         ));
     }
@@ -790,6 +872,7 @@ pub(crate) fn append_mcp_tools_anthropic(
     entries: &[crate::mcp_gallery::McpToolEntry],
     sandbox: permission::SandboxPolicy,
     specs: &mut Vec<Value>,
+    desc_cap: usize,
 ) {
     for entry in entries {
         if !sandbox.allows_mutating_tools()
@@ -799,7 +882,7 @@ pub(crate) fn append_mcp_tools_anthropic(
         }
         specs.push(anthropic_fn(
             &entry.wire_name,
-            &mcp_tool_description(entry),
+            &mcp_tool_description(entry, desc_cap),
             permissive_params(),
         ));
     }
@@ -835,7 +918,7 @@ mod tests {
 
         // FullAuto: both tools advertised, write tagged in the description.
         let mut specs = Vec::new();
-        append_mcp_tools_openai(&entries, permission::SandboxPolicy::WorkspaceWrite, &mut specs);
+        append_mcp_tools_openai(&entries, permission::SandboxPolicy::WorkspaceWrite, &mut specs, 800);
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0]["function"]["name"], "mcp_memory_search_nodes");
         assert!(specs[0]["function"]["description"]
@@ -849,7 +932,7 @@ mod tests {
 
         // read_only: the Write tool is stripped entirely.
         let mut ro = Vec::new();
-        append_mcp_tools_anthropic(&entries, permission::SandboxPolicy::ReadOnly, &mut ro);
+        append_mcp_tools_anthropic(&entries, permission::SandboxPolicy::ReadOnly, &mut ro, 800);
         assert_eq!(ro.len(), 1);
         assert_eq!(ro[0]["name"], "mcp_memory_search_nodes");
     }

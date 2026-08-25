@@ -262,12 +262,19 @@ async fn openai_stream_round(
                         } else {
                             // Hold back a trailing partial-opener tail (a
                             // proper prefix of `<tool_call`) until the next
-                            // chunk resolves it either way.
+                            // chunk resolves it either way. Suffix offsets
+                            // must land on char boundaries — a chunk can end
+                            // mid multi-byte character (e.g. an em-dash), and
+                            // a raw byte slice there panics.
                             const MARKER: &str = "<tool_call";
                             let mut split = piece.len();
                             for n in (1..MARKER.len().min(piece.len())).rev() {
-                                if MARKER.starts_with(&piece[piece.len() - n..]) {
-                                    split = piece.len() - n;
+                                let at = piece.len() - n;
+                                if !piece.is_char_boundary(at) {
+                                    continue;
+                                }
+                                if MARKER.starts_with(&piece[at..]) {
+                                    split = at;
                                     break;
                                 }
                             }
@@ -629,6 +636,61 @@ async fn anthropic_stream_round(
     Ok((content, usage))
 }
 
+/// Fold sources registered by the `attach_connector` / `attach_mcp_server`
+/// meta-tools into the turn's live caps (deduped by connector id / wire
+/// name). Returns true when anything changed → the caller must rebuild its
+/// tool-spec array. Connector tables aren't `Clone` (they hold live MCP
+/// sessions), which is why the loops receive `ToolCaps` BY VALUE: the loop
+/// then owns the only strong Arc ref and `try_unwrap` hands us the Vec to
+/// extend. If a future caller ever shares that Arc, the connector merge
+/// degrades to a restore-and-skip instead of panicking mid-turn.
+fn fold_late_attaches(
+    mgr: &Arc<ChatManager>,
+    sid: &str,
+    live_caps: &mut tools::ToolCaps,
+) -> bool {
+    let Some(slot) = mgr.late_attach_slot(sid) else { return false };
+    let late = std::mem::take(&mut *slot.lock());
+    if late.connectors.is_empty() && late.mcp.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+    if !late.connectors.is_empty() {
+        let taken = std::mem::replace(
+            &mut live_caps.attached_connectors,
+            std::sync::Arc::new(Vec::new()),
+        );
+        match std::sync::Arc::try_unwrap(taken) {
+            Ok(mut conns) => {
+                for c in late.connectors {
+                    if !conns.iter().any(|e| e.connector_id == c.connector_id) {
+                        conns.push(c);
+                        changed = true;
+                    }
+                }
+                live_caps.attached_connectors = std::sync::Arc::new(conns);
+            }
+            Err(arc) => {
+                live_caps.attached_connectors = arc;
+            }
+        }
+    }
+    if !late.mcp.is_empty() {
+        let mut mcp = (*live_caps.mcp_tools).clone();
+        let before = mcp.len();
+        for e in late.mcp {
+            if !mcp.iter().any(|x| x.wire_name == e.wire_name) {
+                mcp.push(e);
+            }
+        }
+        if mcp.len() != before {
+            live_caps.mcp_tools = std::sync::Arc::new(mcp);
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Agentic tool loop for OpenAI-style providers (native + compatible).
 ///
 /// Uses streaming `/v1/chat/completions` calls: request with `tools`, stream
@@ -642,7 +704,7 @@ pub(crate) async fn run_openai_tool_loop(
     base: &str,
     api_key: &str,
     req: &ChatRequest,
-    caps: &tools::ToolCaps,
+    caps: tools::ToolCaps,
     sandbox: permission::SandboxPolicy,
     approval: permission::ApprovalPolicy,
     mgr: &Arc<ChatManager>,
@@ -652,7 +714,12 @@ pub(crate) async fn run_openai_tool_loop(
     perf: crate::chat::turn_perf::TurnPerf,
 ) -> Result<(String, Option<ChatUsage>), String> {
     let url = format!("{base}/v1/chat/completions");
-    let tool_specs = tools::openai_tool_specs(caps, sandbox);
+    // Mutable working copy (owned — see fold_late_attaches for why the loops
+    // take ToolCaps by value): the late-attach drain folds model-initiated
+    // `attach_connector` / `attach_mcp_server` results into the live caps +
+    // specs mid-turn.
+    let mut live_caps = caps;
+    let mut tool_specs = tools::openai_tool_specs(&live_caps, sandbox);
     let art_dir = artifacts_dir(app);
     let cap = if research_mode {
         RESEARCH_MAX_TOOL_ITERS
@@ -684,7 +751,44 @@ pub(crate) async fn run_openai_tool_loop(
     let mut full = String::new();
     let mut total = RoundUsage::default();
 
-    for _ in 0..cap {
+    // [prompt-audit]: final wire composition. On local models the --jinja
+    // chat template renders the `tools` array into the prompt, so the tools
+    // JSON size — not just the system prompt — drives prompt_tokens.
+    {
+        let tools_json = serde_json::to_string(&tool_specs).unwrap_or_default();
+        let hist_chars: usize = req.messages.iter().map(|m| m.content.len()).sum();
+        let retrieval_chars: usize = req.local_docs_retrieval.iter().map(|s| s.len()).sum();
+        eprintln!(
+            "[prompt-audit] request: {} tool specs/{} chars JSON, system={} chars, \
+             history={} msgs/{} chars, retrieval={} chars",
+            tool_specs.len(),
+            tools_json.len(),
+            req.system.as_ref().map(|s| s.len()).unwrap_or(0),
+            req.messages.len(),
+            hist_chars,
+            retrieval_chars
+        );
+        let mut by_desc: Vec<(usize, &str)> = tool_specs
+            .iter()
+            .filter_map(|s| {
+                let name = s.pointer("/function/name").and_then(|n| n.as_str())?;
+                let desc = s
+                    .pointer("/function/description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("");
+                Some((desc.len(), name))
+            })
+            .collect();
+        by_desc.sort_by(|a, b| b.0.cmp(&a.0));
+        let top: Vec<String> = by_desc
+            .iter()
+            .take(6)
+            .map(|(chars, name)| format!("{name}({chars})"))
+            .collect();
+        eprintln!("[prompt-audit] largest tool descriptions: {}", top.join(", "));
+    }
+
+    for round in 0..cap {
         let mut body = json!({
             "model": req.model,
             "messages": messages,
@@ -708,6 +812,12 @@ pub(crate) async fn run_openai_tool_loop(
         let (message, round_usage) =
             openai_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?;
         perf.end_gen();
+        if round_usage.have {
+            eprintln!(
+                "[prompt-audit] round {round}: server prompt_tokens={} completion_tokens={}",
+                round_usage.input, round_usage.output
+            );
+        }
         total.add(round_usage);
 
         let tool_calls = message
@@ -817,7 +927,7 @@ pub(crate) async fn run_openai_tool_loop(
                 let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
                 emit_token(app, sid, &open, &mut full);
                 perf.begin_tool();
-                let result = run_tool(client, &art_dir, caps, sandbox, approval, mgr, app, sid, &name, &args).await;
+                let result = run_tool(client, &art_dir, &live_caps, sandbox, approval, mgr, app, sid, &name, &args).await;
                 perf.end_tool();
                 if block.ends_with("</tool>") {
                     emit_token(app, sid, "</tool>", &mut full);
@@ -844,6 +954,17 @@ pub(crate) async fn run_openai_tool_loop(
                     "content": result,
                 }));
             }
+            // Attach-on-demand drain: fold anything the attach meta-tools
+            // registered into the live caps + specs so the NEXT round can
+            // call the new tools.
+            if fold_late_attaches(mgr, sid, &mut live_caps) {
+                tool_specs = tools::openai_tool_specs(&live_caps, sandbox);
+                eprintln!(
+                    "[prompt-audit] late-attach: specs now {} ({} chars JSON)",
+                    tool_specs.len(),
+                    serde_json::to_string(&tool_specs).map(|s| s.len()).unwrap_or(0)
+                );
+            }
             continue;
         }
 
@@ -867,7 +988,7 @@ pub(crate) async fn run_anthropic_tool_loop(
     base: &str,
     api_key: &str,
     req: &ChatRequest,
-    caps: &tools::ToolCaps,
+    caps: tools::ToolCaps,
     sandbox: permission::SandboxPolicy,
     approval: permission::ApprovalPolicy,
     mgr: &Arc<ChatManager>,
@@ -877,7 +998,9 @@ pub(crate) async fn run_anthropic_tool_loop(
     perf: crate::chat::turn_perf::TurnPerf,
 ) -> Result<(String, Option<ChatUsage>), String> {
     let url = format!("{base}/v1/messages");
-    let tool_specs = tools::anthropic_tool_specs(caps, sandbox);
+    // Mutable working copy (owned) — see the OpenAI loop's late-attach drain.
+    let mut live_caps = caps;
+    let mut tool_specs = tools::anthropic_tool_specs(&live_caps, sandbox);
     let art_dir = artifacts_dir(app);
     let cap = if research_mode {
         RESEARCH_MAX_TOOL_ITERS
@@ -954,7 +1077,7 @@ pub(crate) async fn run_anthropic_tool_loop(
                 let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
                 emit_token(app, sid, &open, &mut full);
                 perf.begin_tool();
-                let result = run_tool(client, &art_dir, caps, sandbox, approval, mgr, app, sid, &name, &args).await;
+                let result = run_tool(client, &art_dir, &live_caps, sandbox, approval, mgr, app, sid, &name, &args).await;
                 perf.end_tool();
                 if block.ends_with("</tool>") {
                     emit_token(app, sid, "</tool>", &mut full);
@@ -976,6 +1099,10 @@ pub(crate) async fn run_anthropic_tool_loop(
                 }));
             }
             messages.push(json!({ "role": "user", "content": results }));
+            // Attach-on-demand drain — mirror of the OpenAI loop.
+            if fold_late_attaches(mgr, sid, &mut live_caps) {
+                tool_specs = tools::anthropic_tool_specs(&live_caps, sandbox);
+            }
             continue;
         }
 

@@ -413,6 +413,8 @@ pub fn run() {
             commands::connectors_cmds::connector_disconnect,
             commands::connectors_cmds::set_session_connectors,
             commands::connectors_cmds::list_session_connectors,
+            commands::connectors_cmds::add_session_connector,
+            commands::connectors_cmds::remove_session_connector,
             // auto-updater (Tauri updater plugin)
             commands::updater_cmds::check_for_update,
             commands::updater_cmds::download_and_install_update,

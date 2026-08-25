@@ -1299,28 +1299,60 @@ pub async fn send_chat_message(
     let sandbox = crate::chat::permission::SandboxPolicy::from_db(&sandbox_str);
     let approval = crate::chat::permission::ApprovalPolicy::from_db(&approval_str);
 
-    // Connectors available to this conversation. Per-session rows
-    // (chat_session_connectors, written by the old "@"-attach flow) are still
-    // honored, but ANY connector connected in Settings → Connectors is ALWAYS
-    // available — the model self-selects one when a task needs it, no
-    // per-conversation opt-in required. "Connected" = a credential row exists
-    // (OAuth connectors) OR a public endpoint that needs no credentials
-    // (Kiwi — `is_public()`, never has a row).
-    let connector_ids: Vec<String> = {
+    // Attach-on-demand: ONLY connectors / MCP-gallery servers attached to this
+    // session ship their tool schemas — rows in `chat_session_connectors`
+    // written by the composer's @-picker, the model-driven `attach_connector`
+    // tool, or the keyword fast-path below. Everything else that is connected
+    // stays reachable through the system-prompt manifest + attach meta-tools,
+    // so a fresh turn sends only the system prompt + built-in tools.
+    // MCP-gallery servers ride the same table under `mcp:<server_id>` keys.
+    let tools_on = tools_enabled.unwrap_or(false);
+    let (mut connector_ids, mcp_server_ids): (Vec<String>, Vec<String>) = {
         let conn = db.0.lock();
-        let mut ids: Vec<String> =
-            db::list_chat_session_connectors(&conn, &chat_session_id).unwrap_or_default();
-        for row in db::list_connector_credential_rows(&conn).unwrap_or_default() {
-            if !ids.contains(&row.connector_id) {
-                ids.push(row.connector_id);
+        let mut cs: Vec<String> = Vec::new();
+        let mut ms: Vec<String> = Vec::new();
+        for row in db::list_chat_session_connectors(&conn, &chat_session_id).unwrap_or_default() {
+            if let Some(server_id) = row.strip_prefix("mcp:") {
+                ms.push(server_id.to_string());
+            } else {
+                cs.push(row);
             }
         }
-        for c in crate::connectors::CONNECTORS {
-            if c.is_public() && !ids.iter().any(|i| i == c.id) {
-                ids.push(c.id.to_string());
+        (cs, ms)
+    };
+    // Keyword fast-path: an explicit "@gmail" token or a registry keyword
+    // phrase ("my inbox", "google calendar") attaches the connector directly
+    // this turn — no `attach_connector` round-trip, which small local models
+    // struggle with. Like every attach path it persists for the session.
+    if tools_on {
+        let available: Vec<String> = {
+            let conn = db.0.lock();
+            db::list_connector_credential_rows(&conn)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| r.connector_id)
+                .chain(
+                    crate::connectors::CONNECTORS
+                        .iter()
+                        .filter(|c| c.is_public())
+                        .map(|c| c.id.to_string()),
+                )
+                .collect()
+        };
+        let avail_refs: Vec<&str> = available.iter().map(|s| s.as_str()).collect();
+        for id in crate::chat::prompts::detect_connector_mentions(&content, &avail_refs) {
+            if !connector_ids.contains(&id) {
+                connector_ids.push(id.clone());
             }
+            let conn = db.0.lock();
+            let _ = db::add_chat_session_connector(&conn, &chat_session_id, &id);
         }
-        ids
+    }
+    // Manifest of still-attachable sources for the system prompt. Derived
+    // AFTER the fast-path so just-attached connectors drop out of it.
+    let manifest = {
+        let (conns, mcp) = attach_availability(&app, &connector_ids, &mcp_server_ids);
+        crate::chat::prompts::attach_manifest_segment(&conns, &mcp)
     };
 
     // 2. Persist the user message.
@@ -1573,21 +1605,44 @@ pub async fn send_chat_message(
     // (provider/model-aware, always included) comes first, then the user's
     // custom prompt + skills (global, provider-independent settings), plus
     // built-in tool guidance.
-    let tools_on = tools_enabled.unwrap_or(false);
-    let mut system: Option<String> = {
+    let (mut system, prompt_audit) = {
         let conn = db.0.lock();
         let custom = db::get_setting(&conn, "assistant.systemPrompt")
             .map_err(|e| e.to_string())?;
         let skills = parse_invoked_skills(&content);
-        crate::chat::build_system_prompt(
+        let built = crate::chat::build_system_prompt(
             provider_id.clone(),
             &model,
             custom.as_deref(),
             &skills,
             tools_on,
             research_mode,
-        )
+            manifest.as_deref(),
+        );
+        // [prompt-audit] inputs captured before `custom`/`skills` are consumed.
+        let audit = (
+            custom.as_deref().map(|c| c.trim().len()).unwrap_or(0),
+            skills.iter().map(|(_, body)| body.len()).sum::<usize>(),
+        );
+        (built, audit)
     };
+    // [prompt-audit]: attribute the system prompt's size on every send. The
+    // catalog is re-derived (cheap dir scan) because build_system_prompt fuses
+    // the parts; core + research segment is the unattributed remainder.
+    {
+        let (custom_chars, invoked_chars) = prompt_audit;
+        let catalog_chars = crate::chat::prompts::available_skills_segment()
+            .map(|s| s.len())
+            .unwrap_or(0);
+        let manifest_chars = manifest.map(|m| m.len()).unwrap_or(0);
+        let total_chars = system.as_ref().map(|s| s.len()).unwrap_or(0);
+        eprintln!(
+            "[prompt-audit] system prompt: {total_chars} chars (tools_on={tools_on}, \
+             research={research_mode}, skills_catalog={catalog_chars}, manifest={manifest_chars}, \
+             custom={custom_chars}, invoked_skill_bodies={invoked_chars}, \
+             attached_connectors={connector_ids:?}, attached_mcp={mcp_server_ids:?})"
+        );
+    }
 
     // 6. Build message history from DB.
     //
@@ -1661,6 +1716,9 @@ pub async fn send_chat_message(
                     attached_connectors: std::sync::Arc::new(Vec::new()),
                     local_docs: false,
                     mcp_tools: std::sync::Arc::new(Vec::new()),
+                    attachable_connectors: std::sync::Arc::new(Vec::new()),
+                    attachable_mcp: std::sync::Arc::new(Vec::new()),
+                    local_model: false,
                     fs_rules: Vec::new(),
                 };
                 let specs = crate::chat::tools::openai_tool_specs(&caps, crate::chat::permission::SandboxPolicy::WorkspaceWrite);
@@ -1903,6 +1961,7 @@ pub async fn send_chat_message(
         approval,
         fs_roots,
         connector_ids,
+        mcp_server_ids,
         system,
         messages,
         shared_db,
@@ -1912,6 +1971,51 @@ pub async fn send_chat_message(
     );
 
     Ok(())
+}
+
+/// Which connectors and MCP-gallery servers are AVAILABLE but NOT yet
+/// attached to the session — i.e. attachable on demand. "Available" =
+/// a credential row exists (OAuth connectors) or the endpoint is public
+/// (`is_public()`, e.g. Kiwi — never has a row); for gallery servers,
+/// `enabled` in their def. Shared by the send path, the context meter, and
+/// the context breakdown so all three agree on what the model can attach.
+fn attach_availability(
+    app: &tauri::AppHandle,
+    attached_connectors: &[String],
+    attached_mcp: &[String],
+) -> (
+    Vec<crate::chat::prompts::ManifestEntry>,
+    Vec<crate::chat::prompts::ManifestEntry>,
+) {
+    let credentialed: Vec<String> = {
+        let db_state = app.state::<crate::DbState>();
+        let conn = db_state.0.lock();
+        db::list_connector_credential_rows(&conn)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| r.connector_id)
+            .collect()
+    };
+    let connectors = crate::connectors::CONNECTORS
+        .iter()
+        .filter(|c| c.is_public() || credentialed.iter().any(|id| id == c.id))
+        .filter(|c| !attached_connectors.iter().any(|id| id == c.id))
+        .map(|c| crate::chat::prompts::ManifestEntry {
+            id: c.id.to_string(),
+            name: c.display_name.to_string(),
+            description: c.description.to_string(),
+        })
+        .collect();
+    let mcp = crate::mcp_gallery::load_defs(app)
+        .into_iter()
+        .filter(|d| d.enabled && !attached_mcp.iter().any(|id| *id == d.id))
+        .map(|d| crate::chat::prompts::ManifestEntry {
+            id: d.id,
+            name: d.name,
+            description: d.description,
+        })
+        .collect();
+    (connectors, mcp)
 }
 
 /// Resolve which skills the user INVOKED in this message — `(name, body)`
@@ -2994,6 +3098,7 @@ pub async fn count_context_tokens(
     chat_state: State<'_, crate::ChatState>,
     local: State<'_, local_models::LocalModelState>,
     db: State<'_, DbState>,
+    app: tauri::AppHandle,
 ) -> CmdResult<crate::types::ContextUsagePayload> {
     let Some(status) = local.0.status() else {
         return Ok(crate::types::ContextUsagePayload {
@@ -3037,22 +3142,42 @@ pub async fn count_context_tokens(
     };
 
     // Use the same system-prompt builder as the send path so the meter's
-    // percentage matches the model's view. We omit skill / connector injection
-    // (those depend on the current user message) — the meter is a rough
-    // indicator, not a token-perfect preview, and the small delta is well
-    // within the 5% slack the threshold check already has.
-    let system_str: String = {
+    // percentage matches the model's view: tools on (the composer default),
+    // skills catalog included, plus the attach-on-demand manifest derived
+    // from the session's attachment rows. Invoked-skill bodies depend on the
+    // next user message and stay omitted — the small delta is well within the
+    // 5% slack the threshold check already has.
+    //
+    // LOCKING: attach_availability re-locks DbState internally, so it must
+    // run AFTER `conn` is dropped — this command is the first thing the
+    // frontend polls once a local sidecar is up, and a nested lock here
+    // deadlocked the whole app on model load.
+    let (custom, attached_c, attached_m): (Option<String>, Vec<String>, Vec<String>) = {
         let conn = db.0.lock();
         let custom = db::get_setting(&conn, "assistant.systemPrompt")
             .map_err(|e| e.to_string())?;
-        let provider_id = ChatProviderId::LocalGguf;
+        let (c, m): (Vec<String>, Vec<String>) =
+            db::list_chat_session_connectors(&conn, &chat_session_id)
+                .unwrap_or_default()
+                .into_iter()
+                .partition(|r| !r.starts_with("mcp:"));
+        (custom, c, m)
+    };
+    let attached_m: Vec<String> = attached_m
+        .iter()
+        .filter_map(|r| r.strip_prefix("mcp:").map(|s| s.to_string()))
+        .collect();
+    let system_str: String = {
+        let (avail_c, avail_m) = attach_availability(&app, &attached_c, &attached_m);
+        let manifest = crate::chat::prompts::attach_manifest_segment(&avail_c, &avail_m);
         crate::chat::build_system_prompt(
-            provider_id,
+            ChatProviderId::LocalGguf,
             &model_str,
             custom.as_deref(),
             &[],
+            true,
             false,
-            false,
+            manifest.as_deref(),
         )
         .unwrap_or_default()
     };
@@ -3134,6 +3259,7 @@ pub async fn count_context_breakdown(
     chat_state: State<'_, crate::ChatState>,
     local: State<'_, local_models::LocalModelState>,
     db: State<'_, DbState>,
+    app: tauri::AppHandle,
 ) -> CmdResult<Option<crate::types::ContextBreakdownPayload>> {
     let Some(status) = local.0.status() else {
         return Ok(None);
@@ -3151,16 +3277,39 @@ pub async fn count_context_breakdown(
     let client = chat_state.0.client.clone();
     let base_url = &status.base_url;
 
-    // 1. System prompt — same builder as the send path. Omit skill/connector
-    //    injection (those depend on the current user message); we capture them
-    //    separately below so their token counts stay distinct.
-    let system_str: String = {
+    // 1. System prompt — same builder as the send path (tools on, manifest
+    //    included). Invoked-skill bodies depend on the current user message;
+    //    we capture them separately below so their token counts stay distinct.
+    //    LOCKING: attach_availability re-locks DbState — same rule as
+    //    count_context_tokens: never call it while `conn` is held.
+    let (custom, attached_c, attached_m): (Option<String>, Vec<String>, Vec<String>) = {
         let conn = db.0.lock();
         let custom = db::get_setting(&conn, "assistant.systemPrompt")
             .map_err(|e| e.to_string())?;
-        let provider_id = ChatProviderId::LocalGguf;
-        crate::chat::build_system_prompt(provider_id, &model_str, custom.as_deref(), &[], false, false)
-            .unwrap_or_default()
+        let (c, m): (Vec<String>, Vec<String>) =
+            db::list_chat_session_connectors(&conn, &chat_session_id)
+                .unwrap_or_default()
+                .into_iter()
+                .partition(|r| !r.starts_with("mcp:"));
+        (custom, c, m)
+    };
+    let attached_m: Vec<String> = attached_m
+        .iter()
+        .filter_map(|r| r.strip_prefix("mcp:").map(|s| s.to_string()))
+        .collect();
+    let system_str: String = {
+        let (avail_c, avail_m) = attach_availability(&app, &attached_c, &attached_m);
+        let manifest = crate::chat::prompts::attach_manifest_segment(&avail_c, &avail_m);
+        crate::chat::build_system_prompt(
+            ChatProviderId::LocalGguf,
+            &model_str,
+            custom.as_deref(),
+            &[],
+            true,
+            false,
+            manifest.as_deref(),
+        )
+        .unwrap_or_default()
     };
     let system_prompt_tokens = crate::chat::compaction::count_json_tokens(&client, base_url, &system_str)
         .await
@@ -3197,6 +3346,9 @@ pub async fn count_context_breakdown(
         // local-docs capability is off here even if a sidecar happens to be up.
         local_docs: false,
         mcp_tools: std::sync::Arc::new(Vec::new()),
+        attachable_connectors: std::sync::Arc::new(Vec::new()),
+        attachable_mcp: std::sync::Arc::new(Vec::new()),
+        local_model: false,
         fs_rules: Vec::new(),
     };
     let tool_specs_json = serde_json::to_string(&crate::chat::tools::openai_tool_specs(&caps, crate::chat::permission::SandboxPolicy::WorkspaceWrite))

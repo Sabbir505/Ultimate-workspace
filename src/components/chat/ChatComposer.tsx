@@ -7,7 +7,8 @@
 // Attachments: images are sent as vision input, docx/pptx/xlsx/pdf and legacy
 // doc/ppt/xls are extracted to text server-side, and plain-text files are
 // inlined into the message.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Plug, Puzzle, SquareSlash, X } from "lucide-react";
 import { AgentModelPicker, type AgentModelSelection } from "./AgentModelPicker";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { ArtifactTypeSelector } from "./ArtifactTypeSelector";
@@ -28,6 +29,11 @@ import {
   toastInfo,
   generateArtifact,
   persistChatCommandMessage,
+  addSessionConnector,
+  removeSessionConnector,
+  listSessionConnectors,
+  listConnectors,
+  mcpGalleryList,
   type PromptTemplate,
   type LlamaOverrides,
   type ArtifactType,
@@ -560,9 +566,12 @@ interface Props {
    *  provider counted). Drives the context meter; null/0 hides it. */
   usedTokens?: number | null;
   /** Live context-window cap from the running llama-server (`-c`). When >0
-   *  and the session is local, the meter uses this instead of the slider
-   *  value, so it always matches what the model actually has. */
+   * and the session is local, the meter uses this instead of the slider
+   * value, so it always matches what the model actually has. */
   liveMaxTokens?: number;
+  /** Active chat session — the @-attach menu writes attachment rows
+   * (connector ids / `mcp:<id>`) against it. Null when no session. */
+  chatSessionId?: string | null;
 }
 
 export function ChatComposer({
@@ -593,6 +602,7 @@ export function ChatComposer({
   thinking,
   onThinkingChange,
   thinkingSupported,
+  chatSessionId,
 }: Props) {
   const [content, setContent] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
@@ -655,6 +665,10 @@ export function ChatComposer({
     | { kind: "command"; name: string; slug: string; description: string };
   const [slashSkills, setSlashSkills] = useState<SlashSkill[]>([]);
   const [slashIndex, setSlashIndex] = useState(0);
+  // The picked slash command rendered as an inline pill (icon + label) in the
+  // composer; serialized back to the `/slug` prefix on send so the backend's
+  // token parsing (invoked skills, /create) sees exactly what it did before.
+  const [commandPill, setCommandPill] = useState<{ slug: string; label: string } | null>(null);
   // Prompt templates (roadmap #14): loaded alongside skills for the slash menu.
   const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
   // Variable-fill state: when a template with variables is selected, show a
@@ -764,15 +778,148 @@ export function ChatComposer({
     setSlashIndex(0);
   }, [slashQuery]);
 
-  // Replace the partial `/query` token with the chosen command.
-  const applySlashCommand = useCallback((command: string) => {
-    setContent(`/${command} `);
-    const ta = textareaRef.current;
-    if (ta) {
-      ta.focus();
-      requestAnimationFrame(() => ta.setSelectionRange(command.length + 2, command.length + 2));
+  // ── Attach-on-demand @-menu ─────────────────────────────────────────────
+  // Typing "@" as the first character lists every attachable source —
+  // connected connectors (OAuth-credentialed or public) and enabled
+  // MCP-gallery servers. Picking one writes a `chat_session_connectors` row
+  // for the active session (its tools then ship on every turn of this
+  // conversation); the row key is the connector id, or `mcp:<server_id>` for
+  // gallery servers. Attachments render as inline icon pills in the input
+  // (next to the command pill); each pill's × detaches the source.
+  interface AttachSource {
+    /** Row key written to the DB: connector id or `mcp:<serverId>`. */
+    rowId: string;
+    /** Display id used for the @token / label. */
+    id: string;
+    name: string;
+    icon: string;
+    description: string;
+    kind: "connector" | "mcp";
+  }
+  const [attachSources, setAttachSources] = useState<AttachSource[]>([]);
+  const [attachedRows, setAttachedRows] = useState<string[]>([]);
+  const [atIndex, setAtIndex] = useState(0);
+  // First-line indent for the textarea = measured width of the pill row, so
+  // the pills overlay the empty start of line 1 and the text wraps at FULL
+  // column width from line 2 on (a plain textarea can't flow around an
+  // inline element; text-indent applies to the first line only).
+  const tokenRowRef = useRef<HTMLSpanElement>(null);
+  const [tokenIndent, setTokenIndent] = useState(0);
+  useLayoutEffect(() => {
+    setTokenIndent(tokenRowRef.current?.offsetWidth ?? 0);
+  }, [commandPill, attachedRows, attachSources]);
+
+  const atQuery = /^@(\S*)$/.exec(content)?.[1]?.toLowerCase() ?? null;
+  const atOpen = atQuery !== null && !!chatSessionId;
+
+  const refreshAttached = useCallback(() => {
+    if (!chatSessionId) {
+      setAttachedRows([]);
+      return;
     }
+    void listSessionConnectors(chatSessionId).then((rows) => {
+      setAttachedRows(rows ?? []);
+    });
+  }, [chatSessionId]);
+
+  // Reload the attachment rows whenever the active session changes (and when
+  // the model attaches a source mid-turn via attach_connector — cheap).
+  useEffect(() => {
+    refreshAttached();
+  }, [refreshAttached]);
+
+  // Load attachable sources: connected (or public) connectors + enabled
+  // MCP-gallery servers. Kiwi is the one public connector — identified by its
+  // endpoint (the registry doesn't serialize an isPublic flag).
+  const loadAttachSources = useCallback(() => {
+    void listConnectors().then((list) => {
+      if (!list) return;
+      const conns: AttachSource[] = list
+        .filter((c) => c.status.connected || c.mcpServerUrl === "https://mcp.kiwi.com")
+        .map((c) => ({
+          rowId: c.id,
+          id: c.id,
+          name: c.displayName,
+          icon: c.icon,
+          description: c.status.connected ? "Connected" : "Public endpoint",
+          kind: "connector" as const,
+        }));
+      void mcpGalleryList().then((g) => {
+        if (!g) return;
+        const mcps: AttachSource[] = g.installed
+          .filter((d) => d.enabled)
+          .map((d) => ({
+            rowId: `mcp:${d.id}`,
+            id: d.id,
+            name: d.name,
+            icon: "🧩",
+            description: d.description?.slice(0, 80) || "MCP server",
+            kind: "mcp" as const,
+          }));
+        setAttachSources([...conns, ...mcps]);
+      });
+    });
   }, []);
+
+  // (Re)load attachable sources every time the popup opens, and once per
+  // session switch so the chips can label rows without the menu ever opening.
+  useEffect(() => {
+    loadAttachSources();
+  }, [loadAttachSources, chatSessionId]);
+  useEffect(() => {
+    if (atOpen) loadAttachSources();
+  }, [atOpen, loadAttachSources]);
+
+  const atFiltered = atQuery !== null
+    ? attachSources.filter((s) => {
+        const attached = attachedRows.includes(s.rowId);
+        const matches =
+          s.id.startsWith(atQuery) ||
+          s.name.toLowerCase().includes(atQuery) ||
+          (atQuery.length > 1 && s.description.toLowerCase().includes(atQuery));
+        return matches && !attached;
+      })
+    : [];
+
+  useEffect(() => {
+    setAtIndex(0);
+  }, [atQuery]);
+
+  const applyAttachSource = useCallback(
+    (source: AttachSource) => {
+      if (!chatSessionId) return;
+      // Drop the partial "@query" token from the input.
+      setContent("");
+      const ta = textareaRef.current;
+      ta?.focus();
+      void addSessionConnector(chatSessionId, source.rowId)
+        .then(() => refreshAttached())
+        .catch((e) => toastError(`Could not attach ${source.name}.`, e));
+    },
+    [chatSessionId, refreshAttached],
+  );
+
+  const detachSource = useCallback(
+    (rowId: string) => {
+      if (!chatSessionId) return;
+      void removeSessionConnector(chatSessionId, rowId)
+        .then(() => refreshAttached())
+        .catch((e) => toastError("Could not detach.", e));
+    },
+    [chatSessionId, refreshAttached],
+  );
+
+  // Human label for an attachment row key ("gmail" → "Gmail",
+  // "mcp:filesystem" → "filesystem (MCP)").
+  const attachLabel = useCallback(
+    (rowId: string): string => {
+      const src = attachSources.find((s) => s.rowId === rowId);
+      if (src) return src.name;
+      const mcp = rowId.startsWith("mcp:");
+      return mcp ? `${rowId.slice(4)} (MCP)` : rowId;
+    },
+    [attachSources],
+  );
 
   // Insert a filled prompt template into the composer (roadmap #14).
   const insertTemplateText = useCallback((text: string) => {
@@ -788,8 +935,10 @@ export function ChatComposer({
     }
   }, []);
 
-  // Handle a selected slash-menu item. Skills and create commands insert a
-  // slash token; prompt templates insert their body (or open variable fill).
+  // Handle a selected slash-menu item. Prompt templates insert their body
+  // (or open variable fill); skills and /create commands become an inline
+  // command PILL in the composer (serialized back to the `/slug` token on
+  // send) instead of plain text.
   const applySlashItem = useCallback((item: SlashItem) => {
     if (item.kind === "command") {
       if (item.slug === "create") {
@@ -797,12 +946,10 @@ export function ChatComposer({
         setCreateInstruction("");
         setCreateTypeOpen(true);
       } else {
-        setContent(`/${item.slug} `);
+        setCommandPill({ slug: item.slug, label: item.name });
+        setContent("");
         const ta = textareaRef.current;
-        if (ta) {
-          ta.focus();
-          requestAnimationFrame(() => ta.setSelectionRange(item.slug.length + 2, item.slug.length + 2));
-        }
+        ta?.focus();
       }
       return;
     }
@@ -820,8 +967,11 @@ export function ChatComposer({
       }
       return;
     }
-    applySlashCommand(item.slug);
-  }, [applySlashCommand, insertTemplateText, promptTemplates]);
+    setCommandPill({ slug: item.slug, label: item.name });
+    setContent("");
+    const ta = textareaRef.current;
+    ta?.focus();
+  }, [insertTemplateText, promptTemplates]);
 
   // Voice recording (roadmap #16): start/stop MediaRecorder, then transcribe
   // the clip and insert the recognized text.
@@ -1056,7 +1206,10 @@ export function ChatComposer({
 
   const handleSend = useCallback(() => {
     if (needsModel || agentLocked) return;
-    const trimmed = content.trim();
+    // The command pill contributes its `/slug` token to the message text so
+    // every downstream parser (invoked skills, /create routing) sees the same
+    // content it would have seen with a plain-text token.
+    const trimmed = (commandPill ? `/${commandPill.slug} ${content}` : content).trim();
     if (!trimmed && attachments.length === 0) return;
 
     // --- /create slash command: deterministic route to artifact generation ---
@@ -1075,6 +1228,7 @@ export function ChatComposer({
       // /create, sees proposal card, then continues conversation normally.
       void triggerArtifactGeneration(createCmd.type, createCmd.instruction);
       setContent("");
+      setCommandPill(null);
       setAttachments([]);
       setAttachError(null);
       setForceResearch(false);
@@ -1097,6 +1251,7 @@ export function ChatComposer({
       // Natural language "create a skill" etc. triggers artifact generation only.
       void triggerArtifactGeneration(intent.type, intent.instruction);
       setContent("");
+      setCommandPill(null);
       setAttachments([]);
       setAttachError(null);
       setForceResearch(false);
@@ -1108,6 +1263,7 @@ export function ChatComposer({
 
     onSend(trimmed, attachments, forceResearch || undefined);
     setContent("");
+    setCommandPill(null);
     setAttachments([]);
     setAttachError(null);
     setForceResearch(false);
@@ -1117,7 +1273,7 @@ export function ChatComposer({
     if (ta) {
       ta.style.height = "auto";
     }
-  }, [content, attachments, onSend, needsModel, agentLocked, forceResearch, detectArtifactIntent, triggerArtifactGeneration]);
+  }, [content, commandPill, attachments, onSend, needsModel, agentLocked, forceResearch, detectArtifactIntent, triggerArtifactGeneration]);
 
   // Handle ArtifactTypeSelector selection
   const handleCreateTypeSelect = useCallback((type: ArtifactType, instruction?: string) => {
@@ -1128,7 +1284,7 @@ export function ChatComposer({
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      // While the slash popup is showing candidates, it owns navigation keys.
+      // While either popup is showing candidates, it owns navigation keys.
       if (slashOpen && slashFiltered.length > 0) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
@@ -1140,18 +1296,46 @@ export function ChatComposer({
           setSlashIndex((i) => (i - 1 + slashFiltered.length) % slashFiltered.length);
           return;
         }
-if (e.key === "Enter" || e.key === "Tab") {
-            e.preventDefault();
-            const item = slashFiltered[Math.min(slashIndex, slashFiltered.length - 1)];
-            applySlashItem(item);
-            return;
-          }
+        if (e.key === "Enter" || e.key === "Tab") {
+          e.preventDefault();
+          const item = slashFiltered[Math.min(slashIndex, slashFiltered.length - 1)];
+          applySlashItem(item);
+          return;
+        }
         if (e.key === "Escape") {
-          // The popup is derived from the text, so "close" = drop the token.
           e.preventDefault();
           setContent("");
           return;
         }
+      }
+      if (atOpen && atFiltered.length > 0) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          setAtIndex((i) => (i + 1) % atFiltered.length);
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setAtIndex((i) => (i - 1 + atFiltered.length) % atFiltered.length);
+          return;
+        }
+        if (e.key === "Enter" || e.key === "Tab") {
+          e.preventDefault();
+          applyAttachSource(atFiltered[Math.min(atIndex, atFiltered.length - 1)]);
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setContent("");
+          return;
+        }
+      }
+      // Backspace on empty text removes the command pill (feels like editing
+      // the token it stands for).
+      if (e.key === "Backspace" && !content && commandPill) {
+        e.preventDefault();
+        setCommandPill(null);
+        return;
       }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
@@ -1162,7 +1346,7 @@ if (e.key === "Enter" || e.key === "Tab") {
         }
       }
     },
-    [disabled, needsModel, agentLocked, handleSend, slashOpen, slashFiltered, slashIndex, applySlashItem],
+    [disabled, needsModel, agentLocked, handleSend, slashOpen, slashFiltered, slashIndex, applySlashItem, atOpen, atFiltered, atIndex, applyAttachSource, content, commandPill],
   );
 
   const isEmpty = !content.trim() && attachments.length === 0;
@@ -1172,7 +1356,7 @@ if (e.key === "Enter" || e.key === "Tab") {
   // The footer row only exists when something visible lives in it (research
   // chip, attach error, needs-model hint) — otherwise it's an empty strip
   // between the textarea and the control bar.
-  const showFooterRow = forceResearch || !!attachError || (!agentLocked && needsModel);
+  const showFooterRow = attachedRows.length > 0 || forceResearch || !!attachError || (!agentLocked && needsModel);
   // The permission-mode selector shows for sessions whose runtime honors it
   // (builtin/local + Claude Code harness).
   const showModeSelector =
@@ -1375,6 +1559,46 @@ if (e.key === "Enter" || e.key === "Tab") {
           </div>
         )}
         <div className="composer-slash-wrap">
+          {(commandPill || attachedRows.length > 0) && (
+            <span className="composer-token-row" ref={tokenRowRef}>
+              {commandPill && (
+                <span className="composer-token-pill composer-token-command">
+                  <SquareSlash className="composer-token-icon" size={13} aria-hidden="true" />
+                  <span className="composer-token-label">{commandPill.label || commandPill.slug}</span>
+                  <button
+                    type="button"
+                    className="composer-token-remove"
+                    aria-label={`Remove ${commandPill.slug} command`}
+                    onClick={() => setCommandPill(null)}
+                  >
+                    <X size={11} strokeWidth={2.5} />
+                  </button>
+                </span>
+              )}
+              {attachedRows.map((rowId) => {
+                const src = attachSources.find((s) => s.rowId === rowId);
+                const Icon = src?.kind === "mcp" ? Puzzle : Plug;
+                return (
+                  <span
+                    key={rowId}
+                    className="composer-token-pill composer-token-attach"
+                    title="Attached for this conversation — hover to detach"
+                  >
+                    <Icon className="composer-token-icon" size={13} aria-hidden="true" />
+                    <span className="composer-token-label">{attachLabel(rowId)}</span>
+                    <button
+                      type="button"
+                      className="composer-token-remove"
+                      aria-label={`Detach ${attachLabel(rowId)}`}
+                      onClick={() => detachSource(rowId)}
+                    >
+                      <X size={11} strokeWidth={2.5} />
+                    </button>
+                  </span>
+                );
+              })}
+            </span>
+          )}
           {slashOpen && slashFiltered.length > 0 && (
             <div className="composer-slash-menu" role="listbox" aria-label="Commands">
               {slashFiltered.map((item, i) => {
@@ -1405,10 +1629,33 @@ if (e.key === "Enter" || e.key === "Tab") {
               })}
             </div>
           )}
+          {atOpen && atFiltered.length > 0 && (
+            <div className="composer-slash-menu" role="listbox" aria-label="Connectors">
+              {atFiltered.map((src, i) => (
+                <button
+                  key={src.rowId}
+                  type="button"
+                  role="option"
+                  aria-selected={i === atIndex}
+                  className={`composer-slash-item${i === atIndex ? " active" : ""}`}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    applyAttachSource(src);
+                  }}
+                  onMouseEnter={() => setAtIndex(i)}
+                >
+                  <span className="composer-slash-cmd">@{src.id}</span>
+                  <span className="composer-slash-name">{src.name}</span>
+                  <span className="composer-slash-desc">{src.description}</span>
+                </button>
+              ))}
+            </div>
+          )}
           <textarea
             ref={textareaRef}
             className="chat-composer-textarea"
-            placeholder={agentLocked ? "Ask anything, or select an agent to customize performance…" : "Write a message…  type / for skills"}
+            placeholder={agentLocked ? "Ask anything, or select an agent to customize performance…" : "Write a message…  / for skills · @ for apps"}
+            style={tokenIndent ? { textIndent: tokenIndent + 8 } : undefined}
             value={content}
             onChange={(e) => setContent(e.target.value)}
             onKeyDown={handleKeyDown}

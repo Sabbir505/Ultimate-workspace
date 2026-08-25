@@ -49,6 +49,11 @@ pub const RUN_CODE: &str = "run_code";
 pub const OPEN_URL: &str = "open_url";
 pub const GET_SKILL: &str = "get_skill";
 pub const LIST_SKILLS: &str = "list_skills";
+/// Attach-on-demand meta-tools: load a connector's / MCP server's tools into
+/// this conversation (see specs.rs and dispatch.rs). Advertised with an enum
+/// of attachable ids; a fresh turn ships no connector schemas at all.
+pub const ATTACH_CONNECTOR: &str = "attach_connector";
+pub const ATTACH_MCP_SERVER: &str = "attach_mcp_server";
 pub const BROWSER_READ: &str = "browser_read";
 
 pub const BROWSER_CLICK: &str = "browser_click";
@@ -190,6 +195,18 @@ pub struct ToolCaps {
     /// the filesystem permission gate; the hard `path_within_scope` gate still
     /// applies, so rules never grant writes outside the enabled/dir scope.
     pub fs_rules: Vec<crate::chat::permission::ApprovalRule>,
+    /// Attach-on-demand catalog: (id, display name) of connectors that are
+    /// available (credentialed or public) but NOT attached this turn. Non-empty
+    /// → the `attach_connector` meta-tool is advertised with these ids as its
+    /// enum; the full tool schemas stay out of the request until attached.
+    pub attachable_connectors: std::sync::Arc<Vec<(String, String)>>,
+    /// Same contract for enabled-but-not-attached MCP-gallery servers
+    /// (`attach_mcp_server`).
+    pub attachable_mcp: std::sync::Arc<Vec<(String, String)>>,
+    /// True for small-context local models: connector/MCP vendor tool
+    /// descriptions are hard-truncated (see specs.rs) so an attached source
+    /// can't blow the window the attach-on-demand design just saved.
+    pub local_model: bool,
 }
 
 impl Default for ToolCaps {
@@ -206,6 +223,9 @@ impl Default for ToolCaps {
             local_docs: false,
             mcp_tools: std::sync::Arc::new(Vec::new()),
             fs_rules: Vec::new(),
+            attachable_connectors: std::sync::Arc::new(Vec::new()),
+            attachable_mcp: std::sync::Arc::new(Vec::new()),
+            local_model: false,
         }
     }
 }
@@ -273,64 +293,25 @@ const GENERATE_FILE_DESC: &str = "Generate a simple downloadable text-based \
     the first line of each slide is its title and remaining lines are bullets. \
     For xlsx/csv, provide comma-separated rows (one row per line).";
 
-const GENERATE_DOCUMENT_DESC: &str = "Create a REAL, professionally designed \
-    document by writing Python that builds it, then saves it to the path in the \
-    CONDUIT_OUTPUT environment variable (the requested filename inside the \
-    working directory). Supports docx, pptx, xlsx and pdf. The output must look \
-    polished — like something ChatGPT/Claude would produce — NOT a plain text \
-    dump: a cover/title, themed colours, real typography, headings, tables, and \
-    for decks multiple well-laid-out slides with a title slide and section \
-    dividers.\n\n\
-    Aim for an EDITORIAL, modern look like Claude/ChatGPT/Gemini ship — an \
-    elegant serif display face paired with a clean sans body, generous \
-    whitespace, a strong type hierarchy, ONE restrained accent colour and rich \
-    full-bleed cover/section slides. Hierarchy comes from type scale, weight and \
-    whitespace — NEVER from decorative accent bars, stripes or underlines under \
-    titles. Clean white pages for documents; save saturated colour for deck \
-    cover/section/closing slides.\n\n\
-    STRONGLY PREFER the pre-installed `conduit_docgen` helper — it ships this \
-    editorial system for docx, pptx AND pdf with almost no code:\n\
-      import conduit_docgen as cd\n\
-      doc = cd.Doc(title='Quarterly Report', subtitle='FY2025 Q2', theme='ink', author='Acme')\n\
-      doc.heading('Overview'); doc.paragraph('...'); doc.bullets(['a','b']); doc.numbered(['1','2'])\n\
-      doc.table(['Metric','Value'], [['Revenue','$1.2M']]); doc.callout('Key point'); doc.save()\n\
-      deck = cd.Deck(title='Product Launch', subtitle='2025', theme='midnight', footer='Acme Inc')\n\
-      deck.section('Introduction', number=1); deck.bullets('Why now', ['ready','mature'], eyebrow='Context')\n\
-      deck.two_column('Compare','A',['fast'],'B',['robust']); deck.table_slide('Numbers',['Q','Rev'],[['Q1','1.0']])\n\
-      deck.closing('Thank you','q@acme.com'); deck.save()\n\
-      pdf = cd.Pdf(title='Research Brief', subtitle='...', theme='plum', author='Acme Labs')\n\
-      pdf.heading('Summary'); pdf.paragraph('...'); pdf.bullets(['a','b'])\n\
-      pdf.table(['Model','Latency'], [['A','12ms']]); pdf.callout('Bottom line'); pdf.save()\n\
-    Themes: ink (blue-black, default), midnight (violet), emerald, plum, amber, \
-    crimson, teal (older names blue/slate/green/purple/red/orange still work). \
-    CHOOSE a theme that fits the subject rather than always defaulting, and vary \
-    structure to fit the content instead of repeating one template. cd.Pdf \
-    handles pdf via reportlab; prefer it over hand-rolled reportlab. You can \
-    still access doc.document / deck.prs for raw python-docx/python-pptx tweaks. \
-    For xlsx use openpyxl. Build enough real content to be genuinely useful \
-    (several sections or 6+ slides for a deck). Import only from the standard \
-    library, conduit_docgen, python-docx, python-pptx, openpyxl and reportlab. \
-    Do not print secrets or perform network side effects.";
+const GENERATE_DOCUMENT_DESC: &str = "Create a professionally designed \
+    docx/pptx/xlsx/pdf by writing a complete Python program in `code` that \
+    builds it and saves it to os.environ[\"CONDUIT_OUTPUT\"] (the requested \
+    filename). STRONGLY PREFER the pre-installed `conduit_docgen` helper \
+    (themes: ink, midnight, emerald, plum, amber, crimson, teal). The output \
+    must look polished — never a plain text dump. The full editorial style \
+    guide + conduit_docgen cheatsheet is returned with the tool result; read \
+    it and regenerate if the first attempt falls short. Imports allowed: \
+    stdlib, conduit_docgen, python-docx, python-pptx, openpyxl, reportlab.";
 
-const GENERATE_DIAGRAM_DESC: &str = "Create a hand-styled, fully-laid-out \
-    diagram as a self-contained .html file. This is the tool for EVERY diagram \
-    — architecture, flowchart, sequence, feature breakdown, mind-map, anything \
-    visual — with deliberate visual hierarchy: nested groupings/containers, a \
-    2-D grid of sub-nodes, mixed box sizes, a bold-label-plus-dim-description \
-    two-line node, solid primary-flow arrows with a dashed feedback line looping \
-    back, and consistent color-per-category. \
-    STRONGLY PREFER authoring the diagram as ONE root inline <svg> (with an \
-    explicit xmlns, viewBox and width/height): draw nodes as <rect rx=..>, \
-    labels as <text>, and connectors as <path>/<line> with an arrowhead \
-    <marker>. Pure SVG is true vector, so it exports crisply to BOTH SVG and \
-    PNG. Wrap that single <svg> in a minimal complete HTML document in the \
-    `html` argument (a <body> holding the <svg>; put the title as a <text> at \
-    the top of the SVG, above the flow). Use inline presentation only — no \
-    external resources, no scripts, no CDN fonts (rely on system font \
-    families). Only fall back to HTML/CSS boxes if a layout genuinely needs \
-    text reflow the SVG can't do. The diagram renders inline in the chat and \
-    exports to SVG and PNG. Do NOT emit ```mermaid blocks — Mermaid is not used \
-    here; every diagram goes through this tool.";
+const GENERATE_DIAGRAM_DESC: &str = "Create a hand-styled diagram as a \
+    self-contained .html file — the tool for EVERY diagram (architecture, \
+    flowchart, sequence, mind-map, …). Author it as ONE root inline <svg> \
+    (explicit xmlns, viewBox, width/height): nodes as <rect rx=..>, labels as \
+    <text>, connectors as <path>/<line> with an arrowhead <marker>; wrap that \
+    svg in a minimal complete HTML document in the `html` argument. Inline \
+    presentation only — no external resources, scripts, or CDN fonts. Do NOT \
+    emit mermaid blocks. The full layout guide is returned with the tool \
+    result; regenerate if the first attempt looks flat.";
 
 const FETCH_URL_DESC: &str = "Fetch a specific web page by URL and return its \
     readable text content (HTML stripped). Use to read an article or page the \
@@ -350,6 +331,17 @@ const GET_SKILL_DESC: &str = "Load a skill's detailed instructions into your \
     questions.";
 
 const LIST_SKILLS_DESC: &str = "List every available skill slug.";
+
+const ATTACH_CONNECTOR_DESC: &str = "Load a connected app's tools into this \
+    conversation (Gmail, Notion, Drive, … — see \"Connected apps & servers\" in the \
+    system prompt for ids). The app's tools become callable immediately and stay \
+    attached for the conversation. Call this FIRST when a request needs one of \
+    the listed services; never claim the service is unavailable before attaching.";
+
+const ATTACH_MCP_SERVER_DESC: &str = "Load an installed MCP server's tools into \
+    this conversation (see \"Connected apps & servers\" in the system prompt for \
+    ids). Same contract as attach_connector: tools become callable immediately \
+    and stay attached for the conversation.";
 
 const LIST_DIRECTORY_DESC: &str = "List the immediate children of a directory \
     (files and subdirectories, one per line). Pass an absolute path. Read-only.";
@@ -446,27 +438,16 @@ const DOWNLOAD_FILE_DESC: &str = "Stream a file from an http(s) URL to an \
     Mutating — a write to disk, gated by the session's permission mode. Use \
     this for ANY file a user wants saved locally from a URL.";
 
-const DOWNLOAD_PROGRESS_DESC: &str = "Report the live progress of a background \
-    download started by `download_file`. Pass the task id returned by \
-    `download_file`. Returns bytes downloaded, total bytes (when known), \
-    percentage, speed, and the final state. This is the tool for tracking \
-    multi-gigabyte transfers and handling retry/resume states. Read-only. If \
-    the user asked you to download a file, call this repeatedly (a few seconds \
-    apart) and report progress to them until the task completes.";
+const DOWNLOAD_PROGRESS_DESC: &str = "Report a `download_file` task's live \
+    progress (bytes, percentage, speed, final state). Poll every few seconds \
+    and report to the user until it completes.";
 
-const RUN_SHELL_DESC: &str = "Run a native shell command on the user's machine \
-    (cmd.exe on Windows, sh on Unix) and capture its output. This is a REAL, \
-    working tool — it executes unsandboxed with the user's privileges and can \
-    access any local working directory, so CLI tools like `huggingface-cli \
-    download`, git, pip, ffmpeg, etc. work exactly as they do in a terminal. \
-    The command runs to completion and its combined stdout/stderr is returned \
-    directly (the output is also shown in the chat). Don't use this for \
-    long-running commands that never exit on their own (e.g. a dev server) — \
-    they will block the turn; prefer a one-shot invocation that finishes. \
-    ALWAYS gated on an approval card before it runs. Use this when a task \
-    needs a native CLI tool that `download_file` (URL → file) or `run_code` \
-    (sandboxed snippet) cannot express. Prefer `download_file` for plain URL \
-    downloads, and `run_code` for small self-contained scripts.";
+const RUN_SHELL_DESC: &str = "Run a native shell command (cmd.exe / sh) with \
+    the user's privileges and return combined stdout/stderr — CLI tools like \
+    git, pip, ffmpeg work as in a terminal. One-shot commands only (nothing \
+    long-running like a dev server). ALWAYS approval-gated. Prefer \
+    `download_file` for plain URL downloads and `run_code` for sandboxed \
+    snippets.";
 
 const TASK_DESC: &str = "Spawn a focused subagent that runs ONE task with its \
     own model turn and reports back. Use this to delegate a self-contained \
@@ -487,17 +468,11 @@ const CANCEL_TASK_DESC: &str = "Cancel a background task started in this \
     later retry resumes instead of restarting; for shell commands it kills the \
     process. Use when the user changes their mind or a task is stalled.";
 
-const ADD_SOURCE_NOTE_DESC: &str = "Record ONE concrete fact you extracted from a \
-    research source, so it is preserved in the source ledger for this chat session \
-    (instead of relying on conversation memory). Call this once per distinct fact \
-    worth keeping — a single page read may produce several notes, or none. Take \
-    `url` and `title` from the page's `browser_read` (or `fetch_url`) result; set \
-    `fact` to a single sentence, and `excerpt` to a SHORT VERBATIM QUOTE from the \
-    page that supports the fact (do not paraphrase at this stage — paraphrasing \
-    happens at synthesis). Set `unavailable` to the `browser_read` `failureReason` \
-    (\"paywalled\", \"login_required\", \"extraction_failed\", \"blocked\") when the \
-    source could not be read, so the gap surfaces in the final Sources section \
-    rather than being silently skipped.";
+const ADD_SOURCE_NOTE_DESC: &str = "Record ONE concrete fact from a research \
+    source into the session's source ledger. One note per distinct fact; take \
+    url/title from the browser_read/fetch_url result, keep `excerpt` a SHORT \
+    VERBATIM quote, and set `unavailable` to the failureReason when the page \
+    couldn't be read.";
 
 const GET_SOURCE_LEDGER_DESC: &str = "Re-read every source note you have recorded \
     for this chat session, returned as a JSON array (each entry: url, title, fact, \

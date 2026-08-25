@@ -414,7 +414,18 @@ pub fn save_defs(app: &AppHandle, defs: &[McpServerDef]) {
 /// a log line, not a failed turn. The spawn+initialize is bounded so a
 /// first-run `npx` download can't stall the turn indefinitely.
 pub async fn attach_enabled(app: &AppHandle) -> Vec<McpToolEntry> {
-    let defs: Vec<McpServerDef> = load_defs(app).into_iter().filter(|d| d.enabled).collect();
+    attach_filtered(app, None).await
+}
+
+/// `attach_enabled`, restricted to servers whose id is in `allowed` (when
+/// given) — the attach-on-demand path passes the session's `mcp:<id>`
+/// attachment rows, and the `attach_mcp_server` meta-tool passes a single id.
+/// Ids not present in the defs are silently ignored.
+pub async fn attach_filtered(app: &AppHandle, allowed: Option<&[String]>) -> Vec<McpToolEntry> {
+    let defs: Vec<McpServerDef> = load_defs(app)
+        .into_iter()
+        .filter(|d| d.enabled && allowed.map_or(true, |a| a.iter().any(|id| *id == d.id)))
+        .collect();
     if defs.is_empty() {
         return Vec::new();
     }

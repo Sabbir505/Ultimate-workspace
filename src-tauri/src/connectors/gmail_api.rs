@@ -462,7 +462,7 @@ mod tests {
             assert!(
                 matches!(
                     def.kind,
-                    permission::ConnectorToolKind::Read | permission::ConnectorToolKind::Write
+                    ConnectorToolKind::Read | ConnectorToolKind::Write
                 ),
                 "{name} must carry an explicit kind"
             );
@@ -485,19 +485,19 @@ mod tests {
         // Read side reads, write side writes.
         assert_eq!(
             defs["gmail_search_threads"].kind,
-            permission::ConnectorToolKind::Read
+            ConnectorToolKind::Read
         );
         assert_eq!(
             defs["gmail_create_draft"].kind,
-            permission::ConnectorToolKind::Write
+            ConnectorToolKind::Write
         );
         assert_eq!(
             defs["gmail_send_message"].kind,
-            permission::ConnectorToolKind::Write
+            ConnectorToolKind::Write
         );
         assert_eq!(
             defs["gmail_label_thread"].kind,
-            permission::ConnectorToolKind::Write
+            ConnectorToolKind::Write
         );
     }
 

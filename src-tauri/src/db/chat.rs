@@ -366,6 +366,38 @@ pub fn list_chat_session_connectors(
     rows.collect()
 }
 
+/// Attach one connector (or `mcp:<server_id>` gallery server) to a session.
+/// Used by the incremental attach paths — the composer's @-mention picker,
+/// the send-time keyword fast-path, and the model-driven `attach_connector`
+/// tool — where replacing the whole set would drop other attachments.
+pub fn add_chat_session_connector(
+    conn: &Connection,
+    chat_session_id: &str,
+    connector_id: &str,
+) -> DbResult<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO chat_session_connectors (chat_session_id, connector_id)
+         VALUES (?1, ?2)",
+        params![chat_session_id, connector_id],
+    )?;
+    Ok(())
+}
+
+/// Detach one connector from a session (the × on a composer attachment chip).
+/// Removing an id that isn't attached is a no-op.
+pub fn remove_chat_session_connector(
+    conn: &Connection,
+    chat_session_id: &str,
+    connector_id: &str,
+) -> DbResult<()> {
+    conn.execute(
+        "DELETE FROM chat_session_connectors
+         WHERE chat_session_id = ?1 AND connector_id = ?2",
+        params![chat_session_id, connector_id],
+    )?;
+    Ok(())
+}
+
 // ---- chat messages ----
 
 fn map_chat_message(row: &rusqlite::Row) -> rusqlite::Result<ChatMessageRecord> {

@@ -206,23 +206,39 @@ impl AgentSessionManager {
                 .map_err(|e| e.to_string())?;
         }
 
-        // Prepend the user's custom system prompt (Settings → Assistant) so the
-        // harness CLI receives the same persona the built-in chat does. If the
-        // user set one, it goes first, separated from their message by a blank
-        // line. The original content is persisted to the DB without the prefix
-        // (the system prompt is separate config, not part of the message).
-        // The attachment appendix goes LAST — after the persona and the typed
-        // text — so file paths/text read as an addendum to the user's words.
+        // Prepend the Conduit persona + the user's custom system prompt
+        // (Settings → Assistant) so the harness CLI presents the same identity
+        // the built-in chat does — without it the CLI answers "I'm Claude
+        // Code / OpenCode" and denies being Conduit. The persona goes FIRST,
+        // the custom prompt after it, both separated from the message by a
+        // blank line. The original content is persisted to the DB without the
+        // prefix (the system prompt is separate config, not part of the
+        // message). The attachment appendix goes LAST — after the persona and
+        // the typed text — so file paths/text read as an addendum to the
+        // user's words.
+        let harness_label = match harness {
+            "claude_code" => "Claude Code",
+            "kimi_code" => "Kimi Code",
+            "opencode" => "OpenCode",
+            other => other,
+        };
+        let persona = format!(
+            "You are Conduit — the agent of the Conduit desktop workspace, running on \
+             the {harness_label} engine. To the user you ARE Conduit: if asked who you \
+             are, answer \"I'm Conduit\" (the {harness_label} engine underneath may be \
+             named as a detail), and never deny being Conduit."
+        );
         let effective = {
             let conn = db.0.lock();
             let custom: Option<String> =
                 crate::db::get_setting(&conn, "assistant.systemPrompt").ok().flatten();
-            let base = match custom {
-                Some(sp) if !sp.trim().is_empty() => {
-                    format!("{sp}\n\n---\n\n{content}")
-                }
-                _ => content.to_string(),
-            };
+            let mut base = persona.clone();
+            if let Some(sp) = custom.filter(|sp| !sp.trim().is_empty()) {
+                base.push_str("\n\n");
+                base.push_str(&sp);
+            }
+            base.push_str("\n\n---\n\n");
+            base.push_str(content);
             if attach_prompt.is_empty() {
                 base
             } else {

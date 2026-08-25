@@ -919,6 +919,127 @@ async fn run_gated_system_tool(
 /// and **pauses the tool loop** on a oneshot until the UI resolves the card.
 /// If the user denies (or the stream is cancelled), a "denied" tool result is
 /// returned instead of executing.
+/// Attach-on-demand meta-tools (`attach_connector` / `attach_mcp_server`).
+/// Validates the id against this turn's attachable catalog, connects the
+/// source, persists the session row (attachments stick for the conversation
+/// per the UX decision), and hands the live tool table to the turn's tool
+/// loop via the manager's late-attach slot — the next round can call the
+/// tools directly. Read-kind by design: the source is one the user already
+/// connected in Settings, so no approval card gates the attach itself.
+async fn run_attach_tool(
+    caps: &tools::ToolCaps,
+    mgr: &Arc<ChatManager>,
+    app: &AppHandle,
+    sid: &str,
+    name: &str,
+    args: &Value,
+) -> String {
+    let is_mcp = name == tools::ATTACH_MCP_SERVER;
+    let key = if is_mcp { "server_id" } else { "connector_id" };
+    let id = args
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if id.is_empty() {
+        return format!(
+            "Error: {name} requires a \"{key}\" argument — pick one from the \
+             \"Connected apps & servers\" list in the system prompt."
+        );
+    }
+    let attachable = if is_mcp {
+        caps.attachable_mcp.iter().any(|(i, _)| *i == id)
+    } else {
+        caps.attachable_connectors.iter().any(|(i, _)| *i == id)
+    };
+    let display = if is_mcp {
+        caps.attachable_mcp
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, n)| n.clone())
+            .unwrap_or_else(|| id.clone())
+    } else {
+        caps.attachable_connectors
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, n)| n.clone())
+            .unwrap_or_else(|| id.clone())
+    };
+    if !attachable {
+        let already_attached = if is_mcp {
+            caps.mcp_tools.iter().any(|e| e.server_id == id)
+        } else {
+            caps.attached_connectors.iter().any(|c| c.connector_id == id)
+        };
+        if already_attached {
+            return format!("{display} is already attached — its tools are in your tool list; call them directly.");
+        }
+        return format!(
+            "Error: \"{id}\" is not attachable. Use an id from the \"Connected apps & servers\" list."
+        );
+    }
+
+    // Connect the source (OAuth refresh + tools/list + classify).
+    if is_mcp {
+        let entries = crate::mcp_gallery::attach_filtered(app, Some(&[id.clone()])).await;
+        if entries.is_empty() {
+            return format!("Error: MCP server \"{id}\" failed to connect — it may be starting up; try once more.");
+        }
+        let names: Vec<&str> = entries.iter().map(|e| e.wire_name.as_str()).collect();
+        let n = names.len();
+        let listing = names.join(", ");
+        let _ = app.emit(
+            "chat:status",
+            crate::types::ChatStatusPayload {
+                chat_session_id: sid.to_string(),
+                reason: "connector_attached".to_string(),
+                message: format!("Attached {display} ({n} tools)"),
+            },
+        );
+        if let Some(slot) = mgr.late_attach_slot(sid) {
+            slot.lock().mcp.extend(entries);
+        }
+        {
+            let db_state = app.state::<crate::DbState>();
+            let conn = db_state.0.lock();
+            let _ = crate::db::add_chat_session_connector(&conn, sid, &format!("mcp:{id}"));
+        }
+        format!("Attached {display} ({n} tools): {listing}")
+    } else {
+        let attached = crate::connectors::connect_all(app, &[id.clone()]).await;
+        let Some(att) = attached.into_iter().next() else {
+            return format!(
+                "Error: {display} failed to connect — the account may need re-authentication in Settings → Connectors."
+            );
+        };
+        let n = att.tools.len();
+        let names: Vec<&str> = att.tools.keys().map(|k| k.as_str()).collect();
+        let listing = if names.len() > 30 {
+            format!("{} … ({} total)", names[..30].join(", "), n)
+        } else {
+            names.join(", ")
+        };
+        let _ = app.emit(
+            "chat:status",
+            crate::types::ChatStatusPayload {
+                chat_session_id: sid.to_string(),
+                reason: "connector_attached".to_string(),
+                message: format!("Attached {display} ({n} tools)"),
+            },
+        );
+        if let Some(slot) = mgr.late_attach_slot(sid) {
+            slot.lock().connectors.push(att);
+        }
+        {
+            let db_state = app.state::<crate::DbState>();
+            let conn = db_state.0.lock();
+            let _ = crate::db::add_chat_session_connector(&conn, sid, &id);
+        }
+        format!("Attached {display} ({n} tools): {listing}")
+    }
+}
+
 pub(crate) async fn run_tool(
     client: &reqwest::Client,
     artifacts_dir: &std::path::Path,
@@ -936,6 +1057,13 @@ pub(crate) async fn run_tool(
     // the provider-agnostic execute_tool dispatcher.
     if let Some(text) = run_browser_tool(app, name, args, artifacts_dir, sid).await {
         return text;
+    }
+
+    // Attach-on-demand meta-tools: connect a connector / MCP server mid-turn
+    // and hand its tools to the loop via the late-attach slot. Runs before
+    // everything else — no permission gate, no artifacts dir involvement.
+    if name == tools::ATTACH_CONNECTOR || name == tools::ATTACH_MCP_SERVER {
+        return run_attach_tool(caps, mgr, app, sid, name, args).await;
     }
 
     // Source-ledger tools read/write the per-session DB ledger, so they run

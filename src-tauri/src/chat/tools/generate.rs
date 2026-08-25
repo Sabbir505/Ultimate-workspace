@@ -48,6 +48,51 @@ pub(super) fn generate_file(artifacts_dir: &Path, args: &Value) -> ToolOutcome {
     }
 }
 
+/// Editorial style guide + conduit_docgen cheatsheet for `generate_document`.
+/// Lives HERE (not in the tool schema) so fresh turns don't pay ~3k chars of
+/// guidance until the tool is actually used — progressive disclosure.
+pub(super) const DOC_STYLE_GUIDE: &str = "\
+DOCUMENT STYLE GUIDE — aim for the editorial, modern look Claude/ChatGPT/Gemini \
+ship: an elegant serif display face paired with a clean sans body, generous \
+whitespace, a strong type hierarchy, ONE restrained accent colour, and rich \
+full-bleed cover/section slides. Hierarchy comes from type scale, weight and \
+whitespace — NEVER decorative accent bars, stripes, or underlines under titles. \
+Clean white pages for documents; save saturated colour for deck cover/section/\
+closing slides. Cover/title, real typography, headings, tables; decks get \
+multiple well-laid-out slides with a title slide and section dividers.
+
+conduit_docgen cheatsheet:
+  import conduit_docgen as cd
+  doc = cd.Doc(title='Quarterly Report', subtitle='FY2025 Q2', theme='ink', author='Acme')
+  doc.heading('Overview'); doc.paragraph('...'); doc.bullets(['a','b']); doc.numbered(['1','2'])
+  doc.table(['Metric','Value'], [['Revenue','$1.2M']]); doc.callout('Key point'); doc.save()
+  deck = cd.Deck(title='Product Launch', subtitle='2025', theme='midnight', footer='Acme Inc')
+  deck.section('Introduction', number=1); deck.bullets('Why now', ['ready','mature'], eyebrow='Context')
+  deck.two_column('Compare','A',['fast'],'B',['robust']); deck.table_slide('Numbers',['Q','Rev'],[['Q1','1.0']])
+  deck.closing('Thank you','q@acme.com'); deck.save()
+  pdf = cd.Pdf(title='Research Brief', subtitle='...', theme='plum', author='Acme Labs')
+  pdf.heading('Summary'); pdf.paragraph('...'); pdf.bullets(['a','b'])
+  pdf.table(['Model','Latency'], [['A','12ms']]); pdf.callout('Bottom line'); pdf.save()
+
+Notes: choose a theme that fits the subject (vary structure instead of repeating \
+one template); cd.Pdf handles pdf via reportlab — prefer it over hand-rolled \
+reportlab; doc.document / deck.prs give raw python-docx/python-pptx access; \
+xlsx uses openpyxl. Build genuinely useful content (several sections or 6+ \
+slides). No secrets, no network side effects. If the document you just built \
+falls short of this guide, regenerate it now.";
+
+/// Layout guide for `generate_diagram` — same progressive-disclosure contract
+/// as DOC_STYLE_GUIDE.
+pub(super) const DIAGRAM_STYLE_GUIDE: &str = "\
+DIAGRAM LAYOUT GUIDE — deliberate visual hierarchy: nested groupings/containers, \
+a 2-D grid of sub-nodes (not a single row), mixed box sizes, bold-label-plus-\
+dim-description two-line nodes, solid primary-flow arrows with a dashed \
+feedback line looping back, and consistent colour per category. Put the title \
+as a <text> at the top of the SVG, above the flow. Pure SVG is true vector and \
+exports crisply to SVG and PNG; fall back to HTML/CSS boxes only if a layout \
+genuinely needs text reflow the SVG can't do. If the diagram you just built \
+looks flat or linear, regenerate it with this guide applied.";
+
 /// Build a rich document by running the model's Python (python-docx etc.).
 pub(super) async fn generate_document(artifacts_dir: &Path, args: &Value) -> ToolOutcome {
     let format = args
@@ -79,7 +124,7 @@ pub(super) async fn generate_document(artifacts_dir: &Path, args: &Value) -> Too
         .unwrap_or("");
     if code.trim().is_empty() && !instructions.trim().is_empty() {
         return ToolOutcome::text(format!(
-            "Error: generate_document needs runnable PYTHON SOURCE in the `code` argument, \
+            "{DOC_STYLE_GUIDE}\n\nError: generate_document needs runnable PYTHON SOURCE in the `code` argument, \
              but it received a natural-language description in `instructions` instead. \
              Re-call generate_document with `code` set to a complete Python program (import \
              python-docx / python-pptx / openpyxl / reportlab, or `conduit_docgen`), that \
@@ -88,18 +133,18 @@ pub(super) async fn generate_document(artifacts_dir: &Path, args: &Value) -> Too
         ));
     }
     if code.trim().is_empty() {
-        return ToolOutcome::text(
-            "Error: generate_document needs runnable PYTHON SOURCE in the `code` argument \
+        return ToolOutcome::text(format!(
+            "{DOC_STYLE_GUIDE}\n\nError: generate_document needs runnable PYTHON SOURCE in the `code` argument \
              (not instructions). Write a complete program that imports python-docx / \
              python-pptx / openpyxl / reportlab (or `conduit_docgen`), builds the document, \
-             and saves it to os.environ[\"CONDUIT_OUTPUT\"].",
-        );
+             and saves it to os.environ[\"CONDUIT_OUTPUT\"]."
+        ));
     }
 
     match pygen::generate(artifacts_dir, &format, filename, code).await {
         Ok(file) => ToolOutcome {
             text: format!(
-                "Created document \"{}\" ({}). It has been saved and is available to the user.",
+                "{DOC_STYLE_GUIDE}\n\nCreated document \"{}\" ({}). It has been saved and is available to the user.",
                 file.filename,
                 file.path.display()
             ),
@@ -153,14 +198,14 @@ pub(super) fn generate_diagram(artifacts_dir: &Path, args: &Value) -> ToolOutcom
     let report = validate_diagram_html(html);
     let note = if report.is_clean() {
         format!(
-            "Created diagram \"{}\" ({}). Structural check passed. It is saved and available to \
+            "{DIAGRAM_STYLE_GUIDE}\n\nCreated diagram \"{}\" ({}). Structural check passed. It is saved and available to \
              the user as a diagram artifact (PNG-exportable).",
             file.filename,
             file.path.display()
         )
     } else {
         format!(
-            "Created diagram \"{}\" ({}), but the structural check found issues you should fix \
+            "{DIAGRAM_STYLE_GUIDE}\n\nCreated diagram \"{}\" ({}), but the structural check found issues you should fix \
              before considering it done:\n{}\n\nThe file is saved and visible to the user; revise \
              and regenerate if the issues affect rendering.",
             file.filename,

@@ -612,6 +612,10 @@ div[data-index]:has(.chat-session-row.menu-open) {
 }
 .chat-thinking-toggle:hover {
   color: var(--text);
+  /* Never inherit the global button:hover skin (tokens.css paints a glass
+     pill + strong border on every button) — this is a bare text toggle. */
+  background: transparent;
+  border: none;
 }
 .chat-thinking.live .chat-thinking-toggle {
   animation: thinking-pulse 1.4s ease-in-out infinite;

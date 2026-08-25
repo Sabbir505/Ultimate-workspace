@@ -92,11 +92,16 @@ function MetricChip({ label, value, live, tone = "idle", hint }: MetricChipProps
 }
 
 export function ComposerMetrics({ chatSessionId, streaming, variant = "row", contextMeter }: Props) {
-  // Pick the source: live snapshot while streaming, otherwise the persisted
-  // session aggregate. Selecting both keeps the row reactive mid-turn while
-  // still rendering something useful on idle chats that have past turns.
+  // Pick the source: live snapshot while streaming, otherwise the LAST
+  // completed turn's final numbers (matching the "Worked for Xs" just
+  // watched), falling back to the persisted session aggregate. Selecting all
+  // three keeps the row reactive mid-turn while still rendering something
+  // useful on idle chats that have past turns.
   const live = useChatStore((s) =>
     chatSessionId ? s.livePerf[chatSessionId] : undefined,
+  );
+  const last = useChatStore((s) =>
+    chatSessionId ? s.lastTurnPerf[chatSessionId] : undefined,
   );
   const agg = useChatStore((s) =>
     chatSessionId ? s.sessionMetrics[chatSessionId] : undefined,
@@ -138,6 +143,33 @@ export function ComposerMetrics({ chatSessionId, streaming, variant = "row", con
     }
     const elapsed = fmtMs(live.elapsedMs);
     if (elapsed) chips.push({ label: "elapsed", value: elapsed, live: true, hint: "Wall-clock time since this turn started" });
+  } else if (last) {
+    // Idle — the LAST turn's final numbers, so the row agrees with the
+    // "Worked for Xs" label on the bubble above. Falls through to the
+    // session aggregate when no turn has completed in this app run.
+    const inp = fmtTokens(last.inputTokens);
+    if (inp) chips.push({ label: "in", value: inp, tone: "tokens", hint: "Input tokens of the last completed turn" });
+    const out = fmtTokens(last.outputTokens) ?? "0 tok";
+    chips.push({ label: "out", value: out, tone: "tokens", hint: "Output tokens of the last completed turn" });
+    const llm = fmtMs(last.llmTimeMs);
+    if (llm) chips.push({ label: "llm", value: llm, hint: "Model generation time of the last completed turn" });
+    if (last.toolTimeMs > 0) {
+      const t = fmtMs(last.toolTimeMs);
+      if (t) chips.push({ label: "tools", value: t, hint: "Tool execution time of the last completed turn, excluding approval waits" });
+    }
+    const ttft = fmtMs(last.ttftMs ?? undefined);
+    if (ttft) chips.push({ label: "ttft", value: ttft, hint: "Time to first token of the last completed turn" });
+    const tokS = fmtTokPerSecond(last.tokensPerSecond ?? undefined);
+    if (tokS) chips.push({ label: "speed", value: tokS, tone: "speed", hint: "Generation rate of the last completed turn" });
+    const cache = fmtPct(last.cacheHitRate ?? undefined);
+    if (cache) {
+      chips.push({
+        label: "cache",
+        value: cache,
+        tone: "cache",
+        hint: `${cache} of the last turn's input tokens were served from the prompt cache`,
+      });
+    }
   } else if (agg) {
     // Idle — show session totals / averages.
     const inp = fmtTokens(agg.inputTokens);

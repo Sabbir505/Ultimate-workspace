@@ -1517,9 +1517,10 @@ function MessageBubbleInner({
       }
     }
   }
-  // The collapsed row's label: live action while streaming, "Working for Xs"
-  // while we have livePerf.elapsedMs, "Worked for Xs" when completed with a
-  // duration, else a legacy one-line summary of the tool steps.
+  // The collapsed row's label: the live action while streaming, else a legacy
+  // one-line summary of the tool steps. Deliberately NOT "Working/Worked for
+  // Xs" — the assistant-message header above the bubble owns that timer, and
+  // showing it here too read as a duplicate.
   const fallbackSummary =
     processToolSteps.length > 0 ? summarizeGroup(processToolSteps) : "";
   const liveElapsedSec = live && livePerf?.elapsedMs != null
@@ -1527,11 +1528,7 @@ function MessageBubbleInner({
     : null;
   const processLabel = processLive
     ? liveLabel
-    : liveElapsedSec != null
-      ? `Working for ${formatDuration(liveElapsedSec)}`
-      : message.durationSec != null
-        ? `Worked for ${formatDuration(message.durationSec)}`
-        : (fallbackSummary || "Worked");
+    : (fallbackSummary || "Worked");
 
   // Detect if this assistant message contains a plan section
   const planSection = !isUser ? detectPlan(message.content) : null;
@@ -1553,7 +1550,10 @@ function MessageBubbleInner({
           )}
           {!isUser && (
             <div className="assistant-message-header">
-              {processLive
+              {/* The single Working/Worked-for timer for the whole turn —
+                 live from the first token (even while only thinking, before
+                 any tool call), "Worked for Xs" once the duration is known. */}
+              {live
                 ? (liveElapsedSec != null ? `Working for ${formatDuration(liveElapsedSec)}` : "Working")
                 : (message.durationSec != null ? `Worked for ${formatDuration(message.durationSec)}` : null)}
             </div>

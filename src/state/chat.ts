@@ -130,6 +130,30 @@ function withoutDeleted(sessions: ChatSession[]): ChatSession[] {
   return sessions.filter((s) => !deletedSessions.has(s.id));
 }
 
+/**
+ * Merge a fresh DB page with the buffer's still-optimistic rows (negative
+ * ids = sent but not yet seen in any refetch). A refetch snapshot taken
+ * BEFORE the backend persisted an in-flight send would otherwise silently
+ * drop that send's bubble: the queue drain appends the optimistic bubble
+ * and an older handler's refetch (cancelStream, onDone of the previous
+ * turn) then replaces the list with rows that predate the persist — the
+ * user sees the assistant reply to a message that never appeared. An
+ * optimistic row is kept only when no fetched row carries the same
+ * role+content (its just-persisted twin), so the finished turn's bubble is
+ * never duplicated.
+ */
+function mergeOptimistic(
+  current: ChatMessageRecord[],
+  fetched: ChatMessageRecord[],
+): ChatMessageRecord[] {
+  const optimistic = current.filter((m) => m.id < 0);
+  if (optimistic.length === 0) return fetched;
+  const key = (m: ChatMessageRecord) => `${m.role}\u0000${m.content}`;
+  const fetchedKeys = new Set(fetched.map(key));
+  const missing = optimistic.filter((o) => !fetchedKeys.has(key(o)));
+  return missing.length > 0 ? [...fetched, ...missing] : fetched;
+}
+
 /** Cap a Map to `max` entries by evicting oldest (insertion-order) entries.
  *  The map's iteration order is insertion order, so the first key seen is
  *  the oldest — which is the one we drop. This protects the most-recently
@@ -242,6 +266,19 @@ export interface ChatTaskProgress {
   total: number | null;
   speedBps: number;
   destPath: string | null;
+}
+
+/** Final metrics of a session's last completed turn — the composer's idle
+ *  metrics row shows these so the numbers match the turn just watched. */
+export interface LastTurnMetrics {
+  llmTimeMs: number;
+  toolTimeMs: number;
+  ttftMs: number | null;
+  tokensPerSecond: number | null;
+  outputTokens: number;
+  inputTokens: number | null;
+  cacheHitRate: number | null;
+  elapsedMs: number | null;
 }
 
 /** A single checkpoint/step extracted from a model-generated plan. Displayed
@@ -497,6 +534,13 @@ export interface ChatState {
    *  session id. Updated on throttled `chat:perf` events while a turn streams,
    *  cleared on `chat:done`. Mirrors the `ChatPerfPayload` from the backend. */
   livePerf: Record<string, ChatPerfPayload>;
+  /** Final metrics of each session's LAST completed turn, keyed by chat
+   *  session id. Captured in `onDone` from the done payload + the final live
+   *  snapshot. The composer's idle row prefers this over the session
+   *  aggregate so the numbers match the turn the user just watched (the
+   *  aggregate sums every turn and is empty for providers that don't write
+   *  cost events, which read as "wrong data"). */
+  lastTurnPerf: Record<string, LastTurnMetrics>;
   /** Session-level aggregate metrics (sums / weighted averages across the
    *  session's assistant turns), keyed by chat session id. Fetched when a
    *  session is opened and after each turn completes (`chat:done`), used for
@@ -730,6 +774,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessionProjects: {},
   messageQueue: {},
   livePerf: {},
+  lastTurnPerf: {},
   sessionMetrics: {},
   loopState: {},
 
@@ -866,7 +911,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // history on open. Older pages prepend via loadOlderMessages.
     const messages = await getChatMessages(chatSessionId, undefined, 200);
     set((s) => ({
-      messages: s.activeChatSessionId === chatSessionId ? (messages ?? []) : s.messages,
+      // mergeOptimistic: a session opened while its queued message is mid-
+      // drain keeps the in-flight bubble instead of snapping back to the
+      // pre-persist snapshot.
+      messages:
+        s.activeChatSessionId === chatSessionId
+          ? mergeOptimistic(s.messages, messages ?? [])
+          : s.messages,
       messagesSessionId:
         s.activeChatSessionId === chatSessionId ? chatSessionId : s.messagesSessionId,
       hasMoreHistory: s.activeChatSessionId === chatSessionId ? (messages?.length ?? 0) >= 200 : s.hasMoreHistory,
@@ -1180,6 +1231,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       loopState: {},
       subagents: {},
       livePerf: {},
+      lastTurnPerf: {},
       sessionMetrics: {},
       previewArtifacts: [],
       activePreviewPath: null,
@@ -1910,10 +1962,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }));
       }
       // Refresh the message list so the persisted partial shows up inline.
+      // mergeOptimistic keeps the just-drained queued message's bubble: the
+      // refetch snapshot can predate that send's DB persist.
       try {
         const messages = await getChatMessages(streamingChatSessionId);
         if (messages && get().activeChatSessionId === streamingChatSessionId) {
-          set({ messages, messagesSessionId: streamingChatSessionId });
+          set((s) => ({
+            messages: mergeOptimistic(s.messages, messages),
+            messagesSessionId: streamingChatSessionId,
+          }));
         }
       } catch {
         /* best-effort refresh */
@@ -1998,6 +2055,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (get().activeChatSessionId !== chatSessionId) {
       void setChatSessionUnread(chatSessionId, true).catch(() => {});
     }
+    // Capture the finished turn's final metrics for the composer's idle row
+    // BEFORE the live snapshot is cleared below — the idle row shows the last
+    // turn's numbers (matching the "Worked for Xs" just watched) instead of
+    // the session aggregate, which sums every turn and is empty for providers
+    // that don't write cost events.
+    const finalLive = get().livePerf[chatSessionId];
+    const lastTurn: LastTurnMetrics = {
+      llmTimeMs: llmTimeMs ?? finalLive?.llmTimeMs ?? 0,
+      toolTimeMs: toolTimeMs ?? finalLive?.toolTimeMs ?? 0,
+      ttftMs: ttftMs ?? finalLive?.ttftMs ?? null,
+      tokensPerSecond: tokensPerSecond ?? finalLive?.tokensPerSecond ?? null,
+      outputTokens: outputTokens ?? finalLive?.outputTokens ?? 0,
+      inputTokens: inputTokens ?? null,
+      cacheHitRate: cacheHitRate ?? null,
+      elapsedMs: finalLive?.elapsedMs ?? null,
+    };
+
     // Clear streaming + live-perf state for this session.
     set((s) => {
       const nextStreaming = { ...s.streaming };
@@ -2010,6 +2084,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         streaming: nextStreaming,
         chatStatus: nextStatus,
         livePerf,
+        lastTurnPerf: { ...s.lastTurnPerf, [chatSessionId]: lastTurn },
         streamingChatSessionId:
           s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
       };
@@ -2073,7 +2148,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const nextPending = { ...s.pendingArtifacts };
         delete nextPending[chatSessionId];
         return {
-          messages: isActiveSession ? messages : s.messages,
+          messages: isActiveSession ? mergeOptimistic(s.messages, messages) : s.messages,
           messagesSessionId: isActiveSession ? chatSessionId : s.messagesSessionId,
           hasMoreHistory: isActiveSession
             ? messages.length >= 200

@@ -399,6 +399,7 @@ pub fn run() {
             // local models (GGUF scan / llama-server sidecar)
             commands::chat_cmds::scan_local_models,
             commands::chat_cmds::start_local_model,
+            commands::chat_cmds::warmup_local_prompt,
             commands::chat_cmds::stop_local_model,
             commands::chat_cmds::local_model_status,
             commands::chat_cmds::get_llama_server_path,

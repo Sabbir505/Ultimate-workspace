@@ -398,6 +398,53 @@ pub fn remove_chat_session_connector(
     Ok(())
 }
 
+/// The working directory the most-recently-active local_gguf session's next
+/// send would resolve to (worktree path, else its bound project's path) —
+/// used by the prompt warmup to replicate the send path's `## Working
+/// directory` system-prompt tail so the cached prefix matches. Returns None
+/// when no local session exists or none of the resolution steps yield a path
+/// (the warmup then omits the section, matching a send without a working
+/// folder). The composer's custom-folder override is frontend-only state and
+/// can't be known here; in that case the first send falls back to paying the
+/// extra prompt eval.
+pub fn latest_local_session_working_root(conn: &Connection) -> DbResult<Option<String>> {
+    let row = conn
+        .query_row(
+            "SELECT cs.worktree_path, cs.project_id
+             FROM chat_sessions cs
+             WHERE cs.provider = 'local_gguf'
+             ORDER BY cs.last_active_at DESC
+             LIMIT 1",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((worktree_path, project_id)) = row else {
+        return Ok(None);
+    };
+    if let Some(wt) = worktree_path.filter(|p| !p.trim().is_empty()) {
+        return Ok(Some(wt));
+    }
+    if let Some(pid) = project_id.filter(|p| !p.trim().is_empty()) {
+        let path = conn
+            .query_row(
+                "SELECT path FROM projects WHERE id = ?1",
+                params![pid],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(p) = path.filter(|p| !p.trim().is_empty()) {
+            return Ok(Some(p));
+        }
+    }
+    Ok(None)
+}
+
 // ---- chat messages ----
 
 fn map_chat_message(row: &rusqlite::Row) -> rusqlite::Result<ChatMessageRecord> {

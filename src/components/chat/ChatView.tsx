@@ -12,6 +12,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useChatStore } from "../../state/chat";
+import { useProjectsStore } from "../../state/projects";
 import { useUiStore } from "../../state/ui";
 import { ChatComposer, type ChatAttachment } from "./ChatComposer";
 import { ApprovalCard, FullAutoConfirmModal } from "./ApprovalFlow";
@@ -31,7 +32,7 @@ const MessageBubble = lazy(() => import("./MessageBubble").then((m) => ({ defaul
 // edit-tool call. None of these appear on the empty welcome screen.
 const TaskProgressCard = lazy(() => import("./TaskProgressCard").then((m) => ({ default: m.TaskProgressCard })));
 const ArtifactProposalCard = lazy(() => import("./ArtifactProposalCard").then((m) => ({ default: m.ArtifactProposalCard })));
-import { listHarnessModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, deleteEmptyChatSessions, getLocalModelOverrides, setLocalModelOverrides, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance } from "../../lib/ipc";
+import { listHarnessModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, deleteEmptyChatSessions, getLocalModelOverrides, setLocalModelOverrides, warmupLocalPrompt, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance } from "../../lib/ipc";
 import { harnessModelCatalog } from "../../lib/harnessModels";
 import { setChatScrollToMessage } from "../../lib/chatScroll";
 import type { AgentModelSelection } from "./AgentModelPicker";
@@ -338,6 +339,31 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
       setLocalLoading(true);
       try {
         await startLocalModel(match.id, match.path, match.mmprojPath, overrides);
+        // Warm the prompt cache with the EXACT prefix this session's next
+        // send will render — system prompt + tools + the `## Working
+        // directory` tail. The working dir is frontend state (custom folder →
+        // worktree → bound project), resolved here exactly like sendMessage
+        // resolves it; the backend can't know it at load time. The loading
+        // spinner stays up until the warmup completes, so "loaded" means the
+        // first message answers immediately instead of paying CUDA init +
+        // multi-thousand-token prompt eval. Best-effort: a failed warmup
+        // just means the first send pays the normal cold-start cost.
+        try {
+          const s = useChatStore.getState();
+          const sid = s.activeChatSessionId;
+          const session = sid ? s.sessions.find((x) => x.id === sid) : undefined;
+          const projects = useProjectsStore.getState();
+          const boundProject = sid
+            ? projects.projectById(s.sessionProjects[sid] ?? projects.selectedProjectId)
+            : undefined;
+          const workingDir =
+            (sid ? s.cwdOverrides[sid] : undefined) ??
+            session?.worktreePath ??
+            boundProject?.path;
+          await warmupLocalPrompt(workingDir);
+        } catch (warmErr) {
+          console.warn("prompt warmup failed (non-fatal)", warmErr);
+        }
         return null;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -1000,11 +1026,15 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
       }
     });
     // If streaming, append the live assistant bubble (no action bar while live).
-    // The key embeds session + current message count so each turn's live row is
-    // a NEW identity to the virtualizer — reusing a constant "streaming" key
-    // made it inherit the previous turn's cached row measurement, which painted
-    // the new reply at a stale offset (over the artifact proposal card).
-    if (isStreaming) {
+    // Rendered from TURN START — not from the first token — so the
+    // "Working for Xs" header is visible during the pre-token wait (prompt
+    // eval can take tens of seconds; the timer used to pop in at "1min"
+    // only once the first token landed). The key embeds session + current
+    // message count so each turn's live row is a NEW identity to the
+    // virtualizer — reusing a constant "streaming" key made it inherit the
+    // previous turn's cached row measurement, which painted the new reply at
+    // a stale offset (over the artifact proposal card).
+    if (activeIsStreaming) {
       list.push({
         role: "assistant",
         content: activeStream,
@@ -1031,7 +1061,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
       });
     }
     return list;
-  }, [messages, activeChatSessionId, artifactProposalsBySession, isStreaming, activeStream, waitingForFirstToken, livePerf, handleDelete, handleSubmitEdit]);
+  }, [messages, activeChatSessionId, artifactProposalsBySession, activeIsStreaming, activeStream, waitingForFirstToken, livePerf, handleDelete, handleSubmitEdit]);
   // PERF (PERFORMANCE_AUDIT.md F5): virtualize the message list — long
   // conversations used to mount EVERY MessageBubble (each re-parsing markdown
   // + katex), which made scroll janky and session-switch slow past a few

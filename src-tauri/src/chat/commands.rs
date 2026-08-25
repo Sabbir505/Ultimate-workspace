@@ -1528,6 +1528,14 @@ pub async fn send_chat_message(
                                     "[local-warmup] sidecar started OK, persisted base_url={:?}",
                                     started.base_url
                                 );
+                                // Same prompt-cache warmup as start_local_model —
+                                // queued behind the in-flight send on
+                                // llama-server, so it primes the NEXT turn.
+                                spawn_prompt_warmup(
+                                    app.clone(),
+                                    started.base_url.clone(),
+                                    started.model_id.clone(),
+                                );
                             }
                             Err(e) => {
                                 eprintln!("[local-warmup] start FAILED: {e}");
@@ -1933,19 +1941,17 @@ pub async fn send_chat_message(
             if !fs_roots.iter().any(|r| r == &root) {
                 fs_roots.push(root.clone());
             }
-            let section = format!(
-                "\n\n## Working directory\nThis chat's working directory is `{root}`. \
-                 Treat it as the current working directory: resolve RELATIVE paths against \
-                 it, and default `list_directory`/`search_files`/`search_content` calls to \
-                 it when the user hasn't said where. This is NOT a restriction: you may \
-                 `list_directory`, `read_file`, `search_files`, and `search_content` ANY \
-                 directory on the machine — pass an absolute path (e.g. \
-                 `search_content(path: \"C:/Users/me/Documents\", query: ...)`) whenever \
-                 the user asks about files outside the working directory. Only WRITES \
-                 (`write_file`/`edit_file`/`delete_file`/`move_file`/`copy_file`) are \
-                 limited to granted roots."
-            );
+            let section = working_directory_section(&root);
             system = Some(system.unwrap_or_default() + &section);
+            // Remember the root for the prompt warmup: the selected project /
+            // custom folder live in frontend state the warmup can't see, and
+            // a missing section here invalidates the entire cached prefix
+            // (the section sits at the end of the system message, right
+            // before the tools region).
+            {
+                let conn = db.0.lock();
+                let _ = db::set_setting(&conn, "chat.local_gguf.last_working_dir", &root);
+            }
         }
     }
     chat_state.0.send(
@@ -1977,9 +1983,10 @@ pub async fn send_chat_message(
 /// attached to the session — i.e. attachable on demand. "Available" =
 /// a credential row exists (OAuth connectors) or the endpoint is public
 /// (`is_public()`, e.g. Kiwi — never has a row); for gallery servers,
-/// `enabled` in their def. Shared by the send path, the context meter, and
-/// the context breakdown so all three agree on what the model can attach.
-fn attach_availability(
+/// `enabled` in their def. Shared by the send path, the context meter, the
+/// context breakdown, and the prompt warmup so all four agree on what the
+/// model can attach.
+pub(crate) fn attach_availability(
     app: &tauri::AppHandle,
     attached_connectors: &[String],
     attached_mcp: &[String],
@@ -2016,6 +2023,201 @@ fn attach_availability(
         })
         .collect();
     (connectors, mcp)
+}
+
+/// The `## Working directory` system-prompt section the send path appends
+/// when the chat has a working folder. Shared with the prompt warmup so the
+/// cached prefix matches the real request byte-for-byte — the section sits at
+/// the END of the system message, right before the tools region in the
+/// rendered prompt, and a single divergent char there would invalidate the
+/// whole cached prefix.
+pub(crate) fn working_directory_section(root: &str) -> String {
+    format!(
+        "\n\n## Working directory\nThis chat's working directory is `{root}`. \
+         Treat it as the current working directory: resolve RELATIVE paths against \
+         it, and default `list_directory`/`search_files`/`search_content` calls to \
+         it when the user hasn't said where. This is NOT a restriction: you may \
+         `list_directory`, `read_file`, `search_files`, and `search_content` ANY \
+         directory on the machine — pass an absolute path (e.g. \
+         `search_content(path: \"C:/Users/me/Documents\", query: ...)`) whenever \
+         the user asks about files outside the working directory. Only WRITES \
+         (`write_file`/`edit_file`/`delete_file`/`move_file`/`copy_file`) are \
+         limited to granted roots."
+    )
+}
+
+/// Prompt-cache warmup for a freshly started local sidecar.
+///
+/// The first real message on a cold model pays three one-time costs: CUDA
+/// kernel init on the first forward pass, chat-template compilation, and —
+/// the big one — prompt-evaluating the multi-thousand-token system prompt
+/// plus tool-schema JSON. llama.cpp caches the rendered prompt prefix across
+/// requests, so one tiny completion built from the SAME parts the send path
+/// assembles (core prompt + skills catalog + attach manifest + tool specs,
+/// with the same attachable enums) absorbs all of that. Best-effort: failures
+/// are logged and never surfaced (the send works identically without the
+/// warmup). Capped at 90s — a slow machine falls back to paying part of the
+/// cost on the first message rather than hanging the load forever.
+///
+/// Two callers:
+/// - `start_local_model` AWAITS this, so the model-loading spinner covers the
+///   warmup and "loaded" means the first message answers immediately. The
+///   wait is the same prompt-eval the first message would otherwise pay — it
+///   just happens in the loading phase where the user expects to wait.
+/// - The send path's sidecar respawn fires it via [`spawn_prompt_warmup`] —
+///   a turn is already in flight there, so it can't block; it primes turn 2.
+pub(crate) async fn run_prompt_warmup(
+    app: &tauri::AppHandle,
+    base_url: &str,
+    model_id: &str,
+    working_dir: Option<&str>,
+) {
+    let started = std::time::Instant::now();
+    // Mirror the send path's assembly for a fresh session: nothing
+    // attached yet, code exec on (composer default), default sandbox,
+    // db-stored approval rules.
+    let (custom, fs_rules) = {
+        let db_state = app.state::<crate::DbState>();
+        let conn = db_state.0.lock();
+        let custom = db::get_setting(&conn, "assistant.systemPrompt").ok().flatten();
+        let fs_rules: Vec<crate::chat::permission::ApprovalRule> = db::get_setting(
+            &conn,
+            "permissions.rules",
+        )
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str(&j).unwrap_or_default())
+        .unwrap_or_default();
+        (custom, fs_rules)
+    };
+    let (avail_c, avail_m) = attach_availability(app, &[], &[]);
+    let manifest = crate::chat::prompts::attach_manifest_segment(&avail_c, &avail_m);
+    let mut system = crate::chat::build_system_prompt(
+        ChatProviderId::LocalGguf,
+        model_id,
+        custom.as_deref(),
+        &[],
+        true,
+        false,
+        manifest.as_deref(),
+    )
+    .unwrap_or_default();
+    // Replicate the send path's `## Working directory` tail — the section
+    // sits at the end of the system message, right before the tools region,
+    // and a single divergent char there invalidates the whole cached prefix
+    // (this mismatch is why the first warmup attempt saved nothing: 7,139
+    // warmup chars vs 7,819 real). The caller supplies the working dir its
+    // next send would resolve to; None matches a send without one.
+    if let Some(root) = working_dir
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty())
+    {
+        eprintln!("[prompt-warmup] matching working directory: {root:?}");
+        system.push_str(&working_directory_section(&root));
+    } else {
+        eprintln!("[prompt-warmup] no working directory — warmup covers the core+skills+manifest prefix only");
+    }
+    let caps = crate::chat::tools::ToolCaps {
+        code_exec: true,
+        fs_roots: Vec::new(),
+        web_search: false,
+        requires_local_sandbox: true,
+        attached_connectors: std::sync::Arc::new(Vec::new()),
+        local_docs: false,
+        mcp_tools: std::sync::Arc::new(Vec::new()),
+        fs_rules,
+        attachable_connectors: std::sync::Arc::new(
+            avail_c.into_iter().map(|e| (e.id, e.name)).collect(),
+        ),
+        attachable_mcp: std::sync::Arc::new(
+            avail_m.into_iter().map(|e| (e.id, e.name)).collect(),
+        ),
+        local_model: true,
+    };
+    let specs = crate::chat::tools::openai_tool_specs(
+        &caps,
+        crate::chat::permission::SandboxPolicy::WorkspaceWrite,
+    );
+    let body = serde_json::json!({
+        "model": model_id,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": "Warmup — reply with: ok" },
+        ],
+        "tools": specs,
+        "max_tokens": 1,
+        "stream": false,
+    });
+    let client = reqwest::Client::new();
+    let url = format!("{base_url}/v1/chat/completions");
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        client.post(&url).json(&body).send(),
+    )
+    .await;
+    match res {
+        Ok(Ok(resp)) if resp.status().is_success() => {
+            eprintln!(
+                "[prompt-warmup] ok in {}ms — first user message skips CUDA init + \
+                 prompt eval of system+tools",
+                started.elapsed().as_millis()
+            );
+        }
+        Ok(Ok(resp)) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            eprintln!(
+                "[prompt-warmup] HTTP {status}: {}",
+                crate::util::truncate_chars(&body, 300)
+            );
+        }
+        Ok(Err(e)) => eprintln!("[prompt-warmup] request failed: {e}"),
+        Err(_) => eprintln!("[prompt-warmup] timed out after 90s — continuing anyway"),
+    }
+}
+
+/// Fire-and-forget variant for paths that can't block (the send path's
+/// sidecar respawn — a turn is already streaming, so the warmup primes the
+/// NEXT turn instead). Uses the working dir persisted by the last send.
+pub(crate) fn spawn_prompt_warmup(app: tauri::AppHandle, base_url: String, model_id: String) {
+    tokio::spawn(async move {
+        let root = {
+            let db_state = app.state::<crate::DbState>();
+            let conn = db_state.0.lock();
+            db::get_setting(&conn, "chat.local_gguf.last_working_dir")
+                .ok()
+                .flatten()
+                .filter(|r| !r.trim().is_empty())
+        };
+        run_prompt_warmup(&app, &base_url, &model_id, root.as_deref()).await;
+    });
+}
+
+/// Warm the local model's prompt cache with the EXACT system+tools prefix
+/// the next send from this chat will render. Called by the frontend right
+/// after `start_local_model` resolves, with the same working-dir resolution
+/// `sendMessage` uses (the working dir is frontend state — selected project /
+/// custom folder / worktree — so the backend can't guess it at load time).
+/// The frontend keeps its loading spinner up until this resolves, so
+/// "loaded" means the first message answers immediately. Capped at 90s;
+/// best-effort (errors are logged, never surfaced).
+#[tauri::command]
+pub async fn warmup_local_prompt(
+    working_dir: Option<String>,
+    local: State<'_, local_models::LocalModelState>,
+    app: tauri::AppHandle,
+) -> CmdResult<()> {
+    let Some(status) = local.0.status() else {
+        return Err("No local model is running.".to_string());
+    };
+    run_prompt_warmup(
+        &app,
+        &status.base_url,
+        &status.model_id,
+        working_dir.as_deref(),
+    )
+    .await;
+    Ok(())
 }
 
 /// Resolve which skills the user INVOKED in this message — `(name, body)`
@@ -2895,6 +3097,12 @@ pub async fn start_local_model(
             .map_err(|e| e.to_string())?;
         local_models::save_last_good_ngl(&conn, &started.model_id, started.n_gpu_layers);
     }
+
+    // The frontend runs `warmup_local_prompt` right after this resolves,
+    // passing the working dir only it knows (selected project / custom
+    // folder / worktree) and keeping its loading spinner up until the
+    // warmup completes — "loaded" then means the first message answers
+    // immediately.
 
     // The frontend expects these exact camelCase fields (mirrors types.rs).
     Ok(StartedModel {

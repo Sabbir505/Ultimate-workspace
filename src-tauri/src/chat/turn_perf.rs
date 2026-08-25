@@ -41,8 +41,36 @@ static ACTIVE: once_cell::sync::Lazy<ActiveRegistry> =
 /// Register the active `TurnPerf` for a session. Calling code holds the
 /// returned `TurnPerf` clone for its own reads; the registry is for the emit
 /// hot path.
+///
+/// Also starts a 500ms heartbeat that emits `chat:perf` for as long as this
+/// perf remains the session's active one. The token-driven emits only start
+/// with the FIRST token, and prompt eval can take tens of seconds — without
+/// the heartbeat the UI's "Working for Xs" timer had no data until the first
+/// token and then jumped straight to e.g. "1min".
 pub fn register(session_id: &str, perf: TurnPerf) -> TurnPerf {
     ACTIVE.lock().insert(session_id.to_string(), perf.clone());
+    // Heartbeat task: tick until this perf is no longer the session's active
+    // one (turn ended → unregistered, or a new turn replaced it). Spawned
+    // through Handle::try_current so non-async callers (tests) don't panic.
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let sid = session_id.to_string();
+        let heartbeat = perf.clone();
+        handle.spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+            loop {
+                interval.tick().await;
+                let still_active = {
+                    ACTIVE.lock().get(&sid).is_some_and(|p| {
+                        Arc::ptr_eq(&p.inner, &heartbeat.inner)
+                    })
+                };
+                if !still_active {
+                    break;
+                }
+                heartbeat.maybe_emit_perf();
+            }
+        });
+    }
     perf
 }
 

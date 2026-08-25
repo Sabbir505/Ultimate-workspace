@@ -1530,6 +1530,16 @@ export const startLocalModel = (
     mmprojPath: mmprojPath ?? null,
     overrides: overrides ?? null,
   });
+/**
+ * Warm the local model's prompt cache with the exact system+tools prefix the
+ * next send will render. Pass the SAME workingDir resolution sendMessage
+ * uses (cwdOverride → worktree → bound project). Resolves when the warmup
+ * completes (≤90s) — the caller keeps its loading state up until then so
+ * "loaded" means the first message answers immediately. Best-effort: errors
+ * mean the first message pays the normal cold-start eval.
+ */
+export const warmupLocalPrompt = (workingDir?: string | null) =>
+  safeInvoke<void>("warmup_local_prompt", { workingDir: workingDir ?? null });
 
 export const stopLocalModel = (modelId: string) =>
   safeInvoke<void>("stop_local_model", { modelId });

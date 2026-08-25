@@ -161,6 +161,15 @@ async fn openai_stream_round(
     // `<tool_call` opener split across SSE chunks — emitted with the next
     // chunk once it proves not to be one (classic incremental-scan carry).
     let mut carry = String::new();
+    // Set when a chunk carries `finish_reason: "stop"`. NOT terminal: the
+    // provider's usage chunk arrives AFTER it (llama-server order: final
+    // delta → `{"choices":[],"usage":{…}}` → `[DONE]`), and breaking here
+    // silently dropped token accounting on every plain (non-tool) turn —
+    // tool rounds end with `finish_reason: "tool_calls"` and read on, which
+    // is why only they had metrics. After stop, a short read grace bounds
+    // the wait for the usage chunk; providers that never send it just hit
+    // the grace instead of the 60s stall watchdog.
+    let mut stop_seen = false;
 
     'outer: while let Some(chunk) = {
         // Watchdog: 60s with no bytes from the provider means the connection
@@ -169,12 +178,17 @@ async fn openai_stream_round(
         // this guard a stalled stream blocks forever — the frontend's
         // `streaming[chatSessionId]` entry never clears and the stop button
         // spins indefinitely. A timeout here returns Err → chat:error.
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            stream.next(),
-        ).await {
+        // After `finish_reason: "stop"` the grace shrinks to 2s: only the
+        // usage chunk (and [DONE]) should follow.
+        let grace = if stop_seen {
+            std::time::Duration::from_secs(2)
+        } else {
+            std::time::Duration::from_secs(60)
+        };
+        match tokio::time::timeout(grace, stream.next()).await {
             Ok(Some(chunk)) => Some(chunk),
             Ok(None) => None,
+            Err(_elapsed) if stop_seen => None,
             Err(_elapsed) => {
                 return Err("stream stalled: no data received for 60s".to_string());
             }
@@ -329,9 +343,11 @@ async fn openai_stream_round(
             }
             // OpenAI/OpenRouter-compatible streams sometimes omit a final
             // `data: [DONE]` but do include `choices[0].finish_reason = "stop"`.
-            // Treat that as terminal too, so the tool loop doesn't wait for EOF.
+            // NOT terminal here — the provider's usage chunk follows it (see
+            // `stop_seen` above); the 2s post-stop read grace ends the round
+            // if it never arrives.
             if v.pointer("/choices/0/finish_reason").and_then(|x| x.as_str()) == Some("stop") {
-                break 'outer;
+                stop_seen = true;
             }
         }
     }

@@ -24,6 +24,11 @@ export interface OcclusionInputs {
   paneVisible: boolean;
   collapsed: boolean;
   activeView: ActiveView;
+  /** An HTML popup that must paint where the webview is (e.g. the context
+   *  meter's hover breakdown) is showing. Native webviews sit above ALL DOM,
+   *  so the only way an HTML tooltip can be seen is to hide the webview while
+   *  the popup is up. Optional so existing callers/tests stay valid. */
+  htmlOverlayOpen?: boolean;
 }
 
 export function browserOccluded({
@@ -33,6 +38,7 @@ export function browserOccluded({
   paneVisible,
   collapsed,
   activeView,
+  htmlOverlayOpen,
 }: OcclusionInputs): boolean {
   return (
     collapsed ||
@@ -40,6 +46,7 @@ export function browserOccluded({
     activeView !== "chat" ||
     paletteOpen ||
     peekOpen ||
-    modalOpen
+    modalOpen ||
+    !!htmlOverlayOpen
   );
 }

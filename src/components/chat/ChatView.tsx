@@ -365,7 +365,16 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
             (sid ? s.cwdOverrides[sid] : undefined) ??
             session?.worktreePath ??
             boundProject?.path;
-          await warmupLocalPrompt(workingDir);
+          // Composer toggles ride along: the tool specs are part of the cached
+          // prefix, so a warmup that assumes different toggles than the first
+          // send uses saves nothing (this mismatch — web_search/code_exec —
+          // is exactly what made first messages pay the full prompt eval).
+          await warmupLocalPrompt(
+            workingDir,
+            sid,
+            s.toolsEnabled,
+            s.codeExecEnabled,
+          );
           lastWarmRef.current = { sid: sid ?? null, wd: workingDir ?? "" };
         } catch (warmErr) {
           console.warn("prompt warmup failed (non-fatal)", warmErr);
@@ -411,7 +420,12 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
     const last = lastWarmRef.current;
     if (last && last.sid === (activeChatSessionId ?? null) && last.wd === wd) return;
     lastWarmRef.current = { sid: activeChatSessionId ?? null, wd };
-    void warmupLocalPrompt(wd || null).catch(() => {});
+    void warmupLocalPrompt(
+      wd || null,
+      activeChatSessionId,
+      s.toolsEnabled,
+      s.codeExecEnabled,
+    ).catch(() => {});
   }, [activeChatSessionId, isLocal, localLoading]);
 
   const handleModelChange = useCallback(

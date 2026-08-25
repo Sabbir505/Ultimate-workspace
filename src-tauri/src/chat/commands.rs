@@ -1531,10 +1531,15 @@ pub async fn send_chat_message(
                                 // Same prompt-cache warmup as start_local_model —
                                 // queued behind the in-flight send on
                                 // llama-server, so it primes the NEXT turn.
+                                // Mirrors this turn's toggles so turn 2's
+                                // prefix matches.
                                 spawn_prompt_warmup(
                                     app.clone(),
                                     started.base_url.clone(),
                                     started.model_id.clone(),
+                                    chat_session_id.clone(),
+                                    tools_on,
+                                    code_exec_enabled.unwrap_or(false),
                                 );
                             }
                             Err(e) => {
@@ -2053,17 +2058,30 @@ pub(crate) fn working_directory_section(root: &str) -> String {
 /// the big one — prompt-evaluating the multi-thousand-token system prompt
 /// plus tool-schema JSON. llama.cpp caches the rendered prompt prefix across
 /// requests, so one tiny completion built from the SAME parts the send path
-/// assembles (core prompt + skills catalog + attach manifest + tool specs,
-/// with the same attachable enums) absorbs all of that. Best-effort: failures
-/// are logged and never surfaced (the send works identically without the
-/// warmup). Capped at 90s — a slow machine falls back to paying part of the
-/// cost on the first message rather than hanging the load forever.
+/// assembles absorbs all of that. Best-effort: failures are logged and never
+/// surfaced (the send works identically without the warmup). Capped at 90s —
+/// a slow machine falls back to paying part of the cost on the first message
+/// rather than hanging the load forever.
+///
+/// PREFIX FIDELITY IS THE WHOLE GAME: llama.cpp reuses the cached KV only up
+/// to the first divergent byte, and the tools region renders AFTER the system
+/// message — one different tool spec invalidates essentially the entire
+/// prefill. The warmup therefore must mirror the real send's capability flags
+/// exactly. It once hardcoded `web_search: false` while the send path (since
+/// native web search landed for local models) always shipped the spec — every
+/// warmup logged "ok" and saved nothing, and the first message still paid the
+/// full ~1min prompt eval. Every flag below now comes from the same source
+/// the send path uses:
+/// - `web_search` — `provider_capabilities` (true for local models),
+/// - `local_docs` — embedding sidecar up AND a searchable corpus indexed,
+/// - `sandbox` — the chat session's persisted `sandbox_policy`,
+/// - `code_exec` / `tools_on` — the composer toggles, passed by the frontend,
+/// - attached connectors — the session's `chat_session_connectors` rows.
 ///
 /// Two callers:
-/// - `start_local_model` AWAITS this, so the model-loading spinner covers the
-///   warmup and "loaded" means the first message answers immediately. The
-///   wait is the same prompt-eval the first message would otherwise pay — it
-///   just happens in the loading phase where the user expects to wait.
+/// - `warmup_local_prompt` (frontend, right after `start_local_model`) — the
+///   loading spinner covers it, so "loaded" means the first message answers
+///   immediately.
 /// - The send path's sidecar respawn fires it via [`spawn_prompt_warmup`] —
 ///   a turn is already in flight there, so it can't block; it primes turn 2.
 pub(crate) async fn run_prompt_warmup(
@@ -2071,12 +2089,15 @@ pub(crate) async fn run_prompt_warmup(
     base_url: &str,
     model_id: &str,
     working_dir: Option<&str>,
+    chat_session_id: Option<&str>,
+    tools_on: bool,
+    code_exec: bool,
 ) {
     let started = std::time::Instant::now();
-    // Mirror the send path's assembly for a fresh session: nothing
-    // attached yet, code exec on (composer default), default sandbox,
-    // db-stored approval rules.
-    let (custom, fs_rules) = {
+    // Mirror the send path's assembly: the session's persisted sandbox policy
+    // and attached connectors (fresh sessions have none), db-stored approval
+    // rules, and the user's custom prompt.
+    let (custom, fs_rules, sandbox, attached_c) = {
         let db_state = app.state::<crate::DbState>();
         let conn = db_state.0.lock();
         let custom = db::get_setting(&conn, "assistant.systemPrompt").ok().flatten();
@@ -2088,16 +2109,37 @@ pub(crate) async fn run_prompt_warmup(
         .flatten()
         .and_then(|j| serde_json::from_str(&j).unwrap_or_default())
         .unwrap_or_default();
-        (custom, fs_rules)
+        let (sandbox, attached_c) = chat_session_id
+            .and_then(|sid| {
+                db::get_chat_session(&conn, sid)
+                    .ok()
+                    .flatten()
+                    .map(|cs| cs.sandbox_policy)
+                    .map(|policy| {
+                        (
+                            crate::chat::permission::SandboxPolicy::from_db(&policy),
+                            db::list_chat_session_connectors(&conn, sid)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .filter(|r| !r.starts_with("mcp:"))
+                                .collect::<Vec<String>>(),
+                        )
+                    })
+            })
+            .unwrap_or((
+                crate::chat::permission::SandboxPolicy::WorkspaceWrite,
+                Vec::new(),
+            ));
+        (custom, fs_rules, sandbox, attached_c)
     };
-    let (avail_c, avail_m) = attach_availability(app, &[], &[]);
+    let (avail_c, avail_m) = attach_availability(app, &attached_c, &[]);
     let manifest = crate::chat::prompts::attach_manifest_segment(&avail_c, &avail_m);
     let mut system = crate::chat::build_system_prompt(
         ChatProviderId::LocalGguf,
         model_id,
         custom.as_deref(),
         &[],
-        true,
+        tools_on,
         false,
         manifest.as_deref(),
     )
@@ -2117,13 +2159,32 @@ pub(crate) async fn run_prompt_warmup(
     } else {
         eprintln!("[prompt-warmup] no working directory — warmup covers the core+skills+manifest prefix only");
     }
+    // Capability flags mirror chat/mod.rs send() exactly (see doc above).
+    let pcaps = crate::chat::prompts::provider_capabilities(
+        ChatProviderId::LocalGguf,
+        model_id,
+    );
+    let local_docs = {
+        let sidecar_up = app
+            .try_state::<local_models::LocalModelState>()
+            .is_some_and(|s| s.0.embedding_status().is_some());
+        sidecar_up && {
+            let db_state = app.state::<crate::DbState>();
+            let conn = db_state.0.lock();
+            db::any_searchable_corpus(&conn)
+        }
+    };
     let caps = crate::chat::tools::ToolCaps {
-        code_exec: true,
+        code_exec,
         fs_roots: Vec::new(),
-        web_search: false,
-        requires_local_sandbox: true,
+        web_search: pcaps.native_web_search,
+        requires_local_sandbox: pcaps.requires_local_sandbox,
+        // A fresh session's first send has no LIVE connector sessions yet
+        // (AttachedConnector needs a connected McpSession — not fabricatable
+        // here). `attached_c` still matters: it's excluded from the
+        // attachable manifest above, matching the send's manifest.
         attached_connectors: std::sync::Arc::new(Vec::new()),
-        local_docs: false,
+        local_docs,
         mcp_tools: std::sync::Arc::new(Vec::new()),
         fs_rules,
         attachable_connectors: std::sync::Arc::new(
@@ -2134,20 +2195,24 @@ pub(crate) async fn run_prompt_warmup(
         ),
         local_model: true,
     };
-    let specs = crate::chat::tools::openai_tool_specs(
-        &caps,
-        crate::chat::permission::SandboxPolicy::WorkspaceWrite,
-    );
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model_id,
         "messages": [
             { "role": "system", "content": system },
             { "role": "user", "content": "Warmup — reply with: ok" },
         ],
-        "tools": specs,
         "max_tokens": 1,
         "stream": false,
     });
+    if tools_on {
+        // Mirror the send's request shape: no `tools` key at all when the
+        // composer toggle is off (an empty array renders differently).
+        let specs = crate::chat::tools::openai_tool_specs(
+            &caps,
+            sandbox,
+        );
+        body["tools"] = serde_json::to_value(specs).unwrap_or_default();
+    }
     let client = reqwest::Client::new();
     let url = format!("{base_url}/v1/chat/completions");
     let res = tokio::time::timeout(
@@ -2178,8 +2243,16 @@ pub(crate) async fn run_prompt_warmup(
 
 /// Fire-and-forget variant for paths that can't block (the send path's
 /// sidecar respawn — a turn is already streaming, so the warmup primes the
-/// NEXT turn instead). Uses the working dir persisted by the last send.
-pub(crate) fn spawn_prompt_warmup(app: tauri::AppHandle, base_url: String, model_id: String) {
+/// NEXT turn instead). Uses the working dir persisted by the last send and
+/// the session's persisted policies so the primed prefix matches turn 2.
+pub(crate) fn spawn_prompt_warmup(
+    app: tauri::AppHandle,
+    base_url: String,
+    model_id: String,
+    chat_session_id: String,
+    tools_on: bool,
+    code_exec: bool,
+) {
     tokio::spawn(async move {
         let root = {
             let db_state = app.state::<crate::DbState>();
@@ -2189,21 +2262,35 @@ pub(crate) fn spawn_prompt_warmup(app: tauri::AppHandle, base_url: String, model
                 .flatten()
                 .filter(|r| !r.trim().is_empty())
         };
-        run_prompt_warmup(&app, &base_url, &model_id, root.as_deref()).await;
+        run_prompt_warmup(
+            &app,
+            &base_url,
+            &model_id,
+            root.as_deref(),
+            Some(&chat_session_id),
+            tools_on,
+            code_exec,
+        )
+        .await;
     });
 }
 
 /// Warm the local model's prompt cache with the EXACT system+tools prefix
 /// the next send from this chat will render. Called by the frontend right
-/// after `start_local_model` resolves, with the same working-dir resolution
-/// `sendMessage` uses (the working dir is frontend state — selected project /
-/// custom folder / worktree — so the backend can't guess it at load time).
-/// The frontend keeps its loading spinner up until this resolves, so
-/// "loaded" means the first message answers immediately. Capped at 90s;
-/// best-effort (errors are logged, never surfaced).
+/// after `start_local_model` resolves, with the same working-dir + composer
+/// toggles `sendMessage` uses (working dir and toggles are frontend state —
+/// selected project / custom folder / worktree, tools + code-exec switches —
+/// so the backend can't guess them at load time). The session id resolves the
+/// persisted sandbox policy + attached connectors. The frontend keeps its
+/// loading spinner up until this resolves, so "loaded" means the first
+/// message answers immediately. Capped at 90s; best-effort (errors are
+/// logged, never surfaced).
 #[tauri::command]
 pub async fn warmup_local_prompt(
     working_dir: Option<String>,
+    chat_session_id: Option<String>,
+    tools_enabled: Option<bool>,
+    code_exec_enabled: Option<bool>,
     local: State<'_, local_models::LocalModelState>,
     app: tauri::AppHandle,
 ) -> CmdResult<()> {
@@ -2215,6 +2302,9 @@ pub async fn warmup_local_prompt(
         &status.base_url,
         &status.model_id,
         working_dir.as_deref(),
+        chat_session_id.as_deref(),
+        tools_enabled.unwrap_or(true),
+        code_exec_enabled.unwrap_or(false),
     )
     .await;
     Ok(())

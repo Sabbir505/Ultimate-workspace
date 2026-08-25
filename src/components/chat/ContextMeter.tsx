@@ -18,9 +18,11 @@
 // The "used" figure is the input_tokens of the last assistant turn (the full
 // prompt size the provider counted), passed in from ChatView. 0 until the
 // first turn completes.
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { contextWindowFor, formatTokens } from "../../lib/contextWindow";
 import { countContextBreakdown, type ContextBreakdown } from "../../lib/ipc";
+import { useUiStore } from "../../state/ui";
 
 interface Props {
   usedTokens: number | null;
@@ -74,6 +76,10 @@ export function ContextMeter({ usedTokens, model, isLocal, localCtx, liveMaxToke
   // token counts; for cloud we estimate from character length (~4 chars/token).
   const [breakdown, setBreakdown] = useState<ContextBreakdown | null | undefined>(undefined);
   const [showPanel, setShowPanel] = useState(false);
+  // Fixed-viewport position for the portaled panel, computed from the circle's
+  // rect at hover time (see the portal note below).
+  const [panelPos, setPanelPos] = useState<{ left: number; bottom: number } | null>(null);
+  const circleRef = useRef<HTMLDivElement>(null);
   const breakdownKey = chatSessionId ?? "";
   const lastKey = useRef(breakdownKey);
   if (lastKey.current !== breakdownKey) {
@@ -81,7 +87,28 @@ export function ContextMeter({ usedTokens, model, isLocal, localCtx, liveMaxToke
     setBreakdown(undefined); // session changed — refetch on next hover
   }
 
+  // While the panel is showing, tell native browser webviews to hide: they
+  // float above ALL DOM, so no z-index could lift the tooltip over them.
+  // Unmount-clears so a mid-hover unmount can't strand the flag true (which
+  // would keep every browser pane hidden forever).
+  const setContextTipOpen = useUiStore((s) => s.setContextTipOpen);
+  useEffect(() => {
+    if (showPanel) setContextTipOpen(true);
+    return () => setContextTipOpen(false);
+  }, [showPanel, setContextTipOpen]);
+
   const onHover = () => {
+    const el = circleRef.current;
+    if (el) {
+      const r = el.getBoundingClientRect();
+      // Center on the circle, clamped so the 260px panel can't leave the
+      // viewport (the circle sits in the composer's corner).
+      const left = Math.min(
+        Math.max(138, r.left + r.width / 2),
+        window.innerWidth - 138,
+      );
+      setPanelPos({ left, bottom: window.innerHeight - r.top + 6 });
+    }
     setShowPanel(true);
     if (breakdown === undefined && chatSessionId) {
       if (isLocal) {
@@ -122,6 +149,7 @@ export function ContextMeter({ usedTokens, model, isLocal, localCtx, liveMaxToke
 
   return (
     <div
+      ref={circleRef}
       className={`context-meter-circle ${level}`}
       role="img"
       aria-label={`Context ${Math.round(pct * 100)}% used`}
@@ -152,8 +180,14 @@ export function ContextMeter({ usedTokens, model, isLocal, localCtx, liveMaxToke
       </svg>
       <span className="context-meter-pct">{Math.round(pct * 100)}</span>
 
-      {showPanel && (
-        <div className="context-meter-panel">
+      {/* Portaled to document.body: the tooltip must overlap the right-side
+          tool panel, which is a sibling subtree with its own stacking context
+          — an absolutely-positioned panel inside the composer loses that fight
+          no matter its z-index. Fixed positioning + a top-layer z-index wins
+          over every HTML surface (native webviews are handled separately via
+          the contextTipOpen occlusion flag). */}
+      {showPanel && panelPos && createPortal(
+        <div className="context-meter-panel" style={{ left: panelPos.left, bottom: panelPos.bottom }}>
           {/* Model + usage stats on one row */}
           <div className="context-meter-panel-top">
             <span className="context-meter-panel-model" title={model ?? ""}>
@@ -197,7 +231,8 @@ export function ContextMeter({ usedTokens, model, isLocal, localCtx, liveMaxToke
               })}
             </div>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

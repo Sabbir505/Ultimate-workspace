@@ -858,13 +858,66 @@ function renderProcessBlock(
   }
 }
 
-/** Format a worked-duration (seconds) as "8s", "2m 13s", or "<1s". */
+/** Format a worked-duration (seconds) as "1s", "8s", or "2m 13s". */
 function formatDuration(sec: number): string {
-  if (sec < 1) return "<1s";
+  if (sec < 1) return "1s";
   if (sec < 60) return `${sec}s`;
   const m = Math.floor(sec / 60);
   const s = sec % 60;
   return s ? `${m}m ${s}s` : `${m}m`;
+}
+
+/** Live whole-seconds elapsed for the "Working for Xs" header. Reading the
+ *  latest `chat:perf` snapshot directly made the timer feel sluggish: the
+ *  backend heartbeat emits every ~500ms through a throttle shared with
+ *  token-driven emits (so gaps can stretch toward ~1s), then the value crosses
+ *  IPC + render latency and gets floored to whole seconds — the visible counter
+ *  could lag wall-clock by over a second and tick unevenly. Instead, each
+ *  snapshot ANCHORS true elapsed at its arrival instant and a local 250ms
+ *  ticker interpolates between anchors, so the displayed second flips on real
+ *  time boundaries no matter when events land. Returns null until the first
+ *  snapshot arrives (caller falls back to a bare "Working"). */
+function useLiveElapsedSec(perf: ChatPerfPayload | null | undefined): number | null {
+  const [sec, setSec] = useState<number | null>(null);
+  const anchor = useRef<{ baseMs: number; at: number } | null>(null);
+  // Re-anchor ONLY when a new snapshot object lands — not on unrelated
+  // re-renders (token flushes), which would otherwise keep advancing `at`
+  // against a stale baseMs and freeze the interpolation mid-stream.
+  const lastPerf = useRef<ChatPerfPayload | null | undefined>(undefined);
+  if (perf !== lastPerf.current) {
+    lastPerf.current = perf;
+    anchor.current = perf ? { baseMs: perf.elapsedMs, at: performance.now() } : null;
+  }
+
+  // Adopt each snapshot's truth as it lands. Monotonic guard: a snapshot
+  // emitted a hair before a second boundary must never regress the display.
+  useEffect(() => {
+    if (!perf) {
+      setSec(null);
+      return;
+    }
+    const next = Math.floor(perf.elapsedMs / 1000);
+    setSec((prev) => (prev == null || next >= prev ? next : prev));
+  }, [perf]);
+
+  // Interpolate between snapshots so the displayed second flips on real
+  // wall-clock boundaries. Only mounted while a snapshot exists, so the live
+  // bubble is the only row paying for this timer.
+  const hasSnapshot = perf != null;
+  useEffect(() => {
+    if (!hasSnapshot) return;
+    const iv = window.setInterval(() => {
+      const a = anchor.current;
+      if (!a) return;
+      const interpolated = Math.floor(
+        (a.baseMs + Math.max(0, performance.now() - a.at)) / 1000,
+      );
+      setSec((prev) => (prev == null || interpolated > prev ? interpolated : prev));
+    }, 250);
+    return () => window.clearInterval(iv);
+  }, [hasSnapshot]);
+
+  return sec;
 }
 
 /** Collapsible "N files changed · +adds −dels" row placed at the end of an
@@ -1426,6 +1479,11 @@ function MessageBubbleInner({
   // Group the turn into ordered render blocks (text / think / activity / diff).
   const blocks = useMemo(() => (isUser ? null : groupSegments(segments)), [isUser, segments]);
 
+  // Live "Working for Xs" seconds — locally interpolated between chat:perf
+  // snapshots so second flips land on wall-clock boundaries. Hook must stay
+  // ABOVE the compaction early return below (rules of hooks).
+  const liveElapsedSec = useLiveElapsedSec(live ? livePerf : null);
+
   // A persisted compaction-summary row renders as a low-weight "earlier context
   // compacted" marker (not a real bubble) so the user understands why
   // scrolling back shows condensed rather than verbatim detail. Tapping
@@ -1493,9 +1551,6 @@ function MessageBubbleInner({
   // is a SEPARATE line under the header — it must never replace the timer.
   const fallbackSummary =
     processToolSteps.length > 0 ? summarizeGroup(processToolSteps) : "";
-  const liveElapsedSec = live && livePerf?.elapsedMs != null
-    ? Math.floor(livePerf.elapsedMs / 1000)
-    : null;
   const processLabel = live
     ? (liveElapsedSec != null
         ? `Working for ${formatDuration(liveElapsedSec)}`

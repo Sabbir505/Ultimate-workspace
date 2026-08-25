@@ -128,6 +128,13 @@ export function ToolPanel() {
   // The active tab instance (the one whose body content is shown).
   const activeInstance = openTabs.find((t) => t.instanceId === activeTabId) ?? null;
   const activeKind: ToolPanelTab = activeInstance?.kind ?? "terminal";
+  // Browser panes render in their OWN always-mounted slot below (never inside
+  // the per-tab body) so switching to Terminal/Files/Canvas — or closing every
+  // tab — keeps the native webviews alive (§6.5 never kill on blur). The old
+  // structure unmounted BrowserPane on tab switch, whose cleanup fire-and-
+  // forgets browser_close: the webview died (full reload on switch back) or,
+  // if the IPC failed, floated over the UI as a ghost.
+  const browserTabActive = activeInstance?.kind === "browser";
 
   // Auto-open the Canvas tab when a non-code artifact preview becomes active
   // (images, markdown, diagrams — NOT .tsx/.jsx/.html which now open as their
@@ -285,8 +292,17 @@ export function ToolPanel() {
             </div>
           </div>
         )}
-        {/* When tabs ARE open, show the tab bar + pane body. */}
-        {!collapsed && openTabs.length > 0 && (
+        {/* When tabs ARE open, show the tab bar + pane body. NOTE: this stays
+            MOUNTED while the panel is collapsed (the wrapper above is
+            display:none) — unmounting here would run BrowserPane's cleanup,
+            which fire-and-forgets browser_close IPC; if it fails (or is merely
+            slow) the native webview survives as a ghost floating over the chat
+            after the panel is "closed". Staying mounted routes the hide through
+            the occlusion effect instead (BrowserPane sees toolPanelCollapsed →
+            browser_set_visible(false) + off-screen, synchronously before
+            paint) and keeps the browser session / terminal ptys alive for when
+            the panel reopens. */}
+        {openTabs.length > 0 && (
           <>
           {/* Tab bar — Shows one chip per open tab INSTANCE + a "+" that pops a
               menu of panes to add. Chips are scrollable + drag-to-reorder. */}
@@ -353,7 +369,12 @@ export function ToolPanel() {
               )}
             </div>
           </div>
-          {/* Pane body — renders the ACTIVE tab instance's content. */}
+          </>
+        )}
+        {/* Pane body — renders the ACTIVE tab instance's content. Skipped
+            entirely while the Browser tab is active: the browser slot below
+            owns that tab's space, and a flex:1 empty body would split it. */}
+        {openTabs.length > 0 && !browserTabActive && (
           <div className="tool-panel-body">
           {activeInstance && (
             <div className="tool-panel-tab-content">
@@ -397,44 +418,9 @@ export function ToolPanel() {
                   )}
                 </>
               )}
-              {activeInstance.kind === "browser" && (
-                <>
-                  {minimizedBrowsers.length > 0 && (
-                    <div className="tool-panel-switcher">
-                      <button
-                        className="ghost"
-                        onClick={restoreMinimizedBrowser}
-                        title="Restore the minimized browser pane"
-                      >
-                        ▣ Restore minimized browser ({minimizedBrowsers.length})
-                      </button>
-                    </div>
-                  )}
-                  {browsers.length === 0 ? (
-                    <div className="tool-panel-empty">
-                      <div>Opening browser…</div>
-                    </div>
-                  ) : (
-                    <div className="tool-panel-pane-slot">
-                      {browsers.map((b) => (
-                        <PaneFrame
-                          key={b.paneId}
-                          pane={b}
-                          index={panes.indexOf(b)}
-                          focused={b.paneId === focusedPaneId}
-                          hidden={b.paneId !== activeBrowserId}
-                          /* Hide the native webview while the pane picker is
-                              open, otherwise the OS-level webview floats on
-                              top of the dropdown (HTML z-index can't cover a
-                              native window). The webview is brought back the
-                              moment the picker closes. */
-                          visible={!collapsed && !tabPickerOpen && b.paneId === activeBrowserId}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
+              {/* Browser tab: its panes render in the always-mounted slot
+                  below (survives tab switches); nothing to show here. The
+                  auto-spawn effect handles the "no browser yet" case. */}
               {activeInstance.kind === "files" && <DevDiffPanel embedded />}
               {activeInstance.kind === "pulls" && <PullsPanel />}
               {activeInstance.kind === "canvas" && (
@@ -529,8 +515,50 @@ export function ToolPanel() {
             </div>
           )}
           </div>
-          </>
         )}
+        {/* Browser slot — ALWAYS mounted (only hidden), hosting every visible
+            browser pane. Kept out of the per-tab body so tab switches and
+            panel collapse/expand never unmount BrowserPane: unmounting is
+            what killed the native webview (or left it as a ghost when the
+            close IPC failed) instead of just hiding it via the occlusion
+            effect. Hidden via display:none when the Browser tab is not
+            active; the webviews hide themselves through BrowserPane's
+            occlusion inputs (toolPanelTab / toolPanelCollapsed). */}
+        <div
+          className="tool-panel-pane-slot"
+          style={{ display: browserTabActive ? undefined : "none" }}
+        >
+          {browserTabActive && minimizedBrowsers.length > 0 && (
+            <div className="tool-panel-switcher">
+              <button
+                className="ghost"
+                onClick={restoreMinimizedBrowser}
+                title="Restore the minimized browser pane"
+              >
+                ▣ Restore minimized browser ({minimizedBrowsers.length})
+              </button>
+            </div>
+          )}
+          {browserTabActive && browsers.length === 0 && (
+            <div className="tool-panel-empty">
+              <div>Opening browser…</div>
+            </div>
+          )}
+          {browsers.map((b) => (
+            <PaneFrame
+              key={b.paneId}
+              pane={b}
+              index={panes.indexOf(b)}
+              focused={b.paneId === focusedPaneId}
+              hidden={b.paneId !== activeBrowserId}
+              /* Hide the native webview while the pane picker is open,
+                  otherwise the OS-level webview floats on top of the dropdown
+                  (HTML z-index can't cover a native window). The webview is
+                  brought back the moment the picker closes. */
+              visible={!collapsed && !tabPickerOpen && b.paneId === activeBrowserId}
+            />
+          ))}
+        </div>
       </div>
       {/* Minimized browser panes stay mounted here (webview kept alive,
           hidden via visible=false) and are restored from the Browser tab. */}

@@ -1538,8 +1538,18 @@ export const startLocalModel = (
  * "loaded" means the first message answers immediately. Best-effort: errors
  * mean the first message pays the normal cold-start eval.
  */
-export const warmupLocalPrompt = (workingDir?: string | null) =>
-  safeInvoke<void>("warmup_local_prompt", { workingDir: workingDir ?? null });
+export const warmupLocalPrompt = (
+  workingDir?: string | null,
+  chatSessionId?: string | null,
+  toolsEnabled?: boolean,
+  codeExecEnabled?: boolean,
+) =>
+  safeInvoke<void>("warmup_local_prompt", {
+    workingDir: workingDir ?? null,
+    chatSessionId: chatSessionId ?? null,
+    toolsEnabled: toolsEnabled ?? null,
+    codeExecEnabled: codeExecEnabled ?? null,
+  });
 
 export const stopLocalModel = (modelId: string) =>
   safeInvoke<void>("stop_local_model", { modelId });

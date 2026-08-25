@@ -37,6 +37,15 @@ describe("browserOccluded", () => {
     expect(browserOccluded({ ...clear, collapsed: true, paneVisible: true })).toBe(true);
   });
 
+  it("is occluded while an HTML overlay (context meter tooltip) is showing", () => {
+    // Native webviews float above all DOM — the tooltip can only win by
+    // hiding the webview for its duration.
+    expect(browserOccluded({ ...clear, htmlOverlayOpen: true })).toBe(true);
+    expect(browserOccluded({ ...clear, htmlOverlayOpen: false })).toBe(false);
+    // Absent input (legacy callers) behaves as false.
+    expect(browserOccluded(clear)).toBe(false);
+  });
+
   it("stays occluded until every condition clears", () => {
     const occluded = { ...clear, paletteOpen: true, paneVisible: false };
     expect(browserOccluded(occluded)).toBe(true);

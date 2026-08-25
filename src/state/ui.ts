@@ -105,6 +105,11 @@ export interface UiState {
    *  strip (same UX as the diff panel / browser pane minimize). Tab contents
    *  stay mounted so terminals and browser webviews keep running. */
   toolPanelCollapsed: boolean;
+  /** True while the context meter's hover breakdown panel is showing. Native
+   *  browser webviews float ABOVE all DOM (CSS z-index can't win), so HTML
+   *  popups that must overlay them piggyback on the occlusion system: while
+   *  this is set, browser panes hide their webviews (see browserOcclusion). */
+  contextTipOpen: boolean;
   /** User-resized width of the tool panel, in pixels (280–640). */
   toolPanelWidth: number;
   /** Whether the Git tools sidebar (right-side vertical panel) is collapsed. */
@@ -198,6 +203,9 @@ export interface UiState {
   activeSubagentId: string | null;
   setActiveSubagentId: (id: string | null) => void;
   setToolPanelCollapsed: (collapsed: boolean) => void;
+  /** Toggle the context meter's hover-breakdown occlusion flag (see
+   *  `contextTipOpen`). */
+  setContextTipOpen: (open: boolean) => void;
   toggleToolPanel: () => void;
   toggleGitSidebar: () => void;
   setPlanCanvas: (content: string | null, title: string | null) => void;
@@ -250,6 +258,7 @@ export const useUiStore = create<UiState>((set) => ({
   activeSubagentId: null,
   // Collapsed by default — the header split icon opens it on demand.
   toolPanelCollapsed: true,
+  contextTipOpen: false,
   toolPanelWidth: 532,
   // Open by default — it's the primary git surface now.
   gitSidebarCollapsed: true,
@@ -463,6 +472,7 @@ export const useUiStore = create<UiState>((set) => ({
     }),
   setActiveSubagentId: (activeSubagentId) => set({ activeSubagentId }),
   setToolPanelCollapsed: (toolPanelCollapsed) => set({ toolPanelCollapsed }),
+  setContextTipOpen: (contextTipOpen) => set({ contextTipOpen }),
   toggleToolPanel: () => set((s) => ({ toolPanelCollapsed: !s.toolPanelCollapsed })),
   toggleGitSidebar: () => set((s) => ({ gitSidebarCollapsed: !s.gitSidebarCollapsed })),
   setPlanCanvas: (content, title) => set({ planCanvasContent: content, planCanvasTitle: title }),

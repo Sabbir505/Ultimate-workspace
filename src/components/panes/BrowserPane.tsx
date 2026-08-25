@@ -110,6 +110,8 @@ export function BrowserPane({ pane, visible = true }: Props) {
   const paletteOpen = useUiStore((s) => s.paletteOpen);
   const peekOpen = useUiStore((s) => s.peek.open);
   const modalOpen = useUiStore((s) => s.modalOpen);
+  // HTML popups that must paint over the webview (context meter hover panel).
+  const contextTipOpen = useUiStore((s) => s.contextTipOpen);
   // The Browser tab's content only renders when this tool-panel tab is the
   // active one AND the panel is not collapsed. PaneFrame's `visible` prop only
   // reflects the active-browser-vs-hidden-browser decision inside the slot —
@@ -156,6 +158,7 @@ export function BrowserPane({ pane, visible = true }: Props) {
     modalOpen,
     paneVisible: visible && inActiveBrowserTab,
     collapsed,
+    htmlOverlayOpen: contextTipOpen,
   });
 
   // Ensure tabState entries exist for any tabs we don't have state for yet.

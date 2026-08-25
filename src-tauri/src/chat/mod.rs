@@ -1158,7 +1158,10 @@ mod tests {
             specs.len(),
             total
         );
-        assert!(total < 30_000, "fresh-turn baseline over 8k budget: {total} chars");
+        // ≈8k tokens at ~4 chars/token. 30_200 (not 30_000) leaves headroom
+        // for the per-turn date anchor, whose rendered length varies with the
+        // weekday/UTC-offset strings.
+        assert!(total < 30_200, "fresh-turn baseline over 8k budget: {total} chars");
     }
 
     #[test]

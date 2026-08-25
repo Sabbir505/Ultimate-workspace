@@ -321,11 +321,9 @@
   align-items: center;
   justify-content: center;
   cursor: default;
-  /* Above the right-side pane (panes.css z 10/20): the circle is the
-     positioning context for the hover breakdown panel, and with the old
-     z-index 2 the panel slid UNDER the pane when it was open. The circle
-     itself is 22px in the composer corner, so the raised context is
-     harmless otherwise. */
+  /* Modest lift so neighboring composer chrome doesn't paint over the ring.
+     The hover breakdown panel is portaled to document.body (see
+     .context-meter-panel) — it no longer relies on this stacking context. */
   z-index: 40;
 }
 
@@ -383,13 +381,15 @@
   color: var(--text, #1a1a1a);
 }
 
-/* Rich hover panel — rendered inside the circle's wrapper. Centered
-   horizontally on the meter (left 50% + translateX -50%) so it appears
-   directly above and centered on the circular ring. */
+/* Rich hover panel — PORTALED to document.body by ContextMeter (fixed
+   positioning, coordinates set inline from the meter circle's rect). It used
+   to be an absolute child of the circle's wrapper, but the right-side tool
+   panel is a sibling subtree with its own stacking context, so the panel
+   slid UNDER the pane no matter how high its z-index climbed. Fixed + body
+   level + a top-layer z-index wins over every HTML surface; native browser
+   webviews are hidden separately while it shows (contextTipOpen occlusion). */
 .context-meter-panel {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 50%;
+  position: fixed;
   transform: translateX(-50%);
   width: 260px;
   padding: 10px 12px;
@@ -400,7 +400,7 @@
   font-family: var(--sans, system-ui, sans-serif);
   pointer-events: none;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
-  z-index: 10;
+  z-index: 2100;
   font-size: 11px;
 }
 :root[data-theme="light"] .context-meter-panel {

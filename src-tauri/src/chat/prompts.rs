@@ -302,6 +302,22 @@ pub fn core_prompt_for(provider: ChatProviderId, model: &str) -> String {
     }
 }
 
+/// "## Current date & time" segment appended right after the CORE prompt on
+/// every turn. Without it the model anchors "today"/"latest" to its training
+/// cutoff (e.g. answering from 2025) — and worse, it feeds that stale year
+/// into `web_search` queries. Computed per turn (not once at startup) so a
+/// session left open overnight rolls over midnight correctly. Kept ~150
+/// chars: the fresh-turn prompt budget (`fresh_turn_baseline_under_8k_budget`)
+/// has limited headroom.
+pub(crate) fn current_datetime_segment() -> String {
+    let now = chrono::Local::now();
+    format!(
+        "## Current date & time\nToday is {}. Treat this as \"today\" for \
+         \"latest\"/relative-time reasoning — never your training cutoff.",
+        now.format("%a %Y-%m-%d (UTC%:z)")
+    )
+}
+
 /// Heuristic: does this user message look like a multi-source *research*
 /// request (vs. a single-fact lookup that one `web_search` answers directly)?
 /// Used to conditionally load the Plan/Execute/Synthesize scaffolding so an
@@ -553,6 +569,10 @@ pub fn build_system_prompt(
 ) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     parts.push(core_prompt_for(provider, model));
+    // Date anchor for every variant (frontier/local/strict/research) — see
+    // current_datetime_segment's doc for why this can't live inside the
+    // static CORE text.
+    parts.push(current_datetime_segment());
     if tools_enabled {
         // One-line catalog of every available skill so the model can decide
         // whether to call `get_skill(slug)` for a given request. Distinct from
@@ -664,6 +684,23 @@ mod tests {
             first_sentence("See https://example.com/page for more.", 120),
             "See https://example.com/page for more."
         );
+    }
+
+    /// The date anchor must reach the model on EVERY variant (frontier and
+    /// local) — a variant that drops it regresses to training-cutoff dates.
+    #[test]
+    fn system_prompt_embeds_current_date() {
+        for provider in [ChatProviderId::LocalGguf, ChatProviderId::OpenAI] {
+            let p = build_system_prompt(provider, "test-model", None, &[], false, false, None)
+                .expect("core + date segment always present");
+            assert!(p.contains("## Current date & time"), "missing date anchor");
+            let today = chrono::Local::now().format("%a %Y-%m-%d").to_string();
+            assert!(
+                p.contains(&today),
+                "date anchor missing today's date ({today}): {:?}",
+                p.split("## Current date & time").nth(1).map(|s| &s[..80.min(s.len())])
+            );
+        }
     }
 
     #[test]

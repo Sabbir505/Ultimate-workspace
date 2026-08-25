@@ -130,12 +130,14 @@ describe("MessageBubble activity grouping", () => {
     expect(container.querySelectorAll(".chat-activity-steps").length).toBe(1);
   });
 
-  it("keeps a think-only turn as a standalone ThinkingBlock (no group)", () => {
+  it("wraps a think-only turn in the collapsible process row (collapsed)", () => {
     const content = "<think>Reasoning only, no tools.</think>\n\nAnswer.";
     const { container } = render(
       <MessageBubble message={assistantMsg(content)} />,
     );
-    expect(container.querySelectorAll(".chat-process-toggle").length).toBe(0);
-    expect(container.querySelectorAll(".chat-thinking-toggle").length).toBe(1);
+    // The single collapsible row is present, collapsed by default — the
+    // ThinkingBlock disclosure only mounts once it is expanded.
+    expect(container.querySelectorAll(".chat-process-toggle").length).toBe(1);
+    expect(container.querySelectorAll(".chat-thinking-toggle").length).toBe(0);
   });
 });

@@ -334,6 +334,11 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   // the only thing a send could still hit). `overrides` (from the picker's
   // per-model gear panel) wins; without it the backend loads the persisted
   // overrides blob itself (incl. last-good ngl).
+  //
+  // lastWarmRef dedupes prompt warmups with the chat-switch effect below:
+  // the cached prefix includes the chat's working-directory section, so
+  // switching between chats with different roots needs a re-warm.
+  const lastWarmRef = useRef<{ sid: string | null; wd: string } | null>(null);
   const spawnLocalModel = useCallback(
     async (match: GgufModel, overrides?: LlamaOverrides): Promise<string | null> => {
       setLocalLoading(true);
@@ -361,6 +366,7 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
             session?.worktreePath ??
             boundProject?.path;
           await warmupLocalPrompt(workingDir);
+          lastWarmRef.current = { sid: sid ?? null, wd: workingDir ?? "" };
         } catch (warmErr) {
           console.warn("prompt warmup failed (non-fatal)", warmErr);
         }
@@ -375,6 +381,38 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
     },
     [],
   );
+
+  // Re-warm the prompt cache when the active chat changes (while a local
+  // model is loaded and idle): the cached prefix includes the chat's
+  // working-directory section, so the first message in a NEW chat (different
+  // project, or unbound) used to pay the full ~22s re-eval. Fire-and-forget —
+  // a message sent mid-warmup queues behind it (the same cost it would pay
+  // without any warmup), and a completed one makes the first token instant.
+  useEffect(() => {
+    if (!isLocal || localLoading) return;
+    const s = useChatStore.getState();
+    if (activeChatSessionId && activeChatSessionId in s.streaming) return;
+    // Only fresh conversations need a warmup: a session with completed turns
+    // already has its real prefix cached from the last turn, and a synthetic
+    // warmup would just churn the GPU queue behind live traffic.
+    if (activeChatSessionId && s.messages.some((m) => m.role === "assistant")) return;
+    const session = activeChatSessionId
+      ? s.sessions.find((x) => x.id === activeChatSessionId)
+      : undefined;
+    const projects = useProjectsStore.getState();
+    const boundProject = activeChatSessionId
+      ? projects.projectById(s.sessionProjects[activeChatSessionId] ?? projects.selectedProjectId)
+      : undefined;
+    const wd =
+      (activeChatSessionId ? s.cwdOverrides[activeChatSessionId] : undefined) ??
+      session?.worktreePath ??
+      boundProject?.path ??
+      "";
+    const last = lastWarmRef.current;
+    if (last && last.sid === (activeChatSessionId ?? null) && last.wd === wd) return;
+    lastWarmRef.current = { sid: activeChatSessionId ?? null, wd };
+    void warmupLocalPrompt(wd || null).catch(() => {});
+  }, [activeChatSessionId, isLocal, localLoading]);
 
   const handleModelChange = useCallback(
     async (model: string) => {

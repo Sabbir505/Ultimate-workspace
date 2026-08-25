@@ -768,44 +768,40 @@ function ActivityStepRow({
 function ProcessSummary({
   live,
   label,
-  stepCount,
   children,
 }: {
   live: boolean;
   label: string;
-  stepCount: number;
   children: ReactNode;
 }) {
-  const [open, setOpen] = useState(false);
-  // Auto-expand during streaming so the user sees live tool activity;
-  // auto-collapse when the turn finishes (unless user toggled manually).
+  // The toggle IS the assistant-message-header slot: plain "Working for Xs"
+  // while streaming, "Worked for Xs ›" once done — same muted header style,
+  // with the chevron marking it expandable.
+  //
+  // Auto-expand while the TURN is in flight (so live tool activity and
+  // thinking are visible — they already show what's happening, so no separate
+  // action line is needed), auto-collapse when it ends. The turn-level live
+  // flag doesn't flicker between tool rounds (unlike per-step state), so
+  // this doesn't flash. A manual toggle latches for the rest of the turn.
+  const [open, setOpen] = useState(live);
   const [userToggled, setUserToggled] = useState(false);
   useEffect(() => {
-    if (live && !userToggled) setOpen(true);
-    else if (!live && !userToggled) setOpen(false);
+    if (!userToggled) setOpen(live);
   }, [live, userToggled]);
-
-  const toggle = () => {
-    setUserToggled(true);
-    setOpen((o) => !o);
-  };
 
   return (
     <div className={`chat-process${live ? " live" : ""}`}>
       <button
+        type="button"
         className="chat-process-toggle"
-        onClick={toggle}
-        title={open ? "Hide process" : "Show what was done"}
+        onClick={() => {
+          setUserToggled(true);
+          setOpen((o) => !o);
+        }}
+        title={open ? "Hide what was done" : "Show what was done"}
+        aria-expanded={open}
       >
-        <span className="chat-process-icon" aria-hidden="true">
-          <StepStatusIcon done={!live} />
-        </span>
         <span className="chat-process-label">{label}</span>
-        {stepCount > 0 && (
-          <span className="chat-process-meta">
-            {stepCount} {stepCount === 1 ? "step" : "steps"}
-          </span>
-        )}
         <span className={`chat-thinking-chevron${open ? " open" : ""}`} aria-hidden="true">
           ›
         </span>
@@ -1443,44 +1439,31 @@ function MessageBubbleInner({
     return <CompactedContextMarker summary={summary} />;
   }
 
-  // Partition the assistant turn into [leading text] [process region]
-  // [trailing answer]. Process kinds (think / activity / diff) bracket the
-  // region; the run of text AFTER the last process block is the synthesized
-  // answer shown below the "Worked for Xs" row, and text BEFORE the first one
-  // is the model's intro shown above it. A think-only turn (no tool/diff
-  // blocks) keeps the old flat layout — standalone ThinkingBlock disclosures,
-  // no "Worked" summary row (documented in groupSegments).
-  //
-  // IMPORTANT: Thinking blocks are rendered OUTSIDE the ProcessSummary
-  // ("toolbox") — they are separate disclosures like the old flat layout.
-  // Only activity (tool calls) and diff (file edits) live inside the collapsible
-  // ProcessSummary so the "Worked for Xs" row summarizes tool work only.
-  let firstTool = -1;
-  let lastTool = -1;
-  let hasToolBlocks = false;
+  // Partition the assistant turn into [process blocks] [text]. Process kinds
+  // (think / activity / diff) ALL live inside the single collapsible
+  // "Worked for Xs" row at the TOP of the bubble; the model's text (intro +
+  // answer) renders below it in source order. (Thinking used to render as
+  // standalone disclosures interleaved with the text, which read as three
+  // separate blocks after the turn ended.)
+  let hasProcess = false;
   if (blocks) {
-    for (let i = 0; i < blocks.length; i++) {
-      const k = blocks[i].kind;
-      if (k === "activity" || k === "diff") {
-        hasToolBlocks = true;
-        if (firstTool === -1) firstTool = i;
-        lastTool = i;
+    for (const b of blocks) {
+      if (b.kind === "activity" || b.kind === "diff" || b.kind === "think") {
+        hasProcess = true;
+        break;
       }
     }
   }
-  const hasProcess = firstTool !== -1 && hasToolBlocks;
 
-  // Aggregate process-level state: is anything still live, how many tool steps
-  // ran, what's the current action while streaming, and which files changed.
-  // Only activity/diff blocks contribute — thinking is separate.
+  // Aggregate process-level state: is anything still live and how many steps
+  // ran. (The old "current action" label is gone — the expanded body already
+  // shows the live steps, so a separate action line was redundant.)
   let processLive = false;
   let processStepCount = 0;
-  let liveLabel = "Working…";
   const processToolSteps: ActivityStep[] = [];
   const fileChanges: { path: string; edit: EditPayload }[] = [];
   if (hasProcess && blocks) {
-    for (let i = firstTool; i <= lastTool; i++) {
-      const b = blocks[i];
+    for (const b of blocks) {
       if (b.kind === "activity") {
         for (const s of b.group.steps) {
           processStepCount++;
@@ -1491,21 +1474,8 @@ function MessageBubbleInner({
         processStepCount++;
         processToolSteps.push({ data: b.step.data, done: b.step.done });
         if (!b.step.done) processLive = true;
-      }
-    }
-    // Live label = the most recent in-flight action (Cursor-style).
-    for (let i = lastTool; i >= firstTool; i--) {
-      const b = blocks[i];
-      if (b.kind === "diff" && !b.step.done) {
-        liveLabel = `${stepLabel(b.step.data)}…`;
-        break;
-      }
-      if (b.kind === "activity") {
-        const cur = [...b.group.steps].reverse().find((s) => !s.done);
-        if (cur) {
-          liveLabel = `${stepLabel(cur.data)}…`;
-          break;
-        }
+      } else if (b.kind === "think" && !b.done) {
+        processLive = true;
       }
     }
   }
@@ -1517,18 +1487,22 @@ function MessageBubbleInner({
       }
     }
   }
-  // The collapsed row's label: the live action while streaming, else a legacy
-  // one-line summary of the tool steps. Deliberately NOT "Working/Worked for
-  // Xs" — the assistant-message header above the bubble owns that timer, and
-  // showing it here too read as a duplicate.
+  // The collapsed row's label is ALWAYS the timer: "Working for Xs" while
+  // streaming, "Worked for Xs" once the duration is known (fallback: a
+  // one-line step summary). The live action ("Thinking…", "Running tool…")
+  // is a SEPARATE line under the header — it must never replace the timer.
   const fallbackSummary =
     processToolSteps.length > 0 ? summarizeGroup(processToolSteps) : "";
   const liveElapsedSec = live && livePerf?.elapsedMs != null
     ? Math.floor(livePerf.elapsedMs / 1000)
     : null;
-  const processLabel = processLive
-    ? liveLabel
-    : (fallbackSummary || "Worked");
+  const processLabel = live
+    ? (liveElapsedSec != null
+        ? `Working for ${formatDuration(liveElapsedSec)}`
+        : "Working")
+    : message.durationSec != null
+      ? `Worked for ${formatDuration(message.durationSec)}`
+      : (fallbackSummary || "Worked");
 
   // Detect if this assistant message contains a plan section
   const planSection = !isUser ? detectPlan(message.content) : null;
@@ -1548,14 +1522,15 @@ function MessageBubbleInner({
           {planSection && (
             <PlanBanner title={planSection.title} summary={planSection.summary} full={planSection.full} />
           )}
-          {!isUser && (
+          {!isUser && !hasProcess && (live || message.durationSec != null) && (
             <div className="assistant-message-header">
-              {/* The single Working/Worked-for timer for the whole turn —
-                 live from the first token (even while only thinking, before
-                 any tool call), "Worked for Xs" once the duration is known. */}
+              {/* Pure-text turn (nothing to expand): plain Working/Worked-for
+                 header, same style the process turns use. */}
               {live
-                ? (liveElapsedSec != null ? `Working for ${formatDuration(liveElapsedSec)}` : "Working")
-                : (message.durationSec != null ? `Worked for ${formatDuration(message.durationSec)}` : null)}
+                ? (liveElapsedSec != null
+                    ? `Working for ${formatDuration(liveElapsedSec)}`
+                    : "Working")
+                : `Worked for ${formatDuration(message.durationSec ?? 0)}`}
             </div>
           )}
           {editing && isUser ? (
@@ -1585,94 +1560,40 @@ function MessageBubbleInner({
               )
             : hasProcess
             ? (() => {
-                // With tool activity: render thinking blocks OUTSIDE the ProcessSummary.
-                // Structure: [leading text] [thinking before tools] [ProcessSummary with tools]
-                // [thinking between tools] [trailing text] [thinking after tools] [FilesChangedSummary]
+                // The single collapsible row sits at the TOP of the bubble
+                // ("Worked for Xs ›" / live action), and ALL of the model's
+                // text — intro and answer — renders below it in source order.
                 if (!blocks) return null;
-                const beforeTools = blocks.slice(0, firstTool);
-                const toolRegion = blocks.slice(firstTool, lastTool + 1);
-                const afterTools = blocks.slice(lastTool + 1);
-
-                // Split toolRegion into alternating thinking and activity/diff segments
-                const thinkingBefore: Block[] = [];
-                const activityBlocks: Block[] = [];
-                const thinkingBetween: Block[] = [];
-                const thinkingAfter: Block[] = [];
-
-                let currentThinking: Block[] = [];
-                for (const b of toolRegion) {
-                  if (b.kind === "think") {
-                    currentThinking.push(b);
-                  } else {
-                    // activity or diff
-                    if (activityBlocks.length === 0) {
-                      // First activity/diff block — preceding thinking goes to thinkingBefore
-                      thinkingBefore.push(...currentThinking);
-                    } else {
-                      // Subsequent activity/diff — preceding thinking goes to thinkingBetween
-                      thinkingBetween.push(...currentThinking);
-                    }
-                    activityBlocks.push(b);
-                    currentThinking = [];
-                  }
-                }
-                // Any remaining thinking after the last tool goes to thinkingAfter
-                thinkingAfter.push(...currentThinking);
-
                 return (
                   <>
-                    {/* Leading intro text renders above the process row. */}
-                    {beforeTools.map((b, i) =>
+                    <ProcessSummary
+                      live={live === true}
+                      label={processLabel}
+                    >
+                      {/* Text blocks render below the row (once) — only
+                          think/activity/diff live inside the expansion. */}
+                      {blocks.map((b, i) =>
+                        b.kind === "text"
+                          ? null
+                          : renderProcessBlock(b, i, onPreviewArtifact),
+                      )}
+                    </ProcessSummary>
+
+                    {blocks.map((b, i) =>
                       b.kind === "text" && b.text.trim().length > 0 ? (
-                        <Markdown key={`lead:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
-                      ) : b.kind === "think" ? (
-                        renderProcessBlock(b, i, onPreviewArtifact)
+                        <Markdown key={`txt:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
                       ) : null,
-                    )}
-
-                    {/* Thinking blocks BEFORE any tool activity that were extracted from toolRegion. */}
-                    {thinkingBefore.map((b, i) =>
-                      b.kind === "think" ? renderProcessBlock(b, i, onPreviewArtifact) : null,
-                    )}
-
-                    {/* The collapsible tool summary (activity + diff only). */}
-                    {activityBlocks.length > 0 && (
-                      <ProcessSummary
-                        live={processLive}
-                        label={processLabel}
-                        stepCount={processStepCount}
-                      >
-                        {activityBlocks.map((b, i) => renderProcessBlock(b, i, onPreviewArtifact))}
-                      </ProcessSummary>
-                    )}
-
-                    {/* Thinking blocks BETWEEN tool activities — standalone disclosures. */}
-                    {thinkingBetween.map((b, i) =>
-                      b.kind === "think" ? renderProcessBlock(b, i, onPreviewArtifact) : null,
-                    )}
-
-                    {/* Trailing synthesized answer renders below the process row. */}
-                    {afterTools.map((b, i) =>
-                      b.kind === "text" && b.text.trim().length > 0 ? (
-                        <Markdown key={`trail:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
-                      ) : null,
-                    )}
-
-                    {/* Thinking blocks AFTER all tool activity — standalone disclosures. */}
-                    {thinkingAfter.map((b, i) =>
-                      b.kind === "think" ? renderProcessBlock(b, i, onPreviewArtifact) : null,
                     )}
 
                     {fileChanges.length > 0 && <FilesChangedSummary files={fileChanges} />}
                   </>
                 );
               })()
-            /* No tool/diff activity (pure answer or think-only turn): flat
-             * layout — markdown text and standalone thinking disclosures. */
+            /* Pure-text turn: flat markdown, nothing to expand. */
             : blocks!.map((b, i) =>
                 b.kind === "text" && b.text.trim().length > 0
                   ? <Markdown key={`flat:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
-                  : renderProcessBlock(b, i, onPreviewArtifact),
+                  : null,
               )}
         {!isUser && artifacts && artifacts.length > 0 && (
           <MessageArtifacts artifacts={artifacts} onPreviewArtifact={onPreviewArtifact} />

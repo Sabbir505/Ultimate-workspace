@@ -67,12 +67,20 @@ pub fn is_blocked_ip(ip: &IpAddr) -> bool {
 /// True when `host` resolves to an IP in a blocked range (or fails to
 /// resolve). Fails closed — unresolvable hostnames are rejected. DNS-rebinding
 /// is mitigated by re-checking `resp.remote_addr()` after the TCP connect.
+///
+/// Resolution uses `(host, 0)` — the `(&str, u16)` `ToSocketAddrs` impl
+/// performs the DNS lookup and ignores the port. The bare-`&str` impl
+/// requires `host:port` and ERRORS on every plain hostname, which (with the
+/// fail-closed `Err => true` below) refused EVERY domain — fetch_url was a
+/// hard wall, pushing models onto the local file-search tools for web
+/// questions.
 pub fn host_blocked(host: &str) -> bool {
+    use std::net::ToSocketAddrs;
     let h = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = h.parse::<IpAddr>() {
         return is_blocked_ip(&ip);
     }
-    let addrs: Vec<IpAddr> = match std::net::ToSocketAddrs::to_socket_addrs(h) {
+    let addrs: Vec<IpAddr> = match (h, 0u16).to_socket_addrs() {
         Ok(it) => it
             .filter_map(|s| match s.ip() {
                 IpAddr::V4(v4) => Some(IpAddr::V4(v4)),
@@ -844,6 +852,19 @@ mod tests {
         // host_blocked strips the URL bracket form before parsing.
         assert!(host_blocked("[::ffff:127.0.0.1]"));
         assert!(host_blocked("::ffff:127.0.0.1"));
+    }
+
+    #[test]
+    fn ssrf_guard_resolves_plain_hostnames() {
+        // Regression: the resolver used the bare-&str ToSocketAddrs impl,
+        // which requires `host:port` and ERRORS on every plain hostname —
+        // with the fail-closed `Err => true` that refused EVERY domain and
+        // turned fetch_url into a hard wall. "localhost" resolves via the
+        // hosts file to loopback: the blocked verdict must come from the IP
+        // check (resolution succeeding), not from a resolution error.
+        assert!(host_blocked("localhost"));
+        // RFC 2606 `.invalid` is guaranteed unresolvable → fail-closed true.
+        assert!(host_blocked("conduit-does-not-exist.invalid"));
     }
 
 }

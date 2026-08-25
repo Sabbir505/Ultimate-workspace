@@ -66,9 +66,16 @@ pub fn provider_capabilities(id: ChatProviderId, model: &str) -> ProviderCaps {
         // LFM that don't appear in the marker list, which would wrongly give
         // them the full Frontier prompt (bloating context). If it runs through
         // the bundled llama-server sidecar, it gets the compact local prompt.
+        //
+        // `native_web_search` is TRUE for local models too: `web_search` is a
+        // keyless DuckDuckGo/Wikipedia scraper served by the app's own HTTP
+        // client — nothing provider-side to lack. Stripping it left local
+        // models with a "MUST web_search first" prompt rule but no such tool,
+        // so they improvised with the LOCAL file-search tools for online
+        // questions.
         ChatProviderId::LocalGguf => ProviderCaps {
             model_class: ModelClass::Local,
-            native_web_search: false,
+            native_web_search: true,
             requires_local_sandbox: true,
         },
         _ => ProviderCaps {
@@ -223,6 +230,11 @@ pub(crate) fn core_prompt_base_local() -> String {
      parameters. Call only tools in that list, and match their schemas exactly — \
      do not invent parameters or tool names. If a tool is unavailable, say so in \
      one plain sentence; don't continue as if it succeeded.\n\n\
+     ## Browser\n\
+     `open_url` opens ANY url in the app's built-in browser pane (the user sees \
+     it) and returns the page text to you; `fetch_url` reads a page silently. \
+     When the user asks to open/visit/show a site, call `open_url` — never say \
+     you can't open a URL.\n\n\
      ## Search vs. just answer\n\
      Your training has a cutoff and you can hallucinate specific facts. Apply per-question:\n\
      - **MUST `web_search` first** for: versions/\"latest\" releases, API signatures that \

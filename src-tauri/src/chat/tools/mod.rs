@@ -314,8 +314,9 @@ const GENERATE_DIAGRAM_DESC: &str = "Create a hand-styled diagram as a \
     result; regenerate if the first attempt looks flat.";
 
 const FETCH_URL_DESC: &str = "Fetch a specific web page by URL and return its \
-    readable text content (HTML stripped). Use to read an article or page the \
-    user linked, or a result returned by web_search.";
+    readable text content (HTML stripped). You CAN open any public web URL \
+    with this — never claim you can't open pages or browse. Use to read an \
+    article or page the user linked, or a result returned by web_search.";
 
 const RUN_CODE_DESC: &str = "Execute a short snippet of code and return its \
     output. Supports python, javascript (node) and bash. Runs locally with a \
@@ -422,9 +423,10 @@ const BROWSER_SCREENSHOT_DESC: &str = "Take a screenshot of the page currently \
     error states), or whenever the user asks to see the page.";
 
 const OPEN_URL_DESC: &str = "Open a web page in the app's built-in browser so \
-    the user can see it, and return its readable text to you. Use when the user \
-    asks to open/show/visit a site, or when it helps to display a page visually \
-    alongside your answer.";
+    the user can see it, and return its readable text to you. You CAN open \
+    any public web URL with this — never claim you can't open sites. Use \
+    when the user asks to open/show/visit a site, or when it helps to \
+    display a page visually alongside your answer.";
 
 const DOWNLOAD_FILE_DESC: &str = "Stream a file from an http(s) URL to an \
     absolute local path on this machine (e.g. model weights such as \

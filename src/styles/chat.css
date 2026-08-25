@@ -258,7 +258,9 @@ div[data-index]:has(.chat-session-row.menu-open) {
 
 .assistant-message-header {
   margin-bottom: 8px;
-  font-size: 11px;
+  /* Same size as the chat message text (chat-bubble-inner) — the
+     Working/Worked-for header reads as part of the message, not a caption. */
+  font-size: 13px;
   color: var(--text-dim);
   white-space: nowrap;
 }
@@ -694,17 +696,18 @@ div[data-index]:has(.chat-session-row.menu-open) {
   margin: 4px 0;
 }
 .chat-process-toggle {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 3px 8px;
-  font-size: 12px;
-  font-family: var(--font-mono);
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 0;
+  /* Same size as the chat message text — matches the pure-text
+     Working/Worked-for header (assistant-message-header). */
+  font-size: 13px;
+  font-family: inherit;
   color: var(--text-dim);
   background: transparent;
   border: none;
-  border-left: 2px solid var(--border);
   border-radius: 0;
   cursor: pointer;
   text-align: left;
@@ -712,10 +715,11 @@ div[data-index]:has(.chat-session-row.menu-open) {
 }
 .chat-process-toggle:hover {
   color: var(--text);
-  border-left-color: var(--text-dim);
+  background: transparent;
+  border: none;
 }
 .chat-process.live .chat-process-toggle {
-  border-left-color: var(--text-dim);
+  color: var(--text);
 }
 .chat-process-icon {
   flex: none;

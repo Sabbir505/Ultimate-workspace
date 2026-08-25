@@ -321,7 +321,12 @@
   align-items: center;
   justify-content: center;
   cursor: default;
-  z-index: 2;
+  /* Above the right-side pane (panes.css z 10/20): the circle is the
+     positioning context for the hover breakdown panel, and with the old
+     z-index 2 the panel slid UNDER the pane when it was open. The circle
+     itself is 22px in the composer corner, so the raised context is
+     harmless otherwise. */
+  z-index: 40;
 }
 
 /* Styled tooltip that appears on hover */

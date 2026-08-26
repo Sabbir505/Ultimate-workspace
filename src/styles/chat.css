@@ -310,6 +310,11 @@ div[data-index]:has(.chat-session-row.menu-open) {
 .chat-messages {
   flex: 1;
   overflow-y: auto;
+  /* Reserve the scrollbar gutter so the column width never shifts when the
+     scrollbar appears/disappears mid-stream — a width shift rescales every
+     width:100% diagram and live iframe, which read as flashing
+     expanding/collapsing diagrams while the next message streams. */
+  scrollbar-gutter: stable;
   /* Claude-style centered conversation column. */
   padding: 20px max(16px, calc((100% - 780px) / 2));
   display: flex;
@@ -1460,6 +1465,7 @@ button.chat-mermaid-open {
 .diagram-lightbox-content {
   flex: 1;
   min-height: 0;
+  position: relative; /* the absolute canvas anchors to THIS, not the screen */
   overflow: hidden;
   cursor: grab;
 }
@@ -1475,7 +1481,10 @@ button.chat-mermaid-open {
   transform-origin: center center;
 }
 .diagram-lightbox-doc {
-  max-width: min(1100px, 92vw);
+  /* Always fits the viewport; the zoom controls handle "bigger". */
+  width: min(1000px, 90vw);
+  max-height: 78vh;
+  overflow: auto;
   padding: 24px;
   border-radius: var(--radius-sm);
   background: #fff;
@@ -1483,7 +1492,7 @@ button.chat-mermaid-open {
 }
 .diagram-lightbox-doc svg {
   display: block;
-  max-width: 100%;
+  width: 100%;
   height: auto;
 }
 .artifact-export-btn-text {

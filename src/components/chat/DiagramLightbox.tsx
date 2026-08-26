@@ -7,9 +7,9 @@
 // diagrams are static vector art, and DOM rendering lets html-to-image
 // rasterize exactly what is on screen. Interactive visuals keep their live
 // iframe in chat — the lightbox is for looking at pictures, big.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArtifactExportMenu } from "./ArtifactExportMenu";
-import { sanitizeHtml } from "../../lib/sanitize";
+import { sanitizeHtml, sanitizeSvg } from "../../lib/sanitize";
 import type { ArtifactPreview } from "../../lib/ipc";
 
 const ZOOM_MIN = 0.25;
@@ -114,6 +114,16 @@ export function DiagramLightbox({
     setPan({ x: 0, y: 0 });
   }, [html]);
 
+  // Sanitize with the RIGHT policy: a bare <svg> string (mermaid diagrams)
+  // must go through the SVG profile — the HTML profile's tight attribute
+  // allowlist strips SVG presentation attributes and guts the diagram to an
+  // empty white card. Full HTML documents (static diagrams) use the HTML
+  // policy as everywhere else.
+  const safeHtml = useMemo(
+    () => (/^\s*<svg[\s>]/i.test(html) ? sanitizeSvg(html) : sanitizeHtml(html)),
+    [html],
+  );
+
   // Synthetic preview so the shared export menu treats this as a diagram
   // (Copy / PNG / SVG / JPG all rasterize `text`).
   const preview: ArtifactPreview = {
@@ -188,10 +198,10 @@ export function DiagramLightbox({
           style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
         >
           {/* SECURITY: model-authored markup into the privileged document —
-              sanitized first (scripts/event handlers stripped). */}
+              sanitized above with the matching profile (SVG vs HTML). */}
           <div
             className="diagram-lightbox-doc"
-            dangerouslySetInnerHTML={{ __html: sanitizeHtml(html) }}
+            dangerouslySetInnerHTML={{ __html: safeHtml }}
           />
         </div>
       </div>

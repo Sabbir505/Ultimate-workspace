@@ -36,11 +36,16 @@ describe("DiagramLightbox", () => {
   it("renders the diagram with zoom controls and closes on Esc", async () => {
     const onClose = vi.fn();
     const { container, getByTitle } = render(
-      <DiagramLightbox html="<svg width='120' height='80'><rect /></svg>" filename="flow.svg" onClose={onClose} />,
+      <DiagramLightbox html="<svg width='120' height='80' viewBox='0 0 120 80'><rect width='120' height='80' /></svg>" filename="flow.svg" onClose={onClose} />,
     );
 
-    // Diagram content is rendered (sanitized) into the canvas…
-    expect(container.querySelector(".diagram-lightbox-doc svg")).not.toBeNull();
+    // Diagram content is rendered (sanitized) into the canvas — and the SVG
+    // survives with its geometry intact: the HTML-profile sanitizer strips
+    // svg attributes and would leave an invisible empty box (regression).
+    const svg = container.querySelector(".diagram-lightbox-doc svg");
+    expect(svg).not.toBeNull();
+    expect(svg!.getAttribute("viewBox")).toBe("0 0 120 80");
+    expect(svg!.getAttribute("width")).toBe("120");
     // …the shared export kebab is present (3-dot menu)…
     expect(container.querySelector(".artifact-kebab")).not.toBeNull();
     // …and the zoom level starts at 100%.

@@ -1,0 +1,41 @@
+- generic [ref=f15e3]:
+  - complementary [ref=f15e5]:
+    - generic [ref=f15e7]:
+      - button "Search" [ref=f15e8] [cursor=pointer]
+      - button "New" [ref=f15e13] [cursor=pointer]
+      - button "Collapse sidebar" [ref=f15e16] [cursor=pointer]
+    - generic [ref=f15e19]:
+      - generic [ref=f15e20]:
+        - button "Artifacts" [ref=f15e22] [cursor=pointer]
+        - button "Schedule automated runs" [ref=f15e28] [cursor=pointer]:
+          - generic [ref=f15e33]: Schedule
+      - generic [ref=f15e35]:
+        - generic [ref=f15e36]: Connectors
+        - button "Manage" [ref=f15e37] [cursor=pointer]
+      - generic [ref=f15e39]:
+        - generic [ref=f15e40]:
+          - generic [ref=f15e41]: Projects
+          - button "Add Project" [ref=f15e42] [cursor=pointer]
+        - generic [ref=f15e44]:
+          - generic [ref=f15e47]: No projects yet
+          - button "Add Project" [ref=f15e48] [cursor=pointer]
+    - generic [ref=f15e49]:
+      - generic [ref=f15e50]: Chat History
+      - generic [ref=f15e55]: No chats yet
+    - generic [ref=f15e59]:
+      - button "Skills Library" [ref=f15e60] [cursor=pointer]
+      - button "Cost" [ref=f15e63] [cursor=pointer]
+      - button "Settings" [ref=f15e66] [cursor=pointer]
+  - generic [ref=f15e70]:
+    - generic [ref=f15e71]:
+      - strong [ref=f15e72]: Conduit
+      - button "Toggle side panel" [ref=f15e73] [cursor=pointer]
+    - generic [ref=f15e80]:
+      - generic [ref=f15e81]:
+        - textbox "Write a message… type / for skills" [active] [ref=f15e83]:
+          - /placeholder: Write a message…  type / for skills
+        - generic [ref=f15e84]:
+          - button "Add files or research" [ref=f15e86] [cursor=pointer]: +
+          - button "Send message" [disabled] [ref=f15e88]: ↑
+      - img "Context 0% used" [ref=f15e90]:
+        - generic: "0"

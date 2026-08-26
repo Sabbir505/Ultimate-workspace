@@ -1,0 +1,8 @@
+graph TD
+    A[Start] --> B{Decision?}
+    B -- Yes --> C[Process Alpha]
+    B -- No --> D[Process Beta]
+    C --> E(Output 1)
+    D --> F(Output 2)
+    E --> G[Finish]
+    F --> G

@@ -1,0 +1,43 @@
+- generic [ref=f5e3]:
+  - complementary [ref=f5e5]:
+    - generic [ref=f5e7]:
+      - button "Search ⌘K" [ref=f5e8] [cursor=pointer]:
+        - generic [ref=f5e12]: Search
+        - generic [ref=f5e13]: ⌘K
+      - button "New" [ref=f5e14] [cursor=pointer]
+      - button "Collapse sidebar" [ref=f5e17] [cursor=pointer]
+    - generic [ref=f5e20]:
+      - generic [ref=f5e21]:
+        - button "Artifacts" [ref=f5e23] [cursor=pointer]
+        - generic [ref=f5e29]: AUTOMATIONS
+        - button "+ New automation" [ref=f5e32] [cursor=pointer]
+      - generic [ref=f5e34]:
+        - generic [ref=f5e35]: Connectors
+        - button "Manage" [ref=f5e36] [cursor=pointer]
+      - generic [ref=f5e38]:
+        - generic [ref=f5e39]:
+          - generic [ref=f5e40]: Projects
+          - button "Add Project" [ref=f5e41] [cursor=pointer]
+        - generic [ref=f5e43]:
+          - generic [ref=f5e46]: No projects yet
+          - button "Add Project" [ref=f5e47] [cursor=pointer]
+    - generic [ref=f5e48]:
+      - generic [ref=f5e49]: Chat History
+      - generic [ref=f5e54]: No chats yet
+    - generic [ref=f5e58]:
+      - button "Skills Library" [ref=f5e59] [cursor=pointer]
+      - button "Cost" [ref=f5e62] [cursor=pointer]
+      - button "Settings" [ref=f5e65] [cursor=pointer]
+  - generic [ref=f5e69]:
+    - generic [ref=f5e70]:
+      - strong [ref=f5e71]: Conduit
+      - button "Toggle side panel" [ref=f5e72] [cursor=pointer]
+    - generic [ref=f5e79]:
+      - generic [ref=f5e80]:
+        - textbox "Write a message… type / for skills" [active] [ref=f5e82]:
+          - /placeholder: Write a message…  type / for skills
+        - generic [ref=f5e83]:
+          - button "Add files or research" [ref=f5e85] [cursor=pointer]: +
+          - button "Send message" [disabled] [ref=f5e87]: ↑
+      - img "Context 0% used" [ref=f5e89]:
+        - generic: "0"

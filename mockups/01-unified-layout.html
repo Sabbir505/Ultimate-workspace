@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Screen 1 — Conduit Unified Layout</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; font-family:-apple-system,"Segoe UI",Roboto,sans-serif; }
+  body { background:#111; color:#e6e6e6; padding:32px; }
+  h1 { font-size:22px; font-weight:600; margin-bottom:6px; }
+  .sub { color:#9a9a9a; font-size:13px; margin-bottom:24px; }
+
+  .window { max-width:1320px; margin:0 auto; border:1px solid #333; border-radius:12px; overflow:hidden; background:#1b1b1e; }
+  .titlebar { display:flex; align-items:center; gap:8px; padding:10px 14px; background:#232327; border-bottom:1px solid #333; }
+  .dot { width:11px; height:11px; border-radius:50%; }
+  .dot.r { background:#ff5f57; } .dot.y { background:#febc2e; } .dot.g { background:#28c840; }
+  .titlebar .t { margin-left:10px; font-size:12.5px; color:#9a9a9a; }
+
+  .body { display:flex; height:720px; }
+
+  /* ---------- LEFT SIDEBAR ---------- */
+  .left { width:248px; min-width:248px; background:#202024; border-right:1px solid #2e2e33; display:flex; flex-direction:column; }
+  .brand { padding:14px 14px 10px; font-size:14px; font-weight:700; letter-spacing:.3px; }
+  .newchat { margin:0 12px 12px; padding:9px 12px; background:#5b8def; color:#fff; border-radius:8px; font-size:13px; font-weight:600; text-align:center; }
+  .sect { padding:6px 12px 2px; font-size:10.5px; font-weight:700; letter-spacing:1px; color:#777; }
+  .item { display:flex; align-items:center; gap:8px; padding:6px 14px; font-size:12.5px; color:#cfcfcf; border-radius:6px; margin:1px 6px; }
+  .item.active { background:#2c2c31; color:#fff; }
+  .item .meta { margin-left:auto; font-size:10.5px; color:#777; }
+  .item.dim { color:#8b8b8b; }
+  .scroll { flex:1; overflow:hidden; }
+  .star { color:#f5c542; }
+  .ok { color:#4caf50; font-size:11px; }
+  .leftfoot { border-top:1px solid #2e2e33; padding:10px 14px; display:flex; gap:14px; font-size:12px; color:#8b8b8b; }
+
+  /* ---------- CENTER CHAT ---------- */
+  .center { flex:1; display:flex; flex-direction:column; background:#1b1b1e; min-width:0; }
+  .chathead { display:flex; align-items:center; gap:10px; padding:12px 18px; border-bottom:1px solid #2a2a2e; }
+  .chathead .title { font-size:14px; font-weight:600; }
+  .chathead .proj { font-size:11.5px; color:#8b8b8b; background:#26262a; padding:3px 9px; border-radius:20px; }
+  .conn { margin-left:auto; display:flex; align-items:center; gap:6px; font-size:11.5px; color:#9a9a9a; }
+  .cdot { width:8px; height:8px; border-radius:50%; background:#4caf50; }
+
+  .msgs { flex:1; padding:20px 26px; overflow:hidden; }
+  .muser { max-width:78%; margin-left:auto; background:#2b3a55; border-radius:12px; padding:10px 14px; font-size:13px; line-height:1.5; }
+  .mass { margin-top:18px; max-width:92%; }
+  .mass .who { font-size:11px; color:#8b8b8b; margin-bottom:6px; }
+  .mass .txt { font-size:13px; line-height:1.6; color:#dcdcdc; }
+  .tool { margin-top:10px; border:1px solid #2e2e33; border-radius:9px; background:#202024; padding:9px 12px; font-size:12px; color:#bdbdbd; display:flex; gap:9px; align-items:center; }
+  .tool .ic { color:#5b8def; }
+  .tool .st { margin-left:auto; color:#4caf50; font-size:11px; }
+  .tool.run .st { color:#febc2e; }
+  .cursorblink { display:inline-block; width:7px; height:14px; background:#5b8def; vertical-align:-2px; margin-left:3px; }
+
+  /* inline diff review card */
+  .diff { margin-top:10px; border:1px solid #3a3a40; border-radius:9px; background:#202024; overflow:hidden; }
+  .dhead { display:flex; align-items:center; gap:9px; padding:8px 12px; font-size:12px; color:#bdbdbd; border-bottom:1px solid #2e2e33; }
+  .dhead .fn { color:#8fb8f5; font-family:Consolas,monospace; }
+  .dhead .stat { font-size:10.5px; }
+  .dhead .stat .p { color:#4caf50; } .dhead .stat .m { color:#e06c75; }
+  .dhead .acts { margin-left:auto; display:flex; gap:7px; }
+  .dhead .rej { font-size:11px; padding:3px 11px; border-radius:6px; border:1px solid #4a4a52; color:#cfcfcf; }
+  .dhead .acc { font-size:11px; padding:3px 11px; border-radius:6px; background:#4caf50; color:#fff; font-weight:600; }
+  .dline { font-family:Consolas,monospace; font-size:11px; padding:2.5px 12px; white-space:pre; }
+  .dline.del { background:rgba(224,108,117,.13); color:#e8a0a5; }
+  .dline.add { background:rgba(76,175,80,.13); color:#a5d6a7; }
+  .dline.ctx { color:#8b8b8b; }
+  .dmore { font-size:10.5px; color:#777; padding:5px 12px; }
+
+  /* composer */
+  .composer { margin:12px 18px 16px; border:1px solid #38383e; border-radius:12px; background:#222226; }
+  .chips { display:flex; gap:8px; padding:10px 12px 0; flex-wrap:wrap; }
+  .chip { display:flex; align-items:center; gap:6px; font-size:11.5px; background:#2c2c31; border:1px solid #3a3a40; padding:5px 10px; border-radius:20px; color:#e0e0e0; }
+  .chip.cli { border-color:#5b8def; color:#cfe0ff; }
+  .chip .cdot { width:7px; height:7px; }
+  .chip.lock { color:#777; }
+  .cinput { padding:10px 14px 4px; font-size:13.5px; color:#cfcfcf; min-height:44px; }
+  .cinput .ph { color:#6d6d6d; }
+  .cfoot { display:flex; align-items:center; gap:12px; padding:6px 12px 10px; color:#777; font-size:12px; }
+  .send { margin-left:auto; background:#5b8def; color:#fff; border-radius:8px; padding:6px 16px; font-size:12.5px; font-weight:600; }
+
+  /* ---------- RIGHT PANEL ---------- */
+  .right { width:380px; min-width:380px; border-left:1px solid #2e2e33; background:#1e1e21; display:flex; flex-direction:column; }
+  .rtabs { display:flex; border-bottom:1px solid #2a2a2e; }
+  .rtab { flex:1; text-align:center; padding:10px 0; font-size:12px; color:#8b8b8b; }
+  .rtab.active { color:#fff; border-bottom:2px solid #5b8def; background:#222226; }
+  .term { flex:1; padding:12px 14px; font-family:"Cascadia Code",Consolas,monospace; font-size:11.5px; line-height:1.65; color:#cfcfcf; }
+  .term .ps { color:#5b8def; }
+  .term .ok { color:#4caf50; }
+  .term .warn { color:#febc2e; }
+  .rfoot { border-top:1px solid #2a2a2e; padding:8px 14px; font-size:11px; color:#777; display:flex; justify-content:space-between; }
+
+  /* annotation badges */
+  .badge { position:relative; }
+  .num { position:absolute; top:-9px; left:-9px; width:20px; height:20px; border-radius:50%; background:#f5c542; color:#111; font-size:11px; font-weight:800; display:flex; align-items:center; justify-content:center; z-index:5; }
+
+  .legend { max-width:1320px; margin:22px auto 0; display:grid; grid-template-columns:1fr 1fr; gap:8px 28px; font-size:12.5px; color:#bdbdbd; }
+  .legend b { color:#f5c542; margin-right:6px; }
+</style>
+</head>
+<body>
+  <h1>Screen 1 — Unified main layout (Cursor-style)</h1>
+  <p class="sub">One workspace: left sidebar · chat in the center · tool panels on the right. The Dev/Chat tab switch is gone.</p>
+
+  <div class="window">
+    <div class="titlebar">
+      <div class="dot r"></div><div class="dot y"></div><div class="dot g"></div>
+      <span class="t">Conduit — ultimate-workspace</span>
+    </div>
+    <div class="body">
+
+      <!-- LEFT SIDEBAR -->
+      <aside class="left badge"><span class="num">1</span>
+        <div class="brand">Conduit</div>
+        <div class="newchat">+ New Chat</div>
+        <div class="scroll">
+          <div class="sect">ARTIFACTS</div>
+          <div class="item">🗂 Artifact library <span class="meta">14</span></div>
+
+          <div class="sect">CONNECTORS</div>
+          <div class="item">Notion <span class="meta ok">✓</span></div>
+          <div class="item">Google Drive <span class="meta ok">✓</span></div>
+          <div class="item dim">+ Add connector</div>
+
+          <div class="sect">AUTOMATIONS</div>
+          <div class="item">⏱ nightly-research <span class="meta">02:00</span></div>
+          <div class="item">⏱ pr-watcher <span class="meta">on</span></div>
+          <div class="item dim">+ New automation</div>
+
+          <div class="sect">PROJECTS</div>
+          <div class="item active">📁 ultimate-workspace</div>
+          <div class="item">📁 mobile-app</div>
+          <div class="item">📁 api-server</div>
+
+          <div class="sect">CHAT HISTORY</div>
+          <div class="item"><span class="star">★</span> Refactor auth module <span class="meta">2m</span></div>
+          <div class="item">Browser MCP fixes <span class="meta">1h</span></div>
+          <div class="item">Relay reconnect bug <span class="meta">3h</span></div>
+          <div class="item">Cost dashboard review <span class="meta">1d</span></div>
+          <div class="item">Mobile pairing flow <span class="meta">2d</span></div>
+        </div>
+        <div class="leftfoot"><span>⚙ Settings</span><span>◈ Skills</span><span>$ Cost</span></div>
+      </aside>
+
+      <!-- CENTER CHAT -->
+      <main class="center badge"><span class="num">2</span>
+        <div class="chathead">
+          <span class="title">Refactor auth module</span>
+          <span class="proj">📁 ultimate-workspace</span>
+          <div class="conn"><span class="cdot"></span> Claude Code · connected via relay</div>
+        </div>
+
+        <div class="msgs">
+          <div class="muser">Refactor src/lib/auth.ts to use the new token store, then update the callers.</div>
+          <div class="mass">
+            <div class="who">Claude Code · Sonnet 4.5</div>
+            <div class="txt">I'll start by reading the current auth module and finding its callers.</div>
+            <div class="tool"><span class="ic">📄</span> Read src/lib/auth.ts <span class="st">done</span></div>
+            <div class="tool"><span class="ic">🔍</span> Grep "verifyToken(" across src/ <span class="st">done</span></div>
+            <div class="diff badge"><span class="num">5</span>
+              <div class="dhead">
+                ✏️ <span class="fn">src/lib/auth.ts</span>
+                <span class="stat"><span class="p">+18</span> <span class="m">−7</span> · 4 hunks</span>
+                <div class="acts"><span class="rej">Reject</span><span class="acc">Accept ✓</span></div>
+              </div>
+              <div class="dline ctx">  42  const session = getSession()</div>
+              <div class="dline del">− 43  const token = legacyVerify(session)</div>
+              <div class="dline add">+ 43  const token = await tokenStore.verify(session)</div>
+              <div class="dline add">+ 44  if (token.expired) await tokenStore.rotate()</div>
+              <div class="dline ctx">  45  return token.claims</div>
+              <div class="dmore">▾ 3 more hunks · click to expand full diff</div>
+            </div>
+            <div class="txt" style="margin-top:10px">Updating the three callers now<span class="cursorblink"></span></div>
+          </div>
+        </div>
+
+        <!-- COMPOSER -->
+        <div class="composer badge"><span class="num">3</span>
+          <div class="chips">
+            <div class="chip cli"><span class="cdot"></span> Claude Code ▾</div>
+            <div class="chip">Sonnet 4.5 ▾</div>
+            <div class="chip">📁 ultimate-workspace ▾</div>
+            <div class="chip">⚡ Full auto ▾</div>
+          </div>
+          <div class="cinput"><span class="ph">Message Claude Code…  (@ to reference files, / for commands)</span></div>
+          <div class="cfoot"><span>📎</span><span>🖼</span><span>⇧↵ newline</span><div class="send">Send ➤</div></div>
+        </div>
+      </main>
+
+      <!-- RIGHT PANEL -->
+      <aside class="right badge"><span class="num">4</span>
+        <div class="rtabs">
+          <div class="rtab active">Terminal</div>
+          <div class="rtab">Browser</div>
+          <div class="rtab">Files</div>
+          <div class="rtab">Canvas</div>
+        </div>
+        <div class="term">
+          <div><span class="ps">PS D:\projects\Ultimate-workspace&gt;</span> npm run test</div>
+          <div>&nbsp;</div>
+          <div><span class="ok">✓</span> src/state/chat.test.ts (12 tests) 41ms</div>
+          <div><span class="ok">✓</span> src/lib/sessionLauncher.test.ts (8 tests) 22ms</div>
+          <div><span class="warn">⚠</span> src/components/ChatView.test.ts — 1 skipped</div>
+          <div>&nbsp;</div>
+          <div>Test Files  3 passed (3)</div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Tests  20 passed (20)</div>
+          <div>&nbsp;</div>
+          <div><span class="ps">PS D:\projects\Ultimate-workspace&gt;</span> <span class="cursorblink" style="background:#cfcfcf"></span></div>
+        </div>
+        <div class="rfoot"><span>powershell · pane 1 of 2</span><span>⤢ expand&nbsp;&nbsp;— collapse</span></div>
+      </aside>
+
+    </div>
+  </div>
+
+  <div class="legend">
+    <div><b>1</b> Left sidebar — New Chat on top, then: Artifact library, Connectors (moved out of Settings), Automations (new feature), Projects, Chat history. Collapsible to icons.</div>
+    <div><b>2</b> Center is always the chat. Header shows chat title, scoped folder, and live CLI connection status via the relay.</div>
+    <div><b>3</b> Composer: pick the CLI first (Claude Code ▾), which unlocks its model list (Sonnet 4.5 ▾). Folder chip scopes the chat's workspace. See Screen 2 for the selector flow.</div>
+    <div><b>4</b> Right tool panel — Terminal (PowerShell), Browser, Files, Canvas as tabs in one collapsible column. See Screen 3 for each variant.</div>
+    <div><b>5</b> Diffs live inline in the chat as review cards (like Cursor): file, +/− stats, expandable hunks, per-edit Accept/Reject. The full-file view opens in the Canvas tab or PeekPanel; batch "Accept all" sits at the end of the turn.</div>
+  </div>
+</body>
+</html>

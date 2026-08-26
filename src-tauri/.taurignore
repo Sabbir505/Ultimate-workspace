@@ -1,0 +1,5 @@
+# Bundled runtime trees (LibreOffice, Python) are staged by scripts/ and are
+# written to at runtime (soffice creates lock/profile files inside its own
+# program dir on every conversion). Watching them makes `tauri dev` rebuild
+# and relaunch the app every time a document preview is opened.
+resources/

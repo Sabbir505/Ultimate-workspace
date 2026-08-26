@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Screen 3 — Right panel variants</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; font-family:-apple-system,"Segoe UI",Roboto,sans-serif; }
+  body { background:#111; color:#e6e6e6; padding:32px; }
+  h1 { font-size:22px; font-weight:600; margin-bottom:6px; }
+  .sub { color:#9a9a9a; font-size:13px; margin-bottom:28px; max-width:980px; line-height:1.5; }
+
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:28px; max-width:1080px; margin:0 auto; }
+  .variant { border:1px solid #333; border-radius:12px; overflow:hidden; background:#1e1e21; display:flex; flex-direction:column; height:380px; }
+  .vlabel { font-size:11px; font-weight:700; letter-spacing:1px; color:#f5c542; padding:10px 14px 0; }
+  .rtabs { display:flex; border-bottom:1px solid #2a2a2e; margin-top:6px; }
+  .rtab { flex:1; text-align:center; padding:8px 0; font-size:11.5px; color:#8b8b8b; }
+  .rtab.active { color:#fff; border-bottom:2px solid #5b8def; background:#222226; }
+  .vbody { flex:1; overflow:hidden; position:relative; }
+  .vnote { font-size:11px; color:#8b8b8b; padding:8px 14px 12px; line-height:1.5; border-top:1px solid #2a2a2e; }
+
+  /* terminal */
+  .term { padding:12px 14px; font-family:"Cascadia Code",Consolas,monospace; font-size:11px; line-height:1.65; color:#cfcfcf; }
+  .term .ps { color:#5b8def; } .term .ok { color:#4caf50; } .term .warn { color:#febc2e; }
+  .blink { display:inline-block; width:7px; height:12px; background:#cfcfcf; vertical-align:-1px; }
+
+  /* browser */
+  .btabs { display:flex; gap:4px; padding:8px 10px 0; background:#232327; }
+  .btab { font-size:10.5px; background:#2c2c31; border-radius:6px 6px 0 0; padding:5px 12px; color:#bdbdbd; }
+  .btab.active { background:#1e1e21; color:#fff; }
+  .urlbar { display:flex; align-items:center; gap:8px; padding:7px 12px; background:#232327; border-bottom:1px solid #2a2a2e; font-size:11px; color:#9a9a9a; }
+  .urlbar .url { flex:1; background:#1b1b1e; border-radius:14px; padding:4px 12px; color:#cfcfcf; }
+  .page { padding:16px; }
+  .page .hero { background:#2b3a55; border-radius:8px; height:56px; display:flex; align-items:center; padding:0 16px; font-size:13px; font-weight:600; }
+  .page .row { display:flex; gap:10px; margin-top:12px; }
+  .page .card { flex:1; background:#26262a; border-radius:8px; height:70px; padding:10px; font-size:10.5px; color:#9a9a9a; }
+  .agentdot { position:absolute; right:14px; bottom:14px; background:#5b8def; color:#fff; font-size:10.5px; padding:5px 11px; border-radius:20px; }
+
+  /* files */
+  .ftree { padding:10px 12px; font-size:12px; line-height:1.9; color:#cfcfcf; }
+  .ftree .dir { color:#8fb8f5; }
+  .ftree .chg { color:#febc2e; }
+  .ftree .add { color:#4caf50; }
+  .ftree .ind { padding-left:18px; }
+  .ftree .ind2 { padding-left:36px; }
+  .ftree .m { float:right; font-size:10px; color:#777; }
+
+  /* canvas */
+  .chead { display:flex; align-items:center; gap:8px; padding:10px 14px; border-bottom:1px solid #2a2a2e; font-size:12px; color:#bdbdbd; }
+  .chead .zoom { margin-left:auto; color:#777; font-size:11px; }
+  .cdoc { margin:14px; background:#26262a; border:1px solid #333; border-radius:8px; padding:14px 16px; font-size:11.5px; line-height:1.7; color:#dcdcdc; }
+  .cdoc h3 { font-size:13px; margin-bottom:6px; color:#fff; }
+  .cdoc .code { background:#1b1b1e; border-radius:6px; padding:8px 10px; font-family:Consolas,monospace; font-size:10.5px; color:#8fb8f5; margin-top:8px; }
+</style>
+</head>
+<body>
+  <h1>Screen 3 — Right tool panel: the four tabs</h1>
+  <p class="sub">One collapsible right column hosts the tools as tabs. Only one is visible at a time; the others stay mounted in the background (terminals keep running, browser sessions stay alive) — same pattern as today's dormant panes.</p>
+
+  <div class="grid">
+
+    <!-- TERMINAL -->
+    <div class="variant">
+      <div class="vlabel">A — TERMINAL (POWERSHELL)</div>
+      <div class="rtabs"><div class="rtab active">Terminal</div><div class="rtab">Browser</div><div class="rtab">Files</div><div class="rtab">Canvas</div></div>
+      <div class="vbody"><div class="term">
+        <div><span class="ps">PS D:\projects\Ultimate-workspace&gt;</span> git status</div>
+        <div>On branch main</div>
+        <div>Changes not staged for commit:</div>
+        <div>&nbsp;&nbsp;<span class="warn">modified:</span>   src/lib/auth.ts</div>
+        <div>&nbsp;&nbsp;<span class="warn">modified:</span>   src/state/chat.ts</div>
+        <div>&nbsp;</div>
+        <div><span class="ps">PS D:\projects\Ultimate-workspace&gt;</span> <span class="blink"></span></div>
+      </div></div>
+      <div class="vnote">Existing TerminalPane/xterm + PTY backend reused as-is, hosted in a panel instead of the grid. Multiple shells via a pane switcher in the footer.</div>
+    </div>
+
+    <!-- BROWSER -->
+    <div class="variant">
+      <div class="vlabel">B — BROWSER</div>
+      <div class="rtabs"><div class="rtab">Terminal</div><div class="rtab active">Browser</div><div class="rtab">Files</div><div class="rtab">Canvas</div></div>
+      <div class="vbody">
+        <div class="btabs"><div class="btab active">localhost:5173</div><div class="btab">docs.rs</div><div class="btab">+</div></div>
+        <div class="urlbar"><span>‹ › ⟳</span><div class="url">http://localhost:5173/dashboard</div></div>
+        <div class="page">
+          <div class="hero">Conduit Dashboard</div>
+          <div class="row"><div class="card">Active sessions<br><b style="color:#fff;font-size:16px">4</b></div><div class="card">Cost today<br><b style="color:#fff;font-size:16px">$2.41</b></div><div class="card">Relay<br><b style="color:#4caf50;font-size:16px">●</b></div></div>
+        </div>
+        <div class="agentdot">🤖 agent is browsing</div>
+      </div>
+      <div class="vnote">Existing BrowserPane (native webview, multi-tab, MCP-controllable). The agent-browsing indicator shows when the CLI drives it via browser MCP.</div>
+    </div>
+
+    <!-- FILES -->
+    <div class="variant">
+      <div class="vlabel">C — FILES</div>
+      <div class="rtabs"><div class="rtab">Terminal</div><div class="rtab">Browser</div><div class="rtab active">Files</div><div class="rtab">Canvas</div></div>
+      <div class="vbody"><div class="ftree">
+        <div class="dir">▾ ultimate-workspace <span class="m">git: main</span></div>
+        <div class="ind dir">▾ src</div>
+        <div class="ind2 dir">▾ lib</div>
+        <div class="ind2 chg">&nbsp;&nbsp;auth.ts <span class="m">M</span></div>
+        <div class="ind2">&nbsp;&nbsp;ipc.ts</div>
+        <div class="ind2 dir">▾ state</div>
+        <div class="ind2 chg">&nbsp;&nbsp;chat.ts <span class="m">M</span></div>
+        <div class="ind2">&nbsp;&nbsp;panes.ts</div>
+        <div class="ind2 add">&nbsp;&nbsp;agents.ts <span class="m">A</span></div>
+        <div class="ind dir">▸ src-tauri</div>
+        <div class="ind">package.json</div>
+      </div></div>
+      <div class="vnote">New lightweight tree for the chat-scoped folder (no full explorer needed at first). Git M/A badges extend today's DevDiffPanel data. Click → PeekPanel preview.</div>
+    </div>
+
+    <!-- CANVAS -->
+    <div class="variant">
+      <div class="vlabel">D — CANVAS</div>
+      <div class="rtabs"><div class="rtab">Terminal</div><div class="rtab">Browser</div><div class="rtab">Files</div><div class="rtab active">Canvas</div></div>
+      <div class="vbody">
+        <div class="chead">📐 auth-refactor-plan.md <span class="zoom">− 100% +</span></div>
+        <div class="cdoc">
+          <h3>Auth refactor plan</h3>
+          1. Extract TokenStore into src/lib/tokens.ts<br>
+          2. Update verifyToken callers (3 files)<br>
+          3. Add refresh-rotation tests
+          <div class="code">export class TokenStore {<br>&nbsp;&nbsp;async rotate(): Promise&lt;Token&gt;</div>
+        </div>
+      </div>
+      <div class="vnote">Today's ArtifactPreviewPane promoted to a first-class tab: rendered markdown/HTML/diagrams the agent produces, with zoom and export.</div>
+    </div>
+
+  </div>
+</body>
+</html>

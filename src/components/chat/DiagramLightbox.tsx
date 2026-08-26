@@ -109,10 +109,60 @@ export function DiagramLightbox({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+  // Reset the transform on a new diagram. Auto-fit is applied once the
+  // injected HTML/SVG has had a frame to measure (see the ResizeObserver
+  // below) — until then we start at 1 so the user sees something.
   useEffect(() => {
     setZoom(1);
     setPan({ x: 0, y: 0 });
   }, [html]);
+
+  // Auto-fit: measure the doc once it mounts and pick a zoom that fits
+  // both dimensions inside the viewport (minus a small gutter for the
+  // 20px padding on each side). The user can then zoom in further; Reset
+  // also re-runs this fit. Skips the fit when the doc would shrink to
+  // half-size or smaller (it already fits comfortably) or when there is
+  // no doc to measure yet.
+  const fitToViewport = useCallback(() => {
+    const content = contentRef.current;
+    const el = content?.querySelector<HTMLElement>(".diagram-lightbox-doc");
+    if (!content || !el) return;
+    const availW = content.clientWidth - 48;
+    const availH = content.clientHeight - 48;
+    const w = el.scrollWidth;
+    const h = el.scrollHeight;
+    if (w <= 0 || h <= 0 || availW <= 0 || availH <= 0) return;
+    const fit = Math.min(availW / w, availH / h, 1);
+    // Only auto-fit when the natural size actually overflows. Diagrams that
+    // already fit keep zoom=1 (no awkward half-size for short diagrams).
+    if (w > availW || h > availH) {
+      wheelZoomed.current = false;
+      setZoom(fit);
+      setPan({ x: 0, y: 0 });
+    }
+  }, []);
+  // Run the fit once after mount + on resize so changing the window or
+  // device-pixel-zoom resizes the diagram to match.
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    let frame = 0;
+    const tryFit = () => {
+      // Two RAFs: first paints the doc, second lets CSS sizes settle.
+      frame = requestAnimationFrame(() => {
+        frame = requestAnimationFrame(() => {
+          fitToViewport();
+        });
+      });
+    };
+    tryFit();
+    const ro = new ResizeObserver(tryFit);
+    ro.observe(el);
+    return () => {
+      cancelAnimationFrame(frame);
+      ro.disconnect();
+    };
+  }, [html, fitToViewport]);
 
   // Sanitize with the RIGHT policy: a bare <svg> string (mermaid diagrams)
   // must go through the SVG profile — the HTML profile's tight attribute
@@ -160,7 +210,11 @@ export function DiagramLightbox({
             type="button"
             className="diagram-lightbox-zoom-level"
             title="Reset zoom"
-            onClick={() => setZoom(1)}
+            onClick={() => {
+              setZoom(1);
+              setPan({ x: 0, y: 0 });
+              requestAnimationFrame(fitToViewport);
+            }}
           >
             {Math.round(zoom * 100)}%
           </button>

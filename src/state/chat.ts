@@ -1921,15 +1921,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // streaming state here (not just the scalar), or the sidebar "working"
       // dot sticks forever. (Harness cancels DO emit terminal events, but
       // clearing early is harmless: onDone tolerates a missing key.)
+      // Also clear livePerf so the next turn starts its timer from 0, not
+      // the cancelled turn's elapsed time (regression: stale timer).
       set((s) => {
         const nextStreaming = { ...s.streaming };
         delete nextStreaming[streamingChatSessionId];
         const nextStatus = { ...s.chatStatus };
         delete nextStatus[streamingChatSessionId];
+        const nextLivePerf = { ...s.livePerf };
+        delete nextLivePerf[streamingChatSessionId];
         return {
           streamingChatSessionId: null,
           streaming: nextStreaming,
           chatStatus: nextStatus,
+          livePerf: nextLivePerf,
         };
       });
       // A cancelled turn frees the queue too — send the next stacked message.

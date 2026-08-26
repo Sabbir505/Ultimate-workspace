@@ -1092,7 +1092,11 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         content: activeStream,
         key: `streaming-${activeChatSessionId ?? "none"}-${messages.length}`,
         live: true,
-        livePerf: livePerf[activeChatSessionId] ?? null,
+        // The live row receives the current perf snapshot at render time
+        // below. Keeping it out of this memo prevents a 500ms perf heartbeat
+        // from rebuilding every persisted row (and invalidating their diagram
+        // subtrees) while the turn streams.
+        livePerf: null,
       });
     }
     // Pre-first-token indicator as a VIRTUALIZED ROW, not a flow sibling:
@@ -1113,7 +1117,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
       });
     }
     return list;
-  }, [messages, activeChatSessionId, artifactProposalsBySession, activeIsStreaming, activeStream, waitingForFirstToken, livePerf, handleDelete, handleSubmitEdit]);
+  }, [messages, activeChatSessionId, artifactProposalsBySession, activeIsStreaming, activeStream, waitingForFirstToken, handleDelete, handleSubmitEdit]);
   // PERF (PERFORMANCE_AUDIT.md F5): virtualize the message list — long
   // conversations used to mount EVERY MessageBubble (each re-parsing markdown
   // + katex), which made scroll janky and session-switch slow past a few
@@ -1191,6 +1195,9 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
   }, [structureSig, messages.length]);
 
   const hasItems = items.length > 0;
+  const currentLivePerf = activeChatSessionId
+    ? livePerf[activeChatSessionId] ?? null
+    : null;
   // Regenerate applies to the most recent assistant message only.
   const lastAssistantKey = [...items]
     .reverse()
@@ -1303,7 +1310,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
                         onPreviewArtifact={setPreviewArtifact}
                         superseded={item.superseded}
                         segmentStart={item.segmentStart}
-                        livePerf={item.livePerf}
+                        livePerf={item.live ? currentLivePerf : item.livePerf}
                       />
                     )}
                   </Suspense>

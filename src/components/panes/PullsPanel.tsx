@@ -18,7 +18,7 @@ import {
 import { openInBrowserPane } from "../../lib/openBrowserPane";
 import { useChatStore } from "../../state/chat";
 import { useProjectsStore } from "../../state/projects";
-import { usePullRequestsStore } from "../../state/pullRequests";
+import { prListCacheKey, usePullRequestsStore, type PrListState } from "../../state/pullRequests";
 import { relativeTime } from "../../lib/relativeTime";
 
 type View = { kind: "list" } | { kind: "detail"; number: number } | { kind: "create" };
@@ -101,10 +101,12 @@ function PrList({
   onOpen: (number: number) => void;
   onCreate: () => void;
 }) {
-  const list = usePullRequestsStore((s) => s.lists[projectId]);
-  const error = usePullRequestsStore((s) => s.listErrors[projectId]);
+  const [stateFilter, setStateFilter] = useState<PrListState>("open");
+  const cacheKey = prListCacheKey(projectId, stateFilter);
+  const list = usePullRequestsStore((s) => s.lists[cacheKey]);
+  const error = usePullRequestsStore((s) => s.listErrors[cacheKey]);
+  const loading = usePullRequestsStore((s) => (s.listLoading[cacheKey] ?? 0) > 0);
   const refreshList = usePullRequestsStore((s) => s.refreshList);
-  const [stateFilter, setStateFilter] = useState<"open" | "closed" | "all">("open");
 
   const refresh = useCallback(() => void refreshList(projectId, stateFilter), [projectId, stateFilter, refreshList]);
   useEffect(() => {
@@ -127,8 +129,8 @@ function PrList({
           <option value="all">All</option>
         </select>
         <div className="pulls-toolbar-spacer" />
-        <button type="button" className="ghost" onClick={refresh} title="Refresh">
-          ⟳
+        <button type="button" className="ghost pulls-refresh" onClick={refresh} title="Refresh" disabled={loading}>
+          {loading ? <span className="pulls-spinner" aria-hidden="true" /> : "⟳"}
         </button>
         <button
           type="button"
@@ -140,13 +142,16 @@ function PrList({
           New PR
         </button>
       </div>
-      {error ? (
+      {error && !list ? (
         <div className="pulls-empty">
           <div className="pulls-empty-title">Couldn't load pull requests</div>
           <div className="pulls-empty-hint">{error}</div>
         </div>
       ) : !list ? (
-        <div className="pulls-empty"><div className="pulls-empty-hint">Loading…</div></div>
+        <div className="pulls-empty">
+          <span className="pulls-spinner" aria-hidden="true" />
+          <div className="pulls-empty-hint">Loading…</div>
+        </div>
       ) : list.length === 0 ? (
         <div className="pulls-empty">
           <div className="pulls-empty-title">No {stateFilter} pull requests</div>

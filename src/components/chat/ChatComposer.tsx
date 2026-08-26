@@ -749,6 +749,11 @@ export function ChatComposer({
   const generationRef = useRef(0);
   const partialTimerRef = useRef<number | null>(null);
   const waveBarsRef = useRef<(HTMLSpanElement | null)[]>([]);
+  // Mirrors `recording` for hotkey/async paths where state may be stale, plus
+  // a "released while the mic was still opening" latch (push-to-talk during
+  // the first-run permission prompt).
+  const recordingRef = useRef(false);
+  const pendingStopRef = useRef(false);
   const captureCtxRef = useRef<AudioContext | null>(null);
   const captureNodesRef = useRef<{
     source: MediaStreamAudioSourceNode;
@@ -1048,6 +1053,8 @@ export function ChatComposer({
   // ghost text, and run one full-buffer pass on stop for the final insert.
   // Same STT server either way — the sidecar lazy-starts itself.
   const stopCapture = useCallback(() => {
+    recordingRef.current = false;
+    pendingStopRef.current = false;
     if (partialTimerRef.current !== null) {
       window.clearInterval(partialTimerRef.current);
       partialTimerRef.current = null;
@@ -1095,39 +1102,41 @@ export function ChatComposer({
     return () => cancelAnimationFrame(raf);
   }, [recording]);
 
-  const toggleRecording = useCallback(async () => {
-    if (recording) {
-      generationRef.current += 1; // invalidate in-flight partials
-      stopCapture();
-      setRecording(false);
-      // Keep the last partial on screen while the full clip transcribes —
-      // clearing here made the text visibly vanish and pop back later.
-      const chunks = samplesRef.current;
-      samplesRef.current = [];
-      tailRef.current = [];
-      tailLenRef.current = 0;
-      if (chunks.length === 0) return;
-      setTranscribing(true);
-      try {
-        const wav = encodeWav16k(joinSamples(chunks, rateRef.current));
-        const res = await transcribeAudio(await blobToBase64(wav), "audio/wav");
-        const text = res?.text ? flattenVoiceText(res.text) : "";
-        if (text) {
-          insertTemplateText(text);
-        } else {
-          toastError("Transcription returned no text. Is a Whisper server running? See Settings → Local Models → Speech.");
-        }
-      } catch (e) {
-        toastError(
-          "No speech-to-text server running. Install and start one in Settings → Local Models → Speech, or point whisper.baseUrl at an OpenAI-compatible STT endpoint.",
-          e,
-        );
-      } finally {
-        setTranscribing(false);
-        setPartialText(null);
+  const finishVoiceRecording = useCallback(async () => {
+    if (!recordingRef.current) return;
+    generationRef.current += 1; // invalidate in-flight partials
+    stopCapture();
+    setRecording(false);
+    // Keep the last partial on screen while the full clip transcribes —
+    // clearing here made the text visibly vanish and pop back later.
+    const chunks = samplesRef.current;
+    samplesRef.current = [];
+    tailRef.current = [];
+    tailLenRef.current = 0;
+    if (chunks.length === 0) return;
+    setTranscribing(true);
+    try {
+      const wav = encodeWav16k(joinSamples(chunks, rateRef.current));
+      const res = await transcribeAudio(await blobToBase64(wav), "audio/wav");
+      const text = res?.text ? flattenVoiceText(res.text) : "";
+      if (text) {
+        insertTemplateText(text);
+      } else {
+        toastError("Transcription returned no text. Is a Whisper server running? See Settings → Local Models → Speech.");
       }
-      return;
+    } catch (e) {
+      toastError(
+        "No speech-to-text server running. Install and start one in Settings → Local Models → Speech, or point whisper.baseUrl at an OpenAI-compatible STT endpoint.",
+        e,
+      );
+    } finally {
+      setTranscribing(false);
+      setPartialText(null);
     }
+  }, [insertTemplateText, stopCapture]);
+
+  const beginVoiceRecording = useCallback(async () => {
+    if (recordingRef.current || transcribing) return;
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -1184,6 +1193,7 @@ export function ChatComposer({
       tailLenRef.current = 0;
       levelRef.current = 0;
       setPartialText(null);
+      recordingRef.current = true;
       setRecording(true);
 
       // Live partials: transcribe the recent tail on a fixed tick. Each tick
@@ -1215,11 +1225,84 @@ export function ChatComposer({
           }
         })();
       }, PARTIAL_TICK_MS);
+
+      // Released while the mic was still opening (first-run permission
+      // prompt): stop immediately so a quick tap can't leave a stuck
+      // recording running with no key held.
+      if (pendingStopRef.current) {
+        pendingStopRef.current = false;
+        void finishVoiceRecording();
+      }
     } catch (e) {
       stream.getTracks().forEach((t) => t.stop());
       toastError("Could not initialize audio recorder.", e);
     }
-  }, [recording, insertTemplateText, stopCapture]);
+  }, [transcribing, finishVoiceRecording]);
+
+  // Discard the current clip without transcribing — push-to-talk aborted
+  // because a real shortcut (Ctrl+C, Ctrl+V, …) joined the hold.
+  const cancelVoiceRecording = useCallback(() => {
+    if (!recordingRef.current) return;
+    generationRef.current += 1;
+    stopCapture();
+    setRecording(false);
+    setPartialText(null);
+    samplesRef.current = [];
+    tailRef.current = [];
+    tailLenRef.current = 0;
+  }, [stopCapture]);
+
+  const toggleRecording = useCallback(() => {
+    if (recordingRef.current) void finishVoiceRecording();
+    else void beginVoiceRecording();
+  }, [beginVoiceRecording, finishVoiceRecording]);
+
+  // Push-to-talk: HOLD the Ctrl key to dictate, release to transcribe+insert.
+  // Solo Ctrl only — any other key joining the hold (Ctrl+C, Ctrl+V, …)
+  // cancels the dictation so keyboard shortcuts keep working untouched.
+  // The mic button still toggles for click users.
+  const ctrlTalkRef = useRef(false);
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Control") {
+        if (e.repeat || recordingRef.current || transcribing) return;
+        ctrlTalkRef.current = true;
+        void beginVoiceRecording();
+        return;
+      }
+      if (ctrlTalkRef.current && e.ctrlKey) {
+        // A shortcut joined the hold — abort without transcribing.
+        ctrlTalkRef.current = false;
+        cancelVoiceRecording();
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key !== "Control" || !ctrlTalkRef.current) return;
+      ctrlTalkRef.current = false;
+      if (recordingRef.current) {
+        void finishVoiceRecording();
+      } else {
+        // Mic still opening (first-run permission prompt) — stop the moment
+        // it does, so a quick tap doesn't leave a stuck recording.
+        pendingStopRef.current = true;
+      }
+    };
+    const onBlur = () => {
+      if (ctrlTalkRef.current && recordingRef.current) {
+        ctrlTalkRef.current = false;
+        cancelVoiceRecording();
+      }
+      ctrlTalkRef.current = false;
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [transcribing, beginVoiceRecording, finishVoiceRecording, cancelVoiceRecording]);
 
   // Close the "+" popover on outside click.
   useEffect(() => {
@@ -2019,6 +2102,25 @@ export function ChatComposer({
           <div className="composer-control-spacer" />
 
           <div className="composer-send-wrap">
+            <button
+              type="button"
+              className={`composer-mic-btn${recording ? " recording" : ""}`}
+              title={recording ? "Stop recording" : transcribing ? "Transcribing…" : "Record voice (or hold Ctrl)"}
+              aria-label={recording ? "Stop recording" : "Record voice"}
+              disabled={transcribing}
+              onClick={toggleRecording}
+            >
+              {transcribing ? (
+                <span className="composer-mic-spinner" />
+              ) : recording ? (
+                <span className="composer-mic-stop" />
+              ) : (
+                /* flexShrink: 0 — flex-shrink squeezed the svg into the
+                   button's content box (invisible) whenever any padding
+                   leaks in. */
+                <Mic size={14} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden />
+              )}
+            </button>
             {streaming ? (
               <button
                 className="composer-send-btn stop"
@@ -2045,25 +2147,6 @@ export function ChatComposer({
                 ↑
               </button>
             )}
-            <button
-              type="button"
-              className={`composer-mic-btn${recording ? " recording" : ""}`}
-              title={recording ? "Stop recording" : transcribing ? "Transcribing…" : "Record voice"}
-              aria-label={recording ? "Stop recording" : "Record voice"}
-              disabled={transcribing}
-              onClick={() => void toggleRecording()}
-            >
-              {transcribing ? (
-                <span className="composer-mic-spinner" />
-              ) : recording ? (
-                <span className="composer-mic-stop" />
-              ) : (
-                /* flexShrink: 0 — flex-shrink squeezed the svg into the
-                   button's content box (invisible) whenever any padding
-                   leaks in. */
-                <Mic size={14} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden />
-              )}
-            </button>
           </div>
         </div>
         <ComposerMetrics

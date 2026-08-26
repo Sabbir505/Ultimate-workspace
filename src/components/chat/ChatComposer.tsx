@@ -1240,7 +1240,7 @@ export function ChatComposer({
   }, [transcribing, finishVoiceRecording]);
 
   // Discard the current clip without transcribing — push-to-talk aborted
-  // because a real shortcut (Ctrl+C, Ctrl+V, …) joined the hold.
+  // because a real shortcut (Alt+Tab, Alt+arrows, …) joined the hold.
   const cancelVoiceRecording = useCallback(() => {
     if (!recordingRef.current) return;
     generationRef.current += 1;
@@ -1257,28 +1257,31 @@ export function ChatComposer({
     else void beginVoiceRecording();
   }, [beginVoiceRecording, finishVoiceRecording]);
 
-  // Push-to-talk: HOLD the Ctrl key to dictate, release to transcribe+insert.
-  // Solo Ctrl only — any other key joining the hold (Ctrl+C, Ctrl+V, …)
+  // Push-to-talk: HOLD the Alt key to dictate, release to transcribe+insert.
+  // Solo Alt only — any other key joining the hold (Alt+Tab, Alt+arrows, …)
   // cancels the dictation so keyboard shortcuts keep working untouched.
   // The mic button still toggles for click users.
-  const ctrlTalkRef = useRef(false);
+  const altTalkRef = useRef(false);
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Control") {
-        if (e.repeat || recordingRef.current || transcribing) return;
-        ctrlTalkRef.current = true;
+      if (e.key === "Alt") {
+        // Ignore AltGr (reports as Ctrl+Alt on intl layouts) and shortcuts
+        // already in flight — only a solo Alt press starts dictation.
+        if (e.ctrlKey || e.metaKey || e.repeat) return;
+        if (recordingRef.current || transcribing) return;
+        altTalkRef.current = true;
         void beginVoiceRecording();
         return;
       }
-      if (ctrlTalkRef.current && e.ctrlKey) {
+      if (altTalkRef.current && e.altKey) {
         // A shortcut joined the hold — abort without transcribing.
-        ctrlTalkRef.current = false;
+        altTalkRef.current = false;
         cancelVoiceRecording();
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.key !== "Control" || !ctrlTalkRef.current) return;
-      ctrlTalkRef.current = false;
+      if (e.key !== "Alt" || !altTalkRef.current) return;
+      altTalkRef.current = false;
       if (recordingRef.current) {
         void finishVoiceRecording();
       } else {
@@ -1288,11 +1291,11 @@ export function ChatComposer({
       }
     };
     const onBlur = () => {
-      if (ctrlTalkRef.current && recordingRef.current) {
-        ctrlTalkRef.current = false;
+      if (altTalkRef.current && recordingRef.current) {
+        altTalkRef.current = false;
         cancelVoiceRecording();
       }
-      ctrlTalkRef.current = false;
+      altTalkRef.current = false;
     };
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
@@ -2105,7 +2108,7 @@ export function ChatComposer({
             <button
               type="button"
               className={`composer-mic-btn${recording ? " recording" : ""}`}
-              title={recording ? "Stop recording" : transcribing ? "Transcribing…" : "Record voice (or hold Ctrl)"}
+              title={recording ? "Stop recording" : transcribing ? "Transcribing…" : "Record voice (or hold Alt)"}
               aria-label={recording ? "Stop recording" : "Record voice"}
               disabled={transcribing}
               onClick={toggleRecording}

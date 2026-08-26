@@ -351,18 +351,31 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   // effect can use it (the panel's own `cwd` is bound to a terminal pane).
   const [externalCwd, setExternalCwd] = useState<string | null>(null);
   useEffect(() => {
-    if (diffPanelFile && diffPanelCwd) {
-      setSelectedFile(diffPanelFile);
-      setExternalCwd(diffPanelCwd);
-      // Clear the store so the same file can be selected again later.
-      useUiStore.getState().setDiffPanelFile(null, null);
-    }
-  }, [diffPanelFile, diffPanelCwd]);
+    if (!diffPanelFile) return;
+    // Chat edit blocks carry ABSOLUTE workspace paths, but get_git_file_diff
+    // only accepts repo-relative ones (validate_repo_relative rejects
+    // absolutes as a path-traversal guard). Strip the repo prefix when the
+    // external path lives inside it; otherwise pass through and let the
+    // fetch's error handling surface the failure.
+    setSelectedFile(toRepoRelativePath(diffPanelFile, diffPanelCwd ?? cwd));
+    if (diffPanelCwd) setExternalCwd(diffPanelCwd);
+    // Clear the store so the same file can be selected again later.
+    useUiStore.getState().setDiffPanelFile(null, null);
+  }, [diffPanelFile, diffPanelCwd, cwd]);
 
   // Reset the inline diff selection when the binding changes (pane focus or
   // fallback project), so a stale file diff doesn't linger over the new
-  // file list.
+  // file list. Skipped on mount: a fresh mount usually means an external
+  // request (chat "Review" button / branch peek) just set diffPanelFile in
+  // the store and then activated this tab — the consume effect above already
+  // applied it during this same commit, so resetting here would wipe the
+  // selection and leave only the generic file list visible.
+  const mountedRef = useRef(false);
   useEffect(() => {
+    if (!mountedRef.current) {
+      mountedRef.current = true;
+      return;
+    }
     setSelectedFile(null);
     setDiffText(null);
     setExternalCwd(null);
@@ -411,6 +424,15 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
         // file watcher tick would otherwise re-parse and re-render
         // thousands of diff lines every tick even though nothing changed.
         setDiffText((prev) => (next === prev ? prev : next));
+        if (firstLoad) {
+          setDiffLoading(false);
+          firstLoad = false;
+        }
+      }).catch(() => {
+        // A rejected fetch (bad path, git failure) must never leave the
+        // panel stuck on "Loading diff…" — degrade to the empty state.
+        if (cancelled) return;
+        setDiffText("");
         if (firstLoad) {
           setDiffLoading(false);
           firstLoad = false;
@@ -798,8 +820,11 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
         )}
       </div>
       <div className="dev-diff-panel-body">
-        {diffDetail}
-        {fileList}
+        {/* The detail view REPLACES the file list while a file is selected
+            (matches .dev-diff-detail's "replaces the file list" design and
+            the "‹ Files" back button) — rendering both stacked made the
+            list peek out below an open diff. */}
+        {diffDetail ?? fileList}
       </div>
     </div>
   );
@@ -822,6 +847,25 @@ function iconFor(kind: string): string {
     default:
       return "·";
   }
+}
+
+/** Strip a repo-root prefix off an externally supplied (usually absolute)
+ *  file path so the backend's repo-relative path validation accepts it.
+ *  Returns the input unchanged when it is already relative, no repo root is
+ *  known, or the path lives outside the repo. Separator-insensitive on
+ *  purpose — chat edit blocks and git status disagree on "/" vs "\\". */
+function toRepoRelativePath(filePath: string, repoCwd: string | null | undefined): string {
+  if (!repoCwd) return filePath;
+  const isAbsolute =
+    /^[a-zA-Z]:[\\/]/.test(filePath) || filePath.startsWith("\\\\") || filePath.startsWith("/");
+  if (!isAbsolute) return filePath;
+  // Normalize separators only for the comparison; lengths stay identical so
+  // the slice below can operate on the original string.
+  const norm = (p: string) => p.replace(/\//g, "\\").toLowerCase();
+  const base = norm(repoCwd).replace(/\\+$/, "");
+  const full = norm(filePath);
+  if (!full.startsWith(base + "\\")) return filePath;
+  return filePath.slice(base.length + 1).replace(/\\/g, "/");
 }
 
 function shortenCwd(cwd: string): string {

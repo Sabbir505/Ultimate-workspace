@@ -754,43 +754,85 @@ div[data-index]:has(.chat-session-row.menu-open) {
   gap: 4px;
 }
 
-/* ---- Files-changed summary at the end of a turn ---- */
-.chat-files-summary {
-  margin: 6px 0 2px;
+/* ---- Consolidated per-turn changes row (files changed + checkpoint undo) ----
+   One card under the assistant answer: "N files changed +adds −dels" with an
+   Undo button on the right; expanding lists the files with Review / Open. */
+.chat-turn-changes {
+  margin: 8px 0 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-2) 45%, transparent);
+  overflow: hidden;
 }
-.chat-files-summary-toggle {
+.chat-turn-changes-head {
+  display: flex;
+  align-items: center;
+}
+.chat-turn-changes-toggle {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 100%;
-  padding: 3px 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.chat-turn-changes-toggle:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.chat-turn-changes-count {
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-turn-changes-stats {
+  flex: none;
+  display: inline-flex;
+  gap: 6px;
+  font-size: 11.5px;
+}
+.chat-turn-changes-undo {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 4px 6px 4px 0;
+  padding: 4px 10px;
   font-size: 11.5px;
   font-family: var(--font-mono);
   color: var(--text-dim);
   background: transparent;
   border: none;
-  border-left: 2px solid var(--border);
-  border-radius: 0;
+  border-radius: var(--radius-xs);
   cursor: pointer;
-  text-align: left;
-  transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
 }
-.chat-files-summary-toggle:hover {
+.chat-turn-changes-undo:hover {
   color: var(--text);
-  border-left-color: var(--text-dim);
+  background: var(--surface-2);
 }
-.chat-files-summary-count {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.chat-turn-changes-body {
+  border-top: 1px solid var(--border);
+  padding: 4px 6px 6px;
 }
-.chat-files-summary-stats {
-  flex: none;
-  display: inline-flex;
-  gap: 6px;
-  font-size: 11px;
+/* Inside the card the file list drops its own left rule — the card border
+   frames it instead. */
+.chat-turn-changes-body .chat-files-list {
+  margin: 0;
+  padding: 0;
+  border-left: none;
+  gap: 2px;
 }
 .chat-files-list {
   list-style: none;
@@ -805,10 +847,14 @@ div[data-index]:has(.chat-session-row.menu-open) {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 2px 8px;
+  padding: 4px 8px;
   font-size: 11.5px;
   font-family: var(--font-mono);
   color: var(--text-dim);
+  border-radius: var(--radius-xs);
+}
+.chat-turn-changes-body .chat-files-row:hover {
+  background: var(--surface-2);
 }
 .chat-files-name {
   color: var(--text);
@@ -831,19 +877,21 @@ div[data-index]:has(.chat-session-row.menu-open) {
   gap: 6px;
   font-size: 11px;
 }
-.chat-files-review {
+.chat-files-review,
+.chat-files-open {
   flex: none;
-  padding: 1px 8px;
+  padding: 2px 10px;
   font-size: 11px;
   font-family: var(--font-mono);
   color: var(--text-dim);
   background: transparent;
   border: 1px solid var(--border);
-  border-radius: var(--radius-xs);
+  border-radius: 999px;
   cursor: pointer;
   transition: color 0.15s var(--ease), border-color 0.15s var(--ease), background 0.15s var(--ease);
 }
-.chat-files-review:hover {
+.chat-files-review:hover,
+.chat-files-open:hover {
   color: var(--text);
   border-color: var(--text-dim);
   background: var(--surface-2);
@@ -1456,43 +1504,9 @@ div[data-index]:has(.chat-session-row.menu-open) {
   color: var(--text-dim);
 }
 
-/* ---- Per-turn git checkpoint chip ---- */
-.chat-checkpoint {
-  margin: 6px 0 2px;
-}
-.chat-checkpoint-toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 3px 8px;
-  font-size: 11.5px;
-  font-family: var(--font-mono);
-  color: var(--text-dim);
-  background: transparent;
-  border: none;
-  border-left: 2px solid color-mix(in srgb, var(--state-working, #46a758) 45%, transparent);
-  border-radius: 0;
-  cursor: pointer;
-  text-align: left;
-  transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
-}
-.chat-checkpoint-toggle:hover {
-  color: var(--text);
-  border-left-color: var(--state-working, #46a758);
-}
-.chat-checkpoint-icon {
-  flex: none;
-  font-size: 12px;
-}
-.chat-checkpoint-body {
-  margin: 4px 0 0;
-  padding-left: 10px;
-  border-left: 2px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
+/* ---- Per-turn checkpoint remnants (status pills, restore modal) ----
+   The chip itself became part of .chat-turn-changes; these pieces are still
+   rendered by TurnChangesRow (A/M/D pills, empty state, confirm dialog). */
 .chat-checkpoint-empty {
   font-size: 11.5px;
   font-family: var(--font-mono);
@@ -1517,23 +1531,6 @@ div[data-index]:has(.chat-session-row.menu-open) {
 .chat-checkpoint-status-D {
   color: var(--danger, #e5484d);
   background: color-mix(in srgb, var(--danger, #e5484d) 14%, transparent);
-}
-.chat-checkpoint-restore {
-  align-self: flex-start;
-  margin: 2px 0 4px;
-  padding: 5px 12px;
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--text);
-  background: color-mix(in srgb, var(--state-working, #46a758) 16%, transparent);
-  border: 1px solid color-mix(in srgb, var(--state-working, #46a758) 40%, transparent);
-  border-radius: 999px;
-  cursor: pointer;
-  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
-}
-.chat-checkpoint-restore:hover {
-  background: color-mix(in srgb, var(--state-working, #46a758) 26%, transparent);
-  border-color: var(--state-working, #46a758);
 }
 
 /* "Also roll back the conversation" checkbox inside the restore modal. */

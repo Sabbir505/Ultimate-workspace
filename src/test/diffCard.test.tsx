@@ -58,7 +58,7 @@ describe("MessageBubble inline diff cards", () => {
     const card = container.querySelector(".diff-card");
     expect(card).not.toBeNull();
     // Header: filename and +/− stats (1 del, 2 adds, one hunk). Scoped to the
-    // card — the turn's trailing FilesChangedSummary repeats the same stats.
+    // card — the turn's trailing TurnChangesRow repeats the same stats.
     expect(card!.querySelector(".diff-card-filename")?.textContent).toBe("src/lib/auth.ts");
     expect(card!.querySelector(".diff-card-adds")?.textContent).toBe("+2");
     expect(card!.querySelector(".diff-card-dels")?.textContent).toBe("−1");

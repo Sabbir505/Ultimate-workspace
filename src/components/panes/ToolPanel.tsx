@@ -1,5 +1,7 @@
 // Right-side tool panel (mockups 01 callout 4 / 03): one collapsible column
-// hosting Terminal | Browser | Files | Canvas as tabs. Only one tab is
+// hosting Terminal | Browser | Changes | Pull Requests | Agents as tabs, plus
+// auto-spawned per-artifact tabs (code/html previews, images, pdfs) and the
+// opened-plan tab. Only one tab is
 // visible at a time; the others stay MOUNTED with display:none so xterm
 // instances, pty processes and native browser webviews keep running (§6.5:
 // never kill on blur). Native webviews are explicitly hidden via the
@@ -13,9 +15,8 @@
 import { lazy, useState, Suspense, useCallback, useEffect, useMemo, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Globe, Layout, Terminal, FileDiff, GitPullRequest, Bot, FileCode } from "lucide-react";
+import { Globe, Terminal, FileDiff, GitPullRequest, Bot, FileCode, NotebookText } from "lucide-react";
 import { openBrowserPane, openShellTerminal, restoreMinimizedBrowser } from "../../lib/sessionLauncher";
-import { useChatStore } from "../../state/chat";
 import {
   activeTerminalPair,
   terminalPanes,
@@ -39,11 +40,12 @@ const TABS: { id: ToolPanelTab; label: string; Icon: React.ElementType }[] = [
   { id: "browser", label: "Browser", Icon: Globe },
   { id: "files", label: "Changes", Icon: FileDiff },
   { id: "pulls", label: "Pull Requests", Icon: GitPullRequest },
-  { id: "canvas", label: "Canvas", Icon: Layout },
   { id: "agents", label: "Agents", Icon: Bot },
-  // Artifact tabs are spawned automatically by code generation — they don't
-  // appear in the "+" picker, but are listed here so their icon renders in chips.
+  // Artifact/plan tabs are spawned automatically (code generation, opened
+  // plans) — they don't appear in the "+" picker, but are listed here so
+  // their icon renders in chips.
   { id: "artifact", label: "Artifact", Icon: FileCode },
+  { id: "plan", label: "Plan", Icon: NotebookText },
 ];
 
 function terminalLabel(t: Pane): string {
@@ -55,7 +57,7 @@ function terminalLabel(t: Pane): string {
 /** Build a display label for a tab instance. For kinds that may have multiple
  *  instances open (terminal/browser/agents), append the instance's short id so
  *  the user can tell them apart. For artifact tabs, show the filename
- *  (e.g. "component.tsx"). For singletons (files/canvas) just the kind. */
+ *  (e.g. "component.tsx"). For singletons (files/plan) just the kind. */
 function tabLabel(inst: ToolPanelTabInstance, fallback: string): string {
   if (inst.kind === "artifact") {
     return inst.artifactFilename ?? "Preview";
@@ -89,10 +91,6 @@ export function ToolPanel() {
   const reorderTab = useUiStore((s) => s.reorderTab);
   // Ref to the chips scroll container — needed for the wheel handler.
   const chipsRef = useRef<HTMLDivElement>(null);
-  const previewArtifacts = useChatStore((s) => s.previewArtifacts);
-  const activePreviewPath = useChatStore((s) => s.activePreviewPath);
-  const setPreviewArtifact = useChatStore((s) => s.setPreviewArtifact);
-  const closePreviewArtifact = useChatStore((s) => s.closePreviewArtifact);
   const panelRef = useRef<HTMLDivElement>(null);
 
   // Only show running terminals (not exited ones).
@@ -129,29 +127,12 @@ export function ToolPanel() {
   const activeInstance = openTabs.find((t) => t.instanceId === activeTabId) ?? null;
   const activeKind: ToolPanelTab = activeInstance?.kind ?? "terminal";
   // Browser panes render in their OWN always-mounted slot below (never inside
-  // the per-tab body) so switching to Terminal/Files/Canvas — or closing every
+  // the per-tab body) so switching to Terminal/Files/Browser — or closing every
   // tab — keeps the native webviews alive (§6.5 never kill on blur). The old
   // structure unmounted BrowserPane on tab switch, whose cleanup fire-and-
   // forgets browser_close: the webview died (full reload on switch back) or,
   // if the IPC failed, floated over the UI as a ghost.
   const browserTabActive = activeInstance?.kind === "browser";
-
-  // Auto-open the Canvas tab when a non-code artifact preview becomes active
-  // (images, markdown, diagrams — NOT .tsx/.jsx/.html which now open as their
-  // own artifact tabs). Skip if the active tab is already an artifact tab (a
-  // code artifact just opened and we don't want to steal focus to Canvas).
-  useEffect(() => {
-    if (!activePreviewPath) return;
-    // Don't steal focus from an artifact tab that was just auto-opened.
-    const ui = useUiStore.getState();
-    if (ui.activeTabId && ui.openTabs.some((t) => t.instanceId === ui.activeTabId && t.kind === "artifact")) {
-      return;
-    }
-    // openCanvasTab dedupes: activates an existing canvas tab or creates one.
-    // The old find-then-addTab path could race under StrictMode double-fire
-    // and stack duplicate canvas tabs.
-    ui.openCanvasTab();
-  }, [activePreviewPath]);
 
   // Auto-open content when a tab is selected while empty — the Terminal and
   // Browser tabs spawn their own content instead of showing an "open" button.
@@ -350,7 +331,7 @@ export function ToolPanel() {
                 <>
                   <div className="tool-panel-picker-scrim" onClick={() => setTabPickerOpen(false)} />
                   <div className="tool-panel-picker-menu" role="menu">
-                    {TABS.filter((t) => t.id !== "artifact").map((t) => (
+                    {TABS.filter((t) => t.id !== "artifact" && t.id !== "plan").map((t) => (
                       <button
                         key={t.id}
                         className="tool-panel-picker-item"
@@ -423,79 +404,33 @@ export function ToolPanel() {
                   auto-spawn effect handles the "no browser yet" case. */}
               {activeInstance.kind === "files" && <DevDiffPanel embedded />}
               {activeInstance.kind === "pulls" && <PullsPanel />}
-              {activeInstance.kind === "canvas" && (
+              {activeInstance.kind === "plan" && (
                 <>
-                  {previewArtifacts.length === 0 && !planCanvasContent ? (
+                  {!planCanvasContent ? (
                     <div className="tool-panel-empty">
-                      <div>No canvas yet</div>
-                      <div>Artifacts from chat will appear here.</div>
+                      <div>No plan open</div>
+                      <div>Plans opened from chat or the git sidebar appear here.</div>
                     </div>
                   ) : (
-                    <>
-                      {planCanvasContent && (
-                        <div className="canvas-plan-view">
-                          <div className="canvas-plan-header">
-                            <span className="canvas-plan-title">
-                              {planCanvasTitle || "Plan"}
-                            </span>
-                            <button
-                              className="ghost"
-                              onClick={() => setPlanCanvas(null, null)}
-                              title="Close plan"
-                            >
-                              ✕
-                            </button>
-                          </div>
-                          <div className="canvas-plan-body">
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                              {planCanvasContent}
-                            </ReactMarkdown>
-                          </div>
-                        </div>
-                      )}
-                      {previewArtifacts.length > 0 && (
-                        <>
-                          <div className="browser-tabbar">
-                            {previewArtifacts.map((a) => (
-                              <div
-                                key={a.path}
-                                className={`browser-tab${a.path === activePreviewPath ? " active" : ""}`}
-                                onClick={() => setPreviewArtifact(a)}
-                                title={a.path}
-                              >
-                                <span className="tab-title">{a.filename}</span>
-                                <button
-                                  className="ghost tab-close"
-                                  title="Close tab"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    closePreviewArtifact(a.path);
-                                  }}
-                                >
-                                  ✕
-                                </button>
-                              </div>
-                            ))}
-                          </div>
-                          <div className="tool-panel-canvas-slot">
-                            {previewArtifacts.map((a) => (
-                              <div
-                                key={a.path}
-                                className="tool-panel-canvas-item"
-                                style={a.path === activePreviewPath ? undefined : { display: "none" }}
-                              >
-                                <Suspense fallback={<div className="artifact-preview-loading">Loading…</div>}>
-                                  <ArtifactPreviewPane
-                                    artifact={a}
-                                    onClose={() => closePreviewArtifact(a.path)}
-                                  />
-                                </Suspense>
-                              </div>
-                            ))}
-                          </div>
-                        </>
-                      )}
-                    </>
+                    <div className="canvas-plan-view">
+                      <div className="canvas-plan-header">
+                        <span className="canvas-plan-title">
+                          {planCanvasTitle || "Plan"}
+                        </span>
+                        <button
+                          className="ghost"
+                          onClick={() => setPlanCanvas(null, null)}
+                          title="Close plan"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      <div className="canvas-plan-body">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {planCanvasContent}
+                        </ReactMarkdown>
+                      </div>
+                    </div>
                   )}
                 </>
               )}

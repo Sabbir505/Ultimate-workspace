@@ -23,6 +23,7 @@ import type { ChatArtifact } from "../../state/chat";
 import { ArtifactExportMenu } from "./ArtifactExportMenu";
 import { JsxPreview } from "./JsxPreview";
 import { sanitizeHtml } from "../../lib/sanitize";
+import { isInteractiveHtml } from "../../lib/interactiveHtml";
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -174,12 +175,20 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
     const lang = ext === "tsx" ? "tsx" : "jsx";
     return <JsxPreview code={text} lang={lang} variant="pane" />;
   }
-  // Plain HTML (non-diagram): iframe preview by default, with a toggle to view
-  // the raw source. Diagrams get the dedicated DiagramFrame wrapper below.
+  // Plain HTML (non-diagram): live iframe preview by default, with a toggle to
+  // view the raw source. Scripts/buttons/forms run inside the sandboxed frame
+  // (full fidelity, same model as the JSX live preview).
   if (kind === "html" && text != null) {
     return <HtmlPreview html={text} title={preview.filename} />;
   }
+  // Diagram-authored HTML: static diagrams keep the content-measured
+  // sanitized frame; interactive ones (scripts/buttons — the model sometimes
+  // authors webapps via generate_diagram) render LIVE, otherwise their
+  // controls silently do nothing in the scripts-blocked frame.
   if (kind === "diagram" && text != null) {
+    if (isInteractiveHtml(text)) {
+      return <HtmlPreview html={text} title={preview.filename} />;
+    }
     return <DiagramFrame html={text} title={preview.filename} />;
   }
   if (kind === "csv" && text != null) {
@@ -213,12 +222,12 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
   );
 }
 
-/** HTML artifact preview: toggle between a sandboxed live iframe and the
- *  raw source. The iframe uses sandbox="allow-scripts" (no allow-same-origin)
- *  so inline <script> tags execute but the iframe is isolated from the parent
- *  window, cookies, and Tauri APIs. External resources (CDN fonts, images via
- *  https) load normally since the sandbox doesn't block network — the iframe
- *  just can't access the parent. */
+/** HTML artifact preview: toggle between a live iframe and the raw source.
+ *  The iframe sandbox allows scripts/forms/modals/popups (NO allow-same-origin)
+ *  so the page is fully interactive — inline <script> tags execute, buttons
+ *  work, forms submit — while the frame stays isolated from the parent window,
+ *  cookies, and Tauri APIs. External resources (CDN fonts, images via https)
+ *  load normally since the sandbox doesn't block network. */
 function HtmlPreview({ html, title }: { html: string; title: string }) {
   const [tab, setTab] = useState<"preview" | "code">("preview");
   return (
@@ -248,7 +257,7 @@ function HtmlPreview({ html, title }: { html: string; title: string }) {
           <iframe
             className="artifact-preview-html"
             title={title}
-            sandbox="allow-scripts"
+            sandbox="allow-scripts allow-forms allow-modals allow-popups"
             srcDoc={html}
           />
         ) : (
@@ -389,7 +398,12 @@ export function ArtifactPreviewPane({
   // (translate + scale), independent of scroll ranges: the iframe/html
   // sizing quirks never leave a reliable scrollable overflow to pan with.
   // Text-like previews keep normal scroll and the CSS-zoom reflow.
-  const pannable = !!preview && (preview.kind === "diagram" || preview.kind === "image");
+  // INTERACTIVE diagrams are excluded: their live iframe needs the pointer
+  // events the gesture layer would swallow.
+  const liveDiagram = !!preview && preview.kind === "diagram" && preview.text != null && isInteractiveHtml(preview.text);
+  const pannable =
+    !!preview &&
+    (preview.kind === "image" || (preview.kind === "diagram" && !liveDiagram));
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const zoomRef = useRef(1);
   zoomRef.current = zoom;
@@ -549,11 +563,14 @@ export function ArtifactPreviewPane({
     );
   }
 
-  // JSX/HTML: skip the full header (zoom/download/close) — the tab chip above
+  // JSX/HTML/live-diagram: skip the full header (zoom/download/close) — the tab chip above
   // already shows the filename + close, and the Preview/Code toggle lives inside
   // the JsxPreview/HtmlPreview component. Only show the "open in default app" + a
   // download button for non-JSX/HTML.
-  const isJsxOrHtml = preview?.kind === "jsx" || preview?.kind === "html";
+  const isJsxOrHtml =
+    preview?.kind === "jsx" ||
+    preview?.kind === "html" ||
+    (preview?.kind === "diagram" && preview.text != null && isInteractiveHtml(preview.text));
 
   return (
     <div className="artifact-preview-pane" ref={paneRef} style={paneStyle}>

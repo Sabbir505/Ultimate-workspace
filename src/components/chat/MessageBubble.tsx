@@ -21,11 +21,10 @@ import { readArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
-import { useProjectsStore } from "../../state/projects";
 import { parseUnifiedDiff } from "../../lib/diff";
 import { openInBrowserPane } from "../../lib/openBrowserPane";
-import { DiffCard, editLineStats, type EditPayload } from "./DiffCard";
-import { CheckpointChip } from "./CheckpointChip";
+import { DiffCard, type EditPayload } from "./DiffCard";
+import { sameTurnFile, TurnChangesRow } from "./TurnChangesRow";
 // InlineDiagram (vector diagrams) and MermaidDiagram (mermaid + its
 // highlight.js language pack) are rarely seen on the initial chat surface and
 // pull in heavy dependencies; lazy-load both so the main bundle stays small.
@@ -920,88 +919,6 @@ function useLiveElapsedSec(perf: ChatPerfPayload | null | undefined): number | n
   return sec;
 }
 
-/** Collapsible "N files changed · +adds −dels" row placed at the end of an
- *  assistant turn that touched files. Expanding lists each edited file with its
- *  own +/− stats and a Review button that opens that file's working-tree diff
- *  in the right side panel (DevDiffPanel). */
-function FilesChangedSummary({ files }: { files: { path: string; edit: EditPayload }[] }) {
-  const [open, setOpen] = useState(false);
-  const setDiffPanelFile = useUiStore((s) => s.setDiffPanelFile);
-  const openFilesTab = useUiStore((s) => s.openFilesTab);
-  const projects = useProjectsStore((s) => s.projects);
-  const selectedProjectId = useProjectsStore((s) => s.selectedProjectId);
-  const cwd = projects.find((p) => p.id === selectedProjectId)?.path ?? null;
-
-  if (files.length === 0) return null;
-
-  let totalAdds = 0;
-  let totalDels = 0;
-  for (const f of files) {
-    const { adds, dels } = editLineStats(f.edit);
-    totalAdds += adds;
-    totalDels += dels;
-  }
-
-  // Open the working-tree diff for `path` in the right-side tool panel.
-  // `openFilesTab` activates (or creates) the singleton "files" tab instance
-  // and expands the panel — the old `setToolPanelTab("files")` call only set
-  // a string field the renderer ignored, so the panel stayed on whatever tab
-  // was active and the diff never appeared.
-  const review = (path: string) => {
-    setDiffPanelFile(path, cwd);
-    openFilesTab();
-  };
-
-  return (
-    <div className="chat-files-summary">
-      <button
-        className="chat-files-summary-toggle"
-        onClick={() => setOpen((o) => !o)}
-        title={open ? "Hide files" : "Show changed files"}
-      >
-        <span className="chat-files-summary-count">
-          {files.length} {files.length === 1 ? "file" : "files"} changed
-        </span>
-        <span className="chat-files-summary-stats">
-          {totalAdds > 0 && <span className="dev-diff-stat-add">+{totalAdds.toLocaleString()}</span>}
-          {totalDels > 0 && <span className="dev-diff-stat-del">−{totalDels.toLocaleString()}</span>}
-        </span>
-        <span className={`chat-thinking-chevron${open ? " open" : ""}`} aria-hidden="true">
-          ›
-        </span>
-      </button>
-      {open && (
-        <ul className="chat-files-list">
-          {files.map((f) => {
-            const { adds, dels } = editLineStats(f.edit);
-            const sep = Math.max(f.path.lastIndexOf("/"), f.path.lastIndexOf("\\"));
-            const basename = sep >= 0 ? f.path.slice(sep + 1) : f.path;
-            const dirname = sep >= 0 ? f.path.slice(0, sep) : "";
-            return (
-              <li className="chat-files-row" key={f.path} title={f.path}>
-                <span className="chat-files-name">{basename}</span>
-                {dirname && <span className="chat-files-path">→ {dirname}</span>}
-                <span className="chat-files-stats">
-                  {adds > 0 && <span className="dev-diff-stat-add">+{adds.toLocaleString()}</span>}
-                  {dels > 0 && <span className="dev-diff-stat-del">−{dels.toLocaleString()}</span>}
-                </span>
-                <button
-                  type="button"
-                  className="chat-files-review"
-                  onClick={() => review(f.path)}
-                  title={`Review diff for ${f.path}`}
-                >
-                  Review
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </div>
-  );
-}
-
 /** Returns a style object for inline code elements using CSS variable lookups
  *  that work in both light and dark themes (the variables resolve at runtime). */
 function useInlineCodeStyle() {
@@ -1639,8 +1556,6 @@ function MessageBubbleInner({
                         <Markdown key={`txt:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
                       ) : null,
                     )}
-
-                    {fileChanges.length > 0 && <FilesChangedSummary files={fileChanges} />}
                   </>
                 );
               })()
@@ -1650,10 +1565,28 @@ function MessageBubbleInner({
                   ? <Markdown key={`flat:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
                   : null,
               )}
-        {!isUser && artifacts && artifacts.length > 0 && (
-          <MessageArtifacts artifacts={artifacts} onPreviewArtifact={onPreviewArtifact} />
+        {/* Consolidated per-turn changes row: "N files changed +adds −dels"
+            with an Undo (checkpoint restore) button; expanding lists the
+            files with Review / Open. Replaces the old stacked
+            FilesChangedSummary + artifact chip + CheckpointChip rows. */}
+        {!isUser && (fileChanges.length > 0 || msgCheckpoints.length > 0) && (
+          <TurnChangesRow
+            files={fileChanges}
+            checkpoints={msgCheckpoints}
+            artifacts={artifacts}
+            onPreviewArtifact={onPreviewArtifact}
+          />
         )}
-        {!isUser && msgCheckpoints.length > 0 && <CheckpointChip checkpoints={msgCheckpoints} />}
+        {/* Artifact chips for files the changes row already covers would be
+            duplicates — only chip the leftovers (rare non-write artifacts). */}
+        {!isUser && artifacts && artifacts.length > 0 && (
+          <MessageArtifacts
+            artifacts={artifacts.filter(
+              (a) => !fileChanges.some((f) => sameTurnFile(a.path, f.path)),
+            )}
+            onPreviewArtifact={onPreviewArtifact}
+          />
+        )}
       </div>
       {!live && (
         <MessageActions
@@ -1721,11 +1654,11 @@ function detectPlan(content: string): PlanInfo | null {
 function PlanBanner({ title, summary, full }: PlanInfo) {
   const [open, setOpen] = useState(false);
   const setPlanCanvas = useUiStore((s) => s.setPlanCanvas);
-  const openCanvasTab = useUiStore((s) => s.openCanvasTab);
+  const openPlanTab = useUiStore((s) => s.openPlanTab);
 
-  const openInCanvas = () => {
+  const openInPlanTab = () => {
     setPlanCanvas(full, title);
-    openCanvasTab();
+    openPlanTab();
   };
 
   return (
@@ -1738,8 +1671,8 @@ function PlanBanner({ title, summary, full }: PlanInfo) {
       {open && (
         <div className="chat-plan-banner-body">
           <div className="chat-plan-banner-summary">{summary}</div>
-          <button className="chat-plan-banner-canvas-btn" onClick={openInCanvas}>
-            Open full plan in Canvas →
+          <button className="chat-plan-banner-canvas-btn" onClick={openInPlanTab}>
+            Open full plan →
           </button>
         </div>
       )}

@@ -52,6 +52,7 @@ export function GitToolsSidebar() {
   // Tool panel / UI store hooks — select individually to avoid churn.
   const addTab = useUiStore((s) => s.addTab);
   const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
+  const openPlanTab = useUiStore((s) => s.openPlanTab);
   const setPlanCanvas = useUiStore((s) => s.setPlanCanvas);
   const setActiveSubagentId = useUiStore((s) => s.setActiveSubagentId);
   const gitSidebarCollapsed = useUiStore((s) => s.gitSidebarCollapsed);
@@ -203,12 +204,11 @@ export function GitToolsSidebar() {
     setToolPanelCollapsed(false);
   };
 
-  // Open a plan in the Canvas tab.
+  // Open a plan in its own tab in the tool panel.
   const openPlan = (plan: { raw: string; label: string }) => {
     const body = plan.raw.replace(/^#{1,3}\s+[^\n]+\n*/, "").trim();
     setPlanCanvas(body || plan.raw, plan.label);
-    addTab("canvas");
-    setToolPanelCollapsed(false);
+    openPlanTab();
   };
 
   // Toggle the branch popover.

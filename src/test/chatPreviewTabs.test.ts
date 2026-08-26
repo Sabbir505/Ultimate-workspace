@@ -1,6 +1,7 @@
 // Tests for the chat store changes in this round:
-// 1. Canvas multi-tab state (previewArtifacts + activePreviewPath): open-or-focus
-//    semantics, close-with-neighbor-activation.
+// 1. Artifact preview routing: setPreviewArtifact opens/focuses a named
+//    artifact tab in the tool panel (the Canvas tab is gone — every preview
+//    is its own tab, deduped by path).
 // 2. Artifact chips for background chats: onDone must attribute pending
 //    artifacts to the last assistant message even when that session is NOT the
 //    one being viewed (previously silently discarded).
@@ -35,6 +36,7 @@ vi.mock("../lib/ipc", () => ({
 
 import { generateChatTitle, getChatMessages, updateChatSessionTitle } from "../lib/ipc";
 import { useChatStore } from "../state/chat";
+import { useUiStore } from "../state/ui";
 
 function session(id: string, title: string | null = null) {
   return { id, title, provider: "openai", model: "m", createdAt: 0, lastActiveAt: 0 } as never;
@@ -55,6 +57,7 @@ function assistantMsg(id: number, chatSessionId: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  useUiStore.setState({ openTabs: [], activeTabId: null, nextTabId: 1 });
   useChatStore.setState({
     sessions: [],
     activeChatSessionId: null,
@@ -63,81 +66,40 @@ beforeEach(() => {
     streamingChatSessionId: null,
     artifactsByMessage: {},
     pendingArtifacts: {},
-    previewArtifacts: [],
-    activePreviewPath: null,
   });
 });
 
-describe("Canvas multi-tab preview state", () => {
+describe("artifact preview routing (named tabs, no Canvas)", () => {
   const a1 = { path: "/tmp/a.py", filename: "a.py" };
   const a2 = { path: "/tmp/b.md", filename: "b.md" };
-  const a3 = { path: "/tmp/c.csv", filename: "c.csv" };
 
-  it("opens artifacts as tabs and focuses the newest one", () => {
+  it("opens each artifact as its own named tab and focuses the newest", () => {
     const s = useChatStore.getState();
     s.setPreviewArtifact(a1);
     s.setPreviewArtifact(a2);
-    const now = useChatStore.getState();
-    expect(now.previewArtifacts).toEqual([a1, a2]);
-    expect(now.activePreviewPath).toBe(a2.path);
+    const ui = useUiStore.getState();
+    const artifactTabs = ui.openTabs.filter((t) => t.kind === "artifact");
+    expect(artifactTabs.map((t) => t.artifactPath)).toEqual([a1.path, a2.path]);
+    expect(ui.activeTabId).toBe(artifactTabs[1].instanceId);
   });
 
-  it("re-opening an existing artifact focuses it instead of duplicating", () => {
+  it("re-opening an existing artifact focuses its tab instead of duplicating", () => {
     const s = useChatStore.getState();
     s.setPreviewArtifact(a1);
     s.setPreviewArtifact(a2);
     s.setPreviewArtifact(a1);
-    const now = useChatStore.getState();
-    expect(now.previewArtifacts).toEqual([a1, a2]);
-    expect(now.activePreviewPath).toBe(a1.path);
+    const ui = useUiStore.getState();
+    expect(ui.openTabs.filter((t) => t.kind === "artifact")).toHaveLength(2);
+    const a1Tab = ui.openTabs.find((t) => t.artifactPath === a1.path)!;
+    expect(ui.activeTabId).toBe(a1Tab.instanceId);
   });
 
-  it("null closes all tabs", () => {
+  it("null is a no-op (no tabs opened or closed)", () => {
     const s = useChatStore.getState();
     s.setPreviewArtifact(a1);
     s.setPreviewArtifact(null);
-    const now = useChatStore.getState();
-    expect(now.previewArtifacts).toEqual([]);
-    expect(now.activePreviewPath).toBeNull();
-  });
-
-  it("closing the focused middle tab activates the neighbor in its slot", () => {
-    const s = useChatStore.getState();
-    s.setPreviewArtifact(a1);
-    s.setPreviewArtifact(a2);
-    s.setPreviewArtifact(a3);
-    s.setPreviewArtifact(a2); // focus middle
-    useChatStore.getState().closePreviewArtifact(a2.path);
-    const now = useChatStore.getState();
-    expect(now.previewArtifacts.map((a) => a.path)).toEqual([a1.path, a3.path]);
-    expect(now.activePreviewPath).toBe(a3.path);
-  });
-
-  it("closing the focused last tab activates the new last tab", () => {
-    const s = useChatStore.getState();
-    s.setPreviewArtifact(a1);
-    s.setPreviewArtifact(a2);
-    useChatStore.getState().closePreviewArtifact(a2.path);
-    expect(useChatStore.getState().activePreviewPath).toBe(a1.path);
-  });
-
-  it("closing a background tab keeps the focused tab", () => {
-    const s = useChatStore.getState();
-    s.setPreviewArtifact(a1);
-    s.setPreviewArtifact(a2);
-    useChatStore.getState().closePreviewArtifact(a1.path);
-    const now = useChatStore.getState();
-    expect(now.previewArtifacts.map((a) => a.path)).toEqual([a2.path]);
-    expect(now.activePreviewPath).toBe(a2.path);
-  });
-
-  it("closing the only tab leaves no focused tab", () => {
-    const s = useChatStore.getState();
-    s.setPreviewArtifact(a1);
-    useChatStore.getState().closePreviewArtifact();
-    const now = useChatStore.getState();
-    expect(now.previewArtifacts).toEqual([]);
-    expect(now.activePreviewPath).toBeNull();
+    const ui = useUiStore.getState();
+    expect(ui.openTabs.filter((t) => t.kind === "artifact")).toHaveLength(1);
   });
 });
 

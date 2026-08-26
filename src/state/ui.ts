@@ -10,13 +10,13 @@ export type ToolPanelTab =
   | "browser"
   | "files" // "Changes" — DevDiffPanel (changed files + inline diffs)
   | "pulls" // "Pull Requests" — PullsPanel (GitHub PR list/create/review)
-  | "canvas"
   | "branch" // Branch switcher + git graph
   | "commit" // Commit/push panel
   | "plans" // Agent plan/step timeline
   | "progress" // Task progress panel
   | "agents" // Subagent view panel
-  | "artifact"; // A generated code artifact (tsx/jsx/html) rendered in-pane
+  | "plan" // An opened plan (markdown) rendered in-pane
+  | "artifact"; // A generated artifact (code/html/image/pdf/…) rendered in-pane
 
 /** One open tab in the right tool panel. Multiple instances of the same
  *  `kind` can coexist — e.g. several terminals pointed at different panes,
@@ -173,8 +173,8 @@ export interface UiState {
   setToolPanelTab: (tab: ToolPanelTab) => void;
   /** Open or focus the singleton working-tree diff tab. */
   openFilesTab: () => void;
-  /** Open or focus the singleton Canvas (diagram/markdown/preview) tab. */
-  openCanvasTab: () => void;
+  /** Open or focus the singleton plan tab (opened plan markdown). */
+  openPlanTab: () => void;
   /** Open tabs in the right-side tool panel — supports MULTIPLE instances of
    *  the same kind (several terminals, several browsers, several agents, …).
    *  Each instance carries its own kind and optional target (paneId for
@@ -186,8 +186,9 @@ export interface UiState {
   activeTabId: string | null;
   /** Add a tab (spawning a new instance of that kind) and activate it. */
   addTab: (kind: ToolPanelTab, target?: { paneId?: string; subagentId?: string }) => void;
-  /** Open a generated code artifact as its own main tab (auto-opens). Dedupes
-   *  by path: if a matching artifact tab is already open, just activates it. */
+  /** Open a generated artifact (code/html/image/pdf/markdown/…) as its own
+   *  main tab (auto-opens). Dedupes by path: if a matching artifact tab is
+   *  already open, just activates it. */
   openArtifactTab: (artifact: {
     path: string;
     filename: string;
@@ -348,29 +349,28 @@ export const useUiStore = create<UiState>((set) => ({
         toolPanelCollapsed: false,
       };
     }),
-  // Open (or activate) the singleton Canvas tab. Multiple callers (ToolPanel
-  // auto-open effect, InlineDiagram, PlanBanner) used to call `addTab("canvas")`
-  // which has no dedupe, stacking a new canvas tab on every fire. This finds
-  // the existing canvas instance and activates it, or creates one if none.
-  openCanvasTab: () =>
+  // Open (or activate) the singleton plan tab. Multiple callers (PlanBanner,
+  // ChatView's plan preview, GitToolsSidebar) open the same plan surface; this
+  // finds the existing plan instance and activates it, or creates one.
+  openPlanTab: () =>
     set((s) => {
-      const existing = s.openTabs.find((t) => t.kind === "canvas");
+      const existing = s.openTabs.find((t) => t.kind === "plan");
       if (existing) {
         return {
           activeTabId: existing.instanceId,
-          toolPanelTab: "canvas",
+          toolPanelTab: "plan",
           toolPanelCollapsed: false,
         };
       }
       const instanceId = `t${s.nextTabId}`;
-      const tab: ToolPanelTabInstance = { instanceId, kind: "canvas" };
+      const tab: ToolPanelTabInstance = { instanceId, kind: "plan" };
       const openTabs = [...s.openTabs, tab];
       if (openTabs.length > 8) openTabs.splice(0, openTabs.length - 8);
       return {
         openTabs,
         nextTabId: s.nextTabId + 1,
         activeTabId: instanceId,
-        toolPanelTab: "canvas",
+        toolPanelTab: "plan",
         toolPanelCollapsed: false,
       };
     }),

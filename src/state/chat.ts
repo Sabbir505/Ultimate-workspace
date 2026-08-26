@@ -492,10 +492,6 @@ export interface ChatState {
   /** Artifacts produced by the in-flight turn, keyed by session, until the
    *  assistant message is persisted and they can be attributed to it. */
   pendingArtifacts: Record<string, ChatArtifact[]>;
-  /** Artifacts open in the Canvas tab, shown like browser tabs. */
-  previewArtifacts: ChatArtifact[];
-  /** Path of the focused Canvas tab (null = no tab focused). */
-  activePreviewPath: string | null;
   /** Artifact proposals from conversational creation, per chat session.
    *  States: "generating" | "ready" | "editing" | "created" | "rejected" */
   artifactProposals: Record<string, { id: string; proposal: ArtifactProposal; state: "generating" | "ready" | "editing" | "created" | "rejected" }[]>;
@@ -653,12 +649,10 @@ export interface ChatState {
    *  drop it locally so the bubble disappears immediately. */
   deleteMessage: (messageId: number) => Promise<void>;
   cancelStream: () => Promise<void>;
-  /** Open an artifact in the Canvas tab, or focus its tab if already open.
-   *  `null` closes all Canvas tabs. */
+  /** Open an artifact as its own named tab in the tool panel (delegates to
+   *  the ui store's openArtifactTab, which dedupes by path). `null` is a
+   *  no-op kept for call-site compatibility. */
   setPreviewArtifact: (artifact: ChatArtifact | null) => void;
-  /** Close one Canvas tab (default: the focused one). Closing the focused tab
-   *  activates its neighbor. */
-  closePreviewArtifact: (path?: string) => void;
   /** Add an artifact proposal for a chat session (starts in "generating" state). */
   addArtifactProposal: (chatSessionId: string, proposal: ArtifactProposal) => void;
   /** Update an artifact proposal's state or proposal data. */
@@ -764,8 +758,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingApprovals: {},
   fullAccessConfirmingFor: null,
   pendingArtifacts: {},
-  previewArtifacts: [],
-  activePreviewPath: null,
   artifactProposals: {},
   tasks: {},
   planSteps: {},
@@ -989,8 +981,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({
       activeChatSessionId: chatSessionId,
       error: null,
-      previewArtifacts: [],
-      activePreviewPath: null,
       thinking: null,
       sessions: s.sessions.map((sess) =>
         sess.id === chatSessionId && sess.unread ? { ...sess, unread: false } : sess,
@@ -1234,8 +1224,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       livePerf: {},
       lastTurnPerf: {},
       sessionMetrics: {},
-      previewArtifacts: [],
-      activePreviewPath: null,
     }));
     return count;
   },
@@ -1700,36 +1688,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setPreviewArtifact: (artifact) => {
-    // null closes ALL Canvas tabs (the pane's empty state shows).
-    if (!artifact) {
-      set({ previewArtifacts: [], activePreviewPath: null });
-      return;
-    }
-    // Open-or-focus: a new artifact becomes a new focused tab; an already
-    // open one just gets focused (keyed by path, like a browser tab's URL).
-    set((s) => ({
-      previewArtifacts: s.previewArtifacts.some((a) => a.path === artifact.path)
-        ? s.previewArtifacts
-        : [...s.previewArtifacts, artifact],
-      activePreviewPath: artifact.path,
-    }));
+    // Every artifact preview opens as its own named tab in the tool panel
+    // (the Canvas tab is gone). openArtifactTab dedupes by path and expands
+    // the panel; null is a no-op kept for call-site compatibility.
+    if (!artifact) return;
+    useUiStore.getState().openArtifactTab({
+      path: artifact.path,
+      filename: artifact.filename,
+      inline: artifact.inline,
+    });
   },
-
-  closePreviewArtifact: (path) =>
-    set((s) => {
-      const closing = path ?? s.activePreviewPath;
-      if (!closing) return s;
-      const idx = s.previewArtifacts.findIndex((a) => a.path === closing);
-      if (idx < 0) return s;
-      const next = s.previewArtifacts.filter((a) => a.path !== closing);
-      // Closing the focused tab activates its neighbor (the one that slid
-      // into the closed tab's slot, or the last tab when closing the tail).
-      const activePreviewPath =
-        s.activePreviewPath === closing
-          ? (next[Math.min(idx, next.length - 1)]?.path ?? null)
-          : s.activePreviewPath;
-      return { previewArtifacts: next, activePreviewPath };
-    }),
 
   addArtifactProposal: (chatSessionId, proposal) =>
     set((s) => ({
@@ -2238,28 +2206,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // SVG renders inline in the chat bubble — no pane, no browser.
     if (ext === "svg") return;
 
-    // Code artifacts (.tsx/.jsx/.html) open as their own top-level tab in the
-    // right-side tool panel — just like Terminal/Browser/Agents, with the
-    // filename as the tab label. They render a live React/HTML preview inside.
-    if (ext === "tsx" || ext === "jsx" || ext === "html" || ext === "htm") {
-      const ui = useUiStore.getState();
-      ui.openArtifactTab({ path, filename });
-      ui.setToolPanelCollapsed(false);
-      return;
-    }
-
-    // Other artifacts (images, markdown, diagrams, csv, pdf, office, code)
-    // open in the Canvas preview pane as before.
-    set((s) =>
-      s.activeChatSessionId === chatSessionId
-        ? {
-            previewArtifacts: s.previewArtifacts.some((a) => a.path === path)
-              ? s.previewArtifacts
-              : [...s.previewArtifacts, artifact],
-            activePreviewPath: artifact.path,
-          }
-        : {},
-    );
+    // Every other artifact opens as its own top-level tab in the right-side
+    // tool panel — just like Terminal/Browser/Agents, with the filename as
+    // the tab label. Code/html render a live preview inside; images, pdf,
+    // markdown, csv, office docs render in ArtifactPreviewPane.
+    const ui = useUiStore.getState();
+    ui.openArtifactTab({ path, filename });
+    ui.setToolPanelCollapsed(false);
   },
 
   onCheckpointCreated: (payload) => {

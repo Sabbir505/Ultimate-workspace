@@ -1549,8 +1549,7 @@ function PlanPreview({
   onSend: (content: string, attachments: import("./ChatComposer").ChatAttachment[], forceResearch?: boolean) => void;
 }) {
   const setPlanCanvas = useUiStore((s) => s.setPlanCanvas);
-  const addTab = useUiStore((s) => s.addTab);
-  const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
+  const openPlanTab = useUiStore((s) => s.openPlanTab);
 
   // Only show plan preview when NOT streaming and we have messages
   if (!activeSessionId || streaming) return null;
@@ -1571,11 +1570,11 @@ function PlanPreview({
   };
 
   const handleExpand = () => {
-    // Strip the plan's own heading from the body so Canvas doesn't double-display
+    // Strip the plan's own heading from the body so the plan tab doesn't
+    // double-display it
     const bodyWithoutHeader = plan.full.replace(/^#{1,3}\s+[^\n]+\n*/, "").trim();
     setPlanCanvas(bodyWithoutHeader || plan.full, plan.title);
-    addTab("canvas");
-    setToolPanelCollapsed(false);
+    openPlanTab();
   };
 
   return (

@@ -1371,6 +1371,126 @@ div[data-index]:has(.chat-session-row.menu-open) {
 .chat-live-viz .chat-live-viz-frame {
   height: 300px; /* replaced by the inline postMessage-driven height */
 }
+/* Click-catcher over a static inline diagram: same-origin frames swallow
+   clicks; the diagram is non-interactive, so this opens the lightbox. */
+.chat-diagram-click-catch {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: transparent;
+  border: none;
+  cursor: zoom-in;
+  padding: 0;
+}
+/* Rendered mermaid diagram: whole block is a button opening the lightbox. */
+button.chat-mermaid-open {
+  display: block;
+  width: 100%;
+  padding: 0;
+  margin: 0;
+  background: none;
+  border: none;
+  cursor: zoom-in;
+  text-align: left;
+}
+
+/* ---- Full-screen diagram lightbox (click a diagram → zoom & save) ---- */
+.diagram-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  background: color-mix(in srgb, var(--editor-bg, #101014) 92%, transparent);
+  backdrop-filter: blur(6px);
+}
+.diagram-lightbox-toolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+}
+.diagram-lightbox-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.diagram-lightbox-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  overflow: hidden;
+}
+.diagram-lightbox-zoom button {
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.diagram-lightbox-zoom button:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.diagram-lightbox-close {
+  padding: 4px 10px;
+  font-size: 13px;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+}
+.diagram-lightbox-close:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.diagram-lightbox-content {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  cursor: grab;
+}
+.diagram-lightbox-content.panning {
+  cursor: grabbing;
+}
+.diagram-lightbox-canvas {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform-origin: center center;
+}
+.diagram-lightbox-doc {
+  max-width: min(1100px, 92vw);
+  padding: 24px;
+  border-radius: var(--radius-sm);
+  background: #fff;
+  box-shadow: 0 12px 48px rgb(0 0 0 / 0.45);
+}
+.diagram-lightbox-doc svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+.artifact-export-btn-text {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
 
 /* Vertical three-dot (kebab) menu for the inline diagram. */
 .artifact-kebab {

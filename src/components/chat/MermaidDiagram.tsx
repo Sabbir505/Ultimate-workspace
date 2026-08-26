@@ -9,8 +9,9 @@
 //
 // While the diagram is still being created we show "Creating the diagram of
 // <topic>…" where <topic> is a short label guessed from the source.
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { sanitizeSvg } from "../../lib/sanitize";
+import { DiagramLightbox } from "./DiagramLightbox";
 
 export interface MermaidDiagramProps {
   /** The raw mermaid source (the text inside the ```mermaid fence). */
@@ -195,10 +196,11 @@ function guessTopic(code: string): string | null {
 // render target even when several appear in one message.
 let diagramSeq = 0;
 
-export function MermaidDiagram({ code }: MermaidDiagramProps) {
+export function MermaidDiagramInner({ code }: MermaidDiagramProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [lightbox, setLightbox] = useState(false);
   // The raw source as of the last successful render — shown as a fallback.
   const [renderedFrom, setRenderedFrom] = useState<string>("");
   // The topic label captured at the moment we kicked off a render, so the
@@ -241,15 +243,40 @@ export function MermaidDiagram({ code }: MermaidDiagramProps) {
             document.documentElement.dataset.theme === "light" ? "light" : "dark";
           const mermaid = await loadMermaid(theme);
           if (cancelled) return;
+          // Wait for webfonts before rendering: mermaid measures label text
+          // with DOM metrics, and a not-yet-loaded font yields clipped /
+          // overflowing node and edge labels.
+          try {
+            await document.fonts.ready;
+          } catch {
+            /* older webview without document.fonts — render anyway */
+          }
+          if (cancelled) return;
           const id = `mermaid-${Date.now()}-${diagramSeq++}`;
           const source =
             trimmed.length > MAX_DIAGRAM_SOURCE_BYTES
               ? trimmed.slice(0, MAX_DIAGRAM_SOURCE_BYTES) +
                 "\n%% [diagram source truncated for safety]"
               : trimmed;
+          // PARSE FIRST: on invalid syntax, mermaid.render() can RESOLVE with
+          // an SVG containing its own error bomb graphic ("Syntax error in
+          // text") instead of throwing — which bypassed the fallback below.
+          // parse() always throws, so bad sources land in the readable
+          // source-code fallback.
+          const parseError = await mermaid.parse(source).then(
+            () => null,
+            (e: unknown) => (e instanceof Error ? e.message : String(e)),
+          );
+          if (parseError) throw new Error(parseError);
+          if (cancelled) return;
           // mermaid.render returns { svg, bindFunctions }; we only need svg.
           const result = (await mermaid.render(id, source)) as RenderResult;
           if (cancelled) return;
+          // Belt-and-braces: a resolved render that still embeds mermaid's
+          // error graphic is a failure too.
+          if (/class="error|Syntax error in text/i.test(result.svg)) {
+            throw new Error("Syntax error in text");
+          }
           // SECURITY: the source is untrusted model output and the result is
           // injected via dangerouslySetInnerHTML in the privileged app window.
           // Sanitize BEFORE normalizeSvg so no onerror/script survives.
@@ -279,14 +306,23 @@ export function MermaidDiagram({ code }: MermaidDiagramProps) {
   // mermaid.render returns a pre-built SVG string. The SVG has already been
   // through sanitizeSvg (DOMPurify) at render time, so no scripts or event
   // handlers from model-authored labels can reach the app window.
+  // Clicking a rendered diagram opens the full-screen zoom/pan lightbox.
   return (
     <div className="chat-mermaid-block">
       <div className="chat-mermaid-body" ref={containerRef}>
         {svg ? (
-          <div
-            className="chat-mermaid-svg"
-            dangerouslySetInnerHTML={{ __html: svg }}
-          />
+          <button
+            type="button"
+            className="chat-mermaid-open"
+            title="Open full view (zoom & save)"
+            aria-label="Open diagram in full view"
+            onClick={() => setLightbox(true)}
+          >
+            <div
+              className="chat-mermaid-svg"
+              dangerouslySetInnerHTML={{ __html: svg }}
+            />
+          </button>
         ) : error ? (
           <div className="chat-mermaid-fallback">
             <div className="chat-mermaid-error">Could not render diagram: {error}</div>
@@ -296,6 +332,13 @@ export function MermaidDiagram({ code }: MermaidDiagramProps) {
           <div className="chat-mermaid-loading">{loadingHint}</div>
         )}
       </div>
+      {lightbox && svg && (
+        <DiagramLightbox html={svg} filename={topic ? `${topic}.svg` : "diagram.svg"} onClose={() => setLightbox(false)} />
+      )}
     </div>
   );
 }
+
+/** Memoized: parents re-render on every streaming token flush; the render
+ *  effect is keyed on `code` alone, so an unchanged fence must not re-run. */
+export const MermaidDiagram = memo(MermaidDiagramInner);

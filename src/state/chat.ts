@@ -1447,14 +1447,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // Working folder resolution, shared by both send paths: a custom folder
     // from the composer "+" picker wins, then the chat's isolated worktree
-    // (roadmap P0 §3.1.1), then the chat's bound project, then the global
-    // selection. This is read-only — browsing a project does NOT rebind the
-    // chat to it (binding is explicit; see newChat and unbindProject). An
-    // unbound chat resolves its working directory against the
-    // currently-selected project without persisting a binding.
+    // (roadmap P0 §3.1.1), then the chat's explicitly bound project. This is
+    // read-only — browsing a project does NOT rebind the chat to it (binding
+    // is explicit; see newChat and unbindProject). A brand-new chat has no
+    // binding and NO working directory: it runs in the app's default
+    // directory, NOT the previously-selected project — clicking a project in
+    // the sidebar must never silently scope a fresh chat to it.
     const projectsState = useProjectsStore.getState();
     const boundProject = projectsState.projectById(
-      get().sessionProjects[activeChatSessionId] ?? projectsState.selectedProjectId,
+      get().sessionProjects[activeChatSessionId],
     );
     const workingDir =
       get().cwdOverrides[activeChatSessionId] ??
@@ -1569,8 +1570,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         chatStatus: { ...s.chatStatus, [sid]: { reason: "thinking", message: "" } },
         pendingArtifacts: { ...s.pendingArtifacts, [sid]: [] },
       }));
+      // Same resolution as sendMessage: explicit binding only — an unbound
+      // (fresh) chat runs in the app's default directory, never the
+      // previously-selected project.
       const boundProject = projectsState.projectById(
-        get().sessionProjects[sid] ?? projectsState.selectedProjectId,
+        get().sessionProjects[sid],
       );
       const workingDir =
         get().cwdOverrides[sid] ?? session.worktreePath ?? boundProject?.path;

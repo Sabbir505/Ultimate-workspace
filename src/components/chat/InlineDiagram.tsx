@@ -15,6 +15,7 @@ import type { ChatArtifact } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { sanitizeHtml } from "../../lib/sanitize";
 import { isInteractiveHtml } from "../../lib/interactiveHtml";
+import { DiagramLightbox } from "./DiagramLightbox";
 
 /** Injected into the iframe document (display only) so the diagram scales down
  *  to the chat width instead of overflowing with a scrollbar. Export still uses
@@ -222,6 +223,15 @@ export function InlineDiagram({
     () => (preview?.text != null ? sanitizeHtml(withFitStyle(preview.text)) : ""),
     [preview],
   );
+  // Live-frame document, memoized so a parent re-render (token flushes while
+  // the rest of the message streams) never changes the srcDoc string identity
+  // — a changed attribute RELOADS the iframe, which flashed every interactive
+  // visual on each streaming update.
+  const liveSrcDoc = useMemo(
+    () => (preview?.text != null ? withLiveResizeScript(preview.text) : ""),
+    [preview],
+  );
+  const [lightboxOpen, setLightboxOpen] = useState(false);
 
   // Measure the actual rendered height of the iframe content after it loads.
   // Uses allow-same-origin sandbox (no allow-scripts) so we can read
@@ -301,7 +311,7 @@ export function InlineDiagram({
           className="chat-diagram-frame chat-live-viz-frame"
           title={artifact.filename}
           sandbox="allow-scripts allow-forms allow-modals allow-popups"
-          srcDoc={withLiveResizeScript(preview.text)}
+          srcDoc={liveSrcDoc}
           style={{ height: liveH ?? LIVE_VIZ_DEFAULT_H }}
         />
         {kebab}
@@ -309,6 +319,10 @@ export function InlineDiagram({
     );
   }
 
+  // Static diagrams render in the sanitized measuring frame. A transparent
+  // click-catcher sits above the iframe (same-origin frames swallow clicks,
+  // and diagrams are non-interactive anyway) so clicking opens the full-screen
+  // zoom/pan lightbox.
   return (
     <div className="chat-diagram-block" ref={blockRef}>
       <iframe
@@ -320,7 +334,21 @@ export function InlineDiagram({
         onLoad={onFrameLoad}
         style={{ height }}
       />
+      <button
+        type="button"
+        className="chat-diagram-click-catch"
+        title="Open full view"
+        aria-label={`Open ${artifact.filename} in full view`}
+        onClick={() => setLightboxOpen(true)}
+      />
       {kebab}
+      {lightboxOpen && (
+        <DiagramLightbox
+          html={preview.text}
+          filename={artifact.filename}
+          onClose={() => setLightboxOpen(false)}
+        />
+      )}
     </div>
   );
 }

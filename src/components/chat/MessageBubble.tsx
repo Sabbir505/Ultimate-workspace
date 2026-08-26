@@ -548,44 +548,6 @@ function stepLabel(data: ToolData | null): string {
   return `${cmd}  ${detail}`;
 }
 
-/** A one-line synthesized summary of what a whole tool-call group accomplished.
- *  Generated client-side from the step set — minimal, log-like, monochrome.
- *  Quality is a judgment call (PRD §13); prefer specifics from `detail`. */
-function summarizeGroup(steps: ActivityStep[]): string {
-  if (steps.length === 0) return "working…";
-
-  // If any step generated a file/document/diagram, lead with what was produced.
-  const produced = steps.find(
-    (s) => s.data?.kind === "file" || s.data?.kind === "code",
-  );
-  if (produced?.data?.title) {
-    const producedCount = steps.filter(
-      (s) => s.data?.kind === "file" || s.data?.kind === "code",
-    ).length;
-    const base = produced.data.detail?.trim() || produced.data.title;
-    return producedCount > 1
-      ? `${producedCount} files  ${base}`
-      : base;
-  }
-
-  // Research-style runs: searches + page reads.
-  const searches = steps.filter((s) => s.data?.kind === "search").length;
-  const reads = steps.filter((s) => s.data?.kind === "web").length;
-  const browser = steps.filter((s) => s.data?.kind === "browser").length;
-  if (searches && reads) {
-    return `${reads} page${reads > 1 ? "s" : ""}  ${searches} query${searches > 1 ? "ies" : "y"}`;
-  }
-  if (searches) return `${searches} query${searches > 1 ? "ies" : "y"}`;
-  if (reads) return `${reads} page${reads > 1 ? "s" : ""}`;
-  if (browser) return `${browser} browser step${browser > 1 ? "s" : ""}`;
-
-  // Generic fallback.
-  const toolNames = new Set(
-    steps.map((s) => s.data?.title).filter(Boolean) as string[],
-  );
-  if (toolNames.size === 1) return [...toolNames][0];
-  return `${steps.length} steps`;
-}
 
 /** Detect whether a string looks like a unified diff. */
 function looksLikeDiff(text: string): boolean {
@@ -830,7 +792,7 @@ function renderProcessBlock(
         <div className="chat-activity-steps" key={`activity:${i}`}>
           {b.group.steps.map((step, j) => (
             <ActivityStepRow
-              key={`${step.data?.kind ?? "step"}:${step.data?.path ?? step.data?.title ?? j}`}
+              key={`${step.data?.kind ?? "step"}:${step.data?.path ?? step.data?.title ?? j}:${j}`}
               step={step}
               done={step.done}
             />
@@ -1463,18 +1425,17 @@ function MessageBubbleInner({
     }
   }
   // The collapsed row's label is ALWAYS the timer: "Working for Xs" while
-  // streaming, "Worked for Xs" once the duration is known (fallback: a
-  // one-line step summary). The live action ("Thinking…", "Running tool…")
-  // is a SEPARATE line under the header — it must never replace the timer.
-  const fallbackSummary =
-    processToolSteps.length > 0 ? summarizeGroup(processToolSteps) : "";
+  // streaming, "Worked for Xs" once the duration is known. A cancelled stream
+  // has no duration — the label falls back to a plain "Worked", never to the
+  // last running tool's summary (a cut-off turn must not retitle itself
+  // "Running shell command" after the fact).
   const processLabel = live
     ? (liveElapsedSec != null
         ? `Working for ${formatDuration(liveElapsedSec)}`
         : "Working")
     : message.durationSec != null
       ? `Worked for ${formatDuration(message.durationSec)}`
-      : (fallbackSummary || "Worked");
+      : "Worked";
 
   // Detect if this assistant message contains a plan section
   const planSection = !isUser ? detectPlan(message.content) : null;
@@ -1568,15 +1529,20 @@ function MessageBubbleInner({
         {/* Consolidated per-turn changes row: "N files changed +adds −dels"
             with an Undo (checkpoint restore) button; expanding lists the
             files with Review / Open. Replaces the old stacked
-            FilesChangedSummary + artifact chip + CheckpointChip rows. */}
-        {!isUser && (fileChanges.length > 0 || msgCheckpoints.length > 0) && (
-          <TurnChangesRow
-            files={fileChanges}
-            checkpoints={msgCheckpoints}
-            artifacts={artifacts}
-            onPreviewArtifact={onPreviewArtifact}
-          />
-        )}
+            FilesChangedSummary + artifact chip + CheckpointChip rows.
+            Shown only once the turn has ENDED — while the model is still
+            streaming the file set is incomplete and the row would flicker
+            in with partial counts. */}
+        {!isUser &&
+          !live &&
+          (fileChanges.length > 0 || msgCheckpoints.length > 0) && (
+            <TurnChangesRow
+              files={fileChanges}
+              checkpoints={msgCheckpoints}
+              artifacts={artifacts}
+              onPreviewArtifact={onPreviewArtifact}
+            />
+          )}
         {/* Artifact chips for files the changes row already covers would be
             duplicates — only chip the leftovers (rare non-write artifacts). */}
         {!isUser && artifacts && artifacts.length > 0 && (

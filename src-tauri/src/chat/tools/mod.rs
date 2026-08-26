@@ -433,7 +433,10 @@ const OPEN_URL_DESC: &str = "Open a web page in the app's built-in browser so \
     the user can see it, and return its readable text to you. You CAN open \
     any public web URL with this — never claim you can't open sites. Use \
     when the user asks to open/show/visit a site, or when it helps to \
-    display a page visually alongside your answer.";
+    display a page visually alongside your answer. This is for WEB URLs only: \
+    never open file:// paths, never start a local server to serve a generated \
+    file, and never use this to \"open\" something the user asked you to \
+    create — created files preview automatically in the app.";
 
 const DOWNLOAD_FILE_DESC: &str = "Stream a file from an http(s) URL to an \
     absolute local path on this machine (e.g. model weights such as \

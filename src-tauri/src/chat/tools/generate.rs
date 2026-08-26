@@ -108,7 +108,16 @@ Deliberate visual hierarchy: nested groupings/containers, a 2-D grid of sub-node
 (not a single row), mixed box sizes, bold-label-plus-dim-description two-line nodes, \
 solid primary-flow arrows with a dashed feedback line looping back, and consistent \
 colour per category. Put the title as a <text> at the top of the SVG, above the flow. \
-If the diagram you just built looks flat or linear, regenerate it with this guide applied.";
+If the diagram you just built looks flat or linear, regenerate it with this guide applied.
+
+SHOWING YOUR WORK — the app handles it: every file you create with write_file is \
+previewed automatically (rendered inline in the chat or opened as a preview tab — \
+HTML runs live, .mmd renders as a diagram, .md renders with diagrams, .tsx runs as \
+a live React app). Therefore: ALWAYS create files with write_file (never paste full \
+file contents into the chat), and NEVER start a local server, spin up a static \
+server, or call open_url/browser to show a file you just created — telling the user \
+\"I created X\" is enough; the preview appears on its own. Markdown files preview \
+with full formatting in the pane too, so never claim a .md can't be opened.";
 
 /// Build a rich document by running the model's Python (python-docx etc.).
 pub(super) async fn generate_document(artifacts_dir: &Path, args: &Value) -> ToolOutcome {

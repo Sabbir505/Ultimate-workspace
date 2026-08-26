@@ -18,7 +18,7 @@
 // to match the preview iframe — diagrams are authored for a light page, so a
 // dark canvas would produce an unreadable near-black export.
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { toPng, toSvg } from "html-to-image";
+import { toJpeg, toPng, toSvg } from "html-to-image";
 import { downloadArtifact } from "../../lib/ipc";
 import { sanitizeHtml } from "../../lib/sanitize";
 import type { ArtifactPreview } from "../../lib/ipc";
@@ -188,10 +188,16 @@ function svgPixelSize(svg: string): { w: number; h: number } {
   return { w: 0, h: 0 };
 }
 
-/** Rasterize a standalone <svg> string to a PNG data URL via an <img> + canvas.
- *  This is reliable in the WebKitGTK/Tauri webview where html-to-image's
- *  foreignObject capture produces a blank image. Throws on failure. */
-async function svgToPng(svg: string, scale = 2, bg = EXPORT_BG): Promise<string> {
+/** Rasterize a standalone <svg> string to a PNG or JPEG data URL via an
+ *  <img> + canvas. This is reliable in the WebKitGTK/Tauri webview where
+ *  html-to-image's foreignObject capture produces a blank image. Throws on
+ *  failure. */
+async function svgToRaster(
+  svg: string,
+  type: "image/png" | "image/jpeg",
+  scale = 2,
+  bg = EXPORT_BG,
+): Promise<string> {
   const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
   try {
     const img = new Image();
@@ -214,7 +220,9 @@ async function svgToPng(svg: string, scale = 2, bg = EXPORT_BG): Promise<string>
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL("image/png");
+    return type === "image/jpeg"
+      ? canvas.toDataURL("image/jpeg", 0.92)
+      : canvas.toDataURL("image/png");
   } finally {
     URL.revokeObjectURL(url);
   }
@@ -228,12 +236,41 @@ async function diagramToPng(html: string): Promise<string> {
   const rootSvg = extractRootSvg(html, bg);
   if (rootSvg) {
     try {
-      return await svgToPng(rootSvg, 2, bg);
+      return await svgToRaster(rootSvg, "image/png", 2, bg);
     } catch {
       // Fall through to the html-to-image path below.
     }
   }
   return rasterizeHtml(html);
+}
+
+/** JPEG variant of diagramToPng: same routing, lossy canvas encode. JPEG has
+ *  no alpha, so the page background is always painted (white by default). */
+async function diagramToJpeg(html: string): Promise<string> {
+  const bg = pageBackground(html);
+  const rootSvg = extractRootSvg(html, bg);
+  if (rootSvg) {
+    try {
+      return await svgToRaster(rootSvg, "image/jpeg", 2, bg);
+    } catch {
+      // Fall through to the html-to-image path below.
+    }
+  }
+  const holder = document.createElement("div");
+  holder.style.position = "fixed";
+  holder.style.left = "-99999px";
+  holder.style.top = "0";
+  holder.style.background = bg;
+  holder.style.padding = "24px";
+  // SECURITY: same as rasterizeHtml — sanitize before main-document innerHTML.
+  holder.innerHTML = sanitizeHtml(html);
+  document.body.appendChild(holder);
+  try {
+    await new Promise((r) => requestAnimationFrame(() => r(null)));
+    return await toJpeg(holder, { quality: 0.92, cacheBust: true, backgroundColor: bg });
+  } finally {
+    document.body.removeChild(holder);
+  }
 }
 
 /** Extract the diagram's own root <svg> as a standalone, namespaced SVG string,
@@ -304,8 +341,28 @@ async function copyDataUrlToClipboard(dataUrl: string): Promise<void> {
   ]);
 }
 
+/** Repaint an image data URL over opaque white and return a JPEG data URL
+ *  (JPEG has no alpha — a transparent PNG would encode as black). */
+async function rasterizeDataUriToJpeg(dataUri: string): Promise<string> {
+  const img = new Image();
+  await new Promise<void>((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error("could not load image for JPG export"));
+    img.src = dataUri;
+  });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, img.naturalWidth);
+  canvas.height = Math.max(1, img.naturalHeight);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("no 2d canvas context");
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0);
+  return canvas.toDataURL("image/jpeg", 0.92);
+}
+
 export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar" }: Props) {
-  const [busy, setBusy] = useState<null | "copy" | "png" | "svg">(null);
+  const [busy, setBusy] = useState<null | "copy" | "png" | "svg" | "jpg">(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -370,6 +427,28 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
       flash("Saved PNG");
     } catch (e) {
       setError(`PNG export failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleDownloadJpg = async () => {
+    setBusy("jpg");
+    setError(null);
+    try {
+      let dataUrl: string;
+      if (hasImageUri && preview.dataUri) {
+        // An image data URI may carry alpha; paint it over white first.
+        dataUrl = await rasterizeDataUriToJpeg(preview.dataUri);
+      } else if (isHtmlDiagram && preview.text) {
+        dataUrl = await diagramToJpeg(preview.text);
+      } else {
+        throw new Error("nothing rasterizable to export");
+      }
+      triggerDownload(dataUrl, `${preview.filename.replace(/\.[^.]+$/, "")}.jpg`);
+      flash("Saved JPG");
+    } catch (e) {
+      setError(`JPG export failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(null);
     }
@@ -464,6 +543,15 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
               type="button"
               role="menuitem"
               className="artifact-kebab-item"
+              disabled={busy !== null}
+              onClick={() => runAndClose(handleDownloadJpg)}
+            >
+              Download as JPG
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="artifact-kebab-item"
               disabled={svgDisabled || busy !== null}
               onClick={() => runAndClose(handleDownloadSvg)}
             >
@@ -499,6 +587,13 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
         disabled={busy !== null}
       >
         <ImageIcon />
+      </Btn>
+      <Btn
+        onClick={handleDownloadJpg}
+        title="Download as JPG"
+        disabled={busy !== null}
+      >
+        <span className="artifact-export-btn-text">JPG</span>
       </Btn>
       <Btn
         onClick={handleDownloadSvg}

@@ -8,7 +8,7 @@
 // doc/ppt/xls are extracted to text server-side, and plain-text files are
 // inlined into the message.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Plug, Puzzle, SquareSlash, X } from "lucide-react";
+import { Mic, Plug, Puzzle, SquareSlash, X } from "lucide-react";
 import { AgentModelPicker, type AgentModelSelection } from "./AgentModelPicker";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { ArtifactTypeSelector } from "./ArtifactTypeSelector";
@@ -190,6 +190,85 @@ function pathBasename(path: string): string {
   return trimmed.split(/[\\/]/).pop() || trimmed;
 }
 
+/** Concatenate captured Float32 sample chunks into one buffer, resampling
+ *  linearly when the AudioContext couldn't run at 16 kHz natively. whisper.cpp
+ *  consumes 16 kHz mono PCM, and capturing at (or converting to) that rate
+ *  here removes any ffmpeg dependency from the STT path. */
+function joinSamples(chunks: Float32Array[], fromRate: number): Float32Array {
+  const total = chunks.reduce((n, c) => n + c.length, 0);
+  const raw = new Float32Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    raw.set(c, off);
+    off += c.length;
+  }
+  if (fromRate === 16000 || total === 0) return raw;
+  const ratio = fromRate / 16000;
+  const out = new Float32Array(Math.max(1, Math.floor(total / ratio)));
+  for (let i = 0; i < out.length; i++) {
+    const src = i * ratio;
+    const i0 = Math.floor(src);
+    const frac = src - i0;
+    const a = raw[i0] ?? 0;
+    const b = raw[i0 + 1] ?? a;
+    out[i] = a + (b - a) * frac;
+  }
+  return out;
+}
+
+/** Canonical 44-byte WAV header + 16-bit LE PCM around 16 kHz mono samples. */
+function encodeWav16k(pcm: Float32Array): Blob {
+  const dataBytes = pcm.length * 2;
+  const buf = new ArrayBuffer(44 + dataBytes);
+  const view = new DataView(buf);
+  const wstr = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+  };
+  wstr(0, "RIFF");
+  view.setUint32(4, 36 + dataBytes, true);
+  wstr(8, "WAVE");
+  wstr(12, "fmt ");
+  view.setUint32(16, 16, true); // PCM chunk size
+  view.setUint16(20, 1, true); // PCM format
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, 16000, true); // sample rate
+  view.setUint32(28, 32000, true); // byte rate
+  view.setUint16(32, 2, true); // block align
+  view.setUint16(34, 16, true); // bits per sample
+  wstr(36, "data");
+  view.setUint32(40, dataBytes, true);
+  let off = 44;
+  for (let i = 0; i < pcm.length; i++, off += 2) {
+    const s = Math.max(-1, Math.min(1, pcm[i]));
+    view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+/** Chunked base64 — spreading the whole buffer into String.fromCharCode
+ *  throws RangeError on clips > ~100KB. 8KB chunks are safe and fast. */
+async function blobToBase64(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+/** Live-partial cadence and window. 3s keeps CPU flat while feeling live;
+ *  the 10s tail bounds each request's cost regardless of session length. */
+const PARTIAL_TICK_MS = 3000;
+const PARTIAL_TAIL_SECONDS = 10;
+
+/** Whisper was trained on subtitle-style transcripts and sprinkles newline
+ *  tokens at segment boundaries — mid-flow, semi-random. Flatten them into
+ *  one predictable paragraph; the composer soft-wraps for readability. */
+function flattenVoiceText(text: string): string {
+  return text.replace(/\s*\n+\s*/g, " ").replace(/ {2,}/g, " ").trim();
+}
+
 /** Stable empty list for the queue selector (a fresh [] per call would make
  *  every store change re-render the composer). */
 const NO_QUEUED_MESSAGES: import("../../state/chat").QueuedChatMessage[] = [];
@@ -358,33 +437,6 @@ function GitPullRequestIcon() {
       <path d="M6 8.5v7a4 4 0 0 0 4 4h5.5" />
       <path d="M18 8.5v7" />
       <circle cx="18" cy="6" r="2.5" />
-    </svg>
-  );
-}
-
-/** Whisper icon for voice recording — modern waveform style (Claude Code-like). */
-function MicIcon({ recording }: { recording?: boolean }) {
-  return (
-    <svg
-      width={15}
-      height={15}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      style={{ flexShrink: 0 }}
-    >
-      {/* Sound wave / whisper waveform */}
-      <path d="M12 2a10 10 0 0 1 10 10" opacity="0.3" />
-      <path d="M12 6a6 6 0 0 1 6 6" opacity="0.5" />
-      <path d="M12 10a2 2 0 0 1 2 2" />
-      <path d="M2 12h3" />
-      <path d="M2 18h3" />
-      <path d="M19 12h3" />
-      <path d="M19 18h3" />
     </svg>
   );
 }
@@ -681,11 +733,29 @@ export function ChatComposer({
   const [broadcastOpen, setBroadcastOpen] = useState(false);
   const [broadcastTargets, setBroadcastTargets] = useState<Record<string, boolean>>({});
   const [broadcastText, setBroadcastText] = useState("");
-  // Voice recording (roadmap #16): MediaRecorder state.
+  // Voice recording (roadmap #16).
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
+  // Live partial transcription (updated every PARTIAL_TICK_MS while the mic
+  // is open) shown as ghost text under the composer, plus the raw capture
+  // plumbing: Float32 sample chunks from a ScriptProcessor on a 16 kHz
+  // AudioContext (no MediaRecorder — partials then never re-decode audio).
+  const [partialText, setPartialText] = useState<string | null>(null);
+  const samplesRef = useRef<Float32Array[]>([]);
+  const tailRef = useRef<Float32Array[]>([]);
+  const tailLenRef = useRef(0);
+  const rateRef = useRef(16000);
+  const levelRef = useRef(0);
+  const generationRef = useRef(0);
+  const partialTimerRef = useRef<number | null>(null);
+  const waveBarsRef = useRef<(HTMLSpanElement | null)[]>([]);
+  const captureCtxRef = useRef<AudioContext | null>(null);
+  const captureNodesRef = useRef<{
+    source: MediaStreamAudioSourceNode;
+    processor: ScriptProcessorNode;
+    sink: GainNode;
+  } | null>(null);
+  const captureStreamRef = useRef<MediaStream | null>(null);
   // Artifact creation (Phase 1): /create command + type selector
   const [createTypeOpen, setCreateTypeOpen] = useState(false);
   const [createInstruction, setCreateInstruction] = useState("");
@@ -973,11 +1043,89 @@ export function ChatComposer({
     ta?.focus();
   }, [insertTemplateText, promptTemplates]);
 
-  // Voice recording (roadmap #16): start/stop MediaRecorder, then transcribe
-  // the clip and insert the recognized text.
+  // Voice recording (roadmap #16): capture raw mic samples on a 16 kHz
+  // AudioContext, transcribe a sliding tail every PARTIAL_TICK_MS for live
+  // ghost text, and run one full-buffer pass on stop for the final insert.
+  // Same STT server either way — the sidecar lazy-starts itself.
+  const stopCapture = useCallback(() => {
+    if (partialTimerRef.current !== null) {
+      window.clearInterval(partialTimerRef.current);
+      partialTimerRef.current = null;
+    }
+    const nodes = captureNodesRef.current;
+    captureNodesRef.current = null;
+    if (nodes) {
+      try {
+        nodes.source.disconnect();
+        nodes.processor.disconnect();
+        nodes.sink.disconnect();
+      } catch {
+        // graph already torn down
+      }
+    }
+    void captureCtxRef.current?.close().catch(() => {});
+    captureCtxRef.current = null;
+    captureStreamRef.current?.getTracks().forEach((t) => t.stop());
+    captureStreamRef.current = null;
+  }, []);
+
+  // Unmount mid-recording (chat switch, window close) must not leak the mic.
+  useEffect(() => stopCapture, [stopCapture]);
+
+  // Wave animation: bars breathe with the live input level (levelRef is fed
+  // by onaudioprocess). rAF writes heights straight to the DOM — React state
+  // at 60fps would re-render the whole composer.
+  useEffect(() => {
+    if (!recording) return;
+    let raf = 0;
+    let phase = 0;
+    const tick = () => {
+      phase += 0.35;
+      const lvl = Math.min(1, levelRef.current * 6);
+      for (let i = 0; i < waveBarsRef.current.length; i++) {
+        const el = waveBarsRef.current[i];
+        if (!el) continue;
+        const wobble = 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(phase * 2 + i * 0.55));
+        const h = lvl > 0.01 ? 3 + Math.min(21, lvl * 26 * wobble + 2) : 3;
+        el.style.height = `${h.toFixed(1)}px`;
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [recording]);
+
   const toggleRecording = useCallback(async () => {
     if (recording) {
-      mediaRecorderRef.current?.stop();
+      generationRef.current += 1; // invalidate in-flight partials
+      stopCapture();
+      setRecording(false);
+      // Keep the last partial on screen while the full clip transcribes —
+      // clearing here made the text visibly vanish and pop back later.
+      const chunks = samplesRef.current;
+      samplesRef.current = [];
+      tailRef.current = [];
+      tailLenRef.current = 0;
+      if (chunks.length === 0) return;
+      setTranscribing(true);
+      try {
+        const wav = encodeWav16k(joinSamples(chunks, rateRef.current));
+        const res = await transcribeAudio(await blobToBase64(wav), "audio/wav");
+        const text = res?.text ? flattenVoiceText(res.text) : "";
+        if (text) {
+          insertTemplateText(text);
+        } else {
+          toastError("Transcription returned no text. Is a Whisper server running? See Settings → Local Models → Speech.");
+        }
+      } catch (e) {
+        toastError(
+          "No speech-to-text server running. Install and start one in Settings → Local Models → Speech, or point whisper.baseUrl at an OpenAI-compatible STT endpoint.",
+          e,
+        );
+      } finally {
+        setTranscribing(false);
+        setPartialText(null);
+      }
       return;
     }
     let stream: MediaStream;
@@ -990,7 +1138,11 @@ export function ChatComposer({
       // of "mic doesn't work" reports.
       const name = (e as Error)?.name ?? "Error";
       if (name === "NotAllowedError" || name === "SecurityError") {
-        toastError("Microphone permission denied — allow it in Windows settings and reload.");
+        // WebView2 denies mic permission requests silently (wry handles only
+        // clipboard); the additionalBrowserArgs media switch in
+        // tauri.conf.json is what makes the grant happen. If users still hit
+        // this, it's an old build or Windows privacy settings.
+        toastError("Microphone access was blocked. Restart the app — if it persists, check Windows → Privacy → Microphone.");
       } else if (name === "NotFoundError" || name === "DevicesNotFoundError") {
         toastError("No microphone found on this device.");
       } else {
@@ -999,47 +1151,75 @@ export function ChatComposer({
       return;
     }
     try {
-      const rec = new MediaRecorder(stream);
-      audioChunksRef.current = [];
-      rec.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
-      rec.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        const blob = new Blob(audioChunksRef.current, { type: rec.mimeType || "audio/webm" });
-        setRecording(false);
-        setTranscribing(true);
-        try {
-          const buf = await blob.arrayBuffer();
-          // Chunked base64 — spreading the whole buffer into String.fromCharCode
-          // throws RangeError on clips > ~100KB. 8KB chunks are safe and fast.
-          const bytes = new Uint8Array(buf);
-          let binary = "";
-          const CHUNK = 0x8000;
-          for (let i = 0; i < bytes.length; i += CHUNK) {
-            binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-          }
-          const b64 = btoa(binary);
-          const res = await transcribeAudio(b64, blob.type);
-          if (res?.text) {
-            insertTemplateText(res.text);
-          } else {
-            toastError("Transcription returned no text. Is a Whisper server running? See Settings → API Keys.");
-          }
-        } catch (e) {
-          // Most common cause: no whisper-compatible server reachable at the
-          // configured base URL (default http://127.0.0.1:8081) → ECONNREFUSED.
-          toastError("Voice transcription failed — check the Whisper server in Settings → API Keys.", e);
-        } finally {
-          setTranscribing(false);
+      const ac = new AudioContext({ sampleRate: 16000 });
+      rateRef.current = ac.sampleRate;
+      const source = ac.createMediaStreamSource(stream);
+      const processor = ac.createScriptProcessor(4096, 1, 1);
+      const sink = ac.createGain();
+      sink.gain.value = 0; // silent sink keeps the graph pulled without echo
+      processor.onaudioprocess = (e) => {
+        const data = new Float32Array(e.inputBuffer.getChannelData(0));
+        samplesRef.current.push(data);
+        tailRef.current.push(data);
+        tailLenRef.current += data.length;
+        // Trim the rolling partial window (2s slack over the tail length).
+        const maxTail = (PARTIAL_TAIL_SECONDS + 2) * rateRef.current;
+        while (tailLenRef.current > maxTail && tailRef.current.length > 1) {
+          const dropped = tailRef.current.shift();
+          tailLenRef.current -= dropped?.length ?? 0;
         }
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+        levelRef.current = levelRef.current * 0.7 + Math.sqrt(sum / data.length) * 0.3;
       };
-      mediaRecorderRef.current = rec;
-      rec.start();
+      source.connect(processor);
+      processor.connect(sink);
+      sink.connect(ac.destination);
+      captureCtxRef.current = ac;
+      captureNodesRef.current = { source, processor, sink };
+      captureStreamRef.current = stream;
+
+      samplesRef.current = [];
+      tailRef.current = [];
+      tailLenRef.current = 0;
+      levelRef.current = 0;
+      setPartialText(null);
       setRecording(true);
+
+      // Live partials: transcribe the recent tail on a fixed tick. Each tick
+      // tags its request with the recording generation — a response landing
+      // after stop (or a quick restart) is dropped instead of flashing stale
+      // ghost text.
+      partialTimerRef.current = window.setInterval(() => {
+        const gen = generationRef.current;
+        void (async () => {
+          try {
+            const joined = joinSamples(tailRef.current, rateRef.current);
+            let peak = 0;
+            for (let i = 0; i < joined.length; i++) {
+              const a = Math.abs(joined[i]);
+              if (a > peak) peak = a;
+            }
+            // Silence gate: don't hit the server for an empty tail, and drop
+            // ghost text so it tracks what's actually audible.
+            if (peak < 0.008) {
+              if (generationRef.current === gen) setPartialText(null);
+              return;
+            }
+            const wav = encodeWav16k(joined);
+            const res = await transcribeAudio(await blobToBase64(wav), "audio/wav");
+            if (generationRef.current !== gen || !res?.text) return;
+            setPartialText(flattenVoiceText(res.text));
+          } catch {
+            // Partials are best-effort — the final pass surfaces real errors.
+          }
+        })();
+      }, PARTIAL_TICK_MS);
     } catch (e) {
       stream.getTracks().forEach((t) => t.stop());
       toastError("Could not initialize audio recorder.", e);
     }
-  }, [recording, insertTemplateText]);
+  }, [recording, insertTemplateText, stopCapture]);
 
   // Close the "+" popover on outside click.
   useEffect(() => {
@@ -1370,6 +1550,23 @@ export function ChatComposer({
 
   return (
     <div className="chat-composer">
+      {/* Floating live-dictation pill — hovers just above the card, centered.
+          Wave bars only, driven by the live mic level. */}
+      {recording && (
+        <div className="voice-pill" aria-hidden="true">
+          <span className="voice-wave">
+            {Array.from({ length: 21 }, (_, i) => (
+              <span
+                key={i}
+                ref={(el) => {
+                  waveBarsRef.current[i] = el;
+                }}
+                style={{ height: 3 }}
+              />
+            ))}
+          </span>
+        </div>
+      )}
           {/* hidden file input + anchored pickers (moved out of the
                conditional footer so they stay mounted wherever it renders) */}
           <input
@@ -1663,6 +1860,14 @@ export function ChatComposer({
             disabled={disabled}
           />
         </div>
+        {/* Live partial transcription as ghost text. Rendered while the mic is
+            open AND through the final pass, so the words never vanish between
+            "live" and "final". */}
+        {(recording || transcribing) && partialText && (
+          <div className="voice-live" role="status" aria-live="polite">
+            <div className="voice-partial">{partialText}</div>
+          </div>
+        )}
         {showFooterRow && (
         <div className="chat-composer-footer">
           {forceResearch && (
@@ -1848,7 +2053,16 @@ export function ChatComposer({
               disabled={transcribing}
               onClick={() => void toggleRecording()}
             >
-              {transcribing ? <span className="composer-mic-spinner" /> : recording ? <span className="composer-mic-stop" /> : <MicIcon />}
+              {transcribing ? (
+                <span className="composer-mic-spinner" />
+              ) : recording ? (
+                <span className="composer-mic-stop" />
+              ) : (
+                /* flexShrink: 0 — flex-shrink squeezed the svg into the
+                   button's content box (invisible) whenever any padding
+                   leaks in. */
+                <Mic size={14} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden />
+              )}
             </button>
           </div>
         </div>

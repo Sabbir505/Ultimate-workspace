@@ -62,6 +62,18 @@ export function useContextMeter({
     usedTokens: null,
     maxTokens: 0,
   });
+  // Reset synchronously when the meter's identity (session / local-ness)
+  // changes. Without this, switching between two LOCAL sessions kept the
+  // previous session's numbers on screen until the first poll of the new one
+  // resolved, and a poll error left them there indefinitely — the composer
+  // showed a stale token count for a chat it didn't belong to. Adjusting
+  // state during render (the React-endorsed pattern) clears it before paint.
+  const meterKey = `${chatSessionId ?? ""}:${isLocal}`;
+  const [lastMeterKey, setLastMeterKey] = useState(meterKey);
+  if (lastMeterKey !== meterKey) {
+    setLastMeterKey(meterKey);
+    setState({ usedTokens: null, maxTokens: 0 });
+  }
   // Keep a ref of the latest streaming flag so the poll loop doesn't have
   // to re-create its interval on every render.
   const streamingRef = useRef(isStreaming);

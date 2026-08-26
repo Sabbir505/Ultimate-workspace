@@ -98,7 +98,7 @@ afterEach(() => {
 });
 
 describe("serializePanes / parseSnapshot", () => {
-  it("round-trips agent, shell, and browser panes; drops login panes", () => {
+  it("round-trips agent and shell panes; drops login and browser panes", () => {
     const store = usePanesStore.getState();
     store.addPane({
       kind: "terminal",
@@ -126,13 +126,9 @@ describe("serializePanes / parseSnapshot", () => {
 
     const snap = serializePanes(usePanesStore.getState().panes);
     expect(snap.v).toBe(1);
-    expect(snap.panes).toHaveLength(3); // login dropped
+    expect(snap.panes).toHaveLength(2); // login + browser dropped
     expect(snap.panes[0]).toMatchObject({ kind: "terminal-agent", sessionId: "sess-1" });
     expect(snap.panes[1]).toMatchObject({ kind: "terminal-shell", cwd: "D:/a" });
-    expect(snap.panes[2]).toMatchObject({
-      kind: "browser",
-      tabs: ["https://example.com", "https://two.example.com"],
-    });
 
     const back = parseSnapshot(JSON.stringify(snap));
     expect(back).toEqual(snap);
@@ -188,12 +184,14 @@ describe("autosave", () => {
 });
 
 describe("restoreLayout", () => {
-  it("rebuilds agent + shell + browser panes from the saved snapshot", async () => {
+  it("rebuilds agent + shell panes and ignores saved browser panes", async () => {
     const snapshot = {
       v: 1,
       panes: [
         { kind: "terminal-agent", sessionId: "sess-1", harness: "claude_code", label: "old" },
         { kind: "terminal-shell", cwd: "D:/a", command: "powershell.exe", label: "Terminal" },
+        // Browser panes in old snapshots are ignored on restore (user request:
+        // no auto-open on app start).
         { kind: "browser", projectId: "pA", tabs: ["https://one.example.com", "https://two.example.com"], activeTabIndex: 1, collapsed: false },
       ],
     };
@@ -205,12 +203,11 @@ describe("restoreLayout", () => {
     expect(restored).toBe(true);
 
     const panes = usePanesStore.getState().panes;
-    expect(panes).toHaveLength(3);
+    expect(panes).toHaveLength(2); // browser pane ignored
     expect(spawnAgentMock).toHaveBeenCalledWith(expect.any(String), "sess-1");
     expect(spawnShellMock).toHaveBeenCalledWith(expect.any(String), "D:/a", "powershell.exe", undefined);
     const browser = panes.find((p) => p.data.kind === "browser");
-    expect(browser?.data.kind === "browser" && browser.data.tabs).toHaveLength(2);
-    expect(browser?.data.kind === "browser" && browser.data.activeTabIndex).toBe(1);
+    expect(browser).toBeUndefined();
   });
 
   it("skips panes whose session no longer exists", async () => {

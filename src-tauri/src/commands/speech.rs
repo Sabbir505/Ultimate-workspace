@@ -17,9 +17,6 @@ use crate::DbState;
 
 type CmdResult<T> = Result<T, String>;
 
-/// Default local whisper-server base URL (whisper.cpp `whisper-server`).
-const DEFAULT_WHISPER_URL: &str = "http://127.0.0.1:8081";
-
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptionResult {
@@ -30,22 +27,58 @@ pub struct TranscriptionResult {
 
 /// Transcribe a recorded audio clip (base64 WAV/MP3 bytes) via a whisper
 /// Server-Sent compatible endpoint. Returns the recognized text.
+///
+/// Endpoint resolution: the RUNNING whisper-server sidecar always wins — POST
+/// to its `/inference` endpoint. If no sidecar is up, one is lazily started
+/// from the installed binary+model (mic press self-heals; Settings → Local
+/// Models → Speech manages both). Only when that's impossible do we fall back
+/// to an explicitly-configured OpenAI-compatible `whisper.baseUrl` — never to
+/// the guessed default port, which just produces confusing connection errors.
 #[tauri::command]
 pub async fn transcribe_audio(
     db: State<'_, DbState>,
+    stt: State<'_, crate::commands::stt::SttState>,
     payload: String,
     mime: Option<String>,
 ) -> CmdResult<TranscriptionResult> {
     use reqwest::multipart;
 
-    let base_url = {
-        let conn = db.0.lock();
-        match db::get_setting(&conn, "whisper.baseUrl") {
-            Ok(Some(u)) if !u.trim().is_empty() => u.trim().to_string(),
-            _ => DEFAULT_WHISPER_URL.to_string(),
+    // Sidecar first: it serves whisper.cpp's native /inference endpoint.
+    let mut sidecar_base = crate::commands::stt::active_base_url(&stt);
+    let mut setup_error: Option<String> = None;
+    if sidecar_base.is_none() {
+        // Lazy-start — best effort. On failure remember why so an unconfigured
+        // setup reports "install it here" instead of a raw connection error.
+        match crate::commands::stt::start_sidecar_core(&db, &stt).await {
+            Ok(port) => sidecar_base = Some(format!("http://127.0.0.1:{port}")),
+            Err(e) => setup_error = Some(e),
+        }
+    }
+    let (base_url, endpoint_path) = match sidecar_base {
+        Some(base) => (base, "/inference".to_string()),
+        None => {
+            let explicit = {
+                let conn = db.0.lock();
+                db::get_setting(&conn, "whisper.baseUrl")
+                    .ok()
+                    .flatten()
+                    .map(|u| u.trim().to_string())
+                    .filter(|u| !u.is_empty())
+            };
+            match explicit {
+                Some(base) => (base, "/v1/audio/transcriptions".to_string()),
+                // Nothing running, nothing installable/startable, and the user
+                // never pointed at an external STT — say exactly what to do.
+                None => {
+                    return Err(setup_error.unwrap_or_else(|| {
+                        "no speech-to-text server available — open Settings → Local Models → Speech"
+                            .into()
+                    }))
+                }
+            }
         }
     };
-    let endpoint = format!("{}/v1/audio/transcriptions", base_url.trim_end_matches('/'));
+    let endpoint = format!("{}{}", base_url.trim_end_matches('/'), endpoint_path);
 
     // Decode the base64 audio payload.
     let bytes = base64::engine::general_purpose::STANDARD

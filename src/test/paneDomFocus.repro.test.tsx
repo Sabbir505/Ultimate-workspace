@@ -3,6 +3,14 @@
 // TerminalPane components (with real xterm instances) and asserts that after
 // focusPane moves focusedPaneId, document.activeElement becomes the
 // newly-focused terminal's xterm helper-textarea.
+//
+// KNOWN FLAKY under the full vitest run: these tests lazy-load the TerminalPane
+// chunk and wait for xterm to mount. Under parallel-suite CPU load the chunk
+// resolution can miss the waitFor timeout (0 textareas mounted) even though the
+// code is fine — the same tests pass reliably when this file runs in isolation
+// (`npx vitest run src/test/paneDomFocus.repro.test.tsx`). The describe below
+// carries `retry: 2` to absorb that; if it still fails after retries, re-run
+// THIS FILE alone before treating it as a product regression.
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { PaneFrame } from "../components/panes/PaneFrame";
@@ -65,7 +73,7 @@ function HarnessWithShortcuts() {
   return <TestPaneHost />;
 }
 
-describe("pane focus moves DOM focus to the terminal", () => {
+describe("pane focus moves DOM focus to the terminal", { retry: 2 }, () => {
   afterEach(() => {
     usePanesStore.setState({ panes: [], focusedPaneId: null });
     cleanup();

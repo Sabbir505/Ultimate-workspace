@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
-import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel, getDataPaths, setChatDbDir, type DataPaths, getChatConfig, type ChatConfigPayload, exportProjectZip, importChatZip, toastError, toastSuccess, getLocalModelOverrides, setLocalModelOverrides, type LlamaOverrides, installHarness, getLlamaServerPath } from "../../lib/ipc";
+import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel, getDataPaths, setChatDbDir, type DataPaths, getChatConfig, type ChatConfigPayload, exportProjectZip, importChatZip, toastError, toastSuccess, getLocalModelOverrides, setLocalModelOverrides, type LlamaOverrides, installHarness, getLlamaServerPath, detectGpuPower } from "../../lib/ipc";
 import { runLoginFlow } from "../../lib/sessionLauncher";
 import type { HarnessId } from "../../types";
 import { shortModelName } from "../../lib/modelLabel";
@@ -20,6 +20,7 @@ import { useArtifactsStore } from "../../state/artifacts";
 import { ModelMarket, FitBadge } from "./ModelMarket";
 import { LlamaAdvancedFields } from "../chat/LlamaAdvancedFields";
 import { KnowledgePanel } from "./KnowledgePanel";
+import { SttPanel } from "./SttPanel";
 import { PermissionRulesPanel } from "./PermissionRulesPanel";
 import { ThemeGalleryPanel } from "./ThemeGalleryPanel";
 import { AcpAgentsPanel } from "./AcpAgentsPanel";
@@ -56,7 +57,6 @@ type Category =
   | "appearance"
   | "notifications"
   | "assistant"
-  | "pricing"
   | "harnesses"
   | "localmodels"
   | "apikeys"
@@ -72,7 +72,6 @@ const CATEGORY_KEYS: Category[] = [
   "appearance",
   "notifications",
   "assistant",
-  "pricing",
   "harnesses",
   "localmodels",
   "apikeys",
@@ -99,7 +98,6 @@ function SettingsNavIcon({ category }: { category: Category }) {
     case "assistant": return <Bot {...props} />;
     case "apikeys": return <KeyRound {...props} />;
     case "localmodels": return <Cpu {...props} />;
-    case "pricing": return <Coins {...props} />;
     case "harnesses": return <TerminalSquare {...props} />;
     case "connectors": return <Plug {...props} />;
     case "mcpgallery": return <Blocks {...props} />;
@@ -136,7 +134,6 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
     items: [
       { key: "apikeys", label: "API Keys", sub: "Chat provider keys" },
       { key: "localmodels", label: "Local Models", sub: "GGUF via llama-server" },
-      { key: "pricing", label: "Pricing", sub: "Per-model $/Mtok rates" },
     ],
   },
   {
@@ -167,21 +164,6 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
       { key: "data", label: "Data", sub: "Location & delete" },
     ],
   },
-];
-
-const MODELS: Array<[string, string, string, string]> = [
-  ["claude-opus-4-8", "Claude Opus 4.8", "5", "25"],
-  ["claude-sonnet-5", "Claude Sonnet 5", "2", "10"],
-  ["claude-sonnet-4-5", "Claude Sonnet 4.5", "3", "15"],
-  ["claude-haiku-4-5", "Claude Haiku 4.5", "1", "5"],
-  ["kimi-k3", "Kimi K3", "3", "15"],
-  ["kimi-k2.7-code", "Kimi K2.7 Code", "0.95", "4"],
-  ["kimi-k2.6", "Kimi K2.6", "0.95", "4"],
-  ["glm-5.2", "GLM 5.2", "1.4", "4.4"],
-  ["glm-5.1", "GLM 5.1", "1.4", "4.4"],
-  ["deepseek-v4-pro", "DeepSeek V4 Pro", "0.435", "0.87"],
-  ["minimax-m3", "MiniMax M3", "0.3", "1.2"],
-  ["qwen3.7-plus", "Qwen 3.7 Plus", "0.4", "1.6"],
 ];
 
 /** iOS-style toggle switch — replaces checkboxes for system-level prefs. */
@@ -446,41 +428,6 @@ export function SettingsView() {
               {category === "assistant" && <AssistantPanel />}
               {category === "git" && <GitPanel />}
 
-              {category === "pricing" && (
-                <>
-                  <div className="panel-head">
-                    <h3>Cost estimate rates</h3>
-                    <span className="panel-count">{MODELS.length} models</span>
-                  </div>
-                  <p className="estimate-note">
-                    Per-million-token list prices per model (defaults from official pricing pages, July
-                    2026; claude-sonnet-5 is the $2/$10 intro rate until 2026-08-31). The dashboard
-                    prices each session by the model recorded in the harness's session log. Adjust to
-                    your actual plan pricing — all cost figures are estimates.
-                  </p>
-                  <div className="rate-grid">
-                    {MODELS.map(([key, label, inDefault, outDefault]) => (
-                      <div className="rate-card" key={key}>
-                        <div className="rate-name">
-                          {label}
-                          <span className="rate-id">{key}</span>
-                        </div>
-                        <div className="rate-fields">
-                          <div className="field">
-                            <label>in $/Mtok</label>
-                            <RateField settingsKey={`price.${key}.input_per_mtok`} fallback={inDefault} />
-                          </div>
-                          <div className="field">
-                            <label>out $/Mtok</label>
-                            <RateField settingsKey={`price.${key}.output_per_mtok`} fallback={outDefault} />
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-
               {category === "harnesses" && (
                 <>
                   <div className="panel-head">
@@ -602,7 +549,7 @@ function LocalModelsPanel() {
   const overridesMapRef = useRef<Record<string, LlamaOverrides>>({});
   const overridesPersistTimer = useRef<number | null>(null);
   // Panel tabs: "models" = on-disk GGUF list, "market" = Hugging Face browser.
-  const [tab, setTab] = useState<"models" | "market">("models");
+  const [tab, setTab] = useState<"models" | "market" | "speech">("models");
   // Dense-row UX state: name filter (shown past 8 models), per-row overflow
   // menu, two-click delete confirmation, inline Advanced expansion, and the
   // dismissible first-run info callout.
@@ -803,9 +750,11 @@ function LocalModelsPanel() {
       const started = await startLocalModel(m.id, m.path, m.mmprojPath, overrides);
       if (!started) throw new Error("start_local_model returned null");
       refreshStatus();
-      // start_local_model persisted chat.local_gguf.model + chat.active_provider.
-      // Reload config so the sidebar "New Chat" seed (chatConfig.model) reflects
-      // the running local model instead of the pre-local default.
+      // start_local_model persisted chat.local_gguf.model (the send-path
+      // default). It intentionally no longer flips chat.active_provider —
+      // that setting drives which provider NEW chats are seeded with, and a
+      // sidecar spawn must not re-point them at local. Reload config so the
+      // sidebar "New Chat" seed reflects the running local model.
       void loadConfig("local_gguf");
 
       // Create/select a chat session with local_gguf provider.
@@ -920,12 +869,30 @@ function LocalModelsPanel() {
           My Models
         </button>
         <button
+          className={`tab${tab === "speech" ? " active" : ""}`}
+          onClick={() => setTab("speech")}
+        >
+          Speech
+        </button>
+        <button
           className={`tab${tab === "market" ? " active" : ""}`}
           onClick={() => setTab("market")}
         >
           Model Market
         </button>
       </div>
+
+      {/* Compaction + Electricity Cost — surfaced near the top so users
+          don't scroll past the model list to reach them. */}
+      {tab === "models" && (
+        <div className="local-model-settings-row">
+          <details className="model-advanced local-compaction-advanced">
+            <summary>Compaction (advanced)</summary>
+            <LocalCompactionControls />
+          </details>
+          <LocalElectricitySettings />
+        </div>
+      )}
 
       {/* llama-server path setup section */}
       {tab === "models" && (
@@ -1191,12 +1158,9 @@ function LocalModelsPanel() {
           });
         })()}
       </div>
-      <details className="model-advanced local-compaction-advanced">
-        <summary>Compaction (advanced)</summary>
-        <LocalCompactionControls />
-      </details>
       </>
       )}
+      {tab === "speech" && <SttPanel />}
       {tab === "market" && (
         <ModelMarket
           onDownloadComplete={() => {
@@ -1209,6 +1173,103 @@ function LocalModelsPanel() {
         />
       )}
     </>
+  );
+}
+
+function LocalElectricitySettings() {
+  const [elecRate, setElecRate] = useState<string>("");
+  const [gpuWatts, setGpuWatts] = useState<string>("");
+  const [gpuName, setGpuName] = useState<string | null>(null);
+  const [detecting, setDetecting] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    const load = async () => {
+      const rate = await getSetting("localModels.electricityRateUsdPerKwh");
+      const watts = await getSetting("localModels.gpuPowerWatts");
+      setElecRate(rate ?? "");
+      setGpuWatts(watts ?? "");
+      setLoaded(true);
+    };
+    void load();
+  }, []);
+
+  const autoDetect = async () => {
+    setDetecting(true);
+    try {
+      const detection = await detectGpuPower();
+      if (detection?.estimatedWatts) {
+        const watts = String(Math.round(detection.estimatedWatts));
+        setGpuWatts(watts);
+        setGpuName(detection.deviceName ?? null);
+        await setSetting("localModels.gpuPowerWatts", watts);
+        toastSuccess(`Detected ${detection.deviceName} — set to ${watts}W`);
+      } else {
+        toastError("No discrete GPU detected — enter the power manually.");
+      }
+    } catch (err) {
+      toastError("GPU detection failed", err);
+    } finally {
+      setDetecting(false);
+    }
+  };
+
+  const save = async () => {
+    await setSetting("localModels.electricityRateUsdPerKwh", elecRate);
+    await setSetting("localModels.gpuPowerWatts", gpuWatts);
+    toastSuccess("Electricity settings saved");
+  };
+
+  if (!loaded) return null;
+
+  return (
+    <details className="model-advanced local-electricity-advanced">
+      <summary>Electricity Cost (advanced)</summary>
+      <div className="model-advanced-fields">
+        <label>
+          Electricity rate ($/kWh)
+          <input
+            type="number"
+            min={0}
+            step={0.01}
+            value={elecRate}
+            onChange={(e) => setElecRate(e.target.value)}
+            onBlur={save}
+          />
+          <span className="local-compaction-hint">
+            Your electricity cost per kilowatt-hour (e.g., 0.15)
+          </span>
+        </label>
+        <label>
+          GPU power (W)
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={gpuWatts}
+              onChange={(e) => setGpuWatts(e.target.value)}
+              onBlur={save}
+            />
+            <button
+              type="button"
+              className="ghost"
+              style={{ padding: "4px 10px", fontSize: 11, flexShrink: 0 }}
+              disabled={detecting}
+              onClick={() => void autoDetect()}
+              title="Auto-detect GPU and estimate its power draw"
+            >
+              {detecting ? "Detecting…" : "Auto-detect"}
+            </button>
+          </div>
+          <span className="local-compaction-hint">
+            {gpuName
+              ? `${gpuName} — override if the estimate is off`
+              : "GPU power consumption in watts, or click Auto-detect"}
+          </span>
+        </label>
+      </div>
+    </details>
   );
 }
 
@@ -2233,27 +2294,6 @@ function ConnectorsPanel() {
 }
 
 /** Numeric input bound to an app_settings key; loads on mount, saves on blur. */
-function RateField({ settingsKey, fallback }: { settingsKey: string; fallback: string }) {
-  const [value, setValue] = useState(fallback);
-  useEffect(() => {
-    void getSetting(settingsKey).then((v) => {
-      if (v !== null && v !== "") setValue(v);
-    });
-  }, [settingsKey]);
-  return (
-    <input
-      value={value}
-      onChange={(e) => setValue(e.target.value)}
-      onBlur={() => {
-        const n = parseFloat(value);
-        if (!Number.isNaN(n) && n >= 0) void setSetting(settingsKey, value);
-        else setValue(fallback);
-      }}
-      inputMode="decimal"
-    />
-  );
-}
-
 // ---- Data (chat DB + artifacts storage + delete) ----
 
 function fmtSize(bytes: number): string {

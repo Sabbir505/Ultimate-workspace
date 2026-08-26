@@ -141,6 +141,10 @@ pub fn run() {
             app.manage(std::sync::Arc::new(
                 commands::local_model_market::DownloadRegistry::default(),
             ));
+            // Speech-to-text: curated whisper.cpp models + the whisper-server
+            // sidecar (Settings → Knowledge manages it; the composer mic uses
+            // it for transcription).
+            app.manage(commands::stt::SttState::default());
             app.manage(std::sync::Arc::new(docs_index::IndexRegistry::default()));
             // Git filesystem watcher — drives the `project:fs-changed` Tauri
             // event that replaces the 4-8s polling loops in
@@ -159,6 +163,16 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     git_watcher::install_all_known(&app_handle, &db_state);
+                });
+            }
+            // STT auto-start (Settings → Knowledge opt-in): same deferred
+            // pattern — the sidecar spawns once the managed states exist.
+            {
+                let app_handle = app.handle().clone();
+                let db_state = DbState(Arc::clone(&shared_db));
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                    commands::stt::maybe_autostart(&app_handle, &db_state);
                 });
             }
 
@@ -386,6 +400,7 @@ pub fn run() {
             commands::chat_cmds::resolve_tool_action,
             commands::chat_cmds::set_chat_api_key,
             commands::chat_cmds::delete_chat_api_key,
+            commands::chat_cmds::set_chat_default_model,
             commands::chat_cmds::get_chat_config,
             commands::chat_cmds::list_chat_models,
             commands::chat_cmds::read_artifact_preview,
@@ -431,6 +446,7 @@ pub fn run() {
             commands::local_model_market::fetch_model_catalog,
             commands::local_model_market::fetch_model_file_sizes,
             commands::local_model_market::get_gpu_vram,
+            commands::local_model_market::detect_gpu_power,
             commands::local_model_market::get_market_settings,
             commands::local_model_market::set_models_directory,
             commands::local_model_market::pick_models_directory,
@@ -458,6 +474,13 @@ pub fn run() {
             commands::budget::remove_budget,
             commands::budget::check_budgets,
             commands::speech::transcribe_audio,
+            commands::stt::stt_status,
+            commands::stt::stt_start,
+            commands::stt::stt_stop,
+            commands::stt::stt_install_server,
+            commands::stt::stt_set_default,
+            commands::stt::stt_set_auto_start,
+            commands::stt::stt_set_server_path,
             commands::worktree_cmds::ensure_chat_session_worktree,
             commands::worktree_cmds::set_chat_session_worktree,
             mcp_gallery::mcp_gallery_list,

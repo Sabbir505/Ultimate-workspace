@@ -42,6 +42,13 @@ vi.mock("../lib/ipc", () => ({
   onModelDownloadProgress: vi.fn().mockResolvedValue(() => {}),
   startModelDownload: vi.fn().mockResolvedValue(undefined),
   cancelModelDownload: vi.fn().mockResolvedValue(undefined),
+  // STT section (curated whisper.cpp models + sidecar status).
+  sttStatus: vi.fn().mockResolvedValue(null),
+  sttStart: vi.fn().mockResolvedValue(null),
+  sttStop: vi.fn().mockResolvedValue(undefined),
+  sttSetDefault: vi.fn().mockResolvedValue(undefined),
+  sttSetAutoStart: vi.fn().mockResolvedValue(undefined),
+  sttSetServerPath: vi.fn().mockResolvedValue(undefined),
   toastError: vi.fn(),
   toastSuccess: vi.fn(),
 }));

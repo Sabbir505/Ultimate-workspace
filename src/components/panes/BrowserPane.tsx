@@ -275,11 +275,15 @@ export function BrowserPane({ pane, visible = true }: Props) {
       const latestTabs = tabsRef.current;
       const latestStates = tabStatesRef.current;
       const offScreen: BrowserRect = { x: -9999, y: -9999, width: 1, height: 1 };
-      for (const tab of latestTabs) {
-        const ts = latestStates.get(tab.tabId);
-        if (ts?.nativeOk !== true) continue;
-        void browserSetVisibleTab(paneId, tab.tabId, false).catch(() => {});
-        void browserSetBoundsTab(paneId, tab.tabId, offScreen).catch(() => {});
+      // Hide every native tab we have ever created, not just tabs still in
+      // the current store snapshot. A tab can be removed from `tabs` before
+      // React's unmount cleanup runs; omitting it leaves an untracked native
+      // WebView2 child above the DOM, intercepting clicks as a ghost overlay.
+      const knownTabIds = new Set(latestTabs.map((tab) => tab.tabId));
+      for (const tabId of nativeTabsRef.current) knownTabIds.add(tabId);
+      for (const tabId of knownTabIds) {
+        void browserSetVisibleTab(paneId, tabId, false).catch(() => {});
+        void browserSetBoundsTab(paneId, tabId, offScreen).catch(() => {});
       }
       void browserClosePane(paneId).catch(() => {});
     };

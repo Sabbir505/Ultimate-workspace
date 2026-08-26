@@ -359,8 +359,11 @@ export function Sidebar() {
           </div>
         </div>
 
-        {/* Projects */}
-        <div className="px-2 py-1.5">
+        {/* Projects — pb matches the pt of the Chat History header below so
+            the header-to-header gap equals the Automations→Projects rhythm
+            (8px). The old py-1.5 stacked the header's mb-1 + 6px block
+            padding + 2px = 12px of dead space above Chat History. */}
+        <div className="px-2 pt-1.5 pb-0.5">
           {/* Same geometry as the Artifacts/Schedule rows: full-width pill
               label + trailing "+" so hover/active fills identically. */}
           <div className="sidebar-section-header flex items-center gap-1 mb-1">

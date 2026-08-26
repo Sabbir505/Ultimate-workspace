@@ -26,6 +26,7 @@ import {
   sendAgentChatMessage,
   sendChatMessage,
   setChatApiKey,
+  setChatDefaultModel,
   setChatSessionStarred,
   setChatSessionUnread,
   supersedeChatTail,
@@ -1296,6 +1297,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sess.id === chatSessionId ? { ...sess, model } : sess,
       ),
     }));
+    // Keep the per-provider default in sync with explicit picks so freshly
+    // created chats seed with THIS model instead of a long-stale one (the
+    // auto-start path reads get_chat_config → chat.<provider>.model).
+    // Skipped for harness/ACP sessions (their model ids are CLI-specific)
+    // and local_gguf (its default is owned by start_local_model — it must
+    // stay identical to the id llama-server was started with or sends 400).
+    if (session && !isCliAgent(session.agent) && session.provider !== "local_gguf") {
+      void setChatDefaultModel(session.provider, model).catch(() => {
+        /* best-effort — seeding just falls back to the previous default */
+      });
+    }
   },
 
   setSessionProvider: async (chatSessionId, provider) => {

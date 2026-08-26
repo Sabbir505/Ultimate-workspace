@@ -648,6 +648,7 @@ export function KnowledgePanel() {
           </Modal>
         );
       })()}
+
     </div>
   );
 }

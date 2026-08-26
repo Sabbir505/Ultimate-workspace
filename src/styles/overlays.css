@@ -888,6 +888,70 @@ table.kv th {
   -moz-appearance: textfield;
 }
 
+/* Settings-panel variant: the Compaction + Electricity Cost disclosures in
+   the Local Models tab. Side by side in one row, spinner arrows hidden. */
+.local-model-settings-row {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-glass, var(--surface));
+}
+.local-model-settings-row > details {
+  flex: 1;
+  min-width: 0;
+}
+.local-model-settings-row summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  user-select: none;
+}
+.local-model-settings-row summary:hover {
+  color: var(--text);
+}
+.local-model-settings-row .model-advanced-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+.local-model-settings-row .model-advanced-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+}
+.local-model-settings-row .model-advanced-fields input[type="number"] {
+  width: 100%;
+  max-width: 160px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs, 4px);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.local-model-settings-row .model-advanced-fields input[type="number"]::-webkit-outer-spin-button,
+.local-model-settings-row .model-advanced-fields input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+  display: none;
+}
+.local-model-settings-row .local-compaction-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
 /* Reserved-height empty / loading state. Keeps the surrounding layout fixed
    whether the region is empty, loading, or full. */
 .empty-reserved {

@@ -452,6 +452,14 @@ pub const OVERRIDES_KEY: &str = "localModels.overrides";
 /// users to set an env var or edit their PATH.
 pub const LLAMA_SERVER_PATH_KEY: &str = "localModels.llamaServerPath";
 
+/// App-settings key for electricity rate in USD per kWh.
+/// Used to calculate electricity cost for local model inference.
+pub const ELECTRICITY_RATE_KEY: &str = "localModels.electricityRateUsdPerKwh";
+
+/// App-settings key for GPU power consumption in watts.
+/// Used to calculate electricity cost for local model inference.
+pub const GPU_POWER_WATTS_KEY: &str = "localModels.gpuPowerWatts";
+
 /// Per-model llama-server runtime overrides — the LM Studio "runtime
 /// settings" analog. `None` everywhere means "auto". `last_good_ngl` is
 /// never user-set: the backend records the GPU-layer count of the last

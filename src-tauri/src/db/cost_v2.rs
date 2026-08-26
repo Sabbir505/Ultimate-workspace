@@ -7,8 +7,9 @@
 
 use rusqlite::{params, Connection};
 use std::collections::{BTreeMap, HashMap};
-use crate::harness_adapters::pricing::{price_usage, cache_savings, ModelRate};
+use crate::harness_adapters::pricing::{price_usage, cache_savings, local_model_electricity_cost, ModelRate};
 use crate::harness_adapters::UsageInfo;
+use crate::chat::local_models::{ELECTRICITY_RATE_KEY, GPU_POWER_WATTS_KEY};
 use crate::types::*;
 use super::DbResult;
 
@@ -49,6 +50,23 @@ pub fn read_rate_overrides(conn: &Connection) -> HashMap<String, ModelRate> {
     }
     let _ = get_setting; // silence unused-import lint if it appears
     out
+}
+
+/// Read local model electricity settings: USD/kWh rate + GPU power (W).
+/// Returns (0, 0) when unset; callers should treat 0 as "skip electricity cost".
+pub fn read_local_model_electricity_settings(conn: &Connection) -> (f64, f64) {
+    use crate::db::get_setting;
+    let rate = get_setting(conn, ELECTRICITY_RATE_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let watts = get_setting(conn, GPU_POWER_WATTS_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    (rate, watts)
 }
 
 fn iso_date_for_range(start_ts: i64, end_ts: i64) -> (String, String) {
@@ -148,6 +166,7 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
     let now = crate::db::now_ts();
     let since = now - (days as i64) * 86_400;
     let overrides = read_rate_overrides(conn);
+    let (elec_rate, gpu_watts) = read_local_model_electricity_settings(conn);
     let (range_start, range_end) = iso_date_for_range(since, now);
 
     let mut totals = CostTotals::default();
@@ -208,7 +227,12 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
             let key = model_key.as_deref().or_else(|| {
                 provider.as_deref().map(crate::harness_adapters::harness_default_model_key)
             });
-            let cost = price_usage(&usage, key, &overrides);
+            // Prefer the cost the harness actually reported (e.g. Claude Code's
+            // "Total cost: $X.XX" line, scraped from pty output). Fall back to
+            // rate-based estimation only when the harness didn't report one —
+            // so the Pricing section's rate table is just a safety net, not
+            // the primary source. (Spec §7.5: reported vs estimated stay distinct.)
+            let cost = reported.or_else(|| price_usage(&usage, key, &overrides));
             let tokens_i = i.unwrap_or(0) + cc.unwrap_or(0) + cr.unwrap_or(0) + o.unwrap_or(0) + reasoning.unwrap_or(0);
             let day = date_str(ts);
             total_rows += 1;
@@ -262,7 +286,8 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
             "SELECT cm.created_at, cm.input_tokens, cm.output_tokens,
                     COALESCE(cm.provider, cs.provider) AS provider, cm.model_key,
                     cm.cache_creation_input_tokens, cm.cache_read_input_tokens,
-                    cm.reasoning_output_tokens, cs.model
+                    cm.reasoning_output_tokens, cs.model,
+                    cm.started_at, cm.completed_at
                FROM chat_messages cm
                JOIN chat_sessions cs ON cs.id = cm.chat_session_id
               WHERE cm.created_at >= ?1 AND cm.role = 'assistant'"
@@ -278,10 +303,12 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
                 r.get::<_, Option<i64>>(6)?,
                 r.get::<_, Option<i64>>(7)?,
                 r.get::<_, Option<String>>(8)?,
+                r.get::<_, Option<i64>>(9)?,
+                r.get::<_, Option<i64>>(10)?,
             ))
         })?;
         for row in rows {
-            let (ts, i, o, provider, model_key, cc, cr, reasoning, session_model) = row?;
+            let (ts, i, o, provider, model_key, cc, cr, reasoning, session_model, started_at, completed_at) = row?;
             let usage = UsageInfo {
                 input_tokens: i, output_tokens: o,
                 cache_creation_input_tokens: cc, cache_read_input_tokens: cr,
@@ -292,7 +319,20 @@ fn compute_cost_rollups_v2(conn: &Connection, days: u32) -> DbResult<CostRollups
             let key = model_key
                 .as_deref()
                 .or_else(|| session_model.as_deref().and_then(crate::harness_adapters::canonical_model_key));
-            let cost = price_usage(&usage, key, &overrides);
+            // Local models: derive cost from electricity (power × duration × rate).
+            // No rate table — they run on the user's hardware. Cloud models keep
+            // the per-token rate calculation.
+            let cost = match provider.as_deref() {
+                Some("local_gguf") if elec_rate > 0.0 && gpu_watts > 0.0 => {
+                    let duration_s = match (started_at, completed_at) {
+                        (Some(s), Some(c)) if c > s => (c - s) as f64,
+                        _ => 0.0,
+                    };
+                    let c = local_model_electricity_cost(gpu_watts, duration_s, elec_rate);
+                    (c > 0.0).then_some(c)
+                }
+                _ => price_usage(&usage, key, &overrides),
+            };
             let tokens_i = i.unwrap_or(0) + cc.unwrap_or(0) + cr.unwrap_or(0) + o.unwrap_or(0) + reasoning.unwrap_or(0);
             let grouped = format!("chat:{}", provider.clone().unwrap_or_else(|| "unknown".to_string()));
             total_rows += 1;
@@ -544,6 +584,29 @@ mod tests {
             "legacy chat row grouped as chat:unknown"
         );
         assert!(r.per_provider.iter().any(|p| p.provider == "chat:anthropic"));
+    }
+
+    #[test]
+    fn local_model_electricity_cost_appears_in_rollup() {
+        let conn = super::super::mem();
+        // 200W GPU, $0.15/kWh rate, 1h duration => $0.03 per row
+        crate::db::set_setting(&conn, crate::chat::local_models::GPU_POWER_WATTS_KEY, "200").unwrap();
+        crate::db::set_setting(&conn, crate::chat::local_models::ELECTRICITY_RATE_KEY, "0.15").unwrap();
+        let cs = super::super::create_chat_session(
+            &conn, "local_gguf", r"D:\models\qwen2.5-7b-q4_k_m.gguf", None,
+        ).unwrap();
+        let now = crate::db::now_ts();
+        // 1h = 3600s of work
+        super::super::add_chat_message(
+            &conn, &cs.id, "assistant", "hi", Some(1_000_000), Some(500_000), Some(0.0),
+            None, None, None, Some("local_gguf"), None, None,
+            Some(now), Some(now + 3600),
+            None, None, None, None,
+        ).unwrap();
+        let r = get_cost_rollups_v2(&conn, 7).unwrap();
+        let prov = r.per_provider.iter().find(|p| p.provider == "chat:local_gguf").unwrap();
+        // 200W × 1h × $0.15/kWh / 1000 = $0.03
+        assert!((prov.cost_usd - 0.03).abs() < 1e-9, "got {}", prov.cost_usd);
     }
 
     #[test]

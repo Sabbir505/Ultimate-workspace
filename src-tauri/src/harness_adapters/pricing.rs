@@ -77,6 +77,21 @@ pub fn cache_savings(usage: &UsageInfo, model_key: Option<&str>, settings: &Hash
     cached * (rate.input_per_mtok - rate.cache_read_per_mtok).max(0.0) / 1_000_000.0
 }
 
+/// Calculate electricity cost for running a local model.
+///
+/// Formula: cost_usd = (power_watts × hours_running × electricity_rate_per_kwh) / 1000
+///
+/// This uses power and time instead of tokens because local models run on
+/// the user's hardware; the cost is in electricity, not API charges.
+pub fn local_model_electricity_cost(
+    power_watts: f64,
+    duration_seconds: f64,
+    electricity_rate_usd_per_kwh: f64,
+) -> f64 {
+    let hours = duration_seconds / 3600.0;
+    (power_watts * hours * electricity_rate_usd_per_kwh) / 1000.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +182,33 @@ mod tests {
             reasoning_output_tokens: None, cost_usd: None };
         let s = cache_savings(&u, Some("claude-sonnet-4-5"), &empty());
         assert_eq!(s, 0.0);
+    }
+
+    // ---- local_model_electricity_cost tests ----
+
+    #[test]
+    fn electricity_cost_basic() {
+        // 100W for 1 hour at $0.15/kWh = $0.015
+        let c = local_model_electricity_cost(100.0, 3600.0, 0.15);
+        assert!((c - 0.015).abs() < 1e-9);
+    }
+
+    #[test]
+    fn electricity_cost_30min_run() {
+        // 200W for 0.5 hour at $0.12/kWh = $0.012
+        let c = local_model_electricity_cost(200.0, 1800.0, 0.12);
+        assert!((c - 0.012).abs() < 1e-9);
+    }
+
+    #[test]
+    fn electricity_cost_zero_duration() {
+        let c = local_model_electricity_cost(150.0, 0.0, 0.15);
+        assert_eq!(c, 0.0);
+    }
+
+    #[test]
+    fn electricity_cost_zero_rate() {
+        let c = local_model_electricity_cost(150.0, 3600.0, 0.0);
+        assert_eq!(c, 0.0);
     }
 }

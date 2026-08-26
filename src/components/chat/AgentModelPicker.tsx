@@ -356,32 +356,38 @@ export function AgentModelPicker({
   // ---- rail entries --------------------------------------------------------
   // The rail is icon-only (~50px); each icon's tooltip carries the agent
   // name. Sections are separated by a divider in the render below.
+  // ONLY AVAILABLE entries are listed — uninstalled CLIs/ACP agents and
+  // keyless providers used to sit in the rail as grayed-out ghosts, which
+  // read as clutter (and as "all agents/providers" instead of what this
+  // machine can actually run). Local is always present (built-in).
   const railSections = useMemo(() => {
     const sections: RailEntry[][] = [];
-    const cli = harnesses.map((h) => ({
-      key: `harness:${h.id}`,
-      label: h.displayName,
-      enabled: h.installed,
-    }));
+    const cli = harnesses
+      .filter((h) => h.installed)
+      .map((h) => ({
+        key: `harness:${h.id}`,
+        label: h.displayName,
+        enabled: true,
+      }));
     if (cli.length > 0) sections.push(cli);
-    if (acpAgents.length > 0) {
-      sections.push(
-        acpAgents.map((a) => ({
-          key: `acp:${a.id}`,
-          label: a.displayName,
-          enabled: a.installed,
-        })),
-      );
-    }
+    const acp = acpAgents
+      .filter((a) => a.installed)
+      .map((a) => ({
+        key: `acp:${a.id}`,
+        label: a.displayName,
+        enabled: true,
+      }));
+    if (acp.length > 0) sections.push(acp);
     const direct: RailEntry[] = [
       { key: "local", label: "Local model", enabled: true },
     ];
     for (const p of PROVIDER_IDS) {
       const cfg = providerCfgs[p];
+      if (!cfg?.hasKey) continue;
       direct.push({
         key: `provider:${p}`,
         label: PROVIDER_LABELS[p],
-        enabled: !!cfg?.hasKey,
+        enabled: true,
       });
     }
     sections.push(direct);
@@ -745,47 +751,47 @@ export function AgentModelPicker({
                         onClick={() => pickModel(r.id)}
                         onPointerEnter={() => setActiveIndex(i)}
                       >
-                          <span title={r.id}>
-                            {query.trim().length > 0
-                              ? highlight(r.label, { score: r.score, matches: r.matches })
-                              : r.label}
-                          </span>
-                          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                            {isCurrent && <span className="model-effort-check">✓</span>}
-                            {isLocalRow && onLoadLocalModel && (
-                              <span
-                                role="button"
-                                tabIndex={0}
-                                className={`agent-model-gear${gearFor === r.id ? " open" : ""}`}
-                                title="Advanced runtime settings — GPU layers, context, sampling…"
-                                aria-label={`Advanced settings for ${r.label}`}
-                                onClick={(e) => {
-                                  // Toggle the gear panel without picking the model.
+                        <span title={r.id}>
+                          {query.trim().length > 0
+                            ? highlight(r.label, { score: r.score, matches: r.matches })
+                            : r.label}
+                        </span>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                          {isCurrent && <span className="model-effort-check">✓</span>}
+                          {isLocalRow && onLoadLocalModel && (
+                            <span
+                              role="button"
+                              tabIndex={0}
+                              className={`agent-model-gear${gearFor === r.id ? " open" : ""}`}
+                              title="Advanced runtime settings — GPU layers, context, sampling…"
+                              aria-label={`Advanced settings for ${r.label}`}
+                              onClick={(e) => {
+                                // Toggle the gear panel without picking the model.
+                                e.stopPropagation();
+                                if (gearFor === r.id) {
+                                  setGearFor(null);
+                                } else {
+                                  setGearFor(r.id);
+                                  setGearDraft({ ...(localOverridesMap?.[r.id] ?? {}) });
+                                }
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
                                   e.stopPropagation();
-                                  if (gearFor === r.id) {
-                                    setGearFor(null);
-                                  } else {
+                                  if (gearFor !== r.id) {
                                     setGearFor(r.id);
                                     setGearDraft({ ...(localOverridesMap?.[r.id] ?? {}) });
+                                  } else {
+                                    setGearFor(null);
                                   }
-                                }}
-                                onKeyDown={(e) => {
-                                  if (e.key === "Enter" || e.key === " ") {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    if (gearFor !== r.id) {
-                                      setGearFor(r.id);
-                                      setGearDraft({ ...(localOverridesMap?.[r.id] ?? {}) });
-                                    } else {
-                                      setGearFor(null);
-                                    }
-                                  }
-                                }}
-                              >
-                                ⚙
-                              </span>
-                            )}
-                          </span>
+                                }
+                              }}
+                            >
+                              ⚙
+                            </span>
+                          )}
+                        </span>
                         </button>
                     );
                   })}

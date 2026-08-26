@@ -47,7 +47,10 @@ export interface LayoutSnapshotV1 {
 }
 
 /** Serialize the live pane grid. Login panes are dropped; everything else
- *  keeps exactly the fields a restart needs to respawn it. */
+ *  keeps exactly the fields a restart needs to respawn it. Browser panes are
+ *  ALSO dropped (user request): reopening the app must not auto-spawn the
+ *  browser pane with the previous session's pages — the user opens it when
+ *  they want it. */
 export function serializePanes(panes: Pane[]): LayoutSnapshotV1 {
   const out: LayoutPane[] = [];
   for (const p of panes) {
@@ -69,15 +72,8 @@ export function serializePanes(panes: Pane[]): LayoutSnapshotV1 {
         });
       }
       // login panes: skipped by design
-    } else {
-      out.push({
-        kind: "browser",
-        projectId: p.data.projectId,
-        tabs: p.data.tabs.map((t) => t.url),
-        activeTabIndex: p.data.activeTabIndex,
-        collapsed: p.data.collapsed ?? false,
-      });
     }
+    // browser panes: skipped by design — no auto-open on app start
   }
   return { v: 1, panes: out };
 }
@@ -165,7 +161,6 @@ export async function restoreLayout(projectId: string): Promise<boolean> {
 
   const panesStore = usePanesStore.getState();
   const projectsStore = useProjectsStore.getState();
-  let restoredBrowser = false;
 
   for (const lp of snap.panes) {
     try {
@@ -194,41 +189,18 @@ export async function restoreLayout(projectId: string): Promise<boolean> {
           ),
         );
         await spawnForPane(paneId, { type: "shell", cwd: lp.cwd, command: lp.command });
-      } else {
-        // Browser: first tab creates the pane; the rest append. Every live
-        // browser pane carries ≥1 tab, but guard anyway.
-        if (lp.tabs.length === 0) continue;
-        let paneId: string | null = null;
-        lp.tabs.forEach((url, i) => {
-          if (i === 0) {
-            paneId = panesStore.addPane({
-              kind: "browser",
-              url,
-              projectId: lp.projectId,
-            });
-            if (lp.collapsed && paneId) panesStore.toggleBrowserCollapsed(paneId);
-          } else if (paneId) {
-            panesStore.addBrowserTab(paneId, url);
-          }
-        });
-        if (paneId && lp.activeTabIndex > 0 && lp.activeTabIndex < lp.tabs.length) {
-          panesStore.switchBrowserTab(paneId, lp.activeTabIndex);
-        }
-        if (paneId && !lp.collapsed) restoredBrowser = true;
       }
+      // Browser panes: skipped on restore BY DESIGN — the app must not
+      // auto-open the browser with the previous session's pages (user
+      // request). Old stored snapshots may still contain `browser` entries;
+      // they are ignored, and the next autosave rewrites the snapshot
+      // without them (serializePanes no longer emits them).
     } catch (err) {
       // One bad pane (deleted session, missing cwd, …) never blocks the rest.
       console.warn("[conduit] workspace restore skipped a pane:", err);
     }
   }
 
-  // Surface the Browser tab when a visible browser came back, so the
-  // restored pane isn't hidden behind a collapsed panel.
-  if (restoredBrowser) {
-    const ui = useUiStore.getState();
-    ui.addTab("browser");
-    ui.setToolPanelCollapsed(false);
-  }
   // Remember what we restored (canonical serialization — same shape
   // saveLayoutNow produces) so it can detect deliberate user changes.
   lastRestoredLayout.set(projectId, JSON.stringify(snap));

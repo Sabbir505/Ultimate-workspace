@@ -251,7 +251,8 @@ fn set_models_dir(conn: &rusqlite::Connection, dir: &str) -> Result<(), String> 
 /// Resolved destination for a new download. Falls back to
 /// `~/Conduit/models` if the user hasn't picked one yet (and creates it
 /// on first use — this is the "default folder" promised in the UI).
-fn resolve_models_dir(conn: &rusqlite::Connection) -> Result<PathBuf, String> {
+/// Also used by the STT module (its models live in a `stt/` subdirectory).
+pub(crate) fn resolve_models_dir(conn: &rusqlite::Connection) -> Result<PathBuf, String> {
     if let Some(s) = get_models_dir(conn) {
         return Ok(PathBuf::from(s));
     }
@@ -676,6 +677,111 @@ pub async fn get_gpu_vram() -> CmdResult<GpuVramInfo> {
     }
 }
 
+/// Estimate a GPU's power draw in watts from its device name.
+/// Uses a lookup table of common consumer/datacenter cards; falls back to a
+/// VRAM-size heuristic for unknown models (more VRAM → bigger card → more power).
+/// Returns `None` when no GPU is detected or the name is unrecognizable AND
+/// VRAM is unavailable.
+pub fn estimate_gpu_power_watts(device_name: &str, vram_bytes: u64) -> Option<f64> {
+    let name = device_name.to_ascii_lowercase();
+    // NVIDIA GeForce / RTX / GTX series (TDP in watts)
+    let known: &[(&str, f64)] = &[
+        // RTX 50 series
+        ("rtx 5090", 575.0), ("rtx 5080", 360.0), ("rtx 5070 ti", 300.0), ("rtx 5070", 250.0),
+        ("rtx 5060 ti", 180.0), ("rtx 5060", 145.0),
+        // RTX 40 series
+        ("rtx 4090", 450.0), ("rtx 4080", 320.0), ("rtx 4070 ti super", 285.0),
+        ("rtx 4070 ti", 285.0), ("rtx 4070 super", 220.0), ("rtx 4070", 200.0),
+        ("rtx 4060 ti", 160.0), ("rtx 4060", 115.0),
+        // RTX 30 series
+        ("rtx 3090 ti", 450.0), ("rtx 3090", 350.0), ("rtx 3080 ti", 350.0),
+        ("rtx 3080", 320.0), ("rtx 3070 ti", 290.0), ("rtx 3070", 220.0),
+        ("rtx 3060 ti", 200.0), ("rtx 3060", 170.0), ("rtx 3050", 130.0),
+        // RTX 20 series
+        ("rtx 2080 ti", 250.0), ("rtx 2080 super", 250.0), ("rtx 2080", 215.0),
+        ("rtx 2070 super", 215.0), ("rtx 2070", 175.0), ("rtx 2060", 160.0),
+        // GTX 16 series
+        ("gtx 1660 ti", 120.0), ("gtx 1660 super", 125.0), ("gtx 1660", 120.0),
+        ("gtx 1650", 75.0),
+        // Titan
+        ("titan rtx", 280.0), ("titan v", 250.0),
+        // AMD Radeon RX series
+        ("rx 7900 xtx", 355.0), ("rx 7900 xt", 315.0), ("rx 7900 gre", 260.0),
+        ("rx 7800 xt", 263.0), ("rx 7700 xt", 245.0), ("rx 7600", 165.0),
+        ("rx 6950 xt", 335.0), ("rx 6900 xt", 300.0), ("rx 6800 xt", 300.0),
+        ("rx 6800", 250.0), ("rx 6700 xt", 230.0), ("rx 6600 xt", 132.0),
+        ("rx 6600", 132.0),
+        // NVIDIA datacenter / pro
+        ("a100", 400.0), ("h100", 700.0), ("a6000", 300.0), ("rtx 6000", 300.0),
+        ("l40s", 350.0), ("l4", 72.0), ("t4", 70.0),
+        // Apple Silicon (integrated — estimate the SoC package power)
+        ("apple m1 max", 60.0), ("apple m1 pro", 45.0), ("apple m1", 30.0),
+        ("apple m2 max", 70.0), ("apple m2 pro", 50.0), ("apple m2", 25.0),
+        ("apple m3 max", 80.0), ("apple m3 pro", 55.0), ("apple m3", 28.0),
+        ("apple m4 max", 85.0), ("apple m4 pro", 60.0), ("apple m4", 30.0),
+    ];
+    // Longest match wins (e.g. "rtx 4070 ti super" over "rtx 4070 ti").
+    let mut best: Option<f64> = None;
+    let mut best_len = 0usize;
+    for (pattern, watts) in known {
+        if name.contains(pattern) && pattern.len() > best_len {
+            best = Some(*watts);
+            best_len = pattern.len();
+        }
+    }
+    if best.is_some() {
+        return best;
+    }
+    // VRAM-size heuristic for unknown discrete GPUs:
+    //   ≤4GB → 75W, ≤8GB → 150W, ≤12GB → 220W, ≤16GB → 300W, ≤24GB → 350W, >24GB → 450W
+    let gb = vram_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    if gb <= 0.0 {
+        return None;
+    }
+    Some(if gb <= 4.0 {
+        75.0
+    } else if gb <= 8.0 {
+        150.0
+    } else if gb <= 12.0 {
+        220.0
+    } else if gb <= 16.0 {
+        300.0
+    } else if gb <= 24.0 {
+        350.0
+    } else {
+        450.0
+    })
+}
+
+/// Auto-detect the GPU and estimate its power draw for the electricity
+/// cost calculator. Returns the device name, VRAM bytes, and estimated watts.
+#[tauri::command]
+pub async fn detect_gpu_power() -> CmdResult<GpuPowerDetection> {
+    match query_total_vram_bytes() {
+        Some((bytes, name)) => {
+            let watts = estimate_gpu_power_watts(&name, bytes);
+            Ok(GpuPowerDetection {
+                device_name: Some(name),
+                total_vram_bytes: Some(bytes),
+                estimated_watts: watts,
+            })
+        }
+        None => Ok(GpuPowerDetection {
+            device_name: None,
+            total_vram_bytes: None,
+            estimated_watts: None,
+        }),
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuPowerDetection {
+    pub device_name: Option<String>,
+    pub total_vram_bytes: Option<u64>,
+    pub estimated_watts: Option<f64>,
+}
+
 /// Tiny URL-encoder — we only need to escape spaces, `&`, `=`, and `+`
 /// for HF's free-text `search` query. Avoids pulling in a full
 /// `urlencoding` crate.
@@ -999,19 +1105,30 @@ async fn run_download(
             resume_from = 0;
         }
     }
-    let mut req = client.get(url);
-    if let Some(t) = token {
-        if !t.is_empty() {
+    // Two attempts max: with the stored token, then — only if HF REJECTED
+    // that token — anonymously. A stored-but-invalid token makes even PUBLIC
+    // files 401, which used to surface as a bogus "this model is gated";
+    // genuinely gated repos still fail both attempts and get the friendly
+    // message below.
+    let mut attempt_auth: Option<&str> = token.filter(|t| !t.is_empty());
+    let resp = loop {
+        let mut req = client.get(url);
+        if let Some(t) = attempt_auth.as_deref() {
             req = req.bearer_auth(t);
         }
-    }
-    if resume_from > 0 {
-        req = req.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
-    }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("download request failed: {e}"))?;
+        if resume_from > 0 {
+            req = req.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
+        }
+        let r = req
+            .send()
+            .await
+            .map_err(|e| format!("download request failed: {e}"))?;
+        let rejected = r.status().as_u16() == 401 || r.status().as_u16() == 403;
+        if rejected && attempt_auth.take().is_some() {
+            continue; // retry anonymously
+        }
+        break r;
+    };
     let status = resp.status();
     if status.as_u16() == 401 || status.as_u16() == 403 {
         let _ = fs::remove_file(partial_path).await;
@@ -1410,6 +1527,68 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::HashMap;
+
+    // ---- estimate_gpu_power_watts ----
+
+    #[test]
+    fn gpu_power_known_nvidia() {
+        assert_eq!(
+            estimate_gpu_power_watts("NVIDIA GeForce RTX 4090", 24 * 1024 * 1024 * 1024),
+            Some(450.0)
+        );
+        assert_eq!(
+            estimate_gpu_power_watts("NVIDIA GeForce RTX 3090", 24 * 1024 * 1024 * 1024),
+            Some(350.0)
+        );
+        assert_eq!(
+            estimate_gpu_power_watts("NVIDIA GeForce RTX 3060", 12 * 1024 * 1024 * 1024),
+            Some(170.0)
+        );
+    }
+
+    #[test]
+    fn gpu_power_longest_match_wins() {
+        // "rtx 4070 ti super" (285W) must win over "rtx 4070 ti" (285W) and "rtx 4070" (200W)
+        assert_eq!(
+            estimate_gpu_power_watts("RTX 4070 Ti SUPER", 16 * 1024 * 1024 * 1024),
+            Some(285.0)
+        );
+    }
+
+    #[test]
+    fn gpu_power_known_amd() {
+        assert_eq!(
+            estimate_gpu_power_watts("AMD Radeon RX 7900 XTX", 24 * 1024 * 1024 * 1024),
+            Some(355.0)
+        );
+    }
+
+    #[test]
+    fn gpu_power_apple_silicon() {
+        assert_eq!(
+            estimate_gpu_power_watts("Apple M3 Max", 36 * 1024 * 1024 * 1024),
+            Some(80.0)
+        );
+    }
+
+    #[test]
+    fn gpu_power_unknown_falls_back_to_vram_heuristic() {
+        // 12GB unknown GPU → 220W heuristic
+        assert_eq!(
+            estimate_gpu_power_watts("Generic Graphics Device", 12 * 1024 * 1024 * 1024),
+            Some(220.0)
+        );
+        // 4GB → 75W
+        assert_eq!(
+            estimate_gpu_power_watts("Generic Graphics Device", 4 * 1024 * 1024 * 1024),
+            Some(75.0)
+        );
+    }
+
+    #[test]
+    fn gpu_power_zero_vram_returns_none() {
+        assert_eq!(estimate_gpu_power_watts("Generic", 0), None);
+    }
 
     // ---- extract_quantization ----
 

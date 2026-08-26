@@ -293,7 +293,10 @@ div[data-index]:has(.chat-session-row.menu-open) {
   font-size: 12px;
   font-weight: 500;
   color: var(--text-dim);
-  max-width: 240px;
+  /* Narrow cap: at 240px a long title ran from the sidebar border halfway
+     across the toolbar's left cluster, crowding the Folder/GitHub notches
+     and reading as glued to the left edge. */
+  max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

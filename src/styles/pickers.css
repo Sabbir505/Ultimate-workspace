@@ -278,11 +278,11 @@
   bottom: calc(100% + 6px);
   left: 0;
   display: flex;
-  /* Content-sized: the popup hugs the model list (effort sits right under
-     the rows) and only caps out — list scrolls — on long lists. */
-  height: auto;
-  max-height: min(300px, calc(100vh - 32px));
-  width: 240px;
+  /* FIXED 300px (user request): the model list gets the remaining space and
+     scrolls, instead of height:auto hugging ~1 row once search + endpoint +
+     effort chrome eat the budget. Still never overflows the window. */
+  height: min(300px, calc(100vh - 32px));
+  width: 300px;
   /* Never overflow the window on narrow layouts; the panes shrink inside. */
   max-width: min(240px, calc(100vw - 24px));
   border: 1px solid var(--border);
@@ -467,7 +467,7 @@
 @media (max-width: 560px) {
   .agent-model-popup {
     width: calc(100vw - 24px);
-    max-height: min(360px, calc(100vh - 32px));
+    height: min(300px, calc(100vh - 32px));
     flex-direction: column;
   }
   .agent-model-rail {

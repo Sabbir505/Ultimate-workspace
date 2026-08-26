@@ -446,6 +446,46 @@ export const transcribeAudio = (payload: string, mime?: string) =>
     mime: mime ?? null,
   });
 
+// ---- Speech-to-text models (Settings → Knowledge manages; mic uses) ----
+
+export interface SttModelInfo {
+  id: string;
+  label: string;
+  filename: string;
+  downloadUrl: string;
+  sizeBytes: number;
+  note: string;
+  recommended: boolean;
+  installed: boolean;
+  isDefault: boolean;
+}
+
+export interface SttStatus {
+  running: boolean;
+  port: number | null;
+  modelPath: string | null;
+  binaryPath: string | null;
+  defaultModel: string | null;
+  autoStart: boolean;
+  sttDir: string | null;
+  catalog: SttModelInfo[];
+}
+
+export const sttStatus = () => safeInvoke<SttStatus>("stt_status");
+export const sttStart = () => safeInvoke<SttStatus>("stt_start");
+export const sttStop = () => safeInvoke<void>("stt_stop");
+/** One-click install: downloads the pinned upstream whisper.cpp release,
+ *  extracts whisper-server.exe (+ DLLs) into the app-data bin dir, and saves
+ *  its path into `stt.whisperServerPath`. Progress arrives on
+ *  `onModelDownloadProgress` under id "stt-whisper-server". */
+export const sttInstallServer = () => safeInvoke<SttStatus>("stt_install_server");
+export const sttSetDefault = (filename: string) =>
+  safeInvoke<void>("stt_set_default", { filename });
+export const sttSetAutoStart = (autoStart: boolean) =>
+  safeInvoke<void>("stt_set_auto_start", { autoStart });
+export const sttSetServerPath = (path: string | null) =>
+  safeInvoke<void>("stt_set_server_path", { path: path ?? null });
+
 /** Pop a chat session out into its own OS window (roadmap #17). */
 export const popOutChat = (sessionId: string) =>
   safeInvoke<void>("pop_out_chat", { sessionId });
@@ -1428,6 +1468,11 @@ export const deleteChatApiKey = (provider: string) =>
   safeInvoke<void>("delete_chat_api_key", { provider });
 export const getChatConfig = (provider?: string) =>
   safeInvoke<ChatConfigPayload | null>("get_chat_config", provider ? { provider } : {});
+/** Persist ONLY the per-provider default model (chat.<provider>.model) — no
+ *  key, base_url, or active_provider changes. Composer model picks call this
+ *  so new chats seed with the last-picked model instead of a stale default. */
+export const setChatDefaultModel = (provider: string, model: string) =>
+  safeInvoke<void>("set_chat_default_model", { provider, model });
 
 export const listChatModels = (
   provider: string,
@@ -2071,6 +2116,15 @@ export interface GpuVramInfo {
 }
 
 export const getGpuVram = () => safeInvoke<GpuVramInfo | null>("get_gpu_vram");
+
+/** Auto-detect GPU + estimate power draw for the electricity cost calculator. */
+export interface GpuPowerDetection {
+  deviceName: string | null;
+  totalVramBytes: number | null;
+  estimatedWatts: number | null;
+}
+export const detectGpuPower = () =>
+  safeInvoke<GpuPowerDetection | null>("detect_gpu_power");
 
 export const getMarketSettings = () =>
   safeInvoke<MarketSettings | null>("get_market_settings");

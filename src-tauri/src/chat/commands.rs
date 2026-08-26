@@ -1517,8 +1517,9 @@ pub async fn send_chat_message(
                                     "chat.local_gguf.model",
                                     &started.model_id,
                                 );
-                                let _ =
-                                    db::set_setting(&conn, "chat.active_provider", "local_gguf");
+                                // No chat.active_provider write here either —
+                                // same reasoning as start_local_model: a warm-up
+                                // respawn must not re-point NEW chats at local.
                                 local_models::save_last_good_ngl(
                                     &conn,
                                     &started.model_id,
@@ -2835,6 +2836,31 @@ pub fn delete_chat_api_key(provider: String, db: State<DbState>) -> CmdResult<()
     Ok(())
 }
 
+/// Persist ONLY the per-provider default model (`chat.<provider>.model`) —
+/// no keychain write, no base_url touch, no `chat.active_provider` flip.
+///
+/// Called when the user picks a model in the composer so freshly created
+/// chats seed with that model (the auto-start path reads get_chat_config →
+/// chat.<provider>.model) instead of a long-stale Settings-era default.
+/// Harness/ACP picks never reach this from the frontend: their model ids are
+/// CLI-specific and meaningless as provider defaults. local_gguf is also not
+/// written here — its default is owned by start_local_model (the id must
+/// match what llama-server was actually started with, or sends would 400).
+#[tauri::command]
+pub fn set_chat_default_model(
+    provider: String,
+    model: String,
+    db: State<DbState>,
+) -> CmdResult<()> {
+    let provider = provider.trim().to_string();
+    if provider.is_empty() {
+        return Err("provider must not be empty".to_string());
+    }
+    let conn = db.0.lock();
+    db::set_setting(&conn, &format!("chat.{provider}.model"), &model)
+        .map_err(|e| e.to_string())
+}
+
 /// Returns non-secret config only — the API key value is NEVER returned.
 ///
 /// When `provider` is None, returns config for the **last-configured** provider
@@ -2877,8 +2903,18 @@ pub fn get_chat_config(provider: Option<String>, db: State<DbState>) -> CmdResul
             if let Some(active) = db::get_setting(&conn, "chat.active_provider")
                 .map_err(|e| e.to_string())?
             {
+                // local_gguf is never honored as the reopen-on provider: the
+                // llama-server sidecar dies with the app, so by the time the
+                // app relaunches that provider is always a dead endpoint —
+                // seeding fresh chats with its last model name manufactured
+                // stale context meters (16K default cap, no live sidecar,
+                // "Model: <gguf>" the user never picked for THIS chat). Local
+                // models stay reachable via the composer picker and Settings
+                // → "Use this model"; they're just never the AUTO default.
+                // This also neutralizes markers written by older builds.
                 if !active.is_empty()
-                    && (active == "local_gguf" || secrets::has_chat_api_key(&conn, &active))
+                    && active != "local_gguf"
+                    && secrets::has_chat_api_key(&conn, &active)
                 {
                     let base_url = db::get_setting(&conn, &format!("chat.{active}.base_url"))
                         .map_err(|e| e.to_string())?;
@@ -3177,13 +3213,20 @@ pub async fn start_local_model(
         .await?;
 
     // Persist the base_url + model for the send path (chat.local_gguf.*).
+    //
+    // Deliberately does NOT touch `chat.active_provider`: that setting means
+    // "the provider the user configured in Settings" and drives which
+    // provider NEW chats are seeded with (get_chat_config → newChat). Letting
+    // a sidecar spawn flip it globally made every fresh chat come up as
+    // local_gguf with a stale model name — even sessions the user never
+    // pointed at a local model. After an app restart the sidecar is gone
+    // anyway, so seeding local by default was never useful; the send path
+    // re-spawns on demand via the warm-up branch below.
     {
         let conn = db.0.lock();
         db::set_setting(&conn, "chat.local_gguf.base_url", &started.base_url)
             .map_err(|e| e.to_string())?;
         db::set_setting(&conn, "chat.local_gguf.model", &started.model_id)
-            .map_err(|e| e.to_string())?;
-        db::set_setting(&conn, "chat.active_provider", "local_gguf")
             .map_err(|e| e.to_string())?;
         local_models::save_last_good_ngl(&conn, &started.model_id, started.n_gpu_layers);
     }

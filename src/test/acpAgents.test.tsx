@@ -135,11 +135,11 @@ describe("AgentModelPicker ACP section", () => {
     render(<AgentModelPicker agent={null} model="" onPick={onPick} />);
     fireEvent.click(screen.getByText(/Select agent/));
     // The rail is icon-only — entries are found by their accessible names
-    // (the tooltip text). Devin is dimmed/disabled.
+    // (the tooltip text). Only INSTALLED agents render: uninstalled ones
+    // (Devin) are hidden entirely instead of ghosting as disabled tabs.
     const zed = await screen.findByRole("tab", { name: "Zed" });
     expect(zed).toBeTruthy();
-    const devin = screen.getByRole("tab", { name: "Devin" });
-    expect((devin as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole("tab", { name: "Devin" })).toBeNull();
     // Rail click drives the right pane; the Default row commits the pick.
     fireEvent.click(zed);
     fireEvent.click(await screen.findByText(/the agent picks its own model/i));

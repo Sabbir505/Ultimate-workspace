@@ -245,6 +245,10 @@
 .composer-mic-btn {
   width: 24px;
   height: 24px;
+  /* Kill the global `button` token padding (5px 11px): with box-sizing
+     border-box it left a 0.4px content box that flex-shrank the icon to
+     invisibility. */
+  padding: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -284,6 +288,60 @@
 :root[data-theme="light"] .composer-mic-btn:hover:not(:disabled) {
   background: rgba(0, 0, 0, 0.1);
   border-color: rgba(0, 0, 0, 0.16);
+}
+
+/* Floating live-dictation pill — hovers above the composer card, top center
+   (.chat-composer is position:relative). Wave bars only. */
+.voice-pill {
+  position: absolute;
+  top: -40px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: rgba(24, 24, 28, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(8px);
+  z-index: 40;
+  white-space: nowrap;
+}
+.voice-wave {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 26px;
+}
+.voice-wave span {
+  width: 3px;
+  border-radius: 2px;
+  background: linear-gradient(to top, rgba(214, 69, 69, 0.55), var(--danger, #d64545));
+  transition: height 0.09s linear;
+}
+/* Ghost text for the in-flight transcription — lives inside the card, below
+   the input; persists from first partial through the final pass. */
+.voice-live {
+  padding: 4px 12px 0;
+}
+.voice-partial {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  font-style: italic;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+:root[data-theme="light"] .voice-pill {
+  background: rgba(252, 252, 253, 0.94);
+  border-color: rgba(0, 0, 0, 0.09);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+}
+:root[data-theme="light"] .voice-wave span {
+  background: linear-gradient(to top, rgba(214, 69, 69, 0.45), var(--danger, #d64545));
 }
 
 /* Mic button inner states: spinner for transcribing, stop square for recording. */
@@ -1068,12 +1126,12 @@
   background: var(--surface-1, rgba(255, 255, 255, 0.08));
 }
 .composer-send-btn {
-  width: 30px;
-  height: 30px;
+  width: 24px;
+  height: 24px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 15px;
+  font-size: 13px;
   line-height: 1;
   border: none;
   border-radius: 50%;
@@ -1081,6 +1139,7 @@
   color: var(--accent-contrast, #fff);
   cursor: pointer;
   flex-shrink: 0;
+  padding: 0;
 }
 .composer-send-btn:hover:not(:disabled) {
   filter: brightness(0.9);

@@ -82,16 +82,33 @@ slides). No secrets, no network side effects. If the document you just built \
 falls short of this guide, regenerate it now.";
 
 /// Layout guide for `generate_diagram` — same progressive-disclosure contract
-/// as DOC_STYLE_GUIDE.
+/// as DOC_STYLE_GUIDE. Routes each visual job to the format that renders it
+/// with the highest fidelity (Claude-style): auto-layouted Mermaid for graph
+/// diagrams, React+Recharts for charts, single-file HTML for interactive
+/// explainers, hand-authored SVG only for freeform static art.
 pub(super) const DIAGRAM_STYLE_GUIDE: &str = "\
-DIAGRAM LAYOUT GUIDE — deliberate visual hierarchy: nested groupings/containers, \
-a 2-D grid of sub-nodes (not a single row), mixed box sizes, bold-label-plus-\
-dim-description two-line nodes, solid primary-flow arrows with a dashed \
-feedback line looping back, and consistent colour per category. Put the title \
-as a <text> at the top of the SVG, above the flow. Pure SVG is true vector and \
-exports crisply to SVG and PNG; fall back to HTML/CSS boxes only if a layout \
-genuinely needs text reflow the SVG can't do. If the diagram you just built \
-looks flat or linear, regenerate it with this guide applied.";
+VISUAL ROUTING — pick the format by job, not habit:
+1. Flowcharts, sequence, ER, state, journey or git-graph diagrams: write a ```mermaid \
+block (or a .mmd file) instead of hand-positioning boxes — Mermaid auto-layouts \
+nodes/edges and always comes out clean. Reserve generate_diagram for freeform \
+static illustration (concept art of an architecture, annotated sketches).
+2. Charts and dashboards (bar/line/pie/area/scatter, KPI panels): create a .tsx \
+file via write_file — the preview sandbox ships pre-installed recharts, d3 and \
+lucide-react (import { LineChart, BarChart, PieChart, XAxis, ... } from \"recharts\"; \
+import { Camera } from \"lucide-react\"), so compose real components instead of \
+drawing axes by hand. Default-export the dashboard component.
+3. Interactive explainers (sliders, buttons, step-through demos): a single-file \
+HTML page via write_file — HTML+CSS+JS in one file, controls fully wired, and if \
+you need a library load it ONLY from https://cdnjs.cloudflare.com (the preview \
+sandbox blocks every other external host).
+4. generate_diagram (inline-SVG HTML): freeform static vector art only. Follow \
+the layout guide below and keep the SVG pure (no <script>/<iframe> — the preview \
+sandbox strips them). \
+Deliberate visual hierarchy: nested groupings/containers, a 2-D grid of sub-nodes \
+(not a single row), mixed box sizes, bold-label-plus-dim-description two-line nodes, \
+solid primary-flow arrows with a dashed feedback line looping back, and consistent \
+colour per category. Put the title as a <text> at the top of the SVG, above the flow. \
+If the diagram you just built looks flat or linear, regenerate it with this guide applied.";
 
 /// Build a rich document by running the model's Python (python-docx etc.).
 pub(super) async fn generate_document(artifacts_dir: &Path, args: &Value) -> ToolOutcome {

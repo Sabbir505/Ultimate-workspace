@@ -303,15 +303,17 @@ const GENERATE_DOCUMENT_DESC: &str = "Create a professionally designed \
     it and regenerate if the first attempt falls short. Imports allowed: \
     stdlib, conduit_docgen, python-docx, python-pptx, openpyxl, reportlab.";
 
-const GENERATE_DIAGRAM_DESC: &str = "Create a hand-styled diagram as a \
-    self-contained .html file — the tool for EVERY diagram (architecture, \
-    flowchart, sequence, mind-map, …). Author it as ONE root inline <svg> \
-    (explicit xmlns, viewBox, width/height): nodes as <rect rx=..>, labels as \
-    <text>, connectors as <path>/<line> with an arrowhead <marker>; wrap that \
-    svg in a minimal complete HTML document in the `html` argument. Inline \
-    presentation only — no external resources, scripts, or CDN fonts. Do NOT \
-    emit mermaid blocks. The full layout guide is returned with the tool \
-    result; regenerate if the first attempt looks flat.";
+const GENERATE_DIAGRAM_DESC: &str = "Create a freeform STATIC vector illustration \
+    (concept sketch, annotated architecture art) as a self-contained .html file. \
+    Author it as ONE root inline <svg> (explicit xmlns, viewBox, width/height): \
+    nodes as <rect rx=..>, labels as <text>, connectors as <path>/<line> with an \
+    arrowhead <marker>; wrap that svg in a minimal complete HTML document in the \
+    `html` argument. Inline presentation only — no external resources, scripts, \
+    or CDN fonts. For structured graph diagrams (flowchart, sequence, ER, state, \
+    mind-map) prefer a ```mermaid block — Mermaid auto-layouts and renders live in \
+    the chat. For charts/dashboards prefer a .tsx file via write_file (the preview \
+    sandbox ships recharts/d3/lucide-react). The full routing + layout guide is \
+    returned with the tool result; regenerate if the first attempt looks flat.";
 
 const FETCH_URL_DESC: &str = "Fetch a specific web page by URL and return its \
     readable text content (HTML stripped). You CAN open any public web URL \
@@ -370,7 +372,12 @@ const SEARCH_CONTENT_DESC: &str = "Search the **content** of files under a direc
 
 const WRITE_FILE_DESC: &str = "Create or overwrite a file with the given text \
     content. Pass an absolute path. Mutating — may require approval depending \
-    on the session's permission mode. Creates parent directories as needed.";
+    on the session's permission mode. Creates parent directories as needed. \
+    Visual routing: charts/dashboards → a .tsx component importing recharts / \
+    d3 / lucide-react (pre-installed in the live preview sandbox, default-export \
+    the component); interactive HTML explainers → a single .html file (external \
+    libraries only from https://cdnjs.cloudflare.com); Mermaid graph diagrams → \
+    a .mmd file or a ```mermaid block.";
 
 const EDIT_FILE_DESC: &str = "Edit an existing file by replacing the first \
     occurrence of `find` with `replace`, or append to it when `append` is set. \

@@ -1070,6 +1070,15 @@ mod tests {
     fn git_init_makes_a_repo() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path();
+        // Some dev machines keep their HOME under git (dotfiles repos), which
+        // makes every tempdir "inside a work tree" via upward traversal — the
+        // test's premise can't hold there. Skip rather than fail spuriously.
+        if std::env::temp_dir().join(".git").exists()
+            || is_git_repo(&std::env::temp_dir())
+        {
+            eprintln!("skipping: temp dir itself is inside a git repo on this machine");
+            return;
+        }
         // Sanity: a fresh temp dir is not a git repo.
         assert!(!is_git_repo(path));
         assert!(!path.join(".git").exists());
@@ -1121,6 +1130,13 @@ mod tests {
     #[test]
     fn get_changed_files_empty_on_non_repo() {
         let dir = tempfile::tempdir().expect("tempdir");
+        // Skip on machines whose temp dir sits inside a git repo (dotfiles
+        // HOME) — the "non-repo" premise can't hold there. See
+        // git_init_makes_a_repo.
+        if is_git_repo(dir.path()) {
+            eprintln!("skipping: temp dir itself is inside a git repo on this machine");
+            return;
+        }
         let files = get_changed_files(dir.path());
         assert!(files.is_empty());
     }

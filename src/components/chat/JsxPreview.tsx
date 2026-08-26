@@ -3,9 +3,11 @@
 // A ```jsx / ```tsx code fence in an assistant message is transpiled in the
 // main window with @babel/standalone (lazy-loaded on first use) and rendered
 // inside a sandboxed iframe. The iframe carries its own inlined React +
-// ReactDOM UMD bundles (imported as raw strings at build time), so previews
-// work fully offline and cannot reach the parent window, cookies, or Tauri
-// APIs (`sandbox="allow-scripts"` only — no `allow-same-origin`).
+// ReactDOM UMD bundles (imported as raw strings at build time), plus a
+// curated chart/icon library set — recharts, d3, lucide-react (vendored UMDs,
+// version-pinned in src/assets/vendor) — so previews work fully offline and
+// cannot reach the parent window, cookies, or Tauri APIs
+// (`sandbox="allow-scripts"` only — no `allow-same-origin`).
 //
 // The user code is expected to `export default` a component (Claude's
 // convention); a handful of common global names (App, Example, …) are also
@@ -18,6 +20,12 @@ import { useSyntaxTheme } from "../../hooks/useSyntaxTheme";
 // package `exports` maps don't expose their `umd/` files as bare specifiers.
 import reactUMD from "../../../node_modules/react/umd/react.production.min.js?raw";
 import reactDomUMD from "../../../node_modules/react-dom/umd/react-dom.production.min.js?raw";
+// Curated artifact libraries (Claude-artifact parity): charts, icons, and
+// low-level viz primitives. Vendored UMDs — see src/assets/vendor/.
+import propTypesUMD from "../../assets/vendor/prop-types.umd.min.js?raw";
+import rechartsUMD from "../../assets/vendor/recharts.umd.min.js?raw";
+import d3UMD from "../../assets/vendor/d3.umd.min.js?raw";
+import lucideReactUMD from "../../assets/vendor/lucide-react.umd.min.js?raw";
 
 type BabelStandalone = typeof import("@babel/standalone");
 
@@ -28,6 +36,7 @@ function loadBabel(): Promise<BabelStandalone> {
 }
 
 /** Transpile JSX/TSX to sandbox-runnable CommonJS. Throws on syntax errors.
+ *  Exported for tests.
  *
  *  SECURITY: we cap the source size at compile time so a misbehaving model
  *  can't ship a pathologically large JSX/TSX payload that bogs down Babel's
@@ -36,7 +45,7 @@ function loadBabel(): Promise<BabelStandalone> {
  *  almost certainly adversarial or broken). */
 const MAX_JSX_SOURCE_BYTES = 1_000_000;
 
-async function transpile(code: string, isTsx: boolean): Promise<string> {
+export async function transpile(code: string, isTsx: boolean): Promise<string> {
   const Babel = await loadBabel();
   const source =
     code.length > MAX_JSX_SOURCE_BYTES
@@ -56,9 +65,10 @@ async function transpile(code: string, isTsx: boolean): Promise<string> {
   return result.code ?? "";
 }
 
-/** Assemble the sandbox document: inlined React runtimes + a CommonJS `require`
- *  shim + the transpiled user module + a bootstrap that mounts the component. */
-function buildSrcDoc(compiled: string): string {
+/** Assemble the sandbox document: inlined React runtime + curated libraries +
+ *  a CommonJS `require` shim + the transpiled user module + a bootstrap that
+ *  mounts the component. Exported for tests. */
+export function buildSrcDoc(compiled: string): string {
   // The transpiled module references require("react") etc.; map those to the
   // inlined UMD globals. Escape </script> so the code can't break out.
   const safe = compiled.replace(/<\/script>/gi, "<\\/script>");
@@ -85,8 +95,13 @@ function buildSrcDoc(compiled: string): string {
 </head>
 <body>
 <div id="root"></div>
+<script>window.process = window.process || { env: { NODE_ENV: "production" } };</script>
 <script>${reactUMD}</script>
 <script>${reactDomUMD}</script>
+<script>${propTypesUMD}</script>
+<script>${rechartsUMD}</script>
+<script>${d3UMD}</script>
+<script>${lucideReactUMD}</script>
 <script>
 (function () {
   var root = document.getElementById("root");
@@ -100,6 +115,10 @@ function buildSrcDoc(compiled: string): string {
   function require(name) {
     if (name === "react") return window.React;
     if (name === "react-dom" || name === "react-dom/client") return window.ReactDOM;
+    if (name === "prop-types") return window.PropTypes;
+    if (name === "recharts") return window.Recharts;
+    if (name === "d3") return window.d3;
+    if (name === "lucide-react" || name === "lucide") return window.LucideReact;
     throw new Error("module \\"" + name + "\\" is not available in the preview sandbox");
   }
   try {

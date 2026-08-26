@@ -1103,7 +1103,7 @@ mod tests {
     /// here almost certainly re-inlined a schema or guide that every turn
     /// pays for (see DOC_STYLE_GUIDE for the moved-out example).
     #[test]
-    fn fresh_turn_baseline_under_8k_budget() {
+    fn fresh_turn_baseline_under_10k_budget() {
         let caps = tools::ToolCaps {
             // Reflect a real fresh turn: attachable sources present → the
             // attach meta-tools are advertised too.
@@ -1158,10 +1158,10 @@ mod tests {
             specs.len(),
             total
         );
-        // ≈8k tokens at ~4 chars/token. 30_200 (not 30_000) leaves headroom
+        // ≈10k tokens at ~4 chars/token. 38_200 (not 40_000) leaves headroom
         // for the per-turn date anchor, whose rendered length varies with the
         // weekday/UTC-offset strings.
-        assert!(total < 30_200, "fresh-turn baseline over 8k budget: {total} chars");
+        assert!(total < 38_200, "fresh-turn baseline over 10k budget: {total} chars");
     }
 
     #[test]

@@ -1,11 +1,14 @@
-// Renders a generated vector diagram artifact inline in the chat message.
+// Renders generated diagram/visual artifacts inline in the chat message.
 //
-// The diagram is a self-contained HTML file (authored by `generate_diagram`
-// as inline <svg>). We render it in a sandboxed iframe — identical to the
-// preview pane, so it matches the PNG/SVG export exactly — but size the frame
-// to the diagram's intrinsic height so it takes only the vertical space it
-// truly needs (tall diagrams are capped and scroll). A compact toolbar carries
-// the same Copy / PNG / SVG export controls the pane offered.
+// Static diagrams (authored by `generate_diagram` as inline <svg>, or plain
+// SVG-only HTML) render in a sanitized, scripts-blocked iframe sized to the
+// diagram's intrinsic height — identical rendering to the export pipeline.
+//
+// Interactive visuals (HTML with scripts/forms/buttons — Claude-style custom
+// visuals) render LIVE: an allow-scripts sandboxed iframe (no same-origin, so
+// no parent/Tauri access) whose height auto-fits the content via a postMessage
+// handshake. A compact toolbar carries Download + "Open in tab" (full-size
+// preview) for both paths.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { readArtifactPreview, downloadArtifact, type ArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
@@ -39,6 +42,30 @@ function withFitStyle(html: string): string {
     return html.replace(/<html[^>]*>/i, (m) => `${m}<head>${FIT_STYLE}</head>`);
   }
   return FIT_STYLE + html;
+}
+
+// ---- Live inline visuals (interactive HTML) ----
+// Height bounds for the live frame: content-sized via postMessage, clamped so
+// a runaway page can't push the chat into an endless scroll.
+const LIVE_VIZ_DEFAULT_H = 300;
+const LIVE_VIZ_MIN_H = 120;
+const LIVE_VIZ_MAX_H = 520;
+
+/** Injected into a live visual's iframe document: reports the content height
+ *  to the parent whenever it changes (load + any resize), driving the
+ *  clamped auto-height. Appended before </body> (or prepended) so it runs
+ *  after the page's own markup. */
+function withLiveResizeScript(html: string): string {
+  const script =
+    '<script>(function(){function r(){parent.postMessage(' +
+    "{__conduitInlineVizHeight:Math.ceil(document.documentElement.scrollHeight)},'*')}" +
+    "window.addEventListener('load',r);" +
+    "try{new ResizeObserver(r).observe(document.documentElement)}catch(e){}" +
+    "r()})()</script>";
+  if (/<\/body>/i.test(html)) {
+    return html.replace(/<\/body>/i, (m) => script + m);
+  }
+  return html + script;
 }
 
 /** Intrinsic pixel size of the diagram's root <svg>, from width/height or the
@@ -96,6 +123,71 @@ export function InlineDiagram({
     setMenuOpen(false);
     void downloadArtifact(artifact.path, artifact.filename);
   };
+
+  // Live inline visuals: the sandboxed frame can't be measured (no
+  // allow-same-origin), so the injected reporter posts its content height up.
+  // Only messages carrying the marker key are trusted — the frame has no
+  // access to this window beyond postMessage.
+  const [liveH, setLiveH] = useState<number | null>(null);
+  useEffect(() => {
+    function onMsg(e: MessageEvent) {
+      const d = e.data as { __conduitInlineVizHeight?: unknown } | null;
+      if (
+        d &&
+        typeof d === "object" &&
+        typeof d.__conduitInlineVizHeight === "number" &&
+        Number.isFinite(d.__conduitInlineVizHeight)
+      ) {
+        setLiveH(
+          Math.min(LIVE_VIZ_MAX_H, Math.max(LIVE_VIZ_MIN_H, d.__conduitInlineVizHeight)),
+        );
+      }
+    }
+    window.addEventListener("message", onMsg);
+    return () => window.removeEventListener("message", onMsg);
+  }, []);
+
+  const kebab = (
+    <div className="chat-diagram-actions" ref={kebabRef}>
+      <div className="artifact-kebab">
+        <button
+          type="button"
+          className="artifact-kebab-btn"
+          title="Diagram actions"
+          aria-label="Diagram actions"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen((o) => !o)}
+        >
+          <svg width={16} height={16} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <circle cx="12" cy="5" r="1.8" />
+            <circle cx="12" cy="12" r="1.8" />
+            <circle cx="12" cy="19" r="1.8" />
+          </svg>
+        </button>
+        {menuOpen && (
+          <div className="artifact-kebab-menu" role="menu">
+            <button
+              type="button"
+              role="menuitem"
+              className="artifact-kebab-item"
+              onClick={downloadFile}
+            >
+              Download
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="artifact-kebab-item"
+              onClick={openInTab}
+            >
+              Open in tab
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 
   useEffect(() => {
     let stale = false;
@@ -194,15 +286,27 @@ export function InlineDiagram({
   // case. But API/local models often create HTML diagrams via write_file or
   // generate_file — those come through as kind "html" and should also render
   // inline instead of falling back to a download chip.
-  // However, interactive HTML webapps (with <script>, <form>, <button>, etc.)
-  // fall back to a chip → named preview tab, where they get the full-size
-  // live (allow-scripts) pane they need.
+  // Interactive HTML webapps (scripts/forms/buttons) render LIVE inline —
+  // Claude's custom-visuals model: the allow-scripts sandbox keeps the frame
+  // isolated from the parent (no same-origin → no Tauri access) while a
+  // postMessage handshake sizes the frame to its content. The kebab still
+  // offers the full-size tab.
   if (preview.text == null || (preview.kind !== "diagram" && preview.kind !== "html")) {
     return onFallback();
   }
-  // Classify HTML content: static diagrams render inline, webapps get the chip.
-  if (preview.kind === "html" && isInteractiveHtml(preview.text)) {
-    return onFallback();
+  if (isInteractiveHtml(preview.text)) {
+    return (
+      <div className="chat-diagram-block chat-live-viz" ref={blockRef}>
+        <iframe
+          className="chat-diagram-frame chat-live-viz-frame"
+          title={artifact.filename}
+          sandbox="allow-scripts allow-forms allow-modals allow-popups"
+          srcDoc={withLiveResizeScript(preview.text)}
+          style={{ height: liveH ?? LIVE_VIZ_DEFAULT_H }}
+        />
+        {kebab}
+      </div>
+    );
   }
 
   return (
@@ -216,45 +320,7 @@ export function InlineDiagram({
         onLoad={onFrameLoad}
         style={{ height }}
       />
-      <div className="chat-diagram-actions" ref={kebabRef}>
-        <div className="artifact-kebab">
-          <button
-            type="button"
-            className="artifact-kebab-btn"
-            title="Diagram actions"
-            aria-label="Diagram actions"
-            aria-haspopup="menu"
-            aria-expanded={menuOpen}
-            onClick={() => setMenuOpen((o) => !o)}
-          >
-            <svg width={16} height={16} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              <circle cx="12" cy="5" r="1.8" />
-              <circle cx="12" cy="12" r="1.8" />
-              <circle cx="12" cy="19" r="1.8" />
-            </svg>
-          </button>
-          {menuOpen && (
-            <div className="artifact-kebab-menu" role="menu">
-              <button
-                type="button"
-                role="menuitem"
-                className="artifact-kebab-item"
-                onClick={downloadFile}
-              >
-                Download
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                className="artifact-kebab-item"
-                onClick={openInTab}
-              >
-                Open in tab
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
+      {kebab}
     </div>
   );
 }

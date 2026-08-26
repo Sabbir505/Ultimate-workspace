@@ -2509,19 +2509,7 @@ pub async fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
     let size = meta.len();
 
     // Classify by extension.
-    let text_kind = match ext.as_str() {
-        "md" | "markdown" => Some("markdown"),
-        "csv" => Some("csv"),
-        "json" => Some("json"),
-        "html" | "htm" => Some("html"),
-        "txt" | "log" | "text" => Some("text"),
-        "tsx" | "jsx" => Some("jsx"),
-        "js" | "ts" | "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "hpp"
-        | "sh" | "bash" | "yaml" | "yml" | "toml" | "xml" | "sql" | "rb" | "php" | "css" => {
-            Some("code")
-        }
-        _ => None,
-    };
+    let text_kind = classify_text_ext(&ext);
     let is_image = matches!(
         ext.as_str(),
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp"
@@ -2690,12 +2678,99 @@ pub async fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
     })
 }
 
+/// Extension → preview `kind` for text-like artifacts. Extracted from
+/// `read_artifact_preview` so the routing table is unit-testable.
+fn classify_text_ext(ext: &str) -> Option<&'static str> {
+    match ext {
+        "md" | "markdown" => Some("markdown"),
+        "csv" => Some("csv"),
+        "json" => Some("json"),
+        "html" | "htm" => Some("html"),
+        // Mermaid sources render as diagrams (MermaidDiagram), not code text.
+        "mmd" | "mermaid" => Some("mermaid"),
+        "txt" | "log" | "text" => Some("text"),
+        "tsx" | "jsx" => Some("jsx"),
+        "js" | "ts" | "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "hpp"
+        | "sh" | "bash" | "yaml" | "yml" | "toml" | "xml" | "sql" | "rb" | "php" | "css" => {
+            Some("code")
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::{classify_text_ext, get_file_mtime};
+
+    #[test]
+    fn mermaid_sources_classify_as_mermaid_kind() {
+        assert_eq!(classify_text_ext("mmd"), Some("mermaid"));
+        assert_eq!(classify_text_ext("mermaid"), Some("mermaid"));
+        // Case-insensitivity is handled upstream (ext is lowercased), but the
+        // table itself must only hold lowercase entries.
+        assert_eq!(classify_text_ext("MMD"), None, "caller lowercases the ext");
+    }
+
+    #[test]
+    fn existing_kinds_unchanged() {
+        assert_eq!(classify_text_ext("md"), Some("markdown"));
+        assert_eq!(classify_text_ext("html"), Some("html"));
+        assert_eq!(classify_text_ext("tsx"), Some("jsx"));
+        assert_eq!(classify_text_ext("py"), Some("code"));
+        assert_eq!(classify_text_ext("exe"), None);
+    }
+
+    #[test]
+    fn get_file_mtime_reports_secs_and_missing_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("artifact.html");
+        std::fs::write(&file, "<html></html>").expect("write");
+
+        let mtime = get_file_mtime(file.to_string_lossy().into_owned())
+            .expect("ipc ok")
+            .expect("existing file has an mtime");
+        assert!(mtime > 0, "mtime is secs-since-epoch, got {mtime}");
+
+        // A file written later has a >= mtime (same-second writes allowed).
+        std::fs::write(&file, "<html>v2</html>").expect("rewrite");
+        let mtime2 = get_file_mtime(file.to_string_lossy().into_owned())
+            .expect("ipc ok")
+            .expect("still exists");
+        assert!(mtime2 >= mtime);
+
+        assert_eq!(
+            get_file_mtime(dir.path().join("gone.html").to_string_lossy().into_owned())
+                .expect("ipc ok"),
+            None,
+            "missing file → None, not an error (preview keeps last render)"
+        );
+    }
+}
+
 /// True when a LibreOffice `soffice` binary is reachable, which is what the
 /// pptx→pdf preview path needs. The frontend uses this to show a one-line
 /// install hint above pptx previews that fell back to the HTML converter.
 #[tauri::command]
 pub fn is_libreoffice_available() -> bool {
     crate::chat::office::libreoffice_available()
+}
+
+/// Last-modified time of a file, in seconds since the Unix epoch. The
+/// artifact preview panes poll this (cheap stat) to hot-reload when the model
+/// edits an open artifact file. `None` when the file is gone (deleted while
+/// previewed) — the caller keeps showing the last good preview.
+#[tauri::command]
+pub fn get_file_mtime(path: String) -> CmdResult<Option<u64>> {
+    let meta = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(_) => return Ok(None),
+    };
+    let secs = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    Ok(secs)
 }
 
 // ---- Artifact download ----

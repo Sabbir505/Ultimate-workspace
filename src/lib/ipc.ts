@@ -1108,6 +1108,7 @@ export interface ArtifactPreview {
     | "json"
     | "html"
     | "diagram"
+    | "mermaid"
     | "code"
     | "jsx"
     | "image"
@@ -1749,6 +1750,12 @@ export const readArtifactPreview = (path: string) =>
  *  When false, pptx previews fall back to the built-in HTML converter. */
 export const isLibreofficeAvailable = () =>
   safeInvoke<boolean>("is_libreoffice_available");
+
+/** Last-modified time of a file (seconds since epoch), or null when the file
+ *  doesn't exist. Artifact preview panes poll this to hot-reload when the
+ *  model edits an open artifact file. */
+export const getFileMtime = (path: string) =>
+  safeInvoke<number | null>("get_file_mtime", { path });
 
 /** Open a generated artifact file with the OS default application. */
 export async function openArtifact(path: string): Promise<void> {

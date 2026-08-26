@@ -277,6 +277,14 @@ mod tests {
         let conn = db::mem();
         let cs = chat_db::create_chat_session(&conn, "anthropic", "m", None).unwrap();
 
+        // Skip on machines whose temp dir sits inside a git repo (dotfiles
+        // HOME): the "non-repo dir" premise can't hold there — see
+        // git::tests::git_init_makes_a_repo.
+        if git::is_git_repo(dir.path()) {
+            eprintln!("skipping: temp dir itself is inside a git repo on this machine");
+            return;
+        }
+
         // Non-repo dir: no-op, no rows.
         maybe_baseline(None, &conn, &cs.id, dir.path());
         after_turn(None, &conn, &cs.id, Some(1), dir.path());

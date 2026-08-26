@@ -307,7 +307,7 @@ pub fn core_prompt_for(provider: ChatProviderId, model: &str) -> String {
 /// cutoff (e.g. answering from 2025) — and worse, it feeds that stale year
 /// into `web_search` queries. Computed per turn (not once at startup) so a
 /// session left open overnight rolls over midnight correctly. Kept ~150
-/// chars: the fresh-turn prompt budget (`fresh_turn_baseline_under_8k_budget`)
+/// chars: the fresh-turn prompt budget (`fresh_turn_baseline_under_10k_budget`)
 /// has limited headroom.
 pub(crate) fn current_datetime_segment() -> String {
     let now = chrono::Local::now();

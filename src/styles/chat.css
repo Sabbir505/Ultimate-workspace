@@ -1362,6 +1362,15 @@ div[data-index]:has(.chat-session-row.menu-open) {
   border-radius: var(--radius-sm);
   background: #fff;
 }
+/* Live interactive visuals: content-sized via postMessage (height is set
+   inline, clamped 120–520px), full chat width, scrollable inside if the
+   page exceeds the clamp. */
+.chat-live-viz {
+  max-width: 100%;
+}
+.chat-live-viz .chat-live-viz-frame {
+  height: 300px; /* replaced by the inline postMessage-driven height */
+}
 
 /* Vertical three-dot (kebab) menu for the inline diagram. */
 .artifact-kebab {

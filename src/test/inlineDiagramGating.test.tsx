@@ -1,8 +1,9 @@
 // Tests the InlineDiagram gating: artifacts classified as `kind: "diagram"`
-// OR `kind: "html"` render inline in the chat — BUT only if the HTML content
-// looks like a static diagram (has SVG, no scripts/forms). Interactive HTML
-// webapps (with <script>, <form>, <button>) fall back to the chip → Canvas
-// preview, where they get the full-size interactive pane they need.
+// OR `kind: "html"` render inline in the chat. Static content (SVG, no
+// scripts/forms) renders in the sanitized measuring frame; interactive HTML
+// webapps (with <script>, <form>, <button>) render LIVE inline — an
+// allow-scripts sandboxed iframe with the postMessage resize handshake
+// (Claude's custom-visuals model) — and the kebab offers the full-size tab.
 // readArtifactPreview is mocked so no live artifact on disk is needed.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, waitFor } from "@testing-library/react";
@@ -90,9 +91,10 @@ describe("InlineDiagram gating (diagram vs plain html)", () => {
     expect(container.querySelector(".chip-fallback")).toBeNull();
   });
 
-  it("falls back to chip for an interactive HTML webapp (scripts/forms)", async () => {
-    // An HTML file with <script> or <form> is an interactive webapp, not a
-    // static diagram — it needs the full-size Canvas pane.
+  it("renders an interactive HTML webapp LIVE inline (no chip fallback)", async () => {
+    // An HTML file with <script> or <form> is an interactive webapp — it now
+    // renders live inline in an allow-scripts (no same-origin) iframe with
+    // the postMessage resize reporter, instead of falling back to a chip.
     mockedRead.mockResolvedValue(
       preview({
         kind: "html",
@@ -103,9 +105,17 @@ describe("InlineDiagram gating (diagram vs plain html)", () => {
       <InlineDiagram artifact={artifact("app.html")} onFallback={() => <div className="chip-fallback" />} />,
     );
     await waitFor(() => {
-      expect(container.querySelector(".chip-fallback")).not.toBeNull();
+      const frame = container.querySelector("iframe.chat-live-viz-frame");
+      expect(frame).not.toBeNull();
     });
-    expect(container.querySelector(".chat-diagram-frame")).toBeNull();
+    const frame = container.querySelector("iframe.chat-live-viz-frame")!;
+    const sandbox = frame.getAttribute("sandbox") ?? "";
+    expect(sandbox).toContain("allow-scripts");
+    expect(sandbox).not.toContain("allow-same-origin");
+    expect(frame.getAttribute("srcdoc")).toContain("__conduitInlineVizHeight");
+    // The page's own script survives (live, not sanitized).
+    expect(frame.getAttribute("srcdoc")).toContain("alert('hi')");
+    expect(container.querySelector(".chip-fallback")).toBeNull();
   });
 
   it("renders inline for HTML with SVG + tiny script (styling only)", async () => {

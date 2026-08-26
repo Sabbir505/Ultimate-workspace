@@ -14,6 +14,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { useSyntaxTheme } from "../../hooks/useSyntaxTheme";
 import {
   downloadArtifact,
+  getFileMtime,
   isLibreofficeAvailable,
   openArtifact,
   readArtifactPreview,
@@ -22,6 +23,7 @@ import {
 import type { ChatArtifact } from "../../state/chat";
 import { ArtifactExportMenu } from "./ArtifactExportMenu";
 import { JsxPreview } from "./JsxPreview";
+import { MermaidDiagram } from "./MermaidDiagram";
 import { sanitizeHtml } from "../../lib/sanitize";
 import { isInteractiveHtml } from "../../lib/interactiveHtml";
 
@@ -138,7 +140,20 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
   if (kind === "markdown" && text != null) {
     return (
       <div className="chat-markdown artifact-preview-md">
-        <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{text}</ReactMarkdown>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm, remarkMath]}
+          rehypePlugins={[rehypeKatex]}
+          components={{
+            // ```mermaid fences render as diagrams, not code blocks — the
+            // same pipeline chat messages use (MermaidDiagram).
+            code({ node: _node, className, children, ...props }) {
+              if (/language-mermaid\b/.test(className ?? "")) {
+                return <MermaidDiagram code={String(children).replace(/\n$/, "")} />;
+              }
+              return <code className={className} {...props}>{children}</code>;
+            },
+          }}
+        >{text}</ReactMarkdown>
       </div>
     );
   }
@@ -168,6 +183,11 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
         draggable={false}
       />
     );
+  }
+  // Mermaid sources (.mmd/.mermaid): render as a themed diagram via the same
+  // pipeline chat fences use.
+  if (kind === "mermaid" && text != null) {
+    return <MermaidDiagram code={text} />;
   }
   // JSX/TSX files: render a live React preview with the same Preview/Code
   // toggle the inline chip uses. JsxPreview handles its own toolbar.
@@ -549,6 +569,43 @@ export function ArtifactPreviewPane({
     };
   }, [artifact.path, inline]);
 
+  // Hot-reload (Claude-style refine loop): the model can edit an open
+  // artifact file (write_file / edit_file, or the harness CLI writing it
+  // directly), so poll the file's mtime and re-read the preview when it
+  // changes. A cheap stat every 2s; the re-read only fires on actual change.
+  // A missing file (deleted mid-preview) keeps the last good render.
+  const [fileMtime, setFileMtime] = useState<number | null>(null);
+  useEffect(() => {
+    if (inline) return;
+    let stale = false;
+    setFileMtime(null); // reset when switching artifacts — first poll re-baselines
+    const tick = () => {
+      void getFileMtime(artifact.path)
+        .then((t) => {
+          if (!stale && t != null) setFileMtime(t);
+        })
+        .catch(() => {});
+    };
+    tick();
+    const iv = window.setInterval(tick, 2_000);
+    return () => {
+      stale = true;
+      window.clearInterval(iv);
+    };
+  }, [artifact.path, inline]);
+  useEffect(() => {
+    if (inline || fileMtime == null) return;
+    let stale = false;
+    void readArtifactPreview(artifact.path)
+      .then((p) => {
+        if (!stale) setPreview(p);
+      })
+      .catch(() => {}); // a mid-write read failing keeps the last good preview
+    return () => {
+      stale = true;
+    };
+  }, [fileMtime, artifact.path, inline]);
+
   if (inline) {
     // Inline JSX/TSX: no extra header — the pane tabs above already show the
     // filename + close, and JsxPreview brings its own Preview/Code toggle.
@@ -563,13 +620,14 @@ export function ArtifactPreviewPane({
     );
   }
 
-  // JSX/HTML/live-diagram: skip the full header (zoom/download/close) — the tab chip above
+  // JSX/HTML/mermaid/live-diagram: skip the full header (zoom/download/close) — the tab chip above
   // already shows the filename + close, and the Preview/Code toggle lives inside
   // the JsxPreview/HtmlPreview component. Only show the "open in default app" + a
   // download button for non-JSX/HTML.
   const isJsxOrHtml =
     preview?.kind === "jsx" ||
     preview?.kind === "html" ||
+    preview?.kind === "mermaid" ||
     (preview?.kind === "diagram" && preview.text != null && isInteractiveHtml(preview.text));
 
   return (

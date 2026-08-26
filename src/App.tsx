@@ -23,7 +23,7 @@ const ToolPanel = lazy(() => import("./components/panes/ToolPanel").then((m) => 
 import { PeekPanel } from "./components/peek/PeekPanel";
 import { ProjectSettingsPanel } from "./components/sidebar/ProjectSettingsPanel";
 import { Sidebar } from "./components/sidebar/Sidebar";
-import { PanelIcon } from "./components/common/PanelIcon";
+import { AppLogo } from "./components/common/AppLogo";
 import { ModelDownloadIndicator } from "./components/settings/ModelDownloadIndicator";
 import { ChatView } from "./components/chat/ChatView";
 import { FolderNotch, GitHubNotch } from "./components/chat/ChatComposer";
@@ -65,6 +65,11 @@ export default function App() {
   const projectSettingsFor = useUiStore((s) => s.projectSettingsFor);
   const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
+  // View back/forward, exposed in the collapsed rail (and expanded sidebar header).
+  const viewHistory = useUiStore((s) => s.viewHistory);
+  const viewIndex = useUiStore((s) => s.viewIndex);
+  const navBack = useUiStore((s) => s.navBack);
+  const navForward = useUiStore((s) => s.navForward);
   const toolPanelCollapsed = useUiStore((s) => s.toolPanelCollapsed);
   const toggleToolPanel = useUiStore((s) => s.toggleToolPanel);
   const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
@@ -163,14 +168,39 @@ export default function App() {
       <div className="main">
         <div className="toolbar">
           {sidebarCollapsed && (
-            <button
-              className="sidebar-restore"
-              onClick={toggleSidebar}
-              title="Show sidebar"
-              aria-label="Show sidebar"
-            >
-              <PanelIcon />
-            </button>
+            <div className="sidebar-collapsed-bar">
+              {/* Logo restores the sidebar; arrows keep view nav reachable. */}
+              <button
+                className="sidebar-restore"
+                onClick={toggleSidebar}
+                title="Show sidebar"
+                aria-label="Show sidebar"
+              >
+                <AppLogo size={20} />
+              </button>
+              <button
+                className="sidebar-nav-btn"
+                onClick={navBack}
+                disabled={viewIndex <= 0}
+                title="Back"
+                aria-label="Back"
+              >
+                <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="m15 18-6-6 6-6" />
+                </svg>
+              </button>
+              <button
+                className="sidebar-nav-btn"
+                onClick={navForward}
+                disabled={viewIndex >= viewHistory.length - 1}
+                title="Forward"
+                aria-label="Forward"
+              >
+                <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="m9 18 6-6-6-6" />
+                </svg>
+              </button>
+            </div>
           )}
           {activeView === "chat" && (
             <>

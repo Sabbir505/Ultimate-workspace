@@ -70,6 +70,11 @@ export interface PendingReplace {
 
 export interface UiState {
   activeView: ActiveView;
+  /** Browser-style back/forward history over visited views. `viewIndex`
+   *  points into `viewHistory`; back/forward move it instead of pushing.
+   *  Written only by setActiveView / navBack / navForward. */
+  viewHistory: ActiveView[];
+  viewIndex: number;
   paletteOpen: boolean;
   peek: PeekState;
   pendingReplace: PendingReplace | null;
@@ -132,6 +137,10 @@ export interface UiState {
   updateModelDownload: (p: ModelDownloadProgress) => void;
 
   setActiveView: (view: ActiveView) => void;
+  /** Step one entry back through the visited views (no-op at the start). */
+  navBack: () => void;
+  /** Step one entry forward through the visited views (no-op at the end). */
+  navForward: () => void;
   /** Conversational artifact creation: form data to prefill when the editor opens.
    *  This is a transient bridge between the proposal card "Edit" action and the
    *  SkillsLibrary/AutomationsView forms. The `chatSessionId` / `proposalId`
@@ -235,6 +244,8 @@ const TOAST_TTL_MS: Record<ToastKind, number> = { error: 9000, info: 5000, succe
 
 export const useUiStore = create<UiState>((set) => ({
   activeView: "chat",
+  viewHistory: ["chat"],
+  viewIndex: 0,
   pendingArtifactFormData: null,
   paletteOpen: false,
   peek: { open: false, mode: "file", projectId: null, filePath: null, cwd: null },
@@ -296,7 +307,28 @@ export const useUiStore = create<UiState>((set) => ({
       return { modelDownloads: next };
     }),
 
-  setActiveView: (activeView) => set({ activeView }),
+  setActiveView: (activeView) =>
+    set((s) => {
+      // Same-view re-selects don't create history entries.
+      if (s.viewHistory[s.viewIndex] === activeView) return {};
+      // A new navigation truncates the forward branch (browser semantics),
+      // and the log is capped so endless switching can't grow it forever.
+      let history = [...s.viewHistory.slice(0, s.viewIndex + 1), activeView];
+      if (history.length > 50) history = history.slice(history.length - 50);
+      return { activeView, viewHistory: history, viewIndex: history.length - 1 };
+    }),
+  navBack: () =>
+    set((s) => {
+      if (s.viewIndex <= 0) return {};
+      const viewIndex = s.viewIndex - 1;
+      return { activeView: s.viewHistory[viewIndex], viewIndex };
+    }),
+  navForward: () =>
+    set((s) => {
+      if (s.viewIndex >= s.viewHistory.length - 1) return {};
+      const viewIndex = s.viewIndex + 1;
+      return { activeView: s.viewHistory[viewIndex], viewIndex };
+    }),
   setPendingArtifactFormData: (pendingArtifactFormData) => set({ pendingArtifactFormData }),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
   togglePalette: () => set((s) => ({ paletteOpen: !s.paletteOpen })),

@@ -18,6 +18,8 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { toastError, toastSuccess, exportChatZip, popOutChat, getMobilePairingInfo, type MobilePairingInfo } from "../../lib/ipc";
 import {
+  ArrowLeft,
+  ArrowRight,
   DollarSign,
   Folder,
   Library,
@@ -59,6 +61,11 @@ export function Sidebar() {
   const setPaletteOpen = useUiStore((s) => s.setPaletteOpen);
   const setGitPromptProjectId = useUiStore((s) => s.setGitPromptProjectId);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
+  // Browser-style back/forward over visited views.
+  const viewHistory = useUiStore((s) => s.viewHistory);
+  const viewIndex = useUiStore((s) => s.viewIndex);
+  const navBack = useUiStore((s) => s.navBack);
+  const navForward = useUiStore((s) => s.navForward);
 
   // Chat store
   const chatSessions = useChatStore((s) => s.sessions);
@@ -311,9 +318,33 @@ export function Sidebar() {
     <aside className="flex flex-col h-full bg-white/95 dark:bg-[#141414] backdrop-blur-xl border-r border-gray-200 dark:border-white/20 overflow-hidden select-none">
       {/* â”€â”€ Consolidated Header: branding + search + collapse in one block â”€â”€ */}
       <div data-tauri-drag-region className="p-3 border-b border-gray-200 dark:border-white/20">
-        {/* Branding */}
+        {/* Branding + back/forward view navigation (browser-style) */}
         <div className="flex items-center justify-between mb-2">
-          <strong className="text-sm font-bold text-gray-900 dark:text-white select-none">Conduit</strong>
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="flex items-center flex-shrink-0">
+              <button
+                type="button"
+                className="sidebar-nav-btn"
+                onClick={navBack}
+                disabled={viewIndex <= 0}
+                title="Back"
+                aria-label="Back"
+              >
+                <ArrowLeft size={14} strokeWidth={1.8} />
+              </button>
+              <button
+                type="button"
+                className="sidebar-nav-btn"
+                onClick={navForward}
+                disabled={viewIndex >= viewHistory.length - 1}
+                title="Forward"
+                aria-label="Forward"
+              >
+                <ArrowRight size={14} strokeWidth={1.8} />
+              </button>
+            </span>
+            <strong className="text-sm font-bold text-gray-900 dark:text-white select-none truncate">Conduit</strong>
+          </div>
           <UpdateButton />
         </div>
         <div className="flex items-center gap-2">

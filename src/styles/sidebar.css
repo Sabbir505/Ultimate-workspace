@@ -429,6 +429,39 @@ button.sidebar-section-label:hover {
   color: var(--text);
 }
 
+/* Back/forward view navigation. Lives in the sidebar header next to the
+ * Conduit brand, and stays available in the collapsed rail (App.tsx) so
+ * view switching works with the sidebar hidden. */
+.sidebar-nav-btn {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+}
+.sidebar-nav-btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.sidebar-nav-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Logo + nav arrows cluster at the start of the toolbar while collapsed. */
+.sidebar-collapsed-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
 
 
 /* Collapse-sidebar icon button (top of the sidebar) */

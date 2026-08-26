@@ -66,6 +66,25 @@ describe("DiagramLightbox", () => {
     fireEvent.click(container.querySelector(".diagram-lightbox")!);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it("fits an oversized SVG into the viewport instead of showing half", async () => {
+    const { container } = render(
+      <DiagramLightbox html="<svg width='2400' height='1800' viewBox='0 0 2400 1800'><rect width='2400' height='1800' /></svg>" filename="large.svg" onClose={() => {}} />,
+    );
+    const content = container.querySelector<HTMLElement>(".diagram-lightbox-content")!;
+    const svg = container.querySelector<SVGSVGElement>(".diagram-lightbox-doc svg")!;
+    Object.defineProperty(content, "clientWidth", { configurable: true, value: 900 });
+    Object.defineProperty(content, "clientHeight", { configurable: true, value: 600 });
+    Object.defineProperty(svg, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ width: 2400, height: 1800, top: 0, left: 0, right: 2400, bottom: 1800, x: 0, y: 0, toJSON: () => ({}) }),
+    });
+    await waitFor(() => {
+      const scale = container.querySelector<HTMLElement>(".diagram-lightbox-canvas")!.style.transform;
+      expect(scale).toMatch(/scale\(0\.[0-4]/);
+      expect(scale).not.toContain("scale(1)");
+    });
+  });
 });
 
 describe("MermaidDiagram render fallback", () => {

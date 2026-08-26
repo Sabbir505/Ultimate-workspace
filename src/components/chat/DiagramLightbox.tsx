@@ -117,30 +117,28 @@ export function DiagramLightbox({
     setPan({ x: 0, y: 0 });
   }, [html]);
 
-  // Auto-fit: measure the doc once it mounts and pick a zoom that fits
-  // both dimensions inside the viewport (minus a small gutter for the
-  // 20px padding on each side). The user can then zoom in further; Reset
-  // also re-runs this fit. Skips the fit when the doc would shrink to
-  // half-size or smaller (it already fits comfortably) or when there is
-  // no doc to measure yet.
+  // Auto-fit: measure the rendered document after it mounts and pick a zoom
+  // that fits the complete diagram inside the viewport. Keep the measurement
+  // bounded to the actual rendered SVG/HTML box — a full HTML document can
+  // report a viewport-sized scrollWidth even when the diagram itself is small.
   const fitToViewport = useCallback(() => {
     const content = contentRef.current;
     const el = content?.querySelector<HTMLElement>(".diagram-lightbox-doc");
     if (!content || !el) return;
-    const availW = content.clientWidth - 48;
-    const availH = content.clientHeight - 48;
-    const w = el.scrollWidth;
-    const h = el.scrollHeight;
-    if (w <= 0 || h <= 0 || availW <= 0 || availH <= 0) return;
+    const graphic = el.querySelector<SVGSVGElement>("svg");
+    const target = graphic ?? el;
+    const availW = Math.max(1, content.clientWidth - 64);
+    const availH = Math.max(1, content.clientHeight - 64);
+    const rect = target.getBoundingClientRect();
+    const w = Math.max(rect.width, target.scrollWidth, 1);
+    const h = Math.max(rect.height, target.scrollHeight, 1);
+    if (w <= 1 || h <= 1) return;
     const fit = Math.min(availW / w, availH / h, 1);
-    // Only auto-fit when the natural size actually overflows. Diagrams that
-    // already fit keep zoom=1 (no awkward half-size for short diagrams).
-    if (w > availW || h > availH) {
-      wheelZoomed.current = false;
-      setZoom(fit);
-      setPan({ x: 0, y: 0 });
-    }
+    wheelZoomed.current = false;
+    setZoom(fit);
+    setPan({ x: 0, y: 0 });
   }, []);
+
   // Run the fit once after mount + on resize so changing the window or
   // device-pixel-zoom resizes the diagram to match.
   useEffect(() => {
@@ -156,12 +154,18 @@ export function DiagramLightbox({
       });
     };
     tryFit();
-    const ro = new ResizeObserver(tryFit);
-    ro.observe(el);
-    return () => {
-      cancelAnimationFrame(frame);
-      ro.disconnect();
-    };
+    // Some runtimes (jsdom) lack ResizeObserver; guard so the mount-time
+    // fit above still runs. In a real browser the observer refits on
+    // window/content size changes.
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(tryFit);
+      ro.observe(el);
+      return () => {
+        cancelAnimationFrame(frame);
+        ro.disconnect();
+      };
+    }
+    return () => cancelAnimationFrame(frame);
   }, [html, fitToViewport]);
 
   // Sanitize with the RIGHT policy: a bare <svg> string (mermaid diagrams)

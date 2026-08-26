@@ -10,12 +10,13 @@
 // handshake. A compact toolbar carries Download + "Open in tab" (full-size
 // preview) for both paths.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { readArtifactPreview, downloadArtifact, type ArtifactPreview } from "../../lib/ipc";
+import { readArtifactPreview, type ArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { sanitizeHtml } from "../../lib/sanitize";
 import { isInteractiveHtml } from "../../lib/interactiveHtml";
 import { DiagramLightbox } from "./DiagramLightbox";
+import { ArtifactExportMenu } from "./ArtifactExportMenu";
 
 /** Injected into the iframe document (display only) so the diagram scales down
  *  to the chat width instead of overflowing with a scrollbar. Export still uses
@@ -95,34 +96,15 @@ export function InlineDiagram({
 }) {
   const [preview, setPreview] = useState<ArtifactPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);
   const [measuredH, setMeasuredH] = useState(0);
   const blockRef = useRef<HTMLDivElement>(null);
-  const kebabRef = useRef<HTMLDivElement>(null);
   const [containerW, setContainerW] = useState(0);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
 
   const openArtifactTab = useUiStore((s) => s.openArtifactTab);
 
-  // Close kebab on outside click
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDoc = (e: MouseEvent) => {
-      if (kebabRef.current && !kebabRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [menuOpen]);
-
   const openInTab = () => {
-    setMenuOpen(false);
     openArtifactTab({ path: artifact.path, filename: artifact.filename });
-  };
-
-  const downloadFile = () => {
-    setMenuOpen(false);
-    void downloadArtifact(artifact.path, artifact.filename);
   };
 
   // Live inline visuals: the sandboxed frame can't be measured (no
@@ -148,47 +130,57 @@ export function InlineDiagram({
     return () => window.removeEventListener("message", onMsg);
   }, []);
 
-  const kebab = (
-    <div className="chat-diagram-actions" ref={kebabRef}>
-      <div className="artifact-kebab">
-        <button
-          type="button"
-          className="artifact-kebab-btn"
-          title="Diagram actions"
-          aria-label="Diagram actions"
-          aria-haspopup="menu"
-          aria-expanded={menuOpen}
-          onClick={() => setMenuOpen((o) => !o)}
-        >
-          <svg width={16} height={16} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <circle cx="12" cy="5" r="1.8" />
-            <circle cx="12" cy="12" r="1.8" />
-            <circle cx="12" cy="19" r="1.8" />
-          </svg>
-        </button>
-        {menuOpen && (
-          <div className="artifact-kebab-menu" role="menu">
+  // The kebab lives ON the inline diagram (hover-revealed): export actions
+  // via the shared menu + "Open in tab". Live visuals add "Open full view"
+  // (the lightbox shows static markup only, so interactive pages go to tab).
+  const isInteractive = preview?.text != null && isInteractiveHtml(preview.text);
+  const kebab = preview ? (
+    <div className="chat-diagram-actions">
+      <ArtifactExportMenu
+        preview={{
+          path: artifact.path,
+          filename: artifact.filename,
+          ext: "html",
+          kind: preview.kind === "diagram" || preview.kind === "html" ? preview.kind : "html",
+          text: preview.text ?? "",
+          dataUri: null,
+          size: (preview.text ?? "").length,
+          truncated: false,
+        }}
+        path={artifact.path}
+        filename={artifact.filename}
+        variant="kebab"
+        extraItems={(closeMenu) => (
+          <>
             <button
               type="button"
               role="menuitem"
               className="artifact-kebab-item"
-              onClick={downloadFile}
-            >
-              Download
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              className="artifact-kebab-item"
-              onClick={openInTab}
+              onClick={() => {
+                closeMenu();
+                openInTab();
+              }}
             >
               Open in tab
             </button>
-          </div>
+            {!isInteractive && (
+              <button
+                type="button"
+                role="menuitem"
+                className="artifact-kebab-item"
+                onClick={() => {
+                  closeMenu();
+                  setLightboxOpen(true);
+                }}
+              >
+                Open full view
+              </button>
+            )}
+          </>
         )}
-      </div>
+      />
     </div>
-  );
+  ) : null;
 
   useEffect(() => {
     let stale = false;
@@ -231,7 +223,6 @@ export function InlineDiagram({
     () => (preview?.text != null ? withLiveResizeScript(preview.text) : ""),
     [preview],
   );
-  const [lightboxOpen, setLightboxOpen] = useState(false);
 
   // Measure the actual rendered height of the iframe content after it loads.
   // Uses allow-same-origin sandbox (no allow-scripts) so we can read
@@ -304,7 +295,7 @@ export function InlineDiagram({
   if (preview.text == null || (preview.kind !== "diagram" && preview.kind !== "html")) {
     return onFallback();
   }
-  if (isInteractiveHtml(preview.text)) {
+  if (isInteractive) {
     return (
       <div className="chat-diagram-block chat-live-viz" ref={blockRef}>
         <iframe

@@ -32,6 +32,10 @@ interface Props {
    *  vertical three-dot button that opens a text menu (used inline on a
    *  chat diagram, revealed on hover). */
   variant?: "toolbar" | "kebab";
+  /** Extra entries appended to the kebab dropdown after the export actions
+   *  (e.g. an inline diagram's "Open in tab"). Receives a close-menu
+   *  callback so entries can dismiss the dropdown after acting. */
+  extraItems?: ReactNode | ((closeMenu: () => void) => ReactNode);
 }
 
 /** Fallback export background when the diagram declares none. Diagrams are
@@ -361,7 +365,7 @@ async function rasterizeDataUriToJpeg(dataUri: string): Promise<string> {
   return canvas.toDataURL("image/jpeg", 0.92);
 }
 
-export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar" }: Props) {
+export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar", extraItems }: Props) {
   const [busy, setBusy] = useState<null | "copy" | "png" | "svg" | "jpg">(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
@@ -566,6 +570,7 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
             >
               Copy image
             </button>
+            {typeof extraItems === "function" ? extraItems(() => setMenuOpen(false)) : extraItems}
           </div>
         )}
       </div>

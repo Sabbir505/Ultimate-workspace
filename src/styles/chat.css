@@ -1357,6 +1357,7 @@ div[data-index]:has(.chat-session-row.menu-open) {
   transition: opacity 0.12s ease;
 }
 .chat-diagram-block:hover .chat-diagram-actions,
+.chat-mermaid-block:hover .chat-diagram-actions,
 .chat-diagram-actions:focus-within {
   opacity: 1;
 }
@@ -1465,12 +1466,30 @@ button.chat-mermaid-open {
 .diagram-lightbox-content {
   flex: 1;
   min-height: 0;
-  position: relative; /* the absolute canvas anchors to THIS, not the screen */
+  position: relative;
   overflow: hidden;
   cursor: grab;
+  background: color-mix(in srgb, #000 25%, transparent);
 }
 .diagram-lightbox-content.panning {
   cursor: grabbing;
+}
+/* Letterbox stage for bare-SVG diagrams: the svg's own preserveAspectRatio
+   scales the WHOLE diagram into this box (never cut), centered on a white
+   card that matches the chat surface. Pan/zoom transform lands here. */
+.diagram-lightbox-stage {
+  flex: 1;
+  min-height: 0;
+  margin: 20px auto;
+  width: min(1400px, 92%);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  box-shadow: 0 12px 48px rgb(0 0 0 / 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  color: #1c2530;
 }
 .diagram-lightbox-canvas {
   position: absolute;
@@ -1481,12 +1500,9 @@ button.chat-mermaid-open {
   transform-origin: center center;
 }
 .diagram-lightbox-doc {
-  /* Bounded card; the auto-fit logic measures the rendered SVG inside
-     and scales the outer canvas to make the full diagram visible. Without
-     a fixed cap the doc grows to max-content and shows as a big white
-     card for HTML documents. */
-  width: min(900px, 80vw);
-  max-height: 60vh;
+  /* HTML documents: bounded scrollable card (scripts don't run here). */
+  width: min(900px, 82vw);
+  max-height: 74vh;
   padding: 20px;
   border-radius: var(--radius-sm);
   background: #fff;
@@ -1495,6 +1511,22 @@ button.chat-mermaid-open {
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   overflow: auto;
   flex: none;
+}
+.diagram-lightbox-svgfill {
+  width: 100%;
+  height: min(78vh, 1100px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* Force the svg to letterbox-fill the stage: mermaid bakes in max-width
+   styles and normalizeSvg strips width/height attributes, so explicit
+   sizing here is what makes the whole diagram visible. */
+.diagram-lightbox-svgfill svg {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  max-height: none !important;
 }
 .diagram-lightbox-doc svg {
   display: block;

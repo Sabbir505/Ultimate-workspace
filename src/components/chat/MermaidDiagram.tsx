@@ -12,6 +12,8 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { sanitizeSvg } from "../../lib/sanitize";
 import { DiagramLightbox } from "./DiagramLightbox";
+import { ArtifactExportMenu } from "./ArtifactExportMenu";
+import { useUiStore } from "../../state/ui";
 
 export interface MermaidDiagramProps {
   /** The raw mermaid source (the text inside the ```mermaid fence). */
@@ -302,11 +304,28 @@ export function MermaidDiagramInner({ code }: MermaidDiagramProps) {
     ? `Creating the diagram of ${topic}…`
     : "Creating the diagram…";
 
+  const openArtifactTab = useUiStore((s) => s.openArtifactTab);
+  // The kebab lives ON the inline diagram (hover-revealed): save as
+  // PNG/JPG/SVG or copy; "Open in tab" jumps to the full-size preview.
+  const syntheticPreview = svg
+    ? {
+        path: topic ? `${topic}.svg` : "diagram.svg",
+        filename: topic ? `${topic}.svg` : "diagram.svg",
+        ext: "svg",
+        kind: "diagram" as const,
+        text: svg,
+        dataUri: null,
+        size: svg.length,
+        truncated: false,
+      }
+    : null;
+
   // SVG (or error fallback) is injected via dangerouslySetInnerHTML because
   // mermaid.render returns a pre-built SVG string. The SVG has already been
   // through sanitizeSvg (DOMPurify) at render time, so no scripts or event
   // handlers from model-authored labels can reach the app window.
-  // Clicking a rendered diagram opens the full-screen zoom/pan lightbox.
+  // Clicking a rendered diagram opens the full-screen zoom/pan lightbox;
+  // the hover kebab carries the export + open-in-tab actions.
   return (
     <div className="chat-mermaid-block">
       <div className="chat-mermaid-body" ref={containerRef}>
@@ -332,6 +351,32 @@ export function MermaidDiagramInner({ code }: MermaidDiagramProps) {
           <div className="chat-mermaid-loading">{loadingHint}</div>
         )}
       </div>
+      {syntheticPreview && (
+        <div className="chat-diagram-actions">
+          <ArtifactExportMenu
+            preview={syntheticPreview}
+            path={syntheticPreview.path}
+            filename={syntheticPreview.filename}
+            variant="kebab"
+            extraItems={(closeMenu) => (
+              <button
+                type="button"
+                role="menuitem"
+                className="artifact-kebab-item"
+                onClick={() => {
+                  closeMenu();
+                  openArtifactTab({
+                    path: syntheticPreview.path,
+                    filename: syntheticPreview.filename,
+                  });
+                }}
+              >
+                Open in tab
+              </button>
+            )}
+          />
+        </div>
+      )}
       {lightbox && svg && (
         <DiagramLightbox html={svg} filename={topic ? `${topic}.svg` : "diagram.svg"} onClose={() => setLightbox(false)} />
       )}

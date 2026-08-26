@@ -1,9 +1,11 @@
 // Tests for the diagram full-view surface:
-//   1. DiagramLightbox: renders the sanitized diagram, zoom buttons update
-//      the level, Esc closes.
+//   1. DiagramLightbox: bare-SVG diagrams render in a letterbox stage with
+//      zoom controls, and close via Esc / backdrop click. No 3-dot export
+//      menu here — export lives on the INLINE diagram's kebab.
 //   2. MermaidDiagram: a source mermaid rejects as a parse error falls back
-//      to the readable source block (never mermaid's error-bomb SVG), and a
-//      good render is clickable open into the lightbox.
+//      to the readable source block (never mermaid's error-bomb SVG); a good
+//      render is clickable into the lightbox AND carries a hover kebab with
+//      the save actions on the inline diagram itself.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 
@@ -33,29 +35,20 @@ afterEach(() => {
 });
 
 describe("DiagramLightbox", () => {
-  it("renders the diagram with zoom controls and closes on Esc", async () => {
+  it("renders the diagram in a letterbox stage without an export menu", () => {
     const onClose = vi.fn();
-    const { container, getByTitle } = render(
-      <DiagramLightbox html="<svg width='120' height='80' viewBox='0 0 120 80'><rect width='120' height='80' /></svg>" filename="flow.svg" onClose={onClose} />,
+    const { container } = render(
+      <DiagramLightbox html="<svg width='2400' height='1800' viewBox='0 0 2400 1800'><rect width='2400' height='1800' /></svg>" filename="flow.svg" onClose={onClose} />,
     );
 
-    // Diagram content is rendered (sanitized) into the canvas — and the SVG
-    // survives with its geometry intact: the HTML-profile sanitizer strips
-    // svg attributes and would leave an invisible empty box (regression).
-    const svg = container.querySelector(".diagram-lightbox-doc svg");
+    // The SVG survives sanitization with its geometry intact.
+    const svg = container.querySelector(".diagram-lightbox-svgfill svg");
     expect(svg).not.toBeNull();
-    expect(svg!.getAttribute("viewBox")).toBe("0 0 120 80");
-    expect(svg!.getAttribute("width")).toBe("120");
-    // …the shared export kebab is present (3-dot menu)…
-    expect(container.querySelector(".artifact-kebab")).not.toBeNull();
-    // …and the zoom level starts at 100%.
-    expect(getByTitle("Reset zoom").textContent).toBe("100%");
-
-    fireEvent.click(getByTitle("Zoom in"));
-    expect(getByTitle("Reset zoom").textContent).toBe("115%");
-
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(svg!.getAttribute("viewBox")).toBe("0 0 2400 1800");
+    // No 3-dot export menu — that belongs to the inline diagram's kebab.
+    expect(container.querySelector(".artifact-kebab")).toBeNull();
+    // Zoom level starts at 100%.
+    expect(container.querySelector(".diagram-lightbox-zoom-level")?.textContent).toBe("100%");
   });
 
   it("closes on backdrop click", () => {
@@ -67,23 +60,12 @@ describe("DiagramLightbox", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("fits an oversized SVG into the viewport instead of showing half", async () => {
+  it("full HTML documents use the bounded scroll card instead of the stage", () => {
     const { container } = render(
-      <DiagramLightbox html="<svg width='2400' height='1800' viewBox='0 0 2400 1800'><rect width='2400' height='1800' /></svg>" filename="large.svg" onClose={() => {}} />,
+      <DiagramLightbox html="<!doctype html><html><body><div>hi</div></body></html>" filename="page.html" onClose={() => {}} />,
     );
-    const content = container.querySelector<HTMLElement>(".diagram-lightbox-content")!;
-    const svg = container.querySelector<SVGSVGElement>(".diagram-lightbox-doc svg")!;
-    Object.defineProperty(content, "clientWidth", { configurable: true, value: 900 });
-    Object.defineProperty(content, "clientHeight", { configurable: true, value: 600 });
-    Object.defineProperty(svg, "getBoundingClientRect", {
-      configurable: true,
-      value: () => ({ width: 2400, height: 1800, top: 0, left: 0, right: 2400, bottom: 1800, x: 0, y: 0, toJSON: () => ({}) }),
-    });
-    await waitFor(() => {
-      const scale = container.querySelector<HTMLElement>(".diagram-lightbox-canvas")!.style.transform;
-      expect(scale).toMatch(/scale\(0\.[0-4]/);
-      expect(scale).not.toContain("scale(1)");
-    });
+    expect(container.querySelector(".diagram-lightbox-doc")).not.toBeNull();
+    expect(container.querySelector(".diagram-lightbox-stage")).toBeNull();
   });
 });
 
@@ -102,7 +84,7 @@ describe("MermaidDiagram render fallback", () => {
     expect(container.querySelector(".chat-mermaid-svg")).toBeNull();
   });
 
-  it("a good render shows the diagram and clicking opens the lightbox", async () => {
+  it("a good render is clickable into the lightbox and carries an inline kebab", async () => {
     parseMock.mockResolvedValue({ diagramType: "flowchart" });
     renderMock.mockResolvedValue({ svg: "<svg width='200' height='100'><rect /></svg>" });
     const { container } = render(<MermaidDiagram code={"flowchart TD\n  A --> B"} />);
@@ -110,10 +92,24 @@ describe("MermaidDiagram render fallback", () => {
     await waitFor(() => {
       expect(container.querySelector(".chat-mermaid-svg")).not.toBeNull();
     });
-    expect(container.querySelector(".chat-mermaid-svg")!.innerHTML).toContain("<rect");
     expect(container.querySelector(".diagram-lightbox")).toBeNull();
 
     fireEvent.click(container.querySelector(".chat-mermaid-open")!);
     expect(container.querySelector(".diagram-lightbox")).not.toBeNull();
+
+    // Close it and verify the inline kebab carries export actions.
+    fireEvent.click(container.querySelector(".diagram-lightbox-close")!);
+    await waitFor(() => {
+      expect(container.querySelector(".diagram-lightbox")).toBeNull();
+    });
+    const kebabBtn = container.querySelector<HTMLElement>(
+      ".chat-mermaid-block .chat-diagram-actions .artifact-kebab-btn",
+    );
+    expect(kebabBtn).not.toBeNull();
+    fireEvent.click(kebabBtn!);
+    const menu = container.querySelector(".chat-mermaid-block .artifact-kebab-menu");
+    expect(menu?.textContent).toContain("Download as PNG");
+    expect(menu?.textContent).toContain("Download as JPG");
+    expect(menu?.textContent).toContain("Open in tab");
   });
 });

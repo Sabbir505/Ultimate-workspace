@@ -1,16 +1,15 @@
 // Full-screen zoom/pan viewer for an inline chat diagram (click a diagram →
 // "open it in the chat screen"): mouse-wheel zoom anchored at the cursor,
-// left-drag pan, −/+/reset controls, Esc or backdrop click to close, and the
-// top-right 3-dot menu reusing ArtifactExportMenu for Copy / PNG / SVG / JPG.
+// left-drag pan, −/+/reset controls, Esc or backdrop click to close.
 //
 // The diagram renders sanitized in the MAIN document (no iframe): inline
-// diagrams are static vector art, and DOM rendering lets html-to-image
-// rasterize exactly what is on screen. Interactive visuals keep their live
-// iframe in chat — the lightbox is for looking at pictures, big.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArtifactExportMenu } from "./ArtifactExportMenu";
+// diagrams are static vector art. Bare <svg> content (mermaid) is placed in
+// a letterbox stage where the SVG's own preserveAspectRatio fits it — the
+// whole diagram is ALWAYS visible, never cut; zoom is for detail. Full HTML
+// documents render in a bounded, scrollable card instead (their scripts do
+// not run here). Export actions live on the INLINE diagram's kebab, not here.
+import { useEffect, useMemo, useRef, useState } from "react";
 import { sanitizeHtml, sanitizeSvg } from "../../lib/sanitize";
-import type { ArtifactPreview } from "../../lib/ipc";
 
 const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 8;
@@ -28,78 +27,14 @@ export function DiagramLightbox({
 }) {
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
-  const contentRef = useRef<HTMLDivElement>(null);
-  const zoomRef = useRef(1);
-  zoomRef.current = zoom;
-  const panRef = useRef(pan);
-  panRef.current = pan;
-  const wheelZoomed = useRef(false);
-  const prevZoom = useRef(1);
+  // Wheel zoom anchored at the cursor: the content point under the pointer
+  // stays put while zooming in or out.
+  const zoomAnchor = useRef({ cx: 0, cy: 0 });
   const panDrag = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
-
-  // Wheel zoom anchored at the cursor (same model as ArtifactPreviewPane's
-  // canvas): the content point under the pointer stays put.
-  useEffect(() => {
-    const el = contentRef.current;
-    if (!el) return;
-    const clamp = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      const rect = el.getBoundingClientRect();
-      const cx = e.clientX - rect.left;
-      const cy = e.clientY - rect.top;
-      const z1 = zoomRef.current;
-      const z2 = clamp(z1 * (e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP));
-      wheelZoomed.current = true;
-      setPan((p) => ({
-        x: cx - (cx - p.x) * (z2 / z1),
-        y: cy - (cy - p.y) * (z2 / z1),
-      }));
-      setZoom(z2);
-    };
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
-  }, []);
-
-  // Button zooms re-anchor at the pane center.
-  useEffect(() => {
-    const el = contentRef.current;
-    const z1 = prevZoom.current;
-    prevZoom.current = zoom;
-    if (!el || z1 === zoom) return;
-    if (wheelZoomed.current) {
-      wheelZoomed.current = false;
-      return;
-    }
-    const rect = el.getBoundingClientRect();
-    const cx = rect.width / 2;
-    const cy = rect.height / 2;
-    setPan((p) => ({
-      x: cx - (cx - p.x) * (zoom / z1),
-      y: cy - (cy - p.y) * (zoom / z1),
-    }));
-  }, [zoom]);
-
-  const onPanStart = useCallback((e: React.PointerEvent) => {
-    if (e.button !== 0) return;
-    const el = contentRef.current;
-    if (!el) return;
-    panDrag.current = { x: e.clientX, y: e.clientY, px: panRef.current.x, py: panRef.current.y };
-    el.setPointerCapture(e.pointerId);
-    el.classList.add("panning");
-  }, []);
-  const onPanMove = useCallback((e: React.PointerEvent) => {
-    const d = panDrag.current;
-    if (!d) return;
-    setPan({ x: d.px + (e.clientX - d.x), y: d.py + (e.clientY - d.y) });
-  }, []);
-  const onPanEnd = useCallback((e: React.PointerEvent) => {
-    panDrag.current = null;
-    const el = contentRef.current;
-    if (!el) return;
-    el.classList.remove("panning");
-    if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
-  }, []);
+  const dragging = useRef(false);
+  // Bare <svg> uses the letterbox stage (aspect-fit, never cut); full HTML
+  // documents use the bounded scroll card.
+  const isBareSvg = useMemo(() => /^\s*<svg[\s>]/i.test(html), [html]);
 
   // Esc closes; reset the view when a different diagram is opened.
   useEffect(() => {
@@ -109,87 +44,10 @@ export function DiagramLightbox({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
-  // Reset the transform on a new diagram. Auto-fit is applied once the
-  // injected HTML/SVG has had a frame to measure (see the ResizeObserver
-  // below) — until then we start at 1 so the user sees something.
   useEffect(() => {
     setZoom(1);
     setPan({ x: 0, y: 0 });
   }, [html]);
-
-  // Auto-fit: measure the rendered document after it mounts and pick a zoom
-  // that fits the complete diagram inside the viewport. Keep the measurement
-  // bounded to the actual rendered SVG/HTML box — a full HTML document can
-  // report a viewport-sized scrollWidth even when the diagram itself is small.
-  const fitToViewport = useCallback(() => {
-    const content = contentRef.current;
-    const el = content?.querySelector<HTMLElement>(".diagram-lightbox-doc");
-    if (!content || !el) return;
-    const graphic = el.querySelector<SVGSVGElement>("svg");
-    const target = graphic ?? el;
-    const availW = Math.max(1, content.clientWidth - 64);
-    const availH = Math.max(1, content.clientHeight - 64);
-    const rect = target.getBoundingClientRect();
-    const w = Math.max(rect.width, target.scrollWidth, 1);
-    const h = Math.max(rect.height, target.scrollHeight, 1);
-    if (w <= 1 || h <= 1) return;
-    const fit = Math.min(availW / w, availH / h, 1);
-    wheelZoomed.current = false;
-    setZoom(fit);
-    setPan({ x: 0, y: 0 });
-  }, []);
-
-  // Run the fit once after mount + on resize so changing the window or
-  // device-pixel-zoom resizes the diagram to match.
-  useEffect(() => {
-    const el = contentRef.current;
-    if (!el) return;
-    let frame = 0;
-    const tryFit = () => {
-      // Two RAFs: first paints the doc, second lets CSS sizes settle.
-      frame = requestAnimationFrame(() => {
-        frame = requestAnimationFrame(() => {
-          fitToViewport();
-        });
-      });
-    };
-    tryFit();
-    // Some runtimes (jsdom) lack ResizeObserver; guard so the mount-time
-    // fit above still runs. In a real browser the observer refits on
-    // window/content size changes.
-    if (typeof ResizeObserver !== "undefined") {
-      const ro = new ResizeObserver(tryFit);
-      ro.observe(el);
-      return () => {
-        cancelAnimationFrame(frame);
-        ro.disconnect();
-      };
-    }
-    return () => cancelAnimationFrame(frame);
-  }, [html, fitToViewport]);
-
-  // Sanitize with the RIGHT policy: a bare <svg> string (mermaid diagrams)
-  // must go through the SVG profile — the HTML profile's tight attribute
-  // allowlist strips SVG presentation attributes and guts the diagram to an
-  // empty white card. Full HTML documents (static diagrams) use the HTML
-  // policy as everywhere else.
-  const safeHtml = useMemo(
-    () => (/^\s*<svg[\s>]/i.test(html) ? sanitizeSvg(html) : sanitizeHtml(html)),
-    [html],
-  );
-
-  // Synthetic preview so the shared export menu treats this as a diagram
-  // (Copy / PNG / SVG / JPG all rasterize `text`).
-  const preview: ArtifactPreview = {
-    path: filename,
-    filename,
-    ext: "html",
-    kind: "diagram",
-    text: html,
-    dataUri: null,
-    size: html.length,
-    truncated: false,
-  };
 
   return (
     <div
@@ -217,7 +75,6 @@ export function DiagramLightbox({
             onClick={() => {
               setZoom(1);
               setPan({ x: 0, y: 0 });
-              requestAnimationFrame(fitToViewport);
             }}
           >
             {Math.round(zoom * 100)}%
@@ -231,7 +88,6 @@ export function DiagramLightbox({
             +
           </button>
         </div>
-        <ArtifactExportMenu preview={preview} path={filename} filename={filename} variant="kebab" />
         <button
           type="button"
           className="diagram-lightbox-close"
@@ -243,25 +99,54 @@ export function DiagramLightbox({
         </button>
       </div>
       <div
-        className="diagram-lightbox-content"
-        ref={contentRef}
+        className={isBareSvg ? "diagram-lightbox-stage" : "diagram-lightbox-content"}
         onClick={(e) => e.stopPropagation()}
-        onPointerDown={onPanStart}
-        onPointerMove={onPanMove}
-        onPointerUp={onPanEnd}
-        onPointerCancel={onPanEnd}
+        onWheel={(e) => {
+          e.preventDefault();
+          const rect = e.currentTarget.getBoundingClientRect();
+          const cx = e.clientX - rect.left;
+          const cy = e.clientY - rect.top;
+          zoomAnchor.current = { cx, cy };
+          setZoom((z1) => {
+            const z2 = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z1 * (e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP)));
+            setPan((p) => ({
+              x: cx - (cx - p.x) * (z2 / z1),
+              y: cy - (cy - p.y) * (z2 / z1),
+            }));
+            return z2;
+          });
+        }}
+        onPointerDown={(e) => {
+          if (e.button !== 0) return;
+          panDrag.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y };
+          dragging.current = true;
+          e.currentTarget.setPointerCapture(e.pointerId);
+        }}
+        onPointerMove={(e) => {
+          const d = panDrag.current;
+          if (!d || !dragging.current) return;
+          setPan({ x: d.px + (e.clientX - d.x), y: d.py + (e.clientY - d.y) });
+        }}
+        onPointerUp={() => {
+          panDrag.current = null;
+          dragging.current = false;
+        }}
+        onPointerCancel={() => {
+          panDrag.current = null;
+          dragging.current = false;
+        }}
+        style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
       >
+        {/* SECURITY: model-authored markup into the privileged document —
+            sanitized with the matching profile (SVG vs HTML). The svg fills
+            the letterbox stage via preserveAspectRatio, so the WHOLE diagram
+            is always visible; the HTML card scrolls internally instead. */}
         <div
-          className="diagram-lightbox-canvas"
-          style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
-        >
-          {/* SECURITY: model-authored markup into the privileged document —
-              sanitized above with the matching profile (SVG vs HTML). */}
-          <div
-            className="diagram-lightbox-doc"
-            dangerouslySetInnerHTML={{ __html: safeHtml }}
-          />
-        </div>
+          className={isBareSvg ? "diagram-lightbox-svgfill" : "diagram-lightbox-doc"}
+          dangerouslySetInnerHTML={{
+            __html: isBareSvg ? sanitizeSvg(html) : sanitizeHtml(html),
+          }}
+        />
       </div>
     </div>
   );

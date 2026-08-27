@@ -322,6 +322,7 @@ export function Sidebar() {
             collapse control on this row too. */}
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2 min-w-0">
+            <strong className="text-sm font-bold text-gray-900 dark:text-white select-none">Conduit</strong>
             <span className="flex items-center flex-shrink-0">
               <button
                 type="button"
@@ -344,7 +345,6 @@ export function Sidebar() {
                 <ArrowRight size={14} strokeWidth={1.8} />
               </button>
             </span>
-            <strong className="text-sm font-bold text-gray-900 dark:text-white select-none truncate">Conduit</strong>
           </div>
           <div className="flex items-center flex-shrink-0">
             <UpdateButton />

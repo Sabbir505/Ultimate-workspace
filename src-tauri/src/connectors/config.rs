@@ -474,7 +474,11 @@ pub const YOUTUBE: Connector = Connector {
     id: "youtube",
     display_name: "YouTube",
     icon: "▶",
-    family: "google",
+    // Standalone family — NOT "google": YouTube has no hosted MCP server and
+    // its scope cannot ride the Workspace combined consent (Google 400s the
+    // mix), so it renders as its own card with its own single-scope Connect
+    // flow beside the other connectors.
+    family: "youtube",
     description: "Search YouTube videos/channels/playlists and read your channel, playlists, playlists and video stats.",
     keywords: &["youtube", "my videos", "my channel", "my playlists", "search youtube", "video stats", "watch later"],
     authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",

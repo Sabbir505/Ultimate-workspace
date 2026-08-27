@@ -193,6 +193,7 @@ export function FamilyIcon({ family, size = 28 }: { family: string; size?: numbe
   if (family === "notion") return Notion(size);
   if (family === "kiwi") return Kiwi(size);
   if (family === "github") return GitHub(size);
+  if (family === "youtube") return Youtube(size);
   return null;
 }
 
@@ -202,4 +203,5 @@ export const FAMILY_NAMES: Record<string, string> = {
   notion: "Notion",
   kiwi: "Kiwi.com",
   github: "GitHub",
+  youtube: "YouTube",
 };

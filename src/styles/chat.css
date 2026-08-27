@@ -1476,12 +1476,14 @@ button.chat-mermaid-open {
 }
 /* Letterbox stage for bare-SVG diagrams: the svg's own preserveAspectRatio
    scales the WHOLE diagram into this box (never cut), centered on a white
-   card that matches the chat surface. Pan/zoom transform lands here. */
+   card that matches the chat surface. Pan/zoom transform lands here. The
+   component sizes the card to the diagram's viewBox aspect inline; these
+   are only the fallbacks for when no aspect could be measured. */
 .diagram-lightbox-stage {
-  flex: 1;
-  min-height: 0;
+  flex: none;
   margin: 20px auto;
   width: min(1400px, 92%);
+  height: min(78vh, 1100px);
   border-radius: var(--radius-sm);
   background: #fff;
   box-shadow: 0 12px 48px rgb(0 0 0 / 0.45);
@@ -1514,7 +1516,7 @@ button.chat-mermaid-open {
 }
 .diagram-lightbox-svgfill {
   width: 100%;
-  height: min(78vh, 1100px);
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;

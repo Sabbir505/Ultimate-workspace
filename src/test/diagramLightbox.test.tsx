@@ -37,35 +37,44 @@ afterEach(() => {
 describe("DiagramLightbox", () => {
   it("renders the diagram in a letterbox stage without an export menu", () => {
     const onClose = vi.fn();
-    const { container } = render(
+    render(
       <DiagramLightbox html="<svg width='2400' height='1800' viewBox='0 0 2400 1800'><rect width='2400' height='1800' /></svg>" filename="flow.svg" onClose={onClose} />,
     );
 
+    // The lightbox portals to document.body so no transformed chat ancestor
+    // can trap its position:fixed fullscreen overlay.
+    const body = document.body;
     // The SVG survives sanitization with its geometry intact.
-    const svg = container.querySelector(".diagram-lightbox-svgfill svg");
+    const svg = body.querySelector(".diagram-lightbox-svgfill svg");
     expect(svg).not.toBeNull();
     expect(svg!.getAttribute("viewBox")).toBe("0 0 2400 1800");
+    // The paper is sized inline to the diagram's viewBox aspect (capped to
+    // the viewport) — not a fixed full-height slab.
+    const stage = body.querySelector<HTMLElement>(".diagram-lightbox-stage");
+    expect(stage).not.toBeNull();
+    expect(stage!.style.width).not.toBe("");
+    expect(stage!.style.height).not.toBe("");
     // No 3-dot export menu — that belongs to the inline diagram's kebab.
-    expect(container.querySelector(".artifact-kebab")).toBeNull();
+    expect(body.querySelector(".artifact-kebab")).toBeNull();
     // Zoom level starts at 100%.
-    expect(container.querySelector(".diagram-lightbox-zoom-level")?.textContent).toBe("100%");
+    expect(body.querySelector(".diagram-lightbox-zoom-level")?.textContent).toBe("100%");
   });
 
   it("closes on backdrop click", () => {
     const onClose = vi.fn();
-    const { container } = render(
+    render(
       <DiagramLightbox html="<svg width='10' height='10' />" filename="x.svg" onClose={onClose} />,
     );
-    fireEvent.click(container.querySelector(".diagram-lightbox")!);
+    fireEvent.click(document.body.querySelector(".diagram-lightbox")!);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it("full HTML documents use the bounded scroll card instead of the stage", () => {
-    const { container } = render(
+    render(
       <DiagramLightbox html="<!doctype html><html><body><div>hi</div></body></html>" filename="page.html" onClose={() => {}} />,
     );
-    expect(container.querySelector(".diagram-lightbox-doc")).not.toBeNull();
-    expect(container.querySelector(".diagram-lightbox-stage")).toBeNull();
+    expect(document.body.querySelector(".diagram-lightbox-doc")).not.toBeNull();
+    expect(document.body.querySelector(".diagram-lightbox-stage")).toBeNull();
   });
 });
 
@@ -92,15 +101,15 @@ describe("MermaidDiagram render fallback", () => {
     await waitFor(() => {
       expect(container.querySelector(".chat-mermaid-svg")).not.toBeNull();
     });
-    expect(container.querySelector(".diagram-lightbox")).toBeNull();
+    expect(document.body.querySelector(".diagram-lightbox")).toBeNull();
 
     fireEvent.click(container.querySelector(".chat-mermaid-open")!);
-    expect(container.querySelector(".diagram-lightbox")).not.toBeNull();
+    expect(document.body.querySelector(".diagram-lightbox")).not.toBeNull();
 
     // Close it and verify the inline kebab carries export actions.
-    fireEvent.click(container.querySelector(".diagram-lightbox-close")!);
+    fireEvent.click(document.body.querySelector(".diagram-lightbox-close")!);
     await waitFor(() => {
-      expect(container.querySelector(".diagram-lightbox")).toBeNull();
+      expect(document.body.querySelector(".diagram-lightbox")).toBeNull();
     });
     const kebabBtn = container.querySelector<HTMLElement>(
       ".chat-mermaid-block .chat-diagram-actions .artifact-kebab-btn",

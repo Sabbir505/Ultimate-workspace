@@ -158,7 +158,6 @@ export function TurnChangesRow({
   const setDiffPanelFile = useUiStore((s) => s.setDiffPanelFile);
   const openFilesTab = useUiStore((s) => s.openFilesTab);
   const openArtifactTab = useUiStore((s) => s.openArtifactTab);
-  const openPeek = useUiStore((s) => s.openPeek);
   const projects = useProjectsStore((s) => s.projects);
   const selectedProjectId = useProjectsStore((s) => s.selectedProjectId);
   const cwd = projects.find((p) => p.id === selectedProjectId)?.path ?? null;
@@ -227,9 +226,9 @@ export function TurnChangesRow({
       onPreviewArtifact?.(artifact);
       return;
     }
-    if (selectedProjectId) {
-      openPeek({ mode: "file", projectId: selectedProjectId, filePath: path, cwd: null });
-    }
+    // Same destination as artifacts: the file preview opens as its own tab in
+    // the right-side tool panel. The peek overlay is not the "Open" target.
+    openFileTab(path);
   };
 
   const restore = async () => {

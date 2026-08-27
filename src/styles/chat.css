@@ -1473,7 +1473,6 @@ button.chat-mermaid-open {
   overflow: hidden;
   cursor: grab;
   background: color-mix(in srgb, #000 25%, transparent);
-  will-change: transform;
 }
 .diagram-lightbox-content.panning {
   cursor: grabbing;
@@ -1496,9 +1495,9 @@ button.chat-mermaid-open {
   justify-content: center;
   cursor: grab;
   color: #1c2530;
-  /* Keep the pan/zoom transform on its own compositor layer — avoids
-     repainting the whole surface on every pointermove. */
-  will-change: transform;
+  /* Deliberately NO will-change/layer promotion here: a promoted layer is
+     rasterized once and GPU-stretched on zoom, which blurs SVG text. Left
+     unpromoted, the vector art re-rasterizes crisply at every zoom level. */
 }
 /* Mermaid diagrams are dark-theme art on a transparent canvas that floats on
    the chat background inline — the lightbox paper matches that surface so

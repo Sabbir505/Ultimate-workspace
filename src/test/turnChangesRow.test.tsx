@@ -192,7 +192,7 @@ describe("TurnChangesRow expanded file list", () => {
     expect(onPreviewArtifact).toHaveBeenCalledWith(artifact);
   });
 
-  it("Open sends non-artifact files to the Peek file viewer", () => {
+  it("Open sends non-artifact files to the tool-panel preview tab (not the peek overlay)", () => {
     useProjectsStore.setState({
       selectedProjectId: "p1",
       projects: [{ id: "p1", path: "D:/proj" } as never],
@@ -202,10 +202,14 @@ describe("TurnChangesRow expanded file list", () => {
     const openButtons = container.querySelectorAll<HTMLButtonElement>(".chat-files-open");
     fireEvent.click(openButtons[1]); // docs/new.md — no artifact match
 
-    const peek = useUiStore.getState().peek;
-    expect(peek.open).toBe(true);
-    expect(peek.mode).toBe("file");
-    expect(peek.filePath).toBe("docs/new.md");
+    // Same destination as artifacts: a named tab in the right-side tool panel
+    // showing the file preview. The peek overlay is not the "Open" target.
+    const ui = useUiStore.getState();
+    const tab = ui.openTabs.find((t) => t.artifactPath?.endsWith("docs/new.md"));
+    expect(tab).toBeDefined();
+    expect(ui.activeTabId).toBe(tab!.instanceId);
+    expect(ui.toolPanelCollapsed).toBe(false);
+    expect(ui.peek.open).toBe(false);
   });
 });
 

@@ -300,10 +300,12 @@ export interface PlanStep {
 export interface ChatArtifact {
   path: string;
   filename: string;
-  /** Inline (non-file) live preview payload — e.g. a ```jsx / ```tsx code
-   *  block from an assistant message. When set, the preview pane renders it
-   *  directly (live React preview) instead of reading `path` from disk. */
-  inline?: { kind: "jsx" | "tsx"; code: string };
+  /** Inline (non-file) live preview payload — a ```jsx / ```tsx code block
+   *  from an assistant message, or an in-memory rendered mermaid SVG (the
+   *  "Open in tab" path for ```mermaid fences, which have no file on disk).
+   *  When set, the preview pane renders it directly instead of reading
+   *  `path` from disk. */
+  inline?: { kind: "jsx" | "tsx" | "svg"; code: string };
 }
 
 /** A message stacked while a turn is running (composer queue, FIFO).

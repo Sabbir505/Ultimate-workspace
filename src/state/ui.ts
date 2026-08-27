@@ -32,8 +32,9 @@ export interface ToolPanelTabInstance {
   /** For artifact tabs: the on-disk artifact file to preview. */
   artifactPath?: string;
   artifactFilename?: string;
-  /** For inline (chat code-fence) artifacts: the live preview payload. */
-  artifactInline?: { kind: "jsx" | "tsx"; code: string };
+  /** For inline (chat code-fence / in-memory svg) artifacts: the live preview
+   *  payload — no file on disk, the pane renders the payload directly. */
+  artifactInline?: { kind: "jsx" | "tsx" | "svg"; code: string };
 }
 
 /** Live progress of a model download from the Hugging Face model market.
@@ -201,7 +202,7 @@ export interface UiState {
   openArtifactTab: (artifact: {
     path: string;
     filename: string;
-    inline?: { kind: "jsx" | "tsx"; code: string };
+    inline?: { kind: "jsx" | "tsx" | "svg"; code: string };
   }) => void;
   /** Close a specific open tab by instance id. Does nothing if unknown. */
   closeTab: (instanceId: string) => void;
@@ -441,7 +442,18 @@ export const useUiStore = create<UiState>((set) => ({
           (t) => t.kind === "artifact" && t.artifactPath === artifact.path,
         );
         if (existing) {
+          // Refresh the inline payload when provided: an inline artifact's
+          // content may have been re-rendered (e.g. the same mermaid diagram
+          // re-rendered) since the tab first opened.
+          const openTabs = artifact.inline
+            ? s.openTabs.map((t) =>
+                t.instanceId === existing.instanceId
+                  ? { ...t, artifactInline: artifact.inline }
+                  : t,
+              )
+            : s.openTabs;
           return {
+            openTabs,
             activeTabId: existing.instanceId,
             toolPanelTab: "artifact",
             toolPanelCollapsed: false,

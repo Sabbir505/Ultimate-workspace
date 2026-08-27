@@ -607,6 +607,23 @@ export function ArtifactPreviewPane({
   }, [fileMtime, artifact.path, inline]);
 
   if (inline) {
+    // Inline mermaid SVG (```mermaid "Open in tab"): sanitized at render time
+    // by MermaidDiagram, so direct injection is safe. No header — the pane
+    // tabs above already show the filename + close.
+    if (inline.kind === "svg") {
+      return (
+        <div className="artifact-preview-pane" ref={paneRef} style={paneStyle}>
+          {resizer}
+          <div className="artifact-preview-content artifact-preview-content-svg">
+            <div
+              className="chat-mermaid-svg"
+              style={{ padding: "20px" }}
+              dangerouslySetInnerHTML={{ __html: inline.code }}
+            />
+          </div>
+        </div>
+      );
+    }
     // Inline JSX/TSX: no extra header — the pane tabs above already show the
     // filename + close, and JsxPreview brings its own Preview/Code toggle.
     // Zoom controls are omitted for JSX (they don't apply to live React).

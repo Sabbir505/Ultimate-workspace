@@ -378,10 +378,15 @@ export function MermaidDiagramInner({ code }: MermaidDiagramProps) {
                 role="menuitem"
                 className="artifact-kebab-item"
                 onClick={() => {
+                  if (!svg) return;
                   closeMenu();
                   openArtifactTab({
                     path: syntheticPreview.path,
                     filename: syntheticPreview.filename,
+                    // A ```mermaid fence has no file on disk — the svg exists
+                    // only in memory. Carry it inline so the tab renders the
+                    // real diagram instead of stat-failing a synthetic path.
+                    inline: { kind: "svg", code: svg },
                   });
                 }}
               >

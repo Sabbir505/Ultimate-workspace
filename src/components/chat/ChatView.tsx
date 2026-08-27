@@ -621,6 +621,16 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   // goes stale the moment the composer grows a line or a queue/approval/
   // goal-loop chip stacks on top of it. Measured live instead.
   const [composerDockRef, composerDockHeight] = useElementHeight<HTMLDivElement>();
+  // Live mirror of the virtualizer's totalSize. MEASURED (2026-08-27): the
+  // virtualizer's measurement cache updates WITHOUT notifying React, so
+  // `virtualizer.getTotalSize()` can return a STALE value at render time —
+  // the sized wrapper div then renders too short, the absolutely-positioned
+  // rows overflow it and define the scroll extent themselves, and the last
+  // message can never scroll above the floating composer. The pin pass
+  // keeps this state in sync so the render always has the true height via
+  // Math.max().
+  const [liveTotal, setLiveTotal] = useState(0);
+  const liveTotalRef = useRef(0);
   // Whether new content should keep the view pinned to the bottom. Flipped
   // off as soon as the user scrolls up, so streaming tokens never yank the
   // scroll back down while they're reading history; flipped on again when
@@ -702,6 +712,9 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   const loadOlderMessages = useChatStore((s) => s.loadOlderMessages);
   const hasMoreHistory = useChatStore((s) => s.hasMoreHistory);
   const loadingOlderRef = useRef(false);
+  // Patch-tail-then-pin, published by the follow effect below so the scroll
+  // handler (flip back to "at bottom") and the mount pass can invoke it too.
+  const pinToLiveEdgeRef = useRef<(() => void) | null>(null);
 
   // Track whether the user is pinned near the bottom. Runs on every scroll
   // (user- or programmatic). Once they scroll up past the threshold, auto
@@ -714,7 +727,13 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
     const threshold = 80; // px from bottom to still count as "at bottom"
     const distanceFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
+    const wasStuck = stickToBottomRef.current;
     stickToBottomRef.current = distanceFromBottom < threshold;
+    // Returning to the live edge re-runs the tail-size patch + pin — a
+    // session that was stranded with its last turn behind the composer
+    // heals the moment the user scrolls back down (the follow effect only
+    // fires on message/dock changes, not on scroll).
+    if (!wasStuck && stickToBottomRef.current) pinToLiveEdgeRef.current?.();
 
     // BUG FIX (jump-to-top on send): the prepend trigger used to fire on
     // `scrollTop < 120` alone — but a chat pinned to the bottom whose content
@@ -759,10 +778,66 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   // dock height is a dep too, so a dock that grows (queue chip, approval
   // card, extra input line) re-pins the view instead of eating the gap.
   useEffect(() => {
-    const el = messagesContainerRef.current;
-    if (!el || !stickToBottomRef.current) return;
-    const raf = requestAnimationFrame(() => {
-      if (!stickToBottomRef.current) return;
+    const patchTailAndPin = () => {
+      const el = messagesContainerRef.current;
+      if (!el || !stickToBottomRef.current) return;
+      // MEASURED ROOT CAUSE (pad-debug overlay, 2026-08-27): the virtualizer's
+      // sized wrapper div rendered with a STALE height (inner h=743 while
+      // totalSize=3017) — its measurement cache was already correct, but no
+      // React re-render ever applied it, so the absolutely-positioned rows
+      // overflowed the div by ~2270px and defined the scroll extent
+      // themselves. At max scroll that pins the last row's bottom to the
+      // container's bottom edge — permanently dockHeight behind the floating
+      // composer (GAP=-171 across every code state). Padding and in-flow
+      // spacers can't win against positioned overflow, so sync the wrapper's
+      // height DIRECTLY in the DOM from the live totalSize — no React
+      // re-render required — before pinning.
+      const rows = el.querySelectorAll<HTMLElement>("[data-index]");
+      const last = rows[rows.length - 1];
+      if (last && last.parentElement) {
+        const inner = last.parentElement;
+        const total = virtualizer.getTotalSize();
+        if (Math.abs(inner.offsetHeight - total) > 1) {
+          // Instant DOM sync (next React render confirms it via liveTotal —
+          // a plain React style write would otherwise clobber this with the
+          // stale getTotalSize() it computes at render time).
+          inner.style.setProperty("height", `${total}px`, "important");
+        }
+        // Push the true total into React state so the NEXT render bakes the
+        // correct height into the JSX (Math.max below) even while
+        // getTotalSize() still returns its stale value at render time.
+        if (total !== liveTotalRef.current) {
+          liveTotalRef.current = total;
+          setLiveTotal(total);
+        }
+        // Secondary hardening: if the tail row is STILL taller than its
+        // cached slot (async content growth — diagrams, highlighting —
+        // measured after the cache settled), patch the cache with the real
+        // height so the next layout pass stops under-allocating it.
+        const overflow =
+          last.getBoundingClientRect().bottom -
+          last.parentElement.getBoundingClientRect().bottom;
+        if (overflow > 1) {
+          const v = virtualizer as unknown as {
+            itemSizeCache?: Map<string, number>;
+            itemSizeCacheVersion?: number;
+            notify?: (sync: boolean) => void;
+          };
+          let key: string | null = null;
+          for (const [k, e] of rowElsRef.current) {
+            if (e === last) {
+              key = k;
+              break;
+            }
+          }
+          const realH = last.offsetHeight;
+          if (key && realH > 0 && v.itemSizeCache && v.itemSizeCache.get(key) !== realH) {
+            v.itemSizeCache.set(key, realH);
+            if (v.itemSizeCacheVersion != null) v.itemSizeCacheVersion++;
+            v.notify?.(false);
+          }
+        }
+      }
       const target = el.scrollHeight - el.clientHeight;
       // Skip the write when already at the live edge: redundant scrollTop
       // writes fire scroll events that keep the virtualizer's isScrolling
@@ -771,9 +846,44 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
       if (Math.abs(el.scrollTop - target) > 1) {
         el.scrollTop = target;
       }
-    });
-    return () => cancelAnimationFrame(raf);
+    };
+    pinToLiveEdgeRef.current = patchTailAndPin;
+    if (!stickToBottomRef.current) return;
+    // SETTLE WINDOW: re-run patch+pin across a short backoff (frames
+    // 1,2,4,8,16,32 ≈ 0.5s at 60fps). One pass isn't enough — the tail row's
+    // content can grow ASYNC after mount (mermaid diagrams, code highlight),
+    // so a size patched at frame 1 can already be stale at frame 4; each
+    // pass re-patches the cache and re-pins against the reflowed layout.
+    const frames = [1, 2, 4, 8, 16, 32];
+    let frame = 0;
+    let raf = 0;
+    const step = () => {
+      patchTailAndPin();
+      frame++;
+      if (frame < frames.length) {
+        raf = requestAnimationFrame(step);
+      }
+    };
+    raf = requestAnimationFrame(step);
+    return () => {
+      cancelAnimationFrame(raf);
+      pinToLiveEdgeRef.current = null;
+    };
   }, [messages, streaming, composerDockHeight]);
+
+  // Heal an already-stranded session on mount / fast-refresh reload: the
+  // patch+pin above only fires on message/dock changes, but a chat saved in
+  // the stuck state (last turn behind the composer) has none coming. The
+  // second, later pass catches async content (diagrams, highlighting)
+  // that lands after the first heal measured the tail row.
+  useEffect(() => {
+    const t1 = setTimeout(() => pinToLiveEdgeRef.current?.(), 350);
+    const t2 = setTimeout(() => pinToLiveEdgeRef.current?.(), 1200);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, []);
 
   // Switching sessions resets to the bottom of the new conversation.
   useEffect(() => {
@@ -1230,21 +1340,22 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
           className="chat-messages"
           ref={messagesContainerRef}
           onScroll={handleScroll}
-          // Reserve the floating composer dock's real height (+ breathing
-          // room) so the last turn never sits behind it. Floored at the old
-          // 220px constant so a compact dock never reserves LESS space than
-          // the original design; falls back to that constant until the
-          // first measurement lands.
-          style={{
-            paddingBottom:
-              composerDockHeight > 0
-                ? Math.max(composerDockHeight + 32, 220)
-                : undefined,
-          }}
         >
           <div
             style={{
-              height: virtualizer.getTotalSize(),
+              // Math.max(liveTotal): the virtualizer's getTotalSize() can be
+              // STALE at render time (its cache updates without notifying
+              // React — see patchTailAndPin); liveTotal is the truth kept by
+              // the pin pass, so the wrapper never renders too short and
+              // lets the positioned rows overflow the scroll extent.
+              // flexShrink 0: WITHOUT this, flexbox squeezes this child to a
+              // fraction of its height (measured 755px vs 3958px specified)
+              // because its absolutely-positioned rows give it zero
+              // min-content size — the overflowed rows then defined the
+              // scroll extent themselves and pinned the last turn behind
+              // the floating composer.
+              height: Math.max(virtualizer.getTotalSize(), liveTotal),
+              flexShrink: 0,
               position: "relative",
               width: "100%",
             }}
@@ -1386,6 +1497,27 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
             </div>
           )}
           <div ref={messagesEndRef} />
+          {/* Scrollable-space reservation for the floating composer dock.
+              MEASURED (pad-debug overlay, 2026-08-27): padding-bottom on this
+              scroll container is NOT counted in its scrollHeight (flex
+              scroll-container quirk — scrollH came up ~220px short of
+              content+padding), so max scroll could never clear the last
+              turn above the composer. An in-flow spacer is ordinary
+              content and always scrolls. Height = the dock's real measured
+              height + breathing room, floored at the original 220px. */}
+          <div
+            aria-hidden="true"
+            style={{
+              height:
+                composerDockHeight > 0
+                  ? Math.max(composerDockHeight + 32, 220)
+                  : 220,
+              // Same flex-shrink trap as the wrapper above: without this the
+              // spacer gets squeezed (measured ~45px vs 220px) and stops
+              // reserving anything.
+              flexShrink: 0,
+            }}
+          />
         </div>
       ) : (
         <div className="chat-welcome">

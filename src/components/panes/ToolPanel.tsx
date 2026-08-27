@@ -154,6 +154,9 @@ export function ToolPanel() {
 
   // Drag-to-resize: left-edge grab zone. The panel is docked right, so the
   // width grows as the pointer moves left. Doubles as the chat|panel splitter.
+  // `resizing` kills the width transition while dragging — an animated width
+  // under the pointer feels like dragging through rubber.
+  const [resizing, setResizing] = useState(false);
   const startResize = useCallback(
     (e: React.PointerEvent) => {
       const panel = panelRef.current;
@@ -161,10 +164,12 @@ export function ToolPanel() {
       e.preventDefault();
       const startX = e.clientX;
       const startWidth = panel.getBoundingClientRect().width;
+      setResizing(true);
       const onMove = (ev: PointerEvent) => {
         setWidth(startWidth + (startX - ev.clientX));
       };
       const onUp = () => {
+        setResizing(false);
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
       };
@@ -238,14 +243,14 @@ export function ToolPanel() {
 
   return (
     <>
-      {/* When collapsed the panel is fully hidden — the toolbar's split icon
-          reopens it. The full panel below stays mounted (display:none) so
-          terminals and browser webviews keep running; webviews are hidden via
-          the `visible` props. */}
+      {/* When collapsed the panel slides shut (width 0, CSS transition — the
+          toolbar's split icon reopens it). The full panel below stays mounted
+          so terminals and browser webviews keep running; webviews are hidden
+          via the `visible` props. */}
       <div
-        className="tool-panel"
+        className={`tool-panel${collapsed ? " collapsed" : ""}${resizing ? " resizing" : ""}`}
         ref={panelRef}
-        style={collapsed ? { display: "none" } : { width }}
+        style={collapsed ? { width: 0 } : { width }}
         aria-label="Tool panel"
       >
         <div

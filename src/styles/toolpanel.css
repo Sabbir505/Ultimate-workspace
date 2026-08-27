@@ -17,6 +17,31 @@
   background: var(--surface);
   border-left: 1px solid var(--border);
   position: relative;
+  /* Expand/collapse slides the width (same feel as the sidebar) — the panel
+     stays mounted, content clipped by overflow while sliding. */
+  overflow: hidden;
+  transition: width 0.28s var(--ease, ease), opacity 0.2s ease;
+}
+.tool-panel.collapsed {
+  width: 0;
+  opacity: 0;
+  border-left-color: transparent;
+  pointer-events: none;
+  /* visibility flips only AFTER the slide so the panel stays paintable
+     while animating and is unfocusable once hidden */
+  visibility: hidden;
+  transition: width 0.28s var(--ease, ease), opacity 0.18s ease,
+    visibility 0s linear 0.28s;
+}
+/* Dragging the resizer updates width continuously — no transition. */
+.tool-panel.resizing {
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tool-panel,
+  .tool-panel.collapsed {
+    transition: none;
+  }
 }
 /* Hide pane headers inside the tool panel — the tab bar replaces them. */
 .tool-panel .pane-header {

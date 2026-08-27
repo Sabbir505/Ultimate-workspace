@@ -1472,30 +1472,31 @@ function MessageBubbleInner({
               )
             : hasProcess
             ? (() => {
-                // The single collapsible row sits at the TOP of the bubble
-                // ("Worked for Xs ›" / live action), and ALL of the model's
-                // text — intro and answer — renders below it in source order.
+                // Source order is preserved across the process boundary:
+                // leading prose renders ABOVE the row, the trailing answer
+                // BELOW it, and mid-run narration sits INSIDE the expansion
+                // exactly where it happened (between the tool groups it
+                // narrates). Nothing is reordered or hoarded at the bottom.
                 if (!blocks) return null;
+                const firstProc = blocks.findIndex((b) => b.kind !== "text");
+                const lastProc = blocks.reduce(
+                  (acc, b, i) => (b.kind !== "text" ? i : acc),
+                  -1,
+                );
+                const leading = firstProc === -1 ? [] : blocks.slice(0, firstProc);
+                const inside = firstProc === -1 ? blocks : blocks.slice(firstProc, lastProc + 1);
+                const trailing = firstProc === -1 ? [] : blocks.slice(lastProc + 1);
+                const textBlock = (b: Block, key: string) =>
+                  b.kind === "text" && b.text.trim().length > 0 ? (
+                    <Markdown key={key} content={b.text} onPreviewArtifact={onPreviewArtifact} />
+                  ) : null;
                 return (
                   <>
-                    <ProcessSummary
-                      live={live === true}
-                      label={processLabel}
-                    >
-                      {/* Text blocks render below the row (once) — only
-                          think/activity/diff live inside the expansion. */}
-                      {blocks.map((b, i) =>
-                        b.kind === "text"
-                          ? null
-                          : renderProcessBlock(b, i, onPreviewArtifact),
-                      )}
+                    {leading.map((b, i) => textBlock(b, `lead:${i}`))}
+                    <ProcessSummary live={live === true} label={processLabel}>
+                      {inside.map((b, i) => renderProcessBlock(b, i, onPreviewArtifact))}
                     </ProcessSummary>
-
-                    {blocks.map((b, i) =>
-                      b.kind === "text" && b.text.trim().length > 0 ? (
-                        <Markdown key={`txt:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
-                      ) : null,
-                    )}
+                    {trailing.map((b, i) => textBlock(b, `trail:${i}`))}
                   </>
                 );
               })()

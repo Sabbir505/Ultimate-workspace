@@ -1170,6 +1170,199 @@ button.git-sidebar-section-header:hover {
   opacity: 0.4;
   cursor: not-allowed;
 }
+.branch-panel-error {
+  padding: 6px 10px;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, #ef4444 15%, transparent);
+  color: #ef4444;
+  font-size: 11px;
+  word-break: break-all;
+}
+.branch-panel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.branch-panel-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s var(--ease);
+}
+.branch-panel-row:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+.branch-panel-row.current {
+  color: var(--accent);
+  font-weight: 600;
+}
+.branch-panel-row:disabled {
+  cursor: default;
+}
+.branch-panel-row-marker {
+  width: 12px;
+  flex-shrink: 0;
+  text-align: center;
+  font-size: 9px;
+}
+.branch-panel-row-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.branch-panel-section {
+  padding: 6px 2px 2px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+
+/* ---- Commit graph table (Git Graph tab) ---- */
+/* GitLens-style columns: Graph | Description | Date | Author | Commit.
+   The rail is drawn per row (a continuous vertical line through the graph
+   column with an orange node dot) so it stays aligned without measuring. */
+.commit-graph {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  overflow: hidden;
+}
+.commit-graph-head {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 118px 100px 76px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+.commit-graph-head > span {
+  padding: 0 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.commit-graph-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.commit-graph-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 118px 100px 76px;
+  align-items: center;
+  min-height: 42px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+  color: var(--text);
+}
+.commit-graph-row:last-child {
+  border-bottom: none;
+}
+.commit-graph-row.head {
+  background: var(--surface-2);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+/* The graph rail: a continuous vertical line through the column center
+   plus an orange node dot on each row. */
+.commit-graph-cell-rail {
+  position: relative;
+  align-self: stretch;
+}
+.commit-graph-cell-rail::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: var(--border-strong);
+}
+.commit-graph-cell-rail::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: #e8833a;
+  box-shadow: 0 0 0 2px var(--surface);
+  z-index: 1;
+}
+.commit-graph-cell-desc {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 12px;
+  flex-wrap: wrap;
+}
+.commit-graph-refs {
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.commit-graph-ref {
+  padding: 1px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.commit-graph-ref.head {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.commit-graph-msg {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.commit-graph-cell-date,
+.commit-graph-cell-author {
+  padding: 8px 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.commit-graph-cell-sha {
+  padding: 8px 12px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* ---- Progress panel (tool-panel tab) ---- */
 .progress-panel {

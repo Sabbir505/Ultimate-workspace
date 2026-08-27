@@ -463,14 +463,30 @@
 .palette {
   margin-top: 12vh;
   width: min(560px, 90vw);
-  background: var(--surface-glass);
-  backdrop-filter: blur(32px) saturate(150%);
-  -webkit-backdrop-filter: blur(32px) saturate(150%);
+  /* Liquid glass, same recipe as the composer card / git sidebar: a
+     translucent gradient body under a heavy frost — the app behind the
+     palette reads as blurred shapes, not a flat opaque sheet. */
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
   border: 1px solid var(--border-strong);
-  border-radius: 14px;
-  box-shadow: var(--glass-rim), var(--glass-shadow-lg);
+  border-radius: 16px;
+  box-shadow: var(--glass-rim), 0 12px 32px -12px rgba(0, 0, 0, 0.35);
   overflow: hidden;
   animation: palette-in 0.22s var(--ease);
+}
+/* Light theme: a touch more body so text keeps contrast on bright backdrops
+   (same bump the composer card uses). */
+:root[data-theme="light"] .palette {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
 }
 @keyframes palette-in {
   from { opacity: 0; transform: translateY(-8px) scale(0.985); }

@@ -742,7 +742,13 @@ pub struct GitLogEntry {
     pub graph: String,
     pub sha: String,
     pub message: String,
+    /// Decoration refs, e.g. `HEAD -> master, origin/master` (parens and the
+    /// leading space stripped; empty when the commit carries no refs).
     pub refs: String,
+    pub author: String,
+    /// Commit date (`%ci`, local "YYYY-MM-DD HH:MM:SS ±ZZ:ZZ") — the frontend
+    /// slices it into a short "MM/DD, hh:mm AM" label.
+    pub date: String,
 }
 
 /// Recent commit log with graph lines (last 50 commits). An unborn HEAD
@@ -764,14 +770,13 @@ pub fn get_git_log(path: &Path) -> Result<Vec<GitLogEntry>, String> {
             "--decorate",
             "-n",
             "50",
-            "--format=%h\u{1f}%s\u{1f}%d",
+            // sha ␟ subject ␟ refs ␟ author ␟ commit-date
+            "--format=%h\u{1f}%s\u{1f}%d\u{1f}%an\u{1f}%ci",
         ],
     )?;
     let mut entries = Vec::new();
     for line in out.lines() {
         // Graph prefix is everything before the first SHA (short hash pattern).
-        // Format: [<graph chars>] <sha> <subject> (<refs>)
-        // Split on the first space to separate graph from the rest.
         let trimmed = line;
         // Find where the graph ends: the graph is leading * | / \ characters.
         let graph_end = trimmed
@@ -782,15 +787,27 @@ pub fn get_git_log(path: &Path) -> Result<Vec<GitLogEntry>, String> {
             .unwrap_or(0);
         let graph = trimmed[..graph_end].trim_end().to_string();
         let rest = trimmed[graph_end..].trim();
-        // rest = "<sha> <subject> (<refs>)" — split on first space.
-        let (sha_part, msg_part) = rest
-            .split_once(' ')
-            .unwrap_or((rest, ""));
+        // rest = "<sha>␟<subject>␟(<refs>)␟<author>␟<date>" — the unit
+        // separator can't appear in any of those fields, so a plain split
+        // is lossless. `refs` comes decorated as " (HEAD -> master, …)".
+        let mut parts = rest.split('\u{1f}');
+        let sha_part = parts.next().unwrap_or(rest).trim();
+        let msg_part = parts.next().unwrap_or("");
+        // Strip the wrapper parens + leading space from the %d decoration.
+        let refs_part = parts.next().unwrap_or("").trim();
+        let refs_part = refs_part
+            .strip_prefix('(')
+            .and_then(|r| r.strip_suffix(')'))
+            .unwrap_or(refs_part);
+        let author = parts.next().unwrap_or("");
+        let date = parts.next().unwrap_or("");
         entries.push(GitLogEntry {
             graph,
             sha: sha_part.to_string(),
             message: msg_part.to_string(),
-            refs: String::new(), // refs are embedded in message with --decorate
+            refs: refs_part.to_string(),
+            author: author.to_string(),
+            date: date.to_string(),
         });
     }
     Ok(entries)

@@ -15,7 +15,7 @@
 import { lazy, useState, Suspense, useCallback, useEffect, useMemo, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Globe, Terminal, FileDiff, GitPullRequest, Bot, FileCode, NotebookText } from "lucide-react";
+import { Globe, Terminal, FileDiff, GitPullRequest, Bot, FileCode, NotebookText, GitBranch } from "lucide-react";
 import { openBrowserPane, openShellTerminal, restoreMinimizedBrowser } from "../../lib/sessionLauncher";
 import {
   activeTerminalPair,
@@ -32,6 +32,7 @@ import { harnessShortName } from "../../types";
 const ArtifactPreviewPane = lazy(() => import("../chat/ArtifactPreviewPane").then((m) => ({ default: m.ArtifactPreviewPane })));
 import { DevDiffPanel } from "./DevDiffPanel";
 import { PullsPanel } from "./PullsPanel";
+import { BranchPanel } from "./BranchPanel";
 import { DormantBrowsers, PaneFrame } from "./PaneFrame";
 import { SubagentPanel } from "./SubagentPanel";
 
@@ -40,6 +41,7 @@ const TABS: { id: ToolPanelTab; label: string; Icon: React.ElementType }[] = [
   { id: "browser", label: "Browser", Icon: Globe },
   { id: "files", label: "Changes", Icon: FileDiff },
   { id: "pulls", label: "Pull Requests", Icon: GitPullRequest },
+  { id: "branch", label: "Git Graph", Icon: GitBranch },
   { id: "agents", label: "Agents", Icon: Bot },
   // Artifact/plan tabs are spawned automatically (code generation, opened
   // plans) — they don't appear in the "+" picker, but are listed here so
@@ -409,6 +411,9 @@ export function ToolPanel() {
                   auto-spawn effect handles the "no browser yet" case. */}
               {activeInstance.kind === "files" && <DevDiffPanel embedded />}
               {activeInstance.kind === "pulls" && <PullsPanel />}
+              {/* Branch tab — the "Git Graph" action in the branch dropdown
+                  lands here: current-branch status + switcher. */}
+              {activeInstance.kind === "branch" && <BranchPanel />}
               {activeInstance.kind === "plan" && (
                 <>
                   {!planCanvasContent ? (

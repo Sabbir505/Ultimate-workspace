@@ -283,7 +283,11 @@ export interface GitLogEntry {
   graph: string;
   sha: string;
   message: string;
+  /** Decoration refs, e.g. "HEAD -> master, origin/master" (no parens). */
   refs: string;
+  author: string;
+  /** Commit date (%ci): "YYYY-MM-DD HH:MM:SS ±ZZ:ZZ" — sliced client-side. */
+  date: string;
 }
 export const listGitBranches = (path: string) =>
   safeInvoke<BranchInfo[] | null>("list_git_branches", { path });

@@ -236,6 +236,12 @@ export function GitToolsSidebar() {
   // "Git tools" title; the sections live in a body that collapses its
   // max-height and fades. The icon is the same element in both states.
   return (
+    <>
+    {/* NOTE: the branch popover below is a SIBLING of the shell, not a
+        child — the shell's backdrop-filter makes it the containing block
+        for position:fixed descendants, which trapped the popover inside
+        the 260px shell (clipped invisible by overflow:hidden). As a
+        sibling it anchors to the real viewport again. */}
     <div
       className={`git-sidebar${gitSidebarCollapsed ? " git-sidebar-collapsed" : ""}`}
     >
@@ -492,33 +498,6 @@ export function GitToolsSidebar() {
         </div>
       </div>
 
-      {/* Branch popover — rendered inline with position:fixed to escape
-          sidebar overflow without createPortal (which was causing WebView crashes).
-          Lives outside .git-sidebar-body so the popover survives collapse. */}
-      {branchOpen && (
-        <div
-          ref={popoverRef}
-          className="git-sidebar-branch-popover-fixed"
-          style={{
-            position: "fixed",
-            // Anchor to the LEFT of the sidebar: the popover's right edge
-            // sits 8px left of the branch row's left edge, so it never
-            // covers the git panel it was opened from.
-            top: branchBtnRef.current?.getBoundingClientRect().top ?? 0,
-            right:
-              window.innerWidth -
-              (branchBtnRef.current?.getBoundingClientRect().left ?? 0) +
-              8,
-            zIndex: 9999,
-          }}
-        >
-          <BranchDropdown
-            chatBound
-            onClose={() => setBranchOpen(false)}
-          />
-        </div>
-      )}
-
       {/* Commit modal — centered in the chat view. */}
       {commitModalOpen && path && (
         <CommitModal
@@ -529,6 +508,34 @@ export function GitToolsSidebar() {
         />
       )}
     </div>
+
+    {/* Branch popover — fixed viewport coords, viewport-anchored as long as
+        NO ancestor here carries filter/transform (chat-view is clean). It
+        must stay OUT of the glass shell: backdrop-filter would capture it. */}
+    {branchOpen && (
+      <div
+        ref={popoverRef}
+        className="git-sidebar-branch-popover-fixed"
+        style={{
+          position: "fixed",
+          // Anchor to the LEFT of the sidebar: the popover's right edge
+          // sits 8px left of the branch row's left edge, so it never
+          // covers the git panel it was opened from.
+          top: branchBtnRef.current?.getBoundingClientRect().top ?? 0,
+          right:
+            window.innerWidth -
+            (branchBtnRef.current?.getBoundingClientRect().left ?? 0) +
+            8,
+          zIndex: 9999,
+        }}
+      >
+        <BranchDropdown
+          chatBound
+          onClose={() => setBranchOpen(false)}
+        />
+      </div>
+    )}
+    </>
   );
 }
 

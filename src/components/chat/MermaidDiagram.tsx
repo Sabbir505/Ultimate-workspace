@@ -57,6 +57,12 @@ async function loadMermaid(theme: string): Promise<MermaidModule> {
             // Cool neutral edges/text; cyan primary accent.
             lineColor: tok("--syntax-operator", "#d4d4d4"),
             textColor: tok("--text", "#e4e4e4"),
+            // Mermaid derives node/label text from stateLabelColor
+            // (stateLabelColor || stateBkg || primaryTextColor) — without an
+            // explicit value it falls back to primaryTextColor, which we pin
+            // to the dark editor bg for accent-filled shapes → invisible
+            // dark-on-dark labels. Pin it to the readable text colour.
+            stateLabelColor: tok("--text", "#e4e4e4"),
             edgeLabelBackground: "transparent",
             primaryColor: tok("--accent", "#88C0D0"),
             primaryTextColor: tok("--editor-bg", "#1a1a1a"),
@@ -73,6 +79,10 @@ async function loadMermaid(theme: string): Promise<MermaidModule> {
             background: "transparent",
             lineColor: tok("--text", "#1a1a1a"),
             textColor: tok("--text", "#1a1a1a"),
+            // See the dark-theme note: without this, state/flow node labels
+            // fall back to primaryTextColor (#ffffff here — white on the
+            // near-white node fill).
+            stateLabelColor: tok("--text", "#1a1a1a"),
             edgeLabelBackground: "transparent",
             primaryColor: tok("--accent", "#0078a8"),
             primaryTextColor: "#ffffff",

@@ -70,7 +70,7 @@ export function LocalModelBanner() {
       </button>
       <strong>Run models locally — free and private</strong>
       <div className="hint">
-        Conduit can run GGUF models on your machine via the bundled llama.cpp
+        Relay can run GGUF models on your machine via the bundled llama.cpp
         server{vramGb ? ` — picks sized for your ${vramGb} GB of VRAM` : " — sized to your hardware"}{" "}
         are marked <em>Recommended</em> in the Model Market.
       </div>

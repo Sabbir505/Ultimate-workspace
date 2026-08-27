@@ -322,12 +322,12 @@ export function Sidebar() {
         <div className="flex items-center justify-between mb-2">
           <button
             type="button"
-            className="sidebar-brand-btn text-sm font-bold text-gray-900 dark:text-white select-none px-1.5 py-0.5 -ml-1.5 rounded-md"
+            className="sidebar-brand-btn sidebar-wordmark select-none px-1.5 py-0.5 -ml-1.5 rounded-md"
             onClick={toggleSidebar}
             title="Collapse sidebar"
             aria-label="Collapse sidebar"
           >
-            Conduit
+            Relay
           </button>
           <span className="flex items-center flex-shrink-0">
             <UpdateButton />

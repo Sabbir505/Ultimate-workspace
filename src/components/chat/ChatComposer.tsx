@@ -8,6 +8,7 @@
 // doc/ppt/xls are extracted to text server-side, and plain-text files are
 // inlined into the message.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Mic, Plug, Puzzle, SquareSlash, X } from "lucide-react";
 import { AgentModelPicker, type AgentModelSelection } from "./AgentModelPicker";
 import { PermissionModeMenu } from "./PermissionModeMenu";
@@ -335,6 +336,7 @@ export function FolderNotch() {
 export function GitHubNotch() {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
   const boundProjectId = useChatStore((s) =>
     s.activeChatSessionId ? s.sessionProjects[s.activeChatSessionId] : undefined,
@@ -360,7 +362,15 @@ export function GitHubNotch() {
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+      const t = e.target as Node;
+      // The popover portals to <body> (out of the toolbar's backdrop root so
+      // its glass frost can see the page) — so both the trigger wrap AND the
+      // portaled popover count as "inside".
+      if (
+        wrapRef.current &&
+        !wrapRef.current.contains(t) &&
+        !popRef.current?.contains(t)
+      ) {
         setOpen(false);
       }
     };
@@ -396,8 +406,23 @@ export function GitHubNotch() {
         </svg>
         <span className="composer-notch-github-name">{gitStatus.branch}</span>
       </button>
-      {open && (
-        <div className="composer-notch-github-popover">
+      {open &&
+        createPortal(
+        <div
+          ref={popRef}
+          className="composer-notch-github-popover"
+          style={{
+            position: "fixed",
+            top: (wrapRef.current?.getBoundingClientRect().bottom ?? 0) + 6,
+            left: "auto",
+            bottom: "auto",
+            right: Math.max(
+              8,
+              window.innerWidth - (wrapRef.current?.getBoundingClientRect().right ?? 0),
+            ),
+            zIndex: 9999,
+          }}
+        >
           <button
             type="button"
             className="composer-notch-pulls-entry"
@@ -412,7 +437,8 @@ export function GitHubNotch() {
             <span>Pull Requests</span>
           </button>
           <BranchDropdown onClose={() => setOpen(false)} />
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

@@ -2,7 +2,13 @@
 // branch name + caret. Clicking opens the BranchDropdown popover. This is the
 // ONLY git element in the toolbar — everything else lives in the GitToolsSidebar
 // (the full vertical panel on the right).
+//
+// The popover PORTALS to <body>: the toolbar carries backdrop-filter (it's
+// glass), which forms a backdrop root — a nested popover's own frost would
+// only sample the toolbar's empty backdrop and render transparent (chat text
+// bled through it sharply). Portaled + fixed-anchored to the pill instead.
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useProjectsStore } from "../../state/projects";
 import { useChatStore } from "../../state/chat";
 import { BranchDropdown } from "./BranchDropdown";
@@ -10,6 +16,7 @@ import { BranchDropdown } from "./BranchDropdown";
 export function GitMenu() {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
 
   const boundProjectId = useChatStore((s) =>
     s.activeChatSessionId ? s.sessionProjects[s.activeChatSessionId] : undefined,
@@ -23,7 +30,13 @@ export function GitMenu() {
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+      const t = e.target as Node;
+      // Both the pill and the portaled popover count as "inside".
+      if (
+        wrapRef.current &&
+        !wrapRef.current.contains(t) &&
+        !popRef.current?.contains(t)
+      ) {
         setOpen(false);
       }
     };
@@ -60,11 +73,27 @@ export function GitMenu() {
         <span className="git-menu-branch-name">{gitStatus.branch}</span>
         <span className="git-menu-branch-caret">▾</span>
       </button>
-      {open && (
-        <div className="git-menu-popover">
-          <BranchDropdown onClose={() => setOpen(false)} />
-        </div>
-      )}
+      {open &&
+        createPortal(
+          <div
+            ref={popRef}
+            className="git-menu-popover"
+            style={{
+              position: "fixed",
+              top: (wrapRef.current?.getBoundingClientRect().bottom ?? 0) + 6,
+              right: Math.max(
+                8,
+                window.innerWidth - (wrapRef.current?.getBoundingClientRect().right ?? 0),
+              ),
+              left: "auto",
+              bottom: "auto",
+              zIndex: 9999,
+            }}
+          >
+            <BranchDropdown onClose={() => setOpen(false)} />
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

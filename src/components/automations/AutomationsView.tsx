@@ -285,7 +285,7 @@ export function AutomationsView() {
         <div className="automations-empty">
           <PlaySquare size={48} strokeWidth={1.5} />
           <h3>No automations scheduled yet</h3>
-          <p>Schedule headless agent runs on a cron schedule — they fire while Conduit is open, or anytime with "Run while closed".</p>
+          <p>Schedule headless agent runs on a cron schedule — they fire while Relay is open, or anytime with "Run while closed".</p>
           <button
             onClick={() => setShowNewForm(true)}
             className="automations-btn primary"
@@ -425,7 +425,7 @@ export function RunWhileClosedToggle() {
   return (
     <label
       className={`automations-rwc${on ? " on" : ""}`}
-      title="Run automations while Conduit is closed (Windows Task Scheduler)"
+      title="Run automations while Relay is closed (Windows Task Scheduler)"
     >
       <input
         type="checkbox"
@@ -510,7 +510,7 @@ export function NotifySettingsButton() {
         <div className="automations-notify-panel">
           <div className="automations-notify-title">Notifications</div>
           <p className="automations-notify-hint">
-            While Conduit is open, failed runs show an OS toast (follows Do Not Disturb)
+            While Relay is open, failed runs show an OS toast (follows Do Not Disturb)
             and a paired phone gets an alert.
           </p>
           <label className="automations-notify-field">
@@ -525,7 +525,7 @@ export function NotifySettingsButton() {
           </label>
           <p className="automations-notify-hint">
             POSTed on every completed run — the only channel that fires while
-            Conduit is fully closed.
+            Relay is fully closed.
           </p>
           <div className="automations-notify-row">
             <button
@@ -1149,7 +1149,7 @@ function AutomationForm({
 
         <p className="automation-form-hint warning">
           Automations run unattended with full-auto permissions. They fire while
-          Conduit is open — or anytime once "Run while closed" is on. Results
+          Relay is open — or anytime once "Run while closed" is on. Results
           land in a dedicated chat named after this automation.
         </p>
         {error && <p className="automation-form-error">{error}</p>}

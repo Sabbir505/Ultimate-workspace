@@ -1,8 +1,8 @@
 {
-  "name": "conduit",
+  "name": "relay",
   "private": true,
   "version": "0.4.1",
-  "description": "Conduit — a local-first, multi-pane desktop shell for AI coding agents",
+  "description": "Relay — a local-first, multi-pane desktop shell for AI coding agents",
   "type": "module",
   "scripts": {
     "dev": "vite",

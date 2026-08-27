@@ -3,7 +3,7 @@
 //    on-disk skill directories (~/.claude/skills, ~/.agents/skills).
 //  - Loops: same convention under loops/ — empty until a harness or the user
 //    creates one.
-//  - Prompt templates: Conduit's own DB-backed skills (§7.15) that expand when
+//  - Prompt templates: Relay's own DB-backed skills (§7.15) that expand when
 //    typed as /slash-commands into any pane.
 // Installed skills/loops are editable in place; creating one writes it to
 // BOTH harness directories so either CLI discovers it by its slash name.
@@ -328,7 +328,7 @@ function InstalledPanel({ kind }: { kind: "skill" | "loop" }) {
   );
 }
 
-// ---- Existing Conduit prompt-template CRUD (§7.15) ----
+// ---- Existing Relay prompt-template CRUD (§7.15) ----
 
 function TemplatesPanel() {
   const skills = useSkillsStore((s) => s.skills);
@@ -406,7 +406,7 @@ function TemplatesPanel() {
         <h3>Saved templates</h3>
         <p className="estimate-note">
           Type a slash command (e.g. <code>/audit</code>) into any pane to expand it into the full
-          template before sending. These are Conduit-side templates, separate from harness skills.
+          template before sending. These are Relay-side templates, separate from harness skills.
         </p>
         {skills.length === 0 && (
           <div className="empty-reserved small">

@@ -26,7 +26,7 @@ export function OnboardingBanner() {
       </button>
       <strong>No agent harness detected</strong>
       <div className="hint">
-        Conduit orchestrates existing CLI agents. Neither <code>claude</code> (Claude Code) nor{" "}
+        Relay orchestrates existing CLI agents. Neither <code>claude</code> (Claude Code) nor{" "}
         <code>kimi</code> (Kimi Code CLI) was found on your PATH. Install one of them to start agent
         sessions — project management, the browser pane, and everything else works regardless.
       </div>

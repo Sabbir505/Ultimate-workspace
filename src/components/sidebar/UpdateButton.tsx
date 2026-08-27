@@ -1,4 +1,4 @@
-// Green "Update" button for the sidebar header, right of the "Conduit" brand.
+// Green "Update" button for the sidebar header, right of the "Relay" brand.
 // Visible only when an update is available (useUpdaterStore.update != null) or
 // an install is in flight / just finished. Hovering (or focusing) the button
 // opens a popover with the version, date, and structured Features / Bug Fixes
@@ -225,7 +225,7 @@ export function UpdateButton() {
 
           {installed && (
             <div className="update-popover-installed">
-              Update installed — Conduit is restarting to apply it.
+              Update installed — Relay is restarting to apply it.
             </div>
           )}
 

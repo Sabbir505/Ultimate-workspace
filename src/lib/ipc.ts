@@ -1830,7 +1830,7 @@ export async function exportChatZip(
   const { save } = await import("@tauri-apps/plugin-dialog");
   const dest = await save({
     defaultPath: defaultName,
-    filters: [{ name: "Conduit backup", extensions: ["zip"] }],
+    filters: [{ name: "Relay backup", extensions: ["zip"] }],
   });
   if (!dest) return false;
   await safeInvoke<void>("export_chat_zip", { sessionId, dest });
@@ -1846,7 +1846,7 @@ export async function exportProjectZip(
   const { save } = await import("@tauri-apps/plugin-dialog");
   const dest = await save({
     defaultPath: defaultName,
-    filters: [{ name: "Conduit backup", extensions: ["zip"] }],
+    filters: [{ name: "Relay backup", extensions: ["zip"] }],
   });
   if (!dest) return false;
   await safeInvoke<void>("export_project_zip", { projectId, dest });
@@ -1859,8 +1859,8 @@ export async function importChatZip(): Promise<string[] | null> {
   const { open } = await import("@tauri-apps/plugin-dialog");
   const src = await open({
     multiple: false,
-    filters: [{ name: "Conduit backup", extensions: ["zip"] }],
-    title: "Select a Conduit backup (.zip) to restore",
+    filters: [{ name: "Relay backup", extensions: ["zip"] }],
+    title: "Select a Relay backup (.zip) to restore",
   });
   if (typeof src !== "string" || !src) return null;
   return safeInvoke<string[]>("import_chat_zip", { src });

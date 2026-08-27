@@ -520,7 +520,7 @@ button.sidebar-section-label:hover {
 
 
 
-/* Conduit brand doubles as the collapse control — dead flat: the global
+/* Relay wordmark doubles as the collapse control — dead flat: the global
    button skin (tokens.css bg/border/rim, plus its hover variant) is fully
    neutralized; the text itself is the affordance, no hover highlight. */
 .sidebar-brand-btn,
@@ -530,6 +530,25 @@ button.sidebar-section-label:hover {
   border-color: transparent;
   box-shadow: none;
 }
+/* Stylish Relay wordmark: brand-orange gradient text, wide-tracked caps.
+   Uses background-clip so the gradient paints the glyphs themselves. */
+.sidebar-wordmark {
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  background: linear-gradient(100deg, #ffb347 0%, #f59e0b 45%, #d97706 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+.sidebar-wordmark:hover,
+.sidebar-wordmark:active {
+  -webkit-text-fill-color: transparent;
+  filter: brightness(1.12);
+}
+
 
 /* Collapse-sidebar icon button (top of the sidebar) */
 .sidebar-collapse-btn {

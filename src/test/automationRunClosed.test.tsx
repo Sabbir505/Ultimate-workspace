@@ -176,7 +176,7 @@ describe("useAutomationEvents", () => {
     expect(osNotifyMock).not.toHaveBeenCalled();
     runFinishedHandler!(payload("provider exploded"));
     expect(osNotifyMock).toHaveBeenCalledWith(
-      "Conduit automation failed",
+      "Relay automation failed",
       "nightly: provider exploded",
     );
     // Every event refreshes the store.

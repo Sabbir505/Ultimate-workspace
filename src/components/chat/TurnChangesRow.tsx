@@ -405,7 +405,7 @@ export function TurnChangesRow({
             everything after)
           </label>
           <p>
-            Conduit saves a safety snapshot of the current state first, so you can undo this
+            Relay saves a safety snapshot of the current state first, so you can undo this
             restore afterwards.
           </p>
         </Modal>

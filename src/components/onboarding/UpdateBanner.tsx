@@ -51,7 +51,7 @@ export function UpdateBanner() {
             </svg>
           </div>
           <h2 className="update-modal-title">Update installed</h2>
-          <p className="update-modal-subtitle">Conduit is restarting to apply the update…</p>
+          <p className="update-modal-subtitle">Relay is restarting to apply the update…</p>
         </div>
       </div>
     );

@@ -97,7 +97,7 @@ export function usePtyEvents(): void {
                 : null;
               const name = session ? sessionDisplayTitle(session.title) : pane.data.label;
               const verb = state === "diff_ready" ? "has a diff ready for review" : "is waiting for input";
-              void notify("Conduit", `${name} ${verb}`);
+              void notify("Relay", `${name} ${verb}`);
               if (settings.notifySound) playNotifyChime();
             }
           }

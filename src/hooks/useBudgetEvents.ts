@@ -19,7 +19,7 @@ export function useBudgetEvents(): void {
       const pct = Math.round(p.usedPct);
       const msg = `${p.projectName}: $${p.spentUsd.toFixed(2)} spent (${pct}% of $${p.monthlyUsd.toFixed(2)} monthly budget)`;
       toastError("Budget alert", msg);
-      void osNotify("Conduit budget alert", msg);
+      void osNotify("Relay budget alert", msg);
     }).then((u) => {
       if (disposed) u();
       else unlistenAlert = u;

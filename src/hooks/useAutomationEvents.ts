@@ -26,7 +26,7 @@ export function useAutomationEvents(): void {
       if (p.status === "ok" || p.status === "skipped") return;
       const settings = useSettingsStore.getState();
       if (settings.dnd) return;
-      void osNotify("Conduit automation failed", `${p.name}: ${p.summary}`);
+      void osNotify("Relay automation failed", `${p.name}: ${p.summary}`);
       if (settings.notifySound) playNotifyChime();
     }).then((u) => {
       if (disposed) u();

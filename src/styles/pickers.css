@@ -243,6 +243,19 @@
 .agent-dot.off {
   background: var(--state-idle);
 }
+/* Provider/agent brand mark on the chip (same glyphs the picker rail uses).
+   Sized to the chip's text line; currentColor keeps it muted like the label. */
+.agent-chip-icon {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: var(--text-dim);
+}
+.agent-chip-icon svg {
+  width: 13px;
+  height: 13px;
+  display: block;
+}
 /* Spinner shown on the agent chip while a harness's config/models load. */
 .agent-chip-spinner {
   width: 10px;

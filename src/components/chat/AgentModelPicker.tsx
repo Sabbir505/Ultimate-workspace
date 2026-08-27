@@ -586,7 +586,31 @@ export function AgentModelPicker({
 
   // ---- chip label ------------------------------------------------------------
 
+  // The chip shows the PROVIDER/AGENT ICON (same marks the picker rail uses)
+  // instead of spelling the provider name out — the model name carries the
+  // information. Full label survives as the tooltip.
   const chipLabel = useMemo(() => {
+    if (agent == null) return null;
+    const h = harnessIdOf(agent);
+    if (h) {
+      const name = harnesses.find((x) => x.id === h)?.displayName ?? h;
+      return model ? (modelLabels?.[model] ?? model) : name;
+    }
+    const a = acpIdOf(agent);
+    if (a) return acpAgents.find((x) => x.id === a)?.displayName ?? a;
+    if (agent === "local") {
+      return model ? shortModelName(model) : "Local model";
+    }
+    if (agent === "builtin") {
+      const p = (provider ?? "") as ProviderId;
+      return model ? (modelLabels?.[model] ?? model) : (PROVIDER_LABELS[p] ?? "API");
+    }
+    return null;
+  }, [agent, model, provider, modelLabels, harnesses, acpAgents]);
+
+  // Full "Provider · model" text for the tooltip (the label alone no longer
+  // names the provider).
+  const chipFullLabel = useMemo(() => {
     if (agent == null) return null;
     const h = harnessIdOf(agent);
     if (h) {
@@ -606,6 +630,22 @@ export function AgentModelPicker({
     return null;
   }, [agent, model, provider, modelLabels, harnesses, acpAgents]);
 
+  // Same icon set the picker rail renders (Claude slash-A, OpenAI knot, …);
+  // falls back to the colored dot for anything the rail doesn't mark.
+  const chipIcon = useMemo(() => {
+    if (agent == null) return null;
+    const h = harnessIdOf(agent);
+    if (h) return railIcon(`harness:${h}`, h);
+    const a = acpIdOf(agent);
+    if (a) return railIcon(`acp:${a}`, a);
+    if (agent === "local") return railIcon("local", "Local");
+    if (agent === "builtin") {
+      const p = (provider ?? "") as ProviderId;
+      return railIcon(`provider:${p}`, PROVIDER_LABELS[p] ?? "API");
+    }
+    return null;
+  }, [agent, provider]);
+
   const dotClass =
     agent == null ? null : harnessIdOf(agent) || acpIdOf(agent) ? "" : agent === "local" ? "local" : "cloud";
 
@@ -624,11 +664,16 @@ export function AgentModelPicker({
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         aria-haspopup="menu"
+        title={chipFullLabel ?? undefined}
       >
         {chipLabel ? (
           <>
             {loading ? (
               <span className="agent-chip-spinner" aria-hidden="true" />
+            ) : chipIcon ? (
+              <span className="agent-chip-icon" aria-hidden="true">
+                {chipIcon}
+              </span>
             ) : (
               <span
                 className={dotClass ? `agent-dot ${dotClass}` : "agent-dot"}

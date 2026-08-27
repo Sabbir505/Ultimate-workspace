@@ -322,7 +322,7 @@ export function Sidebar() {
         <div className="flex items-center justify-between mb-2">
           <button
             type="button"
-            className="text-sm font-bold text-gray-900 dark:text-white select-none px-1.5 py-0.5 -ml-1.5 rounded-md hover:bg-gray-200 dark:hover:bg-white/20 transition-all duration-150 active:scale-95"
+            className="sidebar-brand-btn text-sm font-bold text-gray-900 dark:text-white select-none px-1.5 py-0.5 -ml-1.5 rounded-md"
             onClick={toggleSidebar}
             title="Collapse sidebar"
             aria-label="Collapse sidebar"

@@ -448,7 +448,11 @@ button.sidebar-section-label:hover {
   display: flex;
   align-items: center;
   justify-content: center;
+  /* Full reset of the global `button` skin (tokens.css paints every button
+     with surface-2 bg + border + glass rim unless explicitly cleared). */
   background: transparent;
+  border: none;
+  box-shadow: none;
   border-radius: var(--radius-sm);
   color: var(--text-dim);
 }
@@ -470,6 +474,7 @@ button.sidebar-section-label:hover {
   justify-content: center;
   background: transparent;
   border: none;
+  box-shadow: none;
   border-radius: var(--radius-sm);
   color: var(--text-dim);
 }
@@ -502,6 +507,17 @@ button.sidebar-section-label:hover {
 }
 
 
+
+/* Conduit brand doubles as the collapse control — dead flat: the global
+   button skin (tokens.css bg/border/rim, plus its hover variant) is fully
+   neutralized; the text itself is the affordance, no hover highlight. */
+.sidebar-brand-btn,
+.sidebar-brand-btn:hover,
+.sidebar-brand-btn:active {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
 
 /* Collapse-sidebar icon button (top of the sidebar) */
 .sidebar-collapse-btn {

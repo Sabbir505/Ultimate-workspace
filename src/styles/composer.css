@@ -5,6 +5,7 @@
 .chat-composer {
   position: relative;
   flex-shrink: 0;
+  background: transparent;
   /* Aligned with the centered conversation column. Extra bottom padding
      leaves room for the circular context meter that sits below the send
      button, inside the composer bounds. */
@@ -156,16 +157,16 @@
   flex-direction: column;
   gap: 4px;
   padding: 10px 12px 8px;
-  /* Liquid glass (matches the sidebar surface): near-opaque tinted body so
-     content scrolling underneath never bleeds through, heavy blur +
-     saturation, hairline border + rim. Full transparency here puts the
-     transcript visibly under the composer — unreadable. */
+  /* Liquid glass, TRUE transparent (per design review): the transcript
+     scrolling underneath stays visible through the heavily-frosted body —
+     that's the point of the effect. Text under the card reads as blurred
+     shapes, not sharp competing text. */
   border: 1px solid var(--border);
   border-radius: 16px;
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--surface-glass) 94%, transparent),
-    color-mix(in srgb, var(--surface-glass) 88%, transparent)
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
   );
   backdrop-filter: blur(24px) saturate(160%);
   -webkit-backdrop-filter: blur(24px) saturate(160%);
@@ -178,8 +179,8 @@
 :root[data-theme="light"] .chat-composer-card {
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--surface-glass) 97%, transparent),
-    color-mix(in srgb, var(--surface-glass) 93%, transparent)
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
   );
 }
 .chat-composer-card:focus-within {

@@ -732,6 +732,11 @@ export interface ChatOpenBrowserPayload {
   chatSessionId: string;
   url: string;
 }
+export interface ChatOpenPreviewPayload {
+  chatSessionId: string;
+  path: string;
+  filename: string;
+}
 
 /** A pending per-action tool approval surfaced as a card. Emitted when the
  *  central `check_permission` gate (built-in chat) or the Claude Code
@@ -1665,6 +1670,10 @@ export const listenCheckpointCreated = (handler: (payload: ChatCheckpoint) => vo
   safeListen<ChatCheckpoint>("checkpoint:created", handler);
 export const listenChatOpenBrowser = (handler: (payload: ChatOpenBrowserPayload) => void) =>
   safeListen<ChatOpenBrowserPayload>("chat:open-browser", handler);
+/** `open_file` routed a previewable local file to the in-app tool-panel
+ *  preview instead of the OS handler. */
+export const listenChatOpenPreview = (handler: (payload: ChatOpenPreviewPayload) => void) =>
+  safeListen<ChatOpenPreviewPayload>("chat:open-preview", handler);
 
 export const listenChatTaskProgress = (handler: (payload: ChatTaskProgressPayload) => void) =>
   safeListen<ChatTaskProgressPayload>("chat:task-progress", handler);

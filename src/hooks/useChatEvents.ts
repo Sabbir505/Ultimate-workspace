@@ -15,6 +15,7 @@ import {
   listenChatDone,
   listenChatError,
   listenChatOpenBrowser,
+  listenChatOpenPreview,
   listenChatOwner,
   listenChatStatus,
   listenChatTaskProgress,
@@ -29,6 +30,7 @@ import {
 import { matchPlanStep } from "../lib/planMatcher";
 import { openInBrowserPane } from "../lib/openBrowserPane";
 import { useChatStore } from "../state/chat";
+import { useUiStore } from "../state/ui";
 
 export function useChatEvents(): void {
   useEffect(() => {
@@ -117,6 +119,14 @@ export function useChatEvents(): void {
     unlistens.push(
       listenChatOpenBrowser(({ url }) => {
         openInBrowserPane(url);
+      }),
+    );
+
+    // open_file routed a previewable file to the in-app viewer — open it as a
+    // tab in the right-side tool panel (dedupes by path, expands the panel).
+    unlistens.push(
+      listenChatOpenPreview(({ path, filename }) => {
+        useUiStore.getState().openArtifactTab({ path, filename });
       }),
     );
 

@@ -21,7 +21,7 @@ use crate::chat::stream_events;
 use crate::chat::{permission, tools, ChatManager};
 use crate::types::{
     ChatApprovalRequestPayload, ChatApprovalResolvedPayload, ChatArtifactPayload,
-    ChatOpenBrowserPayload, ChatTokenPayload,
+    ChatOpenBrowserPayload, ChatOpenPreviewPayload, ChatTokenPayload,
 };
 use crate::db;
 
@@ -1233,6 +1233,16 @@ pub(crate) async fn run_tool(
             ChatOpenBrowserPayload {
                 chat_session_id: sid.to_string(),
                 url,
+            },
+        );
+    }
+    if let Some(p) = outcome.preview {
+        let _ = app.emit(
+            "chat:open-preview",
+            ChatOpenPreviewPayload {
+                chat_session_id: sid.to_string(),
+                path: p.path,
+                filename: p.filename,
             },
         );
     }

@@ -90,6 +90,7 @@ mod tests {
             text: "hello".to_string(),
             artifact: None,
             browse_url: None,
+            preview: None,
         };
         assert_eq!(outcome_text(&o), "hello");
         assert!(outcome_artifact_json(&o).is_null());

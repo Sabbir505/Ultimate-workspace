@@ -246,6 +246,9 @@ pub struct ToolOutcome {
     pub text: String,
     pub artifact: Option<ArtifactRef>,
     pub browse_url: Option<String>,
+    /// Ask the UI to open this LOCAL file in the right-side tool-panel
+    /// preview (`open_file` for extensions the app previews natively).
+    pub preview: Option<ArtifactRef>,
 }
 
 impl ToolOutcome {
@@ -254,6 +257,7 @@ impl ToolOutcome {
             text: t.into(),
             artifact: None,
             browse_url: None,
+            preview: None,
         }
     }
 }
@@ -443,12 +447,26 @@ const OPEN_URL_DESC: &str = "Open a web page in the app's built-in browser so \
     something the user asked you to create — created files preview \
     automatically in the app.";
 
-const OPEN_FILE_DESC: &str = "Open a LOCAL file on this machine with the operating \
-    system's default application (e.g. a .mmd/.svg/.html/.png/.pdf file you just \
-    created or saved). Pass the file's ABSOLUTE path. This really opens it on \
-    the user's screen — use it whenever the user asks you to open/launch/show a \
-    local file. For web pages use open_url instead (it is http(s)-only); for \
-    files you never need a local server or a shell `start` command.";
+/// Files the app previews natively in the right-side tool panel — `open_file`
+/// routes these to the in-app preview instead of the OS handler (for a .mmd
+/// diagram the OS just shows an "open with" picker over unusable apps).
+/// Covers the media/PDF extensions plus every text kind `read_artifact_preview`
+/// classifies (code, markdown, html, mermaid, csv, json, …).
+fn previewable_in_app(ext: &str) -> bool {
+    matches!(
+        ext,
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "pdf"
+    ) || crate::chat::commands::classify_text_ext(ext).is_some()
+}
+
+const OPEN_FILE_DESC: &str = "Open a file the user asked to see. Previewable files \
+    (code/text/markdown/html/mermaid diagrams/csv/json/images/pdf) open INSIDE \
+    the app in the right-side preview panel — prefer this for anything you \
+    created (e.g. a saved .mmd/.svg/.html diagram); the user sees it \
+    immediately, no external app involved. Anything else (.exe, .docx, media \
+    the app can't render) opens with the OS default application. Pass the \
+    file's ABSOLUTE path. Never use run_shell/start to open files — this tool \
+    is the way; for web pages use open_url instead (it is http(s)-only).";
 
 const DOWNLOAD_FILE_DESC: &str = "Stream a file from an http(s) URL to an \
     absolute local path on this machine (e.g. model weights such as \
@@ -567,12 +585,14 @@ pub async fn execute_tool(
                     text: format!("Opened {normalized} in the built-in browser.\n\n{text}"),
                     artifact: None,
                     browse_url: Some(normalized),
+                    preview: None,
                 },
                 // Even if reading fails, still show the page to the user.
                 Err(e) => ToolOutcome {
                     text: format!("Opened {normalized} in the built-in browser (could not extract text: {e})."),
                     artifact: None,
                     browse_url: Some(normalized),
+                    preview: None,
                 },
             }
         }
@@ -593,6 +613,32 @@ pub async fn execute_tool(
                     "Error: open_file: no file exists at \"{raw}\". Verify the path \
                      (search_files can locate it), then retry."
                 ));
+            }
+            let filename = p
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| raw.to_string());
+            let ext = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            // Files the app previews natively (code/text/html/diagrams/images/
+            // pdf) open in the right-side tool panel — for a .mmd diagram the
+            // OS handler is just an "open with" picker over unusable apps.
+            if previewable_in_app(&ext) {
+                return ToolOutcome {
+                    text: format!(
+                        "Opened {raw} in the app's file-preview panel (the user sees \
+                         it in the right-side tool pane now)."
+                    ),
+                    artifact: None,
+                    browse_url: None,
+                    preview: Some(ArtifactRef {
+                        path: raw.to_string(),
+                        filename,
+                    }),
+                };
             }
             let target = raw.to_string();
             // Launching the OS handler can block briefly — keep it off the
@@ -877,6 +923,29 @@ mod tests {
             &json!({ "path": gone.to_string_lossy() }),
         ));
         assert!(out.text.contains("no file exists"));
+    }
+
+    #[test]
+    fn open_file_routes_previewable_files_to_the_app_panel() {
+        let client = reqwest::Client::new();
+        let artifacts = std::env::temp_dir();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("traffic.mmd");
+        std::fs::write(&file, "stateDiagram-v2\n[*] --> Red").expect("write");
+
+        let out = tauri::async_runtime::block_on(execute_tool(
+            &client,
+            &artifacts,
+            &ToolCaps::default(),
+            OPEN_FILE,
+            &json!({ "path": file.to_string_lossy() }),
+        ));
+        // A .mmd is previewed natively — it must NOT hit the OS handler (the
+        // OS just pops an "open with" picker over apps that can't render it).
+        assert!(out.preview.is_some(), "previewable ext routes in-app");
+        assert!(out.browse_url.is_none());
+        assert!(out.text.contains("preview"));
+        assert_eq!(out.preview.as_ref().unwrap().filename, "traffic.mmd");
     }
 
     #[test]

@@ -43,6 +43,7 @@ pub(super) fn generate_file(artifacts_dir: &Path, args: &Value) -> ToolOutcome {
                 filename: file.filename,
             }),
             browse_url: None,
+            preview: None,
         },
         Err(e) => ToolOutcome::text(format!("generate_file failed: {e}")),
     }
@@ -179,6 +180,7 @@ pub(super) async fn generate_document(artifacts_dir: &Path, args: &Value) -> Too
                 filename: file.filename,
             }),
             browse_url: None,
+            preview: None,
         },
         Err(e) => ToolOutcome::text(format!(
             "generate_document failed: {e}\n\nIf the document library is unavailable, fall back \
@@ -247,6 +249,7 @@ pub(super) fn generate_diagram(artifacts_dir: &Path, args: &Value) -> ToolOutcom
             filename: file.filename,
         }),
         browse_url: None,
+        preview: None,
     }
 }
 

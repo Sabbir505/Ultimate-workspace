@@ -2680,7 +2680,7 @@ pub async fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
 
 /// Extension → preview `kind` for text-like artifacts. Extracted from
 /// `read_artifact_preview` so the routing table is unit-testable.
-fn classify_text_ext(ext: &str) -> Option<&'static str> {
+pub(crate) fn classify_text_ext(ext: &str) -> Option<&'static str> {
     match ext {
         "md" | "markdown" => Some("markdown"),
         "csv" => Some("csv"),

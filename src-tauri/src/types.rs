@@ -622,6 +622,16 @@ pub struct ChatOpenBrowserPayload {
     pub url: String,
 }
 
+/// Emitted when the `open_file` tool routes a previewable local file to the
+/// app's right-side tool-panel preview (instead of the OS handler).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatOpenPreviewPayload {
+    pub chat_session_id: String,
+    pub path: String,
+    pub filename: String,
+}
+
 /// Emitted when a filesystem tool call needs per-action approval (the central
 /// `check_permission` gate returned `NeedsApproval`). The UI renders an
 /// approval card; the user's choice is sent back via `resolve_tool_action`.

@@ -166,6 +166,7 @@ pub(super) fn fs_write_file(args: &Value) -> ToolOutcome {
                 text: msg,
                 artifact,
                 browse_url: None,
+                preview: None,
             }
         }
         Err(e) => ToolOutcome::text(format!("write_file failed: {e}")),

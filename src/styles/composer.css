@@ -156,15 +156,16 @@
   flex-direction: column;
   gap: 4px;
   padding: 10px 12px 8px;
-  /* Liquid glass (matches the sidebar surface): translucent tinted body so
-     the chat shows through, heavy blur + saturation, hairline border + rim.
-     The old near-opaque card read as a solid black box, not glass. */
+  /* Liquid glass (matches the sidebar surface): near-opaque tinted body so
+     content scrolling underneath never bleeds through, heavy blur +
+     saturation, hairline border + rim. Full transparency here puts the
+     transcript visibly under the composer — unreadable. */
   border: 1px solid var(--border);
   border-radius: 16px;
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--surface-glass) 55%, transparent),
-    color-mix(in srgb, var(--surface-glass) 35%, transparent)
+    color-mix(in srgb, var(--surface-glass) 94%, transparent),
+    color-mix(in srgb, var(--surface-glass) 88%, transparent)
   );
   backdrop-filter: blur(24px) saturate(160%);
   -webkit-backdrop-filter: blur(24px) saturate(160%);
@@ -177,8 +178,8 @@
 :root[data-theme="light"] .chat-composer-card {
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--surface-glass) 68%, transparent),
-    color-mix(in srgb, var(--surface-glass) 48%, transparent)
+    color-mix(in srgb, var(--surface-glass) 97%, transparent),
+    color-mix(in srgb, var(--surface-glass) 93%, transparent)
   );
 }
 .chat-composer-card:focus-within {

@@ -105,6 +105,9 @@ describe("MermaidDiagram render fallback", () => {
 
     fireEvent.click(container.querySelector(".chat-mermaid-open")!);
     expect(document.body.querySelector(".diagram-lightbox")).not.toBeNull();
+    // Mermaid art floats on the chat surface (transparent canvas), so the
+    // lightbox paper must carry the chat surface — not the white paper.
+    expect(document.body.querySelector(".diagram-lightbox-stage.surface-chat")).not.toBeNull();
 
     // Close it and verify the inline kebab carries export actions.
     fireEvent.click(document.body.querySelector(".diagram-lightbox-close")!);

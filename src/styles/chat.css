@@ -1401,14 +1401,17 @@ button.chat-mermaid-open {
 }
 
 /* ---- Full-screen diagram lightbox (click a diagram → zoom & save) ---- */
+/* No backdrop-filter here: a blurred backdrop under a transformed child is a
+   known WebView2/Chromium compositing flicker — the paper "flashes" whenever
+   it reaches the viewport edge. A near-opaque dim gives the same separation
+   without the per-frame blur resampling. */
 .diagram-lightbox {
   position: fixed;
   inset: 0;
   z-index: 1000;
   display: flex;
   flex-direction: column;
-  background: color-mix(in srgb, var(--editor-bg, #101014) 92%, transparent);
-  backdrop-filter: blur(6px);
+  background: color-mix(in srgb, var(--editor-bg, #101014) 97%, transparent);
 }
 .diagram-lightbox-toolbar {
   flex: none;
@@ -1470,6 +1473,7 @@ button.chat-mermaid-open {
   overflow: hidden;
   cursor: grab;
   background: color-mix(in srgb, #000 25%, transparent);
+  will-change: transform;
 }
 .diagram-lightbox-content.panning {
   cursor: grabbing;
@@ -1492,6 +1496,16 @@ button.chat-mermaid-open {
   justify-content: center;
   cursor: grab;
   color: #1c2530;
+  /* Keep the pan/zoom transform on its own compositor layer — avoids
+     repainting the whole surface on every pointermove. */
+  will-change: transform;
+}
+/* Mermaid diagrams are dark-theme art on a transparent canvas that floats on
+   the chat background inline — the lightbox paper matches that surface so
+   the full view looks exactly like the inline render (white would clash). */
+.diagram-lightbox-stage.surface-chat {
+  background: var(--bg-tint);
+  color: var(--text);
 }
 .diagram-lightbox-canvas {
   position: absolute;
@@ -1615,6 +1629,9 @@ button.chat-mermaid-open {
    auto-sizes node boxes to fit their text), so node text is never clipped â€”
    wide diagrams scroll horizontally rather than shrinking. */
 .chat-mermaid-block {
+  position: relative; /* anchors the hover kebab to THIS block — without it
+                         .chat-diagram-actions resolves against the message
+                         bubble and lands in the message's far corner */
   margin: 12px 0;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);

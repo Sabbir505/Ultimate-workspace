@@ -26,11 +26,18 @@ export function DiagramLightbox({
   html,
   filename,
   onClose,
+  surface = "paper",
 }: {
   /** Sanitized-ready diagram markup (full HTML document or bare <svg>). */
   html: string;
   filename: string;
   onClose: () => void;
+  /** Which surface the diagram is themed for: mermaid renders dark-theme
+   *  art on a TRANSPARENT canvas that floats on the chat background, so its
+   *  lightbox paper must be the chat surface — not white. Static diagrams
+   *  from generate_diagram render inline on a white iframe, so "paper"
+   *  (white) matches those. */
+  surface?: "paper" | "chat";
 }) {
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -194,7 +201,11 @@ export function DiagramLightbox({
       </div>
       <div
         ref={stageRef}
-        className={isBareSvg ? "diagram-lightbox-stage" : "diagram-lightbox-content"}
+        className={
+          isBareSvg
+            ? `diagram-lightbox-stage${surface === "chat" ? " surface-chat" : ""}`
+            : "diagram-lightbox-content"
+        }
         onClick={(e) => e.stopPropagation()}
         onWheel={(e) => {
           e.preventDefault();

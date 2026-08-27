@@ -378,7 +378,14 @@ export function MermaidDiagramInner({ code }: MermaidDiagramProps) {
         </div>
       )}
       {lightbox && svg && (
-        <DiagramLightbox html={svg} filename={topic ? `${topic}.svg` : "diagram.svg"} onClose={() => setLightbox(false)} />
+        <DiagramLightbox
+          html={svg}
+          filename={topic ? `${topic}.svg` : "diagram.svg"}
+          onClose={() => setLightbox(false)}
+          // Mermaid renders dark-theme art on a transparent canvas that floats
+          // on the chat surface — the lightbox paper must match, not white.
+          surface="chat"
+        />
       )}
     </div>
   );

@@ -1517,8 +1517,29 @@
   border-radius: var(--radius-sm);
   background: var(--bg-elevated);
 }
+/* QR frame gets the app's liquid-glass card treatment (same recipe as the
+   composer card): translucent gradient + frost + glass rim. The QR image
+   itself keeps an opaque backing so it stays scannable through the frost. */
 .remote-pairing-card .qr-section {
   flex-shrink: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: var(--glass-rim), 0 12px 32px -12px rgba(0, 0, 0, 0.35);
+}
+.remote-pairing-card .qr-section img {
+  display: block;
+  border-radius: var(--radius-xs);
+  /* Opaque backing behind the QR modules — scanners need the contrast. */
+  background: var(--bg-inset);
+  padding: 6px;
 }
 .remote-pairing-card .qr-placeholder {
   background: var(--bg-inset);

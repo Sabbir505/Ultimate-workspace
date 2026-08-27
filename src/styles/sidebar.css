@@ -8,13 +8,16 @@
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--border);
+  /* Liquid glass, same recipe as the composer card / git sidebar: a
+     translucent gradient body under a heavy frost, so the app behind the
+     sidebar reads as blurred shapes instead of a flat sheet. */
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--surface-glass) 85%, rgba(255,255,255,0.08) 15%),
-    color-mix(in srgb, var(--surface-glass) 90%, rgba(255,255,255,0.04) 10%)
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
   );
-  backdrop-filter: blur(32px) saturate(160%);
-  -webkit-backdrop-filter: blur(32px) saturate(160%);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
   box-shadow:
     var(--glass-rim),
     inset 0 0 0 1px rgba(255, 255, 255, 0.08);
@@ -24,6 +27,15 @@
   /* Collapse/expand slides the panel instead of an unmount flash. The inner
      aside keeps a fixed width (below) so content doesn't reflow mid-slide. */
   transition: width 0.28s var(--ease, ease), opacity 0.2s ease;
+}
+/* Light theme: a touch more body so text keeps contrast on bright backdrops
+   (same bump the composer card uses). */
+:root[data-theme="light"] .sidebar {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
 }
 .sidebar.collapsed {
   width: 0;

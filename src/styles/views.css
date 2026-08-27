@@ -35,13 +35,28 @@
   justify-content: flex-end;
   gap: 8px;
 }
-/* Wide, solid variant used by the Artifacts library so the card grid is
-   readable (the default glass fill washes cards out over the dimmed app). */
+/* Wide variant used by the Artifacts library. Same liquid-glass recipe as
+   the composer card: translucent gradient + heavy frost, so the dimmed app
+   behind the gallery reads as blurred shapes. The doc cards carry their own
+   backgrounds, so the grid stays readable through the glass. */
 .modal.modal-artifacts {
   width: min(860px, 92vw);
-  background: var(--surface-solid);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border-radius: 16px;
+  box-shadow: var(--glass-rim), 0 12px 32px -12px rgba(0, 0, 0, 0.35);
+}
+:root[data-theme="light"] .modal.modal-artifacts {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
 }
 
 /* ---------- Per-pane inline diff overlay ---------- */

@@ -2,6 +2,20 @@
    Split out of the old monolithic global.css (2026-08-15). Import order in
    global.css preserves the original cascade — do not reorder imports. */
 /* Composer (bottom bar) â€” Claude-style rounded card */
+/* Floating dock for the composer (+ queue chip / approval card): overlays
+   the transcript so messages scroll BEHIND the glass card. The dock itself
+   is click-transparent; only its children take pointer events. */
+.chat-composer-dock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+.chat-composer-dock > * {
+  pointer-events: auto;
+}
 .chat-composer {
   position: relative;
   flex-shrink: 0;

@@ -1396,6 +1396,11 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         onSend={handleSend}
       />
 
+      {/* Composer dock: overlays the transcript (position:absolute) so
+          messages scroll BEHIND the glass card — that's what makes the
+          transparency read as glass. Queue chip + approval card ride on top
+          of it inside the same overlay. */}
+      <div className="chat-composer-dock">
       {/* Goal-loop status chip: shows iteration count + Stop while a /goal or
           /loop is running for THIS session. Sits above the composer so it
           doesn't push the message list. */}
@@ -1479,6 +1484,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         onThinkingChange={setThinking}
         thinkingSupported={thinkingSupported}
       />
+      </div>
       {fullAccessConfirmingFor && (
         <FullAutoConfirmModal
           onConfirm={() => void confirmFullAccess(fullAccessConfirmingFor!)}

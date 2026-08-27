@@ -437,8 +437,9 @@ button.sidebar-section-label:hover {
   opacity: 1;
   color: var(--accent);
 }
-/* "Show sidebar" button â€” rendered inline at the start of the toolbar while
- * the sidebar is collapsed (App.tsx), so it never overlaps the title. */
+/* "Show sidebar" cluster (logo + view arrows) — rendered inline at the start
+ * of the toolbar while the sidebar is collapsed (App.tsx). Flat/transparent
+ * so the logo reads as part of the toolbar, not a pill on it. */
 .sidebar-restore {
   flex-shrink: 0;
   width: 30px;
@@ -447,11 +448,12 @@ button.sidebar-section-label:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--surface-2);
+  background: transparent;
   border-radius: var(--radius-sm);
   color: var(--text-dim);
 }
 .sidebar-restore:hover {
+  background: var(--surface-2);
   color: var(--text);
 }
 

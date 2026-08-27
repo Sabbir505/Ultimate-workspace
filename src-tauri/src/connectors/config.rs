@@ -648,10 +648,15 @@ pub const CONNECTORS: &[Connector] = &[
 /// scopes and stores the resulting token under every member's credential row,
 /// so one "Connect" click connects all of them.
 ///
-/// YouTube IS a member: its `youtube.readonly` scope rides the combined
-/// consent (this requires the OAuth client's Cloud project to have the
-/// YouTube Data API v3 enabled — otherwise Google rejects the whole consent
-/// with `400 invalid_request`, which is why it was temporarily split out).
+/// YouTube is deliberately NOT a member. MEASURED (2026-08-27, twice): Google
+/// rejects the combined consent with `Error 400: invalid_request` the moment
+/// `youtube.readonly` joins the other 16 scopes — even with the YouTube Data
+/// API v3 enabled on the project, and even though the SAME scope authorizes
+/// fine in a YouTube-only request for the same client. Google enforces some
+/// limit on mixing YouTube scopes with this (unverified, Workspace-restricted)
+/// scope set in one consent. YouTube therefore connects through its OWN
+/// single-connector flow (its row's Connect button); once granted, the stored
+/// token makes it read as connected like any other member.
 pub const GOOGLE_FAMILY_MEMBERS: &[&Connector] = &[
     &GMAIL,
     &GOOGLE_DRIVE,
@@ -661,7 +666,6 @@ pub const GOOGLE_FAMILY_MEMBERS: &[&Connector] = &[
     &GOOGLE_CALENDAR,
     &GOOGLE_CHAT,
     &GOOGLE_PEOPLE,
-    &YOUTUBE,
 ];
 
 /// Loopback callback for the family flow. Google's "Desktop app" client type

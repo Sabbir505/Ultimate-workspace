@@ -67,10 +67,8 @@ export default function App() {
   const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
   // View back/forward, exposed in the collapsed rail (and expanded sidebar header).
-  const viewHistory = useUiStore((s) => s.viewHistory);
-  const viewIndex = useUiStore((s) => s.viewIndex);
-  const navBack = useUiStore((s) => s.navBack);
-  const navForward = useUiStore((s) => s.navForward);
+  // View nav (back/forward) lives in the sidebar's header now — the toolbar
+  // carries no navigation of its own.
   const toolPanelCollapsed = useUiStore((s) => s.toolPanelCollapsed);
   const toggleToolPanel = useUiStore((s) => s.toggleToolPanel);
   const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
@@ -201,35 +199,11 @@ export default function App() {
             children stay clickable — the drag attribute only fires when the
             event target IS the drag-region element. */}
         <div className="toolbar" data-tauri-drag-region="">
-          {/* Left: app identity + view nav — reads as the title bar's origin. */}
-          <span className="toolbar-app-name" data-tauri-drag-region="">
-            Conduit
-          </span>
-          <button
-            className="sidebar-nav-btn"
-            onClick={navBack}
-            disabled={viewIndex <= 0}
-            title="Back"
-            aria-label="Back"
-          >
-            <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="m15 18-6-6 6-6" />
-            </svg>
-          </button>
-          <button
-            className="sidebar-nav-btn"
-            onClick={navForward}
-            disabled={viewIndex >= viewHistory.length - 1}
-            title="Forward"
-            aria-label="Forward"
-          >
-            <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="m9 18 6-6-6-6" />
-            </svg>
-          </button>
+          {/* Left: identity + view nav live in the SIDEBAR's header ("Conduit"
+              + back/forward) — no toolbar duplicates. When the sidebar is
+              collapsed (width 0) only the restore logo stays reachable here. */}
           {sidebarCollapsed && (
             <div className="sidebar-collapsed-bar">
-              {/* Logo restores the sidebar. */}
               <button
                 className="sidebar-restore"
                 onClick={toggleSidebar}

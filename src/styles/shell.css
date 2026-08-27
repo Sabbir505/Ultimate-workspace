@@ -296,13 +296,39 @@
 .composer-notch-github-wrap {
   position: relative;
 }
-/* Popover that appears above the composer pill. */
+/* GitHub-notch popover (portaled to <body>, positioned inline). The glass
+   surface lives HERE on the wrapper — the wrapper also hosts the Pull
+   Requests entry above the branch dropdown, and without it that row floats
+   naked over the page. The nested .branch-dropdown strips its own chrome so
+   the two read as one card. */
 .composer-notch-github-popover {
-  position: absolute;
-  bottom: calc(100% + 4px);
-  left: 0;
+  width: 340px;
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: var(--glass-rim), 0 12px 32px -12px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
   z-index: 50;
   animation: branch-popover-fade 0.15s var(--ease);
+}
+.composer-notch-github-popover .branch-dropdown {
+  width: 100%;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  max-height: none;
+}
+.composer-notch-github-popover .composer-notch-pulls-entry {
+  margin-bottom: 4px;
 }
 @keyframes branch-popover-fade {
   from { opacity: 0; transform: translateY(4px); }

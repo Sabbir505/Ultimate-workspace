@@ -413,13 +413,16 @@ export function GitHubNotch() {
           className="composer-notch-github-popover"
           style={{
             position: "fixed",
+            // LEFT-anchored to the chip (clamped inside the window): the
+            // popover is 340px wide and right-anchoring made it hang over
+            // the sidebar. Opens below the pill like a native dropdown.
             top: (wrapRef.current?.getBoundingClientRect().bottom ?? 0) + 6,
-            left: "auto",
-            bottom: "auto",
-            right: Math.max(
-              8,
-              window.innerWidth - (wrapRef.current?.getBoundingClientRect().right ?? 0),
+            left: Math.min(
+              wrapRef.current?.getBoundingClientRect().left ?? 8,
+              window.innerWidth - 356,
             ),
+            right: "auto",
+            bottom: "auto",
             zIndex: 9999,
           }}
         >

@@ -471,7 +471,10 @@ const RUN_SHELL_DESC: &str = "Run a native shell command (cmd.exe / sh) with \
     git, pip, ffmpeg work as in a terminal. One-shot commands only (nothing \
     long-running like a dev server). ALWAYS approval-gated. Prefer \
     `download_file` for plain URL downloads and `run_code` for sandboxed \
-    snippets.";
+    snippets. NEVER use this to open/launch a file for the user (no `start`, \
+    `open`, `xdg-open`) — that is exactly what the `open_file` tool does, \
+    and shell quoting around `start` only produces Windows 'cannot find' \
+    errors.";
 
 const TASK_DESC: &str = "Spawn a focused subagent that runs ONE task with its \
     own model turn and reports back. Use this to delegate a self-contained \
@@ -833,6 +836,47 @@ mod tests {
     #[test]
     fn open_url_listed_as_safe_tool() {
         assert!(openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite).contains(&OPEN_URL.to_string()));
+    }
+
+    #[test]
+    fn open_file_listed_for_both_providers_and_stripped_read_only() {
+        // Present for both wire formats whenever mutating tools run…
+        let openai = openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
+        assert!(openai.contains(&OPEN_FILE.to_string()));
+        let anthropic: Vec<String> = anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite)
+            .iter()
+            .map(|s| s["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(anthropic.contains(&OPEN_FILE.to_string()));
+        // …and absent from the schema entirely under read_only, so the model
+        // can't even attempt it there.
+        assert!(!openai_names(&ToolCaps::default(), SandboxPolicy::ReadOnly)
+            .contains(&OPEN_FILE.to_string()));
+    }
+
+    #[test]
+    fn open_file_rejects_relative_and_missing_paths_without_launching() {
+        let client = reqwest::Client::new();
+        let dir = std::env::temp_dir();
+        // Relative path → guidance error, no launch attempt.
+        let out = tauri::async_runtime::block_on(execute_tool(
+            &client,
+            &dir,
+            &ToolCaps::default(),
+            OPEN_FILE,
+            &json!({ "path": "traffic.mmd" }),
+        ));
+        assert!(out.text.contains("ABSOLUTE"));
+        // Absolute but non-existent → not-found error, no launch attempt.
+        let gone = std::env::temp_dir().join("definitely-not-here-9f3a2.mmd");
+        let out = tauri::async_runtime::block_on(execute_tool(
+            &client,
+            &dir,
+            &ToolCaps::default(),
+            OPEN_FILE,
+            &json!({ "path": gone.to_string_lossy() }),
+        ));
+        assert!(out.text.contains("no file exists"));
     }
 
     #[test]

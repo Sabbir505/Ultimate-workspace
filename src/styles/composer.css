@@ -156,30 +156,36 @@
   flex-direction: column;
   gap: 4px;
   padding: 10px 12px 8px;
-  /* Glassmorphism: translucent body + blur + hairline border. The card is now
-     fully rounded (no external notch bar), so all four corners use 16px. */
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  /* Liquid glass (matches the sidebar surface): translucent tinted body so
+     the chat shows through, heavy blur + saturation, hairline border + rim.
+     The old near-opaque card read as a solid black box, not glass. */
+  border: 1px solid var(--border);
   border-radius: 16px;
-  background: rgba(255, 255, 255, 0.03);
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 35%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: var(--glass-rim), 0 12px 32px -12px rgba(0, 0, 0, 0.35);
   position: relative;
   overflow: visible;
   transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
 }
-/* Light theme: mirror the sheens with dark values over a light backdrop. */
+/* Light theme: a touch more body so text keeps contrast on bright backdrops. */
 :root[data-theme="light"] .chat-composer-card {
-  border-color: rgba(0, 0, 0, 0.08);
-  background: rgba(0, 0, 0, 0.03);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 68%, transparent),
+    color-mix(in srgb, var(--surface-glass) 48%, transparent)
+  );
 }
 .chat-composer-card:focus-within {
   /* Focus brightens the border + adds an ambient accent glow. */
-  border-color: rgba(255, 255, 255, 0.2);
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4), 0 0 24px -4px var(--accent-glow);
-}
-:root[data-theme="light"] .chat-composer-card:focus-within {
-  border-color: rgba(0, 0, 0, 0.2);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  box-shadow: var(--glass-rim), 0 12px 32px -12px rgba(0, 0, 0, 0.35),
+    0 0 24px -4px var(--accent-glow);
 }
 @media (prefers-reduced-motion: reduce) {
   .chat-composer-card {

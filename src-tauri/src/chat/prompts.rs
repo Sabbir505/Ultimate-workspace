@@ -234,7 +234,10 @@ pub(crate) fn core_prompt_base_local() -> String {
      `open_url` opens ANY url in the app's built-in browser pane (the user sees \
      it) and returns the page text to you; `fetch_url` reads a page silently. \
      When the user asks to open/visit/show a site, call `open_url` — never say \
-     you can't open a URL.\n\n\
+     you can't open a URL. For a LOCAL file (one you created or an existing \
+     document) use `open_file` with its absolute path — it launches the OS \
+     default application on the user's screen; never claim you can't open a \
+     file you just saved.\n\n\
      ## Search vs. just answer\n\
      Your training has a cutoff and you can hallucinate specific facts. Apply per-question:\n\
      - **MUST `web_search` first** for: versions/\"latest\" releases, API signatures that \

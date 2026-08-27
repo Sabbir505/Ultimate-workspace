@@ -57,12 +57,13 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         specs.push(openai_fn(MOVE_FILE, MOVE_FILE_DESC, src_dest_parameters()));
         specs.push(openai_fn(COPY_FILE, COPY_FILE_DESC, src_dest_parameters()));
     }
-    // System tools. The mutating ones (download_file, run_shell) are stripped
-    // under read_only exactly like filesystem writes; the read-only task
-    // tracking/cancelling tools are always present.
+    // System tools. The mutating ones (download_file, run_shell, open_file)
+    // are stripped under read_only exactly like filesystem writes; the
+    // read-only task tracking/cancelling tools are always present.
     if sandbox.allows_mutating_tools() {
         specs.push(openai_fn(DOWNLOAD_FILE, DOWNLOAD_FILE_DESC, download_file_parameters()));
         specs.push(openai_fn(RUN_SHELL, RUN_SHELL_DESC, run_shell_parameters()));
+        specs.push(openai_fn(OPEN_FILE, OPEN_FILE_DESC, path_parameters()));
     }
     specs.push(openai_fn(DOWNLOAD_PROGRESS, DOWNLOAD_PROGRESS_DESC, task_id_parameters()));
     specs.push(openai_fn(GET_TASK_STATUS, GET_TASK_STATUS_DESC, task_id_parameters()));
@@ -193,6 +194,7 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
     if sandbox.allows_mutating_tools() {
         specs.push(anthropic_fn(DOWNLOAD_FILE, DOWNLOAD_FILE_DESC, download_file_parameters()));
         specs.push(anthropic_fn(RUN_SHELL, RUN_SHELL_DESC, run_shell_parameters()));
+        specs.push(anthropic_fn(OPEN_FILE, OPEN_FILE_DESC, path_parameters()));
     }
     specs.push(anthropic_fn(DOWNLOAD_PROGRESS, DOWNLOAD_PROGRESS_DESC, task_id_parameters()));
     specs.push(anthropic_fn(GET_TASK_STATUS, GET_TASK_STATUS_DESC, task_id_parameters()));

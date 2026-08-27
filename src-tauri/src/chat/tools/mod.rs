@@ -47,6 +47,9 @@ pub const GENERATE_DIAGRAM: &str = "generate_diagram";
 pub const FETCH_URL: &str = "fetch_url";
 pub const RUN_CODE: &str = "run_code";
 pub const OPEN_URL: &str = "open_url";
+/// Open a LOCAL file with the OS default application (the `open` crate:
+/// xdg-open / open / start). Complements `open_url`, which is web-only.
+pub const OPEN_FILE: &str = "open_file";
 pub const GET_SKILL: &str = "get_skill";
 pub const LIST_SKILLS: &str = "list_skills";
 /// Attach-on-demand meta-tools: load a connector's / MCP server's tools into
@@ -434,9 +437,18 @@ const OPEN_URL_DESC: &str = "Open a web page in the app's built-in browser so \
     any public web URL with this — never claim you can't open sites. Use \
     when the user asks to open/show/visit a site, or when it helps to \
     display a page visually alongside your answer. This is for WEB URLs only: \
-    never open file:// paths, never start a local server to serve a generated \
-    file, and never use this to \"open\" something the user asked you to \
-    create — created files preview automatically in the app.";
+    to open a LOCAL file (something you created or an existing document) use \
+    the open_file tool instead; never open file:// paths here, never start a \
+    local server to serve a generated file, and never use this to \"open\" \
+    something the user asked you to create — created files preview \
+    automatically in the app.";
+
+const OPEN_FILE_DESC: &str = "Open a LOCAL file on this machine with the operating \
+    system's default application (e.g. a .mmd/.svg/.html/.png/.pdf file you just \
+    created or saved). Pass the file's ABSOLUTE path. This really opens it on \
+    the user's screen — use it whenever the user asks you to open/launch/show a \
+    local file. For web pages use open_url instead (it is http(s)-only); for \
+    files you never need a local server or a shell `start` command.";
 
 const DOWNLOAD_FILE_DESC: &str = "Stream a file from an http(s) URL to an \
     absolute local path on this machine (e.g. model weights such as \
@@ -559,6 +571,35 @@ pub async fn execute_tool(
                     artifact: None,
                     browse_url: Some(normalized),
                 },
+            }
+        }
+        OPEN_FILE => {
+            let raw = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if raw.is_empty() {
+                return ToolOutcome::text("Error: open_file requires a \"path\".");
+            }
+            let p = std::path::Path::new(raw);
+            if !p.is_absolute() {
+                return ToolOutcome::text(format!(
+                    "Error: open_file needs an ABSOLUTE path (got \"{raw}\"). \
+                     Use the full path you wrote the file to."
+                ));
+            }
+            if !p.is_file() {
+                return ToolOutcome::text(format!(
+                    "Error: open_file: no file exists at \"{raw}\". Verify the path \
+                     (search_files can locate it), then retry."
+                ));
+            }
+            let target = raw.to_string();
+            // Launching the OS handler can block briefly — keep it off the
+            // async runtime (same pattern as the other blocking tools).
+            match tokio::task::spawn_blocking(move || open::that(&target)).await {
+                Ok(Ok(_)) => ToolOutcome::text(format!(
+                    "Opened {raw} with the OS default application."
+                )),
+                Ok(Err(e)) => ToolOutcome::text(format!("open_file failed for {raw}: {e}")),
+                Err(e) => ToolOutcome::text(format!("Error: open_file task failed: {e}")),
             }
         }
         GET_SKILL => {

@@ -136,6 +136,17 @@ function normalizeSvg(svg: string): string {
   return out;
 }
 
+/** Resolve the chat surface colour from the theme tokens — the canvas
+ *  mermaid art floats on. Used as the export background so downloaded
+ *  PNG/SVG/JPG match the inline render (dark theme exports dark, not white). */
+function chatSurfaceColor(): string {
+  if (typeof document === "undefined") return "#ffffff";
+  const v = getComputedStyle(document.documentElement)
+    .getPropertyValue("--bg-tint")
+    .trim();
+  return v || "#ffffff";
+}
+
 // The Mermaid diagram-type keywords (first token of a block). Used to detect
 // whether enough source has streamed to identify a topic.
 const DIAGRAM_TYPES = new Set([
@@ -358,6 +369,9 @@ export function MermaidDiagramInner({ code }: MermaidDiagramProps) {
             path={syntheticPreview.path}
             filename={syntheticPreview.filename}
             variant="kebab"
+            // Mermaid art floats on the chat surface (transparent canvas) —
+            // exports must bake THAT in, not white.
+            exportBg={chatSurfaceColor()}
             extraItems={(closeMenu) => (
               <button
                 type="button"

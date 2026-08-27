@@ -36,6 +36,12 @@ interface Props {
    *  (e.g. an inline diagram's "Open in tab"). Receives a close-menu
    *  callback so entries can dismiss the dropdown after acting. */
   extraItems?: ReactNode | ((closeMenu: () => void) => ReactNode);
+  /** Fallback canvas/background colour when the diagram itself declares no
+   *  background. Defaults to white (static diagrams render in a white iframe
+   *  inline). Mermaid diagrams are dark-theme art on a TRANSPARENT canvas
+   *  that floats on the chat surface — they pass the chat surface colour so
+   *  the export matches what the user saw (white would wash it out). */
+  exportBg?: string;
 }
 
 /** Fallback export background when the diagram declares none. Diagrams are
@@ -46,8 +52,8 @@ const EXPORT_BG = "#ffffff";
 /** Best-effort: the diagram page's own background colour, so a downloaded
  *  PNG/SVG matches what the user saw in chat (the diagram may be authored with
  *  a dark background). Reads a full-canvas <rect> fill, then the body inline
- *  style, then body/html/:root CSS rules; falls back to white. */
-function pageBackground(html: string): string {
+ *  style, then body/html/:root CSS rules; falls back to `fallback`. */
+function pageBackground(html: string, fallback: string = EXPORT_BG): string {
   const solid = (v: string): string | null => {
     const t = v.trim().toLowerCase();
     if (t === "transparent" || t === "none" || t === "") return null;
@@ -94,9 +100,9 @@ function pageBackground(html: string): string {
     }
     if (ruleBg) return ruleBg;
   } catch {
-    /* fall back to white */
+    /* fall back to the caller's default */
   }
-  return EXPORT_BG;
+  return fallback;
 }
 
 /** Whether a kind supports the raster export menu at all. */
@@ -148,8 +154,8 @@ function SvgIcon() {
 /** Build an off-DOM node holding the diagram HTML, rasterize it, and return a
  *  PNG data URL. Used by both Copy and Download PNG. Throws on failure (e.g.
  *  tainted canvas) — caller surfaces a friendly error. */
-async function rasterizeHtml(html: string): Promise<string> {
-  const bg = pageBackground(html);
+async function rasterizeHtml(html: string, fallbackBg: string = EXPORT_BG): Promise<string> {
+  const bg = pageBackground(html, fallbackBg);
   const holder = document.createElement("div");
   holder.style.position = "fixed";
   holder.style.left = "-99999px";
@@ -235,8 +241,8 @@ async function svgToRaster(
 /** Produce a PNG data URL for a diagram/html artifact. Prefers rasterizing the
  *  diagram's own root <svg> (reliable everywhere); falls back to html-to-image
  *  for HTML/CSS diagrams that aren't authored as inline SVG. */
-async function diagramToPng(html: string): Promise<string> {
-  const bg = pageBackground(html);
+async function diagramToPng(html: string, fallbackBg: string = EXPORT_BG): Promise<string> {
+  const bg = pageBackground(html, fallbackBg);
   const rootSvg = extractRootSvg(html, bg);
   if (rootSvg) {
     try {
@@ -250,8 +256,8 @@ async function diagramToPng(html: string): Promise<string> {
 
 /** JPEG variant of diagramToPng: same routing, lossy canvas encode. JPEG has
  *  no alpha, so the page background is always painted (white by default). */
-async function diagramToJpeg(html: string): Promise<string> {
-  const bg = pageBackground(html);
+async function diagramToJpeg(html: string, fallbackBg: string = EXPORT_BG): Promise<string> {
+  const bg = pageBackground(html, fallbackBg);
   const rootSvg = extractRootSvg(html, bg);
   if (rootSvg) {
     try {
@@ -308,8 +314,8 @@ function extractRootSvg(html: string, bg = EXPORT_BG): string | null {
 /** Build an off-DOM node holding the diagram HTML and serialize it to an SVG
  *  data URL via html-to-image (wraps the DOM in a <foreignObject>). Fallback
  *  for diagrams that are HTML/CSS rather than pure SVG. */
-async function rasterizeToSvg(html: string): Promise<string> {
-  const bg = pageBackground(html);
+async function rasterizeToSvg(html: string, fallbackBg: string = EXPORT_BG): Promise<string> {
+  const bg = pageBackground(html, fallbackBg);
   const holder = document.createElement("div");
   holder.style.position = "fixed";
   holder.style.left = "-99999px";
@@ -365,12 +371,14 @@ async function rasterizeDataUriToJpeg(dataUri: string): Promise<string> {
   return canvas.toDataURL("image/jpeg", 0.92);
 }
 
-export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar", extraItems }: Props) {
+export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar", extraItems, exportBg }: Props) {
   const [busy, setBusy] = useState<null | "copy" | "png" | "svg" | "jpg">(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const kebabRef = useRef<HTMLDivElement>(null);
+  // Fallback background for diagrams that don't declare their own (see Props).
+  const fallbackBg = exportBg ?? EXPORT_BG;
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -401,7 +409,7 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
       if (hasImageUri && preview.dataUri) {
         await copyDataUrlToClipboard(preview.dataUri);
       } else if (isHtmlDiagram && preview.text) {
-        const dataUrl = await diagramToPng(preview.text);
+        const dataUrl = await diagramToPng(preview.text, fallbackBg);
         await copyDataUrlToClipboard(dataUrl);
       } else {
         throw new Error("nothing rasterizable to copy");
@@ -422,7 +430,7 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
       if (hasImageUri && preview.dataUri) {
         dataUrl = preview.dataUri;
       } else if (isHtmlDiagram && preview.text) {
-        dataUrl = await diagramToPng(preview.text);
+        dataUrl = await diagramToPng(preview.text, fallbackBg);
       } else {
         throw new Error("nothing rasterizable to export");
       }
@@ -445,7 +453,7 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
         // An image data URI may carry alpha; paint it over white first.
         dataUrl = await rasterizeDataUriToJpeg(preview.dataUri);
       } else if (isHtmlDiagram && preview.text) {
-        dataUrl = await diagramToJpeg(preview.text);
+        dataUrl = await diagramToJpeg(preview.text, fallbackBg);
       } else {
         throw new Error("nothing rasterizable to export");
       }
@@ -473,14 +481,14 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
     setError(null);
     try {
       const base = preview.filename.replace(/\.[^.]+$/, "");
-      const rootSvg = extractRootSvg(preview.text, pageBackground(preview.text));
+      const rootSvg = extractRootSvg(preview.text, pageBackground(preview.text, fallbackBg));
       if (rootSvg) {
         const blob = new Blob([rootSvg], { type: "image/svg+xml" });
         const url = URL.createObjectURL(blob);
         triggerDownload(url, `${base}.svg`);
         setTimeout(() => URL.revokeObjectURL(url), 4000);
       } else {
-        const dataUrl = await rasterizeToSvg(preview.text);
+        const dataUrl = await rasterizeToSvg(preview.text, fallbackBg);
         triggerDownload(dataUrl, `${base}.svg`);
       }
       flash("Saved SVG");

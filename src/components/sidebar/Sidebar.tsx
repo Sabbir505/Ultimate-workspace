@@ -37,7 +37,6 @@ import { useUiStore } from "../../state/ui";
 import { useArtifactsStore } from "../../state/artifacts";
 import { ArtifactLibrary } from "./ArtifactLibrary";
 import { ChatSessionRowMemo as ChatSessionRow, type ChatSessionRowData } from "../chat/ChatSessionRow";
-import { PanelIcon } from "../common/PanelIcon";
 import { relativeTime, shortRelativeTime } from "../../lib/relativeTime";
 import { UpdateButton } from "./UpdateButton";
 import { seedFakeUpdate, SHOW_FAKE_UPDATE } from "../../state/updater";
@@ -318,45 +317,41 @@ export function Sidebar() {
     <aside className="flex flex-col h-full bg-white/95 dark:bg-[#141414] backdrop-blur-xl border-r border-gray-200 dark:border-white/20 overflow-hidden select-none">
       {/* â”€â”€ Consolidated Header: branding + search + collapse in one block â”€â”€ */}
       <div data-tauri-drag-region className="p-3 border-b border-gray-200 dark:border-white/20">
-        {/* Branding + back/forward view navigation (browser-style), with the
-            collapse control on this row too. */}
+        {/* The brand doubles as the collapse control (no separate panel icon);
+            back/forward sit at the header's right edge. */}
         <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <strong className="text-sm font-bold text-gray-900 dark:text-white select-none">Conduit</strong>
-            <span className="flex items-center flex-shrink-0">
-              <button
-                type="button"
-                className="sidebar-nav-btn"
-                onClick={navBack}
-                disabled={viewIndex <= 0}
-                title="Back"
-                aria-label="Back"
-              >
-                <ArrowLeft size={14} strokeWidth={1.8} />
-              </button>
-              <button
-                type="button"
-                className="sidebar-nav-btn"
-                onClick={navForward}
-                disabled={viewIndex >= viewHistory.length - 1}
-                title="Forward"
-                aria-label="Forward"
-              >
-                <ArrowRight size={14} strokeWidth={1.8} />
-              </button>
-            </span>
-          </div>
-          <div className="flex items-center flex-shrink-0">
+          <button
+            type="button"
+            className="text-sm font-bold text-gray-900 dark:text-white select-none px-1.5 py-0.5 -ml-1.5 rounded-md hover:bg-gray-200 dark:hover:bg-white/20 transition-all duration-150 active:scale-95"
+            onClick={toggleSidebar}
+            title="Collapse sidebar"
+            aria-label="Collapse sidebar"
+          >
+            Conduit
+          </button>
+          <span className="flex items-center flex-shrink-0">
             <UpdateButton />
             <button
-              className="p-2 rounded-lg bg-transparent border border-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white transition-all duration-150 active:scale-95"
-              onClick={toggleSidebar}
-              title="Collapse sidebar"
-              aria-label="Collapse sidebar"
+              type="button"
+              className="sidebar-nav-btn"
+              onClick={navBack}
+              disabled={viewIndex <= 0}
+              title="Back"
+              aria-label="Back"
             >
-              <PanelIcon />
+              <ArrowLeft size={14} strokeWidth={1.8} />
             </button>
-          </div>
+            <button
+              type="button"
+              className="sidebar-nav-btn"
+              onClick={navForward}
+              disabled={viewIndex >= viewHistory.length - 1}
+              title="Forward"
+              aria-label="Forward"
+            >
+              <ArrowRight size={14} strokeWidth={1.8} />
+            </button>
+          </span>
         </div>
         <div className="flex items-center gap-2">
           {/* Search / command palette trigger */}

@@ -163,7 +163,12 @@ export default function App() {
   return (
     <div className="app">
       <ToastHost />
-      {!sidebarCollapsed && <div className="sidebar"><Sidebar /></div>}
+      {/* Kept mounted so collapse/expand animates as a width slide instead
+          of an unmount flash; the collapsed class hides it after the
+          transition (visibility) so it can't be interacted with. */}
+      <div className={`sidebar${sidebarCollapsed ? " collapsed" : ""}`} aria-hidden={sidebarCollapsed}>
+        <Sidebar />
+      </div>
 
       <div className="main">
         <div className="toolbar">

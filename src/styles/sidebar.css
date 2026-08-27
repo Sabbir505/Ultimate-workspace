@@ -21,6 +21,32 @@
   position: relative;
   z-index: 3;
   overflow: hidden;
+  /* Collapse/expand slides the panel instead of an unmount flash. The inner
+     aside keeps a fixed width (below) so content doesn't reflow mid-slide. */
+  transition: width 0.28s var(--ease, ease), opacity 0.2s ease;
+}
+.sidebar.collapsed {
+  width: 0;
+  opacity: 0;
+  border-right-color: transparent;
+  pointer-events: none;
+  /* visibility flips only AFTER the slide finishes, so the panel stays
+     painted while animating and is unfocusable once hidden */
+  visibility: hidden;
+  transition: width 0.28s var(--ease, ease), opacity 0.18s ease,
+    visibility 0s linear 0.28s;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar,
+  .sidebar.collapsed {
+    transition: none;
+  }
+}
+/* Pin the mounted sidebar content to the expanded width: the animated shell
+   clips it (overflow:hidden) while sliding, so nothing squishes or wraps. */
+.sidebar > aside {
+  width: var(--sidebar-width);
+  flex-shrink: 0;
 }
 /* Liquid glass sheen — subtle animated shimmer across the sidebar surface */
 .sidebar::before {
@@ -460,6 +486,17 @@ button.sidebar-section-label:hover {
   align-items: center;
   gap: 2px;
   flex-shrink: 0;
+  animation: sidebar-collapsed-fade 0.25s var(--ease, ease);
+}
+@keyframes sidebar-collapsed-fade {
+  from {
+    opacity: 0;
+    transform: translateX(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
 }
 
 

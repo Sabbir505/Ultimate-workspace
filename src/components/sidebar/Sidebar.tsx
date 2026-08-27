@@ -318,7 +318,8 @@ export function Sidebar() {
     <aside className="flex flex-col h-full bg-white/95 dark:bg-[#141414] backdrop-blur-xl border-r border-gray-200 dark:border-white/20 overflow-hidden select-none">
       {/* â”€â”€ Consolidated Header: branding + search + collapse in one block â”€â”€ */}
       <div data-tauri-drag-region className="p-3 border-b border-gray-200 dark:border-white/20">
-        {/* Branding + back/forward view navigation (browser-style) */}
+        {/* Branding + back/forward view navigation (browser-style), with the
+            collapse control on this row too. */}
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2 min-w-0">
             <span className="flex items-center flex-shrink-0">
@@ -345,7 +346,17 @@ export function Sidebar() {
             </span>
             <strong className="text-sm font-bold text-gray-900 dark:text-white select-none truncate">Conduit</strong>
           </div>
-          <UpdateButton />
+          <div className="flex items-center flex-shrink-0">
+            <UpdateButton />
+            <button
+              className="p-2 rounded-lg bg-transparent border border-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white transition-all duration-150 active:scale-95"
+              onClick={toggleSidebar}
+              title="Collapse sidebar"
+              aria-label="Collapse sidebar"
+            >
+              <PanelIcon />
+            </button>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           {/* Search / command palette trigger */}
@@ -356,16 +367,6 @@ export function Sidebar() {
           >
             <Search size={14} strokeWidth={1.8} />
             <span className="text-xs font-medium">Search</span>
-          </button>
-
-          {/* Collapse sidebar */}
-          <button
-            className="p-2 rounded-lg bg-transparent border border-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white transition-all duration-150 active:scale-95"
-            onClick={toggleSidebar}
-            title="Collapse sidebar"
-            aria-label="Collapse sidebar"
-          >
-            <PanelIcon />
           </button>
         </div>
       </div>

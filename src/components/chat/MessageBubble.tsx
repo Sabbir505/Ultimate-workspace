@@ -678,9 +678,6 @@ function ActivityStepRow({
           <span className={`chat-thinking-chevron${open ? " open" : ""}`}>›</span>
         )}
       </button>
-      {step.before && step.before.trim().length > 0 && (
-        <div className="chat-step-narration">{step.before}</div>
-      )}
       {open && hasBody && (
         <div className="chat-step-body">
           {step.data?.detail && (
@@ -707,9 +704,6 @@ function ActivityStepRow({
             )
           )}
         </div>
-      )}
-      {step.after && step.after.trim().length > 0 && !open && (
-        <div className="chat-step-narration">{step.after}</div>
       )}
     </div>
   );
@@ -802,9 +796,6 @@ function renderProcessBlock(
     case "diff":
       return (
         <Fragment key={`diff:${b.step.data?.path ?? i}`}>
-          {b.step.before && b.step.before.trim().length > 0 && (
-            <Markdown content={b.step.before} onPreviewArtifact={onPreviewArtifact} />
-          )}
           <DiffCard path={b.step.data!.path!} edit={b.step.data!.edit!} done={b.step.done} />
         </Fragment>
       );
@@ -1137,15 +1128,12 @@ function Markdown({
 /** One step inside an activity group. Tool steps carry the call's `ToolData`;
  *  think steps (`think` set, `data` null) are reasoning interludes folded into
  *  the SAME group so a turn renders as one outer container instead of
- *  alternating activity/thinking blocks. `before`/`after` carry narration
- *  text the model produced around the call — folded into the step instead of
- *  floating as standalone text nodes between rows (the source of the old flat
- *  layout's noise). */
+ *  alternating activity/thinking blocks. (`before`/`after` narration slots are
+ *  retired: model prose renders as normal message text OUTSIDE the process
+ *  region, in source order — captions glued to tool rows read as broken.) */
 interface ActivityStep {
   data: ToolData | null;
   done: boolean;
-  before?: string;
-  after?: string;
 }
 
 /** A grouped run of tool steps, collapsed into one summary line by default. */
@@ -1171,7 +1159,7 @@ type Block =
  *  Boundary rules:
  *  - Text before the first tool/think renders ABOVE the container as markdown.
  *  - A group starts at the first `tool` segment and absorbs every following
- *    `tool`/`text` segment — except file-edit tool calls (`kind: "edit"`),
+ *    `tool` segment — except file-edit tool calls (`kind: "edit"`),
  *    which break out into their own inline diff review card so an edit is
  *    reviewable at a glance instead of buried in the collapsed group. A diff
  *    card flushes the in-progress group, so a turn with edits renders as
@@ -1179,7 +1167,10 @@ type Block =
  *  - A `think` segment flushes the in-progress group (if any) and renders as
  *    its own block; a following tool starts a fresh group. A turn thus renders
  *    as alternating think/activity blocks in source order.
- *  - Mid-run text is narration: it folds into the next step's `before`.
+ *  - Mid-run prose is NORMAL message text, not tool-row decoration: it closes
+ *    the in-progress run and emits as its own text block, so every narration
+ *    the model writes renders outside the process region as markdown (the old
+ *    behavior glued it to tool rows as tiny captions — unreadable).
  *  - Text trailing the last tool/think is the model's synthesized answer and
  *    renders OUTSIDE the group as markdown, after the summary.
  *  - A turn with thinking but NO tool calls keeps the old behavior: the think
@@ -1197,8 +1188,6 @@ function groupSegments(segments: Segment[]): Block[] {
 
   const blocks: Block[] = [];
   let steps: ActivityStep[] = [];
-  let pendingText: string | null = null; // narration held for the next step
-  let started = false;
 
   // Close out the in-progress activity group (a diff card splits the run).
   const flushSteps = () => {
@@ -1209,13 +1198,16 @@ function groupSegments(segments: Segment[]): Block[] {
   };
 
   for (const seg of segments) {
-    if (seg.type === "text" && !started) {
-      // Leading text before any activity: renders above the container.
+    if (seg.type === "text") {
+      // ALL prose — leading, mid-run narration, and the trailing answer —
+      // renders as normal markdown outside the process region, in source
+      // order. Flush the run so the text lands between tool groups. Text
+      // never opens the process region (only tools/think do).
+      flushSteps();
       blocks.push({ kind: "text", text: seg.text });
       continue;
     }
     if (seg.type === "tool") {
-      started = true;
       // A "result" kind block is the captured output of the preceding shell
       // command — merge it INTO that step instead of creating a separate
       // "Output" row, so expanding the shell command reveals its output.
@@ -1229,9 +1221,7 @@ function groupSegments(segments: Segment[]): Block[] {
       const step: ActivityStep = {
         data: seg.data,
         done: seg.done,
-        before: pendingText ?? undefined,
       };
-      pendingText = null;
       if (seg.data?.kind === "edit" && seg.data.path && seg.data.edit) {
         flushSteps();
         blocks.push({ kind: "diff", step });
@@ -1250,28 +1240,17 @@ function groupSegments(segments: Segment[]): Block[] {
       // streaming); any pending narration stays held for the next step.
       if (seg.text.length === 0) continue;
       // Pull thinking OUT of the activity group: close any in-progress tool
-      // run, surface held narration as plain text, then emit the reasoning as
-      // its own disclosure beside the collapsed tool-call summary (not buried
-      // inside it). A following tool starts a fresh group, so a turn renders
-      // as alternating think/activity blocks in source order.
+      // run, then emit the reasoning as its own disclosure beside the
+      // collapsed tool-call summary (not buried inside it). A following tool
+      // starts a fresh group, so a turn renders as alternating
+      // think/activity blocks in source order.
       flushSteps();
-      if (pendingText != null && pendingText.trim().length > 0) {
-        blocks.push({ kind: "text", text: pendingText });
-      }
-      pendingText = null;
       blocks.push({ kind: "think", text: seg.text, done: seg.done });
-      started = true;
       continue;
     }
-    // text while active: narration between calls — hold until the next step
-    // claims it as `before`, or it becomes the trailing answer.
-    pendingText = (pendingText ?? "") + seg.text;
   }
 
   flushSteps();
-  if (pendingText != null && pendingText.trim().length > 0) {
-    blocks.push({ kind: "text", text: pendingText });
-  }
   return blocks;
 }
 

@@ -38,6 +38,7 @@ import { setChatScrollToMessage } from "../../lib/chatScroll";
 import type { AgentModelSelection } from "./AgentModelPicker";
 import { TurnNavigator } from "./TurnNavigator";
 import { useContextMeter } from "../../hooks/useContextMeter";
+import { useElementHeight } from "../../hooks/useElementHeight";
 import { GitToolsSidebar } from "./GitToolsSidebar";
 
 /** Format a backend error message for display. Strips raw JSON blobs,
@@ -615,6 +616,11 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  // The composer dock FLOATS over the transcript, so the message list must
+  // reserve the dock's real height as bottom padding — a hardcoded constant
+  // goes stale the moment the composer grows a line or a queue/approval/
+  // goal-loop chip stacks on top of it. Measured live instead.
+  const [composerDockRef, composerDockHeight] = useElementHeight<HTMLDivElement>();
   // Whether new content should keep the view pinned to the bottom. Flipped
   // off as soon as the user scrolls up, so streaming tokens never yank the
   // scroll back down while they're reading history; flipped on again when
@@ -1209,7 +1215,18 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
     <div className={`chat-view${artifacts && artifacts.length > 0 ? " has-artifacts" : ""}`}>
       <GitToolsSidebar />
       {!activeChatSessionId || hasItems ? (
-        <div className="chat-messages" ref={messagesContainerRef} onScroll={handleScroll}>
+        <div
+          className="chat-messages"
+          ref={messagesContainerRef}
+          onScroll={handleScroll}
+          // Reserve the floating composer dock's real height (+ breathing
+          // room) so the last turn never sits behind it. Falls back to the
+          // CSS constant (220px) until the first measurement lands.
+          style={{
+            paddingBottom:
+              composerDockHeight > 0 ? composerDockHeight + 28 : undefined,
+          }}
+        >
           <div
             style={{
               height: virtualizer.getTotalSize(),
@@ -1400,7 +1417,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
           messages scroll BEHIND the glass card — that's what makes the
           transparency read as glass. Queue chip + approval card ride on top
           of it inside the same overlay. */}
-      <div className="chat-composer-dock">
+      <div className="chat-composer-dock" ref={composerDockRef}>
       {/* Goal-loop status chip: shows iteration count + Stop while a /goal or
           /loop is running for THIS session. Sits above the composer so it
           doesn't push the message list. */}

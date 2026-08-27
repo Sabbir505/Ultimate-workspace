@@ -2747,15 +2747,16 @@ mod preview_tests {
     }
 
     #[test]
-    fn basename_walk_finds_shallowest_match_and_skips_vendor_dirs() {
+    fn basename_walk_prefers_newest_match_and_skips_vendor_dirs() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
-        // Shallow match wins over a deeper duplicate.
         std::fs::create_dir_all(root.join("a/b")).expect("dirs");
-        std::fs::write(root.join("a/b/traffic.mmd"), "deep").expect("write deep");
-        std::fs::write(root.join("traffic.mmd"), "shallow").expect("write shallow");
+        // Two copies: the deeper one is written LAST (newer mtime) — it must
+        // win over the shallower older copy.
+        std::fs::write(root.join("traffic.mmd"), "older-shallow").expect("write shallow");
+        std::fs::write(root.join("a/b/traffic.mmd"), "newer-deep").expect("write deep");
         let hit = find_by_basename_walk(root, "traffic.mmd").expect("found");
-        assert_eq!(std::fs::read_to_string(&hit).unwrap(), "shallow");
+        assert_eq!(std::fs::read_to_string(&hit).unwrap(), "newer-deep");
 
         // Case-insensitive.
         assert!(find_by_basename_walk(root, "TRAFFIC.MMD").is_some());
@@ -2798,8 +2799,8 @@ pub fn get_file_mtime(path: String) -> CmdResult<Option<u64>> {
 }
 
 /// Find a file by basename under `dir` (breadth-first, bounded depth and
-/// scan budget; vendor/heavy/hidden dirs are skipped). Returns the shallowest
-/// match, or `None`.
+/// scan budget; vendor/heavy/hidden dirs are skipped). Returns the most
+/// recently modified match, or `None`.
 ///
 /// Recovers preview targets for chat file-change rows whose recorded path no
 /// longer exists — models sometimes state a destination they didn't actually
@@ -2828,6 +2829,10 @@ fn find_by_basename_walk(root: &std::path::Path, basename: &str) -> Option<Strin
     const MAX_SCANNED: usize = 20_000;
     let mut queue = std::collections::VecDeque::from([(root.to_path_buf(), 0u8)]);
     let mut scanned = 0usize;
+    // Several files can share the name (an old copy in a sibling folder, a
+    // rebuilt copy in the current one) — the MOST RECENTLY MODIFIED match
+    // wins, since the user almost always means the freshest file.
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
     while let Some((cur, depth)) = queue.pop_front() {
         let Ok(entries) = std::fs::read_dir(&cur) else {
             continue;
@@ -2835,21 +2840,31 @@ fn find_by_basename_walk(root: &std::path::Path, basename: &str) -> Option<Strin
         for entry in entries.flatten() {
             scanned += 1;
             if scanned > MAX_SCANNED {
-                return None;
+                break;
             }
             let path = entry.path();
             let name = entry.file_name();
             let lower = name.to_string_lossy().to_lowercase();
             let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if !is_dir && lower == needle {
-                return Some(path.to_string_lossy().into_owned());
+                let mtime = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                let replace = match &best {
+                    None => true,
+                    Some((best_time, _)) => mtime > *best_time,
+                };
+                if replace {
+                    best = Some((mtime, path.clone()));
+                }
             }
             if is_dir && depth < MAX_DEPTH && !SKIP_DIRS.contains(&lower.as_str()) {
                 queue.push_back((path, depth + 1));
             }
         }
     }
-    None
+    best.map(|(_, p)| p.to_string_lossy().into_owned())
 }
 
 // ---- Artifact download ----

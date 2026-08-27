@@ -32,6 +32,10 @@ pub fn fallback_tool_defs(connector_id: &str) -> Option<&'static [FallbackTool]>
         "gcalendar" => Some(GCALENDAR_TOOLS),
         "gchat" => Some(GCHAT_TOOLS),
         "gpeople" => Some(GPEOPLE_TOOLS),
+        // YouTube has NO hosted MCP server at all — its REST fallback is the
+        // connector's entire tool surface, not a stopgap (see `YOUTUBE` in
+        // config.rs).
+        "youtube" => Some(YOUTUBE_TOOLS),
         _ => None,
     }
 }
@@ -255,7 +259,122 @@ pub async fn call_tool(
         "gcalendar" => calendar_call(&http, &token, name, args).await,
         "gchat" => chat_call(&http, &token, name, args).await,
         "gpeople" => people_call(&http, &token, name, args).await,
+        "youtube" => youtube_call(&http, &token, name, args).await,
         other => Err(format!("unknown Google REST connector `{other}`")),
+    }
+}
+
+// ---- YouTube ----
+
+/// YouTube (REST base `https://www.googleapis.com/youtube/v3`).
+///
+/// YouTube's connector surface is fallback-only (no hosted MCP server), so
+/// these tools ARE its product surface. Read-only to match the
+/// `youtube.readonly` scope.
+static YOUTUBE_TOOLS: &[FallbackTool] = &[
+    FallbackTool {
+        name: "youtube_search",
+        description: "Search YouTube for videos, channels, or playlists. Args: query \
+         (required), item_type (optional: \"video\" | \"channel\" | \"playlist\"; default \
+         \"video\"), max_results (optional, 1-50, default 10). Returns per result: title, \
+         id, channelTitle, publishedAt, description snippet; videos also include a \
+         watchable URL.",
+        kind: ConnectorToolKind::Read,
+    },
+    FallbackTool {
+        name: "youtube_video_details",
+        description: "Fetch details for one or more YouTube videos by video id(s) — comma-\
+         separated. Args: video_ids (required, e.g. \"dQw4w9WgXcQ\" or \"id1,id2\"). Returns \
+         title, channel, description, duration, view/like/comment counts, tags.",
+        kind: ConnectorToolKind::Read,
+    },
+    FallbackTool {
+        name: "youtube_my_channel",
+        description: "Read the connected user's own YouTube channel (snippet + statistics: \
+         subscriber count, view count, video count). No arguments.",
+        kind: ConnectorToolKind::Read,
+    },
+    FallbackTool {
+        name: "youtube_list_my_playlists",
+        description: "List playlists owned by the connected user's channel. Args: max_results \
+         (optional, 1-50, default 25). Returns playlist id, title, itemCount, description.",
+        kind: ConnectorToolKind::Read,
+    },
+    FallbackTool {
+        name: "youtube_list_playlist_items",
+        description: "List the videos inside one of the user's YouTube playlists. Args: \
+         playlist_id (required), max_results (optional, 1-50, default 25). Returns position, \
+         videoId, title per item.",
+        kind: ConnectorToolKind::Read,
+    },
+];
+
+async fn youtube_call(
+    http: &reqwest::Client,
+    token: &str,
+    name: &str,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    const BASE: &str = "https://www.googleapis.com/youtube/v3";
+    match name {
+        "youtube_search" => {
+            let query = str_arg(args, "query")
+                .ok_or_else(|| "youtube_search: missing `query` argument".to_string())?;
+            let kind = str_arg(args, "item_type").unwrap_or("video");
+            let max = num_arg(args, "max_results", 10, 50, 1);
+            let url = format!(
+                "{BASE}/search?part=snippet&q={}&type={kind}&maxResults={max}",
+                urlencoding::encode(query)
+            );
+            let json = get_json(http, &url, token, "youtube", "search").await?;
+            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+        }
+        "youtube_video_details" => {
+            let ids = str_arg(args, "video_ids")
+                .ok_or_else(|| "youtube_video_details: missing `video_ids` argument".to_string())?;
+            let url = format!(
+                "{BASE}/videos?part=snippet,contentDetails,statistics,status&id={}",
+                urlencoding::encode(ids)
+            );
+            let json = get_json(http, &url, token, "youtube", "video_details").await?;
+            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+        }
+        "youtube_my_channel" => {
+            let json = get_json(
+                http,
+                &format!("{BASE}/channels?part=snippet,statistics&mine=true"),
+                token,
+                "youtube",
+                "my_channel",
+            )
+            .await?;
+            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+        }
+        "youtube_list_my_playlists" => {
+            let max = num_arg(args, "max_results", 25, 50, 1);
+            let json = get_json(
+                http,
+                &format!("{BASE}/playlists?part=snippet,contentDetails&mine=true&maxResults={max}"),
+                token,
+                "youtube",
+                "list_my_playlists",
+            )
+            .await?;
+            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+        }
+        "youtube_list_playlist_items" => {
+            let pid = str_arg(args, "playlist_id").ok_or_else(|| {
+                "youtube_list_playlist_items: missing `playlist_id` argument".to_string()
+            })?;
+            let max = num_arg(args, "max_results", 25, 50, 1);
+            let url = format!(
+                "{BASE}/playlistItems?part=snippet&playlistId={}&maxResults={max}",
+                urlencoding::encode(pid)
+            );
+            let json = get_json(http, &url, token, "youtube", "list_playlist_items").await?;
+            Ok(serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+        }
+        other => Err(format!("unknown YouTube tool `{other}`")),
     }
 }
 

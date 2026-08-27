@@ -458,6 +458,38 @@ pub const GOOGLE_PEOPLE: Connector = Connector {
     registration_url: None,
 };
 
+/// YouTube — Data API v3 via the Google family OAuth token.
+///
+/// Google ships NO hosted MCP server for YouTube (nothing in the Workspace
+/// MCP Developer Preview covers it), so this connector runs ENTIRELY on its
+/// local REST fallback tools (`google_rest::YOUTUBE_TOOLS`, base
+/// `https://www.googleapis.com/youtube/v3`): `mcp_server_url` is empty and
+/// the session-attach path attaches fallback-only connectors when their MCP
+/// connect fails (see `session::connect_all`). Read-only by design:
+/// `youtube.readonly` covers search plus reads of the user's own channel,
+/// playlists and playlist items without any write reach.
+pub const YOUTUBE_CALLBACK_PORT: u16 = 45134;
+
+pub const YOUTUBE: Connector = Connector {
+    id: "youtube",
+    display_name: "YouTube",
+    icon: "▶",
+    family: "google",
+    description: "Search YouTube videos/channels/playlists and read your channel, playlists, playlists and video stats.",
+    keywords: &["youtube", "my videos", "my channel", "my playlists", "search youtube", "video stats", "watch later"],
+    authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
+    token_url: "https://oauth2.googleapis.com/token",
+    client_id: env_or_empty!("GOOGLE_CLIENT_ID"),
+    client_secret: env_or_empty!("GOOGLE_CLIENT_SECRET"),
+    redirect_uri: "http://localhost:45134/oauth/callback",
+    // Read-only: youtube.readonly grants search plus reads of the user's own
+    // channel/playlists/playlist items with no write reach.
+    scopes: "https://www.googleapis.com/auth/youtube.readonly",
+    mcp_server_url: "",
+    revoke_url: None,
+    registration_url: None,
+};
+
 /// Kiwi.com — the official public flight-search MCP server
 /// (`https://mcp.kiwi.com`, server `kiwicom-flight-search`), launched by
 /// Kiwi.com in 2025 and listed in AltexSoft's Travel MCP Provider Index.
@@ -600,6 +632,7 @@ pub const CONNECTORS: &[Connector] = &[
     GOOGLE_CALENDAR,
     GOOGLE_CHAT,
     GOOGLE_PEOPLE,
+    YOUTUBE,
     KIWI,
     GITHUB,
 ];
@@ -619,6 +652,7 @@ pub const GOOGLE_FAMILY_MEMBERS: &[&Connector] = &[
     &GOOGLE_CALENDAR,
     &GOOGLE_CHAT,
     &GOOGLE_PEOPLE,
+    &YOUTUBE,
 ];
 
 /// Loopback callback for the family flow. Google's "Desktop app" client type

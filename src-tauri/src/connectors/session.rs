@@ -19,12 +19,15 @@ use crate::chat::permission::{self, ConnectorToolKind};
 use crate::connectors::mcp::{McpSession, RemoteTool};
 use crate::connectors::connector_by_id;
 
-/// A connector attached to a turn, with its live MCP session and the
-/// classification of every tool the server exposed.
+/// A connector attached to a turn, with its live MCP session (when the
+/// vendor hosts one — YouTube is fallback-only and attaches sessionless)
+/// and the classification of every tool the server exposed.
 pub struct AttachedConnector {
     pub connector_id: String,
     pub display_name: String,
-    pub session: McpSession,
+    /// Live MCP session, or `None` for fallback-only connectors (whose whole
+    /// tool surface is local — currently YouTube).
+    pub session: Option<McpSession>,
     /// tool name → (kind, description) for every tool the server listed.
     pub tools: HashMap<String, (ConnectorToolKind, Option<String>)>,
     /// Tool names implemented locally via the Gmail REST fallback
@@ -71,6 +74,19 @@ pub async fn connect_all(
             eprintln!("[conduit:connectors] unknown connector id `{id}` — skipping");
             continue;
         };
+        // REST fallbacks: Google's MCP service layer denies every `tools/call`
+        // while the project isn't fully enrolled in the Workspace MCP
+        // Developer Preview, so also advertise local tools backed by the base
+        // Google APIs (gmail: `gmail_*`, the Workspace products:
+        // `gdrive_*`/`gdocs_*`/… — explicit Read/Write kinds — reads
+        // auto-run, writes approval-gate). Computed BEFORE the MCP attempt:
+        // YouTube has no MCP server at all, and a connector with fallback
+        // tools attaches even when its MCP connect fails (below).
+        let fallback_defs: &[crate::connectors::gmail_api::FallbackTool] = if id == "gmail" {
+            crate::connectors::gmail_api::fallback_tool_defs()
+        } else {
+            crate::connectors::google_rest::fallback_tool_defs(id).unwrap_or(&[])
+        };
         match crate::connectors::mcp::connect(app, id).await {
             Ok(session) => {
                 let tools: Vec<RemoteTool> = match session.list_tools().await {
@@ -87,18 +103,6 @@ pub async fn connect_all(
                     let kind = permission::classify_connector_tool(&t.name, t.description.as_deref());
                     map.insert(t.name.clone(), (kind, t.description.clone()));
                 }
-                // REST fallbacks: Google's MCP service layer denies every
-                // `tools/call` while the project isn't fully enrolled in the
-                // Workspace MCP Developer Preview, so also advertise local
-                // tools backed by the base Google APIs (gmail: `gmail_*`,
-                // the Workspace products: `gdrive_*`/`gdocs_*`/… — explicit
-                // Read/Write kinds — reads auto-run, writes approval-gate).
-                let fallback_defs: &[crate::connectors::gmail_api::FallbackTool] = if id == "gmail"
-                {
-                    crate::connectors::gmail_api::fallback_tool_defs()
-                } else {
-                    crate::connectors::google_rest::fallback_tool_defs(id).unwrap_or(&[])
-                };
                 let mut fallback = std::collections::HashSet::new();
                 for def in fallback_defs {
                     map.insert(
@@ -110,15 +114,40 @@ pub async fn connect_all(
                 out.push(AttachedConnector {
                     connector_id: id.to_string(),
                     display_name: cfg.display_name.to_string(),
-                    session,
+                    session: Some(session),
                     tools: map,
                     fallback,
                 });
             }
             Err(e) => {
+                if fallback_defs.is_empty() {
+                    eprintln!(
+                        "[conduit:connectors] {id} connect failed: {e} — skipping for this turn"
+                    );
+                    continue;
+                }
+                // Fallback-only connector (YouTube: no hosted MCP server
+                // exists) — attach WITHOUT a session so the local REST tools
+                // still reach the model.
                 eprintln!(
-                    "[conduit:connectors] {id} connect failed: {e} — skipping for this turn"
+                    "[conduit:connectors] {id} has no reachable MCP server ({e}) — attaching local fallback tools only"
                 );
+                let mut map = HashMap::new();
+                let mut fallback = std::collections::HashSet::new();
+                for def in fallback_defs {
+                    map.insert(
+                        def.name.to_string(),
+                        (def.kind, Some(def.description.to_string())),
+                    );
+                    fallback.insert(def.name.to_string());
+                }
+                out.push(AttachedConnector {
+                    connector_id: id.to_string(),
+                    display_name: cfg.display_name.to_string(),
+                    session: None,
+                    tools: map,
+                    fallback,
+                });
             }
         }
     }

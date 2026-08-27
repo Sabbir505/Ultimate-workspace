@@ -158,6 +158,13 @@ const GitHub: Svg = (size) => (
   </svg>
 );
 
+const Youtube: Svg = (size) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
+    <rect x="1.5" y="4.5" width="21" height="15" rx="4" fill="#FF0000" />
+    <path d="M10 9l5.5 3L10 15V9z" fill="#fff" />
+  </svg>
+);
+
 const LOGOS: Record<string, Svg> = {
   gmail: Gmail,
   gdrive: Drive,
@@ -167,6 +174,7 @@ const LOGOS: Record<string, Svg> = {
   gcalendar: Calendar,
   gchat: Chat,
   gpeople: People,
+  youtube: Youtube,
   notion: Notion,
   kiwi: Kiwi,
   github: GitHub,

@@ -10,7 +10,8 @@
 // CommandPalette is also lazy: it pulls in fuzzy search + relative-time libs
 // (~6 KB) and is invisible until the user hits Cmd/Ctrl+K. Sidebar stays
 // eager because it's the first thing visible on every page.
-import { lazy, Suspense, useEffect, useMemo, useRef } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Modal } from "./components/common/Modal";
 import { ToastHost } from "./components/common/ToastHost";
 import { OnboardingBanner } from "./components/onboarding/OnboardingBanner";
@@ -85,6 +86,29 @@ export default function App() {
       ? (s.sessions.find((x) => x.id === s.activeChatSessionId)?.title?.trim() || "New chat")
       : null,
   );
+
+  // Title-bar maximize glyph state: the toolbar doubles as the window title
+  // bar (decorations:false), so the maximize button must track the real
+  // window state — the user can also maximize by dragging to the top edge or
+  // double-clicking the drag region, so listen rather than assume.
+  const [winMaximized, setWinMaximized] = useState(false);
+  useEffect(() => {
+    const win = getCurrentWindow();
+    let unlisten: (() => void) | null = null;
+    const refresh = () => void win.isMaximized().then(setWinMaximized).catch(() => {});
+    void win
+      .onResized(() => {
+        // Defer: isMaximized can report stale state mid-resize.
+        setTimeout(refresh, 60);
+      })
+      .then((u) => {
+        unlisten = u;
+      });
+    refresh();
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   // Pop-out chat window (roadmap #17): when the window is opened with
   // `?popout=chat&session=<id>`, render a standalone ChatView (no sidebar,
@@ -171,10 +195,41 @@ export default function App() {
       </div>
 
       <div className="main">
-        <div className="toolbar">
+        {/* The toolbar doubles as the window title bar (decorations:false):
+            drag anywhere empty, double-click to maximize, and the
+            window-control cluster sits at the far right edge. Interactive
+            children stay clickable — the drag attribute only fires when the
+            event target IS the drag-region element. */}
+        <div className="toolbar" data-tauri-drag-region="">
+          {/* Left: app identity + view nav — reads as the title bar's origin. */}
+          <span className="toolbar-app-name" data-tauri-drag-region="">
+            Conduit
+          </span>
+          <button
+            className="sidebar-nav-btn"
+            onClick={navBack}
+            disabled={viewIndex <= 0}
+            title="Back"
+            aria-label="Back"
+          >
+            <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="m15 18-6-6 6-6" />
+            </svg>
+          </button>
+          <button
+            className="sidebar-nav-btn"
+            onClick={navForward}
+            disabled={viewIndex >= viewHistory.length - 1}
+            title="Forward"
+            aria-label="Forward"
+          >
+            <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="m9 18 6-6-6-6" />
+            </svg>
+          </button>
           {sidebarCollapsed && (
             <div className="sidebar-collapsed-bar">
-              {/* Logo restores the sidebar; arrows keep view nav reachable. */}
+              {/* Logo restores the sidebar. */}
               <button
                 className="sidebar-restore"
                 onClick={toggleSidebar}
@@ -183,35 +238,18 @@ export default function App() {
               >
                 <AppLogo size={20} />
               </button>
-              <button
-                className="sidebar-nav-btn"
-                onClick={navBack}
-                disabled={viewIndex <= 0}
-                title="Back"
-                aria-label="Back"
-              >
-                <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="m15 18-6-6 6-6" />
-                </svg>
-              </button>
-              <button
-                className="sidebar-nav-btn"
-                onClick={navForward}
-                disabled={viewIndex >= viewHistory.length - 1}
-                title="Forward"
-                aria-label="Forward"
-              >
-                <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="m9 18 6-6-6-6" />
-                </svg>
-              </button>
             </div>
           )}
           {activeView === "chat" && (
             <>
               {/* Plain text title — deliberately no pill/border so it reads
-                  as a label, not a control. */}
-              <span className="toolbar-chat-title" title={chatTitle ?? undefined}>
+                  as a label, not a control. Draggable like dead title-bar
+                  space. */}
+              <span
+                className="toolbar-chat-title"
+                data-tauri-drag-region=""
+                title={chatTitle ?? undefined}
+              >
                 {chatTitle}
               </span>
               <FolderNotch />
@@ -219,7 +257,7 @@ export default function App() {
             </>
           )}
           <ModelDownloadIndicator />
-          <span className="spacer" />
+          <span className="spacer" data-tauri-drag-region="" />
           <button
             className={`ghost toolbar-icon-btn${toolPanelCollapsed ? "" : " active"}`}
             onClick={toggleToolPanel}
@@ -229,6 +267,45 @@ export default function App() {
             <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <rect x="3" y="4" width="18" height="16" rx="2" />
               <line x1="15" y1="4" x2="15" y2="20" />
+            </svg>
+          </button>
+          {/* Window controls — the title bar's right edge, mirroring native
+              Minimize / Maximize / Close order. */}
+          <button
+            className="titlebar-btn"
+            onClick={() => void getCurrentWindow().minimize()}
+            title="Minimize"
+            aria-label="Minimize window"
+          >
+            <svg width={12} height={12} viewBox="0 0 12 12" aria-hidden="true">
+              <line x1="1" y1="6" x2="11" y2="6" stroke="currentColor" strokeWidth={1.2} />
+            </svg>
+          </button>
+          <button
+            className="titlebar-btn"
+            onClick={() => void getCurrentWindow().toggleMaximize()}
+            title={winMaximized ? "Restore" : "Maximize"}
+            aria-label={winMaximized ? "Restore window" : "Maximize window"}
+          >
+            {winMaximized ? (
+              <svg width={12} height={12} viewBox="0 0 12 12" aria-hidden="true">
+                <rect x="1" y="3" width="8" height="8" fill="none" stroke="currentColor" strokeWidth={1.2} />
+                <path d="M3.5 3V1h8v8h-2" fill="none" stroke="currentColor" strokeWidth={1.2} />
+              </svg>
+            ) : (
+              <svg width={12} height={12} viewBox="0 0 12 12" aria-hidden="true">
+                <rect x="1.5" y="1.5" width="9" height="9" fill="none" stroke="currentColor" strokeWidth={1.2} />
+              </svg>
+            )}
+          </button>
+          <button
+            className="titlebar-btn titlebar-close"
+            onClick={() => getCurrentWindow().close()}
+            title="Close"
+            aria-label="Close window"
+          >
+            <svg width={12} height={12} viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M1.5 1.5l9 9m0-9l-9 9" stroke="currentColor" strokeWidth={1.2} strokeLinecap="round" />
             </svg>
           </button>
         </div>

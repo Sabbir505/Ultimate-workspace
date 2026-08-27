@@ -185,6 +185,58 @@
 .toolbar .spacer {
   flex: 1;
 }
+
+/* ---- Title-bar integration (decorations:false) ---- */
+/* The toolbar doubles as the window title bar. The app-name label marks the
+   title bar's origin like a native caption; drag regions live on the
+   toolbar/title/spacer elements (drag attribute fires only when the target
+   IS the marked element, so buttons stay clickable). */
+.toolbar-app-name {
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  user-select: none;
+  cursor: default;
+  padding-right: 2px;
+}
+.toolbar .sidebar-collapsed-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+/* Window controls: square flat buttons hugging the right edge, native-like
+   hit areas. Close hovers red like every Windows title bar. */
+.titlebar-btn {
+  width: 42px;
+  height: 34px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  color: var(--text-dim);
+  cursor: default;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+.titlebar-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.titlebar-btn.titlebar-close:hover {
+  background: #d64545;
+  color: #fff;
+}
+.titlebar-btn svg {
+  display: block;
+}
+.toolbar {
+  /* Slightly taller hit area for the window controls; keeps drag comfortable. */
+  padding-right: 0;
+}
 .toolbar .broadcast-toggle.active {
   background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 92%, #fff 8%), var(--accent));
   border-color: color-mix(in srgb, var(--accent) 70%, transparent);

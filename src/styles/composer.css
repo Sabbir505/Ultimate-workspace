@@ -1388,20 +1388,26 @@
   color: var(--accent, var(--text));
 }
 
-/* --- Composer mode glow (non-default posture) --- */
-/* A subtle colored border/glow on the composer card whenever a non-manual mode
-   is active, so it's never ambiguous which posture governs tool calls. */
-.chat-composer-card.composer-mode-read_only {
-  border-color: #6b7280;
-  box-shadow: var(--glass-rim), 0 0 0 2px rgba(107, 114, 128, 0.18);
+/* --- Composer mode accent (non-default posture) --- */
+/* The composer card stays visually neutral in every posture — no mode
+   border or glow. Mode awareness lives ONLY on the permission chip: its
+   label/icon takes the posture color (manual = dim, read_only = gray,
+   auto_edit = amber, full_auto = red). */
+.chat-composer-card.composer-mode-read_only .permission-mode-trigger.mode-read_only,
+.permission-mode-trigger.inline.mode-read_only {
+  color: #9ca3af;
 }
-.chat-composer-card.composer-mode-auto_edit {
-  border-color: #d4a017;
-  box-shadow: var(--glass-rim), 0 0 0 2px rgba(212, 160, 23, 0.18);
+.chat-composer-card.composer-mode-auto_edit .permission-mode-trigger.mode-auto_edit,
+.permission-mode-trigger.inline.mode-auto_edit {
+  color: #d4a017;
 }
-.chat-composer-card.composer-mode-full_auto {
-  border-color: var(--danger);
-  box-shadow: var(--glass-rim), 0 0 0 3px rgba(214, 69, 69, 0.22);
+.chat-composer-card.composer-mode-full_auto .permission-mode-trigger.mode-full_auto,
+.permission-mode-trigger.inline.mode-full_auto {
+  color: var(--danger);
+}
+/* Manual (default) keeps the quiet dim treatment. */
+.permission-mode-trigger.inline.mode-manual {
+  color: var(--text-dim);
 }
 
 /* ---- Advanced runtime settings (composer model-menu submenu) ---- */

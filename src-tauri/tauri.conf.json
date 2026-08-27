@@ -20,7 +20,7 @@
         "minWidth": 900,
         "minHeight": 600,
         "transparent": false,
-        "decorations": true,
+        "decorations": false,
         "resizable": true,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --use-fake-ui-for-media-stream"
       }
@@ -32,7 +32,9 @@
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": false,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

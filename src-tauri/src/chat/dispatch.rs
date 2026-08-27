@@ -382,7 +382,15 @@ async fn execute_connector_tool(
             Err(e) => format!("Connector tool `{name}` failed: {e}"),
         };
     }
-    match attached[idx].session.call_tool(name, args).await {
+    // Sessionless connectors (YouTube) carry only fallback tools, so this
+    // branch always matched above for them; the None arm is just a guard.
+    let Some(session) = &attached[idx].session else {
+        return format!(
+            "Connector tool `{name}` is unavailable: `{}` has no remote server attached.",
+            attached[idx].connector_id
+        );
+    };
+    match session.call_tool(name, args).await {
         Ok(text) => text,
         Err(e) => format!("Connector tool `{name}` failed: {e}"),
     }

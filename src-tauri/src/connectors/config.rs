@@ -643,6 +643,18 @@ pub const CONNECTORS: &[Connector] = &[
 /// in `oauth.rs` runs a single authorize/exchange flow with the COMBINED
 /// scopes and stores the resulting token under every member's credential row,
 /// so one "Connect" click connects all of them.
+/// Google family members: one OAuth client, one consent screen. `start_family`
+/// in `oauth.rs` runs a single authorize/exchange flow with the COMBINED
+/// scopes and stores the resulting token under every member's credential row,
+/// so one "Connect" click connects all of them.
+///
+/// YouTube is deliberately NOT a member: requesting `youtube.readonly` inside
+/// the combined consent is rejected by Google with `Error 400: invalid_request`
+/// unless the OAuth client's Cloud project has the YouTube Data API v3 enabled
+/// (client 664526499625-… isn't, as measured 2026-08-27) — and that single
+/// blocked scope used to take the whole family flow down with it. YouTube
+/// connects through its OWN single-connector flow instead; enable the
+/// YouTube Data API v3 on the project to make that flow succeed.
 pub const GOOGLE_FAMILY_MEMBERS: &[&Connector] = &[
     &GMAIL,
     &GOOGLE_DRIVE,
@@ -652,7 +664,6 @@ pub const GOOGLE_FAMILY_MEMBERS: &[&Connector] = &[
     &GOOGLE_CALENDAR,
     &GOOGLE_CHAT,
     &GOOGLE_PEOPLE,
-    &YOUTUBE,
 ];
 
 /// Loopback callback for the family flow. Google's "Desktop app" client type

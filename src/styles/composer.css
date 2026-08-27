@@ -730,6 +730,23 @@
   background: rgba(0, 0, 0, 0.1);
   border-color: rgba(0, 0, 0, 0.16);
 }
+/* Toolbar title-bar context: the project + GitHub chips are MORE compact
+   than their composer counterparts — the header is a slim strip and the
+   chips must sit comfortably next to the chat title and window controls. */
+.toolbar .composer-notch-folder,
+.toolbar .composer-notch-github {
+  height: 22px;
+  gap: 4px;
+  padding: 0 7px;
+  font-size: 11px;
+  border-radius: var(--radius-xs);
+}
+.toolbar .composer-notch-folder {
+  max-width: 180px;
+}
+.toolbar .composer-notch-folder .composer-notch-folder-name {
+  max-width: 130px;
+}
 /* The agent selector chip renders FLAT — transparent background and border in
    every state (rest/hover/open). Only its dropdown keeps the glass surface;
    the chip itself is text + dot + chevron, like the permission chip. */

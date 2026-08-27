@@ -1,7 +1,7 @@
 // Full vertical Git tools sidebar panel — a single continuous dark panel on
-// the right side of the app. Contains: a header with a collapse button,
-// a top section with Changes/Branch/Commit rows, a Plans section, and a
-// Progress section.
+// the right side of the app. Contains a collapsible Git section with
+// Changes/Branch/Commit rows, plus collapsible Plans, Progress, and Agents
+// sections.
 //
 // Row behaviours:
 //   "changes" → opens the ToolPanel's Changes (files) tab.
@@ -10,7 +10,7 @@
 //   plan row → opens the plan markdown in the ToolPanel's Canvas tab.
 //
 // Collapsed state: a thin ~50px strip showing just the last plan header in
-//   one sentence — the git icon toggles this.
+//   one sentence — the git icon toggles this. Section state is preserved.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";import {
   getChangedFiles,
   listGitBranches,
@@ -33,7 +33,6 @@ export function GitToolsSidebar() {
     s.activeChatSessionId ? s.sessionProjects[s.activeChatSessionId] : undefined,
   );
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
-  const selectedProjectId = useProjectsStore((s) => s.selectedProjectId);
   const projects = useProjectsStore((s) => s.projects);
   const gitStatuses = useProjectsStore((s) => s.gitStatuses);
   const tasks = useChatStore((s) =>
@@ -58,8 +57,26 @@ export function GitToolsSidebar() {
   const gitSidebarCollapsed = useUiStore((s) => s.gitSidebarCollapsed);
   const toggleGitSidebar = useUiStore((s) => s.toggleGitSidebar);
   const setModalOpen = useUiStore((s) => s.setModalOpen);
+  // Per-section disclosure state. Defaults to open (see ui.ts). The
+  // collapse/expand is animated via a grid-template-rows 0fr→1fr wrapper,
+  // matching the Projects disclosure in the main sidebar (sidebar.css).
+  const gitSectionGitOpen = useUiStore((s) => s.gitSectionGitOpen);
+  const gitSectionPlansOpen = useUiStore((s) => s.gitSectionPlansOpen);
+  const gitSectionProgressOpen = useUiStore((s) => s.gitSectionProgressOpen);
+  const gitSectionAgentsOpen = useUiStore((s) => s.gitSectionAgentsOpen);
+  const toggleGitSectionGit = useUiStore((s) => s.toggleGitSectionGit);
+  const toggleGitSectionPlans = useUiStore((s) => s.toggleGitSectionPlans);
+  const toggleGitSectionProgress = useUiStore((s) => s.toggleGitSectionProgress);
+  const toggleGitSectionAgents = useUiStore((s) => s.toggleGitSectionAgents);
 
-  const projectId = boundProjectId ?? selectedProjectId;
+  // Strictly chat-bound: the git surface follows the ACTIVE SESSION's
+  // project binding, never the sidebar-selected project. A brand-new chat
+  // (created without a projectId) is unbound — falling back to the global
+  // selection here leaked ANOTHER project's changes/branch into it, and
+  // polling even ran git against that project's working dir. Unbound chats
+  // therefore show no git data (path null → poll skips, branch shows HEAD)
+  // until they are bound (binding happens on first send / project "+").
+  const projectId = boundProjectId;
   const project = projects.find((p) => p.id === projectId);
   // The diff/branch surface follows the chat's working directory: when the
   // active chat runs in an isolated worktree (roadmap P0 §3.1.1), git
@@ -186,9 +203,6 @@ export function GitToolsSidebar() {
     return found.slice(0, 10);
   }, [messages]);
 
-  // Last plan summary line for the collapsed strip.
-  const lastPlanSummary = plans.length > 0 ? plans[0].label : null;
-
   // Progress items — from completed tasks.
   const taskList = Object.values(tasks);
   const completed = taskList.filter((t) => t.state === "completed");
@@ -216,189 +230,228 @@ export function GitToolsSidebar() {
     setBranchOpen((prev) => !prev);
   }, []);
 
-  // ---- Collapsed state ----
-  if (gitSidebarCollapsed) {
-    return (
-      <div className="git-sidebar git-sidebar-collapsed">
-        <button
-          className="git-sidebar-expand-btn"
-          onClick={toggleGitSidebar}
-          title="Expand Git tools"
-        >
-          {/* Git branch icon */}
-          <svg width={14} height={14} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="4" cy="3" r="1.5" />
-            <circle cx="4" cy="13" r="1.5" />
-            <circle cx="12" cy="3" r="1.5" />
-            <path d="M4 4.5v7" />
-            <path d="M12 4.5c0 4-4 2-4 4.5" />
-          </svg>
-        </button>
-        {lastPlanSummary && (
-          <div className="git-sidebar-collapsed-summary" title={lastPlanSummary}>
-            {lastPlanSummary}
-          </div>
-        )}
-      </div>
-    );
-  }
-
+  // ---- Always-mounted shell so the collapse/expand can animate smoothly.
+  // The shell slides between a compact icon chip (48px) and the full panel
+  // (260px). The header row holds the git-branch toggle icon plus the
+  // "Git tools" title; the sections live in a body that collapses its
+  // max-height and fades. The icon is the same element in both states.
   return (
-    <div className="git-sidebar">
-      {/* Header */}
-      <div className="git-sidebar-header">
-        <div className="git-sidebar-header-left">
-          <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-            <path d="M14 2v6h6" />
-            <path d="M8 13h8" /><path d="M8 17h5" />
-          </svg>
-          <span className="git-sidebar-title">Git tools</span>
+    <div
+      className={`git-sidebar${gitSidebarCollapsed ? " git-sidebar-collapsed" : ""}`}
+    >
+      <div className="git-sidebar-inner">
+        <div className="git-sidebar-header">
+          {/* Whole-sidebar collapse/expand. Same icon in both states. */}
+          <button
+            className="git-sidebar-collapse-btn"
+            onClick={toggleGitSidebar}
+            title={gitSidebarCollapsed ? "Expand git tools" : "Collapse git tools"}
+            aria-label={gitSidebarCollapsed ? "Expand git tools" : "Collapse git tools"}
+          >
+            <svg width={14} height={14} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="4" cy="3" r="1.5" />
+              <circle cx="4" cy="13" r="1.5" />
+              <circle cx="12" cy="3" r="1.5" />
+              <path d="M4 4.5v7" />
+              <path d="M12 4.5c0 4-4 2-4 4.5" />
+            </svg>
+          </button>
+          {/* Git-section disclosure toggle. */}
+          <button
+            className="git-sidebar-header-left"
+            onClick={toggleGitSectionGit}
+            title={gitSectionGitOpen ? "Collapse git" : "Expand git"}
+            aria-expanded={gitSectionGitOpen}
+            aria-controls="git-section-git"
+          >
+            <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <path d="M14 2v6h6" />
+              <path d="M8 13h8" /><path d="M8 17h5" />
+            </svg>
+            <span className="git-sidebar-title">Git tools</span>
+          </button>
         </div>
-        <button
-          className="git-sidebar-collapse-btn"
-          onClick={toggleGitSidebar}
-          title="Toggle Git tools sidebar"
-        >
-          <svg width={14} height={14} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="4" cy="3" r="1.5" /><circle cx="4" cy="13" r="1.5" /><circle cx="12" cy="3" r="1.5" />
-            <path d="M4 4.5v7" /><path d="M12 4.5c0 4-4 2-4 4.5" />
-          </svg>
-        </button>
-      </div>
 
-      {/* Top section: Changes / Branch / Commit rows */}
+        {/* Body: the four sections. Collapses height + fades on whole-sidebar
+            collapse; hidden from the a11y tree once the fade finishes. */}
+        <div className="git-sidebar-body">
+
+      {/* Top section: Git group (Changes / Branch / Commit rows).
+          The section toggle is the "Git tools" title in the header above. */}
       <div className="git-sidebar-section">
-        <button
-          className="git-sidebar-row"
-          title="View changed files in the side panel"
-          onClick={openChanges}
+        <div
+          id="git-section-git"
+          className={`git-section-collapse${gitSectionGitOpen ? " open" : ""}`}
+          aria-hidden={!gitSectionGitOpen}
         >
-          <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
-          </svg>
-          <span className="git-sidebar-row-label">changes</span>
-          {added > 0 && <span className="git-sidebar-diff added">+{added.toLocaleString()}</span>}
-          {deleted > 0 && <span className="git-sidebar-diff deleted">-{deleted.toLocaleString()}</span>}
-        </button>
+          <div className="git-section-collapse-inner">
+            <button
+              className="git-sidebar-row"
+              title="View changed files in the side panel"
+              onClick={openChanges}
+            >
+              <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+              </svg>
+              <span className="git-sidebar-row-label">changes</span>
+              {added > 0 && <span className="git-sidebar-diff added">+{added.toLocaleString()}</span>}
+              {deleted > 0 && <span className="git-sidebar-diff deleted">-{deleted.toLocaleString()}</span>}
+            </button>
 
-        {/* Branch row — opens BranchDropdown via portal anchored to button pos. */}
-        <button
-          ref={branchBtnRef}
-          className={`git-sidebar-row${branchOpen ? " open" : ""}`}
-          onClick={toggleBranchPopover}
-          title="Switch branch"
-        >
-          <svg width={15} height={15} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="4" cy="3" r="1.5" /><circle cx="4" cy="13" r="1.5" /><circle cx="12" cy="3" r="1.5" />
-            <path d="M4 4.5v7" /><path d="M12 4.5c0 4-4 2-4 4.5" />
-          </svg>
-          <span className="git-sidebar-row-label">{gitStatus?.branch ?? "HEAD"}</span>
-          <span className="git-sidebar-caret">▾</span>
-        </button>
+            {/* Branch row — opens BranchDropdown via portal anchored to button pos. */}
+            <button
+              ref={branchBtnRef}
+              className={`git-sidebar-row${branchOpen ? " open" : ""}`}
+              onClick={toggleBranchPopover}
+              title="Switch branch"
+            >
+              <svg width={15} height={15} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="4" cy="3" r="1.5" /><circle cx="4" cy="13" r="1.5" /><circle cx="12" cy="3" r="1.5" />
+                <path d="M4 4.5v7" /><path d="M12 4.5c0 4-4 2-4 4.5" />
+              </svg>
+              <span className="git-sidebar-row-label">{gitStatus?.branch ?? "HEAD"}</span>
+              <span className="git-sidebar-caret">▾</span>
+            </button>
 
-        <button
-          className="git-sidebar-row"
-          title="Commit or push changes"
-          onClick={() => setCommitModalOpen(true)}
-        >
-          <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="3" /><path d="M3 12h6" /><path d="M15 12h6" />
-          </svg>
-          <span className="git-sidebar-row-label">Commit or push</span>
-        </button>
+            <button
+              className="git-sidebar-row"
+              title="Commit or push changes"
+              onClick={() => setCommitModalOpen(true)}
+            >
+              <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="3" /><path d="M3 12h6" /><path d="M15 12h6" />
+              </svg>
+              <span className="git-sidebar-row-label">Commit or push</span>
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Plans section */}
       <div className="git-sidebar-section">
-        <div className="git-sidebar-section-header">
+        <button
+          className="git-sidebar-section-header"
+          onClick={toggleGitSectionPlans}
+          title={gitSectionPlansOpen ? "Collapse plans" : "Expand plans"}
+          aria-expanded={gitSectionPlansOpen}
+          aria-controls="git-section-plans"
+        >
           <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
             <line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" />
             <circle cx="4" cy="6" r="1" /><circle cx="4" cy="12" r="1" /><circle cx="4" cy="18" r="1" />
           </svg>
           <span className="git-sidebar-section-title">Plans</span>
+        </button>
+        <div
+          id="git-section-plans"
+          className={`git-section-collapse${gitSectionPlansOpen ? " open" : ""}`}
+          aria-hidden={!gitSectionPlansOpen}
+        >
+          <div className="git-section-collapse-inner">
+            {plans.length === 0 ? (
+              <div className="git-sidebar-empty">No plans yet.</div>
+            ) : (
+              plans.map((p, i) => (
+                <button
+                  key={i}
+                  className="git-sidebar-plan"
+                  onClick={() => openPlan(p)}
+                  title={p.label}
+                >
+                  <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" />
+                    <path d="M12 7v4M12 11l-5 6M12 11l5 6" />
+                  </svg>
+                  <span className="git-sidebar-plan-text">{p.label}…</span>
+                </button>
+              ))
+            )}
+          </div>
         </div>
-        {plans.length === 0 ? (
-          <div className="git-sidebar-empty">No plans yet.</div>
-        ) : (
-          plans.map((p, i) => (
-            <button
-              key={i}
-              className="git-sidebar-plan"
-              onClick={() => openPlan(p)}
-              title={p.label}
-            >
-              <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" />
-                <path d="M12 7v4M12 11l-5 6M12 11l5 6" />
-              </svg>
-              <span className="git-sidebar-plan-text">{p.label}…</span>
-            </button>
-          ))
-        )}
       </div>
 
       {/* Progress section — plan steps + completed background tasks */}
       <div className="git-sidebar-section">
-        <div className="git-sidebar-section-header">
+        <button
+          className="git-sidebar-section-header"
+          onClick={toggleGitSectionProgress}
+          title={gitSectionProgressOpen ? "Collapse progress" : "Expand progress"}
+          aria-expanded={gitSectionProgressOpen}
+          aria-controls="git-section-progress"
+        >
           <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
             <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
           </svg>
           <span className="git-sidebar-section-title">
             Progress {completedPlanStepsNum + completed.length}/{totalPlanStepsNum + totalTasks || completedPlanStepsNum + completed.length}
           </span>
+        </button>
+        <div
+          id="git-section-progress"
+          className={`git-section-collapse${gitSectionProgressOpen ? " open" : ""}`}
+          aria-hidden={!gitSectionProgressOpen}
+        >
+          <div className="git-section-collapse-inner">
+            {planSteps.length === 0 && completed.length === 0 ? (
+              <div className="git-sidebar-empty">No progress yet.</div>
+            ) : (
+              <>
+                {/* Plan steps — all statuses */}
+                {planSteps.map((step) => (
+                  <div
+                    key={step.stepId}
+                    className={`git-sidebar-progress-item progress-${step.status}`}
+                    title={step.status === "failed" ? (step.failedReason ?? "Failed") : step.label}
+                  >
+                    {step.status === "completed" ? (
+                      <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M20 6 9 17l-5-5" />
+                      </svg>
+                    ) : step.status === "in_progress" ? (
+                      <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#3b82f6" strokeWidth={2} strokeLinecap="round">
+                        <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+                      </svg>
+                    ) : step.status === "failed" ? (
+                      <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth={2.5} strokeLinecap="round">
+                        <path d="M18 6 6 18M6 6l12 12" />
+                      </svg>
+                    ) : (
+                      <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth={2} strokeLinecap="round">
+                        <circle cx="12" cy="12" r="3" />
+                      </svg>
+                    )}
+                    <span
+                      className={`git-sidebar-progress-text${step.status === "completed" ? " completed" : ""}`}
+                    >
+                      {step.label}
+                    </span>
+                  </div>
+                ))}
+                {/* Completed background tasks (downloads/shells) — unchanged */}
+                {completed.map((t) => (
+                  <div key={t.taskId} className="git-sidebar-progress-item">
+                    <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M20 6 9 17l-5-5" />
+                    </svg>
+                    <span className="git-sidebar-progress-text">{t.message || t.kind}</span>
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
         </div>
-        {planSteps.length === 0 && completed.length === 0 ? (
-          <div className="git-sidebar-empty">No progress yet.</div>
-        ) : (
-          <>
-            {/* Plan steps — all statuses */}
-            {planSteps.map((step) => (
-              <div
-                key={step.stepId}
-                className={`git-sidebar-progress-item progress-${step.status}`}
-                title={step.status === "failed" ? (step.failedReason ?? "Failed") : step.label}
-              >
-                {step.status === "completed" ? (
-                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M20 6 9 17l-5-5" />
-                  </svg>
-                ) : step.status === "in_progress" ? (
-                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#3b82f6" strokeWidth={2} strokeLinecap="round">
-                    <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
-                  </svg>
-                ) : step.status === "failed" ? (
-                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth={2.5} strokeLinecap="round">
-                    <path d="M18 6 6 18M6 6l12 12" />
-                  </svg>
-                ) : (
-                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth={2} strokeLinecap="round">
-                    <circle cx="12" cy="12" r="3" />
-                  </svg>
-                )}
-                <span
-                  className={`git-sidebar-progress-text${step.status === "completed" ? " completed" : ""}`}
-                >
-                  {step.label}
-                </span>
-              </div>
-            ))}
-            {/* Completed background tasks (downloads/shells) — unchanged */}
-            {completed.map((t) => (
-              <div key={t.taskId} className="git-sidebar-progress-item">
-                <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M20 6 9 17l-5-5" />
-                </svg>
-                <span className="git-sidebar-progress-text">{t.message || t.kind}</span>
-              </div>
-            ))}
-          </>
-        )}
       </div>
 
       {/* Agents section — active subagents in this session */}
       <div className="git-sidebar-section">
-        <div className="git-sidebar-section-header">
+        <button
+          className="git-sidebar-section-header"
+          onClick={toggleGitSectionAgents}
+          title={gitSectionAgentsOpen ? "Collapse agents" : "Expand agents"}
+          aria-expanded={gitSectionAgentsOpen}
+          aria-controls="git-section-agents"
+        >
           <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="3" />
             <circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="19" cy="18" r="2" /><circle cx="5" cy="18" r="2" />
@@ -408,41 +461,61 @@ export function GitToolsSidebar() {
           {Object.keys(subagents).length > 0 && (
             <span className="git-sidebar-section-badge">{Object.keys(subagents).length}</span>
           )}
+        </button>
+        <div
+          id="git-section-agents"
+          className={`git-section-collapse${gitSectionAgentsOpen ? " open" : ""}`}
+          aria-hidden={!gitSectionAgentsOpen}
+        >
+          <div className="git-section-collapse-inner">
+            {Object.keys(subagents).length === 0 ? (
+              <div className="git-sidebar-empty">No active agents.</div>
+            ) : (
+              Object.values(subagents).map((sub) => (
+                <button
+                  key={sub.id}
+                  className="git-sidebar-plan git-sidebar-agent"
+                  onClick={() => {
+                    setActiveSubagentId(sub.id);
+                    addTab("agents");
+                  }}
+                  title={sub.task}
+                >
+                  <span className={`chat-subagent-dot ${sub.status}`} />
+                  <span className="git-sidebar-plan-text">{sub.role}: {sub.task.length > 30 ? `${sub.task.slice(0, 30)}…` : sub.task}</span>
+                </button>
+              ))
+            )}
+          </div>
         </div>
-        {Object.keys(subagents).length === 0 ? (
-          <div className="git-sidebar-empty">No active agents.</div>
-        ) : (
-          Object.values(subagents).map((sub) => (
-            <button
-              key={sub.id}
-              className="git-sidebar-plan git-sidebar-agent"
-              onClick={() => {
-                setActiveSubagentId(sub.id);
-                addTab("agents");
-              }}
-              title={sub.task}
-            >
-              <span className={`chat-subagent-dot ${sub.status}`} />
-              <span className="git-sidebar-plan-text">{sub.role}: {sub.task.length > 30 ? `${sub.task.slice(0, 30)}…` : sub.task}</span>
-            </button>
-          ))
-        )}
+      </div>
+        </div>
       </div>
 
       {/* Branch popover — rendered inline with position:fixed to escape
-          sidebar overflow without createPortal (which was causing WebView crashes). */}
+          sidebar overflow without createPortal (which was causing WebView crashes).
+          Lives outside .git-sidebar-body so the popover survives collapse. */}
       {branchOpen && (
         <div
           ref={popoverRef}
           className="git-sidebar-branch-popover-fixed"
           style={{
             position: "fixed",
-            top: (branchBtnRef.current?.getBoundingClientRect().bottom ?? 0) + 4,
-            right: window.innerWidth - (branchBtnRef.current?.getBoundingClientRect().right ?? 0),
+            // Anchor to the LEFT of the sidebar: the popover's right edge
+            // sits 8px left of the branch row's left edge, so it never
+            // covers the git panel it was opened from.
+            top: branchBtnRef.current?.getBoundingClientRect().top ?? 0,
+            right:
+              window.innerWidth -
+              (branchBtnRef.current?.getBoundingClientRect().left ?? 0) +
+              8,
             zIndex: 9999,
           }}
         >
-          <BranchDropdown onClose={() => setBranchOpen(false)} />
+          <BranchDropdown
+            chatBound
+            onClose={() => setBranchOpen(false)}
+          />
         </div>
       )}
 

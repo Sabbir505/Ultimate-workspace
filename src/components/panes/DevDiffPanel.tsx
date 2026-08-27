@@ -119,7 +119,23 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   // closure from the first render.
   const sessions = useProjectsStore((s) => s.sessions);
   const projects = useProjectsStore((s) => s.projects);
-  const selectedProjectId = useProjectsStore((s) => s.selectedProjectId);
+  // Active chat session + its project binding — the embedded Files tab
+  // follows the CHAT, never the sidebar-selected project. Falling back to
+  // the global selection leaked the LAST project's changes into a brand-new
+  // (unbound) chat's Changes tab.
+  const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
+  const chatSessions = useChatStore((s) => s.sessions);
+  const sessionProjects = useChatStore((s) => s.sessionProjects);
+  const activeChatSession = useMemo(
+    () =>
+      activeChatSessionId
+        ? chatSessions.find((x) => x.id === activeChatSessionId)
+        : undefined,
+    [activeChatSessionId, chatSessions],
+  );
+  const activeBoundProjectId = activeChatSessionId
+    ? sessionProjects[activeChatSessionId]
+    : undefined;
 
   // Resolve the diff root once per focus change OR whenever the
   // projects/sessions list updates. Per PRD §7.10, a session may run inside
@@ -127,18 +143,22 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   // A non-terminal focused pane (browser) doesn't bind — the panel ignores it.
   const boundPane = focusedPane && focusedPane.data.kind === "terminal" ? focusedPane : null;
   // Embedded (tool panel Files tab) fallback: with no focused terminal the
-  // user's context is the selected project, so diff against its root.
-  const fallbackProject =
+  // user's context is the ACTIVE CHAT — diff against its worktree, or its
+  // bound project's root. An unbound chat resolves to "" (empty state)
+  // instead of diffing whatever project is selected in the sidebar.
+  const fallbackCwd =
     embedded && !boundPane
-      ? projects.find((p) => p.id === selectedProjectId) ?? null
-      : null;
+      ? activeChatSession?.worktreePath ??
+        projects.find((p) => p.id === activeBoundProjectId)?.path ??
+        ""
+      : "";
   const cwd = useMemo(
-    () => (boundPane ? paneCwd(boundPane) : fallbackProject?.path ?? ""),
+    () => (boundPane ? paneCwd(boundPane) : fallbackCwd),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [boundPane, fallbackProject, sessions, projects, selectedProjectId],
+    [boundPane, fallbackCwd, sessions, projects, activeBoundProjectId],
   );
-  // Cache key for the file list: the pane id, or the fallback project id.
-  const bindKey = boundPane?.paneId ?? (fallbackProject ? `project:${fallbackProject.id}` : null);
+  // Cache key for the file list: the pane id, or the active chat binding.
+  const bindKey = boundPane?.paneId ?? (fallbackCwd ? `chat:${activeChatSessionId}` : null);
 
   // Project root for the "union" fetch: in worktree-scoped sessions the agent
   // may write files OUTSIDE the pane's cwd (e.g. directly into the project
@@ -161,9 +181,11 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
         : null;
       return project?.path ?? "";
     }
-    return fallbackProject?.path ?? "";
+    // Embedded: the active chat's bound project root (union scope for a
+    // worktree cwd; equals the cwd when bound without a worktree).
+    return projects.find((p) => p.id === activeBoundProjectId)?.path ?? "";
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [boundPane, fallbackProject, sessions, projects]);
+  }, [boundPane, activeBoundProjectId, sessions, projects]);
 
   // Refresh on the same cadence as the existing git-status polling
   // (useGitStatusPolling, every 8s) — plus an immediate fetch on focus
@@ -561,11 +583,11 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     totalDeleted += f.deleted ?? 0;
   }
   // Project context: the focused session's project, or — in the embedded
-  // project fallback — the selected project itself.
+  // fallback — the active chat's bound project.
   const sessionId = boundPane?.data.kind === "terminal" ? boundPane.data.sessionId : null;
   const projectId = sessionId
     ? useProjectsStore.getState().sessions.find((s) => s.id === sessionId)?.projectId ?? null
-    : fallbackProject?.id ?? null;
+    : activeBoundProjectId ?? null;
 
   const sendPr = () => {
     if (files.length === 0) return;

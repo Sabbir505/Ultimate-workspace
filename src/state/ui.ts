@@ -120,6 +120,15 @@ export interface UiState {
   toolPanelWidth: number;
   /** Whether the Git tools sidebar (right-side vertical panel) is collapsed. */
   gitSidebarCollapsed: boolean;
+  /** Per-section open/closed flags inside the expanded Git sidebar. These are
+   *  independent of `gitSidebarCollapsed` (which hides the whole panel) — the
+   *  user can collapse individual sections (Git / Plans / Progress / Agents)
+   *  while the sidebar itself is open. Defaults to open so first-time users
+   *  see every section's content. */
+  gitSectionGitOpen: boolean;
+  gitSectionPlansOpen: boolean;
+  gitSectionProgressOpen: boolean;
+  gitSectionAgentsOpen: boolean;
   /** Plan markdown content to show in the Canvas tab. Set when a plan
    *  row is clicked in the Git tools sidebar. */
   planCanvasContent: string | null;
@@ -219,6 +228,10 @@ export interface UiState {
   setContextTipOpen: (open: boolean) => void;
   toggleToolPanel: () => void;
   toggleGitSidebar: () => void;
+  toggleGitSectionGit: () => void;
+  toggleGitSectionPlans: () => void;
+  toggleGitSectionProgress: () => void;
+  toggleGitSectionAgents: () => void;
   setPlanCanvas: (content: string | null, title: string | null) => void;
   setDiffPanelFile: (file: string | null, cwd: string | null) => void;
   setToolPanelWidth: (width: number) => void;
@@ -275,6 +288,13 @@ export const useUiStore = create<UiState>((set) => ({
   toolPanelWidth: 532,
   // Open by default — it's the primary git surface now.
   gitSidebarCollapsed: true,
+  // All four sections open by default so first-time users see the full
+  // surface. They can collapse individual sections (state is preserved
+  // while the whole sidebar is itself collapsed).
+  gitSectionGitOpen: true,
+  gitSectionPlansOpen: true,
+  gitSectionProgressOpen: true,
+  gitSectionAgentsOpen: true,
   planCanvasContent: null,
   planCanvasTitle: null,
   diffPanelFile: null,
@@ -519,6 +539,10 @@ export const useUiStore = create<UiState>((set) => ({
   setContextTipOpen: (contextTipOpen) => set({ contextTipOpen }),
   toggleToolPanel: () => set((s) => ({ toolPanelCollapsed: !s.toolPanelCollapsed })),
   toggleGitSidebar: () => set((s) => ({ gitSidebarCollapsed: !s.gitSidebarCollapsed })),
+  toggleGitSectionGit: () => set((s) => ({ gitSectionGitOpen: !s.gitSectionGitOpen })),
+  toggleGitSectionPlans: () => set((s) => ({ gitSectionPlansOpen: !s.gitSectionPlansOpen })),
+  toggleGitSectionProgress: () => set((s) => ({ gitSectionProgressOpen: !s.gitSectionProgressOpen })),
+  toggleGitSectionAgents: () => set((s) => ({ gitSectionAgentsOpen: !s.gitSectionAgentsOpen })),
   setPlanCanvas: (content, title) => set({ planCanvasContent: content, planCanvasTitle: title }),
   setDiffPanelFile: (diffPanelFile, diffPanelCwd) => set({ diffPanelFile, diffPanelCwd }),
   setToolPanelWidth: (toolPanelWidth) =>

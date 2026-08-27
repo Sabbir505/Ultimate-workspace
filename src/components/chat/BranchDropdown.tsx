@@ -1,29 +1,42 @@
-// A popover dropdown showing the repo's branches with search, create, and a
-// compact git log graph. Used by both the composer's GitHub pill and the
-// top-right git menu — both just render <BranchDropdown /> inside their own
-// positioning wrapper.
+// A compact popover dropdown for switching branches: search-first list with
+// the current branch checked (plus an uncommitted-changes count under it)
+// and two footer actions — "Create and switch to new branch…" and "Git
+// Graph" (which opens the full branch panel tab with the log graph).
 //
-// Fetches branches + log from the backend on open, with a 5s refresh. The
-// active project path is resolved from the projects store (chat-bound project
-// wins over global selection).
+// Rendered by the composer's GitHub pill, the top-right git menu, and the
+// Git tools sidebar — each supplies its own positioning wrapper.
+//
+// Fetches branches + dirty-file count from the backend on open, refreshed
+// by the FS watcher. `chatBound` (Git tools sidebar) resolves the repo
+// STRICTLY from the active chat session's binding — an unbound new chat
+// gets "No project selected." instead of leaking the sidebar-selected
+// project's branches. The composer/menu surfaces keep the chat-bound →
+// globally-selected fallback.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   listGitBranches,
   checkoutGitBranch,
   createGitBranch,
-  getGitLog,
   getChangedFiles,
   safeListen,
   type ChangedFile,
   type BranchInfo,
-  type GitLogEntry,
 } from "../../lib/ipc";
 import { useProjectsStore } from "../../state/projects";
 import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { Modal } from "../common/Modal";
 
-export function BranchDropdown({ onClose }: { onClose?: () => void }) {
+export function BranchDropdown({
+  onClose,
+  chatBound = false,
+}: {
+  onClose?: () => void;
+  /** Strictly resolve the repo from the active chat session's project
+   *  binding (no global-selection fallback). Used by the Git tools sidebar
+   *  whose git surface is chat-scoped. */
+  chatBound?: boolean;
+}) {
   const boundProjectId = useChatStore((s) =>
     s.activeChatSessionId ? s.sessionProjects[s.activeChatSessionId] : undefined,
   );
@@ -31,12 +44,14 @@ export function BranchDropdown({ onClose }: { onClose?: () => void }) {
   const projects = useProjectsStore((s) => s.projects);
   const refreshGitStatus = useProjectsStore((s) => s.refreshGitStatus);
 
-  const projectId = boundProjectId ?? selectedProjectId;
+  const projectId = chatBound
+    ? boundProjectId
+    : boundProjectId ?? selectedProjectId;
   const project = projects.find((p) => p.id === projectId);
   const path = project?.path ?? null;
 
   const [branches, setBranches] = useState<BranchInfo[]>([]);
-  const [log, setLog] = useState<GitLogEntry[]>([]);
+  const [dirtyCount, setDirtyCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -49,15 +64,16 @@ export function BranchDropdown({ onClose }: { onClose?: () => void }) {
   // Files that would be left behind by the branch switch.
   const [dirtyFiles, setDirtyFiles] = useState<ChangedFile[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+  const createInputRef = useRef<HTMLInputElement>(null);
 
   const fetchAll = useCallback(async () => {
     if (!path) return;
-    const [bl, lg] = await Promise.all([
+    const [bl, cf] = await Promise.all([
       listGitBranches(path),
-      getGitLog(path),
+      getChangedFiles(path),
     ]);
     setBranches(bl ?? []);
-    setLog(lg ?? []);
+    setDirtyCount(cf?.length ?? 0);
     setError(null);
     setLoading(false);
   }, [path]);
@@ -65,11 +81,10 @@ export function BranchDropdown({ onClose }: { onClose?: () => void }) {
   useEffect(() => {
     setLoading(true);
     void fetchAll();
-    // Subscribe to the FS watcher event so the branch list and recent
-    // commits refresh on actual changes (e.g. `git checkout` from the
-    // terminal, an agent doing `git pull`, etc). The backend debounces
-    // to 300 ms so a burst of FS events from one git op becomes one
-    // refresh, not a thundering herd.
+    // Subscribe to the FS watcher event so the branch list and dirty count
+    // refresh on actual changes (e.g. `git checkout` from the terminal, an
+    // agent editing files). The backend debounces to 300 ms so a burst of
+    // FS events from one git op becomes one refresh, not a thundering herd.
     let cancelled = false;
     let unlisten: (() => void) | null = null;
     void safeListen<string>("project:fs-changed", (changedPath) => {
@@ -94,14 +109,16 @@ export function BranchDropdown({ onClose }: { onClose?: () => void }) {
     inputRef.current?.focus();
   }, []);
 
+  // Focus the create input the moment the inline create row appears.
+  useEffect(() => {
+    if (creating) createInputRef.current?.focus();
+  }, [creating]);
+
   const filtered = useMemo(() => {
     if (!query.trim()) return branches;
     const q = query.toLowerCase();
     return branches.filter((b) => b.name.toLowerCase().includes(q));
   }, [branches, query]);
-
-  const localBranches = filtered.filter((b) => !b.isRemote);
-  const remoteBranches = filtered.filter((b) => b.isRemote);
 
   // Shared checkout logic — performs the actual git checkout, then refreshes.
   const performCheckout = async (name: string) => {
@@ -133,20 +150,13 @@ export function BranchDropdown({ onClose }: { onClose?: () => void }) {
     await performCheckout(name);
   };
 
-  const handleCreate = async () => {
+  // "Create and switch": create the branch, then check it out.
+  const createAndSwitch = async () => {
     if (!path || !newName.trim()) return;
-    try {
-      const files = await getChangedFiles(path);
-      if (files && files.length > 0) {
-        setDirtyCheckout("__create__");
-        return;
-      }
-    } catch {
-      // getChangedFiles failed — proceed anyway.
-    }
     setBusy("__create__");
     try {
       await createGitBranch(path, newName.trim());
+      await checkoutGitBranch(path, newName.trim());
       setNewName("");
       setCreating(false);
       await fetchAll();
@@ -159,6 +169,20 @@ export function BranchDropdown({ onClose }: { onClose?: () => void }) {
     }
   };
 
+  const handleCreate = async () => {
+    if (!path || !newName.trim()) return;
+    try {
+      const files = await getChangedFiles(path);
+      if (files && files.length > 0) {
+        setDirtyCheckout("__create__");
+        return;
+      }
+    } catch {
+      // getChangedFiles failed — proceed anyway.
+    }
+    await createAndSwitch();
+  };
+
   // Confirm a dirty checkout: the user acknowledged the warning.
   const confirmDirtyCheckout = async () => {
     if (!dirtyCheckout) return;
@@ -167,22 +191,17 @@ export function BranchDropdown({ onClose }: { onClose?: () => void }) {
     if (name === "__create__") {
       // Retry the create flow (skip the dirty check this time).
       if (!path || !newName.trim()) return;
-      setBusy("__create__");
-      try {
-        await createGitBranch(path, newName.trim());
-        setNewName("");
-        setCreating(false);
-        await fetchAll();
-        void refreshGitStatus();
-        if (onClose) onClose();
-      } catch (e) {
-        setError(String(e));
-      } finally {
-        setBusy(null);
-      }
+      await createAndSwitch();
       return;
     }
     await performCheckout(name);
+  };
+
+  const openGitGraph = () => {
+    const s = useUiStore.getState();
+    s.addTab("branch");
+    s.setToolPanelCollapsed(false);
+    if (onClose) onClose();
   };
 
   if (!path) {
@@ -192,29 +211,33 @@ export function BranchDropdown({ onClose }: { onClose?: () => void }) {
   return (
     <>
     <div className="branch-dropdown" onClick={(e) => e.stopPropagation()}>
-      <div className="branch-dropdown-header">
-        <span className="branch-dropdown-title">Branches</span>
-        <button
-          className="branch-dropdown-create-btn"
-          onClick={() => setCreating((c) => !c)}
-          title="Create new branch"
-        >
-          + New
-        </button>
+      {/* Search-first header */}
+      <div className="branch-dd-search-wrap">
+        <svg className="branch-dd-search-icon" width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="11" cy="11" r="7" />
+          <path d="m21 21-4.35-4.35" />
+        </svg>
+        <input
+          ref={inputRef}
+          className="branch-dd-search"
+          placeholder="Search branches"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
       </div>
 
       {creating && (
-        <div className="branch-dropdown-create-row">
+        <div className="branch-dd-create-row">
           <input
-            className="branch-dropdown-input"
+            ref={createInputRef}
+            className="branch-dd-create-input"
             placeholder="branch-name"
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleCreate()}
-            autoFocus
           />
           <button
-            className="branch-dropdown-create-confirm"
+            className="branch-dd-create-confirm"
             onClick={handleCreate}
             disabled={!newName.trim() || busy === "__create__"}
           >
@@ -223,67 +246,48 @@ export function BranchDropdown({ onClose }: { onClose?: () => void }) {
         </div>
       )}
 
-      <input
-        ref={inputRef}
-        className="branch-dropdown-search"
-        placeholder="Search branches…"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-      />
-
       {error && <div className="branch-dropdown-error">{error}</div>}
 
-      <div className="branch-dropdown-list">
+      <div className="branch-dd-label">Branches</div>
+
+      <div className="branch-dd-list">
         {loading ? (
           <div className="branch-dropdown-empty">Loading branches…</div>
         ) : filtered.length === 0 ? (
           <div className="branch-dropdown-empty">No branches found.</div>
         ) : (
-          <>
-            {localBranches.length > 0 && (
-              <>
-                <div className="branch-dropdown-section">Local</div>
-                {localBranches.map((b) => (
-                  <BranchRow
-                    key={b.name}
-                    branch={b}
-                    busy={busy === b.name}
-                    onCheckout={() => handleCheckout(b.name)}
-                  />
-                ))}
-              </>
-            )}
-            {remoteBranches.length > 0 && (
-              <>
-                <div className="branch-dropdown-section">Remote</div>
-                {remoteBranches.map((b) => (
-                  <BranchRow
-                    key={b.name}
-                    branch={b}
-                    busy={busy === b.name}
-                    onCheckout={() => handleCheckout(b.name)}
-                  />
-                ))}
-              </>
-            )}
-          </>
+          filtered.map((b) => (
+            <BranchRow
+              key={b.name}
+              branch={b}
+              dirtyCount={b.isCurrent ? dirtyCount : 0}
+              busy={busy === b.name}
+              onCheckout={() => handleCheckout(b.name)}
+            />
+          ))
         )}
       </div>
 
-      {log.length > 0 && (
-        <>
-          <div className="branch-dropdown-section">Recent commits</div>
-          <div className="branch-dropdown-log">
-            {log.slice(0, 15).map((e, i) => (
-              <div key={i} className="branch-dropdown-log-row">
-                <code className="branch-dropdown-log-graph">{e.graph}</code>
-                <code className="branch-dropdown-log-sha">{e.sha}</code>
-                <span className="branch-dropdown-log-msg">{e.message}</span>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
+      {/* Footer actions */}
+      <div className="branch-dd-actions">
+        <button
+          className="branch-dd-action"
+          onClick={() => setCreating((c) => !c)}
+          disabled={busy === "__create__"}
+        >
+          <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+          Create and switch to new branch…
+        </button>
+        <button className="branch-dd-action" onClick={openGitGraph}>
+          <svg width={13} height={13} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="4" cy="3" r="1.5" /><circle cx="4" cy="13" r="1.5" /><circle cx="12" cy="3" r="1.5" />
+            <path d="M4 4.5v7" /><path d="M12 4.5c0 4-4 2-4 4.5" />
+          </svg>
+          Git Graph
+        </button>
+      </div>
     </div>
 
     {/* Dirty checkout modal — centered over the chat view */}
@@ -371,25 +375,40 @@ function PeekButton({ filePath, projectPath, onPeek }: { filePath: string; proje
 
 function BranchRow({
   branch,
+  dirtyCount,
   busy,
   onCheckout,
 }: {
   branch: BranchInfo;
+  dirtyCount: number;
   busy: boolean;
   onCheckout: () => void;
 }) {
   return (
     <button
-      className={`branch-dropdown-row ${branch.isCurrent ? "current" : ""}`}
+      className={`branch-dd-row ${branch.isCurrent ? "current" : ""}`}
       onClick={onCheckout}
       disabled={branch.isCurrent || busy}
       title={branch.lastCommitMessage}
     >
-      <span className="branch-dropdown-row-icon">
-        {branch.isCurrent ? "●" : ""}
+      {/* Git-branch glyph — dimmed for the current row (the check marks it). */}
+      <svg className="branch-dd-row-icon" width={14} height={14} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="4" cy="3" r="1.5" /><circle cx="4" cy="13" r="1.5" /><circle cx="12" cy="3" r="1.5" />
+        <path d="M4 4.5v7" /><path d="M12 4.5c0 4-4 2-4 4.5" />
+      </svg>
+      <span className="branch-dd-row-body">
+        <span className="branch-dd-row-name">{branch.name}</span>
+        {branch.isCurrent && dirtyCount > 0 && (
+          <span className="branch-dd-row-sub">
+            Uncommitted changes: {dirtyCount} {dirtyCount === 1 ? "file" : "files"}
+          </span>
+        )}
       </span>
-      <span className="branch-dropdown-row-name">{branch.name}</span>
-      <span className="branch-dropdown-row-msg">{branch.lastCommitMessage}</span>
+      {branch.isCurrent && (
+        <svg className="branch-dd-row-check" width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round">
+          <path d="M20 6 9 17l-5-5" />
+        </svg>
+      )}
     </button>
   );
 }

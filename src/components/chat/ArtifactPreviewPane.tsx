@@ -684,7 +684,16 @@ export function ArtifactPreviewPane({
         onPointerCancel={onPanEnd}
       >
         {error ? (
-          <div className="artifact-preview-error">Could not open preview: {error}</div>
+          <div className="artifact-preview-error">
+            {/cannot stat|os error\s*2|no such file/i.test(error) ? (
+              <>
+                This file is no longer on disk — it may have been moved or
+                deleted since the turn that created it.
+              </>
+            ) : (
+              <>Could not open preview: {error}</>
+            )}
+          </div>
         ) : !preview ? (
           <div className="artifact-preview-loading">Loading preview…</div>
         ) : pannable ? (

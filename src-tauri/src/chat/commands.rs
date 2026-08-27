@@ -2700,7 +2700,7 @@ fn classify_text_ext(ext: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod preview_tests {
-    use super::{classify_text_ext, get_file_mtime};
+    use super::{classify_text_ext, find_by_basename_walk, get_file_mtime};
 
     #[test]
     fn mermaid_sources_classify_as_mermaid_kind() {
@@ -2745,6 +2745,30 @@ mod preview_tests {
             "missing file → None, not an error (preview keeps last render)"
         );
     }
+
+    #[test]
+    fn basename_walk_finds_shallowest_match_and_skips_vendor_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        // Shallow match wins over a deeper duplicate.
+        std::fs::create_dir_all(root.join("a/b")).expect("dirs");
+        std::fs::write(root.join("a/b/traffic.mmd"), "deep").expect("write deep");
+        std::fs::write(root.join("traffic.mmd"), "shallow").expect("write shallow");
+        let hit = find_by_basename_walk(root, "traffic.mmd").expect("found");
+        assert_eq!(std::fs::read_to_string(&hit).unwrap(), "shallow");
+
+        // Case-insensitive.
+        assert!(find_by_basename_walk(root, "TRAFFIC.MMD").is_some());
+
+        // Missing basename → None.
+        assert_eq!(find_by_basename_walk(root, "absent.txt"), None);
+
+        // Vendor dirs are skipped — the only copy lives under node_modules.
+        let dir2 = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir2.path().join("node_modules/pkg")).expect("dirs");
+        std::fs::write(dir2.path().join("node_modules/pkg/only.txt"), "x").expect("write");
+        assert_eq!(find_by_basename_walk(dir2.path(), "only.txt"), None);
+    }
 }
 
 /// True when a LibreOffice `soffice` binary is reachable, which is what the
@@ -2771,6 +2795,61 @@ pub fn get_file_mtime(path: String) -> CmdResult<Option<u64>> {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs());
     Ok(secs)
+}
+
+/// Find a file by basename under `dir` (breadth-first, bounded depth and
+/// scan budget; vendor/heavy/hidden dirs are skipped). Returns the shallowest
+/// match, or `None`.
+///
+/// Recovers preview targets for chat file-change rows whose recorded path no
+/// longer exists — models sometimes state a destination they didn't actually
+/// write to, and files can move between the turn and the click.
+#[tauri::command]
+pub async fn find_file_by_basename(dir: String, basename: String) -> CmdResult<Option<String>> {
+    if basename.trim().is_empty() {
+        return Ok(None);
+    }
+    tokio::task::spawn_blocking(move || {
+        let root = std::path::PathBuf::from(&dir);
+        Ok(find_by_basename_walk(&root, &basename))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Sync core of `find_file_by_basename` — separated so it's unit-testable
+/// without a tokio runtime. `basename` is matched case-insensitively.
+fn find_by_basename_walk(root: &std::path::Path, basename: &str) -> Option<String> {
+    let needle = basename.to_lowercase();
+    const SKIP_DIRS: [&str; 8] = [
+        "node_modules", ".git", "target", "dist", "build", ".next", ".venv", "__pycache__",
+    ];
+    const MAX_DEPTH: u8 = 6;
+    const MAX_SCANNED: usize = 20_000;
+    let mut queue = std::collections::VecDeque::from([(root.to_path_buf(), 0u8)]);
+    let mut scanned = 0usize;
+    while let Some((cur, depth)) = queue.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&cur) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            scanned += 1;
+            if scanned > MAX_SCANNED {
+                return None;
+            }
+            let path = entry.path();
+            let name = entry.file_name();
+            let lower = name.to_string_lossy().to_lowercase();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if !is_dir && lower == needle {
+                return Some(path.to_string_lossy().into_owned());
+            }
+            if is_dir && depth < MAX_DEPTH && !SKIP_DIRS.contains(&lower.as_str()) {
+                queue.push_back((path, depth + 1));
+            }
+        }
+    }
+    None
 }
 
 // ---- Artifact download ----

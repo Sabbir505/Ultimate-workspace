@@ -18,11 +18,14 @@
 //    line stats.
 //  - `artifacts`: files the backend registered as chat artifacts. When "Open"
 //    is clicked on one, it routes to the preview pane (live HTML/React for
-//    .html/.tsx/...); everything else opens in the Peek file viewer.
+//    .html/.tsx/...); everything else opens the file preview in the
+//    right-side tool panel (recovering the path when it's stale).
 import { useState } from "react";
 import { Modal } from "../common/Modal";
 import {
+  findFileByBasename,
   getGitStatus,
+  getFileMtime,
   listChatCheckpoints,
   restoreChatCheckpoint,
   toastError,
@@ -226,9 +229,29 @@ export function TurnChangesRow({
       onPreviewArtifact?.(artifact);
       return;
     }
-    // Same destination as artifacts: the file preview opens as its own tab in
-    // the right-side tool panel. The peek overlay is not the "Open" target.
-    openFileTab(path);
+    void openRecovered(path);
+  };
+
+  // Tool-panel previews read from disk, and recorded change paths go stale
+  // (the model states a destination it didn't actually write to; files move).
+  // Before opening: anchor a relative path to the project root, and when the
+  // recorded path doesn't exist, look the basename up under the project so
+  // the click still lands on the real file.
+  const openRecovered = async (path: string) => {
+    const isAbsolute = /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("/");
+    const root = cwd ? cwd.replace(/[\\/]+$/, "") : "";
+    const sep = root.includes("\\") ? "\\" : "/";
+    const target = !isAbsolute && root ? `${root}${sep}${path}` : path;
+    let resolved = target;
+    try {
+      if (root && (await getFileMtime(target)) == null) {
+        const found = await findFileByBasename(root, splitPath(path).basename);
+        if (found) resolved = found;
+      }
+    } catch {
+      /* stat/search failing must not block opening the tab */
+    }
+    openFileTab(resolved);
   };
 
   const restore = async () => {

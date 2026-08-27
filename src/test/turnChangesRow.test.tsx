@@ -8,7 +8,8 @@
 //   3. Expand: per-file rows with Review / Open; checkpoint-only files (no
 //      diff block, e.g. shell-made edits) show A/M/D pills and no Review.
 //   4. Open: artifact files route to onPreviewArtifact (preview pane);
-//      everything else opens the file in the Peek viewer.
+//      everything else opens the file preview as a tool-panel tab, resolving
+//      stale paths (relative → project root, missing → basename search).
 //   5. Undo → confirm modal (checkbox default ON) → IPC restore with the
 //      checkpoint id + rollback flag; success refetches the conversation and
 //      toasts the rolled-back message count; errors toast instead of throwing.
@@ -21,10 +22,13 @@ vi.mock("../lib/ipc", () => ({
   toastSuccess: vi.fn(),
   getGitStatus: vi.fn(),
   listChatCheckpoints: vi.fn(),
+  getFileMtime: vi.fn(),
+  findFileByBasename: vi.fn(),
 }));
 
 const { restoreChatCheckpoint, toastSuccess, toastError, getGitStatus, listChatCheckpoints } =
   await import("../lib/ipc");
+const { getFileMtime, findFileByBasename } = await import("../lib/ipc");
 const restoreMock = vi.mocked(restoreChatCheckpoint);
 const toastSuccessMock = vi.mocked(toastSuccess);
 const toastErrorMock = vi.mocked(toastError);
@@ -192,7 +196,7 @@ describe("TurnChangesRow expanded file list", () => {
     expect(onPreviewArtifact).toHaveBeenCalledWith(artifact);
   });
 
-  it("Open sends non-artifact files to the tool-panel preview tab (not the peek overlay)", () => {
+  it("Open sends non-artifact files to the tool-panel preview tab (not the peek overlay)", async () => {
     useProjectsStore.setState({
       selectedProjectId: "p1",
       projects: [{ id: "p1", path: "D:/proj" } as never],
@@ -204,12 +208,65 @@ describe("TurnChangesRow expanded file list", () => {
 
     // Same destination as artifacts: a named tab in the right-side tool panel
     // showing the file preview. The peek overlay is not the "Open" target.
-    const ui = useUiStore.getState();
-    const tab = ui.openTabs.find((t) => t.artifactPath?.endsWith("docs/new.md"));
-    expect(tab).toBeDefined();
-    expect(ui.activeTabId).toBe(tab!.instanceId);
-    expect(ui.toolPanelCollapsed).toBe(false);
-    expect(ui.peek.open).toBe(false);
+    await waitFor(() => {
+      const ui = useUiStore.getState();
+      const tab = ui.openTabs.find((t) => t.artifactPath?.endsWith("docs/new.md"));
+      expect(tab).toBeDefined();
+      expect(ui.activeTabId).toBe(tab!.instanceId);
+      expect(ui.toolPanelCollapsed).toBe(false);
+      expect(ui.peek.open).toBe(false);
+    });
+  });
+
+  it("Open anchors a relative change path to the project root", async () => {
+    useProjectsStore.setState({
+      selectedProjectId: "p1",
+      projects: [{ id: "p1", path: "D:/proj" } as never],
+    });
+    vi.mocked(getFileMtime).mockResolvedValue(42); // file exists at the joined path
+    const { container } = render(
+      <TurnChangesRow
+        files={[{ path: "docs/new.md", edit: { mode: "write", content: "x" } }]}
+        checkpoints={[]}
+      />,
+    );
+    fireEvent.click(container.querySelector(".chat-turn-changes-toggle")!);
+    fireEvent.click(container.querySelector(".chat-files-open")!);
+
+    await waitFor(() => {
+      const tab = useUiStore
+        .getState()
+        .openTabs.find((t) => t.artifactPath === "D:/proj/docs/new.md");
+      expect(tab).toBeDefined();
+    });
+    // Existed on disk at the anchored path — no basename search needed.
+    expect(findFileByBasename).not.toHaveBeenCalled();
+  });
+
+  it("Open recovers a stale recorded path via the project basename search", async () => {
+    useProjectsStore.setState({
+      selectedProjectId: "p1",
+      projects: [{ id: "p1", path: "D:/proj" } as never],
+    });
+    // The recorded path is gone from disk; the real file lives elsewhere in
+    // the project (the model stated a destination it didn't write to).
+    vi.mocked(getFileMtime).mockResolvedValue(null);
+    vi.mocked(findFileByBasename).mockResolvedValue("D:/proj/a3/deep/traffic.mmd");
+    const { container } = render(
+      <TurnChangesRow
+        files={[{ path: "D:/elsewhere/traffic.mmd", edit: { mode: "write", content: "x" } }]}
+        checkpoints={[]}
+      />,
+    );
+    fireEvent.click(container.querySelector(".chat-turn-changes-toggle")!);
+    fireEvent.click(container.querySelector(".chat-files-open")!);
+
+    await waitFor(() => {
+      const tab = useUiStore
+        .getState()
+        .openTabs.find((t) => t.artifactPath === "D:/proj/a3/deep/traffic.mmd");
+      expect(tab).toBeDefined();
+    });
   });
 });
 

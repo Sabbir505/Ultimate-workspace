@@ -406,6 +406,7 @@ pub fn run() {
             commands::chat_cmds::read_artifact_preview,
             commands::chat_cmds::is_libreoffice_available,
             commands::chat_cmds::get_file_mtime,
+            commands::chat_cmds::find_file_by_basename,
             commands::chat_cmds::download_artifact,
             commands::chat_cmds::download_artifacts_zip,
             commands::chat_cmds::list_artifacts,

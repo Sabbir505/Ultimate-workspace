@@ -1757,6 +1757,12 @@ export const isLibreofficeAvailable = () =>
 export const getFileMtime = (path: string) =>
   safeInvoke<number | null>("get_file_mtime", { path });
 
+/** Search `dir` (bounded breadth-first) for a file with this basename.
+ *  Returns the shallowest match or null — recovers a preview target when a
+ *  recorded change path no longer exists on disk. */
+export const findFileByBasename = (dir: string, basename: string) =>
+  safeInvoke<string | null>("find_file_by_basename", { dir, basename });
+
 /** Open a generated artifact file with the OS default application. */
 export async function openArtifact(path: string): Promise<void> {
   try {

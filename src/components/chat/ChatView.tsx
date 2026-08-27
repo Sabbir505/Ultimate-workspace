@@ -750,9 +750,19 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   // repositions every scrollable ANCESTOR and can be hijacked mid-flight by
   // the virtualizer's own scroll corrections — both able to leave the list
   // stranded away from (or above) the live edge during a send/stream burst.
+  //
+  // The write is deferred one animation frame: the virtualizer materializes
+  // the newly-mounted tail rows a LAYOUT PASS after `messages` changes, so
+  // a synchronous write here reads the STALE scrollHeight and strands the
+  // live edge behind the floating composer — exactly the "last turn is
+  // stuck at the bottom of the screen under the composer" symptom. The
+  // dock height is a dep too, so a dock that grows (queue chip, approval
+  // card, extra input line) re-pins the view instead of eating the gap.
   useEffect(() => {
     const el = messagesContainerRef.current;
-    if (el && stickToBottomRef.current) {
+    if (!el || !stickToBottomRef.current) return;
+    const raf = requestAnimationFrame(() => {
+      if (!stickToBottomRef.current) return;
       const target = el.scrollHeight - el.clientHeight;
       // Skip the write when already at the live edge: redundant scrollTop
       // writes fire scroll events that keep the virtualizer's isScrolling
@@ -761,8 +771,9 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
       if (Math.abs(el.scrollTop - target) > 1) {
         el.scrollTop = target;
       }
-    }
-  }, [messages, streaming]);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [messages, streaming, composerDockHeight]);
 
   // Switching sessions resets to the bottom of the new conversation.
   useEffect(() => {
@@ -1220,11 +1231,15 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
           ref={messagesContainerRef}
           onScroll={handleScroll}
           // Reserve the floating composer dock's real height (+ breathing
-          // room) so the last turn never sits behind it. Falls back to the
-          // CSS constant (220px) until the first measurement lands.
+          // room) so the last turn never sits behind it. Floored at the old
+          // 220px constant so a compact dock never reserves LESS space than
+          // the original design; falls back to that constant until the
+          // first measurement lands.
           style={{
             paddingBottom:
-              composerDockHeight > 0 ? composerDockHeight + 28 : undefined,
+              composerDockHeight > 0
+                ? Math.max(composerDockHeight + 32, 220)
+                : undefined,
           }}
         >
           <div

@@ -4,6 +4,8 @@
 //! All SSE streaming, API keys stored in the OS keychain, HTTP in Rust backend.
 
 pub mod artifacts;
+pub mod jsdocgen;
+pub mod pdfprint;
 pub mod codeexec;
 pub mod compaction;
 pub mod commands;

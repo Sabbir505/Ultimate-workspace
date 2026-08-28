@@ -5,65 +5,81 @@ description: "Use this skill whenever generating a PDF in Conduit's Chat tab san
 
 # PDF Generation
 
-Two real paths — pick based on what's actually being asked for, don't default to one blindly.
+Default path: **HTML → PDF** (`language: "html"`). Your HTML is rendered by a
+real browser engine (the app's hidden WebView2 print pipeline with Paged.js)
+and printed to PDF — so full CSS, flex/grid, SVG, inline images and every
+Unicode language (CJK, Arabic, emoji) "just work". No font registration, no
+manual wrapping, no Latin-1 limits.
 
-## Path 0 — `conduit_docgen` helper (preferred for styled PDFs)
+## Path A — HTML → PDF (default; `language: "html"`)
 
-A styling toolkit named `conduit_docgen` is pre-installed in every `generate_document("pdf", ...)` run (it ships reportlab under the hood). For a styled report/one-pager/brief, prefer it over hand-rolling reportlab — it handles fonts, spacing, headings, tables, and callouts with consistent typography:
+Write a complete, self-contained HTML document in `code`:
+
+```html
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 20mm 17mm;
+          @bottom-center { content: counter(page); font-size: 9pt; color: #666; } }
+  body  { font-family: Georgia, "Times New Roman", serif; color: #1a1a1a; line-height: 1.6; }
+  h1, h2 { font-family: "Segoe UI", system-ui, sans-serif; }
+  h1 { font-size: 26pt; margin: 0 0 0.3em; }
+  h2 { font-size: 15pt; margin-top: 1.6em; }
+  .cover { page: cover; break-after: page; padding-top: 80mm; text-align: center; }
+  section { break-before: page; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
+</style>
+</head>
+<body>
+  <div class="cover"><h1>Research Brief</h1><p>Acme Labs · 2026</p></div>
+  <section><h2>Summary</h2><p>…</p></section>
+</body>
+</html>
+```
+
+Rules:
+
+- **Inline everything** — all CSS in `<style>` tags; images as data URIs or
+  absolute local `file:///` paths. No external `<link>`, no `<script>`.
+- **Page structure via `@page`** — Paged.js is preloaded: margin boxes
+  (`@bottom-center { content: counter(page) }`), running headers
+  (`string-set`), `counter(pages)`, `break-before: page`, named pages all
+  work. The paper is A4 portrait; size the layout for it.
+- **Full-bleed cover**: `@page cover { margin: 0 }` + a named-page cover div
+  with the accent colour of the document.
+- **Editorial look**: serif display face + clean sans body, generous
+  whitespace, strong type hierarchy, ONE restrained accent colour, clean
+  white pages. No decorative bars/stripes/underlines.
+- The tool result arrives after the PDF is rendered — if it reports a render
+  error, fix the HTML and re-call.
+
+## Path B — Python + `conduit_docgen` (fallback; `language: "python"`)
+
+When the HTML engine is unavailable (headless runs) use the bundled Python
+toolkit (reportlab under the hood):
 
 ```python
 import conduit_docgen as cd
-pdf = cd.Pdf(title="Report", subtitle="Q2", theme="plum", author="Acme")
-pdf.heading("Overview")
-pdf.paragraph("Body text…")
-pdf.bullets(["a", "b"])
-pdf.table(["Key", "Value"], [["x", "1"]])
-pdf.callout("Bottom line.")
+pdf = cd.Pdf(title="Research Brief", subtitle="2026", theme="plum", author="Acme Labs")
+pdf.heading("Summary"); pdf.paragraph("Body…"); pdf.bullets(["a", "b"])
+pdf.table(["Key", "Value"], [["x", "1"]]); pdf.callout("Bottom line.")
 pdf.save()  # writes to os.environ["CONDUIT_OUTPUT"]
 ```
 
-This is the preferred path for styled PDFs — it avoids the `soffice` conversion step (Path A) and the low-level reportlab gotchas (Path B). Drop down to Path B only when you need pixel-exact layout the helper can't express (form fields, label sheets, fixed-position flyers).
+Drop to raw reportlab only for pixel-exact print layouts (forms, label
+sheets): remember y grows upward, units are points, `Platypus` for wrapping
+text, register TTF fonts explicitly.
 
-## Path A — Generate via docx/pptx, then convert (preferred for most requests)
+## Design principles (both paths)
 
-If the content is a normal document or slide deck and the user just wants the final format to be PDF, it is almost always easier and higher-quality to build it with `python-docx` or `python-pptx` (see those skills) and convert at the end:
+Real size/weight contrast for headings; generous margins (≥ 0.5"); no
+decorative accent bars; consistent spacing; tables for genuinely tabular
+data; a wall of unbroken text is a readability failure even when correct.
 
-```bash
-soffice --headless --convert-to pdf output.docx
-# or
-soffice --headless --convert-to pdf output.pptx
-```
+## Verify
 
-This path gets you all the layout/typography quality of Word or PowerPoint's own rendering engine for free, rather than manually positioning every element yourself. Default to this path unless the request specifically needs PDF-native features (form fields, precise print-layout control, page-level programmatic control) that docx/pptx generation doesn't give you.
-
-## Path B — Generate directly with reportlab (when precise layout control is needed)
-
-Use `reportlab` when the user needs exact print-layout control (e.g. a one-page flyer with fixed element positions, a form, a label sheet) that a word-processor-style flow document can't guarantee.
-
-### Core gotchas
-
-- **Coordinate origin is bottom-left**, not top-left — this trips up anyone used to screen/web coordinates. `y` increases upward. Plan positions accordingly or work in a helper coordinate system and flip before drawing.
-- **Units default to points** (72pt = 1 inch) — use `reportlab.lib.units.inch`/`cm` explicitly rather than hand-converting, to avoid off-by-a-fraction errors that are hard to spot visually.
-- **Text does not auto-wrap** with the low-level `canvas.drawString()` API — for any paragraph of real length, use `Platypus` (`Paragraph`, `Frame`, `SimpleDocTemplate`) which handles wrapping and flow across pages, rather than manually computing line breaks.
-- **Page size defaults to US Letter** — set `pagesize=A4` explicitly from `reportlab.lib.pagesizes` if needed.
-- **Fonts**: built-in fonts are limited (Helvetica, Times, Courier + bold/italic variants). For anything else (matching Conduit's Space Grotesk brand type), register a TTF font explicitly with `pdfmetrics.registerFont()` before use — it will silently fall back to Helvetica if you reference an unregistered font name, which is easy to miss visually at a glance.
-- **Images**: `canvas.drawImage(path, x, y, width=, height=, preserveAspectRatio=True)` — always pass explicit dimensions and set `preserveAspectRatio=True` unless deliberately stretching.
-
-## Design principles
-
-Same rules as docx/pptx generation apply: real size/weight contrast for headings, generous margins (≥0.5"), no decorative accent bars/stripes, consistent spacing units, and — for anything data-heavy — prefer a clean table over a wall of text.
-
-## Verify the output — required
-
-Whichever path was used, render pages to images and inspect them before calling the task done:
-
-```bash
-pdftoppm -jpeg -r 100 output.pdf page
-ls page-*.jpg   # inspect these
-```
-
-Check for: text running off the page edge, overlapping elements, inconsistent margins between pages, images at the wrong aspect ratio.
-
-## Dependencies
-
-`reportlab` (pip, for Path B) · LibreOffice (`soffice`, for Path A conversion) · `pdftoppm` (Poppler, for rendering verification images)
+PDFs preview in-app — open the artifact and check pagination, overflow, and
+font rendering before declaring the task done.

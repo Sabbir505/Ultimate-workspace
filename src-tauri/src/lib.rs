@@ -121,6 +121,14 @@ pub fn run() {
             // Same registration for the bundled LibreOffice that backs the
             // pptx→pdf preview path (resource_dir/libreoffice/program/soffice).
             chat::office::set_resource_dir(resource_dir);
+            // Pre-create the hidden HTML→PDF print window on the main thread
+            // (setup runs there), so document generation never has to build a
+            // window from an async worker. Failure is non-fatal — the PDF
+            // tool falls back to the Python engine with a hint.
+            #[cfg(windows)]
+            if let Err(e) = chat::pdfprint::ensure_print_window(app.handle()) {
+                eprintln!("[conduit] hidden PDF print window unavailable: {e}");
+            }
             app.manage(DbState(Arc::clone(&shared_db)));
             app.manage(PtyState(PtyManager::new(app.handle().clone(), Arc::clone(&shared_db))));
             app.manage(BrowserState(Arc::new(browser::BrowserManager::new(
@@ -405,6 +413,8 @@ pub fn run() {
             commands::chat_cmds::list_chat_models,
             commands::chat_cmds::read_artifact_preview,
             commands::chat_cmds::is_libreoffice_available,
+            commands::chat_cmds::office_accurate_pdf,
+            commands::chat_cmds::docgen_complete,
             commands::chat_cmds::get_file_mtime,
             commands::chat_cmds::find_file_by_basename,
             commands::chat_cmds::download_artifact,

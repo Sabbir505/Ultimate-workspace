@@ -271,12 +271,21 @@ fn generate_document_parameters() -> Value {
                 "type": "string",
                 "description": "Base file name (extension optional).",
             },
+            "language": {
+                "type": "string",
+                "enum": ["javascript", "html", "python"],
+                "description": "Engine for `code`. javascript (default for docx/pptx): \
+                    program against the preloaded `docx` / `PptxGenJS` globals, delivers via \
+                    `await conduit.save(...)`. html (default for pdf): a complete styled HTML \
+                    document rendered to PDF by a real browser engine (CSS/SVG/Unicode). \
+                    python: python-docx / python-pptx / openpyxl / reportlab on the bundled \
+                    interpreter, saving to the CONDUIT_OUTPUT path.",
+            },
             "code": {
                 "type": "string",
-                "description": "Complete Python source that builds the document \
-                    and saves it to the CONDUIT_OUTPUT path. Prefer \
-                    `import conduit_docgen as cd` (styled toolkit); style guide \
-                    arrives with the tool result.",
+                "description": "Complete program/source for the chosen `language` that builds \
+                    the document. The style guide and engine cheatsheet arrive with the tool \
+                    result.",
             }
         },
         "required": ["format", "filename", "code"],

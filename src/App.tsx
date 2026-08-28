@@ -27,6 +27,9 @@ import { Sidebar } from "./components/sidebar/Sidebar";
 import { AppLogo } from "./components/common/AppLogo";
 import { ModelDownloadIndicator } from "./components/settings/ModelDownloadIndicator";
 import { ChatView } from "./components/chat/ChatView";
+// In-app JS document engine (generate_document language:"javascript"): must
+// be mounted wherever a chat can run, including the pop-out chat window.
+import { DocCodeRunner } from "./components/chat/DocCodeRunner";
 import { FolderNotch, GitHubNotch } from "./components/chat/ChatComposer";
 import { useChatStore } from "./state/chat";
 import { GitToolsSidebar } from "./components/chat/GitToolsSidebar";
@@ -177,6 +180,7 @@ export default function App() {
   if (popout?.kind === "chat") {
     return (
       <div className="popout-chat-root">
+        <DocCodeRunner />
         <ChatView popoutSessionId={popout.session ?? undefined} />
       </div>
     );
@@ -184,6 +188,7 @@ export default function App() {
 
   return (
     <div className="app">
+      <DocCodeRunner />
       <ToastHost />
       {/* Kept mounted so collapse/expand animates as a width slide instead
           of an unmount flash; the collapsed class hides it after the

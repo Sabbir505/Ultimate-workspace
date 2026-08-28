@@ -546,12 +546,18 @@ async fn run_blocking_tool(
 /// Dispatch a tool call to its implementation. `args` is the JSON object of
 /// arguments the model produced. Returns the tool result as a string that is
 /// fed back to the model as a `tool` / `tool_result` message.
+///
+/// `app` is `Some` in every live turn (chat, relay MCP, subagent); unit tests
+/// pass `None`, and the tools that need an app window (the HTML→PDF print
+/// engine, the JavaScript document runner) report a Python-fallback hint when
+/// it's absent.
 pub async fn execute_tool(
     client: &reqwest::Client,
     artifacts_dir: &Path,
     caps: &ToolCaps,
     name: &str,
     args: &Value,
+    app: Option<&tauri::AppHandle>,
 ) -> ToolOutcome {
     match name {
         WEB_SEARCH => {
@@ -565,7 +571,7 @@ pub async fn execute_tool(
             }
         }
         GENERATE_FILE => generate_file(artifacts_dir, args),
-        GENERATE_DOCUMENT => generate_document(artifacts_dir, args).await,
+        GENERATE_DOCUMENT => generate_document(app, artifacts_dir, args).await,
         GENERATE_DIAGRAM => generate_diagram(artifacts_dir, args),
         FETCH_URL => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
@@ -775,6 +781,7 @@ mod tests {
             &ToolCaps::default(),
             GENERATE_DIAGRAM,
             &json!({ "filename": "diag_test", "html": html }),
+            None,
         ));
         assert!(out.artifact.is_some(), "should surface an artifact");
         let art = out.artifact.unwrap();
@@ -796,6 +803,7 @@ mod tests {
             &ToolCaps::default(),
             GENERATE_DIAGRAM,
             &json!({ "filename": "x", "html": "" }),
+            None,
         ));
         assert!(out.artifact.is_none());
         assert!(out.text.contains("requires non-empty"));
@@ -911,6 +919,7 @@ mod tests {
             &ToolCaps::default(),
             OPEN_FILE,
             &json!({ "path": "traffic.mmd" }),
+            None,
         ));
         assert!(out.text.contains("ABSOLUTE"));
         // Absolute but non-existent → not-found error, no launch attempt.
@@ -921,6 +930,7 @@ mod tests {
             &ToolCaps::default(),
             OPEN_FILE,
             &json!({ "path": gone.to_string_lossy() }),
+            None,
         ));
         assert!(out.text.contains("no file exists"));
     }
@@ -939,6 +949,7 @@ mod tests {
             &ToolCaps::default(),
             OPEN_FILE,
             &json!({ "path": file.to_string_lossy() }),
+            None,
         ));
         // A .mmd is previewed natively — it must NOT hit the OS handler (the
         // OS just pops an "open with" picker over apps that can't render it).
@@ -958,6 +969,7 @@ mod tests {
             &ToolCaps::default(),
             OPEN_URL,
             &json!({ "url": "ftp://example.com" }),
+            None,
         ));
         assert!(out.browse_url.is_none());
         assert!(out.text.contains("http(s)"));
@@ -983,6 +995,7 @@ mod tests {
             &ToolCaps::default(),
             RUN_CODE,
             &json!({ "language": "python", "code": "print(1)" }),
+            None,
         ));
         assert!(out.text.contains("code execution is disabled"));
     }
@@ -998,6 +1011,7 @@ mod tests {
             &ToolCaps::default(),
             WEB_SEARCH,
             &json!({ "query": "rust programming language" }),
+            None,
         ));
         println!("{}", out.text);
         assert!(out.text.contains("Search results"));
@@ -1014,6 +1028,7 @@ mod tests {
             &ToolCaps::default(),
             "does_not_exist",
             &json!({}),
+            None,
         ));
         assert!(out.text.contains("unknown tool"));
     }
@@ -1028,6 +1043,7 @@ mod tests {
             &ToolCaps::default(),
             LIST_SKILLS,
             &json!({}),
+            None,
         ));
         // The built-in docx skill always exists (even when shadowed by an
         // on-disk override the slug is preserved), so the listing must

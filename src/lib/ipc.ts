@@ -1764,6 +1764,21 @@ export const readArtifactPreview = (path: string) =>
 export const isLibreofficeAvailable = () =>
   safeInvoke<boolean>("is_libreoffice_available");
 
+/** "Accurate view" for Office previews: LibreOffice-converted PDF of the
+ *  ORIGINAL file (true pagination, fonts, charts), as a data URI. Null when
+ *  LibreOffice is unavailable or the conversion failed — the caller keeps the
+ *  fast preview. Cached backend-side by (path, size, mtime). */
+export const officeAccuratePdf = (path: string) =>
+  safeInvoke<string | null>("office_accurate_pdf", { path });
+
+/** Resolve one JavaScript document-generation run (see DocCodeRunner): the
+ *  produced file as base64, or an error message. */
+export const docgenComplete = (args: {
+  requestId: string;
+  base64?: string;
+  error?: string;
+}) => safeInvoke<null>("docgen_complete", args);
+
 /** Last-modified time of a file (seconds since epoch), or null when the file
  *  doesn't exist. Artifact preview panes poll this to hot-reload when the
  *  model edits an open artifact file. */

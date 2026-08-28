@@ -9,7 +9,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::chat::{artifacts, pygen};
+use crate::chat::artifacts;
 use super::{ArtifactRef, ToolOutcome};
 
 pub(super) fn generate_file(artifacts_dir: &Path, args: &Value) -> ToolOutcome {
@@ -49,9 +49,9 @@ pub(super) fn generate_file(artifacts_dir: &Path, args: &Value) -> ToolOutcome {
     }
 }
 
-/// Editorial style guide + conduit_docgen cheatsheet for `generate_document`.
-/// Lives HERE (not in the tool schema) so fresh turns don't pay ~3k chars of
-/// guidance until the tool is actually used — progressive disclosure.
+/// Editorial style guide shared by every document engine. Lives HERE (not in
+/// the tool schema) so fresh turns don't pay ~3k chars of guidance until the
+/// tool is actually used — progressive disclosure.
 pub(super) const DOC_STYLE_GUIDE: &str = "\
 DOCUMENT STYLE GUIDE — aim for the editorial, modern look Claude/ChatGPT/Gemini \
 ship: an elegant serif display face paired with a clean sans body, generous \
@@ -60,27 +60,58 @@ full-bleed cover/section slides. Hierarchy comes from type scale, weight and \
 whitespace — NEVER decorative accent bars, stripes, or underlines under titles. \
 Clean white pages for documents; save saturated colour for deck cover/section/\
 closing slides. Cover/title, real typography, headings, tables; decks get \
-multiple well-laid-out slides with a title slide and section dividers.
+multiple well-laid-out slides with a title slide and section dividers. Build \
+genuinely useful content (several sections or 6+ slides). No secrets, no \
+network side effects. If the document you just built falls short of this \
+guide, regenerate it now.";
 
-conduit_docgen cheatsheet:
-  import conduit_docgen as cd
-  doc = cd.Doc(title='Quarterly Report', subtitle='FY2025 Q2', theme='ink', author='Acme')
-  doc.heading('Overview'); doc.paragraph('...'); doc.bullets(['a','b']); doc.numbered(['1','2'])
-  doc.table(['Metric','Value'], [['Revenue','$1.2M']]); doc.callout('Key point'); doc.save()
-  deck = cd.Deck(title='Product Launch', subtitle='2025', theme='midnight', footer='Acme Inc')
-  deck.section('Introduction', number=1); deck.bullets('Why now', ['ready','mature'], eyebrow='Context')
-  deck.two_column('Compare','A',['fast'],'B',['robust']); deck.table_slide('Numbers',['Q','Rev'],[['Q1','1.0']])
-  deck.closing('Thank you','q@acme.com'); deck.save()
-  pdf = cd.Pdf(title='Research Brief', subtitle='...', theme='plum', author='Acme Labs')
-  pdf.heading('Summary'); pdf.paragraph('...'); pdf.bullets(['a','b'])
-  pdf.table(['Model','Latency'], [['A','12ms']]); pdf.callout('Bottom line'); pdf.save()
+/// Engine guide for `language: "javascript"` (docx / pptx). The default for
+/// docx+pptx: no Python dependency, works on every OS, and produces real
+/// editable OOXML (the same engines Anthropic's public document skills use).
+pub(super) const JS_DOCGEN_GUIDE: &str = "\
+JS DOCGEN — for docx and pptx, write JavaScript for `language:\"javascript\"`. \
+The code runs in the app's document sandbox with `docx` (Word) and \
+`PptxGenJS` (PowerPoint) preloaded and a `conduit` helper. Deliver the file \
+with EXACTLY ONE `await conduit.save(blobOrBytesOrDataUrl)`.
+DOCX (docx npm):
+  const { Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, \
+TableCell, AlignmentType } = docx;
+  const doc = new Document({ sections: [{ children: [ \
+new Paragraph({ text: 'Title', heading: HeadingLevel.HEADING_1 }), \
+new Paragraph(new TextRun({ text: 'Body', bold: true })), \
+new Table({ rows: [new TableRow({ children: [new TableCell({ children: [new Paragraph('Cell')] })] })] }) \
+] }] });
+  await conduit.save(await Packer.toBlob(doc));
+  Headings MUST use HeadingLevel (real Word styles); lists: \
+new Paragraph({ text:'x', bullet:{level:0} }) or numbering.
+PPTX (PptxGenJS):
+  const pptx = new PptxGenJS();
+  pptx.defineLayout({ name: 'W', width: 13.33, height: 7.5 }); pptx.layout = 'W';
+  pptx.defineSlideMaster({ title: 'M', background: { color: '0B1220' } });
+  const s = pptx.addSlide({ masterName: 'M' });
+  s.addText('Title', { x: 0.6, y: 0.5, w: 12, h: 1, fontSize: 40, bold: true, color: 'FFFFFF' });
+  s.addChart(pptx.ChartType.bar, [{ name: 'Rev', labels: ['Q1','Q2'], values: [4, 6] }], \
+{ x: 0.6, y: 1.8, w: 6, h: 4 });
+  await conduit.save(await pptx.write({ outputType: 'blob' }));
+  Gotchas: hex colors WITHOUT '#' (use '0B1220' not '#0B1220' — a '#' corrupts \
+the file); always set a 16:9 layout (defineLayout) because the default is 10x5.63in; \
+fonts/sizes on every addText call. If generation fails, retry once with \
+language:\"python\".";
 
-Notes: choose a theme that fits the subject (vary structure instead of repeating \
-one template); cd.Pdf handles pdf via reportlab — prefer it over hand-rolled \
-reportlab; doc.document / deck.prs give raw python-docx/python-pptx access; \
-xlsx uses openpyxl. Build genuinely useful content (several sections or 6+ \
-slides). No secrets, no network side effects. If the document you just built \
-falls short of this guide, regenerate it now.";
+/// Engine guide for `language: "html"` (pdf). Browser-grade fidelity via the
+/// app's hidden WebView2 print engine + Paged.js (@page, page numbers,
+/// running headers, TOC page refs) — full Unicode/CJK/web-font support.
+pub(super) const HTML_PDF_GUIDE: &str = "\
+HTML→PDF — for pdf, write a complete styled HTML document in `code` with \
+`language:\"html\"`. It is rendered by a real browser engine and printed to \
+PDF; CSS, SVG, images (inline data URIs), tables, flex/grid ALL work, and any \
+Unicode language renders correctly. Rules: inline all CSS in <style> tags (no \
+external <link>/<script>); page structure comes from @page — e.g. \
+@page { size: A4; margin: 20mm; @bottom-center { content: counter(page); } } \
+(Paged.js is preloaded, so margin boxes/page counters work); use \
+break-before: page for section starts; full-bleed cover: @page:first with \
+margin 0 and a full-height cover div. Keep it a polished editorial document \
+(serif display + sans body, one accent colour, generous whitespace).";
 
 /// Layout guide for `generate_diagram` — same progressive-disclosure contract
 /// as DOC_STYLE_GUIDE. Routes each visual job to the format that renders it
@@ -120,8 +151,28 @@ server, or call open_url/browser to show a file you just created — telling the
 \"I created X\" is enough; the preview appears on its own. Markdown files preview \
 with full formatting in the pane too, so never claim a .md can't be opened.";
 
-/// Build a rich document by running the model's Python (python-docx etc.).
-pub(super) async fn generate_document(artifacts_dir: &Path, args: &Value) -> ToolOutcome {
+/// The engine table for `generate_document`, by format and `language`.
+/// docx/pptx default to the cross-platform JavaScript engine (docx npm /
+/// PptxGenJS); pdf defaults to the HTML print engine (browser-grade layout,
+/// real Unicode); xlsx stays Python/openpyxl. "python" remains available for
+/// every format as the fallback engine (bundled interpreter).
+fn default_language(format: &str) -> &'static str {
+    match format {
+        "pdf" => "html",
+        "docx" | "pptx" => "javascript",
+        _ => "python",
+    }
+}
+
+/// Build a rich document by running the model's program with the engine the
+/// model chose: JavaScript (docx npm / PptxGenJS, via the in-app runner),
+/// HTML (PDF via the hidden WebView2 print engine), or Python (python-docx /
+/// python-pptx / openpyxl / reportlab on the bundled interpreter).
+pub(super) async fn generate_document(
+    app: Option<&tauri::AppHandle>,
+    artifacts_dir: &Path,
+    args: &Value,
+) -> ToolOutcome {
     let format = args
         .get("format")
         .and_then(|v| v.as_str())
@@ -129,8 +180,15 @@ pub(super) async fn generate_document(artifacts_dir: &Path, args: &Value) -> Too
         .to_lowercase();
     let filename = args.get("filename").and_then(|v| v.as_str()).unwrap_or("");
     let code = args.get("code").and_then(|v| v.as_str()).unwrap_or("");
+    let language = match args.get("language").and_then(|v| v.as_str()) {
+        Some("javascript" | "js") => "javascript",
+        Some("html") => "html",
+        Some("python" | "py") => "python",
+        _ => default_language(&format),
+    };
 
-    if !pygen::is_supported(&format) {
+    let supported = matches!(format.as_str(), "docx" | "pptx" | "xlsx" | "pdf");
+    if !supported {
         return ToolOutcome::text(format!(
             "Error: generate_document supports docx, pptx, xlsx and pdf (got \"{format}\"). \
              Use generate_file for plain text formats."
@@ -140,53 +198,141 @@ pub(super) async fn generate_document(artifacts_dir: &Path, args: &Value) -> Too
         return ToolOutcome::text("Error: generate_document requires a \"filename\".");
     }
 
-    // The most common failure: the model passed natural-language `instructions`
-    // (or `description`) instead of a runnable Python program in `code`. Detect
-    // that and steer it back, instead of silently returning "empty code" —
-    // which is what makes the model give up and emit a Markdown fallback.
+    // Engine-specific validation for the requested route; anything invalid
+    // steers the model back with the matching guide instead of failing
+    // silently (the #1 source of abandoned document turns).
     let instructions = args
         .get("instructions")
         .or_else(|| args.get("description"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    if code.trim().is_empty() && !instructions.trim().is_empty() {
-        return ToolOutcome::text(format!(
-            "{DOC_STYLE_GUIDE}\n\nError: generate_document needs runnable PYTHON SOURCE in the `code` argument, \
-             but it received a natural-language description in `instructions` instead. \
-             Re-call generate_document with `code` set to a complete Python program (import \
-             python-docx / python-pptx / openpyxl / reportlab, or `conduit_docgen`), that \
-             builds the {format} described below and saves it to os.environ[\"CONDUIT_OUTPUT\"]. \
-             Do not pass prose. Requested: {instructions}",
-        ));
-    }
     if code.trim().is_empty() {
-        return ToolOutcome::text(format!(
-            "{DOC_STYLE_GUIDE}\n\nError: generate_document needs runnable PYTHON SOURCE in the `code` argument \
-             (not instructions). Write a complete program that imports python-docx / \
-             python-pptx / openpyxl / reportlab (or `conduit_docgen`), builds the document, \
-             and saves it to os.environ[\"CONDUIT_OUTPUT\"]."
-        ));
+        let (engine_hint, guide) = match language {
+            "html" => (
+                "a complete styled HTML document",
+                HTML_PDF_GUIDE,
+            ),
+            "javascript" => (
+                "a complete JavaScript program (uses the preloaded `docx` / `PptxGenJS` \
+                 globals and `await conduit.save(...)`)",
+                JS_DOCGEN_GUIDE,
+            ),
+            _ => (
+                "a complete Python program that saves the file to os.environ[\"CONDUIT_OUTPUT\"]",
+                DOC_STYLE_GUIDE,
+            ),
+        };
+        let steer = if instructions.trim().is_empty() {
+            format!(
+                "{guide}\n\nError: generate_document needs runnable source in the `code` \
+                 argument for language=\"{language}\" — pass {engine_hint}."
+            )
+        } else {
+            format!(
+                "{guide}\n\nError: generate_document received a natural-language description \
+                 in `instructions` instead of runnable {language} source in `code`. Re-call \
+                 with `code` set to {engine_hint}. Requested: {instructions}"
+            )
+        };
+        return ToolOutcome::text(steer);
     }
 
-    match pygen::generate(artifacts_dir, &format, filename, code).await {
-        Ok(file) => ToolOutcome {
-            text: format!(
-                "{DOC_STYLE_GUIDE}\n\nCreated document \"{}\" ({}). It has been saved and is available to the user.",
+    // Window-backed engines need an AppHandle (absent in unit tests and
+    // headless runs); they degrade to a Python-fallback hint rather than a
+    // dead end.
+    let no_app = || {
+        Err("the selected engine needs the app window, which is unavailable in this \
+             headless run. Re-run with language=\\\"python\\\" to use the bundled Python \
+             engine instead."
+            .to_string())
+    };
+    let result = match language {
+        "html" if format == "pdf" => match app {
+            Some(a) => generate_pdf_from_html(a, artifacts_dir, filename, code).await,
+            None => no_app(),
+        },
+        "javascript" if matches!(format.as_str(), "docx" | "pptx") => match app {
+            Some(a) => crate::chat::jsdocgen::generate(a, artifacts_dir, &format, filename, code).await,
+            None => no_app(),
+        },
+        "python" => crate::chat::pygen::generate(artifacts_dir, &format, filename, code).await,
+        // Engine/format mismatches (e.g. html for pptx) fall back to the
+        // default engine for that format rather than failing the turn.
+        _ => match default_language(&format) {
+            "html" => match app {
+                Some(a) => generate_pdf_from_html(a, artifacts_dir, filename, code).await,
+                None => no_app(),
+            },
+            "javascript" => match app {
+                Some(a) => crate::chat::jsdocgen::generate(a, artifacts_dir, &format, filename, code).await,
+                None => no_app(),
+            },
+            _ => crate::chat::pygen::generate(artifacts_dir, &format, filename, code).await,
+        },
+    };
+
+    let engine_guide = match language {
+        "html" => HTML_PDF_GUIDE,
+        "javascript" => JS_DOCGEN_GUIDE,
+        _ => DOC_STYLE_GUIDE,
+    };
+
+    match result {
+        Ok(file) => {
+            let mut text = format!(
+                "{engine_guide}\n\nCreated document \"{}\" ({}). It has been saved and is available to the user.",
                 file.filename,
                 file.path.display()
-            ),
-            artifact: Some(ArtifactRef {
-                path: file.path.display().to_string(),
-                filename: file.filename,
-            }),
-            browse_url: None,
-            preview: None,
-        },
-        Err(e) => ToolOutcome::text(format!(
-            "generate_document failed: {e}\n\nIf the document library is unavailable, fall back \
-             to generate_file with well-structured content."
-        )),
+            );
+            if !file.log.trim().is_empty() && file.log.trim() != "generated with the in-app JavaScript engine (docx / PptxGenJS)" {
+                text.push_str(&format!("\n\nGenerator output:\n{}", file.log));
+            }
+            ToolOutcome {
+                text,
+                artifact: Some(ArtifactRef {
+                    path: file.path.display().to_string(),
+                    filename: file.filename,
+                }),
+                browse_url: None,
+                preview: None,
+            }
+        }
+        Err(e) => {
+            let fallback = if language == "python" {
+                String::new()
+            } else {
+                "\n\nYou can retry with language:\"python\" (bundled Python engine) if the \
+                 problem persists."
+                    .to_string()
+            };
+            ToolOutcome::text(format!("generate_document failed: {e}{fallback}"))
+        }
     }
+}
+
+/// Render a model-authored HTML document to PDF with the hidden WebView2
+/// print engine (see `pdfprint`), writing to the requested artifact path.
+async fn generate_pdf_from_html(
+    app: &tauri::AppHandle,
+    artifacts_dir: &Path,
+    filename: &str,
+    html: &str,
+) -> Result<crate::chat::pygen::Generated, String> {
+    let path = crate::chat::jsdocgen::planned_path(artifacts_dir, "pdf", filename);
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "document.pdf".to_string());
+    let title = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Document".to_string());
+    crate::chat::pdfprint::render_html_to_pdf(app, html, &path, &title).await?;
+    Ok(crate::chat::pygen::Generated {
+        path,
+        filename: name,
+        log: String::new(),
+    })
 }
 
 /// Sentinel HTML comment prepended to every diagram file. The preview

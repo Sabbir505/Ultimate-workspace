@@ -222,7 +222,7 @@ async fn run_gated_fs_tool(
     }
 
     // Approved — execute the tool now and return its real result.
-    let outcome = tools::execute_tool(client, artifacts_dir, caps, name, args).await;
+    let outcome = tools::execute_tool(client, artifacts_dir, caps, name, args, Some(app)).await;
     if let Some(a) = outcome.artifact {
         let kind = std::path::Path::new(&a.filename)
             .extension()
@@ -1212,7 +1212,7 @@ pub(crate) async fn run_tool(
         }
     }
 
-    let outcome = tools::execute_tool(client, artifacts_dir, caps, name, args).await;
+    let outcome = tools::execute_tool(client, artifacts_dir, caps, name, args, Some(app)).await;
     if let Some(a) = outcome.artifact {
         // Persist to the Artifacts sidebar (30-day retention) before notifying
         // the UI. A DB failure must not block the chat, so errors are ignored.

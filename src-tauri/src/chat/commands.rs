@@ -2483,11 +2483,12 @@ pub(crate) fn base64_encode(data: &[u8]) -> String {
 
 /// Read a generated artifact for in-app preview. Text-like files return their
 /// decoded (and length-capped) text; images and PDFs return a `data:` URI;
-/// Office documents are rendered as: docx → raw bytes for client-side mammoth
-/// rendering (kind = `office`, original_bytes = true); pptx → converted to PDF
-/// via headless LibreOffice when available (kind = `pdf`), else the hand-rolled
-/// HTML converter (kind = `office`); xlsx → HTML (kind = `office`). Anything
-/// else returns metadata only (rendered as a file card).
+/// Office documents are rendered as: docx → raw bytes for client-side
+/// docx-preview rendering (kind = `office`, original_bytes = true); pptx →
+/// converted to PDF via headless LibreOffice when available (kind = `pdf`),
+/// else the hand-rolled HTML converter (kind = `office`); xlsx → HTML
+/// (kind = `office`). Anything else returns metadata only (rendered as a
+/// file card).
 ///
 /// `async` because pptx→pdf shells out to LibreOffice for several seconds —
 /// that work runs on `spawn_blocking` so the IPC handler isn't stalled.
@@ -2620,7 +2621,7 @@ pub async fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
     // Office documents: render to faithful, self-contained HTML (colours,
     // fonts, tables, slide layouts) shown in a sandboxed iframe (kind = office).
     // For docx/pptx, also return the raw bytes as data_uri for client-side
-    // rendering (mammoth.js for docx; pptx raw bytes back the fallback when
+    // rendering (docx-preview for docx; pptx raw bytes back the fallback when
     // LibreOffice conversion failed).
     if matches!(ext.as_str(), "docx" | "pptx" | "xlsx") && size <= MAX_MEDIA {
         // spawn_blocking (B2 + B13): the read AND the Office→HTML renderers
@@ -2752,8 +2753,11 @@ mod preview_tests {
         let root = dir.path();
         std::fs::create_dir_all(root.join("a/b")).expect("dirs");
         // Two copies: the deeper one is written LAST (newer mtime) — it must
-        // win over the shallower older copy.
+        // win over the shallower older copy. The sleep keeps the two mtimes
+        // out of the same filesystem timestamp bucket (NTFS granularity made
+        // a plain back-to-back write pair flaky).
         std::fs::write(root.join("traffic.mmd"), "older-shallow").expect("write shallow");
+        std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(root.join("a/b/traffic.mmd"), "newer-deep").expect("write deep");
         let hit = find_by_basename_walk(root, "traffic.mmd").expect("found");
         assert_eq!(std::fs::read_to_string(&hit).unwrap(), "newer-deep");
@@ -2778,6 +2782,57 @@ mod preview_tests {
 #[tauri::command]
 pub fn is_libreoffice_available() -> bool {
     crate::chat::office::libreoffice_available()
+}
+
+/// "Accurate view" for Office artifact previews: convert the original
+/// docx/pptx/xlsx (and legacy .doc/.ppt) to PDF with headless LibreOffice and
+/// return a `data:application/pdf;base64,…` URI for the in-app PDF viewer.
+/// Results come from the same (path,len,mtime)-keyed cache as the pptx
+/// preview path, so toggling is cheap after the first conversion. `None`
+/// means LibreOffice isn't available or the conversion failed — the caller
+/// keeps showing the fast preview.
+#[tauri::command]
+pub async fn office_accurate_pdf(path: String) -> CmdResult<Option<String>> {
+    const MAX_MEDIA: u64 = 25 * 1024 * 1024;
+    let p = Path::new(&path);
+    let ext_ok = p
+        .extension()
+        .map(|e| {
+            matches!(
+                e.to_string_lossy().to_ascii_lowercase().as_str(),
+                "docx" | "pptx" | "xlsx" | "doc" | "ppt"
+            )
+        })
+        .unwrap_or(false);
+    let size_ok = std::fs::metadata(p).map(|m| m.len() <= MAX_MEDIA).unwrap_or(false);
+    if !ext_ok || !size_ok {
+        return Ok(None);
+    }
+    let path_for_convert = path.clone();
+    let pdf_bytes = tokio::task::spawn_blocking(move || {
+        crate::chat::office::office_to_pdf(Path::new(&path_for_convert))
+    })
+    .await
+    .ok()
+    .flatten();
+    Ok(pdf_bytes.map(|b| format!("data:application/pdf;base64,{}", base64_encode(&b))))
+}
+
+/// Completion callback for the JavaScript document engine (`jsdocgen`). The
+/// frontend `DocCodeRunner` executes the model's program in a sandboxed
+/// iframe and posts the produced file back as base64 (or an error message).
+/// Resolves the async waiter parked in `chat::jsdocgen::generate`.
+#[tauri::command]
+pub fn docgen_complete(request_id: String, data_b64: Option<String>, error: Option<String>) -> CmdResult<()> {
+    let result = match (data_b64, error) {
+        (Some(b64), _) => crate::chat::jsdocgen::decode_base64(&b64),
+        (None, Some(e)) => Err(e),
+        (None, None) => Err(
+            "the document runner returned neither file data nor an error".to_string(),
+        ),
+    };
+    crate::chat::jsdocgen::complete(&request_id, result);
+    Ok(())
 }
 
 /// Last-modified time of a file, in seconds since the Unix epoch. The

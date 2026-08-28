@@ -16,14 +16,17 @@ import {
   downloadArtifact,
   getFileMtime,
   isLibreofficeAvailable,
+  officeAccuratePdf,
   openArtifact,
   readArtifactPreview,
   type ArtifactPreview,
 } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { ArtifactExportMenu } from "./ArtifactExportMenu";
+import { DocxViewer } from "./DocxViewer";
 import { JsxPreview } from "./JsxPreview";
 import { MermaidDiagram } from "./MermaidDiagram";
+import { PdfViewer } from "./PdfViewer";
 import { sanitizeHtml } from "../../lib/sanitize";
 import { isInteractiveHtml } from "../../lib/interactiveHtml";
 
@@ -128,6 +131,82 @@ function DiagramFrame({ html, title }: { html: string; title: string }) {
   );
 }
 
+/** Office preview (docx/pptx/xlsx): the fast renderer plus a "PDF view"
+ *  toggle that converts the ORIGINAL file through LibreOffice for true
+ *  pagination/fonts (same conversion the pptx path uses automatically).
+ *  Fast renderers: docx → docx-preview (real styles, headers/footers,
+ *  numbering) with the backend HTML as parse-failure fallback; xlsx and
+ *  LibreOffice-less pptx → the backend's tolerant HTML converter. */
+function OfficePreview({ preview }: { preview: ArtifactPreview }) {
+  const { ext, text, dataUri } = preview;
+  const [pdfMode, setPdfMode] = useState(false);
+  const [pdfUri, setPdfUri] = useState<string | null>(null);
+  const [pdfState, setPdfState] = useState<"idle" | "loading" | "error">("idle");
+
+  const loadAccurate = useCallback(async () => {
+    if (pdfUri || pdfState === "loading") return;
+    setPdfState("loading");
+    try {
+      const uri = await officeAccuratePdf(preview.path);
+      if (uri) {
+        setPdfUri(uri);
+        setPdfMode(true);
+        setPdfState("idle");
+      } else {
+        setPdfState("error");
+      }
+    } catch {
+      setPdfState("error");
+    }
+  }, [pdfUri, pdfState, preview.path]);
+
+  const fastPreview =
+    ext === "docx" && dataUri ? (
+      <DocxViewer dataUri={dataUri} fallbackHtml={text ?? ""} filename={preview.filename} />
+    ) : (
+      <iframe
+        className={`artifact-preview-html office ${ext}`}
+        title={preview.filename}
+        sandbox=""
+        srcDoc={sanitizeHtml(text ?? "")}
+      />
+    );
+
+  return (
+    <div className="office-preview">
+      <div className="office-preview-bar">
+        <div className="office-preview-seg" role="tablist" aria-label="Preview mode">
+          <button
+            type="button"
+            className={`office-preview-seg-btn${!pdfMode ? " active" : ""}`}
+            onClick={() => setPdfMode(false)}
+          >
+            Formatted
+          </button>
+          <button
+            type="button"
+            className={`office-preview-seg-btn${pdfMode ? " active" : ""}`}
+            title="Render the original file via LibreOffice — true page layout"
+            onClick={() => (pdfUri ? setPdfMode(true) : void loadAccurate())}
+          >
+            {pdfState === "loading" ? "Converting…" : "PDF view"}
+          </button>
+        </div>
+        {pdfState === "error" && (
+          <span className="office-preview-note">LibreOffice conversion unavailable</span>
+        )}
+      </div>
+      <div className="office-preview-body">
+        {pdfMode && pdfUri ? (
+          <PdfViewer dataUri={pdfUri} filename={preview.filename} />
+        ) : (
+          fastPreview
+        )}
+      </div>
+    </div>
+  );
+}
+
 function PreviewBody({ preview }: { preview: ArtifactPreview }) {
   const { kind, text, dataUri, ext } = preview;
 
@@ -135,7 +214,15 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
     return <img className="artifact-preview-image" src={dataUri} alt={preview.filename} />;
   }
   if (kind === "pdf" && dataUri) {
-    return <embed className="artifact-preview-pdf" src={dataUri} type="application/pdf" />;
+    // pdf.js (search/nav/selection, identical on every platform) with the
+    // native viewer as a fallback for pathological files.
+    return (
+      <PdfViewer
+        dataUri={dataUri}
+        filename={preview.filename}
+        fallback={<embed className="artifact-preview-pdf" src={dataUri} type="application/pdf" />}
+      />
+    );
   }
   if (kind === "markdown" && text != null) {
     return (
@@ -161,12 +248,7 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
     return (
       <>
         {(ext === "pptx" || ext === "docx" || ext === "doc") && <LibreOfficeHint />}
-        <iframe
-          className={`artifact-preview-html office ${ext}`}
-          title={preview.filename}
-          sandbox=""
-          srcDoc={sanitizeHtml(text)}
-        />
+        <OfficePreview preview={preview} />
       </>
     );
   }

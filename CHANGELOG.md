@@ -1,21 +1,43 @@
-# Conduit Changelog
+# Relay Changelog
 
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+> **Naming note:** "Relay" is the user-visible product name (window title, `package.json` name, `tauri.conf.json` `productName`, `<title>`, sidebar/banner/HTML strings). The Rust crate name, the bundle identifier (`dev.conduit.app`), the NSIS installer filename pattern, the mobile app name (`Conduit Mobile`), the mobile bundle identifier (`com.conduit.mobile`), and the Windows scheduled-task name (`ConduitAutomations`) are still "Conduit" / `conduit` — the rebrand (`e9abc7c3`) was deliberately limited to user-visible surfaces. See `AI CONTEXT/RELEASE.md`.
+
 ---
 
 ## [Unreleased]
 
 ### Added
+- **Full-fidelity document pipeline (doc/ppt/pdf)** — New generation + preview engines across every document format:
+  - **PDF generation via a real browser engine** — `generate_document` for pdf now takes `language: "html"` (default): the model authors styled HTML, which renders in a hidden WebView2 window with the Paged.js polyfill (real `@page` margin boxes, page numbers, running headers) and prints with `ICoreWebView2_7::PrintToPdf` — full CSS/SVG/Unicode/CJK support, replacing the hand-rolled Latin-1-only PDF writer
+  - **DOCX generation via the `docx` npm library** (default `language: "javascript"`) — the model's program runs in a sandboxed iframe (`DocCodeRunner`) with the library preloaded, delivering real editable OOXML (headings, tables, numbering, styles) with no Python dependency; Python/`conduit_docgen` remains as fallback
+  - **PPTX generation via PptxGenJS** (default `language: "javascript"`) — 16:9 layouts, native charts, slide masters, with the documented gotchas (hex colors, explicit layout) encoded in the prompts/skills
+  - **PDF.js viewer** — in-app PDF pane rebuilt on pdf.js (page nav, zoom, text search, text selection), identical on WebView2/WKWebView/WebKitGTK, replacing the native `<embed>` whose behavior varied with the Evergreen runtime (and doesn't exist on Linux)
+  - **docx-preview viewer** — DOCX previews render with real document styles, headers/footers, numbering and images via docx-preview, falling back to the backend HTML converter on parse failure; new "PDF view" toggle converts the original file through LibreOffice for true pagination (`office_accurate_pdf`)
+  - Built-in `/docx`, `/pptx`, `/pdf` skills rewritten for the new engines
+- **Relay rebrand** — User-visible product name switched from "Conduit" to "Relay" (window title, `package.json` name, `tauri.conf.json` `productName`, `<title>`, sidebar/banner/HTML strings, frost fix for toolbar popovers) ([e9abc7c3](https://github.com/Conduit-official/Conduit/commit/e9abc7c3))
+- **Recognizable app icons + branded installer** — New app icon set, branded installer artwork, standalone YouTube consent card ([03c2ab8a](https://github.com/Conduit-official/Conduit/commit/03c2ab8a))
+- **Git Graph commit table** — Drop the branch list, roomier rows, clip descriptions ([d834ad70](https://github.com/Conduit-official/Conduit/commit/d834ad70), [3791b529](https://github.com/Conduit-official/Conduit/commit/3791b529))
+- **Floating composer over transcript** — Composer floats over the transcript; messages scroll behind the glass, edge reservations, transparent app logo ([bd69c970](https://github.com/Conduit-official/Conduit/commit/bd69c970), [f772979b](https://github.com/Conduit-official/Conduit/commit/f772979b), [2816f9da](https://github.com/Conduit-official/Conduit/commit/2816f9da), [a6088241](https://github.com/Conduit-official/Conduit/commit/a6088241))
+- **Liquid glass across the app** — Composer glass extended to sidebar, modals, QR frame ([86588979](https://github.com/Conduit-official/Conduit/commit/86588979), [09449738](https://github.com/Conduit-official/Conduit/commit/09449738), [3ef47dca](https://github.com/Conduit-official/Conduit/commit/3ef47dca), [20b3c207](https://github.com/Conduit-official/Conduit/commit/20b3c207))
+- **Git sidebar enhancements** — Collapsible sections, liquid glass, chat-bound data ([11837617](https://github.com/Conduit-official/Conduit/commit/11837617))
+- **Right tool panel as a slide-out** — Tool panel slides open/closed like the sidebar ([a6a2ccdb](https://github.com/Conduit-official/Conduit/commit/a6a2ccdb))
+- **Mode-colored permission chip** — Permission chip tinted by current mode ([f2c5af11](https://github.com/Conduit-official/Conduit/commit/f2c5af11))
+- **YouTube connector** — Standalone YouTube card in the connectors panel ([f2c5af11](https://github.com/Conduit-official/Conduit/commit/f2c5af11))
+- **Toolbar as title bar** — Slimmer title bar; Conduit + nav arrows live only in the sidebar ([85bcd924](https://github.com/Conduit-official/Conduit/commit/85bcd924))
+- **GitHub-notch popover** — Glass on the wrapper, left-anchored under the chip ([573582b4](https://github.com/Conduit-official/Conduit/commit/573582b4))
+- **Mermaid stateLabelColor fix** — state/flow node labels visible ([55740144](https://github.com/Conduit-official/Conduit/commit/55740144))
+- **Composer chip with provider icon** — Chip shows the provider icon, not the provider name ([1ac84047](https://github.com/Conduit-official/Conduit/commit/1ac84047))
 - **Agent/Model picker redesign** — Combined agent/model selection with icon rail and per-model local runtime settings ([cb7d782a](https://github.com/Conduit-official/Conduit/commit/cb7d782a))
 - **Conversational artifacts** — Artifacts now support conversational context and can be referenced in chat ([045e9a9d](https://github.com/Conduit-official/Conduit/commit/045e9a9d))
 - **MCP server gallery** — Built-in chat can now launch stdio MCP servers with one click ([b2c3d8ab](https://github.com/Conduit-official/Conduit/commit/b2c3d8ab))
 - **AI diff review quick action** — Per-file and whole-tree AI diff review cards in the Git tools sidebar ([52e76ddd](https://github.com/Conduit-official/Conduit/commit/52e76ddd))
 - **Per-turn RAG auto-retrieval** — Chat automatically retrieves relevant documents per turn; support for per-chat doc attachments and MCP `search_docs` ([a0635298](https://github.com/Conduit-official/Conduit/commit/a0635298))
-- **Activity strip** — Added §3.1.6 activity strip to GitToolsSidebar ([ed35499b](https://github.com/Conduit-official/Conduit/commit/ed35499b))
+- **Activity strip** — §3.1.6 activity strip in GitToolsSidebar ([ed35499b](https://github.com/Conduit-official/Conduit/commit/ed35499b))
 - **Automation hardening** — Dual permission policies and settings improvements ([887d3364](https://github.com/Conduit-official/Conduit/commit/887d3364))
 - **Mobile remote access** — E2E relay encryption (HKDF+XChaCha20-Poly1305) and Tailscale auto-serve with QR pairing ([9aed4a84](https://github.com/Conduit-official/Conduit/commit/9aed4a84), [03361f16](https://github.com/Conduit-official/Conduit/commit/03361f16), [aa7b3e4b](https://github.com/Conduit-official/Conduit/commit/aa7b3e4b))
 - **Browser devtools** — New `browser_open_devtools` command to open native devtools for a browser tab
@@ -24,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Chat UI** — Replaced per-message Save As / Find & Update chips with natural language controls ([4b38ded0](https://github.com/Conduit-official/Conduit/commit/4b38ded0))
 - **Automation view** — Made responsive when tool panel opens ([246ca988](https://github.com/Conduit-official/Conduit/commit/246ca988), [d8c79312](https://github.com/Conduit-official/Conduit/commit/d8c79312))
+- **Family connect flow** — YouTube connects standalone; slimmer toolbar chips ([254fa255](https://github.com/Conduit-official/Conduit/commit/254fa255))
 
 ### Fixed
 - **Artifact creation** — `/create` now works across all providers, harness CLIs, and local models ([47ba0e86](https://github.com/Conduit-official/Conduit/commit/47ba0e86))
@@ -33,11 +56,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Remote access binding** — Fixed relay binding to tailnet IP so phone can connect cross-network without HTTPS serve ([760bdffc](https://github.com/Conduit-official/Conduit/commit/760bdffc))
 - **Remote portal QR modal** — Centered the sidebar pairing QR modal on screen ([57ca347b](https://github.com/Conduit-official/Conduit/commit/57ca347b))
 - **Async serve-enable** — Added activation check for remote portal ([d9794a82](https://github.com/Conduit-official/Conduit/commit/d9794a82))
+- **Family connect 400** — YouTube connects standalone; keep YouTube out of the combined Google consent ([59e2ea7d](https://github.com/Conduit-official/Conduit/commit/59e2ea7d), [d73a6d64](https://github.com/Conduit-official/Conduit/commit/d73a6d64))
 
 ### Documentation & Maintenance
-- Updated AI_CONTEXT.md to reflect 226 commands and 21 tables
-- Updated BUG_AUDIT.md and PERFORMANCE_AUDIT.md to reflect current state (all Sev H/M resolved, 407/407 tests passing)
-- Updated PROJECT_OVERVIEW.md with current architecture and metrics
+- **2026-08-27 doc pass** — `PROJECT_OVERVIEW.md`, `BUG_AUDIT.md`, `PERFORMANCE_AUDIT.md`, `AI CONTEXT/AI_CONTEXT.md`, and `README.md` (new) rewritten to match the current implementation. Realized metrics: 235 IPC commands, 21 tables, 68 vitest files / 460 tests passing, 539 cargo-lib tests + 1 failed, 34 `tsc --noEmit` errors, entry chunk 458.96 KB / 141.47 KB gzip. See `BUG_AUDIT.md` for the two open Sev M items.
+- **Earlier (2026-08-23) doc pass** — Updated `PROJECT_OVERVIEW.md` with current architecture and metrics — **superseded by the 2026-08-27 pass above** (the 2026-08-23 numbers no longer match the code).
 
 ---
 

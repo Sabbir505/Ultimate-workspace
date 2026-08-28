@@ -57,7 +57,7 @@ pub async fn execute_conduit_tool(
     let client = reqwest::Client::new();
     let artifacts_dir = crate::chat::dispatch::artifacts_dir(app);
     let caps = ToolCaps::default();
-    let outcome = tools::execute_tool(&client, &artifacts_dir, &caps, tool_name, args).await;
+    let outcome = tools::execute_tool(&client, &artifacts_dir, &caps, tool_name, args, Some(app)).await;
     Ok(json!({
         "text": outcome_text(&outcome),
         "artifact": outcome_artifact_json(&outcome)

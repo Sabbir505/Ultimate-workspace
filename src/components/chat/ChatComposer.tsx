@@ -613,8 +613,16 @@ interface Props {
    *  Kimi/OpenCode headless runs have no approval channel (they always run
    *  full-auto), so ChatView hides the menu for those harnesses. */
   permissionMode?: PermissionMode;
-  onPermissionModeChange?: (mode: PermissionMode) => void;
+  /** String-typed: harness sessions pick from their own catalog (values like
+   *  "acceptEdits"/"build" aren't built-in PermissionModes). */
+  onPermissionModeChange?: (mode: string) => void;
   permissionModeSupported?: boolean;
+  /** Whether the mode menu offers the "Plan" posture — true for builtin/local
+   *  sessions with tools enabled (the plan gate lives in the built-in loop). */
+  planAvailable?: boolean;
+  /** HARNESS catalog override: when set (CLI-harness session), the mode menu
+   *  lists the harness's own postures instead of the built-in ones. */
+  modes?: import("./PermissionModeMenu").ModeOption[];
   effort?: string;
   provider?: string;
   /** Local-model context size in tokens (0 = Auto) — feeds the context meter. */
@@ -669,6 +677,8 @@ export function ChatComposer({
   permissionMode,
   onPermissionModeChange,
   permissionModeSupported = true,
+  planAvailable = false,
+  modes: harnessModes,
   effort,
   provider,
   localCtx,
@@ -2129,6 +2139,8 @@ export function ChatComposer({
               mode={permissionMode!}
               onModeChange={onPermissionModeChange!}
               variant="inline"
+              planAvailable={planAvailable}
+              modes={harnessModes}
             />
           )}
           <div className="composer-control-spacer" />

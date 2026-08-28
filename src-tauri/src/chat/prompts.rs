@@ -148,7 +148,10 @@ pub(crate) fn core_prompt_base() -> String {
      ## Tools\n\
      Call only tools actually in your tool list this turn. Each entry's schema carries its \
      name, parameters, and usage notes — follow the schema rather than guessing. If something \
-     you need isn't available, say so plainly instead of improvising.\n\n\
+     you need isn't available, say so plainly instead of improvising. For multi-step work, \
+     keep `todo_write` current (one in_progress step; complete steps as you finish them); \
+     for large, ambiguous, or hard-to-reverse tasks prefer `enter_plan_mode` first, then \
+     `present_plan` — the user's approval unlocks changes.\n\n\
      ## In-app browser pane\n\
      Drive the embedded browser (`open_url` + `browser_*` tools) as an observeâ†'act loop: \
      open the page, `browser_read(mode:\"interactive\")` to get numbered element refs, act by \
@@ -554,13 +557,34 @@ pub fn detect_connector_mentions(content: &str, available: &[&str]) -> Vec<Strin
     hits
 }
 
+/// Plan-mode scaffolding, appended only while the session is in plan mode
+/// (user toggle or the model's own `enter_plan_mode` call). Short on purpose —
+/// the real contract lives in the `enter_plan_mode`/`present_plan` tool
+/// descriptions; this is the standing reminder for the rest of the turn.
+const PLAN_MODE_SEGMENT: &str = "## Plan mode (active)\n\
+    This session is in plan mode: mutating tools are BLOCKED until the user \
+    approves a plan. Work in this order:\n\
+    1. Research with read-only tools (read_file, list_directory, search_*, \
+    web_search, browser_read).\n\
+    2. Call `present_plan` with the detailed approach as markdown — what you'll \
+    change, how, and how you'll verify it. This is the DESIGN, not a step \
+    checklist. Never call it after changes are already made. Do NOT repeat the \
+    plan in your reply text — the approval card renders it for the user; keep \
+    your prose to a one-line acknowledgment.\n\
+    3. After approval, break the plan into concrete steps with `todo_write` \
+    (the Progress list renders them — don't restate them in prose) and \
+    execute, keeping the list current.\n\
+    A rejection returns the user's feedback — revise and re-present. If the task \
+    needs no changes, just answer in text.";
+
 /// Assemble the effective system prompt from the built-in CORE prompt (always
 /// included, provider/model-aware), the available-skills catalog (only when
 /// tools are on), the attach-on-demand manifest for connectors / MCP servers
 /// (only when tools are on), the research-mode scaffolding (only on
-/// research-shaped turns with tools on), the user's custom system prompt, and
-/// any invoked skills (the caller pre-filters to skills whose `/command`
-/// appears in the message). Returns `None` when nothing applies.
+/// research-shaped turns with tools on), the plan-mode scaffolding (only while
+/// plan mode is active), the user's custom system prompt, and any invoked
+/// skills (the caller pre-filters to skills whose `/command` appears in the
+/// message). Returns `None` when nothing applies.
 pub fn build_system_prompt(
     provider: ChatProviderId,
     model: &str,
@@ -568,6 +592,7 @@ pub fn build_system_prompt(
     skills: &[(String, String)],
     tools_enabled: bool,
     research_mode: bool,
+    plan_mode: bool,
     manifest: Option<&str>,
 ) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
@@ -593,10 +618,15 @@ pub fn build_system_prompt(
     }
     // The research segment references tools (web_search/browser_read/
     // add_source_note/generate_file), so it only applies when tools are on.
-    // The call site already guarantees research_mode â‡' tools_enabled; the
+    // The call site already guarantees research_mode ⇒ tools_enabled; the
     // `&& tools_enabled` here is defense-in-depth.
     if research_mode && tools_enabled {
         parts.push(core_prompt_research(model));
+    }
+    // Plan mode gates tool behavior, so — like the research segment — it only
+    // applies on tool-enabled turns.
+    if plan_mode && tools_enabled {
+        parts.push(PLAN_MODE_SEGMENT.to_string());
     }
     if let Some(c) = custom {
         let c = c.trim();
@@ -694,7 +724,7 @@ mod tests {
     #[test]
     fn system_prompt_embeds_current_date() {
         for provider in [ChatProviderId::LocalGguf, ChatProviderId::OpenAI] {
-            let p = build_system_prompt(provider, "test-model", None, &[], false, false, None)
+            let p = build_system_prompt(provider, "test-model", None, &[], false, false, false, None)
                 .expect("core + date segment always present");
             assert!(p.contains("## Current date & time"), "missing date anchor");
             let today = chrono::Local::now().format("%a %Y-%m-%d").to_string();

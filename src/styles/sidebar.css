@@ -531,8 +531,15 @@ button.sidebar-section-label:hover {
   box-shadow: none;
 }
 /* Stylish Relay wordmark: brand-orange gradient text, wide-tracked caps.
-   Uses background-clip so the gradient paints the glyphs themselves. */
-.sidebar-wordmark {
+   Uses background-clip so the gradient paints the glyphs themselves.
+   The gradient MUST be re-declared for :hover/:active: the neutralized
+   button skin above sets `background: transparent` on hover at equal-or
+   higher specificity, and with background-clip:text a transparent background
+   paints NO glyphs — the wordmark went invisible on hover. Later-in-file
+   equal-specificity rules win, so these restore it. */
+.sidebar-wordmark,
+.sidebar-wordmark:hover,
+.sidebar-wordmark:active {
   font-size: 15px;
   font-weight: 800;
   letter-spacing: 0.14em;
@@ -543,9 +550,7 @@ button.sidebar-section-label:hover {
   -webkit-text-fill-color: transparent;
   color: transparent;
 }
-.sidebar-wordmark:hover,
-.sidebar-wordmark:active {
-  -webkit-text-fill-color: transparent;
+.sidebar-wordmark:hover {
   filter: brightness(1.12);
 }
 

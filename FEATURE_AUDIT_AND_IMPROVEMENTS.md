@@ -1,4 +1,8 @@
-# Conduit — Feature Audit, Improvement Roadmap & Local-Model Experience Plan
+# Relay — Feature Audit, Improvement Roadmap & Local-Model Experience Plan
+
+> **Naming note:** This document refers to the project as "Conduit" because it was written before the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The findings still apply; the name has not. See `README.md` and `AI CONTEXT/RELEASE.md` for the current naming.
+>
+> **Metric note (2026-08-27):** This audit cites "157 registered IPC commands" from 2026-08-14. The current count is **235** (see `AI CONTEXT/AI_CONTEXT.md` §2.2 and `src-tauri/src/lib.rs:239-494`).
 
 > **Date:** 2026-08-14 · **Basis:** direct read of the current source tree (157 registered IPC commands in `src-tauri/src/lib.rs`), plus `PROJECT_OVERVIEW.md`, `PERFORMANCE_AUDIT.md` (Round 2), `AI CONTEXT/BUG_LIST_ROUND2.md` (all 48 fixed), and a full competitor scan (see `COMPETITOR_ANALYSIS_AND_GAPS.md`).
 >

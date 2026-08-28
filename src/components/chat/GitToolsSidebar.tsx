@@ -27,6 +27,7 @@ import { usePlanTracker } from "../../hooks/usePlanTracker";
 const EMPTY_TASKS: Record<string, unknown> = {};
 const EMPTY_STEPS: unknown[] = [];
 const EMPTY_SUBAGENTS: Record<string, unknown> = {};
+const EMPTY_ACCEPTED: import("../../lib/ipc").ChatPlanRecord[] = [];
 
 export function GitToolsSidebar() {
   const boundProjectId = useChatStore((s) =>
@@ -40,6 +41,11 @@ export function GitToolsSidebar() {
   );
   const planSteps = useChatStore((s) =>
     s.activeChatSessionId ? (s.planSteps[s.activeChatSessionId] ?? EMPTY_STEPS) : EMPTY_STEPS,
+  );
+  // APPROVED plan documents (present_plan → user accepted). These are the
+  // sidebar Plans list; execution steps live in planSteps (Progress below).
+  const acceptedPlans = useChatStore((s) =>
+    s.activeChatSessionId ? (s.sessionPlans[s.activeChatSessionId] ?? EMPTY_ACCEPTED) : EMPTY_ACCEPTED,
   );
   const subagents = useChatStore((s) =>
     s.activeChatSessionId ? (s.subagents[s.activeChatSessionId] ?? EMPTY_SUBAGENTS) : EMPTY_SUBAGENTS,
@@ -225,6 +231,14 @@ export function GitToolsSidebar() {
     openPlanTab();
   };
 
+  // The Plans list: APPROVED structured plans (present_plan → user accepted)
+  // take priority; the prose scan stays as the fallback for sessions without
+  // the plan tools (CLI harnesses), which still announce plans in text.
+  const displayPlans: { raw: string; label: string; approved?: boolean }[] =
+    acceptedPlans.length > 0
+      ? acceptedPlans.map((p) => ({ raw: p.content, label: p.title, approved: true }))
+      : plans;
+
   // Toggle the branch popover.
   const toggleBranchPopover = useCallback(() => {
     setBranchOpen((prev) => !prev);
@@ -355,20 +369,26 @@ export function GitToolsSidebar() {
           aria-hidden={!gitSectionPlansOpen}
         >
           <div className="git-section-collapse-inner">
-            {plans.length === 0 ? (
+            {displayPlans.length === 0 ? (
               <div className="git-sidebar-empty">No plans yet.</div>
             ) : (
-              plans.map((p, i) => (
+              displayPlans.map((p, i) => (
                 <button
                   key={i}
                   className="git-sidebar-plan"
                   onClick={() => openPlan(p)}
                   title={p.label}
                 >
-                  <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" />
-                    <path d="M12 7v4M12 11l-5 6M12 11l5 6" />
-                  </svg>
+                  {p.approved ? (
+                    <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" style={{ color: "#3fb970" }}>
+                      <path d="M20 6 9 17l-5-5" />
+                    </svg>
+                  ) : (
+                    <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="5" r="2" /><circle cx="5" cy="19" r="2" /><circle cx="19" cy="19" r="2" />
+                      <path d="M12 7v4M12 11l-5 6M12 11l5 6" />
+                    </svg>
+                  )}
                   <span className="git-sidebar-plan-text">{p.label}…</span>
                 </button>
               ))

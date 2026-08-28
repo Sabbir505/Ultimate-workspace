@@ -290,18 +290,56 @@ pub fn update_chat_session_policies(
     sandbox: &str,
     approval: &str,
 ) -> DbResult<()> {
-    let legacy = match (sandbox, approval) {
-        ("read_only", _) => "read_only",
-        ("workspace_write", "on_request") => "manual",
-        ("workspace_write", "auto_edit") => "auto_edit",
-        ("workspace_write", "full_access") => "full_auto",
-        _ => "manual",
-    };
+    let legacy = permission_label_from_policies(sandbox, approval);
     conn.execute(
         "UPDATE chat_sessions SET sandbox_policy = ?2, approval_policy = ?3, permission_mode = ?4 WHERE id = ?1",
         params![chat_session_id, sandbox, approval, legacy],
     )?;
     Ok(())
+}
+
+/// The `permission_mode` label that corresponds to a dual-policy pair. Used
+/// both by `update_chat_session_policies` (policies changed → label follows)
+/// and by `set_chat_session_plan` (plan mode exited → restore the label that
+/// matches the policies that were preserved underneath the whole time).
+pub fn permission_label_from_policies(sandbox: &str, approval: &str) -> &'static str {
+    match (sandbox, approval) {
+        ("read_only", _) => "read_only",
+        ("workspace_write", "on_request") => "manual",
+        ("workspace_write", "auto_edit") => "auto_edit",
+        ("workspace_write", "full_access") => "full_auto",
+        _ => "manual",
+    }
+}
+
+/// Enter (`plan = true`) or exit (`plan = false`) plan mode for a session.
+/// Plan mode is a LABEL on the legacy `permission_mode` column — the
+/// dual-policy columns are intentionally untouched, so the posture the user
+/// had before planning (manual / auto_edit / full_auto) is what governs tool
+/// calls the moment the plan is approved, with zero restore bookkeeping.
+/// Returns the label now stored (the caller emits it to the UI).
+pub fn set_chat_session_plan(conn: &Connection, chat_session_id: &str, plan: bool) -> DbResult<String> {
+    let label: String = if plan {
+        "plan".to_string()
+    } else {
+        let (sandbox, approval): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT sandbox_policy, approval_policy FROM chat_sessions WHERE id = ?1",
+                params![chat_session_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or((None, None));
+        permission_label_from_policies(
+            sandbox.as_deref().unwrap_or("workspace_write"),
+            approval.as_deref().unwrap_or("on_request"),
+        )
+        .to_string()
+    };
+    conn.execute(
+        "UPDATE chat_sessions SET permission_mode = ?2 WHERE id = ?1",
+        params![chat_session_id, label],
+    )?;
+    Ok(label)
 }
 
 pub fn update_chat_session_watch_mode(
@@ -833,6 +871,36 @@ mod tests {
         delete_chat_session(&conn, &run_log.id).unwrap();
         let reloaded = crate::db::get_automation(&conn, &automation.id).unwrap().unwrap();
         assert_eq!(reloaded.chat_session_id, None);
+    }
+
+    #[test]
+    fn plan_mode_label_round_trips_and_restores_posture() {
+        let conn = super::super::mem();
+        // Fresh sessions start as manual (workspace_write + on_request).
+        let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+        assert_eq!(cs.permission_mode, "manual");
+
+        // Entering plan flips the label to "plan"; the dual-policy columns
+        // are untouched (that's the whole point — approval resumes them).
+        let label = set_chat_session_plan(&conn, &cs.id, true).unwrap();
+        assert_eq!(label, "plan");
+        let read = get_chat_session(&conn, &cs.id).unwrap().unwrap();
+        assert_eq!(read.permission_mode, "plan");
+        assert_eq!(read.sandbox_policy, "workspace_write");
+        assert_eq!(read.approval_policy, "on_request");
+
+        // Exiting restores the label derived from the preserved policies.
+        let label = set_chat_session_plan(&conn, &cs.id, false).unwrap();
+        assert_eq!(label, "manual");
+        let read = get_chat_session(&conn, &cs.id).unwrap().unwrap();
+        assert_eq!(read.permission_mode, "manual");
+
+        // A session whose real posture is auto_edit restores to auto_edit,
+        // not manual.
+        update_chat_session_policies(&conn, &cs.id, "workspace_write", "auto_edit").unwrap();
+        set_chat_session_plan(&conn, &cs.id, true).unwrap();
+        let label = set_chat_session_plan(&conn, &cs.id, false).unwrap();
+        assert_eq!(label, "auto_edit");
     }
 
     #[test]

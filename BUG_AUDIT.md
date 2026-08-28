@@ -1,8 +1,8 @@
-# BUG AUDIT — Conduit
+# BUG AUDIT — Relay (crate: Conduit)
 
-**Last verified:** 2026-08-23
+**Last verified:** 2026-08-27
 **Branch:** `master`
-**Working tree:** All H/M items from the 2026-08-17 audit are resolved. Re-ran `vitest` (59 files / 407 tests), `tsc`, and `cargo test` — all green.
+**Working tree:** **NOT GREEN.** `tsc --noEmit` reports 34 errors and `cargo test --lib` has 1 failing test. The previous audit (2026-08-23) claimed everything was green — that is no longer accurate. The H/M items from the 2026-08-17 audit remain resolved; the regression is in `tsc` and one cargo unit test.
 
 ---
 
@@ -24,10 +24,12 @@
 | `~~B1~~` | L | `agent_sessions.rs` | Claude Code `--resume` rebinding used the harness-level id but stored the CLI session id per turn | **RESOLVED** — `app_settings` key now `agent.cli_session_id.<harness>.<sid>` |
 | `N1` | L | `components/cost-dashboard/BudgetPanel.tsx:37` | Alleged unhandled-rejection in async IIFE | **FALSE POSITIVE** — line 37 uses `void refresh();`, the correct pattern; the async work is also caught inside `refresh` |
 | `N2` | L | `test/budgetPanel.test.tsx:34` | Mock returns an array for `setBudget` (should be `undefined`) | **MINIMAL RISK** — production code ignores the return value of `setBudget`, so the mismatch does not surface at runtime; test still passes |
-| `N3` | L | `test/themeGallery.test.tsx` | 5 tests said to fail on import/edit/export | **RESOLVED** — `vitest` now passes all 59 files / 407 tests; import/edit/export paths verified |
+| `N3` | L | `test/themeGallery.test.tsx` | 5 tests said to fail on import/edit/export | **RESOLVED** — current `vitest` run is fully green for this file |
 | `N4` | L | `test/activityGrouping.test.tsx` | 1 test said to fail on fallback labels | **RESOLVED** — current suite green |
+| **`N5`** | **M** | `src/components/chat/GitToolsSidebar.tsx`, `src/components/panes/ProgressPanel.tsx` | `tsc --noEmit` reports 34 errors, all `TS18046: x is of type 'unknown'`. Affected names: `step` (GitToolsSidebar lines 409, 410, 411, 413, 417, 421, 431, 433), `t` (208, 213, 439, 443), `sub` (482, 485, 488, 490, 491), and `t` in ProgressPanel (28, 30, 32, 33, 35, 37). Root cause: destructured values from `unknown`-typed store selectors are then used without narrowing. | **OPEN** — fix the destructures to either type the selector return or narrow inline |
+| **`N6`** | **M** | `src-tauri/src/chat/commands.rs:2759` | `cargo test --lib chat::commands::preview_tests::basename_walk_prefers_newest_match_and_skips_vendor_dirs` fails — assertion compares `older-shallow == newer-deep`. The test exists and the function exists; either the walk is choosing the wrong file or the test fixture is misordered. | **OPEN** — investigate walk ordering vs. the test's expectation; this is a real regression in the current tree |
 
-**No currently-open Sev H or M items.**
+**No currently-open Sev H items. Two open Sev M items (N5, N6).**
 
 ---
 
@@ -46,10 +48,12 @@
 
 ---
 
-## Regression-suite health
+## Regression-suite health (2026-08-27)
 
-* **Unit tests:** 59 files · 407 tests · **all passing**
-* **TypeScript:** `tsc --noEmit` clean
-* **Rust:** `cargo test` clean
+* **Unit tests:** 68 files · 460 tests · **all passing** (vitest)
+* **TypeScript:** `tsc --noEmit` — **34 errors** (see N5)
+* **Rust:** `cargo test --lib` — **539 passed, 1 FAILED, 11 ignored** (see N6); `cargo test` (all targets) propagates the lib failure; smoke test passes
 
-New test files added since the last audit (2026-08-17): `acpAgents`, `agentModelPicker`, `apiKeysPanel`, `approvalRules`, `artifactProposalCard`, `automationRunClosed`, `broadcast`, `chatSessionRowExport`, `chatStreamLifecycle`, `checkpointChip`, `commandPaletteChats`, `composerHud`, `costDashboard`, `costRollups`, `deletedChatTombstone`, `knowledgePanel`, `localModelAdvanced`, `messageBranching`, `modalOpen`, `modelMarket`, `permissionModeMenu`, `permissionModeStore`, `projectBindingSwitch`, `promptTemplates`, `pullsPanel`, `releaseNotes`, `safeSlice`, `sanitizeSvg`, `toasts`, `updaterDismiss`, `useCostRollups`, `vramRecommendations`, `workspaceRestore`, `worktreeSessions`.
+> The previous version of this document said `tsc --noEmit clean` and `cargo test clean`. Both claims are now false. The 2026-08-23 audit predates the regressions; this 2026-08-27 pass reflects the current tree.
+
+Test files added since the 2026-08-23 audit: `acpAgents`, `agentModelPicker`, `apiKeysPanel`, `approvalRules`, `artifactProposalCard`, `automationRunClosed`, `broadcast`, `chatSessionRowExport`, `chatStreamLifecycle`, `checkpointChip`, `commandPaletteChats`, `composerHud`, `costDashboard`, `costRollups`, `deletedChatTombstone`, `knowledgePanel`, `localModelAdvanced`, `messageBranching`, `modalOpen`, `modelMarket`, `permissionModeMenu`, `permissionModeStore`, `projectBindingSwitch`, `promptTemplates`, `pullsPanel`, `releaseNotes`, `safeSlice`, `sanitizeSvg`, `toasts`, `updaterDismiss`, `useCostRollups`, `vramRecommendations`, `workspaceRestore`, `worktreeSessions`.

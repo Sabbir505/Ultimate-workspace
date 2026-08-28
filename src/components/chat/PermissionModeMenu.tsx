@@ -1,23 +1,32 @@
 // Approval-mode selector for the chat composer. A pill trigger
-// ("Manual ▾") opens an upward glass menu listing the four postures
-// (read_only / manual / auto_edit / full_auto) that govern filesystem AND
-// connected-account tool calls, styled to match ModelEffortMenu's dropdown
-// exactly — same glass surface, chevron, checkmark,
-// and outside-click handling. Switching INTO full_auto does NOT apply here:
-// the store opens a one-time confirmation modal instead; selecting full_auto
-// in this menu calls onModeChange("full_auto") only as a request the store may
-// intercept.
+// ("Manual ▾") opens an upward glass menu listing the postures that govern
+// tool calls. TWO catalogs:
+//   * built-in sessions — our dual-policy postures (read_only / plan /
+//     manual / auto_edit / full_auto);
+//   * CLI-harness sessions — the HARNESS'S OWN postures via the `modes`
+//     prop (OpenCode build/plan, Claude Code default/acceptEdits/plan/
+//     bypassPermissions): what the user picks is what the harness spawn
+//     passes to the CLI, with no mapping layer.
+// Switching INTO full_auto does NOT apply here: the store opens a one-time
+// confirmation modal instead; selecting full_auto in this menu calls
+// onModeChange("full_auto") only as a request the store may intercept.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PermissionMode } from "../../state/chat";
 
 export interface ModeOption {
-  value: PermissionMode;
+  value: string;
   label: string;
   /** One-line description shown under the label in the menu. */
   description: string;
 }
 
 export const PERMISSION_MODES: ModeOption[] = [
+  {
+    value: "plan",
+    label: "Plan",
+    description:
+      "Research first — the model must propose a plan you approve before it changes anything.",
+  },
   {
     value: "read_only",
     label: "Read Only",
@@ -41,6 +50,7 @@ export const PERMISSION_MODES: ModeOption[] = [
 ];
 
 export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
+  plan: "Plan",
   read_only: "Read Only",
   manual: "Manual",
   auto_edit: "Auto-Edit",
@@ -48,15 +58,23 @@ export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
 };
 
 interface Props {
-  mode: PermissionMode;
-  onModeChange: (mode: PermissionMode) => void;
+  mode: string;
+  onModeChange: (mode: string) => void;
   /** `"inline"` renders a borderless trigger that blends into the composer
    *  footer like the `+` attach button (no pill border); `"pill"` (default)
    *  renders the bordered pill matching ModelEffortMenu. */
   variant?: "pill" | "inline";
+  /** Whether the "Plan" posture is selectable for this session. Plan mode is
+   *  enforced by the built-in provider's plan gate, so it only makes sense
+   *  for builtin/local sessions with tools enabled; harness/ACP sessions
+   *  hide the entry (default false — opt in). */
+  planAvailable?: boolean;
+  /** HARNESS catalog override: when set, the menu lists exactly these
+   *  postures (the harness's own) instead of the built-in ones. */
+  modes?: ModeOption[];
 }
 
-export function PermissionModeMenu({ mode, onModeChange, variant = "pill" }: Props) {
+export function PermissionModeMenu({ mode, onModeChange, variant = "pill", planAvailable = false, modes: modesOverride }: Props) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
@@ -98,17 +116,26 @@ export function PermissionModeMenu({ mode, onModeChange, variant = "pill" }: Pro
     return () => window.removeEventListener("pointerdown", onDown);
   }, [open]);
 
+  // The effective catalog: a harness override wins wholesale; otherwise the
+  // built-in postures, with "plan" filtered out where the plan gate doesn't
+  // exist (filtered from keyboard-nav bounds too so arrows can't reach it).
+  const modes: ModeOption[] =
+    modesOverride ??
+    (planAvailable
+      ? PERMISSION_MODES
+      : PERMISSION_MODES.filter((m) => m.value !== "plan"));
+
   // Keep active index in range + scroll into view.
   useEffect(() => {
-    setActiveIndex((i) => (i >= PERMISSION_MODES.length ? 0 : i));
-  }, [open]);
+    setActiveIndex((i) => (i >= modes.length ? 0 : i));
+  }, [open, modes.length]);
 
   useEffect(() => {
     if (!open) return;
     itemRefs.current[activeIndex]?.scrollIntoView({ block: "nearest" });
   }, [activeIndex, open]);
 
-  const choose = (value: PermissionMode) => {
+  const choose = (value: string) => {
     onModeChange(value);
     setOpen(false);
   };
@@ -117,20 +144,22 @@ export function PermissionModeMenu({ mode, onModeChange, variant = "pill" }: Pro
     if (!open) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActiveIndex((i) => Math.min(i + 1, PERMISSION_MODES.length - 1));
+      setActiveIndex((i) => Math.min(i + 1, modes.length - 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setActiveIndex((i) => Math.max(i - 1, 0));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const opt = PERMISSION_MODES[activeIndex];
+      const opt = modes[activeIndex];
       if (opt) choose(opt.value);
     } else if (e.key === "Escape") {
       setOpen(false);
     }
   };
 
-  const label = PERMISSION_MODE_LABELS[mode];
+  // Trigger label: the catalog entry when present, else the raw value
+  // (harness labels always resolve through their catalog).
+  const label = modes.find((m) => m.value === mode)?.label ?? PERMISSION_MODE_LABELS[mode as PermissionMode] ?? mode;
   const variantClass = variant === "inline" ? " inline" : "";
 
   return (
@@ -159,7 +188,7 @@ export function PermissionModeMenu({ mode, onModeChange, variant = "pill" }: Pro
             Approval posture for tool calls this turn.
           </div>
           <div className="permission-mode-divider" />
-          {PERMISSION_MODES.map((opt, i) => (
+          {modes.map((opt, i) => (
             <button
               key={opt.value}
               ref={(el) => {

@@ -1,5 +1,7 @@
 # Conduit Build Log
 
+> **Naming note:** This log refers to the project as "Conduit" because most entries predate the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The build progress, test coverage, and design decisions are unchanged; the name has. See `README.md` and `AI CONTEXT/RELEASE.md`.
+
 Running log per PRD §13.3: what was built, what was tested and how, assumptions/deviations, known issues.
 
 ---

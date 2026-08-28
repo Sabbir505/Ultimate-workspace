@@ -698,6 +698,85 @@ pub struct PlanStepProgressPayload {
     pub tool_call: Option<String>,
 }
 
+// ---- Structured plan tracking (todo_write / enter_plan_mode / present_plan) ----
+
+/// One item of the model-declared task list. The same shape flows through the
+/// `todo_write` tool input, the `present_plan` proposal, and every plan event,
+/// so the frontend renders all of them with one component.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanTodo {
+    pub content: String,
+    /// "pending" | "in_progress" | "completed"
+    pub status: String,
+    /// Present continuous label shown while the step runs ("Writing parser.rs").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_form: Option<String>,
+}
+
+/// The model's authoritative task list for a session, emitted on every
+/// `todo_write` call and after a plan approval. Replaces the session's list.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatPlanUpdatedPayload {
+    pub chat_session_id: String,
+    pub todos: Vec<PlanTodo>,
+}
+
+/// Plan mode flipped on/off for a session (user toggle or `enter_plan_mode`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatPlanModePayload {
+    pub chat_session_id: String,
+    pub active: bool,
+    /// Why it flipped ("user enabled plan mode", "model requested planning",
+    /// "plan approved", …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The session's permission_mode label AFTER this transition ("plan" when
+    /// active; otherwise the restored posture label), so the UI's mode
+    /// selector stays in sync without deriving anything.
+    #[serde(default)]
+    pub label: String,
+}
+
+/// An APPROVED plan — the approach document the model presented via
+/// `present_plan` and the user accepted. Listed in the sidebar's Plans
+/// section; execution steps live separately in the todo list (Progress).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanRecord {
+    pub id: String,
+    /// Short heading (first markdown heading / first line of the plan).
+    pub title: String,
+    /// The full plan markdown.
+    pub content: String,
+    /// Unix seconds when the user approved it.
+    pub approved_at: i64,
+}
+
+/// A `present_plan` call awaiting the user's decision. The turn is paused on
+/// the approval oneshot until `resolve_plan_proposal` delivers the verdict.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatPlanProposalPayload {
+    pub chat_session_id: String,
+    pub pending_id: String,
+    /// Short heading for the card.
+    pub title: String,
+    /// The plan markdown (the approach — NOT a step checklist).
+    pub plan: String,
+}
+
+/// Emitted when the user approves a plan proposal — appends to the session's
+/// Plans list in the sidebar.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatPlanAcceptedPayload {
+    pub chat_session_id: String,
+    pub plan: PlanRecord,
+}
+
 /// In-app preview of a generated artifact file (see `read_artifact_preview`).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

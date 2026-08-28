@@ -241,6 +241,7 @@ pub fn delete_chat_session(
     db: State<DbState>,
     agent_state: State<crate::agent_sessions::AgentSessionState>,
     chat_state: State<'_, crate::ChatState>,
+    plan_state: State<'_, crate::chat::plan::PlanState>,
 ) -> CmdResult<()> {
     // Kill any harness process still backing this chat and drop its state,
     // including the persisted CLI session ids used for cross-turn resume.
@@ -251,6 +252,8 @@ pub fn delete_chat_session(
     // which releases a harness reader thread blocked on can_use_tool.
     chat_state.0.cancel(&chat_session_id);
     chat_state.0.invalidate_context_tokens(&chat_session_id);
+    // Drop the session's plan state (todos, plan mode, pending feedback).
+    plan_state.clear_session(&chat_session_id);
     let conn = db.0.lock();
     for harness in ["claude_code", "kimi_code", "opencode"] {
         let _ = db::delete_setting(
@@ -1284,7 +1287,7 @@ pub async fn send_chat_message(
     let content = format!("{content}{extra_text}");
     let chat_mgr = &chat_state.0;
     // 1. Look up the session — provider/model/permission policies for this turn.
-    let (provider_str, model_str, sandbox_str, approval_str) = {
+    let (provider_str, model_str, sandbox_str, approval_str, mode_label) = {
         let conn = db.0.lock();
         let cs = db::get_chat_session(&conn, &chat_session_id)
             .map_err(|e| e.to_string())?
@@ -1294,6 +1297,7 @@ pub async fn send_chat_message(
             cs.model,
             cs.sandbox_policy,
             cs.approval_policy,
+            cs.permission_mode,
         )
     };
     let sandbox = crate::chat::permission::SandboxPolicy::from_db(&sandbox_str);
@@ -1619,6 +1623,16 @@ pub async fn send_chat_message(
     // (provider/model-aware, always included) comes first, then the user's
     // custom prompt + skills (global, provider-independent settings), plus
     // built-in tool guidance.
+    // Plan mode seeds from the persisted row label ("plan" on permission_mode)
+    // so it survives app restarts; the in-memory PlanState flag is what the
+    // dispatch gate reads per tool call. set_plan_mode no-ops (and emits
+    // nothing) when the flag already matches.
+    let session_plan_mode = {
+        let plan_state = app.state::<crate::chat::plan::PlanState>();
+        let persisted = mode_label == "plan";
+        plan_state.set_plan_mode(Some(&app), &chat_session_id, persisted, "restored from session", &mode_label);
+        tools_on && plan_state.plan_mode(&chat_session_id)
+    };
     let (mut system, prompt_audit) = {
         let conn = db.0.lock();
         let custom = db::get_setting(&conn, "assistant.systemPrompt")
@@ -1631,6 +1645,7 @@ pub async fn send_chat_message(
             &skills,
             tools_on,
             research_mode,
+            session_plan_mode,
             manifest.as_deref(),
         );
         // [prompt-audit] inputs captured before `custom`/`skills` are consumed.
@@ -1935,6 +1950,24 @@ pub async fn send_chat_message(
             .to_string_lossy()
             .to_string(),
     );
+    // Directories the user granted from an approval card ("always allow" on an
+    // out-of-scope path — resolve_tool_action persists them). Without merging
+    // these here, a remembered choice kept hitting the hard scope gate.
+    {
+        let granted: Vec<String> = {
+            let conn = shared_db.lock();
+            db::get_setting(&conn, "permissions.grantedRoots")
+                .ok()
+                .flatten()
+                .and_then(|j| serde_json::from_str(&j).unwrap_or_default())
+                .unwrap_or_default()
+        };
+        for root in granted {
+            if !fs_roots.iter().any(|r| r.eq_ignore_ascii_case(&root)) {
+                fs_roots.push(root);
+            }
+        }
+    }
     // The chat's working folder — a custom folder from the composer picker,
     // or the selected project's path (the frontend sends both through this
     // param). Granted as an additional root for this turn (deduped against
@@ -2141,6 +2174,7 @@ pub(crate) async fn run_prompt_warmup(
         custom.as_deref(),
         &[],
         tools_on,
+        false,
         false,
         manifest.as_deref(),
     )
@@ -2434,18 +2468,133 @@ pub fn persist_partial_chat_message(
 /// does the execution (it paused on the matching oneshot), so this command only
 /// delivers the decision. Unknown / already-resolved `pending_id` is a no-op
 /// (the card may have been auto-dismissed when the stream was cancelled).
+/// Persist the target's parent directory as a user-granted root when an
+/// approval is remembered ("always allow"). Without this, a remembered rule
+/// auto-ran the NEXT call past the card — straight into the hard scope gate,
+/// which refuses out-of-root writes: the remembered choice turned the write
+/// into an error. Granting the directory makes the choice actually stick
+/// (and gives Full Auto sessions a real root for out-of-project work).
+fn grant_directory_for_approved_tool(
+    conn: &rusqlite::Connection,
+    tool: &str,
+    args: &serde_json::Value,
+) {
+    use crate::chat::tools;
+    let mutating = matches!(
+        tool,
+        tools::WRITE_FILE | tools::EDIT_FILE | tools::DELETE_FILE
+            | tools::MOVE_FILE | tools::COPY_FILE | tools::DOWNLOAD_FILE
+    );
+    if !mutating {
+        return;
+    }
+    let target = crate::chat::dispatch::fs_target_path(tool, args);
+    if target.is_empty() {
+        return;
+    }
+    let path = std::path::Path::new(&target);
+    let Some(dir) = path.parent() else { return };
+    let dir = dir.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+    // Only absolute paths have a stable root to grant.
+    if dir.is_empty() || !path.is_absolute() {
+        return;
+    }
+    let mut roots: Vec<String> = db::get_setting(conn, "permissions.grantedRoots")
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str(&j).unwrap_or_default())
+        .unwrap_or_default();
+    if roots.iter().any(|r| r.eq_ignore_ascii_case(&dir)) {
+        return;
+    }
+    roots.push(dir);
+    let _ = db::set_setting(
+        conn,
+        "permissions.grantedRoots",
+        &serde_json::to_string(&roots).unwrap_or_default(),
+    );
+}
+
 #[tauri::command]
 pub fn resolve_tool_action(
     pending_id: String,
     approved: bool,
     chat_state: State<'_, crate::ChatState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<()> {
     if let Some(pending) = chat_state.0.take_pending_approval(&pending_id) {
+        if approved {
+            // "Always allow" on an out-of-scope path can only ever work if the
+            // directory itself becomes granted — persist it now.
+            grant_directory_for_approved_tool(&db.0.lock(), &pending.tool, &pending.args);
+        }
         // The receiver end lives in the paused tool loop. A send error means
         // the loop already ended (stream cancelled) — ignore it.
         let _ = pending.response_tx.send(approved);
     }
     Ok(())
+}
+
+/// Resolve a `present_plan` proposal card. Same pause/resume contract as
+/// `resolve_tool_action`, plus the rejection feedback: the text is stored in
+/// PlanState BEFORE the oneshot is released (store-then-send ordering), so
+/// the paused `present_plan` handler reads it right after waking. Unknown /
+/// already-resolved `pending_id` is a no-op (card auto-dismissed on cancel).
+#[tauri::command]
+pub fn resolve_plan_proposal(
+    pending_id: String,
+    approved: bool,
+    feedback: Option<String>,
+    chat_state: State<'_, crate::ChatState>,
+    plan_state: State<'_, crate::chat::plan::PlanState>,
+) -> CmdResult<()> {
+    if let Some(pending) = chat_state.0.take_pending_approval(&pending_id) {
+        if let Some(f) = feedback.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+            plan_state.store_feedback(&pending_id, f);
+        }
+        let _ = pending.response_tx.send(approved);
+    }
+    Ok(())
+}
+
+/// Enter or exit plan mode for a chat session from the composer's mode menu.
+/// Writes the persisted label ("plan" on permission_mode; the posture label
+/// derived from the untouched dual policies on exit), syncs the in-memory
+/// gate flag, and emits `chat:plan-mode` so every window's mode selector
+/// agrees. Exiting restores the policies the session already had — plan mode
+/// never modified them.
+#[tauri::command]
+pub fn set_chat_session_plan_mode(
+    chat_session_id: String,
+    active: bool,
+    db: State<'_, DbState>,
+    plan_state: State<'_, crate::chat::plan::PlanState>,
+    app: AppHandle,
+) -> CmdResult<()> {
+    // Persist first so the emitted event's label matches the stored row.
+    let label = {
+        let conn = db.0.lock();
+        crate::db::set_chat_session_plan(&conn, &chat_session_id, active).map_err(|e| e.to_string())?
+    };
+    plan_state.set_plan_mode(Some(&app), &chat_session_id, active, if active { "user enabled plan mode" } else { "user disabled plan mode" }, &label);
+    Ok(())
+}
+
+/// Set a HARNESS session's native permission mode (the mode menu shows the
+/// harness's own postures — e.g. OpenCode build/plan, Claude Code
+/// default/acceptEdits/plan/bypassPermissions — instead of our built-in
+/// ones). Persists the label on permission_mode; the harness spawn reads it
+/// per turn and maps it to the CLI's own flags. Built-in sessions go through
+/// `update_chat_session_policies` / `set_chat_session_plan_mode` instead.
+#[tauri::command]
+pub fn set_chat_session_permission_mode(
+    chat_session_id: String,
+    mode: String,
+    db: State<'_, DbState>,
+) -> CmdResult<()> {
+    let conn = db.0.lock();
+    db::update_chat_session_permission_mode(&conn, &chat_session_id, &mode)
+        .map_err(|e| e.to_string())
 }
 
 // ---- Artifact preview ----
@@ -3742,6 +3891,7 @@ pub async fn count_context_tokens(
             &[],
             true,
             false,
+            false,
             manifest.as_deref(),
         )
         .unwrap_or_default()
@@ -3871,6 +4021,7 @@ pub async fn count_context_breakdown(
             custom.as_deref(),
             &[],
             true,
+            false,
             false,
             manifest.as_deref(),
         )

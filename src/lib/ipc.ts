@@ -789,6 +789,65 @@ export interface PlanStepProgressPayload {
   toolCall: string | null;
 }
 
+// ---- Structured plan tracking (todo_write / enter_plan_mode / present_plan) ----
+
+/** One item of the model-declared task list. Same shape on the wire for the
+ *  `todo_write` tool input, `present_plan` proposals, and every plan event. */
+export interface PlanTodo {
+  content: string;
+  /** "pending" | "in_progress" | "completed" */
+  status: "pending" | "in_progress" | "completed";
+  /** Present-continuous label shown while the step runs ("Writing parser"). */
+  activeForm?: string | null;
+}
+
+/** The model's authoritative task list for a session, pushed as
+ *  `chat:plan-updated` on every todo_write call and after a plan approval. */
+export interface ChatPlanUpdatedPayload {
+  chatSessionId: string;
+  todos: PlanTodo[];
+}
+
+/** Plan mode flipped on/off for a session (`chat:plan-mode`) — from the
+ *  mode menu, the model's `enter_plan_mode` call, or a plan approval.
+ *  `label` is the session's permissionMode AFTER the transition ("plan" when
+ *  active; otherwise the restored posture label). */
+export interface ChatPlanModePayload {
+  chatSessionId: string;
+  active: boolean;
+  reason?: string | null;
+  label: string;
+}
+
+/** An APPROVED plan — the approach document the model presented via
+ *  present_plan and the user accepted. Listed in the sidebar Plans section;
+ *  execution steps live separately in the todo list (Progress). */
+export interface ChatPlanRecord {
+  id: string;
+  title: string;
+  /** The full plan markdown. */
+  content: string;
+  approvedAt: number;
+}
+
+/** A `present_plan` proposal awaiting the user's decision
+ *  (`chat:plan-proposal`). Resolved via `resolvePlanProposal`. */
+export interface ChatPlanProposalPayload {
+  chatSessionId: string;
+  pendingId: string;
+  /** Short heading for the card. */
+  title: string;
+  /** The plan markdown (the approach — NOT a step checklist). */
+  plan: string;
+}
+
+/** Emitted when the user approves a plan proposal — appends to the session's
+ *  Plans list in the sidebar. */
+export interface ChatPlanAcceptedPayload {
+  chatSessionId: string;
+  plan: ChatPlanRecord;
+}
+
 /** A persisted artifact in the sidebar library (30-day retention). */
 export interface ArtifactRecord {
   id: string;
@@ -1278,6 +1337,18 @@ export const sendChatMessage = (
     thinking: thinking ?? null,
     extraFsRoot: extraFsRoot ?? null,
   });
+
+/** Enter or exit plan mode for a chat session (the "Plan" posture in the
+ *  mode menu). Persists the label on the session row and syncs the live
+ *  gate; exiting restores the posture the session had before planning. */
+export const setChatSessionPlanMode = (chatSessionId: string, active: boolean) =>
+  safeInvoke<void>("set_chat_session_plan_mode", { chatSessionId, active });
+
+/** Set a HARNESS session's native permission mode (the harness's own
+ *  postures — OpenCode build/plan, Claude Code default/acceptEdits/plan/
+ *  bypassPermissions). The harness spawn maps it to CLI flags per turn. */
+export const setChatSessionPermissionMode = (chatSessionId: string, mode: string) =>
+  safeInvoke<void>("set_chat_session_permission_mode", { chatSessionId, mode });
 export const updateChatSessionModel = (chatSessionId: string, model: string) =>
   safeInvoke<void>("update_chat_session_model", { chatSessionId, model });
 
@@ -1689,6 +1760,27 @@ export const listenChatApprovalResolved = (handler: (payload: ChatApprovalResolv
 
 export const listenPlanStepProgress = (handler: (payload: PlanStepProgressPayload) => void) =>
   safeListen<PlanStepProgressPayload>("chat:plan-step-progress", handler);
+
+// ---- Structured plan tracking ----
+
+export const listenPlanUpdated = (handler: (payload: ChatPlanUpdatedPayload) => void) =>
+  safeListen<ChatPlanUpdatedPayload>("chat:plan-updated", handler);
+export const listenPlanMode = (handler: (payload: ChatPlanModePayload) => void) =>
+  safeListen<ChatPlanModePayload>("chat:plan-mode", handler);
+export const listenPlanProposal = (handler: (payload: ChatPlanProposalPayload) => void) =>
+  safeListen<ChatPlanProposalPayload>("chat:plan-proposal", handler);
+export const listenPlanAccepted = (handler: (payload: ChatPlanAcceptedPayload) => void) =>
+  safeListen<ChatPlanAcceptedPayload>("chat:plan-accepted", handler);
+
+/** Resolve a `present_plan` proposal card. `approved` seeds the todo list,
+ *  unlocks mutations and exits plan mode; `false` returns `feedback` to the
+ *  model so it revises the plan. */
+export const resolvePlanProposal = (pendingId: string, approved: boolean, feedback?: string) =>
+  safeInvoke<void>("resolve_plan_proposal", {
+    pendingId,
+    approved,
+    feedback: feedback ?? null,
+  });
 
 // ---- Subagent events ----
 

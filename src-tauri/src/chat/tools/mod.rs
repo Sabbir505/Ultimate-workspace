@@ -93,6 +93,24 @@ pub const GET_TASK_STATUS: &str = "get_task_status";
 /// started in this session.
 pub const CANCEL_TASK: &str = "cancel_task";
 
+// ---- Structured plan tracking ----
+//
+// Session-state tools dispatched in chat/plan.rs (NOT via execute_tool — they
+// need PlanState +, for present_plan, the approval oneshot). The todo list is
+// the model-declared progress state the UI renders; plan mode gates mutations
+// behind an approved plan. Dispatched before every other tool family in
+// run_tool, and never permission-gated (they change no user data).
+
+/// Rewrite the model's whole task list for the session. The authoritative
+/// progress state — the UI renders it as a live checklist.
+pub const TODO_WRITE: &str = "todo_write";
+/// Model-initiated plan mode: flips the session read-only so the model can
+/// research, then propose a plan for approval.
+pub const ENTER_PLAN_MODE: &str = "enter_plan_mode";
+/// Propose the plan as an approval card; the turn pauses until the user
+/// approves (unlocks mutations) or rejects with feedback.
+pub const PRESENT_PLAN: &str = "present_plan";
+
 // ---- Research source ledger ----
 //
 // Tools the model calls during a research turn to record what it learns. They
@@ -528,6 +546,99 @@ const RESET_SOURCE_LEDGER_DESC: &str = "Clear every source note recorded for thi
     chat session. Call this at the START of each new research task so a fresh \
     question begins from a clean ledger (notes from a previous, unrelated question \
     are discarded).";
+
+const TODO_WRITE_DESC: &str = "Create or update your task list for the current \
+    task. Use it for any multi-step work (2+ distinct steps or files); skip it \
+    for trivial single-step answers. Rules: rewrite the WHOLE list on every \
+    call (it replaces the previous one); at most one item in_progress at a \
+    time; mark an item completed IMMEDIATELY after finishing it, not in \
+    batches; revise the list whenever scope changes. The list is rendered to \
+    the user as a live progress tracker — do not repeat it in your reply.";
+
+const ENTER_PLAN_MODE_DESC: &str = "Switch this session into plan mode before \
+    starting complex or risky work: multiple files/steps, ambiguous \
+    requirements, or hard-to-reverse actions (deletes, moves, migrations, \
+    shell commands). In plan mode you research with read-only tools (file \
+    reads, search, web) — mutating tools are blocked until the user approves a \
+    plan via present_plan. Do NOT use it for quick questions, single-file \
+    tweaks, or pure research; and if you have ALREADY started making changes, \
+    keep going and track progress with todo_write instead.";
+
+const PRESENT_PLAN_DESC: &str = "Present your PLAN for the user's approval \
+    (plan mode only). `plan` is the detailed APPROACH in markdown — what \
+    you'll change, how, and how you'll verify — NOT a step checklist. Shown \
+    as an approval card; the turn pauses until the user decides. Approved: \
+    plan mode exits, then break the plan into concrete steps with todo_write \
+    and execute. Rejected: the result contains the user's feedback — revise \
+    and present again. Call it BEFORE making any changes, never after work \
+    has started. Do NOT also write the plan out in your reply — the card \
+    renders it; a one-line acknowledgment is enough.";
+
+/// Shared `items` array schema for todo_write (required) and present_plan
+/// (optional-present — the handler falls back to the current list). `required`
+/// controls whether `items` sits in the schema's `required` array.
+fn todo_items_parameters(required: bool) -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "description": "The FULL step list — every call rewrites the whole list.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "Short imperative step label, e.g. \"Write the parser module\"."
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["pending", "in_progress", "completed"],
+                            "description": "Defaults to pending."
+                        },
+                        "active_form": {
+                            "type": "string",
+                            "description": "Present-continuous label shown while this step runs, e.g. \"Writing parser\"."
+                        }
+                    },
+                    "required": ["content"]
+                }
+            }
+        },
+        "required": if required { vec!["items"] } else { vec![] }
+    })
+}
+
+fn enter_plan_mode_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "reason": {
+                "type": "string",
+                "description": "One line on why this task needs an approved plan."
+            }
+        }
+    })
+}
+
+/// present_plan's schema: the plan is an approach DOCUMENT (markdown), not a
+/// step list — steps come later via todo_write, after approval.
+fn plan_text_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "plan": {
+                "type": "string",
+                "description": "The detailed approach as markdown: what you'll change, how, key files/components, and how you'll verify. Design, not a step checklist."
+            },
+            "title": {
+                "type": "string",
+                "description": "Short heading for the approval card. Defaults to the plan's first heading/line."
+            }
+        },
+        "required": ["plan"]
+    })
+}
 
 /// Run a blocking (sync, unbounded-walk) tool implementation on the dedicated
 /// blocking pool instead of the async runtime. A JoinHandle panic surfaces as

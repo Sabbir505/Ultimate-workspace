@@ -1,5 +1,7 @@
 # Conduit — Grounded Audit Log
 
+> **Naming note:** This document refers to the project as "Conduit" because it was written before the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The audit findings still apply; the name has not. See `README.md` and `AI CONTEXT/RELEASE.md` for the current naming.
+
 All findings grounded in actual code/config (`file:line`), not framework assumptions.
 Verdicts: **proved** / **no-issue** / **weak** / **N/A**
 Severity: critical / high / medium / low / info

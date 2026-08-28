@@ -39,6 +39,11 @@ import {
   updateChatSessionPolicies,
   updateChatSessionWatchMode,
   resolveToolAction,
+  resolvePlanProposal,
+  setChatSessionPlanMode,
+  setChatSessionPermissionMode,
+  type ChatPlanAcceptedPayload,
+  type ChatPlanRecord,
   ensureChatSessionWorktree,
   setChatSessionWorktree,
   getSetting,
@@ -50,15 +55,19 @@ import {
   type ChatConfigPayload,
   type ChatMessageRecord,
   type ChatPerfPayload,
+  type ChatPlanModePayload,
+  type ChatPlanProposalPayload,
+  type ChatPlanUpdatedPayload,
   type ChatSession,
   type ChatSessionMetricsPayload,
   type ChatTaskProgressPayload,
+  type PlanTodo,
   type SubagentInfo,
   type SubagentSpawnPayload,
   type SubagentTokenPayload,
   type SubagentDonePayload,
 } from "../lib/ipc";
-export type { ArtifactProposal } from "../lib/ipc";
+export type { ArtifactProposal, PlanTodo } from "../lib/ipc";
 import type { ArtifactProposal } from "../lib/ipc";
 import { generateSessionTitle } from "../lib/sessionTitle";
 import { tailCodePoints } from "../lib/safeSlice";
@@ -241,8 +250,59 @@ export const permissionModeToPolicies = (
   }
 };
 
-/** Tool permission mode for chat sessions. */
-export type PermissionMode = "read_only" | "manual" | "auto_edit" | "full_auto";
+/** Tool permission mode for chat sessions. "plan" is the plan-mode posture:
+ *  the model must propose a plan via `present_plan` and the user approves
+ *  before any mutation; the session's real policies are preserved underneath
+ *  and resume when the plan is approved (or the mode is switched off). */
+export type PermissionMode = "read_only" | "plan" | "manual" | "auto_edit" | "full_auto";
+
+/** A CLI harness's OWN permission postures. Harness sessions show these in
+ *  the mode menu instead of the built-in ones — no mapping, the harness's
+ *  native contract is what the user sees (and what the spawn passes to the
+ *  CLI, e.g. `claude --permission-mode plan` / `opencode run --mode plan`). */
+export interface HarnessModeOption {
+  value: string;
+  label: string;
+  description: string;
+}
+
+export const HARNESS_PERMISSION_MODES: Record<string, HarnessModeOption[] | undefined> = {
+  claude_code: [
+    {
+      value: "default",
+      label: "Default",
+      description: "Claude asks before each mutating action.",
+    },
+    {
+      value: "acceptEdits",
+      label: "Accept Edits",
+      description: "File edits auto-run; other actions still ask.",
+    },
+    {
+      value: "plan",
+      label: "Plan",
+      description: "Claude's read-only planning mode — no changes until switched out.",
+    },
+    {
+      value: "bypassPermissions",
+      label: "Bypass",
+      description: "Claude runs everything without asking.",
+    },
+  ],
+  opencode: [
+    {
+      value: "build",
+      label: "Build",
+      description: "Full agent — reads and writes.",
+    },
+    {
+      value: "plan",
+      label: "Plan",
+      description: "OpenCode's read-only planning mode — no changes.",
+    },
+  ],
+  // kimi_code: prompt-mode runs auto-approve tool calls; no posture to pick.
+};
 
 
 /** A pending tool-approval card, one per chat session (the tool loop — or
@@ -252,6 +312,16 @@ export interface PendingApproval {
   tool: string;
   summary: string;
   args: unknown;
+}
+
+/** A pending `present_plan` proposal — the plan-approval card. One per chat
+ *  session; the turn pauses until the user approves or rejects with feedback.
+ *  The plan is the APPROACH DOCUMENT (markdown) — steps come after approval
+ *  via the model's todo_write calls. */
+export interface PendingPlanProposal {
+  pendingId: string;
+  title: string;
+  plan: string;
 }
 
 /** Live progress of a background chat task (download_file / run_shell),
@@ -392,6 +462,14 @@ function clearSessionState(s: ChatState, chatSessionId: string): Partial<ChatSta
   delete tasks[chatSessionId];
   const planSteps = { ...s.planSteps };
   delete planSteps[chatSessionId];
+  const sessionTodos = { ...s.sessionTodos };
+  delete sessionTodos[chatSessionId];
+  const planMode = { ...s.planMode };
+  delete planMode[chatSessionId];
+  const pendingPlanProposals = { ...s.pendingPlanProposals };
+  delete pendingPlanProposals[chatSessionId];
+  const sessionPlans = { ...s.sessionPlans };
+  delete sessionPlans[chatSessionId];
   const subagents = { ...s.subagents };
   delete subagents[chatSessionId];
   const livePerf = { ...s.livePerf };
@@ -423,6 +501,10 @@ function clearSessionState(s: ChatState, chatSessionId: string): Partial<ChatSta
     messageQueue,
     tasks,
     planSteps,
+    sessionTodos,
+    planMode,
+    pendingPlanProposals,
+    sessionPlans,
     subagents,
     livePerf,
     sessionMetrics,
@@ -503,6 +585,18 @@ export interface ChatState {
   /** Plan checkpoints extracted from model-generated plans, keyed by
    *  chat session id → steps array. Displayed in Git sidebar Progress. */
   planSteps: Record<string, PlanStep[]>;
+  /** The model's authoritative todo list (todo_write), keyed by session id.
+   *  Rendered as the live plan checklist card; also synced into planSteps
+   *  (source "todo_write") so the sidebar stays consistent. */
+  sessionTodos: Record<string, PlanTodo[]>;
+  /** Plan-mode flag per chat session, mirrored from the backend
+   *  (chat:plan-mode events) and set locally by the composer toggle. */
+  planMode: Record<string, boolean>;
+  /** Pending present_plan proposals per chat session — the approval cards. */
+  pendingPlanProposals: Record<string, PendingPlanProposal>;
+  /** APPROVED plans per chat session (newest first) — the sidebar Plans
+   *  list. Execution steps live in sessionTodos/planSteps (Progress). */
+  sessionPlans: Record<string, ChatPlanRecord[]>;
   /** Active subagents per chat session, keyed by sessionId → subagent id → info.
    *  Updated by chat:subagent-spawn / chat:subagent-tokens / chat:subagent-done. */
   subagents: Record<string, Record<string, SubagentInfo>>;
@@ -716,6 +810,27 @@ export interface ChatState {
   setPlanSteps: (chatSessionId: string, steps: PlanStep[]) => void;
   /** Update a single plan step's status from a backend event or text match. */
   onPlanStepProgress: (chatSessionId: string, stepId: string, status: PlanStep["status"], detail?: string, toolCall?: string) => void;
+  /** Replace the session's authoritative todo list (chat:plan-updated) and
+   *  mirror it into planSteps so the sidebar Progress section agrees. */
+  onPlanUpdated: (payload: ChatPlanUpdatedPayload) => void;
+  /** Plan-mode flag flipped (chat:plan-mode, or the composer mode menu).
+   *  `label` mirrors the session's persisted permissionMode so the mode
+   *  selector agrees everywhere ("plan" when active, the restored posture
+   *  label when not). */
+  onPlanMode: (payload: ChatPlanModePayload) => void;
+  /** Enter/exit plan mode from the mode menu. Persists via
+   *  set_chat_session_plan_mode and syncs the live gate; exiting restores the
+   *  posture the session had before planning. */
+  setSessionPlanMode: (chatSessionId: string, active: boolean) => Promise<void>;
+  /** Set a HARNESS session's native permission mode (harness-mode menu). */
+  setSessionPermissionMode: (chatSessionId: string, mode: string) => Promise<void>;
+  /** Surface/clear a present_plan proposal card (chat:plan-proposal). */
+  onPlanProposal: (payload: ChatPlanProposalPayload) => void;
+  onPlanProposalResolved: (chatSessionId: string) => void;
+  /** Append an APPROVED plan to the session's Plans list (chat:plan-accepted). */
+  onPlanAccepted: (payload: ChatPlanAcceptedPayload) => void;
+  /** Deliver the user's approve/reject decision to the paused turn. */
+  resolvePlanProposal: (chatSessionId: string, approved: boolean, feedback?: string) => Promise<void>;
   /** Subagent spawn detected — add entry to the store. */
   onSubagentSpawn: (payload: SubagentSpawnPayload) => void;
   /** Subagent token chunk — append to active subagent output. */
@@ -763,6 +878,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   artifactProposals: {},
   tasks: {},
   planSteps: {},
+  sessionTodos: {},
+  planMode: {},
+  pendingPlanProposals: {},
+  sessionPlans: {},
   subagents: {},
   ownerSessionByChatId: {},
   cwdOverrides: {},
@@ -1217,6 +1336,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       pendingApprovals: {},
       tasks: {},
       planSteps: {},
+      sessionTodos: {},
+      planMode: {},
+      pendingPlanProposals: {},
+      sessionPlans: {},
       messageQueue: {},
       cwdOverrides: {},
       sessionProjects: {},
@@ -2343,6 +2466,133 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       return { planSteps: { ...s.planSteps, [chatSessionId]: updated } };
     });
+  },
+
+  setSessionPermissionMode: async (chatSessionId, mode) => {
+    // Optimistic label; the harness spawn reads the persisted row per turn.
+    set((s) => ({
+      sessions: s.sessions.map((sess) =>
+        sess.id === chatSessionId ? { ...sess, permissionMode: mode } : sess,
+      ),
+    }));
+    try {
+      await setChatSessionPermissionMode(chatSessionId, mode);
+    } catch (err) {
+      toastError("Couldn't switch the harness mode", err);
+    }
+  },
+
+  onPlanUpdated: (payload) => {
+    const { chatSessionId, todos } = payload;
+    set((s) => {
+      // The todo list is authoritative when present — mirror it into planSteps
+      // (replacing any todo_write-sourced steps, keeping prose-parsed ones) so
+      // the Git sidebar Progress section renders the same state.
+      const parsed = (s.planSteps[chatSessionId] ?? []).filter((st) => st.source !== "todo_write");
+      const mirrored: PlanStep[] = todos.map((t, i) => ({
+        stepId: `todo-${chatSessionId}-${i}`,
+        label: t.content,
+        status: t.status,
+        source: "todo_write",
+        planIndex: 0,
+        stepIndex: i,
+        completedAt: t.status === "completed" ? Date.now() : undefined,
+      }));
+      return {
+        sessionTodos: { ...s.sessionTodos, [chatSessionId]: todos },
+        planSteps: { ...s.planSteps, [chatSessionId]: [...parsed, ...mirrored] },
+      };
+    });
+  },
+
+  onPlanMode: (payload) => {
+    set((s) => ({
+      planMode: { ...s.planMode, [payload.chatSessionId]: payload.active },
+      // Mirror the persisted label onto the session record so the composer's
+      // mode selector (which reads session.permissionMode) shows "plan" while
+      // active and the restored posture after exit — including when the flip
+      // was model-initiated (enter_plan_mode) or came from an approval.
+      sessions: s.sessions.map((sess) =>
+        sess.id === payload.chatSessionId && payload.label
+          ? { ...sess, permissionMode: payload.label }
+          : sess,
+      ),
+    }));
+  },
+
+  setSessionPlanMode: async (chatSessionId, active) => {
+    const prev = get().planMode[chatSessionId] ?? false;
+    if (prev === active) return;
+    // Optimistic: flip the flag; on entry the label becomes "plan" (on exit
+    // the event carries the restored posture label — local IPC, so the gap
+    // is imperceptible).
+    set((s) => ({
+      planMode: { ...s.planMode, [chatSessionId]: active },
+      sessions: s.sessions.map((sess) =>
+        sess.id === chatSessionId && active
+          ? { ...sess, permissionMode: "plan" }
+          : sess,
+      ),
+    }));
+    try {
+      await setChatSessionPlanMode(chatSessionId, active);
+    } catch (err) {
+      set((s) => ({
+        planMode: { ...s.planMode, [chatSessionId]: prev },
+      }));
+      toastError("Couldn't switch plan mode", err);
+    }
+  },
+
+  onPlanProposal: (payload) => {
+    set((s) => ({
+      pendingPlanProposals: {
+        ...s.pendingPlanProposals,
+        [payload.chatSessionId]: {
+          pendingId: payload.pendingId,
+          title: payload.title,
+          plan: payload.plan,
+        },
+      },
+    }));
+  },
+
+  onPlanAccepted: (payload) => {
+    set((s) => ({
+      sessionPlans: {
+        ...s.sessionPlans,
+        [payload.chatSessionId]: [
+          payload.plan,
+          ...(s.sessionPlans[payload.chatSessionId] ?? []),
+        ],
+      },
+    }));
+  },
+
+  onPlanProposalResolved: (chatSessionId) => {
+    set((s) => {
+      const next = { ...s.pendingPlanProposals };
+      delete next[chatSessionId];
+      return { pendingPlanProposals: next };
+    });
+  },
+
+  resolvePlanProposal: async (chatSessionId, approved, feedback) => {
+    const pending = get().pendingPlanProposals[chatSessionId];
+    if (!pending) return;
+    // Optimistically remove the card (same contract as resolveApproval — the
+    // backend also dismisses via events, but no flicker if the event is slow).
+    get().onPlanProposalResolved(chatSessionId);
+    try {
+      await resolvePlanProposal(pending.pendingId, approved, feedback);
+    } catch (err) {
+      // The turn is still paused on the proposal — restore the card so the
+      // user can retry instead of hanging the turn (mirrors audit M3).
+      set((s) => ({
+        pendingPlanProposals: { ...s.pendingPlanProposals, [chatSessionId]: pending },
+      }));
+      toastError("Couldn't deliver the plan decision", err);
+    }
   },
 
   onSubagentSpawn: (payload) => {

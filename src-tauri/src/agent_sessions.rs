@@ -1447,15 +1447,28 @@ fn spawn_claude(
     // permission prompts to the reader thread over the stdio control protocol
     // (`--permission-prompt-tool stdio` — Claude Code 2.x), where they become
     // the same chat:approval-request cards the built-in chat uses.
-    let (sandbox_str, approval_str) = {
+    let (sandbox_str, approval_str, harness_mode) = {
         let conn = db.0.lock();
         crate::db::get_chat_session(&conn, sid)
             .ok()
             .flatten()
-            .map(|cs| (cs.sandbox_policy, cs.approval_policy))
-            .unwrap_or_else(|| ("workspace_write".to_string(), "on_request".to_string()))
+            .map(|cs| (cs.sandbox_policy, cs.approval_policy, cs.permission_mode))
+            .unwrap_or_else(|| {
+                (
+                    "workspace_write".to_string(),
+                    "on_request".to_string(),
+                    "manual".to_string(),
+                )
+            })
     };
-    let gated = approval_str != "full_access";
+    // Harness-NATIVE mode (mode menu shows Claude Code's own postures when
+    // the session has one selected). Unknown/legacy labels ("manual", "plan"
+    // from the BUILT-IN posture, …) fall through to the policy mapping above.
+    let claude_mode = match harness_mode.as_str() {
+        "default" | "acceptEdits" | "plan" | "bypassPermissions" => Some(harness_mode.clone()),
+        _ => None,
+    };
+    let gated = approval_str != "full_access" && claude_mode.as_deref() != Some("bypassPermissions");
     let mut args: Vec<String> = vec![
         "-p".into(),
         "--input-format".into(),
@@ -1468,6 +1481,12 @@ fn spawn_claude(
     if gated {
         args.push("--permission-prompt-tool".into());
         args.push("stdio".into());
+        // Claude Code's own plan / accept-edits postures — the flag is the
+        // contract; "default" needs no flag.
+        if let Some(m) = claude_mode.as_deref().filter(|m| *m != "default") {
+            args.push("--permission-mode".into());
+            args.push(m.to_string());
+        }
     } else {
         args.push("--dangerously-skip-permissions".into());
     }
@@ -2022,6 +2041,20 @@ fn spawn_per_turn(
             if !entry.model.is_empty() {
                 flags.push("-m".into());
                 flags.push(entry.model.clone());
+            }
+            // Harness-native mode: the session label "plan" selects OpenCode's
+            // read-only planning mode ("build" is the default — no flag).
+            let harness_mode = {
+                let conn = db.0.lock();
+                crate::db::get_chat_session(&conn, sid)
+                    .ok()
+                    .flatten()
+                    .map(|cs| cs.permission_mode)
+                    .unwrap_or_default()
+            };
+            if harness_mode == "plan" {
+                flags.push("--mode".into());
+                flags.push("plan".into());
             }
             // OpenCode: --auto is baked into the wrapper/argv prefix.
             if let Some(id) = &resume {
@@ -3037,25 +3070,55 @@ fn handle_kimi_event(
     }
 }
 
-/// Parse TodoWrite input and emit structured plan-step progress events so
-/// the frontend tracks individual task items (shared by the per-turn and
-/// persistent-server OpenCode paths).
+/// Parse TodoWrite input and emit the FULL normalized todo list as a
+/// `chat:plan-updated` event, so harness sessions (Claude Code etc. — which
+/// do their own planning/task tracking) get the same Progress-list rendering
+/// as the built-in agent. Claude Code rewrites the whole list each call, so
+/// the event replaces the session's list authoritatively. Shared by the
+/// per-turn and persistent-server OpenCode paths.
 fn emit_todowrite_steps(app: Option<&AppHandle>, sid: &str, name: &str, inp: &Value) {
     if !name.eq_ignore_ascii_case("TodoWrite") {
         return;
     }
-    if let Some(todos) = inp.get("todos").and_then(|v| v.as_array()) {
-        for todo in todos {
-            let content = todo.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            let status = todo.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-            if !content.is_empty() {
-                if let Some(app_handle) = app {
-                    crate::chat::tasks::emit_plan_step_progress(
-                        app_handle, sid, content, status, None, None::<&str>,
-                    );
-                }
+    let Some(todos) = inp.get("todos").and_then(|v| v.as_array()) else {
+        return;
+    };
+    let items: Vec<crate::types::PlanTodo> = todos
+        .iter()
+        .filter_map(|todo| {
+            let content = todo.get("content").and_then(|v| v.as_str())?.trim().to_string();
+            if content.is_empty() {
+                return None;
             }
-        }
+            let status = match todo.get("status").and_then(|v| v.as_str()) {
+                Some("completed") => "completed",
+                Some("in_progress") => "in_progress",
+                _ => "pending",
+            };
+            let active_form = todo
+                .get("activeForm")
+                .or_else(|| todo.get("active_form"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty());
+            Some(crate::types::PlanTodo {
+                content,
+                status: status.to_string(),
+                active_form,
+            })
+        })
+        .collect();
+    if items.is_empty() {
+        return;
+    }
+    if let Some(app_handle) = app {
+        let _ = app_handle.emit(
+            "chat:plan-updated",
+            crate::types::ChatPlanUpdatedPayload {
+                chat_session_id: sid.to_string(),
+                todos: items,
+            },
+        );
     }
 }
 

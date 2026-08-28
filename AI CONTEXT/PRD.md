@@ -2,6 +2,8 @@
 ## Codename: Conduit
 ### A local-first, multi-pane desktop shell for AI coding agents
 
+> **Naming note:** This PRD was written under the codename "Conduit". The product was rebranded to "Relay" in user-visible surfaces on 2026-08-27 (commit `e9abc7c3`); the crate, bundle id, and other internal identifiers are still "Conduit" — see `README.md` and `AI CONTEXT/RELEASE.md`. The requirements themselves are unchanged.
+
 **Document purpose:** This PRD is written to be handed to an AI coding agent (Kimi Code CLI / Kimi K3, or Claude Code) as the primary build specification. It should be read top to bottom before any code is written. Where a decision is ambiguous, this document states the default to take rather than leaving it open.
 
 ---

@@ -1,6 +1,6 @@
 # Remote access — pairing your phone to the desktop
 
-Conduit's desktop app runs a **loopback-only** WebSocket relay (`127.0.0.1:<port>`) that the mobile companion app connects to. The phone never holds API keys — every request is proxied through the desktop session.
+Relay's desktop app runs a **loopback-only** WebSocket relay (`127.0.0.1:<port>`) that the mobile companion app connects to. The phone never holds API keys — every request is proxied through the desktop session.
 
 There are two ways to bridge the phone to the loopback relay:
 

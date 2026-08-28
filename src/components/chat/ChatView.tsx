@@ -16,8 +16,9 @@ import { useProjectsStore } from "../../state/projects";
 import { useUiStore } from "../../state/ui";
 import { ChatComposer, type ChatAttachment } from "./ChatComposer";
 import { ApprovalCard, FullAutoConfirmModal } from "./ApprovalFlow";
+import { PlanProposalCard } from "./PlanProposalCard";
 import type { PermissionMode } from "../../state/chat";
-import { permissionModeToPolicies } from "../../state/chat";
+import { HARNESS_PERMISSION_MODES, permissionModeToPolicies } from "../../state/chat";
 import type { ChatPerfPayload } from "../../lib/ipc";
 // TypingIndicator is tiny and eager — imported from its own module so the
 // entry chunk doesn't statically pull in MessageBubble (react-markdown).
@@ -602,16 +603,51 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   const pendingApprovals = useChatStore((s) => s.pendingApprovals);
   const fullAccessConfirmingFor = useChatStore((s) => s.fullAccessConfirmingFor);
   const resolveApproval = useChatStore((s) => s.resolveApproval);
+  // Plan mode + proposal cards (present_plan) + the authoritative todo list.
+  const pendingPlanProposals = useChatStore((s) => s.pendingPlanProposals);
+  const resolvePlanProposalAction = useChatStore((s) => s.resolvePlanProposal);
+  const planModeMap = useChatStore((s) => s.planMode);
+  const toolsEnabled = useChatStore((s) => s.toolsEnabled);
   const confirmFullAccess = useChatStore((s) => s.confirmFullAccess);
   const cancelFullAccessConfirm = useChatStore((s) => s.cancelFullAccessConfirm);
   const setSessionPolicies = useChatStore((s) => s.setSessionPolicies);
+  // Plan mode applies to built-in/local sessions with tools on (harness/ACP
+  // sessions track plans through their own harness todo mechanisms instead).
+  const planModeSupported = !harnessAgent && !acpAgent && toolsEnabled;
+  const setSessionPlanMode = useChatStore((s) => s.setSessionPlanMode);
+  const setSessionPermissionMode = useChatStore((s) => s.setSessionPermissionMode);
+  // CLI-harness sessions get the HARNESS'S OWN postures in the mode menu
+  // (OpenCode build/plan, Claude Code default/acceptEdits/plan/bypass) —
+  // no mapping to our dual policies; the pick rides to the CLI verbatim.
+  const harnessModeOptions = harnessAgent
+    ? HARNESS_PERMISSION_MODES[harnessAgent]
+    : undefined;
   const handlePermissionModeChange = useCallback(
-    (mode: PermissionMode) => {
+    (mode: string) => {
       if (!activeChatSessionId) return;
-      const { sandbox, approval } = permissionModeToPolicies(mode);
+      // Harness session: persist the native mode verbatim; the spawn maps it
+      // to the CLI's own flags (claude --permission-mode, opencode --mode).
+      if (harnessModeOptions) {
+        void setSessionPermissionMode(activeChatSessionId, mode);
+        return;
+      }
+      // "Plan" is a posture of its own: it flips the persisted label + live
+      // gate and PRESERVES the session's dual policies, so approval resumes
+      // exactly the posture that was active before planning.
+      if (mode === "plan") {
+        if (planModeSupported) void setSessionPlanMode(activeChatSessionId, true);
+        return;
+      }
+      // Selecting a real posture while in plan mode also exits plan mode.
+      if (planModeMap[activeChatSessionId]) {
+        void setSessionPlanMode(activeChatSessionId, false);
+      }
+      const { sandbox, approval } = permissionModeToPolicies(
+        mode as Exclude<PermissionMode, "plan">,
+      );
       void setSessionPolicies(activeChatSessionId, sandbox, approval);
     },
-    [activeChatSessionId, setSessionPolicies],
+    [activeChatSessionId, harnessModeOptions, planModeSupported, planModeMap, setSessionPermissionMode, setSessionPlanMode, setSessionPolicies],
   );
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -1470,6 +1506,9 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
               ))}
             </div>
           )}
+          {/* Plan STEPS live in the git sidebar's Progress section (plus the
+              live per-step "Working on" line there) — no duplicate checklist
+              under the chat stream. */}
           {activeChatSessionId && (artifactProposalsBySession[activeChatSessionId]?.some((entry) => entry.proposal.sourceMessageId == null) ?? false) && (
             <div className="artifact-proposals-container">
               {(artifactProposalsBySession[activeChatSessionId] ?? [])
@@ -1604,6 +1643,19 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         </div>
       )}
 
+      {/* present_plan proposal — the model is PAUSED until this is resolved.
+          Approving unlocks mutations; rejecting sends the feedback text back. */}
+      {activeChatSessionId && pendingPlanProposals[activeChatSessionId] && (
+        <div className="composer-approval-wrap">
+          <PlanProposalCard
+            proposal={pendingPlanProposals[activeChatSessionId]}
+            onResolve={(approved, feedback) =>
+              void resolvePlanProposalAction(activeChatSessionId, approved, feedback)
+            }
+          />
+        </div>
+      )}
+
       <ChatComposer
         draft={draft}
         onSend={handleSend}
@@ -1625,12 +1677,13 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         }
         onPermissionModeChange={handlePermissionModeChange}
         permissionModeSupported={
-          // Kimi/OpenCode/ACP headless runs have no approval channel (kimi -p
-          // auto-approves; opencode run can't surface an ask; ACP v1 doesn't
-          // map permissions) — the menu only shows for builtin/local chats
-          // and Claude Code sessions.
-          (!harnessAgent && !acpAgent) || harnessAgent === "claude_code"
+          // Kimi/ACP headless runs have no approval channel — no menu. The
+          // menu shows for builtin/local chats, Claude Code sessions, and any
+          // harness with a native mode catalog (OpenCode build/plan).
+          (!harnessAgent && !acpAgent) || !!harnessModeOptions
         }
+        planAvailable={planModeSupported}
+        modes={harnessModeOptions}
         agentLoading={harnessAgent ? harnessLoading : false}
         effort={effort}
         provider={activeSession?.provider}

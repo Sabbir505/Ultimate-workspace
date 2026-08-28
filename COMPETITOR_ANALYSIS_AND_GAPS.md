@@ -1,4 +1,6 @@
-# Conduit — Competitor Analysis & Gap Report
+# Relay — Competitor Analysis & Gap Report
+
+> **Naming note:** This document refers to the project as "Conduit" because it was written before the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The findings still apply; the name has not. See `README.md` and `AI CONTEXT/RELEASE.md` for the current naming.
 
 > **Date:** 2026-08-14 · **Method:** live web research (primary sources: vendor sites, pricing pages, GitHub READMEs; URLs cited throughout) cross-referenced against a full read of the Conduit source tree. Companion document: `FEATURE_AUDIT_AND_IMPROVEMENTS.md`.
 

@@ -38,6 +38,11 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         openai_fn(ADD_SOURCE_NOTE, ADD_SOURCE_NOTE_DESC, add_source_note_parameters()),
         openai_fn(GET_SOURCE_LEDGER, GET_SOURCE_LEDGER_DESC, no_parameters()),
         openai_fn(RESET_SOURCE_LEDGER, RESET_SOURCE_LEDGER_DESC, no_parameters()),
+        // Plan tracking — always on (session-state tools, not gated by permission
+        // mode; the plan gate, not the schema, decides what's blocked per mode).
+        openai_fn(TODO_WRITE, TODO_WRITE_DESC, todo_items_parameters(true)),
+        openai_fn(ENTER_PLAN_MODE, ENTER_PLAN_MODE_DESC, enter_plan_mode_parameters()),
+        openai_fn(PRESENT_PLAN, PRESENT_PLAN_DESC, plan_text_parameters()),
         // Read-only filesystem tools — present in every mode.
         openai_fn(LIST_DIRECTORY, LIST_DIRECTORY_DESC, list_directory_parameters()),
         openai_fn(READ_FILE, READ_FILE_DESC, read_file_parameters()),
@@ -176,6 +181,10 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
         anthropic_fn(ADD_SOURCE_NOTE, ADD_SOURCE_NOTE_DESC, add_source_note_parameters()),
         anthropic_fn(GET_SOURCE_LEDGER, GET_SOURCE_LEDGER_DESC, no_parameters()),
         anthropic_fn(RESET_SOURCE_LEDGER, RESET_SOURCE_LEDGER_DESC, no_parameters()),
+        // Plan tracking — mirror of the OpenAI builder's block above.
+        anthropic_fn(TODO_WRITE, TODO_WRITE_DESC, todo_items_parameters(true)),
+        anthropic_fn(ENTER_PLAN_MODE, ENTER_PLAN_MODE_DESC, enter_plan_mode_parameters()),
+        anthropic_fn(PRESENT_PLAN, PRESENT_PLAN_DESC, plan_text_parameters()),
         anthropic_fn(LIST_DIRECTORY, LIST_DIRECTORY_DESC, list_directory_parameters()),
         anthropic_fn(READ_FILE, READ_FILE_DESC, read_file_parameters()),
         anthropic_fn(SEARCH_FILES, SEARCH_FILES_DESC, search_files_parameters()),

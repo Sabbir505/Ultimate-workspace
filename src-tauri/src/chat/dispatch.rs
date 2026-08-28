@@ -93,7 +93,11 @@ pub(crate) fn artifacts_dir(app: &AppHandle) -> std::path::PathBuf {
 /// only for the granted-root containment check in `check_permission`. Pulls
 /// `path`/`src`/`dest` from the args; returns "" when none is present (which
 /// `check_permission` treats as outside any root → gated).
-fn fs_target_path(name: &str, args: &Value) -> String {
+/// Resolve a tool's filesystem target (write-side for move/copy, `dest_path`
+/// for downloads, `path` otherwise). `pub(crate)` so the approval-resolution
+/// path in commands.rs can grant the target's directory when the user
+/// remembers a choice.
+pub(crate) fn fs_target_path(name: &str, args: &Value) -> String {
     if name == tools::MOVE_FILE || name == tools::COPY_FILE {
         // For move/copy, the destination is the write-side — check that.
         args.get("dest")
@@ -1060,6 +1064,25 @@ pub(crate) async fn run_tool(
     name: &str,
     args: &Value,
 ) -> String {
+    // Plan-mode gate + plan tools, BEFORE every other family: while a session
+    // is in plan mode every mutating tool is refused (reads stay allowed), and
+    // the three plan tools dispatch here because they need PlanState and — for
+    // present_plan — the shared approval oneshot. Plan mode can only flip
+    // inside these handlers (one turn per session), so one read per call is
+    // authoritative.
+    let plan_mode = {
+        let plan = app.state::<crate::chat::plan::PlanState>();
+        if crate::chat::plan::is_plan_tool(name) {
+            return crate::chat::plan::run_plan_tool(&plan, mgr, app, sid, name, args)
+                .await
+                .unwrap_or_default();
+        }
+        plan.plan_mode(sid)
+    };
+    if let Some(denial) = crate::chat::plan::gate_denial(plan_mode, name) {
+        return denial;
+    }
+
     // Agentic browser tools act on the live browser-pane webview, so they run
     // here (where the AppHandle -> BrowserState is available) rather than in
     // the provider-agnostic execute_tool dispatcher.
@@ -1095,6 +1118,12 @@ pub(crate) async fn run_tool(
     // auto-run under auto_edit/full_auto); Reads auto-run. This reuses the
     // SAME approval oneshot as filesystem tools — no parallel gating mechanism.
     if let Some((idx, kind)) = crate::connectors::find_tool(&caps.attached_connectors, name) {
+        // Vendor tools aren't covered by the name-based plan gate above — a
+        // Write-kind remote tool mutates the connected account, so plan mode
+        // refuses it with the same guidance.
+        if plan_mode && matches!(kind, permission::ConnectorToolKind::Write) {
+            return crate::chat::plan::gate_denial(true, name).unwrap_or_default();
+        }
         let decision = permission::check_connector_permission(sandbox, approval, kind);
         if matches!(decision, permission::PermissionDecision::NeedsApproval) {
             return run_gated_connector_tool(
@@ -1119,6 +1148,10 @@ pub(crate) async fn run_tool(
     // read_only/manual — and the same approval oneshot, so there is exactly
     // one gating UX for every remote tool.
     if let Some((_, entry)) = crate::mcp_gallery::find_tool(&caps.mcp_tools, name) {
+        // Same plan-mode refusal as connector writes (see above).
+        if plan_mode && matches!(entry.kind, permission::ConnectorToolKind::Write) {
+            return crate::chat::plan::gate_denial(true, name).unwrap_or_default();
+        }
         let decision = permission::check_connector_permission(sandbox, approval, entry.kind);
         if matches!(decision, permission::PermissionDecision::NeedsApproval) {
             return run_gated_mcp_tool(mgr, app, sid, entry, args).await;

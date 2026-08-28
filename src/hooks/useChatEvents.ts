@@ -22,6 +22,10 @@ import {
   listenChatToken,
   listenCheckpointCreated,
   listenPlanStepProgress,
+  listenPlanUpdated,
+  listenPlanMode,
+  listenPlanProposal,
+  listenPlanAccepted,
   listenChatPerf,
   listenChatSubagentSpawn,
   listenChatSubagentTokens,
@@ -159,13 +163,17 @@ export function useChatEvents(): void {
       }),
     );
 
-    // Plan step progress from backend — matches against parsed plan steps
-    // via fuzzy label matching. No mobile relay (desktop-only).
+    // Plan step progress from backend — matches against PROSE-PARSED plan
+    // steps only (source "parsed"). Steps from the model's authoritative
+    // todo_write list must never be fuzzy-matched: a "Write src/x.ts" tool
+    // description would wrongly complete whichever step shares two words.
     unlistens.push(
       listenPlanStepProgress(({ chatSessionId, stepLabel, status, detail, toolCall }) => {
         const store = useChatStore.getState();
-        const steps = store.planSteps[chatSessionId];
-        if (!steps) return;
+        const steps = (store.planSteps[chatSessionId] ?? []).filter(
+          (st) => st.source === "parsed",
+        );
+        if (steps.length === 0) return;
         const matched = matchPlanStep(
           { stepLabel, toolCall: toolCall ?? undefined },
           steps,
@@ -179,6 +187,30 @@ export function useChatEvents(): void {
             toolCall ?? undefined,
           );
         }
+      }),
+    );
+
+    // Structured plan tracking: the model's authoritative todo list, the
+    // plan-mode flag, and present_plan proposal cards. No mobile relay
+    // (desktop-only).
+    unlistens.push(
+      listenPlanUpdated((payload) => {
+        useChatStore.getState().onPlanUpdated(payload);
+      }),
+    );
+    unlistens.push(
+      listenPlanMode((payload) => {
+        useChatStore.getState().onPlanMode(payload);
+      }),
+    );
+    unlistens.push(
+      listenPlanProposal((payload) => {
+        useChatStore.getState().onPlanProposal(payload);
+      }),
+    );
+    unlistens.push(
+      listenPlanAccepted((payload) => {
+        useChatStore.getState().onPlanAccepted(payload);
       }),
     );
 

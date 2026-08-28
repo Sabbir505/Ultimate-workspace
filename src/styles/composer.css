@@ -1408,8 +1408,12 @@
 /* --- Composer mode accent (non-default posture) --- */
 /* The composer card stays visually neutral in every posture — no mode
    border or glow. Mode awareness lives ONLY on the permission chip: its
-   label/icon takes the posture color (manual = dim, read_only = gray,
-   auto_edit = amber, full_auto = red). */
+   label/icon takes the posture color (manual = dim, plan = blue,
+   read_only = gray, auto_edit = amber, full_auto = red). */
+.chat-composer-card.composer-mode-plan .permission-mode-trigger.mode-plan,
+.permission-mode-trigger.inline.mode-plan {
+  color: #5aa7f0;
+}
 .chat-composer-card.composer-mode-read_only .permission-mode-trigger.mode-read_only,
 .permission-mode-trigger.inline.mode-read_only {
   color: #9ca3af;

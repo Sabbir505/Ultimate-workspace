@@ -16,6 +16,7 @@ pub mod export;
 pub mod local_models;
 pub mod office;
 pub mod permission;
+pub mod plan;
 pub mod prompts;
 pub mod proto;
 pub mod providers;
@@ -1150,6 +1151,7 @@ mod tests {
             &[],
             true,
             false,
+            false,
             manifest.as_deref(),
         )
         .unwrap();
@@ -1200,6 +1202,7 @@ mod tests {
             &[],
             true,
             true,
+            false,
             None,
         )
         .unwrap();
@@ -1213,6 +1216,7 @@ mod tests {
             &[],
             true,
             false,
+            false,
             None,
         )
         .unwrap();
@@ -1225,6 +1229,7 @@ mod tests {
             &[],
             false,
             true,
+            false,
             None,
         )
         .unwrap();
@@ -1240,6 +1245,7 @@ mod tests {
             &[],
             true,
             true,
+            false,
             None,
         )
         .unwrap();
@@ -1252,6 +1258,7 @@ mod tests {
             &[],
             true,
             true,
+            false,
             None,
         )
         .unwrap();

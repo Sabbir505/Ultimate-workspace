@@ -1,6 +1,13 @@
-# Releasing Conduit (auto-update)
+# Releasing Relay (auto-update)
 
-Conduit ships updates automatically via the Tauri updater plugin. When you publish
+> **Naming.** "Relay" is the user-visible product name (window title, `package.json` name, `tauri.conf.json` `productName`, `<title>`). The Rust crate is still `conduit`; the bundle id is `dev.conduit.app`; the NSIS installer filename is `Conduit_<version>_x64-setup.exe`; the updater signing key file is `.tauri/conduit-update.key`; the mobile app is `Conduit Mobile` (`com.conduit.mobile`); the Windows scheduled-task entry is `ConduitAutomations`. The rebrand was deliberately limited to user-visible surfaces. Each of those still-`Conduit` identifiers has a deliberate reason for not being renamed:
+>
+> - **Crate name + bundle id** — renaming either forces a fresh install on every user (different bundle id = macOS/Windows treats it as a new app).
+> - **NSIS filename + updater key filename** — the `make-latest-json.mjs` script and `.github/workflows/build.yml` both reference the `Conduit_...setup.exe` regex and the `conduit-update.key` secret path. Renaming either breaks update verification for already-installed copies.
+> - **Scheduled-task name** — `ConduitAutomations` is registered in Windows Task Scheduler when the user enables `run while closed`. Renaming the string would orphan the existing registration (the scheduler entry would keep firing the old sidecar, but the new one would never run).
+> - **Mobile app name + bundle id** — App Store / Play Store identifiers are immutable post-launch.
+
+Relay ships updates automatically via the Tauri updater plugin. When you publish
 a new version, every running copy checks GitHub Releases on startup (and every 4
 hours), shows a banner with the changelog, and downloads + installs the update
 with one click.
@@ -26,7 +33,7 @@ and CI handles the rest.
 
 ## Platform
 
-Conduit ships for **Windows (NSIS installer)** only. The installer is built on
+Relay ships for **Windows (NSIS installer)** only. The installer is built on
 `windows-latest` in CI, signed on `ubuntu-latest`, and distributed via GitHub
 Releases.
 
@@ -68,7 +75,7 @@ Pushing the tag triggers `.github/workflows/build.yml`, which:
 Monitor the run at:
 `https://github.com/Sabbir505/Ultimate-workspace/actions`
 
-The moment the release is live, every running Conduit sees it within 4 hours
+The moment the release is live, every running Relay sees it within 4 hours
 (or on their next launch) and shows the update banner.
 
 ### Release notes

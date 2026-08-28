@@ -1,0 +1,25 @@
+stateDiagram-v2
+    [*] --> Red
+
+    state Red {
+        [*] --> Red_On
+        Red_On: Red light on
+        Red_On --> Red_Flash : pedestrian request
+        Red_Flash: Red flashing
+        Red_Flash --> Red_On : pedestrian done
+    }
+    Red --> Green : timer 30s
+
+    state Green {
+        [*] --> Green_On
+        Green_On: Green light on
+    }
+    Green --> Yellow : timer 30s
+
+    state Yellow {
+        [*] --> Yellow_On
+        Yellow_On: Yellow light on
+    }
+    Yellow --> Red : timer 5s
+
+    Red --> [*] : power off

@@ -139,6 +139,7 @@ pub fn run() {
                 agent_sessions::AgentSessionManager::new(),
             )));
             app.manage(TaskState(Arc::new(chat::tasks::TaskManager::new())));
+            app.manage(chat::plan::PlanState::default());
             app.manage(MobileRelayState(Arc::new(mobile::relay::MobileRelayState::new())));
             app.manage(OAuthFlowsState(Arc::new(
                 connectors::oauth::OAuthFlows::default(),
@@ -406,6 +407,9 @@ pub fn run() {
             commands::agent_cmds::list_acp_agents,
             commands::agent_cmds::chat_token_subscribe,
             commands::chat_cmds::resolve_tool_action,
+            commands::chat_cmds::resolve_plan_proposal,
+            commands::chat_cmds::set_chat_session_plan_mode,
+            commands::chat_cmds::set_chat_session_permission_mode,
             commands::chat_cmds::set_chat_api_key,
             commands::chat_cmds::delete_chat_api_key,
             commands::chat_cmds::set_chat_default_model,

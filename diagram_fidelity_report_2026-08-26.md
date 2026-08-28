@@ -1,6 +1,8 @@
-# How Claude Creates Diagrams — and What Conduit Needs to Match That Fidelity
+# How Claude Creates Diagrams — and What Relay Needs to Match That Fidelity
 
 *Research report · 2026-08-26 · no code changes*
+
+> **Naming note:** This document refers to the project as "Conduit" because it was written before the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The findings still apply; the name has not. See `README.md` and `AI CONTEXT/RELEASE.md` for the current naming.
 
 ## 1. How Claude actually does it
 

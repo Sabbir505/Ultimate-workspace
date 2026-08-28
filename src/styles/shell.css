@@ -865,7 +865,14 @@ button.git-sidebar-section-header:hover {
 }
 
 /* ---- Canvas plan view (plan markdown from GitToolsSidebar) ---- */
+/* Fills the tool-panel tab (a flex column with min-height:0) so the BODY
+   scrolls. Without the flex fill the body grew to its natural height and
+   long plans were unreachable below the fold. */
 .canvas-plan-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   border-bottom: 1px solid var(--border);
   margin-bottom: 6px;
 }
@@ -877,6 +884,7 @@ button.git-sidebar-section-header:hover {
   padding: 6px 8px;
   background: var(--surface-solid);
   border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
 .canvas-plan-title {
@@ -886,9 +894,10 @@ button.git-sidebar-section-header:hover {
 }
 
 .canvas-plan-body {
-  padding: 14px 16px;
-  max-height: none;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  padding: 14px 16px;
   background: var(--surface);
   font-size: 13px;
   line-height: 1.7;

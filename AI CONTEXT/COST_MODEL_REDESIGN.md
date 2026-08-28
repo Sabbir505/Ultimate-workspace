@@ -1,5 +1,7 @@
 # Cost Model Redesign (T3-Code parity)
 
+> **Naming note:** This spec was written under the project name "Conduit". The product is "Relay" in user-visible surfaces as of 2026-08-27 (commit `e9abc7c3`); the crate is still `conduit`. See `README.md` and `AI CONTEXT/RELEASE.md`.
+>
 > **Status:** design spec, ready for review.
 > **Author:** Claude (brainstorming pass, 2026-08-08).
 > **Target release:** single PR, after spec sign-off.

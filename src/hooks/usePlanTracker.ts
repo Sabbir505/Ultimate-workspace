@@ -42,6 +42,7 @@ function extractPlanSection(content: string): string | null {
  *  alongside the chat message stream). */
 export function usePlanTracker(): void {
   const planSteps = useChatStore((s) => s.planSteps);
+  const sessionTodos = useChatStore((s) => s.sessionTodos);
   const messages = useChatStore((s) => s.messages);
   const activeSessionId = useChatStore((s) => s.activeChatSessionId);
   const setPlanSteps = useChatStore((s) => s.setPlanSteps);
@@ -57,8 +58,15 @@ export function usePlanTracker(): void {
   const parsedUpToId = useRef<number | null>(null);
   const parsedSessionId = useRef<string | null>(null);
 
+  // FALLBACK ONLY. When the model maintains its authoritative todo list via
+  // `todo_write`, the structured path owns the plan state — prose parsing and
+  // text-marker completion scanning must not run (they'd fight the tool:
+  // regex guesses vs declared statuses).
+  const todosActive = (activeSessionId && (sessionTodos[activeSessionId]?.length ?? 0) > 0) || false;
+
   // Parse new plans from assistant messages
   useEffect(() => {
+    if (todosActive) return;
     if (parsedSessionId.current !== activeSessionId) {
       parsedSessionId.current = activeSessionId;
       parsedUpToId.current = null;
@@ -96,10 +104,11 @@ export function usePlanTracker(): void {
     if (foundNew) {
       setPlanSteps(activeSessionId, allSteps);
     }
-  }, [messages, activeSessionId]);
+  }, [messages, activeSessionId, todosActive]);
 
   // Scan new messages for text-based completion markers
   useEffect(() => {
+    if (todosActive) return;
     if (!activeSessionId) return;
     const steps = planSteps[activeSessionId];
     if (!steps || steps.length === 0) return;
@@ -115,5 +124,5 @@ export function usePlanTracker(): void {
     for (const step of completed) {
       onPlanStepProgress(activeSessionId, step.stepId, "completed", "detected in message");
     }
-  }, [messages, planSteps, activeSessionId]);
+  }, [messages, planSteps, activeSessionId, todosActive]);
 }

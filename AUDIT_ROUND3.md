@@ -1,4 +1,6 @@
-# Conduit — Bug & Performance Audit (Round 3)
+# Relay — Bug & Performance Audit (Round 3)
+
+> **Naming note:** This document refers to the project as "Conduit" because it was written before the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The findings still apply; the name has not. See `README.md` and `AI CONTEXT/RELEASE.md` for the current naming.
 
 **Date:** 2026-08-21 · **Scope:** frontend state/hooks (`src/state`, `src/hooks`, `src/lib/ipc.ts`), component render paths (`src/components`), SQLite layer (`src-tauri/src/db`) + DB-touching backend paths.
 **Method:** parallel deep reads of the hot files; every Critical/High finding below was spot-verified against the working tree before inclusion.

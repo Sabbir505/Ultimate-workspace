@@ -1,0 +1,24 @@
+stateDiagram-v2
+    [*] --> Red
+    
+    Red --> Green : timer expired
+    Green --> Yellow : timer expired
+    Yellow --> Red : timer expired
+    
+    note right of Red
+        Duration: 30s
+        Vehicles: Stop
+        Pedestrians: Walk signal
+    end note
+    
+    note right of Green
+        Duration: 25s
+        Vehicles: Go
+        Pedestrians: Don't walk
+    end note
+    
+    note right of Yellow
+        Duration: 5s
+        Vehicles: Caution
+        Pedestrians: Don't walk
+    end note

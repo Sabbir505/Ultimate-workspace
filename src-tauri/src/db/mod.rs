@@ -805,6 +805,7 @@ pub use chat::{
     mark_branch_superseded, mark_superseded, search_chat_messages,
     chat_worktree_paths,
     remove_chat_session_connector, set_chat_session_connectors,
+    permission_label_from_policies, set_chat_session_plan,
     set_chat_session_project, set_chat_session_starred, set_chat_session_unread,
     set_chat_session_worktree,
     touch_chat_session, update_chat_session_agent, update_chat_session_model,

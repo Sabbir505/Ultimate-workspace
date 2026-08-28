@@ -25,11 +25,33 @@ export function DocxViewer({
   filename: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const naturalPageWidth = useRef(0);
   const [failed, setFailed] = useState(false);
+
+  // docx-preview renders pages at the document's real paper size (Letter ≈
+  // 816px), and its centered .docx-wrapper overflows BOTH pane edges when the
+  // pane is narrower — the left overflow is unreachable via scroll. Scale the
+  // wrapper down to fit the pane width (fit-to-width, never above 100%).
+  // CSS zoom rescales layout, so page stacking and vertical scroll stay right.
+  const fitToWidth = useCallback(() => {
+    const container = containerRef.current;
+    const wrapper = container?.querySelector<HTMLElement>(".docx-wrapper");
+    if (!container || !wrapper) return;
+    if (!naturalPageWidth.current) {
+      wrapper.style.removeProperty("zoom");
+      naturalPageWidth.current =
+        wrapper.querySelector<HTMLElement>("section.docx")?.offsetWidth ?? 0;
+    }
+    if (!naturalPageWidth.current) return;
+    const scale = Math.min(1, (container.clientWidth - 12) / naturalPageWidth.current);
+    if (scale < 0.999) wrapper.style.setProperty("zoom", String(scale));
+    else wrapper.style.removeProperty("zoom");
+  }, []);
 
   const render = useCallback(async () => {
     const container = containerRef.current;
     if (!container) return;
+    naturalPageWidth.current = 0;
     try {
       container.innerHTML = "";
       await renderAsync(dataUriToBuffer(dataUri), container, container, {
@@ -44,16 +66,22 @@ export function DocxViewer({
         renderEndnotes: true,
         experimental: true,
       });
+      fitToWidth();
       setFailed(false);
     } catch (err) {
       console.warn(`[DocxViewer] docx-preview failed for ${filename}`, err);
       setFailed(true);
     }
-  }, [dataUri, filename]);
+  }, [dataUri, filename, fitToWidth]);
 
   useEffect(() => {
     void render();
-  }, [render]);
+    const container = containerRef.current;
+    if (!container) return;
+    const ro = new ResizeObserver(() => fitToWidth());
+    ro.observe(container);
+    return () => ro.disconnect();
+  }, [render, fitToWidth]);
 
   if (failed) {
     return (

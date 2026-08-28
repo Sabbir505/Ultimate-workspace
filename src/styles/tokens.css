@@ -92,6 +92,9 @@
   --doc-fold-light: #383838;
   --doc-fold-dark: #484848;
   --text: #e4e4e4;
+  /* Chat message body text — one step dimmer than --text so long assistant
+     replies don't glare on the dark surface. Rest of the app keeps --text. */
+  --chat-text: #c9c9c9;
   --text-dim: #a0a0a0;
   --accent: #6e706f;
   --accent-soft: rgba(110, 112, 111, 0.16);
@@ -215,6 +218,7 @@
   --doc-fold-light: #e8e8e8;
   --doc-fold-dark: #d0d0d0;
   --text: #1a1a1a;
+  --chat-text: #1a1a1a;
   --text-dim: #6a6a6a;
   --accent: #6e706f;
   --accent-soft: rgba(110, 112, 111, 0.12);

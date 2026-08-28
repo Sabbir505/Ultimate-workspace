@@ -464,6 +464,7 @@ div[data-index]:has(.chat-session-row.menu-open) {
   border-radius: var(--radius);
   font-size: 13px;
   line-height: 1.6;
+  color: var(--chat-text);
   overflow-wrap: break-word;
   word-break: break-word;
   /* body sets user-select: none to keep chrome/buttons non-selectable; let

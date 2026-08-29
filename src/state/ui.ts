@@ -205,6 +205,11 @@ export interface UiState {
   activeTabId: string | null;
   /** Add a tab (spawning a new instance of that kind) and activate it. */
   addTab: (kind: ToolPanelTab, target?: { paneId?: string; subagentId?: string }) => void;
+  /** Open the Agents pane for ONE subagent without stacking duplicate tabs:
+   *  an existing agents tab is re-focused and re-targeted, a new instance is
+   *  only created when none is open. Spawning agents never auto-opens —
+   *  this runs only on an explicit click (chat chip or sidebar row). */
+  openAgentsTab: (subagentId: string) => void;
   /** Open a generated artifact (code/html/image/pdf/markdown/…) as its own
    *  main tab (auto-opens). Dedupes by path: if a matching artifact tab is
    *  already open, just activates it. */
@@ -449,6 +454,38 @@ export const useUiStore = create<UiState>((set) => ({
         toolPanelTab: kind,
         // Opening an agent tab focuses that subagent in the panel.
         ...(kind === "agents" ? { activeSubagentId: target?.subagentId ?? s.activeSubagentId } : {}),
+      };
+    }),
+  // Focus ONE subagent in the Agents pane without stacking tabs: clicking
+  // three agents in a row must re-target the SAME pane, not litter the tab
+  // strip with an instance per click. Reuses an open agents tab when present.
+  openAgentsTab: (subagentId) =>
+    set((s) => {
+      const existing = s.openTabs.find((t) => t.kind === "agents");
+      if (existing) {
+        return {
+          openTabs: s.openTabs.map((t) =>
+            t.instanceId === existing.instanceId ? { ...t, subagentId } : t,
+          ),
+          activeTabId: existing.instanceId,
+          toolPanelTab: "agents",
+          toolPanelCollapsed: false,
+          activeSubagentId: subagentId,
+        };
+      }
+      const instanceId = `t${s.nextTabId}`;
+      const tab: ToolPanelTabInstance = {
+        instanceId,
+        kind: "agents",
+        subagentId,
+      };
+      return {
+        openTabs: [...s.openTabs, tab],
+        nextTabId: s.nextTabId + 1,
+        activeTabId: instanceId,
+        toolPanelTab: "agents",
+        toolPanelCollapsed: false,
+        activeSubagentId: subagentId,
       };
     }),
   // Open a generated code artifact (tsx/jsx/html) as its own tab. If one is

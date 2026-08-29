@@ -128,7 +128,6 @@ export function SubagentPanel() {
   );
   const activeSubagentId = useUiStore((s) => s.activeSubagentId);
   const setActiveSubagentId = useUiStore((s) => s.setActiveSubagentId);
-  const setToolPanelTab = useUiStore((s) => s.addTab);
   const panelRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -148,10 +147,12 @@ export function SubagentPanel() {
     }
   });
 
-  // When subagent is selected, auto-open the Agents tab if somehow not active
+  // When a subagent is selected, make sure the tool panel is actually VISIBLE
+  // (the click sites open/focus the agents tab themselves via openAgentsTab —
+  // this effect must never stack another tab instance on selection changes).
   useEffect(() => {
     if (selectedSub) {
-      setToolPanelTab("agents");
+      useUiStore.getState().setToolPanelCollapsed(false);
     }
   }, [selectedSub?.id]);
 

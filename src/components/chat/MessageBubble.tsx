@@ -390,8 +390,9 @@ type Segment =
 
 /** Split an assistant message into ordered segments: plain markdown text,
  *  `<think>` reasoning blocks, and `<tool>` process cards. A block whose
- *  closing tag hasn't streamed in yet is marked `done: false`. */
-function parseSegments(content: string): Segment[] {
+ *  closing tag hasn't streamed in yet is marked `done: false`. Exported for
+ *  the parallel fan-out regression test (stacked open markers). */
+export function parseSegments(content: string): Segment[] {
   const segs: Segment[] = [];
   let rest = content;
   const tagRe = /<(think|tool)>/;
@@ -408,8 +409,18 @@ function parseSegments(content: string): Segment[] {
     const afterOpen = rest.slice(m.index + m[0].length);
     const close = `</${tag}>`;
     const ci = afterOpen.indexOf(close);
-    const inner = ci === -1 ? afterOpen : afterOpen.slice(0, ci);
-    const done = ci !== -1;
+    // Parallel subagent fan-out opens several <tool> markers BACK-TO-BACK
+    // (the pre-pass emits every Task's opener before any tool completes), so
+    // a repeated opener can arrive before the closing tag. Treat the next
+    // opener as the end of THIS segment — still unterminated (done: false) —
+    // instead of swallowing the whole run into one inner blob whose JSON
+    // parse fails and renders a phantom "working…" row. Tool-marker content
+    // is sanitizer-escaped, so a real opener inside `inner` can't false-hit;
+    // `<think>` never stacks, so the split stays tool-only.
+    const ni = tag === "tool" ? afterOpen.indexOf("<tool>") : -1;
+    const end = ci === -1 ? ni : ni === -1 ? ci : Math.min(ci, ni);
+    const inner = end === -1 ? afterOpen : afterOpen.slice(0, end);
+    const done = end !== -1 && end === ci;
 
     if (tag === "think") {
       segs.push({ type: "think", text: inner.trim(), done });
@@ -423,8 +434,11 @@ function parseSegments(content: string): Segment[] {
       segs.push({ type: "tool", data, done });
     }
 
-    if (ci === -1) break;
-    rest = afterOpen.slice(ci + close.length);
+    if (end === -1) break;
+    rest =
+      end === ci
+        ? afterOpen.slice(ci + close.length)
+        : afterOpen.slice(end);
   }
   return segs;
 }
@@ -679,8 +693,8 @@ function ActivityStepRow({
         list.find((x) => x.task === task) ??
         list.find((x) => x.role === role && x.status === "running");
       if (match) {
-        useUiStore.getState().setActiveSubagentId(match.id);
-        useUiStore.getState().addTab("agents");
+        // Opens exactly THIS agent; reuses the Agents pane (no tab spam).
+        useUiStore.getState().openAgentsTab(match.id);
       }
     };
     return (

@@ -59,7 +59,8 @@ export function GitToolsSidebar() {
   const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
   const openPlanTab = useUiStore((s) => s.openPlanTab);
   const setPlanCanvas = useUiStore((s) => s.setPlanCanvas);
-  const setActiveSubagentId = useUiStore((s) => s.setActiveSubagentId);
+  // Click-to-open ONE agent in the right pane (reuses the pane, no tab spam).
+  const openAgentsTab = useUiStore((s) => s.openAgentsTab);
   const gitSidebarCollapsed = useUiStore((s) => s.gitSidebarCollapsed);
   const toggleGitSidebar = useUiStore((s) => s.toggleGitSidebar);
   const setModalOpen = useUiStore((s) => s.setModalOpen);
@@ -501,10 +502,7 @@ export function GitToolsSidebar() {
                 <button
                   key={sub.id}
                   className={`git-sidebar-agent-row${sub.status === "running" ? " running" : ""}`}
-                  onClick={() => {
-                    setActiveSubagentId(sub.id);
-                    addTab("agents");
-                  }}
+                  onClick={() => openAgentsTab(sub.id)}
                   title={sub.task}
                 >
                   <svg className="git-sidebar-agent-icon" width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">

@@ -944,86 +944,152 @@
   background: var(--bg-tint);
 }
 
-/* Message queue — messages stacked while a turn is running, shown above the
-   composer card, oldest on top (FIFO). */
+/* Message queue — the notch stack above the composer card (Cursor-style).
+   One row per queued message: grip (drag to reorder), expandable text,
+   ↥ Steer (send now), pencil (edit), trash (delete). Rows sit flush on top
+   of the composer card like the plan/approval notches. */
 .composer-queue {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
   margin-bottom: 6px;
 }
-.composer-queue-item {
+.composer-queue-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px;
+  padding: 7px 8px 7px 6px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--surface-glass);
   backdrop-filter: blur(20px) saturate(140%);
   -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: 0 4px 16px -10px rgba(0, 0, 0, 0.5);
   font-size: 12.5px;
   color: var(--text-dim);
+  transition: border-color 120ms ease, background 120ms ease;
 }
-.composer-queue-index {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent);
-  font-size: 11px;
-  font-weight: 600;
+.composer-queue-row.drag-over {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-glass));
 }
-.composer-queue-text {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text);
-}
-.composer-queue-remove {
+.composer-queue-grip {
   flex: none;
   display: flex;
   align-items: center;
   justify-content: center;
   width: 18px;
-  height: 18px;
+  height: 20px;
+  color: var(--text-dim);
+  opacity: 0.6;
+  cursor: grab;
+}
+.composer-queue-row:hover .composer-queue-grip {
+  opacity: 1;
+}
+.composer-queue-row:active .composer-queue-grip {
+  cursor: grabbing;
+}
+.composer-queue-text {
+  flex: 1;
+  min-width: 0;
   padding: 0;
   border: none;
-  border-radius: 50%;
   background: transparent;
-  color: var(--text-dim);
-  font-size: 14px;
-  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
   cursor: pointer;
 }
-.composer-queue-remove:hover {
-  background: var(--surface-2);
-  color: var(--text);
+.composer-queue-text.expanded {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 140px;
+  overflow-y: auto;
 }
-.composer-queue-header {
+.composer-queue-steer {
+  flex: none;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 4px;
-  border: none;
-  background: transparent;
-  color: var(--text-dim);
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  text-align: left;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
 }
-.composer-queue-header:hover {
+.composer-queue-steer:hover {
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
   color: var(--text);
 }
-.composer-queue-chevron {
-  font-size: 10px;
-  width: 10px;
+.composer-queue-icon-btn {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.composer-queue-icon-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.composer-queue-edit {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.composer-queue-edit-input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12.5px;
+  font-family: inherit;
+  line-height: 1.45;
+  resize: vertical;
+  outline: none;
+}
+.composer-queue-edit-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.composer-queue-btn {
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.composer-queue-btn.primary {
+  background: color-mix(in srgb, var(--accent) 22%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+.composer-queue-btn:hover {
+  filter: brightness(1.12);
 }
 .composer-context-meter-spacer {
   flex: 1;

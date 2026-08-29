@@ -9,7 +9,7 @@
 // inlined into the message.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Mic, Plug, Puzzle, SquareSlash, X } from "lucide-react";
+import { ArrowUpToLine, GripVertical, Mic, Pencil, Plug, Puzzle, SquareSlash, Trash2, X } from "lucide-react";
 import { AgentModelPicker, type AgentModelSelection } from "./AgentModelPicker";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { ArtifactTypeSelector } from "./ArtifactTypeSelector";
@@ -273,6 +273,154 @@ function flattenVoiceText(text: string): string {
 /** Stable empty list for the queue selector (a fresh [] per call would make
  *  every store change re-render the composer). */
 const NO_QUEUED_MESSAGES: import("../../state/chat").QueuedChatMessage[] = [];
+
+/** One stacked queued message in the composer notch (Cursor-style): grip to
+ *  drag-reorder, click the text to expand/collapse it, ↥ Steer sends it
+ *  immediately (interrupting the running turn), the pencil edits it in
+ *  place, the trash drops it. */
+function QueuedMessageRow({
+  message,
+  index,
+  count,
+  onSteer,
+  onEdit,
+  onDelete,
+  onDropFrom,
+}: {
+  message: import("../../state/chat").QueuedChatMessage;
+  index: number;
+  count: number;
+  onSteer: () => void;
+  onEdit: (text: string) => void;
+  onDelete: () => void;
+  /** Drop: another row (source index) was dropped onto THIS row. */
+  onDropFrom: (from: number) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(message.content);
+  const [dragOver, setDragOver] = useState(false);
+
+  const label =
+    message.content ||
+    `${message.attachments?.length ?? 0} attachment${(message.attachments?.length ?? 0) === 1 ? "" : "s"}`;
+
+  const commitEdit = () => {
+    const text = draft.trim();
+    if (text) onEdit(text);
+    setEditing(false);
+  };
+
+  return (
+    <div
+      className={`composer-queue-row${dragOver ? " drag-over" : ""}`}
+      draggable={!editing}
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/conduit-queue-index", String(index));
+      }}
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        if (!dragOver) setDragOver(true);
+      }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragOver(false);
+        const from = Number(e.dataTransfer.getData("text/conduit-queue-index"));
+        if (!Number.isNaN(from) && from !== index) onDropFrom(from);
+      }}
+      onDragEnd={() => setDragOver(false)}
+    >
+      <span
+        className="composer-queue-grip"
+        title="Drag to reorder"
+        aria-hidden="true"
+      >
+        <GripVertical size={12} strokeWidth={2} />
+      </span>
+      {editing ? (
+        <div className="composer-queue-edit">
+          <textarea
+            autoFocus
+            className="composer-queue-edit-input"
+            value={draft}
+            rows={Math.min(6, Math.max(2, draft.split("\n").length))}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                commitEdit();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                setDraft(message.content);
+                setEditing(false);
+              }
+            }}
+          />
+          <div className="composer-queue-edit-actions">
+            <button type="button" className="composer-queue-btn primary" onClick={commitEdit}>
+              Save
+            </button>
+            <button
+              type="button"
+              className="composer-queue-btn"
+              onClick={() => {
+                setDraft(message.content);
+                setEditing(false);
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <button
+            type="button"
+            className={`composer-queue-text${expanded ? " expanded" : ""}`}
+            title={expanded ? "Click to collapse" : "Click to expand"}
+            onClick={() => setExpanded((v) => !v)}
+          >
+            {label}
+          </button>
+          <button
+            type="button"
+            className="composer-queue-steer"
+            title="Send this message now — interrupts the current turn"
+            aria-label={`Steer queued message ${index + 1} of ${count} — send now`}
+            onClick={onSteer}
+          >
+            <ArrowUpToLine size={12} strokeWidth={2.2} aria-hidden="true" />
+            Steer
+          </button>
+          <button
+            type="button"
+            className="composer-queue-icon-btn"
+            title="Edit this message"
+            aria-label="Edit queued message"
+            onClick={() => {
+              setDraft(message.content);
+              setEditing(true);
+            }}
+          >
+            <Pencil size={13} strokeWidth={2} />
+          </button>
+          <button
+            type="button"
+            className="composer-queue-icon-btn"
+            title="Delete this message"
+            aria-label="Delete queued message"
+            onClick={onDelete}
+          >
+            <Trash2 size={13} strokeWidth={2} />
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
 
 /** Notch chip beside the agent selector showing the directory the chat is
  *  working in: the custom folder chosen via the "+" picker when set, else the
@@ -709,9 +857,8 @@ export function ChatComposer({
 
   // Messages stacked while a turn is running (FIFO — the store enqueues on
   // send-during-stream and drains when the turn finishes). Rendered as a
-  // collapsible strip (collapsed by default) above the composer card;
-  // "×" drops one from the queue.
-  const [queueExpanded, setQueueExpanded] = useState(false);
+  // notch stack above the composer card: one row per message with grip
+  // (drag to reorder), expandable text, Steer (send now), Edit and Delete.
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
   // Team broadcast (roadmap #18): the session list + the broadcast action.
   const broadcastSessions = useChatStore((s) => s.sessions);
@@ -722,6 +869,9 @@ export function ChatComposer({
       : NO_QUEUED_MESSAGES,
   );
   const removeQueuedMessage = useChatStore((s) => s.removeQueuedMessage);
+  const steerQueuedMessage = useChatStore((s) => s.steerQueuedMessage);
+  const editQueuedMessage = useChatStore((s) => s.editQueuedMessage);
+  const moveQueuedMessage = useChatStore((s) => s.moveQueuedMessage);
   const setCwdOverride = useChatStore((s) => s.setCwdOverride);
 
   // Open the native (OS) folder dialog so any drive/folder can be picked as
@@ -1827,40 +1977,20 @@ export function ChatComposer({
               </div>
             </div>
           )}
-      {queuedMessages.length > 0 && (
+      {queuedMessages.length > 0 && activeChatSessionId && (
         <div className="composer-queue" aria-label="Queued messages">
-          <button
-            type="button"
-            className="composer-queue-header"
-            onClick={() => setQueueExpanded((v) => !v)}
-            aria-expanded={queueExpanded}
-          >
-            <span className="composer-queue-chevron" aria-hidden="true">
-              {queueExpanded ? "▾" : "▸"}
-            </span>
-            Queued ({queuedMessages.length})
-          </button>
-          {queueExpanded &&
-            queuedMessages.map((m, i) => (
-              <div className="composer-queue-item" key={m.id}>
-                <span className="composer-queue-index">{i + 1}</span>
-                <span className="composer-queue-text" title={m.content}>
-                  {m.content ||
-                    `${m.attachments?.length ?? 0} attachment${(m.attachments?.length ?? 0) === 1 ? "" : "s"}`}
-                </span>
-                <button
-                  type="button"
-                  className="composer-queue-remove"
-                  title="Remove from queue"
-                  aria-label="Remove from queue"
-                  onClick={() =>
-                    activeChatSessionId && removeQueuedMessage(activeChatSessionId, m.id)
-                  }
-                >
-                  ×
-                </button>
-              </div>
-            ))}
+          {queuedMessages.map((m, i) => (
+            <QueuedMessageRow
+              key={m.id}
+              message={m}
+              index={i}
+              count={queuedMessages.length}
+              onSteer={() => void steerQueuedMessage(activeChatSessionId, m.id)}
+              onEdit={(text) => editQueuedMessage(activeChatSessionId, m.id, text)}
+              onDelete={() => removeQueuedMessage(activeChatSessionId, m.id)}
+              onDropFrom={(from) => moveQueuedMessage(activeChatSessionId, from, i)}
+            />
+          ))}
         </div>
       )}
       <div className={`chat-composer-card${modeGlowClass}`}>
@@ -1976,7 +2106,13 @@ export function ChatComposer({
           <textarea
             ref={textareaRef}
             className="chat-composer-textarea"
-            placeholder={agentLocked ? "Ask anything, or select an agent to customize performance…" : "Write a message…  / for skills · @ for apps"}
+            placeholder={
+              streaming
+                ? "keep typing to queue follow-up changes"
+                : agentLocked
+                  ? "Ask anything, or select an agent to customize performance…"
+                  : "Write a message…  / for skills · @ for apps"
+            }
             style={tokenIndent ? { textIndent: tokenIndent + 8 } : undefined}
             value={content}
             onChange={(e) => setContent(e.target.value)}

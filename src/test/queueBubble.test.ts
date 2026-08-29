@@ -144,3 +144,83 @@ describe("queued message bubble", () => {
     expect(msgs.filter((m) => m.content === "first")).toHaveLength(1);
   });
 });
+
+describe("queue stack actions (steer / edit / move / delete)", () => {
+  it("steer interrupts the running turn and sends the picked message NOW", async () => {
+    let resolveSend: () => void = () => {};
+    (sendChatMessage as ReturnType<typeof vi.fn>).mockImplementation(
+      () => new Promise((r) => { resolveSend = r as () => void; }),
+    );
+    void useChatStore.getState().sendMessage("running turn");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(useChatStore.getState().streaming.s1).toBeDefined();
+
+    // Stack two follow-ups while the turn streams.
+    await useChatStore.getState().sendMessage("first queued");
+    await useChatStore.getState().sendMessage("second queued");
+    const queue = useChatStore.getState().messageQueue.s1;
+    expect(queue).toHaveLength(2);
+
+    // STEER the SECOND one: it must jump the stack, the running turn must be
+    // cancelled (streaming cleared), and the first must stay queued.
+    (sendChatMessage as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    const steeredId = queue[1].id;
+    await useChatStore.getState().steerQueuedMessage("s1", steeredId);
+    await new Promise((r) => setTimeout(r, 0));
+    await Promise.resolve();
+
+    const after = useChatStore.getState();
+    // The interrupted turn ended AND the steered message opened a NEW stream.
+    expect(after.streaming.s1).toBeDefined();
+    expect(after.messages.some((m) => m.role === "assistant" && m.content === "running turn")).toBe(false);
+    // The steered message left the queue; the other one is still stacked.
+    expect(after.messageQueue.s1.map((m) => m.content)).toEqual(["first queued"]);
+    // The steered message was SENT (not re-queued).
+    expect(after.messages.some((m) => m.role === "user" && m.content === "second queued")).toBe(true);
+  });
+
+  it("steer without a running turn just sends immediately", async () => {
+    (sendChatMessage as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    useChatStore.setState({
+      messageQueue: {
+        s1: [
+          { id: 11, content: "solo" },
+          { id: 12, content: "stays" },
+        ],
+      },
+    } as never);
+    await useChatStore.getState().steerQueuedMessage("s1", 11);
+    await new Promise((r) => setTimeout(r, 0));
+    await Promise.resolve();
+    const after = useChatStore.getState();
+    expect(after.messageQueue.s1.map((m) => m.content)).toEqual(["stays"]);
+    expect(after.messages.some((m) => m.content === "solo")).toBe(true);
+  });
+
+  it("edit rewrites a queued message's text in place", () => {
+    useChatStore.setState({
+      messageQueue: { s1: [{ id: 21, content: "before" }] },
+    } as never);
+    useChatStore.getState().editQueuedMessage("s1", 21, "after");
+    expect(useChatStore.getState().messageQueue.s1[0].content).toBe("after");
+  });
+
+  it("move reorders the stack and tolerates out-of-range indices", () => {
+    useChatStore.setState({
+      messageQueue: {
+        s1: [
+          { id: 1, content: "a" },
+          { id: 2, content: "b" },
+          { id: 3, content: "c" },
+        ],
+      },
+    } as never);
+    useChatStore.getState().moveQueuedMessage("s1", 0, 2);
+    expect(useChatStore.getState().messageQueue.s1.map((m) => m.content)).toEqual(["b", "c", "a"]);
+    // Out-of-range / same-index moves are no-ops.
+    useChatStore.getState().moveQueuedMessage("s1", 5, 0);
+    useChatStore.getState().moveQueuedMessage("s1", 1, 1);
+    expect(useChatStore.getState().messageQueue.s1.map((m) => m.content)).toEqual(["b", "c", "a"]);
+  });
+});

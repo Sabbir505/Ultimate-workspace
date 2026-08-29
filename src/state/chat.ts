@@ -408,6 +408,12 @@ export interface QueuedChatMessage {
   forceResearch?: boolean;
 }
 
+/** Monotonic id for queued messages — `Date.now()` collided when two
+ *  messages stacked within the same millisecond, and steer/edit/delete act
+ *  BY ID (the collision made steer remove both rows). In-memory only, so a
+ *  plain counter is sufficient. */
+let NEXT_QUEUE_ID = 1;
+
 /** A per-session goal-driven loop (/goal / /loop). The host auto-issues a
  *  follow-up turn whenever the last reply said `LOOP_STATUS: continue`, up to
  *  `max` iterations. `advanceLoop` inspects the sentinel to decide. */
@@ -733,8 +739,18 @@ export interface ChatState {
    *  binding AND any custom-folder override, so the composer notch disappears
    *  and the working directory falls back to the global selection. */
   unbindProject: (chatSessionId: string) => void;
-  /** Drop one queued message from a session's FIFO queue (composer "×"). */
+  /** Drop one queued message from a session's FIFO queue (composer trash). */
   removeQueuedMessage: (chatSessionId: string, id: number) => void;
+  /** STEER: send one queued message IMMEDIATELY. Interrupts the session's
+   *  running turn (Stop) and dispatches the picked message ahead of the rest
+   *  of the stack; the remaining messages stay queued and drain when the
+   *  steered turn finishes. */
+  steerQueuedMessage: (chatSessionId: string, id: number) => Promise<void>;
+  /** Rewrite a queued message's text in place (composer pencil). */
+  editQueuedMessage: (chatSessionId: string, id: number, content: string) => void;
+  /** Reorder the stack: move the message at `from` so it lands at `to`
+   *  (grip drag-and-drop). */
+  moveQueuedMessage: (chatSessionId: string, from: number, to: number) => void;
   /** Send the oldest queued message for a session. No-op unless the session
    *  is active and no stream is running (sendMessage targets the active
    *  session; queued items for background sessions wait for selectSession). */
@@ -985,6 +1001,48 @@ export const useChatStore = create<ChatState>((set, get) => ({
         [chatSessionId]: (s.messageQueue[chatSessionId] ?? []).filter((m) => m.id !== id),
       },
     })),
+
+  steerQueuedMessage: async (chatSessionId, id) => {
+    const queue = get().messageQueue[chatSessionId] ?? [];
+    const steered = queue.find((m) => m.id === id);
+    if (!steered) return;
+    const remaining = queue.filter((m) => m.id !== id);
+    // Park the rest of the stack FIRST: cancelStream drains the queue on
+    // completion (chat.ts cancel path), and without this it would fire the
+    // WRONG (FIFO-next) message ahead of the steered one.
+    set((s) => ({ messageQueue: { ...s.messageQueue, [chatSessionId]: [] } }));
+    if (chatSessionId in get().streaming) {
+      // Steering = interrupt. Stop the in-flight turn, then dispatch the
+      // steered message as the very next turn (the partial reply survives
+      // via the cancel path's partial persist).
+      await get().cancelStream();
+    }
+    // Put the not-yet-sent messages back — they drain FIFO once the steered
+    // turn finishes (onDone → drainQueue).
+    set((s) => ({ messageQueue: { ...s.messageQueue, [chatSessionId]: remaining } }));
+    void get().sendMessage(steered.content, steered.attachments, steered.forceResearch);
+  },
+
+  editQueuedMessage: (chatSessionId, id, content) =>
+    set((s) => ({
+      messageQueue: {
+        ...s.messageQueue,
+        [chatSessionId]: (s.messageQueue[chatSessionId] ?? []).map((m) =>
+          m.id === id ? { ...m, content } : m,
+        ),
+      },
+    })),
+
+  moveQueuedMessage: (chatSessionId, from, to) =>
+    set((s) => {
+      const queue = [...(s.messageQueue[chatSessionId] ?? [])];
+      if (from < 0 || from >= queue.length || to < 0 || to >= queue.length || from === to) {
+        return {};
+      }
+      const [moved] = queue.splice(from, 1);
+      queue.splice(to, 0, moved);
+      return { messageQueue: { ...s.messageQueue, [chatSessionId]: queue } };
+    }),
 
   drainQueue: (chatSessionId) => {
     // sendMessage targets the ACTIVE session, so a background session's queue
@@ -1558,7 +1616,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // gating on it would let a second turn start in an already-streaming chat.
     if (activeChatSessionId in get().streaming) {
       const queued: QueuedChatMessage = {
-        id: Date.now(),
+        id: NEXT_QUEUE_ID++,
         content,
         attachments: attachments ?? undefined,
         forceResearch: forceResearch || undefined,

@@ -577,8 +577,11 @@ const PLAN_MODE_SEGMENT: &str = "## Plan mode (active)\n\
     3. After approval, break the plan into concrete steps with `todo_write` \
     (the Progress list renders them — don't restate them in prose) and \
     execute, keeping the list current.\n\
-    A rejection returns the user's feedback — revise and re-present. If the task \
-    needs no changes, just answer in text.";
+    Every plan-mode turn about a task that will change anything MUST end with \
+    a `present_plan` call (or a clarifying question if required details are \
+    genuinely missing) — never end with prose alone. If the user's message is \
+    pure Q&A that implies no changes, just answer in text. A rejection \
+    returns the user's feedback — revise and re-present.";
 
 /// Assemble the effective system prompt from the built-in CORE prompt (always
 /// included, provider/model-aware), the available-skills catalog (only when

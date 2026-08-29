@@ -40,6 +40,7 @@ import {
   updateChatSessionWatchMode,
   resolveToolAction,
   resolvePlanProposal,
+  resolveAgentQuestion,
   setChatSessionPlanMode,
   setChatSessionPermissionMode,
   type ChatPlanAcceptedPayload,
@@ -58,6 +59,8 @@ import {
   type ChatPlanModePayload,
   type ChatPlanProposalPayload,
   type ChatPlanUpdatedPayload,
+  type ChatQuestionInput,
+  type ChatQuestionRequestPayload,
   type ChatSession,
   type ChatSessionMetricsPayload,
   type ChatTaskProgressPayload,
@@ -301,7 +304,18 @@ export const HARNESS_PERMISSION_MODES: Record<string, HarnessModeOption[] | unde
       description: "OpenCode's read-only planning mode — no changes.",
     },
   ],
-  // kimi_code: prompt-mode runs auto-approve tool calls; no posture to pick.
+  kimi_code: [
+    {
+      value: "default",
+      label: "Default",
+      description: "Kimi works normally (prompt mode auto-approves tool calls).",
+    },
+    {
+      value: "plan",
+      label: "Plan",
+      description: "Kimi researches and replies with a plan — no file changes.",
+    },
+  ],
 };
 
 
@@ -322,6 +336,13 @@ export interface PendingPlanProposal {
   pendingId: string;
   title: string;
   plan: string;
+}
+
+/** A pending harness question (Claude Code AskUserQuestion). One per chat
+ *  session; the harness turn pauses until the user answers or skips. */
+export interface PendingQuestion {
+  pendingId: string;
+  questions: ChatQuestionInput[];
 }
 
 /** Live progress of a background chat task (download_file / run_shell),
@@ -452,6 +473,8 @@ function clearSessionState(s: ChatState, chatSessionId: string): Partial<ChatSta
   delete pendingArtifacts[chatSessionId];
   const pendingApprovals = { ...s.pendingApprovals };
   delete pendingApprovals[chatSessionId];
+  const pendingQuestions = { ...s.pendingQuestions };
+  delete pendingQuestions[chatSessionId];
   const sessionProjects = { ...s.sessionProjects };
   delete sessionProjects[chatSessionId];
   const loopState = { ...s.loopState };
@@ -496,6 +519,7 @@ function clearSessionState(s: ChatState, chatSessionId: string): Partial<ChatSta
     artifacts,
     pendingArtifacts,
     pendingApprovals,
+    pendingQuestions,
     sessionProjects,
     loopState,
     messageQueue,
@@ -594,6 +618,10 @@ export interface ChatState {
   planMode: Record<string, boolean>;
   /** Pending present_plan proposals per chat session — the approval cards. */
   pendingPlanProposals: Record<string, PendingPlanProposal>;
+  /** Pending harness questions (Claude Code AskUserQuestion) per chat
+   *  session — the question cards. The harness turn is PAUSED until the user
+   *  answers/skips; cleared on resolve, cancel, or session close. */
+  pendingQuestions: Record<string, PendingQuestion>;
   /** APPROVED plans per chat session (newest first) — the sidebar Plans
    *  list. Execution steps live in sessionTodos/planSteps (Progress). */
   sessionPlans: Record<string, ChatPlanRecord[]>;
@@ -804,6 +832,16 @@ export interface ChatState {
    *  / chat:approval-resolved events). */
   onApprovalRequest: (payload: ChatApprovalRequestPayload) => void;
   onApprovalResolved: (payload: ChatApprovalResolvedPayload) => void;
+  /** Surface a harness question card (chat:question-request — Claude Code
+   *  AskUserQuestion). The harness turn is paused until resolveQuestion. */
+  onQuestionRequest: (payload: ChatQuestionRequestPayload) => void;
+  /** Answer the session's pending question card (or skip it with no
+   *  selections and no free text). */
+  resolveQuestion: (
+    chatSessionId: string,
+    answers: Record<string, string | string[]>,
+    response?: string,
+  ) => Promise<void>;
   /** Track a background chat task's progress (downloads / shell runs). */
   onTaskProgress: (payload: ChatTaskProgressPayload) => void;
   /** Replace all plan steps for a session (called after parsing a new plan). */
@@ -873,6 +911,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   artifactsByMessage: {},
   checkpointsByMessage: {},
   pendingApprovals: {},
+  pendingQuestions: {},
   fullAccessConfirmingFor: null,
   pendingArtifacts: {},
   artifactProposals: {},
@@ -1334,6 +1373,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       checkpointsByMessage: {},
       pendingArtifacts: {},
       pendingApprovals: {},
+      pendingQuestions: {},
       tasks: {},
       planSteps: {},
       sessionTodos: {},
@@ -2229,10 +2269,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       delete nextStatus[chatSessionId];
       const livePerf = { ...s.livePerf };
       delete livePerf[chatSessionId];
+      // A turn can only complete after its question was answered, but a
+      // CANCELLED turn drops the pending on the backend without a resolved
+      // event — clear any stale card here so cancel never leaves one stuck.
+      const pendingQuestions = { ...s.pendingQuestions };
+      delete pendingQuestions[chatSessionId];
       return {
         streaming: nextStreaming,
         chatStatus: nextStatus,
         livePerf,
+        pendingQuestions,
         lastTurnPerf: { ...s.lastTurnPerf, [chatSessionId]: lastTurn },
         streamingChatSessionId:
           s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
@@ -2419,6 +2465,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 
+  onQuestionRequest: ({ chatSessionId, pendingId, questions }) => {
+    // Surface the question card. Only one at a time (the harness blocks on
+    // it); a new request replaces any stale one.
+    const parsed = Array.isArray(questions) ? questions : [];
+    set((s) => ({
+      pendingQuestions: {
+        ...s.pendingQuestions,
+        [chatSessionId]: { pendingId, questions: parsed },
+      },
+    }));
+  },
+
+  resolveQuestion: async (chatSessionId, answers, response) => {
+    const pending = get().pendingQuestions[chatSessionId];
+    if (!pending) return;
+    // Optimistically remove the card (mirrors resolveApproval).
+    set((s) => {
+      const next = { ...s.pendingQuestions };
+      delete next[chatSessionId];
+      return { pendingQuestions: next };
+    });
+    try {
+      await resolveAgentQuestion(chatSessionId, pending.pendingId, answers, response);
+    } catch (err) {
+      // The harness is still blocked on stdin — put the card back and
+      // surface the failure so the turn can't hang silently.
+      set((s) => ({
+        pendingQuestions: { ...s.pendingQuestions, [chatSessionId]: pending },
+      }));
+      toastError("Couldn't deliver the answer", err);
+    }
+  },
+
   onError: (chatSessionId, message, code) => {
     // Clear streaming state and surface the error for the active session.
     // Also drop this session's live-perf chip and pending-artifact buffer —
@@ -2433,11 +2512,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       delete nextLivePerf[chatSessionId];
       const nextPendingArtifacts = { ...s.pendingArtifacts };
       delete nextPendingArtifacts[chatSessionId];
+      // An errored/cancelled turn must not leave a question card stuck
+      // (the backend already dropped its pending).
+      const nextPendingQuestions = { ...s.pendingQuestions };
+      delete nextPendingQuestions[chatSessionId];
       return {
         streaming: nextStreaming,
         chatStatus: nextStatus,
         livePerf: nextLivePerf,
         pendingArtifacts: nextPendingArtifacts,
+        pendingQuestions: nextPendingQuestions,
         streamingChatSessionId:
           s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
         error:

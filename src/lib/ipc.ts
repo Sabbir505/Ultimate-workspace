@@ -1758,6 +1758,45 @@ export const listenChatApprovalRequest = (handler: (payload: ChatApprovalRequest
 export const listenChatApprovalResolved = (handler: (payload: ChatApprovalResolvedPayload) => void) =>
   safeListen<ChatApprovalResolvedPayload>("chat:approval-resolved", handler);
 
+// ---- Harness questions (Claude Code AskUserQuestion over the control protocol) ----
+
+/** One question from a harness `AskUserQuestion` tool call. */
+export interface ChatQuestionInput {
+  question: string;
+  /** Short label shown as a chip (the CLI caps it at 12 chars). */
+  header?: string;
+  options?: { label: string; description?: string }[];
+  multiSelect?: boolean;
+}
+
+/** Emitted when a harness asks the user a question mid-turn; the turn is
+ *  PAUSED until resolveAgentQuestion answers (or the turn is cancelled →
+ *  skipped). */
+export interface ChatQuestionRequestPayload {
+  chatSessionId: string;
+  pendingId: string;
+  questions: ChatQuestionInput[];
+}
+
+export const listenChatQuestionRequest = (handler: (payload: ChatQuestionRequestPayload) => void) =>
+  safeListen<ChatQuestionRequestPayload>("chat:question-request", handler);
+
+/** Answer a pending harness question. `answers` maps question text → chosen
+ *  option label (string, or an array for multiSelect); `response` is an
+ *  optional free-text reply that replaces the structured answers entirely. */
+export const resolveAgentQuestion = (
+  chatSessionId: string,
+  pendingId: string,
+  answers: Record<string, string | string[]>,
+  response?: string,
+) =>
+  safeInvoke<void>("resolve_agent_question", {
+    chatSessionId,
+    pendingId,
+    answers,
+    response: response ?? null,
+  });
+
 export const listenPlanStepProgress = (handler: (payload: PlanStepProgressPayload) => void) =>
   safeListen<PlanStepProgressPayload>("chat:plan-step-progress", handler);
 

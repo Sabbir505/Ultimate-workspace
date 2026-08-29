@@ -660,6 +660,22 @@ pub struct ChatApprovalResolvedPayload {
     pub approved: bool,
 }
 
+/// Emitted when a harness asks the user a QUESTION mid-turn — a Claude Code
+/// `AskUserQuestion` that arrived over the can_use_tool control protocol.
+/// The turn is PAUSED until `resolve_agent_question` answers (or the turn is
+/// cancelled, which resolves as "skipped"). `questions` is the raw
+/// AskUserQuestion input array: `[{question, header, options: [{label,
+/// description}], multiSelect}]`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatQuestionRequestPayload {
+    pub chat_session_id: String,
+    /// The synthetic id of the pending question — pass to `resolve_agent_question`.
+    pub pending_id: String,
+    /// The verbatim questions array from the AskUserQuestion input.
+    pub questions: serde_json::Value,
+}
+
 /// Emitted while a background chat task (download_file / run_shell) makes
 /// progress. The UI renders a live progress card; the model polls the same
 /// state via `get_task_status` / `download_progress`.

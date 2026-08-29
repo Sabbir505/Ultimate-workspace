@@ -1933,6 +1933,113 @@ button.chat-mermaid-open {
 .approval-card-write  { --approval-accent: #e3b341; --approval-accent-contrast: #1b1b1f; }
 .approval-card-edit   { --approval-accent: #5aa7f0; --approval-accent-contrast: #fff; }
 
+/* --- Harness question card (Claude Code AskUserQuestion) ---
+ * Reuses the approval-card chrome (badge/title/buttons) but stacks into a
+ * column: each question renders its header chip + option buttons; a free-
+ * text field carries the protocol's top-level `response`. */
+.approval-card-question {
+  --approval-accent: var(--accent);
+  --approval-accent-contrast: #fff;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 10px 12px 12px;
+}
+.approval-card-question .approval-card-title {
+  flex: none;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+.question-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.question-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.question-chip {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--approval-accent);
+  border: 1px solid color-mix(in srgb, var(--approval-accent) 40%, transparent);
+  background: color-mix(in srgb, var(--approval-accent) 12%, transparent);
+}
+.question-text {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  min-width: 0;
+}
+.question-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.question-options.multi {
+  flex-wrap: wrap;
+}
+.question-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  max-width: 100%;
+  text-align: left;
+  padding: 5px 10px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+}
+.question-option:hover {
+  border-color: color-mix(in srgb, var(--approval-accent) 55%, transparent);
+}
+.question-option.picked {
+  border-color: var(--approval-accent);
+  background: color-mix(in srgb, var(--approval-accent) 14%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--approval-accent) 55%, transparent);
+}
+.question-option-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+.question-option-desc {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.question-free-text {
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  outline: none;
+}
+.question-free-text:focus {
+  border-color: color-mix(in srgb, var(--approval-accent) 55%, transparent);
+}
+.approval-card-question .approval-card-actions {
+  justify-content: flex-end;
+}
+.approval-btn.approve:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: none;
+}
+
 /* --- Structured plan tracking (todo_write / enter_plan_mode / present_plan) ---
  * One visual language for the proposal card (above the composer, turn
  * paused), the live checklist (below the stream), and the sidebar lists.

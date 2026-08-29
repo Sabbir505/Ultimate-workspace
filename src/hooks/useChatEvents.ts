@@ -11,6 +11,7 @@ import {
   emitMobileSessionChatEvent,
   listenChatApprovalRequest,
   listenChatApprovalResolved,
+  listenChatQuestionRequest,
   listenChatArtifact,
   listenChatDone,
   listenChatError,
@@ -154,6 +155,15 @@ export function useChatEvents(): void {
     unlistens.push(
       listenChatApprovalResolved((payload) => {
         useChatStore.getState().onApprovalResolved(payload);
+      }),
+    );
+
+    // Harness questions (Claude Code AskUserQuestion over the control
+    // protocol) — surface the question card; the harness turn is paused on
+    // stdin until resolveQuestion answers or skips it.
+    unlistens.push(
+      listenChatQuestionRequest((payload) => {
+        useChatStore.getState().onQuestionRequest(payload);
       }),
     );
 

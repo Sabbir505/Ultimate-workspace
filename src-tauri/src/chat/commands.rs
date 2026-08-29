@@ -2586,15 +2586,50 @@ pub fn set_chat_session_plan_mode(
 /// ones). Persists the label on permission_mode; the harness spawn reads it
 /// per turn and maps it to the CLI's own flags. Built-in sessions go through
 /// `update_chat_session_policies` / `set_chat_session_plan_mode` instead.
+///
+/// claude_code is special: its CLI process is LONG-LIVED, so the label alone
+/// would only apply on the next respawn. We also best-effort live-apply the
+/// change through the control protocol (`set_permission_mode`) — mid-turn
+/// switches then take effect immediately; the label-mismatch respawn on the
+/// next send remains the deterministic backstop.
 #[tauri::command]
 pub fn set_chat_session_permission_mode(
     chat_session_id: String,
     mode: String,
     db: State<'_, DbState>,
+    app: AppHandle,
 ) -> CmdResult<()> {
-    let conn = db.0.lock();
-    db::update_chat_session_permission_mode(&conn, &chat_session_id, &mode)
-        .map_err(|e| e.to_string())
+    db::update_chat_session_permission_mode(&db.0.lock(), &chat_session_id, &mode)
+        .map_err(|e| e.to_string())?;
+    if let Some(state) = app.try_state::<crate::agent_sessions::AgentSessionState>() {
+        let _ = state.0.apply_claude_permission_mode(&chat_session_id, &mode);
+    }
+    Ok(())
+}
+
+/// Answer a pending harness question (a Claude Code `AskUserQuestion` that
+/// arrived over the can_use_tool control protocol). `answers` maps question
+/// text → chosen option label (string, or an array for multiSelect);
+/// `response` is an optional free-text reply that replaces the structured
+/// answers. Same pause/resume contract as `resolve_tool_action` — unknown /
+/// already-resolved ids are a no-op.
+#[tauri::command]
+pub fn resolve_agent_question(
+    chat_session_id: String,
+    pending_id: String,
+    answers: serde_json::Value,
+    response: Option<String>,
+    chat_state: State<'_, crate::ChatState>,
+) -> CmdResult<()> {
+    let _ = &chat_session_id; // registry is keyed by pending id; kept for UI symmetry
+    if let Some(pending) = chat_state.0.take_pending_question(&pending_id) {
+        let answers = if answers.is_object() { answers } else { serde_json::json!({}) };
+        let _ = pending.response_tx.send(crate::chat::QuestionReply {
+            answers,
+            response: response.filter(|s| !s.trim().is_empty()),
+        });
+    }
+    Ok(())
 }
 
 // ---- Artifact preview ----

@@ -136,7 +136,9 @@ pub(crate) fn harness_tool_summary(tool: &str, input: &Value) -> String {
         }
         None
     };
-    let target = pick(&["file_path", "path", "notebook_path", "command", "pattern", "url", "prompt"])
+    // "plan" is Claude Code's ExitPlanMode payload — without it the
+    // plan-mode approval card would give the user nothing to judge.
+    let target = pick(&["file_path", "path", "notebook_path", "command", "pattern", "url", "prompt", "plan"])
         .map(|t| if t.chars().count() > 160 { format!("{}…", t.chars().take(160).collect::<String>()) } else { t })
         .unwrap_or_default();
     let verb = match tool {
@@ -148,6 +150,7 @@ pub(crate) fn harness_tool_summary(tool: &str, input: &Value) -> String {
         "WebFetch" => "Fetch",
         "WebSearch" => "Search the web for",
         "Task" => "Launch a subagent:",
+        "ExitPlanMode" => "Wants to leave plan mode and start implementing:",
         other => other,
     };
     if target.is_empty() {

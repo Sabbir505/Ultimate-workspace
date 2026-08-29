@@ -16,6 +16,7 @@ import { useProjectsStore } from "../../state/projects";
 import { useUiStore } from "../../state/ui";
 import { ChatComposer, type ChatAttachment } from "./ChatComposer";
 import { ApprovalCard, FullAutoConfirmModal } from "./ApprovalFlow";
+import { QuestionCard } from "./QuestionCard";
 import { PlanProposalCard } from "./PlanProposalCard";
 import type { PermissionMode } from "../../state/chat";
 import { HARNESS_PERMISSION_MODES, permissionModeToPolicies } from "../../state/chat";
@@ -603,6 +604,9 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   const pendingApprovals = useChatStore((s) => s.pendingApprovals);
   const fullAccessConfirmingFor = useChatStore((s) => s.fullAccessConfirmingFor);
   const resolveApproval = useChatStore((s) => s.resolveApproval);
+  // Harness questions (AskUserQuestion) — same composer slot as approvals.
+  const pendingQuestions = useChatStore((s) => s.pendingQuestions);
+  const resolveQuestionAction = useChatStore((s) => s.resolveQuestion);
   // Plan mode + proposal cards (present_plan) + the authoritative todo list.
   const pendingPlanProposals = useChatStore((s) => s.pendingPlanProposals);
   const resolvePlanProposalAction = useChatStore((s) => s.resolvePlanProposal);
@@ -934,6 +938,11 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   const approvalKey = activeChatSessionId
     ? pendingApprovals[activeChatSessionId]?.pendingId ?? null
     : null;
+  // A harness question card mounting/unmounting has the same viewport-shrink
+  // effect as an approval card — include it in the anchor key.
+  const questionKey = activeChatSessionId
+    ? pendingQuestions[activeChatSessionId]?.pendingId ?? null
+    : null;
   useEffect(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
@@ -962,7 +971,7 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
       el.scrollTop = Math.min(max, Math.max(0, el.scrollHeight - el.clientHeight - prevBottom));
     });
     return () => cancelAnimationFrame(raf);
-  }, [approvalKey]);
+  }, [approvalKey, questionKey]);
 
   // Register a scroll-to-message helper so the TurnNavigator can jump to a
   // specific turn. Sets stickToBottom OFF first so the auto-follow effect
@@ -1638,6 +1647,23 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
             approval={pendingApprovals[activeChatSessionId]}
             onResolve={(approved) =>
               void resolveApproval(activeChatSessionId, approved)
+            }
+          />
+        </div>
+      )}
+
+      {/* Harness question (Claude Code AskUserQuestion) — the CLI is PAUSED
+          on stdin until this is answered or skipped. */}
+      {activeChatSessionId && pendingQuestions[activeChatSessionId] && (
+        <div className="composer-approval-wrap">
+          <QuestionCard
+            question={pendingQuestions[activeChatSessionId]}
+            onResolve={(answers, response, skipped) =>
+              void resolveQuestionAction(
+                activeChatSessionId,
+                skipped ? {} : answers,
+                skipped ? undefined : response,
+              )
             }
           />
         </div>

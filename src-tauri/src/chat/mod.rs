@@ -68,6 +68,26 @@ pub(crate) struct PendingApproval {
     pub response_tx: tokio::sync::oneshot::Sender<bool>,
 }
 
+/// A pending harness question — a Claude Code `AskUserQuestion` that arrived
+/// over the can_use_tool control protocol and needs the USER's answers (not a
+/// permission decision). The reader thread pauses on the oneshot until the UI
+/// calls `resolve_agent_question`; a dropped sender (cancel/session delete)
+/// resolves to a skip, so neither side can wedge.
+pub(crate) struct PendingQuestion {
+    pub chat_session_id: String,
+    /// Sender resumed with the user's answers. Dropped = cancelled → skip.
+    pub response_tx: tokio::sync::oneshot::Sender<QuestionReply>,
+}
+
+/// The user's answer to a pending harness question. `answers` maps question
+/// text → chosen option label (string, or an array of labels for
+/// multiSelect); `response` carries an optional free-text reply that replaces
+/// the structured answers entirely (the protocol's top-level `response`).
+pub(crate) struct QuestionReply {
+    pub answers: serde_json::Value,
+    pub response: Option<String>,
+}
+
 /// Manages active chat streams. Each chat_session_id maps to a cancellation
 /// token (tokio AbortHandle). Only one stream per session is allowed — sending
 /// a new message cancels the previous one automatically.
@@ -78,6 +98,10 @@ pub struct ChatManager {
     /// tool call that `check_permission` flags as `NeedsApproval` registers
     /// here and pauses its loop on the oneshot receiver until the UI resolves.
     pending: Mutex<HashMap<String, PendingApproval>>,
+    /// Pending harness questions (`AskUserQuestion` over the control
+    /// protocol). Separate from `pending` because the resolution carries the
+    /// user's ANSWERS, not a bool — the approval-card UI must not render it.
+    pending_questions: Mutex<HashMap<String, PendingQuestion>>,
     /// PERF (PERFORMANCE_AUDIT.md B11): memoized context-meter token counts.
     /// The frontend polls `count_context_tokens` every 2 s while a local
     /// session is idle, and each call used to re-send the ENTIRE active
@@ -110,6 +134,7 @@ impl ChatManager {
             client: reqwest::Client::new(),
             streams: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
+            pending_questions: Mutex::new(HashMap::new()),
             context_token_cache: Mutex::new(HashMap::new()),
             late_attach: Mutex::new(HashMap::new()),
         }
@@ -201,6 +226,45 @@ impl ChatManager {
         for k in to_remove {
             self.pending.lock().remove(&k); // sender drops → receiver errors
         }
+        // Same contract for pending harness questions: sender drop → the
+        // blocked reader thread resumes as "user skipped the question".
+        let q_remove: Vec<String> = self
+            .pending_questions
+            .lock()
+            .iter()
+            .filter(|(_, q)| q.chat_session_id == chat_session_id)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in q_remove {
+            self.pending_questions.lock().remove(&k);
+        }
+    }
+
+    /// Register a pending harness question and return its synthetic id plus
+    /// the receiver the reader thread awaits. The reader pauses until the UI
+    /// calls `resolve_agent_question` (or the pending is dropped on cancel →
+    /// skip).
+    pub(crate) fn register_pending_question(
+        &self,
+        chat_session_id: &str,
+    ) -> (String, tokio::sync::oneshot::Receiver<QuestionReply>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let id = next_synthetic_tool_id();
+        self.pending_questions.lock().insert(
+            id.clone(),
+            PendingQuestion {
+                chat_session_id: chat_session_id.to_string(),
+                response_tx: tx,
+            },
+        );
+        (id, rx)
+    }
+
+    /// Resolve a pending harness question by id, handing the user's answers
+    /// to the paused reader thread. `None` when the id is unknown (already
+    /// resolved, cancelled, or never existed) — the UI treats that as a no-op.
+    pub(crate) fn take_pending_question(&self, id: &str) -> Option<PendingQuestion> {
+        self.pending_questions.lock().remove(id)
     }
 
     /// Send a chat message. Spawns a tokio task that:

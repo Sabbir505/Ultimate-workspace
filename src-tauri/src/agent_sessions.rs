@@ -74,6 +74,12 @@ struct AgentChild {
     /// claude_code: the model the persistent process was spawned with —
     /// a change kills and respawns it.
     spawned_model: Option<String>,
+    /// claude_code: the permission-mode label the persistent process was
+    /// spawned with (`--permission-mode` is baked into the CLI invocation).
+    /// A changed label live-applies via the set_permission_mode control
+    /// request where possible and otherwise respawns on the next send —
+    /// without this the mode menu's pick silently never reached the CLI.
+    spawned_mode: Option<String>,
     /// The CLI's own session id, captured from turn output and passed back
     /// to continue the conversation (kimi `--session`, opencode `-s`,
     /// claude `--resume` on respawn). Shared with the reader thread, which
@@ -165,6 +171,7 @@ impl AgentSessionManager {
                     model: model.to_string(),
                     child: None,
                     spawned_model: None,
+                    spawned_mode: None,
                     cli_session_id: Arc::new(Mutex::new(stored)),
                     turn_in_flight: Arc::new(AtomicBool::new(false)),
                     cancelled: Arc::new(AtomicBool::new(false)),
@@ -185,6 +192,7 @@ impl AgentSessionManager {
             }
             entry.harness = harness.to_string();
             entry.spawned_model = None;
+            entry.spawned_mode = None;
             if let Ok(mut g) = entry.cli_session_id.lock() {
                 *g = None;
             }
@@ -309,6 +317,48 @@ impl AgentSessionManager {
         }
         emit_done(Some(app), chat_session_id, None, None, None);
         Ok(())
+    }
+
+    /// Best-effort LIVE application of a Claude Code permission-mode change to
+    /// the session's running CLI process via the stdio control protocol
+    /// (`set_permission_mode`). The deterministic path is the mode-label
+    /// mismatch respawn in `send_claude_turn` — this only makes the change
+    /// take effect immediately, including mid-turn. Returns false (no-op)
+    /// when the session isn't a live gated claude_code process or the label
+    /// isn't a harness-native mode; a process spawned with
+    /// `--dangerously-skip-permissions` has no armed control protocol, so a
+    /// "bypassPermissions" label can't be live-applied (the respawn covers it).
+    pub fn apply_claude_permission_mode(&self, chat_session_id: &str, mode_label: &str) -> bool {
+        const WIRE_MODES: [&str; 4] = ["default", "acceptEdits", "plan", "bypassPermissions"];
+        if !WIRE_MODES.contains(&mode_label) {
+            return false;
+        }
+        let Ok(sessions) = self.sessions.lock() else {
+            return false;
+        };
+        let Some(entry) = sessions.get(chat_session_id) else {
+            return false;
+        };
+        if entry.harness != "claude_code" || entry.child.is_none() {
+            return false;
+        }
+        let Ok(mut guard) = entry.stdin.lock() else {
+            return false;
+        };
+        let Some(stdin) = guard.as_mut() else {
+            return false;
+        };
+        let request = json!({
+            "request_id": format!("conduit-setmode-{}", now_ms_u64()),
+            "type": "control_request",
+            "request": { "subtype": "set_permission_mode", "mode": mode_label },
+        })
+        .to_string();
+        stdin
+            .write_all(request.as_bytes())
+            .and_then(|_| stdin.write_all(b"\n"))
+            .and_then(|_| stdin.flush())
+            .is_ok()
     }
 
     /// Drop all state for a deleted chat: kill any running process tree and
@@ -599,7 +649,16 @@ fn send_claude_turn(
     project_id: Option<&str>,
     connectors: &[crate::connectors::HarnessMcpServer],
 ) -> Result<(), String> {
-    if entry.child.is_none() || entry.spawned_model.as_deref() != Some(entry.model.as_str()) {
+    // The persisted permission-mode label rides the spawn flags; a changed
+    // label must respawn exactly like a changed model does — the CLI process
+    // is long-lived and never re-reads the DB. (The mode menu ALSO live-applies
+    // via set_permission_mode where the running CLI supports it; this is the
+    // deterministic backstop for that best-effort path.)
+    let current_mode = chat_permission_mode_label(db, sid);
+    if entry.child.is_none()
+        || entry.spawned_model.as_deref() != Some(entry.model.as_str())
+        || entry.spawned_mode.as_deref() != Some(current_mode.as_str())
+    {
         if let Some(mut old) = entry.child.take() {
             kill_child_tree(&mut old);
         }
@@ -607,7 +666,7 @@ fn send_claude_turn(
         // inherit the previous process's `true`.
         let cancelled = Arc::new(AtomicBool::new(false));
         entry.cancelled = Arc::clone(&cancelled);
-        entry.child = Some(spawn_claude(
+        let (child, spawned_mode) = spawn_claude(
             app,
             db,
             sid,
@@ -619,7 +678,9 @@ fn send_claude_turn(
             &cancelled,
             &entry.stdin,
             connectors,
-        )?);
+        )?;
+        entry.child = Some(child);
+        entry.spawned_mode = Some(spawned_mode);
         entry.spawned_model = Some(entry.model.clone());
     }
 
@@ -1440,7 +1501,7 @@ fn spawn_claude(
     cancelled: &Arc<AtomicBool>,
     shared_stdin: &Arc<Mutex<Option<std::process::ChildStdin>>>,
     connectors: &[crate::connectors::HarnessMcpServer],
-) -> Result<Child, String> {
+) -> Result<(Child, String), String> {
     let alias = claude_model_alias(model);
     // Per-session dual permission policies. full_access approval keeps the
     // historical bypass-everything spawn; every other posture routes the CLI's
@@ -1527,7 +1588,6 @@ fn spawn_claude(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to spawn claude CLI: {e}"))?;
-
     let stdout = child
         .stdout
         .take()
@@ -1579,7 +1639,21 @@ fn spawn_claude(
             watches,
         );
     });
-    Ok(child)
+    // The mode label the flags above were built from — the caller records it
+    // on the entry so a later label change can respawn (or live-apply).
+    Ok((child, harness_mode))
+}
+
+/// The chat session's persisted permission-mode label (the harness mode menu
+/// writes it verbatim — claude "plan"/"acceptEdits"/…, opencode "plan"/…).
+/// Empty when the row is missing.
+fn chat_permission_mode_label(db: &DbState, sid: &str) -> String {
+    let conn = db.0.lock();
+    crate::db::get_chat_session(&conn, sid)
+        .ok()
+        .flatten()
+        .map(|cs| cs.permission_mode)
+        .unwrap_or_default()
 }
 
 /// Build the control_response the CLI expects on stdin after a can_use_tool
@@ -1639,6 +1713,14 @@ fn handle_can_use_tool(
         .unwrap_or("tool")
         .to_string();
     let input = request.get("input").cloned().unwrap_or(json!({}));
+    // Claude Code's AskUserQuestion rides the SAME can_use_tool control
+    // request, but it wants the user's ANSWERS, not an approve/deny decision.
+    // Routing it through the approval card would either stall the turn (deny)
+    // or hand the model an empty answer set (approve with unchanged input).
+    if tool == "AskUserQuestion" {
+        handle_ask_user_question(app, sid, &request_id, &input, shared_stdin);
+        return;
+    }
     let summary = crate::chat::dispatch::harness_tool_summary(&tool, &input);
 
     // Resolve the shared approval registry. `try_state` (not `state`): the
@@ -1692,6 +1774,116 @@ fn handle_can_use_tool(
     // `db` is unused by the relay itself but keeps the signature symmetric
     // with the other reader helpers that persist state mid-turn.
     let _ = db;
+}
+
+/// Answer one Claude Code `AskUserQuestion` control request. Surfaces the
+/// questions as a dedicated question card (`chat:question-request`) and
+/// blocks the reader thread until the user answers, skips, or the turn is
+/// cancelled. The answer rides back as an ALLOW response whose
+/// `updatedInput` echoes the original questions plus an `answers` object
+/// mapping question text → chosen label (multi-select answers are arrays; a
+/// free-text reply goes in the top-level `response` field, which the CLI
+/// substitutes for the structured answers). A cancelled/dropped pending
+/// resolves to a DENY with a skip message so the CLI continues instead of
+/// wedging on stdin.
+fn handle_ask_user_question(
+    app: Option<&AppHandle>,
+    sid: &str,
+    request_id: &str,
+    input: &Value,
+    shared_stdin: &Arc<Mutex<Option<std::process::ChildStdin>>>,
+) {
+    let response = match app.and_then(|a| a.try_state::<crate::ChatState>()) {
+        Some(state) => {
+            let (pending_id, rx) = state.0.register_pending_question(sid);
+            let _ = app.unwrap().emit(
+                "chat:question-request",
+                crate::types::ChatQuestionRequestPayload {
+                    chat_session_id: sid.to_string(),
+                    pending_id: pending_id,
+                    questions: input.get("questions").cloned().unwrap_or(json!([])),
+                },
+            );
+            match rx.blocking_recv() {
+                Ok(reply) => {
+                    let free = reply
+                        .response
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    // Skip = no selections AND no free text. Resolve as a
+                    // deny so the model learns the question went unanswered —
+                    // an allow with an empty `answers` object would just make
+                    // the CLI auto-resolve the tool with nothing.
+                    let empty_answers = reply
+                        .answers
+                        .as_object()
+                        .map(|o| o.is_empty())
+                        .unwrap_or(true);
+                    if empty_answers && free.is_none() {
+                        ask_user_skip_response(request_id)
+                    } else {
+                        ask_user_allow_response(request_id, input, &reply.answers, free.as_deref())
+                    }
+                }
+                Err(_) => ask_user_skip_response(request_id),
+            }
+        }
+        // No app/registry → nobody can ever answer. Deny so the CLI continues.
+        None => can_use_tool_response(request_id, false, input),
+    };
+    let line = response.to_string();
+    if let Ok(mut guard) = shared_stdin.lock() {
+        if let Some(stdin) = guard.as_mut() {
+            let _ = stdin
+                .write_all(line.as_bytes())
+                .and_then(|_| stdin.write_all(b"\n"))
+                .and_then(|_| stdin.flush());
+        }
+    }
+}
+
+/// Build the ALLOW control_response that answers a Claude Code
+/// `AskUserQuestion`: `updatedInput` must echo the original `questions` array
+/// (required for tool processing) plus an `answers` object keyed by question
+/// TEXT → chosen option label. A free-text reply goes in the top-level
+/// `response` field, which the CLI substitutes for the structured answers.
+/// A non-object `answers` is coerced to `{}` — a malformed payload must never
+/// wedge the protocol.
+fn ask_user_allow_response(
+    request_id: &str,
+    input: &Value,
+    answers: &Value,
+    free_response: Option<&str>,
+) -> Value {
+    let mut updated = input.clone();
+    updated["answers"] = if answers.is_object() {
+        answers.clone()
+    } else {
+        json!({})
+    };
+    if let Some(free) = free_response.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        updated["response"] = json!(free);
+    }
+    can_use_tool_response(request_id, true, &updated)
+}
+
+/// Build the DENY control_response used when the user skipped a harness
+/// question (Skip button, or the pending was dropped by a cancel/session
+/// delete): the model is told the question went unanswered so the turn
+/// proceeds instead of wedging on stdin.
+fn ask_user_skip_response(request_id: &str) -> Value {
+    json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": {
+                "behavior": "deny",
+                "message": "The user dismissed the question without answering. \
+Continue with your best judgment and state any assumption you make.",
+            },
+        },
+    })
 }
 
 /// Reader loop for the persistent claude process: one JSON event per line.
@@ -2026,8 +2218,24 @@ fn spawn_per_turn(
                 flags.extend(crate::harness_bundle::kimi_bundle_args(
                     b, &artifacts_dir_for_bundle(app, cwd), resume.is_some()));
             }
+            // Kimi plan mode: the CLI rejects `--plan` in prompt mode
+            // ("Cannot combine --prompt with --plan", verified against the
+            // installed CLI) and `--agent-file` is forbidden with --session
+            // resume — so the plan posture rides as a prompt directive.
+            // Advisory only (prompt mode auto-approves tool calls), but it is
+            // the strongest lever kimi's headless mode offers.
+            let turn_content = if chat_permission_mode_label(db, sid) == "plan" {
+                format!(
+                    "{content}\n\n[PLAN MODE ACTIVE — read-only. The user enabled plan mode: \
+research and analyze, then reply with a detailed implementation plan as markdown. \
+Do NOT modify, create, or delete any files and do NOT run mutating commands. \
+End your reply with the plan and wait for the user's approval.]"
+                )
+            } else {
+                content.to_string()
+            };
             let (spec, env) =
-                crate::harness_adapters::turn_spec(crate::harness_adapters::TurnHarness::Kimi, content, flags);
+                crate::harness_adapters::turn_spec(crate::harness_adapters::TurnHarness::Kimi, &turn_content, flags);
             prompt_env = env;
             spec
         }
@@ -2043,7 +2251,10 @@ fn spawn_per_turn(
                 flags.push(entry.model.clone());
             }
             // Harness-native mode: the session label "plan" selects OpenCode's
-            // read-only planning mode ("build" is the default — no flag).
+            // read-only planning AGENT ("build" is the default — no flag).
+            // NOTE: `opencode run` has no `--mode` flag — yargs silently
+            // dropped it, so plan mode never reached the CLI. The supported
+            // lever is `--agent <name>` (built-in agents: build, plan).
             let harness_mode = {
                 let conn = db.0.lock();
                 crate::db::get_chat_session(&conn, sid)
@@ -2053,7 +2264,7 @@ fn spawn_per_turn(
                     .unwrap_or_default()
             };
             if harness_mode == "plan" {
-                flags.push("--mode".into());
+                flags.push("--agent".into());
                 flags.push("plan".into());
             }
             // OpenCode: --auto is baked into the wrapper/argv prefix.
@@ -2286,6 +2497,15 @@ fn send_opencode_turn(
     // this function executes on the tokio runtime (async command), where a
     // nested block_on panics and would poison the sessions lock.
     let model_body = split_opencode_model(&entry.model);
+    // Harness-native plan mode rides the message body's `agent` field
+    // (verified against the server OpenAPI spec). Read per turn so a mode
+    // switch applies from the very next message — the server process itself
+    // never needs a respawn.
+    let agent_body = if chat_permission_mode_label(db, sid) == "plan" {
+        Some("plan")
+    } else {
+        None
+    };
 
     // Set turn_in_flight BEFORE spawning the turn thread (mirrors
     // send_claude_turn): the thread may observe completion before send returns.
@@ -2336,7 +2556,7 @@ fn send_opencode_turn(
             },
         };
 
-        match opencode_post_message(&base2, &oc_sid2, model_body, &content2) {
+        match opencode_post_message(&base2, &oc_sid2, model_body, agent_body, &content2) {
             Ok((input, output, cost)) => {
                 // The POST resolves when the turn completes but can race its
                 // last SSE flush — wait for a reader-quiet gap so the final
@@ -2558,10 +2778,14 @@ fn split_opencode_model(model: &str) -> Option<Value> {
 
 /// POST one turn. Resolves when the TURN completes (the endpoint blocks until
 /// then) and carries final usage + cost; streaming arrives via SSE meanwhile.
+/// `agent` selects OpenCode's built-in agent ("plan" for plan mode — the
+/// message body's `agent` field is the server-path equivalent of `run
+/// --agent`; verified against the server's OpenAPI spec).
 fn opencode_post_message(
     base_url: &str,
     oc_sid: &str,
     model: Option<Value>,
+    agent: Option<&str>,
     content: &str,
 ) -> Result<(Option<i64>, Option<i64>, Option<f64>), String> {
     tauri::async_runtime::block_on(async {
@@ -2574,6 +2798,9 @@ fn opencode_post_message(
         let mut body = json!({ "parts": [ { "type": "text", "text": content } ] });
         if let Some(m) = model {
             body["model"] = m;
+        }
+        if let Some(a) = agent {
+            body["agent"] = json!(a);
         }
         let resp = client
             .post(format!("{base_url}/session/{oc_sid}/message"))
@@ -4290,6 +4517,42 @@ mod tests {
             .contains("denied"));
         // Deny must NOT echo updatedInput (the tool never runs).
         assert!(deny["response"]["response"].get("updatedInput").is_none());
+    }
+
+    #[test]
+    fn ask_user_allow_response_carries_answers() {
+        let input = json!({
+            "questions": [
+                { "question": "Which db?", "header": "DB",
+                  "options": [{"label": "SQLite", "description": "embedded"},
+                              {"label": "Postgres", "description": "server"}],
+                  "multiSelect": false },
+                { "question": "Extras?", "header": "Extras", "options": [],
+                  "multiSelect": true }
+            ]
+        });
+        let answers = json!({"Which db?": "SQLite", "Extras?": ["a", "b"]});
+        let resp = ask_user_allow_response("req-7", &input, &answers, None);
+        let updated = &resp["response"]["response"]["updatedInput"];
+        assert_eq!(resp["response"]["response"]["behavior"], "allow");
+        // The original questions array MUST be echoed back unchanged.
+        assert_eq!(updated["questions"], input["questions"]);
+        assert_eq!(updated["answers"]["Which db?"], "SQLite");
+        assert_eq!(updated["answers"]["Extras?"], json!(["a", "b"]));
+        // No free-text reply → no `response` field.
+        assert!(updated.get("response").is_none());
+    }
+
+    #[test]
+    fn ask_user_allow_response_free_text_and_garbage_answers() {
+        let input = json!({"questions": [{"question": "Proceed?"}]});
+        // A non-object answers payload must coerce to {} (never wedge the
+        // protocol with a malformed updatedInput).
+        let resp = ask_user_allow_response("req-8", &input, &json!("oops"), Some("  do it safely  "));
+        let updated = &resp["response"]["response"]["updatedInput"];
+        assert_eq!(updated["answers"], json!({}));
+        // Free-text reply is trimmed and replaces the structured answers.
+        assert_eq!(updated["response"], "do it safely");
     }
 
     use super::*;

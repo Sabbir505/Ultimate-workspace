@@ -3714,13 +3714,30 @@ fn sanitize(v: String) -> String {
 fn tool_meta_claude(block: &Value) -> Option<(String, Vec<Value>)> {
     let name = block.get("name").and_then(|n| n.as_str())?.to_string();
     let input = block.get("input").cloned().unwrap_or(json!({}));
-    // One marker per MultiEdit hunk so each gets its own DiffCard.
+    // One marker per MultiEdit hunk so each gets its own DiffCard. The harness
+    // uses snake_case (old_string / new_string); accept the camelCase variants
+    // too so OpenCode/anything wrapping Claude's API can land DiffCards.
     if name == "MultiEdit" {
-        let path = input.get("file_path").and_then(|p| p.as_str()).unwrap_or("").to_string();
+        let path = input
+            .get("file_path")
+            .or_else(|| input.get("filePath"))
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .to_string();
         let edits = input.get("edits").and_then(|e| e.as_array()).cloned().unwrap_or_default();
         let vals = edits
             .iter()
             .map(|e| {
+                let find = e
+                    .get("old_string")
+                    .or_else(|| e.get("oldString"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let replace = e
+                    .get("new_string")
+                    .or_else(|| e.get("newString"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 json!({
                     "kind": "edit",
                     "title": format!("Editing file \"{path}\""),
@@ -3728,8 +3745,8 @@ fn tool_meta_claude(block: &Value) -> Option<(String, Vec<Value>)> {
                     "path": path,
                     "edit": {
                         "mode": "replace",
-                        "find": sanitize(e.get("old_string").and_then(|v| v.as_str()).unwrap_or("").to_string()),
-                        "replace": sanitize(e.get("new_string").and_then(|v| v.as_str()).unwrap_or("").to_string()),
+                        "find": sanitize(find.to_string()),
+                        "replace": sanitize(replace.to_string()),
                     },
                 })
             })
@@ -3962,13 +3979,24 @@ fn result_marker_text(id: u64, text: &str, is_error: bool) -> String {
 /// OpenCode all converge on similar tool names; the edit-shaped tools map to
 /// DiffCard payloads, everything else to activity-group steps.
 fn tool_meta_generic(name: &str, input: &Value) -> Value {
-    let s = |k: &str| {
-        input
-            .get(k)
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
+    // Tools emit args in different conventions: Claude Code uses snake_case
+    // (`file_path` / `old_string` / `new_string`), OpenCode uses camelCase
+    // (`filePath` / `oldString` / `newString`). Look up both keys per field;
+    // the helper's existing priority (snake first) is preserved.
+    let s = |keys: &[&str]| {
+        for k in keys {
+            if let Some(v) = input.get(*k).and_then(|v| v.as_str()) {
+                if !v.is_empty() {
+                    return v.to_string();
+                }
+            }
+        }
+        String::new()
     };
+    let s_path = || s(&["file_path", "filePath", "path", "file_path_abs"]);
+    let s_find = || s(&["old_string", "oldString", "find"]);
+    let s_replace = || s(&["new_string", "newString", "replace", "newText"]);
+    let s_content = || s(&["content", "fileContent", "text"]);
     // Normalize the common aliases the CLIs use for file edits.
     let lname = name.to_lowercase();
     let is_edit = matches!(lname.as_str(), "edit" | "edit_file" | "multiedit" | "str_replace_editor");
@@ -3976,42 +4004,40 @@ fn tool_meta_generic(name: &str, input: &Value) -> Value {
     let is_shell = matches!(lname.as_str(), "bash" | "shell" | "run_shell" | "run_command");
 
     if is_edit {
-        let path = if s("file_path").is_empty() { s("path") } else { s("file_path") };
-        let find = if s("old_string").is_empty() { s("find") } else { s("old_string") };
-        let replace = if s("new_string").is_empty() { s("replace") } else { s("new_string") };
+        let path = s_path();
         json!({
             "kind": "edit",
             "title": format!("Editing file \"{path}\""),
             "detail": path,
             "path": path,
-            "edit": { "mode": "replace", "find": sanitize(find), "replace": sanitize(replace) },
+            "edit": { "mode": "replace", "find": sanitize(s_find()), "replace": sanitize(s_replace()) },
         })
     } else if is_write {
-        let path = if s("file_path").is_empty() { s("path") } else { s("file_path") };
+        let path = s_path();
         json!({
             "kind": "edit",
             "title": format!("Writing file \"{path}\""),
             "detail": path,
             "path": path,
-            "edit": { "mode": "write", "content": sanitize(s("content")) },
+            "edit": { "mode": "write", "content": sanitize(s_content()) },
         })
     } else if is_shell {
-        let cmd = if s("command").is_empty() { s("cmd") } else { s("command") };
+        let cmd = s(&["command", "cmd"]);
         json!({ "kind": "code", "title": "Running shell command", "lang": "bash", "code": sanitize(cmd) })
     } else {
         match name {
-            "Read" | "read" | "read_file" => json!({ "kind": "tool", "title": "Reading file", "detail": if s("file_path").is_empty() { s("path") } else { s("file_path") } }),
-            "Grep" | "grep" => json!({ "kind": "search", "title": "Searching code", "detail": s("pattern") }),
-            "Glob" | "glob" => json!({ "kind": "search", "title": "Finding files", "detail": s("pattern") }),
-            "WebSearch" | "web_search" => json!({ "kind": "search", "title": "Searching the web", "detail": s("query") }),
-            "WebFetch" | "web_fetch" | "fetch_url" => json!({ "kind": "web", "title": "Reading a web page", "detail": s("url") }),
+            "Read" | "read" | "read_file" => json!({ "kind": "tool", "title": "Reading file", "detail": s_path() }),
+            "Grep" | "grep" => json!({ "kind": "search", "title": "Searching code", "detail": s(&["pattern", "query"]) }),
+            "Glob" | "glob" => json!({ "kind": "search", "title": "Finding files", "detail": s(&["pattern", "glob", "query"]) }),
+            "WebSearch" | "web_search" => json!({ "kind": "search", "title": "Searching the web", "detail": s(&["query", "searchQuery"]) }),
+            "WebFetch" | "web_fetch" | "fetch_url" => json!({ "kind": "web", "title": "Reading a web page", "detail": s(&["url", "uri"]) }),
             "TodoWrite" | "todowrite" => json!({ "kind": "tool", "title": "Updating task list" }),
             "Task" | "task" => json!({
                 "kind": "subagent",
                 "title": "Running subagent",
-                "detail": s("description"),
-                "role": s("subagent_type"),
-                "prompt": sanitize(s("prompt")),
+                "detail": s(&["description", "task", "summary"]),
+                "role": s(&["subagent_type", "type", "agent_type"]),
+                "prompt": sanitize(s(&["prompt", "message", "input"])),
             }),
             _ => json!({ "kind": "tool", "title": format!("Running tool {name}") }),
         }

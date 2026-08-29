@@ -69,14 +69,12 @@ export function Sidebar() {
   // Chat store
   const chatSessions = useChatStore((s) => s.sessions);
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
-  const chatStreaming = useChatStore(
-    useCallback((s) => {
-      if (!activeChatSessionId) return {};
-      const next: Record<string, string> = {};
-      const id = activeChatSessionId;
-      if (id in s.streaming) next[id] = s.streaming[id];
-      return next;
-    }, [activeChatSessionId]),
+  // Every session id currently streaming — the sidebar row needs the spinner
+  // even for background sessions (a user working in chat A must still see
+  // chat B is responding). The old selector filtered to the active session
+  // only, so nested-project background chats never lit up.
+  const streamingIds = useChatStore(
+    useCallback((s) => Object.keys(s.streaming), []),
   );
   const chatConfig = useChatStore((s) => s.config);
   const chatLoaded = useChatStore((s) => s.loaded);
@@ -494,7 +492,7 @@ export function Sidebar() {
                           <div className="sidebar-project-chats">
                             {projectChats.map((c) => {
                               const active = c.id === activeChatSessionId;
-                              const working = c.id in chatStreaming;
+                              const working = streamingIds.includes(c.id);
                               return (
                                 <div
                                   key={c.id}
@@ -620,7 +618,7 @@ export function Sidebar() {
                   <ChatSessionRow
                     session={s}
                     active={s.id === activeChatSessionId}
-                    working={s.id in chatStreaming}
+                    working={streamingIds.includes(s.id)}
                     onSelect={handleSelectChat}
                     onDelete={handleDeleteChat}
                     onRename={handleRenameChat}

@@ -827,11 +827,19 @@ function formatDuration(sec: number): string {
  *  could lag wall-clock by over a second and tick unevenly. Instead, each
  *  snapshot ANCHORS true elapsed at its arrival instant and a local 250ms
  *  ticker interpolates between anchors, so the displayed second flips on real
- *  time boundaries no matter when events land. Returns null until the first
- *  snapshot arrives (caller falls back to a bare "Working"). */
-function useLiveElapsedSec(perf: ChatPerfPayload | null | undefined): number | null {
+ *  time boundaries no matter when events land.
+ *
+ *  `fallback` (the bubble's live flag) keeps the ticker running from MOUNT
+ *  when no perf snapshots exist at all — harness turns (claude/opencode CLIs)
+ *  never emit chat:perf, so without the fallback their header stuck on a bare
+ *  "Working" with no seconds. */
+function useLiveElapsedSec(
+  perf: ChatPerfPayload | null | undefined,
+  fallback: boolean,
+): number | null {
   const [sec, setSec] = useState<number | null>(null);
   const anchor = useRef<{ baseMs: number; at: number } | null>(null);
+  const mountedAt = useRef<number>(performance.now());
   // Re-anchor ONLY when a new snapshot object lands — not on unrelated
   // re-renders (token flushes), which would otherwise keep advancing `at`
   // against a stale baseMs and freeze the interpolation mid-stream.
@@ -841,33 +849,42 @@ function useLiveElapsedSec(perf: ChatPerfPayload | null | undefined): number | n
     anchor.current = perf ? { baseMs: perf.elapsedMs, at: performance.now() } : null;
   }
 
-  // Adopt each snapshot's truth as it lands. Monotonic guard: a snapshot
-  // emitted a hair before a second boundary must never regress the display.
+  // Adopt each snapshot's truth as it lands. TURN RESET: within one turn
+  // elapsedMs only grows, so a snapshot landing FAR behind the previous
+  // snapshot's means a NEW turn is reusing this bubble (cancel + resend
+  // before the live row remounts) — adopt the smaller truth instead of
+  // letting the monotonic display guard freeze the old turn's count on
+  // screen (the stale "Working for Xs" regression). Small backwards jitter
+  // (<1.5s) still can't regress the display.
+  const prevPerfRef = useRef<ChatPerfPayload | null | undefined>(undefined);
   useEffect(() => {
+    const prev = prevPerfRef.current;
+    prevPerfRef.current = perf;
     if (!perf) {
       setSec(null);
       return;
     }
     const next = Math.floor(perf.elapsedMs / 1000);
-    setSec((prev) => (prev == null || next >= prev ? next : prev));
+    const isTurnReset = prev != null && perf.elapsedMs + 1500 < prev.elapsedMs;
+    setSec((cur) => (isTurnReset || cur == null || next >= cur ? next : cur));
   }, [perf]);
 
   // Interpolate between snapshots so the displayed second flips on real
-  // wall-clock boundaries. Only mounted while a snapshot exists, so the live
-  // bubble is the only row paying for this timer.
-  const hasSnapshot = perf != null;
+  // wall-clock boundaries. Runs while snapshots exist OR while `fallback` is
+  // set (a live bubble without perf events — anchored to mount time), so
+  // completed bubbles (no perf, not live) never pay for a timer.
+  const ticking = perf != null || fallback;
   useEffect(() => {
-    if (!hasSnapshot) return;
+    if (!ticking) return;
     const iv = window.setInterval(() => {
-      const a = anchor.current;
-      if (!a) return;
+      const a = anchor.current ?? { baseMs: 0, at: mountedAt.current };
       const interpolated = Math.floor(
         (a.baseMs + Math.max(0, performance.now() - a.at)) / 1000,
       );
       setSec((prev) => (prev == null || interpolated > prev ? interpolated : prev));
     }, 250);
     return () => window.clearInterval(iv);
-  }, [hasSnapshot]);
+  }, [ticking]);
 
   return sec;
 }
@@ -1338,9 +1355,10 @@ function MessageBubbleInner({
   const blocks = useMemo(() => (isUser ? null : groupSegments(segments)), [isUser, segments]);
 
   // Live "Working for Xs" seconds — locally interpolated between chat:perf
-  // snapshots so second flips land on wall-clock boundaries. Hook must stay
+  // snapshots so second flips land on wall-clock boundaries; harness turns
+  // (no perf events) tick from bubble mount via the fallback. Hook must stay
   // ABOVE the compaction early return below (rules of hooks).
-  const liveElapsedSec = useLiveElapsedSec(live ? livePerf : null);
+  const liveElapsedSec = useLiveElapsedSec(live ? livePerf : null, !!live);
 
   // A persisted compaction-summary row renders as a low-weight "earlier context
   // compacted" marker (not a real bubble) so the user understands why

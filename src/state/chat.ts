@@ -1440,10 +1440,45 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (prev && isCliAgent(prev.agent) && prev.agent !== agent) {
       try { await cancelAgentChatMessage(chatSessionId); } catch { /* best-effort */ }
     }
+    // Reset the per-session permission mode when the harness actually
+    // CHANGES (e.g. built-in → opencode, or opencode → claude_code). The
+    // session row's permission_mode label is harness-specific — Claude Code's
+    // "default"/"acceptEdits" or OpenCode's "build"/"plan" are meaningless
+    // outside their CLI, so reusing the previous label made the mode menu
+    // show a stale posture. Switch INTO harness: start at the harness's
+    // first catalog entry. Switch OUT of harness to builtin: leave the
+    // built-in posture alone (the toggle stays on the same dual policies).
+    let nextPermissionMode: string | null | undefined = undefined;
+    if (agent && agent.startsWith("harness:") && agent !== prev?.agent) {
+      const harnessId = agent.slice("harness:".length);
+      const catalog = HARNESS_PERMISSION_MODES[harnessId];
+      nextPermissionMode = catalog?.[0]?.value ?? "default";
+    } else if (agent === null && prev?.agent && prev.agent.startsWith("harness:")) {
+      // Built-in sessions don't track a mode in permission_mode; the store
+      // treats the built-in posture as derived from the dual policies.
+      nextPermissionMode = "manual";
+    }
     await updateChatSessionAgent(chatSessionId, agent);
+    if (nextPermissionMode !== undefined) {
+      try {
+        await setChatSessionPermissionMode(chatSessionId, nextPermissionMode);
+      } catch {
+        // Best-effort — agent swap still applied; the harness menu will
+        // read the session row on the next render regardless.
+      }
+    }
     set((s) => ({
       sessions: s.sessions.map((sess) =>
-        sess.id === chatSessionId ? { ...sess, agent } : sess,
+        sess.id === chatSessionId
+          ? {
+              ...sess,
+              agent,
+              permissionMode:
+                nextPermissionMode !== undefined
+                  ? nextPermissionMode
+                  : sess.permissionMode,
+            }
+          : sess,
       ),
     }));
   },
@@ -2422,6 +2457,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   onPerf: (payload) => {
+    // Ignore stragglers: a perf event emitted just before an abort can cross
+    // IPC AFTER cancelStream/onDone cleared the entry. Re-creating it here
+    // would seed the NEXT turn's live timer with the OLD turn's elapsed
+    // (elapsedMs resets to 0 on the new turn, and the display's monotonic
+    // guard then froze the stale value on screen). Only a session that is
+    // actually streaming may hold a live perf snapshot.
+    if (!(payload.chatSessionId in get().streaming)) return;
     set((s) => ({
       livePerf: { ...s.livePerf, [payload.chatSessionId]: payload },
     }));

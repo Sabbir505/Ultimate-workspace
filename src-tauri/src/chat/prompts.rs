@@ -159,7 +159,9 @@ pub(crate) fn core_prompt_base() -> String {
      navigation. Triage with mode \"summary_only\" before committing to full reads. A \
      failureReason (paywalled/login_required/blocked) means unreadable — report it, don't \
      treat as empty. Prefer open_url + browser_read over fetch_url when the user should see \
-     the page live.\n\n\
+     the page live. Preview a web app you built by opening its files directly: static apps \
+     via open_url with the absolute path (file:/// — no server needed); framework dev \
+     servers run as a background task, then open http://localhost:PORT.\n\n\
      ## Artifacts & diagrams\n\
      Files produced via generate_document/generate_file/generate_diagram surface in the \
      artifact panel automatically — a short one-line acknowledgment afterward is enough. \
@@ -237,10 +239,11 @@ pub(crate) fn core_prompt_base_local() -> String {
      `open_url` opens ANY url in the app's built-in browser pane (the user sees \
      it) and returns the page text to you; `fetch_url` reads a page silently. \
      When the user asks to open/visit/show a site, call `open_url` — never say \
-     you can't open a URL. For a LOCAL file (one you created or an existing \
-     document) use `open_file` with its absolute path — it launches the OS \
-     default application on the user's screen; never claim you can't open a \
-     file you just saved.\n\n\
+     you can't open a URL. `open_url` also accepts absolute file paths: to \
+     preview a web app you built, open its index.html directly (e.g. \
+     C:\\proj\\index.html) — no local server needed. For a LOCAL document \
+     (PDF/image to view in an OS app) use `open_file` instead; never claim you \
+     can't open a file you just saved.\n\n\
      ## Search vs. just answer\n\
      Your training has a cutoff and you can hallucinate specific facts. Apply per-question:\n\
      - **MUST `web_search` first** for: versions/\"latest\" releases, API signatures that \

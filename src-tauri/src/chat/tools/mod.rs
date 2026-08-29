@@ -454,16 +454,55 @@ const BROWSER_SCREENSHOT_DESC: &str = "Take a screenshot of the page currently \
     when you need visual confirmation of the rendered page (layout, dialogs, \
     error states), or whenever the user asks to see the page.";
 
-const OPEN_URL_DESC: &str = "Open a web page in the app's built-in browser so \
-    the user can see it, and return its readable text to you. You CAN open \
-    any public web URL with this — never claim you can't open sites. Use \
-    when the user asks to open/show/visit a site, or when it helps to \
-    display a page visually alongside your answer. This is for WEB URLs only: \
-    to open a LOCAL file (something you created or an existing document) use \
-    the open_file tool instead; never open file:// paths here, never start a \
-    local server to serve a generated file, and never use this to \"open\" \
-    something the user asked you to create — created files preview \
-    automatically in the app.";
+/// Accept and normalize every URL form `open_url` understands:
+/// http(s):// as-is; `file:///…` as-is; `file://C:/…` (missing slash — a
+/// common model slip, parses with a bogus `c:` host) repaired to
+/// `file:///C:/…`; bare absolute Windows paths (`C:\a\b.html` / `C:/a/b.html`)
+/// and absolute POSIX paths (`/a/b.html`) converted to `file:///` URLs.
+/// Relative paths are refused — the model must give an absolute location.
+pub(crate) fn normalize_open_url(raw: &str) -> Result<String, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("open_url requires a `url` argument.".to_string());
+    }
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        return Ok(raw.to_string());
+    }
+    if let Some(rest) = raw.strip_prefix("file://") {
+        // `file:///…` → rest starts with '/'; `file://C:/…` → repair.
+        if rest.starts_with('/') {
+            return Ok(raw.to_string());
+        }
+        return Ok(format!("file:///{}", rest.trim_start_matches('/')));
+    }
+    // Absolute Windows path: drive-letter colon (`C:\` or `C:/`).
+    let bytes = raw.as_bytes();
+    let looks_windows_abs = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    if looks_windows_abs {
+        return Ok(format!("file:///{}", raw.replace('\\', "/")));
+    }
+    if raw.starts_with('/') {
+        return Ok(format!("file://{raw}"));
+    }
+    Err("open_url needs an absolute http(s) URL, a file:/// URL, or an absolute \
+         file path (e.g. C:\\project\\index.html or /home/u/project/index.html). \
+         Relative paths can't be opened — give the full path."
+        .to_string())
+}
+
+const OPEN_URL_DESC: &str = "Open a page in the app's built-in browser so the \
+    user can SEE it, and (for web pages) return its readable text to you. \
+    Accepts http(s):// URLs AND file:/// URLs / absolute file paths. Use it \
+    when the user asks to open/show/visit a site, and ALWAYS to preview a web \
+    app you just built: for a static app (HTML/CSS/JS files on disk) open its \
+    index.html directly via its absolute path (e.g. C:\\proj\\index.html) — \
+    no server needed; only for framework apps (vite/next/…) start the dev \
+    server as a background task first, then open its http://localhost:PORT \
+    URL. Documents meant for the OS handler (PDFs, images) use open_file \
+    instead.";
 
 /// Files the app previews natively in the right-side tool panel — `open_file`
 /// routes these to the in-app preview instead of the OS handler (for a .mmd
@@ -692,12 +731,27 @@ pub async fn execute_tool(
             }
         }
         OPEN_URL => {
-            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("").trim();
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
-                return ToolOutcome::text("Error: open_url requires an http(s) URL.");
+            let raw = args.get("url").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let normalized = match normalize_open_url(raw) {
+                Ok(u) => u,
+                Err(e) => return ToolOutcome::text(format!("Error: {e}")),
+            };
+            // Local file preview: the browser pane webview renders file://
+            // directly (relative css/js/img load from the same folder), and
+            // reqwest can't fetch file:// for the text readback — just show it.
+            if normalized.starts_with("file://") {
+                return ToolOutcome {
+                    text: format!(
+                        "Opened {normalized} in the built-in browser. The page is live \
+                         in the pane — use browser_read / browser_screenshot (or the \
+                         conduit-browser MCP tools in harness sessions) to inspect it."
+                    ),
+                    artifact: None,
+                    browse_url: Some(normalized),
+                    preview: None,
+                };
             }
-            let normalized = url.to_string();
-            match fetch_url(client, url).await {
+            match fetch_url(client, &normalized).await {
                 Ok(text) => ToolOutcome {
                     text: format!("Opened {normalized} in the built-in browser.\n\n{text}"),
                     artifact: None,
@@ -843,6 +897,58 @@ pub async fn execute_tool(
 mod tests {
     use super::*;
     use super::super::permission::SandboxPolicy;
+
+    #[test]
+    fn normalize_open_url_accepts_every_preview_form() {
+        // Web URLs pass through untouched.
+        assert_eq!(
+            normalize_open_url("https://example.com").unwrap(),
+            "https://example.com"
+        );
+        assert_eq!(
+            normalize_open_url("http://localhost:5173/").unwrap(),
+            "http://localhost:5173/"
+        );
+        // Proper file:/// passes through.
+        assert_eq!(
+            normalize_open_url("file:///C:/proj/index.html").unwrap(),
+            "file:///C:/proj/index.html"
+        );
+        // The classic model slip: file://C:/… (bogus host) is repaired.
+        assert_eq!(
+            normalize_open_url("file://C:/proj/index.html").unwrap(),
+            "file:///C:/proj/index.html"
+        );
+        // Bare absolute Windows paths (either slash) convert.
+        assert_eq!(
+            normalize_open_url(r"C:\Users\u\app\index.html").unwrap(),
+            "file:///C:/Users/u/app/index.html"
+        );
+        assert_eq!(
+            normalize_open_url("C:/proj/index.html").unwrap(),
+            "file:///C:/proj/index.html"
+        );
+        // Absolute POSIX path converts.
+        assert_eq!(
+            normalize_open_url("/home/u/app/index.html").unwrap(),
+            "file:///home/u/app/index.html"
+        );
+        // Whitespace is trimmed.
+        assert_eq!(
+            normalize_open_url("  C:\\a.html \n").unwrap(),
+            "file:///C:/a.html"
+        );
+    }
+
+    #[test]
+    fn normalize_open_url_rejects_relative_and_empty() {
+        assert!(normalize_open_url("").is_err());
+        assert!(normalize_open_url("./index.html").is_err());
+        assert!(normalize_open_url("index.html").is_err());
+        assert!(normalize_open_url("src/app.js").is_err());
+        // Drive-less single segment isn't an absolute path.
+        assert!(normalize_open_url("C:index.html").is_err());
+    }
 
     fn openai_names(caps: &ToolCaps, sandbox: SandboxPolicy) -> Vec<String> {
         openai_tool_specs(caps, sandbox)

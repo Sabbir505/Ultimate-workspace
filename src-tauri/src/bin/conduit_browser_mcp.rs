@@ -306,11 +306,11 @@ fn tool_schemas() -> Vec<Value> {
     vec![
         json!({
             "name": "navigate",
-            "description": "Navigate the in-app browser pane to a URL. This is NOT an external browser — the page loads in the Conduit window's visible pane. Auto-opens a pane if none exists. Use this (not fetch_url) when the user asks to browse, open a website, search, or interact with a web page. After navigating, call read_page to see what's on the page.",
+            "description": "Navigate the in-app browser pane to a URL. This is NOT an external browser — the page loads in the Conduit window's visible pane. Auto-opens a pane if none exists. Use this (not fetch_url) when the user asks to browse, open a website, search, or interact with a web page. ALSO use it to preview a web app you just built: a static app (HTML/CSS/JS on disk) needs NO server — navigate straight to its index.html via a file:/// URL (e.g. file:///C:/proj/index.html); only framework dev servers (vite/next/…) need to be started first (background task), then navigate to http://localhost:PORT. After navigating, call read_page to see what's on the page.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "url": { "type": "string", "description": "Absolute URL to navigate to (e.g. https://google.com)." },
+                    "url": { "type": "string", "description": "Absolute URL — https://… for web pages, or file:///C:/path/index.html to preview a local app you created." },
                     "pane_id": { "type": "string", "description": "Optional explicit browser pane id (omit to target the most-recently-used pane for the project)." }
                 },
                 "required": ["url"]

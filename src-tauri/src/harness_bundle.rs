@@ -97,7 +97,12 @@ pub fn build_instructions_md(project_path: &str, artifacts_dir: &str) -> String 
          Routing: browse/research/E2E-test → navigate + read_page + click/type_text + wait_for. \
          Silent text-only fetch the user needn't watch → `fetch_url`. Opening a site for the \
          user → `navigate` (or the built-in `open_url`) — always prefer these over fetch_url \
-         when the user should see the page."
+         when the user should see the page.\n\n\
+         Previewing an app you built: a STATIC app (HTML/CSS/JS files on disk) needs NO local \
+         server — `navigate` straight to its index.html via a file:/// URL (e.g. \
+         file:///C:/proj/index.html). Only framework dev servers (vite/next/…) need starting \
+         first as a background task, then navigate to http://localhost:PORT. Never leave a \
+         serve command blocking in the foreground."
     ));
     parts.join("\n\n")
 }

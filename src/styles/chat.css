@@ -1938,14 +1938,29 @@ button.chat-mermaid-open {
   border: none;
   border-radius: 0;
   background: transparent;
+  box-shadow: none;
   color: var(--text-dim);
   font-size: 12px;
   cursor: pointer;
   text-align: left;
   outline: none;
 }
-/* Deliberately no hover background: the rows sit inside the process region
-   and a hover tint read as a border/box on every pass. */
+/* tokens.css paints a glass pill skin on EVERY button — base box-shadow rim
+   plus a button:hover background/border (higher specificity than a single
+   class, so the hover state must be re-overridden explicitly). These rows
+   sit inside the process region and must stay flat chrome. */
+.chat-fold-toggle:hover,
+.chat-edit-row-toggle:hover,
+.chat-fold-toggle:active,
+.chat-edit-row-toggle:active,
+.chat-fold-toggle:focus-visible,
+.chat-edit-row-toggle:focus-visible {
+  border: none;
+  box-shadow: none;
+  background: transparent;
+  color: var(--text);
+  transform: none;
+}
 
 .chat-fold-title {
   font-family: var(--font-mono);

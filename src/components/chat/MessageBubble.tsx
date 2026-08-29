@@ -371,6 +371,10 @@ interface ToolData {
    *  (mockup 01 callout 5). See `tool_block` in src-tauri/src/chat/proto.rs. */
   path?: string;
   edit?: EditPayload;
+  /** Subagent Task steps carry the spawned agent's role + task so the row
+   *  renders as the "SubAgent <role> · <task>" chip (shine while running). */
+  role?: string;
+  task?: string;
   /** Optional result text rendered once the call completes. The backend
    *  doesn't populate this today (tool output is summarized by the model in
    *  the following narration), but the expandable step detail shows args/code
@@ -659,6 +663,51 @@ function ActivityStepRow({
   const hasBody = Boolean(
     step.data?.code || step.data?.detail || step.data?.result,
   );
+  // Subagent Task steps render as the agent chip — same visual language as
+  // the git sidebar's AGENTS rows: icon + SubAgent + blue role + task, a
+  // shimmer sweep while the agent runs, click opens the Agents pane.
+  if (step.data?.kind === "subagent") {
+    const role = step.data.role || "agent";
+    const task = step.data.task || step.data.detail || "";
+    const openAgent = () => {
+      const s = useChatStore.getState();
+      const list = s.activeChatSessionId
+        ? Object.values(s.subagents[s.activeChatSessionId] ?? {})
+        : [];
+      const match =
+        list.find((x) => x.status === "running" && x.task === task) ??
+        list.find((x) => x.task === task) ??
+        list.find((x) => x.role === role && x.status === "running");
+      if (match) {
+        useUiStore.getState().setActiveSubagentId(match.id);
+        useUiStore.getState().addTab("agents");
+      }
+    };
+    return (
+      <div className={`chat-agent-chip${done ? "" : " running"}`}>
+        <button
+          type="button"
+          className="chat-agent-chip-btn"
+          onClick={openAgent}
+          title={`${task} — click to watch this agent`}
+        >
+          <svg className="chat-agent-chip-icon" width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+            <rect x="4" y="8" width="16" height="12" rx="2" />
+            <circle cx="9" cy="14" r="1.2" fill="currentColor" stroke="none" />
+            <circle cx="15" cy="14" r="1.2" fill="currentColor" stroke="none" />
+            <path d="M12 8V4M8 4h8" />
+          </svg>
+          <span className="chat-agent-chip-label">SubAgent</span>
+          <span className="chat-agent-chip-role">{role}</span>
+          <span className="chat-agent-chip-sep" aria-hidden="true">·</span>
+          <span className="chat-agent-chip-task">{task}</span>
+          {done ? (
+            <span className="chat-agent-chip-check" aria-hidden="true">✓</span>
+          ) : null}
+        </button>
+      </div>
+    );
+  }
   return (
     <div className={`chat-step${done ? "" : " live"}`}>
       <button
@@ -1490,27 +1539,27 @@ function MessageBubbleInner({
               )
             : hasProcess
             ? (() => {
-                // Source order is preserved across the process boundary:
-                // leading prose renders ABOVE the row, the trailing answer
-                // BELOW it, and mid-run narration sits INSIDE the expansion
-                // exactly where it happened (between the tool groups it
-                // narrates). Nothing is reordered or hoarded at the bottom.
+                // The "Working for Xs / Worked for Xs" header is ALWAYS the
+                // first line of the assistant turn — narration that arrived
+                // before the first tool call ("Let me read the page…") used
+                // to push the header below itself, so the same turn shape
+                // rendered differently depending on whether the model chose
+                // to speak first. Everything up to the last process block
+                // (intro prose included, in source order) now lives INSIDE
+                // the expansion; only the final answer renders below the row.
                 if (!blocks) return null;
-                const firstProc = blocks.findIndex((b) => b.kind !== "text");
                 const lastProc = blocks.reduce(
                   (acc, b, i) => (b.kind !== "text" ? i : acc),
                   -1,
                 );
-                const leading = firstProc === -1 ? [] : blocks.slice(0, firstProc);
-                const inside = firstProc === -1 ? blocks : blocks.slice(firstProc, lastProc + 1);
-                const trailing = firstProc === -1 ? [] : blocks.slice(lastProc + 1);
+                const inside = blocks.slice(0, lastProc + 1);
+                const trailing = blocks.slice(lastProc + 1);
                 const textBlock = (b: Block, key: string) =>
                   b.kind === "text" && b.text.trim().length > 0 ? (
                     <Markdown key={key} content={b.text} onPreviewArtifact={onPreviewArtifact} />
                   ) : null;
                 return (
                   <>
-                    {leading.map((b, i) => textBlock(b, `lead:${i}`))}
                     <ProcessSummary live={live === true} label={processLabel}>
                       {inside.map((b, i) => renderProcessBlock(b, i, onPreviewArtifact))}
                     </ProcessSummary>

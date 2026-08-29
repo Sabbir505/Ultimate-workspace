@@ -558,7 +558,11 @@ const TASK_DESC: &str = "Spawn a focused subagent that runs ONE task with its \
     session, gets the `prompt` as its sole user message, and its output is \
     streamed live to the Agents panel. The subagent's final text is returned \
     to you as the tool result. Keep prompts self-contained — the subagent \
-    does NOT see this conversation's history.";
+    does NOT see this conversation's history. For INDEPENDENT subtasks, call \
+    Task MULTIPLE TIMES IN THE SAME TURN — the calls run in parallel (each \
+    subagent has read-only tools: it can read files and fetch pages itself); \
+    only sequence them when one subtask genuinely depends on another's \
+    result.";
 
 const GET_TASK_STATUS_DESC: &str = "Report the status of any background task \
     (`download_file` or `run_shell`) by its task id: state (running/completed/\

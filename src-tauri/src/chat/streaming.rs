@@ -84,7 +84,7 @@ impl RoundUsage {
 /// frontend's segment parser (a closing tag truncates the marker block; an
 /// opener prematurely starts a new segment). Mirrors `tool_block`'s arg-side
 /// sanitize in proto.rs.
-fn neutralize_markers(v: &str) -> String {
+pub(crate) fn neutralize_markers(v: &str) -> String {
     v.replace("</tool>", "<\\/tool>")
         .replace("<tool>", "<\\tool>")
         .replace("<think>", "<\\think>")
@@ -919,7 +919,38 @@ pub(crate) async fn run_openai_tool_loop(
                 }
             }
             messages.push(echoed);
-            for tc in &tool_calls {
+            // PARALLEL SUBAGENT FAN-OUT: a round that contains several `Task`
+            // calls (the model asking for multiple subagents at once — the
+            // whole point of subagents) must run them CONCURRENTLY, not
+            // one-by-one. Pre-pass: open every Task's marker and spawn its
+            // run_tool onto its own tokio task; the in-order pass below then
+            // awaits the handles so tool results still attach in call order.
+            let mut deferred: Vec<Option<tokio::task::JoinHandle<String>>> =
+                (0..tool_calls.len()).map(|_| None).collect();
+            for (idx, tc) in tool_calls.iter().enumerate() {
+                let name = tc.get("function").and_then(|f| f.get("name")).and_then(|x| x.as_str()).unwrap_or("");
+                if name != tools::TASK {
+                    continue;
+                }
+                let args_str = tc.get("function").and_then(|f| f.get("arguments")).and_then(|x| x.as_str()).unwrap_or("{}");
+                let args = parse_tool_args(args_str);
+                let block = tool_block(&name, &args);
+                let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
+                emit_token(app, sid, &open, &mut full);
+                deferred[idx] = Some(crate::chat::dispatch::spawn_run_tool(
+                    client.clone(),
+                    art_dir.to_path_buf(),
+                    std::sync::Arc::new(live_caps.clone()),
+                    sandbox,
+                    approval,
+                    Arc::clone(mgr),
+                    app.clone(),
+                    sid.to_string(),
+                    name.to_string(),
+                    args,
+                ));
+            }
+            for (idx, tc) in tool_calls.iter().enumerate() {
                 let id = tc.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
                 let name = tc
                     .get("function")
@@ -938,13 +969,24 @@ pub(crate) async fn run_openai_tool_loop(
                 // the frontend sees the step as live (spinner + live action
                 // label) while it executes — the closing tag after completion
                 // flips it to done. `full` accumulates the same bytes either
-                // way, so the persisted message is identical.
-                let block = tool_block(&name, &args);
-                let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
-                emit_token(app, sid, &open, &mut full);
+                // way, so the persisted message is identical. (Deferred Task
+                // calls opened their marker in the pre-pass above.)
+                let is_deferred = deferred[idx].is_some();
+                if !is_deferred {
+                    let block = tool_block(&name, &args);
+                    let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
+                    emit_token(app, sid, &open, &mut full);
+                }
                 perf.begin_tool();
-                let result = run_tool(client, &art_dir, &live_caps, sandbox, approval, mgr, app, sid, &name, &args).await;
+                let result = if let Some(handle) = deferred[idx].take() {
+                    handle
+                        .await
+                        .unwrap_or_else(|e| format!("Error: subagent task failed: {e}"))
+                } else {
+                    run_tool(client, &art_dir, &live_caps, sandbox, approval, mgr, app, sid, &name, &args).await
+                };
                 perf.end_tool();
+                let block = tool_block(&name, &args);
                 if block.ends_with("</tool>") {
                     emit_token(app, sid, "</tool>", &mut full);
                 }
@@ -1083,18 +1125,53 @@ pub(crate) async fn run_anthropic_tool_loop(
             messages.push(json!({ "role": "assistant", "content": content }));
 
             let mut results: Vec<Value> = Vec::new();
-            for tu in &tool_uses {
+            // PARALLEL SUBAGENT FAN-OUT — see the OpenAI loop's pre-pass.
+            let mut deferred: Vec<Option<tokio::task::JoinHandle<String>>> =
+                (0..tool_uses.len()).map(|_| None).collect();
+            for (idx, tu) in tool_uses.iter().enumerate() {
+                let name = tu.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                if name != tools::TASK {
+                    continue;
+                }
+                let args = tu.get("input").cloned().unwrap_or_else(|| json!({}));
+                let block = tool_block(name, &args);
+                let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
+                emit_token(app, sid, &open, &mut full);
+                deferred[idx] = Some(crate::chat::dispatch::spawn_run_tool(
+                    client.clone(),
+                    art_dir.to_path_buf(),
+                    std::sync::Arc::new(live_caps.clone()),
+                    sandbox,
+                    approval,
+                    Arc::clone(mgr),
+                    app.clone(),
+                    sid.to_string(),
+                    name.to_string(),
+                    args,
+                ));
+            }
+            for (idx, tu) in tool_uses.iter().enumerate() {
                 let id = tu.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
                 let name = tu.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
                 let args = tu.get("input").cloned().unwrap_or_else(|| json!({}));
 
-                // Two-part emission — see the OpenAI loop's marker.
-                let block = tool_block(&name, &args);
-                let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
-                emit_token(app, sid, &open, &mut full);
+                // Two-part emission — see the OpenAI loop's marker. (Deferred
+                // Task calls opened their marker in the pre-pass above.)
+                if deferred[idx].is_none() {
+                    let block = tool_block(&name, &args);
+                    let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
+                    emit_token(app, sid, &open, &mut full);
+                }
                 perf.begin_tool();
-                let result = run_tool(client, &art_dir, &live_caps, sandbox, approval, mgr, app, sid, &name, &args).await;
+                let result = if let Some(handle) = deferred[idx].take() {
+                    handle
+                        .await
+                        .unwrap_or_else(|e| format!("Error: subagent task failed: {e}"))
+                } else {
+                    run_tool(client, &art_dir, &live_caps, sandbox, approval, mgr, app, sid, &name, &args).await
+                };
                 perf.end_tool();
+                let block = tool_block(&name, &args);
                 if block.ends_with("</tool>") {
                     emit_token(app, sid, "</tool>", &mut full);
                 }

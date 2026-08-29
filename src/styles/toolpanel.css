@@ -408,7 +408,10 @@
 .subagent-empty-hint { font-size: 11px; opacity: 0.6; }
 
 .subagent-panel-list, .subagent-panel-view {
-  display: flex; flex-direction: column; height: 100%;
+  /* flex-fill the tab (whose height is flex-derived — height:100% against it
+     is unreliable and let the body grow past the pane with no scrollbar). */
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
 }
 .subagent-panel-header {
   display: flex; align-items: center; gap: 8px;
@@ -467,11 +470,88 @@
 }
 .subagent-bubble-content { color: var(--text); font-size: 13px; line-height: 1.6; }
 .subagent-bubble-streaming { position: relative; }
-
-/* Git sidebar agent section */
-.git-sidebar-agent {
+/* Tool-activity rows inside a subagent's output (parsed from <tool> markers
+   in the token stream) — same visual language as the chat's activity steps. */
+.subagent-tool-rows { display: flex; flex-direction: column; gap: 2px; margin: 2px 0; }
+.subagent-tool-row {
   display: flex; align-items: center; gap: 6px;
+  padding: 3px 8px;
+  border-left: 2px solid var(--border);
+  font-size: 11.5px; color: var(--text-dim);
 }
+.subagent-tool-row .subagent-tool-title { color: var(--text); }
+.subagent-tool-row .subagent-tool-detail {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  opacity: 0.75; font-family: var(--font-mono); font-size: 10.5px;
+}
+.subagent-tool-row.done { border-left-color: #3fb970; }
+.subagent-tool-row.running { border-left-color: #5aa7f0; }
+.subagent-tool-spinner {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  border: 1.5px solid var(--border); border-top-color: #5aa7f0;
+  animation: tool-spin 0.7s linear infinite;
+}
+
+/* Git sidebar agent rows — "SubAgent <role> · <task>" chip per agent.
+   Running agents carry a shimmer sweep; done agents are quiet. */
+.git-sidebar-agent-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 9px;
+  margin-bottom: 4px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow: hidden;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+.git-sidebar-agent-row:hover {
+  border-color: color-mix(in srgb, #5aa7f0 45%, var(--border));
+  color: var(--text);
+}
+.git-sidebar-agent-icon { flex-shrink: 0; color: var(--text-dim); }
+.git-sidebar-agent-label { flex-shrink: 0; font-weight: 600; color: var(--text); }
+.git-sidebar-agent-role { flex-shrink: 0; font-weight: 600; color: #5aa7f0; }
+.git-sidebar-agent-dot-sep { flex-shrink: 0; color: var(--text-dim); opacity: 0.6; }
+.git-sidebar-agent-task {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Shimmer sweep while the agent runs — a translucent gradient band sliding
+   across the chip. Vanishes when the row loses `.running`. */
+.git-sidebar-agent-row.running {
+  border-color: color-mix(in srgb, #5aa7f0 40%, var(--border));
+}
+.git-sidebar-agent-row.running::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    105deg,
+    transparent 30%,
+    color-mix(in srgb, #5aa7f0 18%, transparent) 48%,
+    color-mix(in srgb, #5aa7f0 30%, transparent) 50%,
+    color-mix(in srgb, #5aa7f0 18%, transparent) 52%,
+    transparent 70%
+  );
+  background-size: 220% 100%;
+  animation: agent-shine 1.6s ease-in-out infinite;
+}
+@keyframes agent-shine {
+  0% { background-position: 180% 0; }
+  100% { background-position: -80% 0; }
+}
+.git-sidebar-agent-row.running .git-sidebar-agent-icon { color: #5aa7f0; }
 .git-sidebar-section-badge {
   font-size: 10px; padding: 1px 6px; border-radius: 99px;
   background: var(--surface-2); color: var(--text-dim);

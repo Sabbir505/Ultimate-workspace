@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::chat::stream_events;
@@ -701,11 +701,20 @@ async fn run_task_subagent(
         .map(|p| format!("You are operating in the project at: {p}"))
         .unwrap_or_else(|| "No project root is bound to this task.".to_string());
     let system_prompt = format!(
-        "You are a focused subagent spawned by the main assistant. {role_instructions}\n{cwd_line}\nYou do NOT have access to tools — return a self-contained textual answer the main assistant can act on."
+        "You are a focused subagent spawned by the main assistant. {role_instructions}\n{cwd_line}\n\
+         You have READ-ONLY tools — list_directory, read_file, search_files, search_content, \
+         fetch_url — use them to ground your answer in the real workspace or web before \
+         answering. You CANNOT modify anything: if changes are needed, describe the exact \
+         edits in your answer instead of applying them."
     );
 
-    // Generate a subagent id and emit the spawn event.
-    let sub_id = format!("sub-{}", crate::db::now_ts());
+    // Generate a subagent id and emit the spawn event. The counter suffix is
+    // load-bearing now that a round's Task calls spawn CONCURRENTLY — subagents
+    // created in the same second used to collide on the plain timestamp id and
+    // overwrite each other in the frontend store (keyed by id).
+    static SUB_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let sub_seq = SUB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let sub_id = format!("sub-{}-{sub_seq}", crate::db::now_ts());
     let _ = app.emit(
         "chat:subagent-spawn",
         SubagentSpawnPayload {
@@ -727,15 +736,15 @@ async fn run_task_subagent(
             .as_deref()
             .unwrap_or(AnthropicProvider::DEFAULT_BASE);
         let url = format!("{base}/v1/messages");
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
             "max_tokens": 4096,
             "stream": true,
             "system": system_prompt,
             "messages": [{"role": "user", "content": prompt}],
         });
-        stream_subagent_sse(
-            &client, &url, &api_key, &body, app, sid, &sub_id, true,
+        run_subagent_loop(
+            &client, &url, &api_key, &mut body, app, sid, &sub_id, true,
         ).await
     } else {
         let base = base_url
@@ -746,7 +755,7 @@ async fn run_task_subagent(
                 OpenAIProvider::DEFAULT_BASE
             });
         let url = format!("{base}/v1/chat/completions");
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
             "stream": true,
             "stream_options": {"include_usage": true},
@@ -755,8 +764,8 @@ async fn run_task_subagent(
                 {"role": "user", "content": prompt},
             ],
         });
-        stream_subagent_sse(
-            &client, &url, &api_key, &body, app, sid, &sub_id, false,
+        run_subagent_loop(
+            &client, &url, &api_key, &mut body, app, sid, &sub_id, false,
         ).await
     };
 
@@ -788,14 +797,59 @@ async fn run_task_subagent(
     }
 }
 
-/// Stream an SSE completion call, emitting each content delta as
-/// `chat:subagent-tokens`. Handles both OpenAI-style (`choices/0/delta/content`)
-/// and Anthropic-style (`content_block_delta/text`) SSE formats.
-async fn stream_subagent_sse(
+/// Read-only tools a subagent may use: enough to ground its answer in the
+/// actual workspace/web, no mutation (so no approval cards can ever be
+/// needed — reads are exempt from the fs scope gate by contract), no browser
+/// pane takeover, no background tasks. Filtered out of the shared spec
+/// builders so the wire schema only advertises these.
+const SUBAGENT_TOOL_ALLOW: &[&str] = &[
+    tools::LIST_DIRECTORY,
+    tools::READ_FILE,
+    tools::SEARCH_FILES,
+    tools::SEARCH_CONTENT,
+    tools::FETCH_URL,
+];
+/// Max model rounds (tool rounds + final answer) per subagent. Deliberately
+/// generous (100): research subagents that read many files per round need
+/// room, and each round is a bounded tool batch — the RESULT cap below is
+/// what keeps context size in check, not the round count.
+const SUBAGENT_MAX_ROUNDS: usize = 100;
+/// Cap per tool result fed back to the subagent (keeps context bounded).
+const SUBAGENT_RESULT_CAP: usize = 6_000;
+
+/// Spec list for the subagent's provider format, filtered to the read-only
+/// allowlist above.
+fn subagent_tool_specs(is_anthropic: bool) -> Vec<Value> {
+    let caps = tools::ToolCaps::default();
+    let all = if is_anthropic {
+        tools::anthropic_tool_specs(&caps, permission::SandboxPolicy::ReadOnly)
+    } else {
+        tools::openai_tool_specs(&caps, permission::SandboxPolicy::ReadOnly)
+    };
+    all.into_iter()
+        .filter(|s| {
+            let name = if is_anthropic {
+                s.get("name").and_then(|n| n.as_str())
+            } else {
+                s.pointer("/function/name").and_then(|n| n.as_str())
+            };
+            name.is_some_and(|n| SUBAGENT_TOOL_ALLOW.contains(&n))
+        })
+        .collect()
+}
+
+/// Stream a subagent completion WITH tools. Runs up to `SUBAGENT_MAX_ROUNDS`
+/// streaming rounds: text deltas emit live as `chat:subagent-tokens`; tool
+/// calls are announced as `<tool>` markers in the same stream (so the Agents
+/// pane renders live activity rows), executed read-only via `execute_tool`,
+/// and their results are fed back for the next round. Returns the full
+/// accumulated output (text + markers) as the tool result for the MAIN agent.
+#[allow(clippy::too_many_arguments)]
+async fn run_subagent_loop(
     client: &reqwest::Client,
     url: &str,
     api_key: &str,
-    body: &Value,
+    body: &mut Value,
     app: &AppHandle,
     sid: &str,
     sub_id: &str,
@@ -803,74 +857,253 @@ async fn stream_subagent_sse(
 ) -> Result<String, String> {
     use crate::types::SubagentTokenPayload;
     use futures_util::StreamExt;
+    use std::collections::BTreeMap;
 
-    let mut req = client
-        .post(url)
-        .header("content-type", "application/json")
-        .json(body);
-    if is_anthropic {
-        req = req
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01");
-    } else {
-        req = req.header("Authorization", format!("Bearer {api_key}"));
-    }
-    let resp = req.send().await.map_err(|e| format!("request failed: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        let b = resp.text().await.unwrap_or_default();
-        return Err(format!("HTTP {status}: {}", crate::util::truncate_chars(&b, 500)));
+    let emit = |chunk: &str| {
+        let _ = app.emit(
+            "chat:subagent-tokens",
+            SubagentTokenPayload {
+                chat_session_id: sid.to_string(),
+                subagent_id: sub_id.to_string(),
+                chunk: chunk.to_string(),
+            },
+        );
+    };
+
+    let artifacts_dir = artifacts_dir(app);
+    let caps = tools::ToolCaps::default();
+    let tool_specs = subagent_tool_specs(is_anthropic);
+    let has_tools = !tool_specs.is_empty();
+    if has_tools {
+        if is_anthropic {
+            body["tools"] = Value::Array(tool_specs);
+        } else {
+            body["tools"] = Value::Array(tool_specs);
+        }
     }
 
-    let mut stream = resp.bytes_stream();
-    let mut pending = String::new();
     let mut output = String::new();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("stream read error: {e}"))?;
-        pending.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(nl) = pending.find('\n') {
-            let line: String = pending.drain(..=nl).collect();
-            let line = line.trim_end();
-            let data = match line.strip_prefix("data: ") {
-                Some(d) => d,
-                None => continue,
-            };
-            if data == "[DONE]" {
-                continue;
-            }
-            let v: serde_json::Value = match serde_json::from_str(data) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            // OpenAI-style: choices/0/delta/content
-            if let Some(c) = v.pointer("/choices/0/delta/content").and_then(|x| x.as_str()) {
-                if !c.is_empty() {
-                    output.push_str(c);
-                    let _ = app.emit(
-                        "chat:subagent-tokens",
-                        SubagentTokenPayload {
-                            chat_session_id: sid.to_string(),
-                            subagent_id: sub_id.to_string(),
-                            chunk: c.to_string(),
-                        },
-                    );
+    for round in 0..SUBAGENT_MAX_ROUNDS {
+        let mut req = client
+            .post(url)
+            .header("content-type", "application/json")
+            .json(body);
+        if is_anthropic {
+            req = req
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01");
+        } else {
+            req = req.header("Authorization", format!("Bearer {api_key}"));
+        }
+        let resp = req.send().await.map_err(|e| format!("request failed: {e}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let b = resp.text().await.unwrap_or_default();
+            return Err(format!("HTTP {status}: {}", crate::util::truncate_chars(&b, 500)));
+        }
+
+        let mut stream = resp.bytes_stream();
+        let mut pending = String::new();
+        // Round accumulators.
+        let mut round_text = String::new();
+        // OpenAI: index → (id, name, arguments-json-accumulated).
+        let mut oai_calls: BTreeMap<i64, (String, String, String)> = BTreeMap::new();
+        // Anthropic: block index → (id, name, partial-json-accumulated).
+        let mut ant_calls: BTreeMap<i64, (String, String, String)> = BTreeMap::new();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| format!("stream read error: {e}"))?;
+            pending.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(nl) = pending.find('\n') {
+                let line: String = pending.drain(..=nl).collect();
+                let line = line.trim_end();
+                let data = match line.strip_prefix("data: ") {
+                    Some(d) => d,
+                    None => continue,
+                };
+                if data == "[DONE]" {
+                    continue;
+                }
+                let v: serde_json::Value = match serde_json::from_str(data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if is_anthropic {
+                    match v.get("type").and_then(|t| t.as_str()) {
+                        Some("content_block_delta") => {
+                            if let Some(c) = v.pointer("/delta/text").and_then(|x| x.as_str()) {
+                                if !c.is_empty() {
+                                    round_text.push_str(c);
+                                    output.push_str(c);
+                                    emit(c);
+                                }
+                            }
+                            if v.pointer("/delta/type").and_then(|x| x.as_str())
+                                == Some("input_json_delta")
+                            {
+                                if let Some(idx) = v.get("index").and_then(|i| i.as_i64()) {
+                                    let piece = v
+                                        .pointer("/delta/partial_json")
+                                        .and_then(|x| x.as_str())
+                                        .unwrap_or("");
+                                    ant_calls.entry(idx).or_insert_with(|| {
+                                        (String::new(), String::new(), String::new())
+                                    }).2.push_str(piece);
+                                }
+                            }
+                        }
+                        Some("content_block_start") => {
+                            let block = v.pointer("/content_block");
+                            if block.and_then(|b| b.get("type")).and_then(|t| t.as_str())
+                                == Some("tool_use")
+                            {
+                                if let Some(idx) = v.get("index").and_then(|i| i.as_i64()) {
+                                    let id = block
+                                        .and_then(|b| b.get("id"))
+                                        .and_then(|x| x.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let name = block
+                                        .and_then(|b| b.get("name"))
+                                        .and_then(|x| x.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    ant_calls.insert(idx, (id, name, String::new()));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                } else {
+                    // OpenAI-style deltas.
+                    if let Some(c) = v.pointer("/choices/0/delta/content").and_then(|x| x.as_str())
+                    {
+                        if !c.is_empty() {
+                            round_text.push_str(c);
+                            output.push_str(c);
+                            emit(c);
+                        }
+                    }
+                    if let Some(tcs) =
+                        v.pointer("/choices/0/delta/tool_calls").and_then(|x| x.as_array())
+                    {
+                        for tc in tcs {
+                            let idx = tc.get("index").and_then(|i| i.as_i64()).unwrap_or(0);
+                            let entry =
+                                oai_calls.entry(idx).or_insert_with(|| {
+                                    (String::new(), String::new(), String::new())
+                                });
+                            if let Some(id) = tc.get("id").and_then(|x| x.as_str()) {
+                                if !id.is_empty() {
+                                    entry.0 = id.to_string();
+                                }
+                            }
+                            if let Some(n) =
+                                tc.pointer("/function/name").and_then(|x| x.as_str())
+                            {
+                                if !n.is_empty() {
+                                    entry.1 = n.to_string();
+                                }
+                            }
+                            if let Some(a) =
+                                tc.pointer("/function/arguments").and_then(|x| x.as_str())
+                            {
+                                entry.2.push_str(a);
+                            }
+                        }
+                    }
                 }
             }
-            // Anthropic-style: content_block_delta/delta/text
-            if let Some(c) = v.pointer("/delta/text").and_then(|x| x.as_str()) {
-                if !c.is_empty() {
-                    output.push_str(c);
-                    let _ = app.emit(
-                        "chat:subagent-tokens",
-                        SubagentTokenPayload {
-                            chat_session_id: sid.to_string(),
-                            subagent_id: sub_id.to_string(),
-                            chunk: c.to_string(),
-                        },
-                    );
-                }
+        }
+
+        // No tool calls → this round's text is the final answer.
+        let has_calls = !oai_calls.is_empty() || !ant_calls.is_empty();
+        if !has_calls {
+            break;
+        }
+        if round + 1 >= SUBAGENT_MAX_ROUNDS {
+            // Out of rounds — tell the model (and the pane) the loop ends here.
+            let note = "\n\n_[Subagent reached its tool-round limit; returning findings so far.]_";
+            output.push_str(note);
+            emit(note);
+            break;
+        }
+
+        if is_anthropic {
+            // Echo the assistant turn: text blocks + tool_use blocks.
+            let mut blocks: Vec<Value> = Vec::new();
+            if !round_text.trim().is_empty() {
+                blocks.push(json!({ "type": "text", "text": round_text }));
             }
+            let mut results: Vec<Value> = Vec::new();
+            for (_idx, (id, name, args_acc)) in ant_calls.iter() {
+                let args: Value = if args_acc.trim().is_empty() {
+                    json!({})
+                } else {
+                    serde_json::from_str(args_acc).unwrap_or(json!({}))
+                };
+                blocks.push(json!({ "type": "tool_use", "id": id, "name": name, "input": args }));
+                let meta = crate::agent_sessions::tool_meta_generic(name, &args);
+                emit(&format!("<tool>{meta}</tool>"));
+                let outcome =
+                    tools::execute_tool(client, &artifacts_dir, &caps, name, &args, Some(app))
+                        .await;
+                let result = crate::util::truncate_chars(&outcome.text, SUBAGENT_RESULT_CAP);
+                emit(&format!(
+                    "<tool>{}</tool>",
+                    json!({"kind": "result", "title": "Output", "result": crate::chat::streaming::neutralize_markers(&result)})
+                ));
+                results.push(json!({
+                    "type": "tool_result",
+                    "tool_use_id": id,
+                    "content": result,
+                }));
+            }
+            body["messages"].as_array_mut().map(|m| {
+                m.push(json!({ "role": "assistant", "content": blocks }));
+                m.push(json!({ "role": "user", "content": results }));
+            });
+        } else {
+            // Echo assistant tool_calls + feed results back (OpenAI format).
+            let mut calls_json: Vec<Value> = Vec::new();
+            let mut results: Vec<Value> = Vec::new();
+            for (_idx, (id, name, args_acc)) in oai_calls.iter() {
+                calls_json.push(json!({
+                    "id": id, "type": "function",
+                    "function": { "name": name, "arguments": args_acc },
+                }));
+                let args: Value = if args_acc.trim().is_empty() {
+                    json!({})
+                } else {
+                    serde_json::from_str(args_acc).unwrap_or(json!({}))
+                };
+                let meta = crate::agent_sessions::tool_meta_generic(name, &args);
+                emit(&format!("<tool>{meta}</tool>"));
+                let outcome =
+                    tools::execute_tool(client, &artifacts_dir, &caps, name, &args, Some(app))
+                        .await;
+                let result = crate::util::truncate_chars(&outcome.text, SUBAGENT_RESULT_CAP);
+                emit(&format!(
+                    "<tool>{}</tool>",
+                    json!({"kind": "result", "title": "Output", "result": crate::chat::streaming::neutralize_markers(&result)})
+                ));
+                results.push(json!({
+                    "role": "tool",
+                    "tool_call_id": id,
+                    "content": result,
+                }));
+            }
+            body["messages"].as_array_mut().map(|m| {
+                let mut echo = json!({ "role": "assistant", "tool_calls": calls_json });
+                if !round_text.trim().is_empty() {
+                    echo["content"] = json!(round_text);
+                }
+                m.push(echo);
+                for r in results {
+                    m.push(r);
+                }
+            });
         }
     }
 
@@ -1050,6 +1283,39 @@ async fn run_attach_tool(
         }
         format!("Attached {display} ({n} tools): {listing}")
     }
+}
+
+/// Owned-argument `run_tool` wrapper that runs on its own tokio task. Used by
+/// the tool loops to fan a round's `Task` calls out CONCURRENTLY: tokio::spawn
+/// needs 'static, so everything run_tool borrows is cloned/moved in. Behavior
+/// is identical to the inline path (same gating, same marker tail).
+pub(crate) fn spawn_run_tool(
+    client: reqwest::Client,
+    artifacts_dir: std::path::PathBuf,
+    caps: std::sync::Arc<tools::ToolCaps>,
+    sandbox: permission::SandboxPolicy,
+    approval: permission::ApprovalPolicy,
+    mgr: Arc<ChatManager>,
+    app: AppHandle,
+    sid: String,
+    name: String,
+    args: Value,
+) -> tokio::task::JoinHandle<String> {
+    tokio::spawn(async move {
+        run_tool(
+            &client,
+            &artifacts_dir,
+            &caps,
+            sandbox,
+            approval,
+            &mgr,
+            &app,
+            &sid,
+            &name,
+            &args,
+        )
+        .await
+    })
 }
 
 pub(crate) async fn run_tool(

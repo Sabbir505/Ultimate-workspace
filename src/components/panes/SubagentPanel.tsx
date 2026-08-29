@@ -1,15 +1,92 @@
 /**
- * SubagentPanel — renders the active subagent's chat inside the right-side
- * ToolPanel's "Agents" tab. Shows the initial prompt as a user-style bubble,
- * then the subagent's output streaming in real-time beneath it. Read-only;
- * no composer. When no subagent is selected, shows a list of all agents.
+ * SubagentPanel — renders the selected subagent's run inside the right-side
+ * ToolPanel's "Agents" tab. The spawn prompt renders as a user-style bubble,
+ * the output streams live beneath it as an assistant-style bubble — parsed
+ * into markdown text interleaved with tool-activity rows (the backend embeds
+ * `<tool>{json}</tool>` markers in the token stream: {"kind":"tool"} rows go
+ * live at call time, a following {"kind":"result"} completes the row and
+ * carries a collapsible output preview). When no subagent is selected, shows
+ * the agent list.
  */
 
-import { useEffect, useLayoutEffect, useRef } from "react";
-import { useChatStore } from "../../state/chat";
-import { useUiStore } from "../../state/ui";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useChatStore } from "../../state/chat";
+import { useUiStore } from "../../state/ui";
+
+interface ToolRow {
+  title: string;
+  detail: string;
+  done: boolean;
+  result?: string;
+}
+
+/** Parse a (possibly mid-stream) subagent output into ordered render
+ *  segments: markdown text and tool rows. A `result` marker completes the
+ *  most recent tool row; a trailing unclosed `<tool>` (mid-stream) renders
+ *  as a running row when its JSON is parseable, otherwise is skipped. */
+function parseSubagentOutput(output: string): { text: string[]; rows: ToolRow[] } {
+  const text: string[] = [];
+  const rows: ToolRow[] = [];
+  const re = /<tool>([\s\S]*?)<\/tool>/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  const pushText = (t: string) => {
+    if (t.trim()) text.push(t);
+  };
+  while ((m = re.exec(output)) !== null) {
+    pushText(output.slice(last, m.index));
+    last = m.index + m[0].length;
+    try {
+      const v = JSON.parse(m[1]);
+      if (v.kind === "result") {
+        const row = [...rows].reverse().find((r) => !r.done);
+        if (row) {
+          row.done = true;
+          row.result = typeof v.result === "string" ? v.result : undefined;
+        }
+      } else {
+        rows.push({
+          title: typeof v.title === "string" ? v.title : "Running tool",
+          detail: typeof v.detail === "string" ? v.detail : "",
+          done: false,
+        });
+      }
+    } catch {
+      /* malformed marker — skip */
+    }
+  }
+  pushText(output.slice(last));
+  return { text, rows };
+}
+
+function ToolActivityRow({ row }: { row: ToolRow }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={`subagent-tool-row ${row.done ? "done" : "running"}`}>
+      {row.done ? (
+        <span aria-hidden="true" style={{ color: "#3fb970" }}>✓</span>
+      ) : (
+        <span className="subagent-tool-spinner" aria-hidden="true" />
+      )}
+      <span
+        className="subagent-tool-title"
+        onClick={row.done && row.result ? () => setOpen((o) => !o) : undefined}
+        style={row.done && row.result ? { cursor: "pointer" } : undefined}
+        title={row.done && row.result ? "Toggle output" : undefined}
+      >
+        {row.title}
+      </span>
+      {row.detail && <span className="subagent-tool-detail">{row.detail}</span>}
+      {open && row.result && (
+        <div className="subagent-tool-result" style={{ whiteSpace: "pre-wrap", fontSize: 10.5, opacity: 0.85, marginTop: 4, maxHeight: 160, overflowY: "auto" }}>
+          {row.result}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function SubagentListItem({
   sub,
@@ -55,16 +132,21 @@ export function SubagentPanel() {
   const panelRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
+  const selectedSub =
+    activeSubagentId != null ? subagents[activeSubagentId] : undefined;
+
+  // Parsed render segments — recomputed as tokens stream in.
+  const segments = useMemo(
+    () => (selectedSub ? parseSubagentOutput(selectedSub.output) : null),
+    [selectedSub?.output],
+  );
+
   // Auto-scroll to the end as the subagent outputs tokens
   useLayoutEffect(() => {
     if (panelRef.current) {
       panelRef.current.scrollTop = panelRef.current.scrollHeight;
     }
   });
-
-  // Click outside the list to close — keep panel mounted but show list
-  const selectedSub =
-    activeSubagentId != null ? subagents[activeSubagentId] : undefined;
 
   // When subagent is selected, auto-open the Agents tab if somehow not active
   useEffect(() => {
@@ -92,7 +174,7 @@ export function SubagentPanel() {
     );
   }
 
-  if (selectedSub) {
+  if (selectedSub && segments) {
     return (
       <div className="subagent-panel-view">
         <div className="subagent-panel-header">
@@ -126,7 +208,7 @@ export function SubagentPanel() {
           </span>
         </div>
         <div className="subagent-panel-body" ref={panelRef}>
-          {/* Prompt bubble */}
+          {/* Prompt — user-style bubble (the subagent's "user message"). */}
           <div className="subagent-bubble subagent-prompt-bubble">
             <div className="subagent-bubble-label">Prompt</div>
             <div className="subagent-bubble-content">
@@ -135,13 +217,30 @@ export function SubagentPanel() {
               </ReactMarkdown>
             </div>
           </div>
-          {/* Output bubble — grows live as tokens stream in */}
+          {/* Output — assistant-style bubble: live markdown interleaved with
+              tool-activity rows parsed from the <tool> marker stream. */}
           <div className="subagent-bubble subagent-output-bubble">
             <div className="subagent-bubble-label">Output</div>
             <div className="subagent-bubble-content subagent-bubble-streaming">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {selectedSub.output}
-              </ReactMarkdown>
+              {segments.rows.length > 0 && (
+                <div className="subagent-tool-rows">
+                  {segments.rows.map((row, i) => (
+                    <ToolActivityRow key={`row-${i}-${row.title}`} row={row} />
+                  ))}
+                </div>
+              )}
+              {segments.text.map((t, i) => (
+                <ReactMarkdown key={`text-${i}`} remarkPlugins={[remarkGfm]}>
+                  {t}
+                </ReactMarkdown>
+              ))}
+              {segments.text.length === 0 && segments.rows.length === 0 &&
+                selectedSub.status === "running" && (
+                  <div className="subagent-tool-row running">
+                    <span className="subagent-tool-spinner" aria-hidden="true" />
+                    <span className="subagent-tool-title">Working…</span>
+                  </div>
+                )}
               {selectedSub.status === "running" && (
                 <span className="streaming-cursor" />
               )}

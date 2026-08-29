@@ -3977,8 +3977,9 @@ fn result_marker_text(id: u64, text: &str, is_error: bool) -> String {
 
 /// Shared tool-name → marker-meta mapping across CLIs. Claude, Kimi and
 /// OpenCode all converge on similar tool names; the edit-shaped tools map to
-/// DiffCard payloads, everything else to activity-group steps.
-fn tool_meta_generic(name: &str, input: &Value) -> Value {
+/// DiffCard payloads, everything else to activity-group steps. Also used by
+/// the built-in subagent loop (chat/dispatch.rs) for its `<tool>` markers.
+pub(crate) fn tool_meta_generic(name: &str, input: &Value) -> Value {
     // Tools emit args in different conventions: Claude Code uses snake_case
     // (`file_path` / `old_string` / `new_string`), OpenCode uses camelCase
     // (`filePath` / `oldString` / `newString`). Look up both keys per field;

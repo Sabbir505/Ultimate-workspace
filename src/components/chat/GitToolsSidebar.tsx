@@ -500,15 +500,23 @@ export function GitToolsSidebar() {
               Object.values(subagents).map((sub) => (
                 <button
                   key={sub.id}
-                  className="git-sidebar-plan git-sidebar-agent"
+                  className={`git-sidebar-agent-row${sub.status === "running" ? " running" : ""}`}
                   onClick={() => {
                     setActiveSubagentId(sub.id);
                     addTab("agents");
                   }}
                   title={sub.task}
                 >
-                  <span className={`chat-subagent-dot ${sub.status}`} />
-                  <span className="git-sidebar-plan-text">{sub.role}: {sub.task.length > 30 ? `${sub.task.slice(0, 30)}…` : sub.task}</span>
+                  <svg className="git-sidebar-agent-icon" width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="4" y="8" width="16" height="12" rx="2" />
+                    <circle cx="9" cy="14" r="1.2" fill="currentColor" stroke="none" />
+                    <circle cx="15" cy="14" r="1.2" fill="currentColor" stroke="none" />
+                    <path d="M12 8V4M8 4h8" />
+                  </svg>
+                  <span className="git-sidebar-agent-label">SubAgent</span>
+                  <span className="git-sidebar-agent-role">{sub.role}</span>
+                  <span className="git-sidebar-agent-dot-sep" aria-hidden="true">·</span>
+                  <span className="git-sidebar-agent-task">{sub.task}</span>
                 </button>
               ))
             )}

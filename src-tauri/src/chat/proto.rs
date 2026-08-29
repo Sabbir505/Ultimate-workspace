@@ -312,6 +312,18 @@ pub(crate) fn tool_block(name: &str, args: &Value) -> String {
         json!({ "kind": "tool", "title": "Reading the source ledger" })
     } else if name == tools::RESET_SOURCE_LEDGER {
         json!({ "kind": "tool", "title": "Resetting the source ledger" })
+    } else if name == tools::TASK {
+        // Subagent chip: the frontend renders this as the same "SubAgent
+        // <role> · <task>" chip the git sidebar uses (shine while running,
+        // click opens the Agents pane).
+        let role = if s("subagent_type").is_empty() { "agent".to_string() } else { s("subagent_type") };
+        json!({
+            "kind": "subagent",
+            "title": "SubAgent",
+            "role": role,
+            "task": s("description"),
+            "prompt": sanitize(s("prompt")),
+        })
     } else {
         json!({ "kind": "tool", "title": format!("Running tool {name}") })
     };

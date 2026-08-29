@@ -707,8 +707,10 @@ async fn run_task_subagent(
     let system_prompt = format!(
         "You are a focused subagent spawned by the main assistant. {role_instructions}\n{cwd_line}\n\
          You have READ-ONLY tools — list_directory, read_file, search_files, search_content, \
-         fetch_url — use them to ground your answer in the real workspace or web before \
-         answering. You CANNOT modify anything: if changes are needed, describe the exact \
+         fetch_url, web_search — use them to ground your answer in the real workspace or web before \
+         answering. When researching the web, record each source as you read it with \
+         add_source_note (url + fact) and consult get_source_ledger to review what you've \
+         recorded. You CANNOT modify anything: if changes are needed, describe the exact \
          edits in your answer instead of applying them."
     );
 
@@ -811,12 +813,22 @@ async fn run_task_subagent(
 /// needed — reads are exempt from the fs scope gate by contract), no browser
 /// pane takeover, no background tasks. Filtered out of the shared spec
 /// builders so the wire schema only advertises these.
+///
+/// Research agents get the full read-side research stack: web_search to find
+/// sources, add_source_note/get_source_ledger to record them against the
+/// session's ledger (the ledger tools live in the per-session DB, dispatched
+/// by `run_ledger_tool` — intercepted in the subagent loop the same way the
+/// main tool loop does). `reset_source_ledger` stays EXCLUDED: a subagent
+/// must never wipe the session's ledger.
 const SUBAGENT_TOOL_ALLOW: &[&str] = &[
     tools::LIST_DIRECTORY,
     tools::READ_FILE,
     tools::SEARCH_FILES,
     tools::SEARCH_CONTENT,
     tools::FETCH_URL,
+    tools::WEB_SEARCH,
+    tools::ADD_SOURCE_NOTE,
+    tools::GET_SOURCE_LEDGER,
 ];
 /// Max model rounds (tool rounds + final answer) per subagent. Deliberately
 /// generous (100): research subagents that read many files per round need
@@ -845,6 +857,34 @@ fn subagent_tool_specs(is_anthropic: bool) -> Vec<Value> {
             name.is_some_and(|n| SUBAGENT_TOOL_ALLOW.contains(&n))
         })
         .collect()
+}
+
+/// Execute one subagent tool call. The DB-backed source-ledger tools are
+/// intercepted first — the subagent loop bypasses `run_tool`, where the main
+/// loop dispatches them, so without this the model could never record
+/// sources. Then the read-only allowlist is enforced AT EXECUTION: the specs
+/// only advertise it, but `execute_tool` dispatches by name and the subagent
+/// loop has no permission layer — a hallucinated/injected write_file must not
+/// run unchecked. Everything else goes to the shared `execute_tool`.
+async fn subagent_run_tool(
+    app: &AppHandle,
+    sid: &str,
+    client: &reqwest::Client,
+    artifacts_dir: &std::path::Path,
+    caps: &tools::ToolCaps,
+    name: &str,
+    args: &Value,
+) -> ToolOutcome {
+    if !SUBAGENT_TOOL_ALLOW.contains(&name) {
+        return ToolOutcome::text(format!(
+            "Error: `{name}` is not available to subagents (read-only tool set). \
+Use one of the listed read-only tools instead."
+        ));
+    }
+    if let Some(result) = run_ledger_tool(app, sid, name, args).await {
+        return ToolOutcome::text(result);
+    }
+    tools::execute_tool(client, artifacts_dir, caps, name, args, Some(app)).await
 }
 
 /// Stream a subagent completion WITH tools. Runs up to `SUBAGENT_MAX_ROUNDS`
@@ -1118,19 +1158,8 @@ async fn run_subagent_loop(
                 blocks.push(json!({ "type": "tool_use", "id": id, "name": name, "input": args }));
                 let meta = crate::agent_sessions::tool_meta_generic(name, &args);
                 emit(&format!("<tool>{meta}</tool>"));
-                // Enforce the read-only allowlist AT EXECUTION: the specs only
-                // advertise it, but `execute_tool` dispatches by name and the
-                // subagent loop bypasses the main loop's permission layer — a
-                // hallucinated/injected write_file would otherwise run
-                // unchecked with no approval card.
-                let outcome = if !SUBAGENT_TOOL_ALLOW.contains(&name.as_str()) {
-                    ToolOutcome::text(format!(
-                        "Error: `{name}` is not available to subagents (read-only tool set). \
-Use one of the listed read-only tools instead."
-                    ))
-                } else {
-                    tools::execute_tool(client, &artifacts_dir, &caps, name, &args, Some(app)).await
-                };
+                let outcome =
+                    subagent_run_tool(app, sid, client, &artifacts_dir, &caps, name, &args).await;
                 let result = crate::util::truncate_chars(&outcome.text, SUBAGENT_RESULT_CAP);
                 emit(&format!(
                     "<tool>{}</tool>",
@@ -1162,17 +1191,8 @@ Use one of the listed read-only tools instead."
                 };
                 let meta = crate::agent_sessions::tool_meta_generic(name, &args);
                 emit(&format!("<tool>{meta}</tool>"));
-                // Same read-only enforcement as the Anthropic branch above —
-                // the subagent loop bypasses the main loop's permission gate,
-                // so a hallucinated/injected write tool must not execute.
-                let outcome = if !SUBAGENT_TOOL_ALLOW.contains(&name.as_str()) {
-                    ToolOutcome::text(format!(
-                        "Error: `{name}` is not available to subagents (read-only tool set). \
-Use one of the listed read-only tools instead."
-                    ))
-                } else {
-                    tools::execute_tool(client, &artifacts_dir, &caps, name, &args, Some(app)).await
-                };
+                let outcome =
+                    subagent_run_tool(app, sid, client, &artifacts_dir, &caps, name, &args).await;
                 let result = crate::util::truncate_chars(&outcome.text, SUBAGENT_RESULT_CAP);
                 emit(&format!(
                     "<tool>{}</tool>",

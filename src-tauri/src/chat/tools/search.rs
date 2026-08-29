@@ -42,26 +42,38 @@ pub fn is_blocked_ip(ip: &IpAddr) -> bool {
                 || v4.is_documentation()
         }
         IpAddr::V6(v6) => {
+            // Loopback/unspecified/multicast FIRST: `to_ipv4()` below converts
+            // the IPv4-COMPATIBLE form too, so `::1` became 0.0.0.1 and slipped
+            // past every V4 rule (loopback is only 127.0.0.0/8 in V4) — the
+            // bracketed-loopback SSRF shape `http://[::1]:8080/` was reachable.
+            if v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() {
+                return true;
+            }
             // IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d)
             // addresses smuggle a V4 address past every V6 check below —
             // `[::ffff:127.0.0.1]` is NOT `is_loopback()`. Unwrap the
-            // embedded V4 and apply the V4 rules to it. (`to_ipv4` covers
-            // both mapped and compatible forms; ::1 is neither and falls
-            // through to the V6 checks.)
+            // embedded V4 and apply the V4 rules to it.
             if let Some(v4) = v6.to_ipv4() {
                 return is_blocked_ip(&IpAddr::V4(v4));
             }
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                // Unique-local (fc00::/7) — RFC4193
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
+            // Unique-local (fc00::/7) — RFC4193
+            (v6.segments()[0] & 0xfe00) == 0xfc00
                 // Link-local (fe80::/10)
                 || (v6.segments()[0] & 0xffc0) == 0xfe80
                 // Documentation (2001:db8::/32) — parity with the V4 arm
                 || (v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8)
         }
     }
+}
+
+/// True when a proxy is configured via environment (HTTP(S)_PROXY /
+/// ALL_PROXY — the common Clash/V2Ray setup). reqwest honors these by
+/// default, which changes what the SSRF guards can meaningfully check: the
+/// TCP peer becomes the PROXY (127.0.0.1:7890), not the target host.
+pub(super) fn proxy_env_set() -> bool {
+    ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
+        .iter()
+        .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()))
 }
 
 /// True when `host` resolves to an IP in a blocked range (or fails to
@@ -74,11 +86,27 @@ pub fn is_blocked_ip(ip: &IpAddr) -> bool {
 /// fail-closed `Err => true` below) refused EVERY domain — fetch_url was a
 /// hard wall, pushing models onto the local file-search tools for web
 /// questions.
+///
+/// Proxy environments skip the DNS-resolution half entirely: the connection
+/// egresses through the user's proxy (which does its own resolution), so a
+/// local lookup — often broken or fake-IP under TUN-mode setups — says
+/// nothing about the real target. Literal-IP hosts (the actual SSRF shapes:
+/// `http://127.0.0.1/`, `http://169.254.169.254/`) are still blocked by name.
 pub fn host_blocked(host: &str) -> bool {
+    host_blocked_in(host, proxy_env_set())
+}
+
+/// `host_blocked` with the proxy decision injected — tests pin both sides
+/// (the process env leaks into `cargo test`, so the wrapper alone can't be
+/// asserted deterministically).
+pub(crate) fn host_blocked_in(host: &str, proxied: bool) -> bool {
     use std::net::ToSocketAddrs;
     let h = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = h.parse::<IpAddr>() {
         return is_blocked_ip(&ip);
+    }
+    if proxied {
+        return false;
     }
     let addrs: Vec<IpAddr> = match (h, 0u16).to_socket_addrs() {
         Ok(it) => it
@@ -131,14 +159,21 @@ pub(super) async fn fetch_url(client: &reqwest::Client, url: &str) -> Result<Str
         .await
         .map_err(|e| format!("request failed: {e}"))?;
     // DNS-rebinding guard: re-verify the resolved peer IP after the TCP
-    // connection has been opened.
-    if let Some(peer) = resp.remote_addr() {
-        if is_blocked_ip(&peer.ip()) {
-            return Err(format!(
-                "fetch_url refused: peer {} is in a blocked address range \
-                 (DNS-rebinding guard).",
-                peer.ip()
-            ));
+    // connection has been opened. SKIPPED when a proxy is configured: the
+    // TCP peer is then the proxy itself (e.g. 127.0.0.1:7890 — Clash), which
+    // the blocklist always refuses, so this check rejected EVERY fetch in
+    // proxied setups (the "DNS-rebinding guard refuses all connections"
+    // failure the subagents kept reporting). The pre-connect host_blocked()
+    // name check still guards literal private/loopback hosts.
+    if !proxy_env_set() {
+        if let Some(peer) = resp.remote_addr() {
+            if is_blocked_ip(&peer.ip()) {
+                return Err(format!(
+                    "fetch_url refused: peer {} is in a blocked address range \
+                     (DNS-rebinding guard).",
+                    peer.ip()
+                ));
+            }
         }
     }
     let status = resp.status();
@@ -680,6 +715,18 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn host_blocked_always_blocks_literal_private_and_loopback_ips() {
+        // Deterministic regardless of proxy env: the SSRF shapes that matter
+        // (literal loopback / LAN / metadata addresses) are blocked by name
+        // before any DNS is consulted. Public literals stay allowed.
+        for host in ["127.0.0.1", "10.0.0.5", "192.168.1.10", "172.16.0.1",
+                     "169.254.169.254", "100.64.0.1", "::1", "[::ffff:127.0.0.1]"] {
+            assert!(host_blocked(host), "{host} must be blocked");
+        }
+        assert!(!host_blocked("93.184.216.34"));
+    }
+
+    #[test]
     fn html_to_text_drops_scripts_and_tags() {
         let html = "<html><head><title>Hi</title><style>x{}</style></head>\
             <body><script>bad()</script><p>Hello <b>world</b></p></body></html>";
@@ -862,9 +909,16 @@ mod tests {
         // turned fetch_url into a hard wall. "localhost" resolves via the
         // hosts file to loopback: the blocked verdict must come from the IP
         // check (resolution succeeding), not from a resolution error.
-        assert!(host_blocked("localhost"));
+        // Pinned on the NON-proxied path: the test process inherits the
+        // user's shell env (HTTP_PROXY etc.), where hostname resolution is
+        // skipped by design.
+        assert!(host_blocked_in("localhost", false));
         // RFC 2606 `.invalid` is guaranteed unresolvable → fail-closed true.
-        assert!(host_blocked("conduit-does-not-exist.invalid"));
+        assert!(host_blocked_in("conduit-does-not-exist.invalid", false));
+        // Proxied path: hostname checks are skipped (the proxy resolves),
+        // literal IPs are still judged.
+        assert!(!host_blocked_in("example.com", true));
+        assert!(host_blocked_in("127.0.0.1", true));
     }
 
 }

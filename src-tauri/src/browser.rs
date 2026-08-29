@@ -538,6 +538,16 @@ impl BrowserManager {
         eprintln!("[conduit:browser] create OK for label={label}");
 
         self.webviews.lock().insert(label.clone(), pane);
+
+        // CDP: enable the Page domain for this webview so Page.* methods work
+        // immediately and page-domain events (load, frameNavigated — the
+        // Phase 2 wait_for upgrade) can be subscribed. Best-effort: a failure
+        // never blocks pane creation. Must run AFTER the map insert (the CDP
+        // call resolves the pane through it), like every other main-thread
+        // roundtrip in this method.
+        if let Err(e) = self.call_devtools_protocol(&label, "Page.enable", "{}") {
+            eprintln!("[conduit:browser] Page.enable failed (non-fatal): {e}");
+        }
         self.pane_visible.lock().insert(pane_id.to_string(), true);
         self.pane_active_tab.lock().insert(pane_id.to_string(), tab_id.to_string());
 
@@ -1095,6 +1105,101 @@ impl BrowserManager {
     pub fn capture_active_png(&self) -> Option<Vec<u8>> {
         let label = self.active_label().ok()?;
         self.capture_pane_png(&label)
+    }
+
+    /// Call a Chrome DevTools Protocol method on the pane's WebView2 and
+    /// return the raw JSON result object. This is the entry point of the CDP
+    /// execution layer — Phase 1 wires `Page.captureScreenshot` (below) and
+    /// `Page.enable`; later phases move the eval-bridge primitives (a11y
+    /// tree extraction, input events, network-idle waits) onto CDP as well.
+    /// Runs the COM roundtrip on the main thread with the message loop
+    /// pumped (same pattern as `capture_pane_png`), so the UI stays alive.
+    #[cfg(windows)]
+    pub fn call_devtools_protocol(
+        &self,
+        label: &str,
+        method: &str,
+        params_json: &str,
+    ) -> Result<String, String> {
+        use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
+        use windows::core::HSTRING;
+
+        let pane = self.get(label)?;
+        let method_h = HSTRING::from(method);
+        let params_h = HSTRING::from(params_json);
+        let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+        let _ = pane.webview.with_webview(move |platform_webview| {
+            let outcome = (|| -> Result<String, String> {
+                let core = unsafe { platform_webview.controller().CoreWebView2() }
+                    .map_err(|e| format!("CoreWebView2 unavailable: {e}"))?;
+                let (rtx, rrx) = std::sync::mpsc::channel::<Result<String, String>>();
+                CallDevToolsProtocolMethodCompletedHandler::wait_for_async_operation(
+                    Box::new(move |handler| unsafe {
+                        core.CallDevToolsProtocolMethod(&method_h, &params_h, &handler)
+                    }
+                    .map_err(webview2_com::Error::WindowsError)),
+                    // Completed-handler args: (HRESULT → Result<()>, result
+                    // JSON → String). Forward the JSON out through the
+                    // channel; the closure itself must return Ok.
+                    Box::new(move |hr: windows::core::Result<()>, json: String| {
+                        let _ = rtx.send(hr.map(|_| json).map_err(|e| e.to_string()));
+                        Ok(())
+                    }),
+                )
+                .map_err(|e| format!("cdp wait: {e}"))?;
+                rrx.recv()
+                    .map_err(|_| "cdp completed handler dropped".to_string())?
+            })();
+            let _ = tx.send(outcome);
+        });
+        rx.recv_timeout(Duration::from_secs(20))
+            .unwrap_or_else(|_| Err("cdp call timed out".to_string()))
+    }
+
+    #[cfg(not(windows))]
+    pub fn call_devtools_protocol(
+        &self,
+        _label: &str,
+        _method: &str,
+        _params_json: &str,
+    ) -> Result<String, String> {
+        Err("CDP execution layer requires the Windows WebView2 backend".to_string())
+    }
+
+    /// Capture the pane as PNG via CDP `Page.captureScreenshot` — the CDP
+    /// path renders through the compositor (works where the COM
+    /// `CapturePreview` stream roundtrip intermittently returns an empty
+    /// frame) and decodes the base64 payload straight out of the JSON.
+    pub fn capture_pane_png_via_cdp(&self, label: &str) -> Option<Vec<u8>> {
+        #[cfg(windows)]
+        {
+            let json = self
+                .call_devtools_protocol(label, "Page.captureScreenshot", r#"{"format":"png"}"#)
+                .ok()?;
+            let v: serde_json::Value = serde_json::from_str(&json).ok()?;
+            let b64 = v.get("data")?.as_str()?;
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.decode(b64).ok()
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = label;
+            None
+        }
+    }
+
+    /// CDP-first capture with the COM CapturePreview path as fallback — the
+    /// screenshot callers use this so a CDP failure degrades instead of
+    /// breaking the tool.
+    pub fn capture_active_png_via_cdp(&self) -> Option<Vec<u8>> {
+        let label = self.active_label().ok()?;
+        match self.capture_pane_png_via_cdp(&label) {
+            Some(png) if !png.is_empty() => Some(png),
+            _ => {
+                eprintln!("[conduit:browser] CDP screenshot empty — falling back to CapturePreview");
+                self.capture_pane_png(&label)
+            }
+        }
     }
 
     /// Read the active page with structured readability-style extraction.

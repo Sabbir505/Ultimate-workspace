@@ -1593,11 +1593,13 @@ async fn run_browser_tool(
     let browser = app.state::<crate::BrowserState>();
     let mgr = browser.0.clone();
 
-    // Screenshot is blocking COM work (UI-thread CapturePreview roundtrip) and
-    // unlike the other tools it saves a file + emits an artifact event, so it
-    // gets its own branch instead of the shared match below.
+    // Screenshot goes through the CDP execution layer (compositor-rendered,
+    // no COM IStream roundtrip) with the legacy CapturePreview path as
+    // fallback — both are blocking main-thread roundtrips, so
+    // spawn_blocking as before.
     if name == BROWSER_SCREENSHOT {
-        let png = match tokio::task::spawn_blocking(move || mgr.capture_active_png()).await {
+        let png = match tokio::task::spawn_blocking(move || mgr.capture_active_png_via_cdp()).await
+        {
             Ok(Some(png)) => png,
             Ok(None) => {
                 return Some("browser_screenshot failed: capture unavailable (no page is open in the browser pane, or the platform doesn't support capture).".to_string())

@@ -29,15 +29,25 @@ describe("contextWindowFor", () => {
     expect(catalogContextWindow("claude-sonnet-4-5-20250929")).toBe(200_000);
     expect(catalogContextWindow("kimi-k3")).toBe(256_000);
     expect(catalogContextWindow("glm-5.2")).toBe(200_000);
+    expect(catalogContextWindow("glm-4.6-air")).toBe(200_000);
+    expect(catalogContextWindow("glm-4-flash")).toBe(128_000);
     expect(catalogContextWindow("deepseek-v4-pro")).toBe(128_000);
-    expect(catalogContextWindow("gemini-3-pro")).toBe(1_000_000);
-    expect(catalogContextWindow("gpt-4.1-mini")).toBe(1_000_000);
+    expect(catalogContextWindow("mixtral-8x7b")).toBe(32_768);
   });
 
-  it("unknown models keep the flat API default", () => {
+  it("unknown models default to the modern 1M norm", () => {
     expect(catalogContextWindow("totally-unknown-model")).toBeNull();
     expect(contextWindowFor("totally-unknown-model", false, undefined)).toBe(API_CONTEXT_WINDOW);
     expect(contextWindowFor(undefined, false)).toBe(API_CONTEXT_WINDOW);
+  });
+
+  it("known smaller windows stay catalog-pinned (exceptions to the 1M norm)", () => {
+    expect(catalogContextWindow("gpt-4o")).toBe(128_000);
+    expect(catalogContextWindow("kimi-k3")).toBe(256_000);
+    expect(catalogContextWindow("qwen2.5-7b")).toBe(128_000);
+    // 1M-class families resolve through the default.
+    expect(catalogContextWindow("gpt-4.1-mini")).toBeNull();
+    expect(catalogContextWindow("gemini-3-pro")).toBeNull();
   });
 
   it("ignores a stale localCtx on an API/cloud session (slider is global UI state)", () => {
@@ -47,6 +57,7 @@ describe("contextWindowFor", () => {
     // never reads this value, so honoring it here would just mislead the user.
     expect(contextWindowFor("claude-sonnet-4-5", false, 8192)).toBe(200_000);
     expect(contextWindowFor("totally-unknown-model", false, 131072)).toBe(API_CONTEXT_WINDOW);
+    expect(contextWindowFor("gpt-4.1", false, 8192)).toBe(1_000_000);
   });
 });
 

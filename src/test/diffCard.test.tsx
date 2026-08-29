@@ -55,6 +55,11 @@ describe("MessageBubble inline diff cards", () => {
     );
     expandProcess(container);
 
+    // Edit steps render as a COMPACT row first (✏ Edit file dir +N −M) — the
+    // inline diff card opens on click.
+    const row = container.querySelector(".chat-edit-row-toggle");
+    expect(row).not.toBeNull();
+    fireEvent.click(row!);
     const card = container.querySelector(".diff-card");
     expect(card).not.toBeNull();
     // Header: filename and +/− stats (1 del, 2 adds, one hunk). Scoped to the
@@ -84,12 +89,15 @@ describe("MessageBubble inline diff cards", () => {
     const { container } = render(<MessageBubble message={assistantMsg(content)} />);
     expandProcess(container);
 
-    // One diff card for the edit, and the two web reads fold into collapsed
-    // activity groups around it (the edit splits the run in two) — all inside
-    // the turn's single ProcessSummary.
-    expect(container.querySelectorAll(".diff-card").length).toBe(1);
+    // The edit renders as a compact row (diff hidden until clicked); the two
+    // web reads become single activity rows around it — all inside the turn's
+    // single ProcessSummary.
+    expect(container.querySelectorAll(".chat-edit-row").length).toBe(1);
     expect(container.querySelectorAll(".chat-process-toggle").length).toBe(1);
-    expect(container.querySelectorAll(".chat-activity-steps").length).toBe(2);
+    // Edit row closed by default → no diff card yet; clicking opens it.
+    expect(container.querySelectorAll(".diff-card").length).toBe(0);
+    fireEvent.click(container.querySelector(".chat-edit-row-toggle")!);
+    expect(container.querySelectorAll(".diff-card").length).toBe(1);
   });
 
   it("caps the preview at 5 lines with a more-lines footer", () => {
@@ -106,6 +114,7 @@ describe("MessageBubble inline diff cards", () => {
     );
     expandProcess(container);
 
+    fireEvent.click(container.querySelector(".chat-edit-row-toggle")!);
     expect(container.querySelectorAll(".diff-card .diff-line.add").length).toBe(5);
     expect(queryByText(/3 more lines/)).not.toBeNull();
   });

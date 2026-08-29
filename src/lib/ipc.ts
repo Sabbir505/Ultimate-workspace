@@ -170,6 +170,12 @@ export const browserClosePane = (paneId: string) =>
   safeInvoke<void>("browser_close_pane", { paneId });
 export const listenBrowserNavigatedTab = (handler: (payload: BrowserNavigatedPayload) => void) =>
   safeListen<BrowserNavigatedPayload>("browser:navigated", handler);
+/** WebView2 NavigationCompleted (success only) — the label of the webview
+ *  ("browser-{pane}-tab-{tab}"). The ground-truth "this page really finished
+ *  loading" signal, used to clear the pane's loading flag even when the
+ *  navigation-start event never surfaced. */
+export const listenBrowserLoadCompleted = (handler: (label: string) => void) =>
+  safeListen<string>("browser:load-completed", handler);
 
 // --- Browser pane project registry + MCP roundtrip wrappers ---
 export const registerBrowserPaneProject = (paneId: string, projectId: string) =>

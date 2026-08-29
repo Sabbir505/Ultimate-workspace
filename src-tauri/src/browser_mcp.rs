@@ -416,7 +416,7 @@ async fn op_navigate(
     let (pane_id, tab_id) = parse_label(&label)
         .ok_or_else(|| McpError { code: "invalid_args", message: format!("bad label: {label}") })?;
     browser
-        .navigate(&pane_id, &tab_id, url)
+        .navigate(_app, &pane_id, &tab_id, url)
         .map_err(|e| McpError { code: "nav_failure", message: e })?;
 
     // Best-effort title read (non-fatal if it fails).

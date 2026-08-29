@@ -29,6 +29,41 @@ const EMPTY_STEPS: unknown[] = [];
 const EMPTY_SUBAGENTS: Record<string, unknown> = {};
 const EMPTY_ACCEPTED: import("../../lib/ipc").ChatPlanRecord[] = [];
 
+const SIDEBAR_VISIBLE_CAP = 4;
+
+/** "more X" affordance for sidebar sections: shows the first
+ *  SIDEBAR_VISIBLE_CAP rows inline; hovering (or focusing) the more-row opens
+ *  a small glass popover — same visual language as the branch menu — listing
+ *  the remaining rows with their normal click behavior. */
+function SidebarMoreRow({
+  count,
+  label,
+  children,
+}: {
+  count: number;
+  label: string;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div
+      className="git-sidebar-more"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <button
+        type="button"
+        className="git-sidebar-more-btn"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        more {count} {label}
+      </button>
+      {open && <div className="git-sidebar-more-pop">{children}</div>}
+    </div>
+  );
+}
+
 export function GitToolsSidebar() {
   const boundProjectId = useChatStore((s) =>
     s.activeChatSessionId ? s.sessionProjects[s.activeChatSessionId] : undefined,
@@ -373,7 +408,8 @@ export function GitToolsSidebar() {
             {displayPlans.length === 0 ? (
               <div className="git-sidebar-empty">No plans yet.</div>
             ) : (
-              displayPlans.map((p, i) => (
+              <>
+              {displayPlans.slice(0, SIDEBAR_VISIBLE_CAP).map((p, i) => (
                 <button
                   key={i}
                   className="git-sidebar-plan"
@@ -392,7 +428,22 @@ export function GitToolsSidebar() {
                   )}
                   <span className="git-sidebar-plan-text">{p.label}…</span>
                 </button>
-              ))
+              ))}
+              {displayPlans.length > SIDEBAR_VISIBLE_CAP && (
+                <SidebarMoreRow count={displayPlans.length - SIDEBAR_VISIBLE_CAP} label="plans">
+                  {displayPlans.slice(SIDEBAR_VISIBLE_CAP).map((p, i) => (
+                    <button
+                      key={`more-${i}`}
+                      className="git-sidebar-plan"
+                      onClick={() => openPlan(p)}
+                      title={p.label}
+                    >
+                      <span className="git-sidebar-plan-text">{p.label}…</span>
+                    </button>
+                  ))}
+                </SidebarMoreRow>
+              )}
+              </>
             )}
           </div>
         </div>
@@ -424,8 +475,9 @@ export function GitToolsSidebar() {
               <div className="git-sidebar-empty">No progress yet.</div>
             ) : (
               <>
-                {/* Plan steps — all statuses */}
-                {planSteps.map((step) => (
+                {/* Plan steps — all statuses. Capped at the section budget:
+                    the rest fold into the more-row's hover popover below. */}
+                {planSteps.slice(0, SIDEBAR_VISIBLE_CAP).map((step) => (
                   <div
                     key={step.stepId}
                     className={`git-sidebar-progress-item progress-${step.status}`}
@@ -455,8 +507,9 @@ export function GitToolsSidebar() {
                     </span>
                   </div>
                 ))}
-                {/* Completed background tasks (downloads/shells) — unchanged */}
-                {completed.map((t) => (
+                {/* Completed background tasks (downloads/shells) — fill the
+                    slots the plan steps didn't use. */}
+                {completed.slice(0, Math.max(0, SIDEBAR_VISIBLE_CAP - Math.min(planSteps.length, SIDEBAR_VISIBLE_CAP))).map((t) => (
                   <div key={t.taskId} className="git-sidebar-progress-item">
                     <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
                       <path d="M20 6 9 17l-5-5" />
@@ -464,6 +517,37 @@ export function GitToolsSidebar() {
                     <span className="git-sidebar-progress-text">{t.message || t.kind}</span>
                   </div>
                 ))}
+                {(planSteps.length > SIDEBAR_VISIBLE_CAP ||
+                  completed.length > Math.max(0, SIDEBAR_VISIBLE_CAP - Math.min(planSteps.length, SIDEBAR_VISIBLE_CAP))) && (
+                  <SidebarMoreRow
+                    count={
+                      planSteps.length +
+                      completed.length -
+                      Math.min(planSteps.length, SIDEBAR_VISIBLE_CAP) -
+                      Math.max(0, SIDEBAR_VISIBLE_CAP - Math.min(planSteps.length, SIDEBAR_VISIBLE_CAP))
+                    }
+                    label="items"
+                  >
+                    {planSteps.slice(SIDEBAR_VISIBLE_CAP).map((step) => (
+                      <div
+                        key={`more-${step.stepId}`}
+                        className={`git-sidebar-progress-item progress-${step.status}`}
+                        title={step.status === "failed" ? (step.failedReason ?? "Failed") : step.label}
+                      >
+                        <span className={`git-sidebar-progress-text${step.status === "completed" ? " completed" : ""}`}>
+                          {step.label}
+                        </span>
+                      </div>
+                    ))}
+                    {completed
+                      .slice(Math.max(0, SIDEBAR_VISIBLE_CAP - Math.min(planSteps.length, SIDEBAR_VISIBLE_CAP)))
+                      .map((t) => (
+                        <div key={`more-${t.taskId}`} className="git-sidebar-progress-item">
+                          <span className="git-sidebar-progress-text">{t.message || t.kind}</span>
+                        </div>
+                      ))}
+                  </SidebarMoreRow>
+                )}
               </>
             )}
           </div>
@@ -498,7 +582,8 @@ export function GitToolsSidebar() {
             {Object.keys(subagents).length === 0 ? (
               <div className="git-sidebar-empty">No active agents.</div>
             ) : (
-              Object.values(subagents).map((sub) => (
+              <>
+              {Object.values(subagents).slice(0, SIDEBAR_VISIBLE_CAP).map((sub) => (
                 <button
                   key={sub.id}
                   className={`git-sidebar-agent-row${sub.status === "running" ? " running" : ""}`}
@@ -516,7 +601,24 @@ export function GitToolsSidebar() {
                   <span className="git-sidebar-agent-dot-sep" aria-hidden="true">·</span>
                   <span className="git-sidebar-agent-task">{sub.task}</span>
                 </button>
-              ))
+              ))}
+              {Object.values(subagents).length > SIDEBAR_VISIBLE_CAP && (
+                <SidebarMoreRow count={Object.values(subagents).length - SIDEBAR_VISIBLE_CAP} label="agents">
+                  {Object.values(subagents).slice(SIDEBAR_VISIBLE_CAP).map((sub) => (
+                    <button
+                      key={`more-${sub.id}`}
+                      className={`git-sidebar-agent-row${sub.status === "running" ? " running" : ""}`}
+                      onClick={() => openAgentsTab(sub.id)}
+                      title={sub.task}
+                    >
+                      <span className="git-sidebar-agent-label">SubAgent</span>
+                      <span className="git-sidebar-agent-role">{sub.role}</span>
+                      <span className="git-sidebar-agent-task">{sub.task}</span>
+                    </button>
+                  ))}
+                </SidebarMoreRow>
+              )}
+              </>
             )}
           </div>
         </div>

@@ -353,6 +353,33 @@ fn sanitize(rect: Rect) -> Rect {
     }
 }
 
+/// Append one line to `<app-data>/logs/browser.log`. The pane's stderr is
+/// invisible in packaged/dev-direct launches, and the stuck-loading diagnosis
+/// needs the FULL navigation chain visible — create/navigate/nav-start/
+/// nav-complete with error codes. Best-effort: logging must never fail a
+/// browser operation.
+pub(crate) fn browser_log(app: &tauri::AppHandle, msg: &str) {
+    let Some(dir) = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .map(|d| d.join("logs"))
+        .filter(|d| std::fs::create_dir_all(d).is_ok())
+    else {
+        return;
+    };
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let line = format!("[{:?}] {msg}\n", ts);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("browser.log"))
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+}
+
 /// JS snippet that monkey-patches history.pushState / replaceState to call
 /// browser_push_state whenever the URL changes via same-document navigation.
 /// This catches Bing's Images/Videos/Maps tab clicks, SPA route changes, etc.
@@ -477,6 +504,7 @@ impl BrowserManager {
     pub fn create(&self, pane_id: &str, tab_id: &str, url: &str, rect: Rect) -> Result<(), String> {
         let label = browser_label(pane_id, tab_id);
         eprintln!("[conduit:browser] create pane={pane_id} tab={tab_id} label={label} url={url} rect={rect:?}");
+        browser_log(&self.app, &format!("create pane={pane_id} tab={tab_id} label={label} url={url} rect={rect:?}"));
 
         // Guard against concurrent creates for the same label. React
         // StrictMode double-mounts in dev, so the frontend may send two
@@ -486,6 +514,7 @@ impl BrowserManager {
             let mut inf = self.in_flight.lock();
             if inf.contains(&label) {
                 eprintln!("[conduit:browser] create SKIP label={label} — already in-flight");
+                browser_log(&self.app, &format!("create SKIP label={label} — already in-flight"));
                 return Ok(());
             }
             inf.insert(label.clone());
@@ -534,10 +563,26 @@ impl BrowserManager {
         // produce a `BrowserPane` whose API is uniform for the rest of
         // this module. See `build_pane_on_main_thread` for the platform
         // split.
-        let pane = self.build_pane_on_main_thread(pane_id, tab_id, url, rect)?;
+        let pane = match self.build_pane_on_main_thread(pane_id, tab_id, url, rect) {
+            Ok(p) => p,
+            Err(e) => {
+                browser_log(&self.app, &format!("create FAILED label={label}: {e}"));
+                return Err(e);
+            }
+        };
         eprintln!("[conduit:browser] create OK for label={label}");
 
         self.webviews.lock().insert(label.clone(), pane);
+
+        // Definitive navigation instrumentation: WebView2's own
+        // NavigationStarting / NavigationCompleted events, registered
+        // straight on CoreWebView2 (wry's on_navigation only covers
+        // navigation-START, and nothing covered completion/failure — a pane
+        // whose navigation silently never ran looked identical to one stuck
+        // loading). Logs every transition to logs/browser.log with the error
+        // code, and emits `browser:navigated` on COMPLETED so the frontend's
+        // loading flag tracks real load completion.
+        self.attach_navigation_listeners(&label);
 
         // CDP: enable the Page domain for this webview so Page.* methods work
         // immediately and page-domain events (load, frameNavigated — the
@@ -545,8 +590,12 @@ impl BrowserManager {
         // never blocks pane creation. Must run AFTER the map insert (the CDP
         // call resolves the pane through it), like every other main-thread
         // roundtrip in this method.
-        if let Err(e) = self.call_devtools_protocol(&label, "Page.enable", "{}") {
-            eprintln!("[conduit:browser] Page.enable failed (non-fatal): {e}");
+        match self.call_devtools_protocol(&label, "Page.enable", "{}") {
+            Ok(_) => browser_log(&self.app, &format!("Page.enable OK label={label}")),
+            Err(e) => {
+                eprintln!("[conduit:browser] Page.enable failed (non-fatal): {e}");
+                browser_log(&self.app, &format!("Page.enable FAILED label={label}: {e}"));
+            }
         }
         self.pane_visible.lock().insert(pane_id.to_string(), true);
         self.pane_active_tab.lock().insert(pane_id.to_string(), tab_id.to_string());
@@ -555,15 +604,101 @@ impl BrowserManager {
         // method runs on an async worker) — same WebView2 constraint as
         // add_child above.
         let (nav_pane, parsed) = self.prepare_navigate(pane_id, tab_id, url)?;
-        self.run_main_thread_call(move || {
+        browser_log(&self.app, &format!("create navigate label={label} url={parsed}"));
+        let nav_result = self.run_main_thread_call(move || {
             nav_pane.webview.navigate(parsed).map_err(|e| e.to_string())
-        })?;
+        });
+        match &nav_result {
+            Ok(_) => browser_log(&self.app, &format!("create navigate OK label={label}")),
+            Err(e) => browser_log(&self.app, &format!("create navigate FAILED label={label}: {e}")),
+        }
+        nav_result?;
         self.spawn_post_nav_inject(pane_id, tab_id);
 
         // Hand keyboard focus back to the main webview: the freshly-attached
         // WebView2 child grabs it, stealing keystrokes from the chat composer.
         self.refocus_main_webview();
         Ok(())
+    }
+
+    /// Register WebView2 NavigationStarting / NavigationCompleted COM event
+    /// handlers on the pane's webview (best-effort, diagnostics + truthful
+    /// load events). Runs on the main thread via with_webview; the handlers
+    /// are COM-refcounted by WebView2 so they outlive this call.
+    fn attach_navigation_listeners(&self, label: &str) {
+        #[cfg(windows)]
+        {
+            use webview2_com::NavigationCompletedEventHandler;
+            use webview2_com::NavigationStartingEventHandler;
+            use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2NavigationCompletedEventArgs;
+            use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2NavigationStartingEventArgs;
+
+            let app = self.app.clone();
+            let label_start = label.to_string();
+            let app_complete = self.app.clone();
+            let label_complete = label.to_string();
+            let _ = self.get(label).map(|pane| {
+                let _ = pane.webview.with_webview(move |platform_webview| {
+                    use webview2_com::take_pwstr;
+                    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_WEB_ERROR_STATUS;
+                    let Ok(core) = (unsafe { platform_webview.controller().CoreWebView2() }) else {
+                        return;
+                    };
+                    // NavigationStarting: every navigation attempt (URL +
+                    // whether wry's on_navigation allowed it).
+                    let start_handler = NavigationStartingEventHandler::create(Box::new(
+                        move |_sender, args: Option<ICoreWebView2NavigationStartingEventArgs>| {
+                            if let Some(args) = args {
+                                let mut pw = windows::core::PWSTR::null();
+                                if unsafe { args.Uri(&mut pw) }.is_ok() {
+                                    let uri = take_pwstr(pw);
+                                    browser_log(&app, &format!("nav START label={label_start} uri={uri}"));
+                                }
+                            }
+                            Ok(())
+                        },
+                    ));
+                    let mut start_token = 0i64;
+                    let _ = unsafe { core.add_NavigationStarting(&start_handler, &mut start_token) };
+                    // NavigationCompleted: success/failure + the WebView2 error
+                    // code — the ground truth for "stuck loading" reports.
+                    let complete_handler = NavigationCompletedEventHandler::create(Box::new(
+                        move |_sender, args: Option<ICoreWebView2NavigationCompletedEventArgs>| {
+                            if let Some(args) = args {
+                                let mut success = windows::core::BOOL::default();
+                                let _ = unsafe { args.IsSuccess(&mut success) };
+                                let mut err = COREWEBVIEW2_WEB_ERROR_STATUS::default();
+                                let _ = unsafe { args.WebErrorStatus(&mut err) };
+                                browser_log(
+                                    &app_complete,
+                                    &format!(
+                                        "nav COMPLETE label={label_complete} success={} error={}",
+                                        success.as_bool(),
+                                        err.0
+                                    ),
+                                );
+                                if success.as_bool() {
+                                    // The navigation reached a real load end —
+                                    // mirror it through an event the frontend
+                                    // can use to clear `loading` truthfully.
+                                    let _ = app_complete.emit(
+                                        "browser:load-completed",
+                                        label_complete.clone(),
+                                    );
+                                }
+                            }
+                            Ok(())
+                        },
+                    ));
+                    let mut complete_token = 0i64;
+                    let _ = unsafe { core.add_NavigationCompleted(&complete_handler, &mut complete_token) };
+                });
+            });
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = label;
+        }
     }
 
     /// Build the underlying webview (Windows/macOS: child webview via
@@ -617,6 +752,7 @@ impl BrowserManager {
                 .initialization_script(BRIDGE_OVERLAY_JS)
                 .on_navigation(move |nav_url| {
                     eprintln!("[conduit:browser] navigation: {nav_url}");
+                    browser_log(&app, &format!("wry on_navigation (nav START allowed) url={nav_url} label={label_for_nav}"));
                     let _ = app.emit(
                         "browser:navigated",
                         BrowserNavigatedEvent {
@@ -836,10 +972,21 @@ impl BrowserManager {
         });
     }
 
-    pub fn navigate(&self, pane_id: &str, tab_id: &str, url: &str) -> Result<(), String> {
-        let (pane, parsed) = self.prepare_navigate(pane_id, tab_id, url)?;
-        pane.webview.navigate(parsed)
-            .map_err(|e| e.to_string())?;
+    pub fn navigate(&self, app: &AppHandle, pane_id: &str, tab_id: &str, url: &str) -> Result<(), String> {
+        let (pane, parsed) = match self.prepare_navigate(pane_id, tab_id, url) {
+            Ok(v) => v,
+            Err(e) => {
+                browser_log(app, &format!("navigate REJECTED pane={pane_id} tab={tab_id} url={url}: {e}"));
+                return Err(e);
+            }
+        };
+        browser_log(app, &format!("navigate pane={pane_id} tab={tab_id} url={parsed}"));
+        let result = pane.webview.navigate(parsed.clone()).map_err(|e| e.to_string());
+        match &result {
+            Ok(_) => browser_log(app, &format!("navigate INVOKE OK url={parsed} — waiting for nav START/COMPLETE")),
+            Err(e) => browser_log(app, &format!("navigate INVOKE FAILED url={parsed}: {e}")),
+        }
+        result?;
         self.spawn_post_nav_inject(pane_id, tab_id);
         self.refocus_main_webview();
         Ok(())
@@ -916,6 +1063,10 @@ impl BrowserManager {
     pub fn set_bounds(&self, pane_id: &str, tab_id: &str, rect: Rect) -> Result<(), String> {
         ensure_supported()?;
         let rect = sanitize(rect);
+        // Zero/degenerate rects make the pane INVISIBLE (black area under the
+        // app UI) while every navigation actually succeeds — log the rect so
+        // "stuck loading" reports can be told apart from "never painted".
+        browser_log(&self.app, &format!("set_bounds pane={pane_id} tab={tab_id} rect={rect:?}"));
         let label = browser_label(pane_id, tab_id);
         let pane = self
             .webviews

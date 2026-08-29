@@ -9,6 +9,7 @@
 // empty welcome screen — so we lazy-load it via dynamic import() in
 // StepCodeHighlighter below. That moves it out of the initial bundle.
 import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Pencil } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -21,9 +22,10 @@ import { readArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
+import { useProjectsStore } from "../../state/projects";
 import { parseUnifiedDiff } from "../../lib/diff";
 import { openInBrowserPane } from "../../lib/openBrowserPane";
-import { DiffCard, type EditPayload } from "./DiffCard";
+import { DiffCard, editLineStats, type EditPayload } from "./DiffCard";
 import { sameTurnFile, TurnChangesRow } from "./TurnChangesRow";
 // InlineDiagram (vector diagrams) and MermaidDiagram (mermaid + its
 // highlight.js language pack) are rarely seen on the initial chat surface and
@@ -858,12 +860,18 @@ function renderProcessBlock(
           ))}
         </div>
       );
-    case "diff":
+    case "folded":
       return (
-        <Fragment key={`diff:${b.step.data?.path ?? i}`}>
-          <DiffCard path={b.step.data!.path!} edit={b.step.data!.edit!} done={b.step.done} />
-        </Fragment>
+        <FoldedStepGroup
+          key={`folded:${b.title}:${i}`}
+          title={b.title}
+          icon={b.icon}
+          count={b.count}
+          steps={b.steps}
+        />
       );
+    case "editrow":
+      return <EditFileRow key={`editrow:${b.step.data?.path ?? i}`} step={b.step} />;
     case "think":
       return b.text.length > 0 ? (
         <ThinkingBlock key={`think:${i}`} thinking={b.text} done={b.done} />
@@ -873,6 +881,130 @@ function renderProcessBlock(
         <Markdown key={`text:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
       ) : null;
   }
+}
+
+/** A run of N consecutive same-tool calls folded into ONE expandable row
+ *  ("⌗ Terminal · 2 commands ⌄") — nine stacked search rows drowned the
+ *  transcript. Expanded, it renders the original per-call rows. */
+function FoldedStepGroup({
+  title,
+  icon,
+  count,
+  steps,
+}: {
+  title: string;
+  icon: string;
+  count: number;
+  steps: ActivityStep[];
+}) {
+  const [open, setOpen] = useState(false);
+  const allDone = steps.every((s) => s.done);
+  const noun =
+    icon === "code" ? "commands" : icon === "web" || icon === "search" ? "searches" : "calls";
+  return (
+    <div className="chat-fold-group">
+      <button
+        type="button"
+        className="chat-fold-toggle"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+      >
+        <StepStatusIcon done={allDone} />
+        <ToolIcon kind={icon} />
+        <span className="chat-fold-title">{title.toLowerCase().replace(/\s+/g, "_")}</span>
+        <span className="chat-fold-count">
+          {count} {noun}
+        </span>
+        <span className={`chat-thinking-chevron${open ? " open" : ""}`} aria-hidden="true">
+          ›
+        </span>
+      </button>
+      {open && (
+        <div className="chat-fold-body chat-activity-steps">
+          {steps.map((step, j) => (
+            <ActivityStepRow
+              key={`${step.data?.kind ?? "step"}:${j}`}
+              step={step}
+              done={step.done}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Compact file-edit row (Cursor-style): ✏ Edit  [kind icon] file  dir  +N −M.
+ *  Clicking the row expands the inline diff card; clicking the FILE NAME opens
+ *  the file in the right-side diff overlay (same surface the git sidebar and
+ *  turn-changes rows use). */
+function EditFileRow({ step }: { step: ActivityStep }) {
+  const [open, setOpen] = useState(false);
+  const path = step.data?.path ?? "";
+  const edit = step.data?.edit;
+  const fileName = path.split(/[\\/]/).pop() ?? path;
+  const dir = path.slice(0, path.length - fileName.length).replace(/[\\/]$/, "");
+  const stats = useMemo(() => (edit ? editLineStats(edit) : null), [edit]);
+  const selectedProjectId = useProjectsStore((s) => s.selectedProjectId);
+  const projectPath = useProjectsStore((s) =>
+    s.projects.find((p) => p.id === s.selectedProjectId)?.path,
+  );
+
+  const openDiffOverlay = () => {
+    // Same routing as the turn-changes rows: an open git repo diff goes to
+    // the DevDiffPanel overlay; anything else falls back to a file tab.
+    const status = selectedProjectId
+      ? useProjectsStore.getState().gitStatuses[selectedProjectId]
+      : undefined;
+    useUiStore.getState().setDiffPanelFile(path, status && !status.isRepo ? null : (projectPath ?? null));
+    useUiStore.getState().addTab("files");
+  };
+
+  return (
+    <div className="chat-edit-row">
+      <button
+        type="button"
+        className="chat-edit-row-toggle"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+      >
+        <Pencil size={12} strokeWidth={2} className="chat-edit-row-pen" aria-hidden="true" />
+        <span className="chat-edit-row-verb">{step.done ? "Edit" : "Editing"}</span>
+        <span
+          className="chat-edit-row-file"
+          role="button"
+          tabIndex={0}
+          title={`Open ${path} in the diff panel`}
+          onClick={(e) => {
+            e.stopPropagation();
+            openDiffOverlay();
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.stopPropagation();
+              e.preventDefault();
+              openDiffOverlay();
+            }
+          }}
+        >
+          {fileName}
+        </span>
+        {dir && <span className="chat-edit-row-dir">{dir}</span>}
+        {stats && (
+          <span className="chat-edit-row-stats">
+            {stats.adds > 0 && <span className="diff-stat-add">+{stats.adds}</span>}
+            {stats.dels > 0 && <span className="diff-stat-del">−{stats.dels}</span>}
+          </span>
+        )}
+        <span className={`chat-thinking-chevron${open ? " open" : ""}`} aria-hidden="true">
+          ›
+        </span>
+      </button>
+      {open && edit && path && (
+        <DiffCard path={path} edit={edit} done={step.done} />
+      )}
+    </div>
+  );
 }
 
 /** Format a worked-duration (seconds) as "1s", "8s", or "2m 13s". */
@@ -1224,13 +1356,24 @@ interface ActivityGroup {
 }
 
 /** A render block: either a standalone text/think segment (rendered as
- *  before), a collapsed activity group spanning a contiguous tool run, or an
- *  inline diff review card for a file-edit tool call (mockup 01 callout 5). */
+ *  before), a collapsed activity group spanning a contiguous tool run, a
+ *  folded run of consecutive same-tool rows (one expandable row), or a
+ *  compact file-edit row that expands to the inline diff card. */
 type Block =
   | { kind: "text"; text: string }
   | { kind: "think"; text: string; done: boolean }
   | { kind: "activity"; group: ActivityGroup }
-  | { kind: "diff"; step: ActivityStep };
+  | { kind: "folded"; title: string; icon: string; count: number; steps: ActivityStep[] }
+  | { kind: "editrow"; step: ActivityStep };
+
+/** Titles used for the consecutive-same-tool folding. Subagent chips, edit
+ *  cards and result rows keep their dedicated rendering. */
+function foldableTitle(step: ActivityStep): string | null {
+  const kind = step.data?.kind;
+  if (kind === "subagent" || kind === "edit" || kind === "result") return null;
+  const title = step.data?.title?.trim();
+  return title ? title : null;
+}
 
 /** Walk the parsed segments and collapse the turn's TOOL activity into
  *  ActivityGroup blocks. Thinking (`<think>`) never enters a group: each
@@ -1271,12 +1414,42 @@ function groupSegments(segments: Segment[]): Block[] {
   const blocks: Block[] = [];
   let steps: ActivityStep[] = [];
 
-  // Close out the in-progress activity group (a diff card splits the run).
+  // Close out the in-progress activity group. Consecutive runs of the SAME
+  // tool (nine web searches in a row, two shell commands, …) fold into ONE
+  // expandable "tool · N" row — one row per call drowned the transcript.
   const flushSteps = () => {
-    if (steps.length > 0) {
-      blocks.push({ kind: "activity", group: { steps } });
-      steps = [];
+    if (steps.length === 0) return;
+    let run: ActivityStep[] = [];
+    const flushRun = () => {
+      if (run.length === 0) return;
+      if (run.length >= 2 && run.every((s) => foldableTitle(s) !== null)) {
+        blocks.push({
+          kind: "folded",
+          title: foldableTitle(run[0]) ?? "",
+          icon: run[0].data?.kind ?? "tool",
+          count: run.length,
+          steps: run,
+        });
+      } else {
+        for (const s of run) blocks.push({ kind: "activity", group: { steps: [s] } });
+      }
+      run = [];
+    };
+    for (const step of steps) {
+      const title = foldableTitle(step);
+      const prevTitle = run.length > 0 ? foldableTitle(run[run.length - 1]) : null;
+      if (run.length > 0 && (title === null || title !== prevTitle)) {
+        flushRun();
+      }
+      if (title !== null) {
+        run.push(step);
+      } else {
+        // Non-foldable kinds (subagent chips etc.) keep their own row.
+        blocks.push({ kind: "activity", group: { steps: [step] } });
+      }
     }
+    flushRun();
+    steps = [];
   };
 
   for (const seg of segments) {
@@ -1306,7 +1479,7 @@ function groupSegments(segments: Segment[]): Block[] {
       };
       if (seg.data?.kind === "edit" && seg.data.path && seg.data.edit) {
         flushSteps();
-        blocks.push({ kind: "diff", step });
+        blocks.push({ kind: "editrow", step });
       } else if (seg.data?.kind === "result") {
         // A result that didn't merge (no preceding shell step, or the
         // preceding step already has a result) — keep it as its own row so
@@ -1447,7 +1620,7 @@ function MessageBubbleInner({
   let hasProcess = false;
   if (blocks) {
     for (const b of blocks) {
-      if (b.kind === "activity" || b.kind === "diff" || b.kind === "think") {
+      if (b.kind === "activity" || b.kind === "folded" || b.kind === "editrow" || b.kind === "think") {
         hasProcess = true;
         break;
       }
@@ -1469,7 +1642,7 @@ function MessageBubbleInner({
           processToolSteps.push(s);
           if (!s.done) processLive = true;
         }
-      } else if (b.kind === "diff") {
+      } else if (b.kind === "editrow") {
         processStepCount++;
         processToolSteps.push({ data: b.step.data, done: b.step.done });
         if (!b.step.done) processLive = true;
@@ -1481,7 +1654,7 @@ function MessageBubbleInner({
   // File changes span the whole turn (diff blocks are always in the region).
   if (blocks) {
     for (const b of blocks) {
-      if (b.kind === "diff" && b.step.data?.path && b.step.data?.edit) {
+      if (b.kind === "editrow" && b.step.data?.path && b.step.data?.edit) {
         fileChanges.push({ path: b.step.data.path, edit: b.step.data.edit });
       }
     }

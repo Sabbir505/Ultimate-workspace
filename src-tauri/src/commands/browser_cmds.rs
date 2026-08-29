@@ -27,12 +27,13 @@ pub async fn browser_create(
 
 #[tauri::command]
 pub fn browser_navigate(
+    app: tauri::AppHandle,
     pane_id: String,
     tab_id: String,
     url: String,
     browser: State<BrowserState>,
 ) -> CmdResult<()> {
-    browser.0.navigate(&pane_id, &tab_id, &url)
+    browser.0.navigate(&app, &pane_id, &tab_id, &url)
 }
 
 /// Open the WebView2 DevTools window for a pane's webview (roadmap #15):

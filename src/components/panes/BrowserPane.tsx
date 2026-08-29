@@ -38,6 +38,7 @@ import {
   browserSetVisibleTab,
   browserClosePane,
   listenBrowserNavigatedTab,
+  listenBrowserLoadCompleted,
   tauriRuntimeAvailable,
   type BrowserRect,
   type BrowserNavigatedPayload,
@@ -438,6 +439,28 @@ export function BrowserPane({ pane, visible = true }: Props) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paneId, projectId]);
+
+  // --- WebView2 NavigationCompleted (ground truth) — clear the loading flag
+  // when a load REALLY finished, even if the navigation-start event never
+  // surfaced (the stuck-loading bug: spinner forever, black pane). ---
+  useEffect(() => {
+    const listenReady = listenBrowserLoadCompleted((label: string) => {
+      // label = "browser-{paneId}-tab-{tabId}" (browser_label format).
+      const m = /^browser-(.+)-tab-(.+)$/.exec(label);
+      if (!m || m[1] !== paneId) return;
+      const tabId = m[2];
+      setTabStates((prev) => {
+        const existing = prev.get(tabId);
+        if (!existing || (!existing.loading && !existing.loadFailed)) return prev;
+        const next = new Map(prev);
+        next.set(tabId, { ...existing, loading: false, loadFailed: false });
+        return next;
+      });
+    });
+    return () => {
+      void listenReady.then((u) => u());
+    };
+  }, [paneId]);
 
   // Iframe fallback only: arm the "didn't respond" heuristic whenever the
   // frame navigates. The native path has no XFO problem, so no timeout there.

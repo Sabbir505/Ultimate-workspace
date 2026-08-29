@@ -16,8 +16,12 @@
 // The "used" figure (passed in by the meter consumer) is the input_tokens of
 // the last assistant turn — the full prompt size the provider counted.
 
-/** Fixed context-window cap for API/cloud models with no better answer. */
-export const API_CONTEXT_WINDOW = 256_000;
+/** Fixed context-window cap for API/cloud models with no better answer.
+ *  1M is the modern norm — Gemini, GPT-4.1/5, Qwen commercial tiers,
+ *  MiniMax and most frontier releases ship 1M-class windows, so unknown
+ *  models default there; the family table below carries the known smaller
+ *  exceptions (Claude 200k, GPT-4o 128k, DeepSeek 128k, Kimi 256k, …). */
+export const API_CONTEXT_WINDOW = 1_000_000;
 
 /** Default context window for a local model when the slider is at "Auto" (0). */
 export const LOCAL_DEFAULT_CONTEXT = 16_384;
@@ -29,35 +33,37 @@ const FAMILY_WINDOWS: [needle: string, tokens: number][] = [
   // Anthropic (200k across opus/sonnet/haiku 3.5–5; 1M exists only as beta)
   ["claude", 200_000],
   // OpenAI
-  ["gpt-4.1", 1_000_000],
   ["gpt-4o", 128_000],
   ["gpt-4-turbo", 128_000],
-  ["gpt-5", 400_000],
+  // (plain "gpt-4" is intentionally absent: the contains rule would swallow
+  // gpt-4.1/gpt-4o; the rare legacy id falls to the 1M default and the
+  // OpenRouter derivation prices it correctly where available)
   ["o1", 200_000],
   ["o3", 200_000],
   ["o4", 200_000],
+  // (gpt-4.1 / gpt-5 and anything newer are 1M/400k+ — the 1M default below
+  // already covers them)
   // Google
-  ["gemini", 1_000_000],
+  ["gemini-1.0", 32_768],
+  // (gemini 1.5/2.x/3 are 1M — covered by the default)
   // DeepSeek
   ["deepseek", 128_000],
   // Zhipu GLM (4.6+ ships 200k; older 4.x 128k)
   ["glm-4.6", 200_000],
   ["glm-5", 200_000],
-  ["glm", 128_000],
+  ["glm-4", 128_000],
   // Moonshot Kimi
   ["kimi", 256_000],
-  // Qwen (commercial plus/max tiers reach 1M; open ids are 128k-ish)
-  ["qwen3-max", 1_000_000],
-  ["qwen-plus", 1_000_000],
-  ["qwen", 131_072],
-  // MiniMax M-series are 1M-context
-  ["minimax", 1_000_000],
-  // Others commonly routed through the built-in providers
-  ["llama", 131_072],
+  // Qwen (open ids are 128k-ish; commercial plus/max are 1M — default covers)
+  ["qwen2.5", 128_000],
+  ["qwen-2.5", 128_000],
+  // Others with documented smaller windows
+  ["llama-2", 4_096],
+  ["llama-3", 128_000],
   ["mistral", 131_072],
-  ["grok-4", 256_000],
-  ["grok", 131_072],
   ["mixtral", 32_768],
+  ["grok-3", 131_072],
+  ["phi", 128_000],
 ];
 
 /** Resolve the max context window (tokens) for the active model.

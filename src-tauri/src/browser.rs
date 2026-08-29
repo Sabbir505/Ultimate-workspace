@@ -607,6 +607,14 @@ impl BrowserManager {
             let label_for_nav = label.clone();
             let blank: tauri::Url = "about:blank".parse().expect("about:blank is a valid url");
             let builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(blank))
+                // Visual-feedback overlay: install at DOCUMENT-START in every
+                // page the pane ever loads. This is the primary installation
+                // path — the post-navigation evals below are belt-and-braces.
+                // Without this, the overlay only existed on pages reached via
+                // an explicit navigate() call: the FIRST click into a new page
+                // cleared it, and every agent action after that degraded
+                // silently to no-visual clicks (no cursor, no typing effect).
+                .initialization_script(BRIDGE_OVERLAY_JS)
                 .on_navigation(move |nav_url| {
                     eprintln!("[conduit:browser] navigation: {nav_url}");
                     let _ = app.emit(
@@ -637,6 +645,13 @@ impl BrowserManager {
                             match app_ref.get_webview(&lbl) {
                                 Some(w) => {
                                     let _ = w.eval(&pushstate_injection_js(&pid, &tid));
+                                    // Belt-and-braces: the overlay is ALSO an
+                                    // initialization script (installs at
+                                    // document-start in every page), but keep
+                                    // the eval here so panes created before a
+                                    // bridge update and any document-start
+                                    // race still get visuals. Idempotent.
+                                    let _ = w.eval(BRIDGE_OVERLAY_JS);
                                 }
                                 // Webview gone (tab closed mid-load) — stop.
                                 None => break,

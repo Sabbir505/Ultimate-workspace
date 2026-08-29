@@ -270,7 +270,7 @@ pub struct ToolOutcome {
 }
 
 impl ToolOutcome {
-    fn text(t: impl Into<String>) -> Self {
+    pub(crate) fn text(t: impl Into<String>) -> Self {
         Self {
             text: t.into(),
             artifact: None,

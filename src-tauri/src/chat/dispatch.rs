@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::chat::stream_events;
+use crate::chat::tools::ToolOutcome;
 use crate::chat::{permission, tools, ChatManager};
 use crate::types::{
     ChatApprovalRequestPayload, ChatApprovalResolvedPayload, ChatArtifactPayload,
@@ -741,10 +742,15 @@ async fn run_task_subagent(
         let url = format!("{base}/v1/messages");
         let mut body = serde_json::json!({
             "model": model,
-            "max_tokens": 4096,
+            "max_tokens": 6144,
             "stream": true,
             "system": system_prompt,
             "messages": [{"role": "user", "content": prompt}],
+            // Enable extended thinking so the subagent's reasoning streams to
+            // the Agents pane (budget must stay below max_tokens). The
+            // thinking blocks are display-only here — they are never echoed
+            // back into the follow-up rounds' assistant messages.
+            "thinking": {"type": "enabled", "budget_tokens": 2048},
         });
         run_subagent_loop(
             &client, &url, &api_key, &mut body, app, sid, &sub_id, true,
@@ -910,6 +916,10 @@ async fn run_subagent_loop(
         let mut pending = String::new();
         // Round accumulators.
         let mut round_text = String::new();
+        // Reasoning streams display-only into the pane wrapped in
+        // <think></think> (the chat view's markup) — never re-sent to the
+        // provider, never echoed into the assistant round_text.
+        let mut in_think = false;
         // OpenAI: index → (id, name, arguments-json-accumulated).
         let mut oai_calls: BTreeMap<i64, (String, String, String)> = BTreeMap::new();
         // Anthropic: block index → (id, name, partial-json-accumulated).
@@ -935,15 +945,40 @@ async fn run_subagent_loop(
                 if is_anthropic {
                     match v.get("type").and_then(|t| t.as_str()) {
                         Some("content_block_delta") => {
-                            if let Some(c) = v.pointer("/delta/text").and_then(|x| x.as_str()) {
+                            let dtype = v.pointer("/delta/type").and_then(|x| x.as_str());
+                            if dtype == Some("thinking_delta") {
+                                // Extended-thinking delta: open the <think>
+                                // block lazily, stream the reasoning text.
+                                if let Some(c) =
+                                    v.pointer("/delta/thinking").and_then(|x| x.as_str())
+                                {
+                                    if !c.is_empty() {
+                                        if !in_think {
+                                            output.push_str("<think>");
+                                            emit("<think>");
+                                            in_think = true;
+                                        }
+                                        let clean =
+                                            crate::chat::streaming::sanitize_stream_text(c);
+                                        output.push_str(&clean);
+                                        emit(&clean);
+                                    }
+                                }
+                            } else if let Some(c) =
+                                v.pointer("/delta/text").and_then(|x| x.as_str())
+                            {
                                 if !c.is_empty() {
+                                    if in_think {
+                                        output.push_str("</think>");
+                                        emit("</think>");
+                                        in_think = false;
+                                    }
                                     round_text.push_str(c);
                                     output.push_str(c);
                                     emit(c);
                                 }
                             }
-                            if v.pointer("/delta/type").and_then(|x| x.as_str())
-                                == Some("input_json_delta")
+                            if dtype == Some("input_json_delta")
                             {
                                 if let Some(idx) = v.get("index").and_then(|i| i.as_i64()) {
                                     let piece = v
@@ -980,9 +1015,35 @@ async fn run_subagent_loop(
                     }
                 } else {
                     // OpenAI-style deltas.
+                    // Reasoning-first providers (DeepSeek, OpenRouter
+                    // reasoning models) stream `reasoning_content` / `reasoning`
+                    // alongside content — wrap in <think> like the main loop.
+                    if let Some(r) = v
+                        .pointer("/choices/0/delta/reasoning_content")
+                        .and_then(|x| x.as_str())
+                        .or_else(|| {
+                            v.pointer("/choices/0/delta/reasoning").and_then(|x| x.as_str())
+                        })
+                    {
+                        if !r.is_empty() {
+                            if !in_think {
+                                output.push_str("<think>");
+                                emit("<think>");
+                                in_think = true;
+                            }
+                            let clean = crate::chat::streaming::sanitize_stream_text(r);
+                            output.push_str(&clean);
+                            emit(&clean);
+                        }
+                    }
                     if let Some(c) = v.pointer("/choices/0/delta/content").and_then(|x| x.as_str())
                     {
                         if !c.is_empty() {
+                            if in_think {
+                                output.push_str("</think>");
+                                emit("</think>");
+                                in_think = false;
+                            }
                             round_text.push_str(c);
                             output.push_str(c);
                             emit(c);
@@ -1020,6 +1081,14 @@ async fn run_subagent_loop(
             }
         }
 
+        // Round end: a reasoning block that never saw a text delta still
+        // needs its closing tag, or the pane renders it open forever.
+        if in_think {
+            output.push_str("</think>");
+            emit("</think>");
+            in_think = false;
+        }
+
         // No tool calls → this round's text is the final answer.
         let has_calls = !oai_calls.is_empty() || !ant_calls.is_empty();
         if !has_calls {
@@ -1049,9 +1118,19 @@ async fn run_subagent_loop(
                 blocks.push(json!({ "type": "tool_use", "id": id, "name": name, "input": args }));
                 let meta = crate::agent_sessions::tool_meta_generic(name, &args);
                 emit(&format!("<tool>{meta}</tool>"));
-                let outcome =
-                    tools::execute_tool(client, &artifacts_dir, &caps, name, &args, Some(app))
-                        .await;
+                // Enforce the read-only allowlist AT EXECUTION: the specs only
+                // advertise it, but `execute_tool` dispatches by name and the
+                // subagent loop bypasses the main loop's permission layer — a
+                // hallucinated/injected write_file would otherwise run
+                // unchecked with no approval card.
+                let outcome = if !SUBAGENT_TOOL_ALLOW.contains(&name.as_str()) {
+                    ToolOutcome::text(format!(
+                        "Error: `{name}` is not available to subagents (read-only tool set). \
+Use one of the listed read-only tools instead."
+                    ))
+                } else {
+                    tools::execute_tool(client, &artifacts_dir, &caps, name, &args, Some(app)).await
+                };
                 let result = crate::util::truncate_chars(&outcome.text, SUBAGENT_RESULT_CAP);
                 emit(&format!(
                     "<tool>{}</tool>",
@@ -1083,9 +1162,17 @@ async fn run_subagent_loop(
                 };
                 let meta = crate::agent_sessions::tool_meta_generic(name, &args);
                 emit(&format!("<tool>{meta}</tool>"));
-                let outcome =
-                    tools::execute_tool(client, &artifacts_dir, &caps, name, &args, Some(app))
-                        .await;
+                // Same read-only enforcement as the Anthropic branch above —
+                // the subagent loop bypasses the main loop's permission gate,
+                // so a hallucinated/injected write tool must not execute.
+                let outcome = if !SUBAGENT_TOOL_ALLOW.contains(&name.as_str()) {
+                    ToolOutcome::text(format!(
+                        "Error: `{name}` is not available to subagents (read-only tool set). \
+Use one of the listed read-only tools instead."
+                    ))
+                } else {
+                    tools::execute_tool(client, &artifacts_dir, &caps, name, &args, Some(app)).await
+                };
                 let result = crate::util::truncate_chars(&outcome.text, SUBAGENT_RESULT_CAP);
                 emit(&format!(
                     "<tool>{}</tool>",
@@ -1846,4 +1933,35 @@ async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Value) -> Str
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Contract lock: the subagent tool allowlist must never gain a mutating
+    /// tool. The subagent loop bypasses the main loop's permission layer (no
+    /// approval cards by design), so the allowlist IS the permission boundary.
+    #[test]
+    fn subagent_allowlist_is_read_only() {
+        const MUTATING: &[&str] = &[
+            tools::WRITE_FILE,
+            tools::EDIT_FILE,
+            tools::DELETE_FILE,
+            tools::MOVE_FILE,
+            tools::COPY_FILE,
+            tools::DOWNLOAD_FILE,
+            tools::RUN_SHELL,
+            tools::RUN_CODE,
+        ];
+        for name in SUBAGENT_TOOL_ALLOW {
+            assert!(
+                !MUTATING.contains(name),
+                "subagent allowlist must stay read-only: {name} is mutating"
+            );
+        }
+        // And the grounding basics must remain available.
+        assert!(SUBAGENT_TOOL_ALLOW.contains(&tools::READ_FILE));
+        assert!(SUBAGENT_TOOL_ALLOW.contains(&tools::FETCH_URL));
+    }
 }

@@ -443,7 +443,9 @@ export function parseSegments(content: string): Segment[] {
   return segs;
 }
 
-function ThinkingBlock({ thinking, done }: { thinking: string; done: boolean }) {
+/** Reasoning disclosure — shared with the subagent pane (Agents panel), which
+ *  streams the subagent's <think> blocks with the same visual language. */
+export function ThinkingBlock({ thinking, done }: { thinking: string; done: boolean }) {
   // Expanded while streaming (live), collapsed once the turn finishes.
   const [open, setOpen] = useState(!done);
   // Auto-collapse when the turn completes — but only if the user hasn't

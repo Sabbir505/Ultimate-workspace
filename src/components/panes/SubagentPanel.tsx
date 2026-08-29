@@ -1,12 +1,12 @@
 /**
  * SubagentPanel — renders the selected subagent's run inside the right-side
- * ToolPanel's "Agents" tab. The spawn prompt renders as a user-style bubble,
- * the output streams live beneath it as an assistant-style bubble — parsed
- * into markdown text interleaved with tool-activity rows (the backend embeds
- * `<tool>{json}</tool>` markers in the token stream: {"kind":"tool"} rows go
- * live at call time, a following {"kind":"result"} completes the row and
- * carries a collapsible output preview). When no subagent is selected, shows
- * the agent list.
+ * ToolPanel's "Agents" tab, at the same fidelity as the main chat view: the
+ * spawn prompt renders as a user-style bubble and the output streams live
+ * beneath it, parsed into ORDERED segments (markdown text / <think> reasoning
+ * disclosures / tool rows) with the chat view's own parser. Tool markers with
+ * an edit payload render as inline DiffCards; a following result marker
+ * completes the preceding tool row and carries a collapsible output preview.
+ * When no subagent is selected, shows the agent list.
  */
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -14,51 +14,69 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
+import { parseSegments, ThinkingBlock } from "../chat/MessageBubble";
+import { DiffCard, type EditPayload } from "../chat/DiffCard";
 
-interface ToolRow {
-  title: string;
-  detail: string;
-  done: boolean;
+/** The marker payload the backend embeds in <tool>{json}</tool> (see
+ *  tool_meta_generic) — the same shape the chat view's ToolData carries. */
+interface ToolData {
+  kind?: string;
+  title?: string;
+  detail?: string;
+  lang?: string;
+  code?: string;
+  path?: string;
+  edit?: EditPayload;
+  role?: string;
+  task?: string;
   result?: string;
 }
 
-/** Parse a (possibly mid-stream) subagent output into ordered render
- *  segments: markdown text and tool rows. A `result` marker completes the
- *  most recent tool row; a trailing unclosed `<tool>` (mid-stream) renders
- *  as a running row when its JSON is parseable, otherwise is skipped. */
-function parseSubagentOutput(output: string): { text: string[]; rows: ToolRow[] } {
-  const text: string[] = [];
-  const rows: ToolRow[] = [];
-  const re = /<tool>([\s\S]*?)<\/tool>/g;
-  let last = 0;
-  let m: RegExpExecArray | null;
-  const pushText = (t: string) => {
-    if (t.trim()) text.push(t);
-  };
-  while ((m = re.exec(output)) !== null) {
-    pushText(output.slice(last, m.index));
-    last = m.index + m[0].length;
-    try {
-      const v = JSON.parse(m[1]);
-      if (v.kind === "result") {
-        const row = [...rows].reverse().find((r) => !r.done);
-        if (row) {
-          row.done = true;
-          row.result = typeof v.result === "string" ? v.result : undefined;
+/** Ordered output segment — mirrors the chat view's Segment union. */
+type SubSegment =
+  | { type: "text"; text: string }
+  | { type: "think"; text: string; done: boolean }
+  | { type: "tool"; data: ToolData | null; done: boolean };
+
+/** Parse a (possibly mid-stream) subagent output into ORDERED render
+ *  segments using the chat view's own parser (text / think / tool, tolerant
+ *  of a trailing unterminated marker). A `result` marker is folded into the
+ *  most recent tool segment (its collapsible output) instead of becoming its
+ *  own row — same merge rule as the chat view's activity grouping.
+ *
+ *  Done semantics differ from the chat view on purpose: the subagent loop
+ *  announces every tool call with a FULLY-CLOSED marker and streams the
+ *  result marker only after execution, so a tool segment counts as done when
+ *  its result folded in — not when its marker closed. Exported for the
+ *  pane-fidelity regression tests. */
+export function parseSubagentOutput(output: string): SubSegment[] {
+  const segs = parseSegments(output) as SubSegment[];
+  const out: SubSegment[] = [];
+  for (const seg of segs) {
+    if (seg.type === "tool" && seg.data?.kind === "result") {
+      const resultText =
+        typeof seg.data.result === "string" ? seg.data.result : "";
+      // Attach to the most recent tool segment that has no result yet.
+      for (let i = out.length - 1; i >= 0; i--) {
+        const prev = out[i];
+        if (prev.type === "tool" && prev.data && prev.data.kind !== "result") {
+          if (prev.data.result === undefined) {
+            prev.data.result = resultText;
+            prev.done = true;
+          }
+          break;
         }
-      } else {
-        rows.push({
-          title: typeof v.title === "string" ? v.title : "Running tool",
-          detail: typeof v.detail === "string" ? v.detail : "",
-          done: false,
-        });
       }
-    } catch {
-      /* malformed marker — skip */
+      continue;
     }
+    if (seg.type === "tool") {
+      // Announced, not yet completed — the result marker flips it.
+      out.push({ type: "tool", data: seg.data, done: false });
+      continue;
+    }
+    out.push(seg);
   }
-  pushText(output.slice(last));
-  return { text, rows };
+  return out;
 }
 
 function ToolActivityRow({ row }: { row: ToolRow }) {
@@ -86,6 +104,13 @@ function ToolActivityRow({ row }: { row: ToolRow }) {
       )}
     </div>
   );
+}
+
+interface ToolRow {
+  title: string;
+  detail: string;
+  done: boolean;
+  result?: string;
 }
 
 function SubagentListItem({
@@ -218,30 +243,49 @@ export function SubagentPanel() {
               </ReactMarkdown>
             </div>
           </div>
-          {/* Output — assistant-style bubble: live markdown interleaved with
-              tool-activity rows parsed from the <tool> marker stream. */}
+          {/* Output — assistant-style bubble: the SAME ordered segment stream
+              as the chat view (markdown text / think disclosures / tool rows
+              / inline diff cards), in source order. */}
           <div className="subagent-bubble subagent-output-bubble">
             <div className="subagent-bubble-label">Output</div>
             <div className="subagent-bubble-content subagent-bubble-streaming">
-              {segments.rows.length > 0 && (
-                <div className="subagent-tool-rows">
-                  {segments.rows.map((row, i) => (
-                    <ToolActivityRow key={`row-${i}-${row.title}`} row={row} />
-                  ))}
+              {segments.map((seg, i) => {
+                if (seg.type === "text") {
+                  return seg.text.trim().length > 0 ? (
+                    <div className="subagent-seg-text" key={`t:${i}`}>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{seg.text}</ReactMarkdown>
+                    </div>
+                  ) : null;
+                }
+                if (seg.type === "think") {
+                  return seg.text.length > 0 ? (
+                    <ThinkingBlock key={`k:${i}`} thinking={seg.text} done={seg.done} />
+                  ) : null;
+                }
+                const d = seg.data;
+                if (d?.kind === "edit" && d.path && d.edit) {
+                  return (
+                    <DiffCard key={`d:${i}`} path={d.path} edit={d.edit} done={seg.done} />
+                  );
+                }
+                return (
+                  <ToolActivityRow
+                    key={`r:${i}`}
+                    row={{
+                      title: d?.title?.trim() || "Running tool",
+                      detail: d?.detail ?? "",
+                      done: seg.done,
+                      result: d?.result,
+                    }}
+                  />
+                );
+              })}
+              {segments.length === 0 && selectedSub.status === "running" && (
+                <div className="subagent-tool-row running">
+                  <span className="subagent-tool-spinner" aria-hidden="true" />
+                  <span className="subagent-tool-title">Working…</span>
                 </div>
               )}
-              {segments.text.map((t, i) => (
-                <ReactMarkdown key={`text-${i}`} remarkPlugins={[remarkGfm]}>
-                  {t}
-                </ReactMarkdown>
-              ))}
-              {segments.text.length === 0 && segments.rows.length === 0 &&
-                selectedSub.status === "running" && (
-                  <div className="subagent-tool-row running">
-                    <span className="subagent-tool-spinner" aria-hidden="true" />
-                    <span className="subagent-tool-title">Working…</span>
-                  </div>
-                )}
               {selectedSub.status === "running" && (
                 <span className="streaming-cursor" />
               )}

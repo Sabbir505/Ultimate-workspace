@@ -90,6 +90,21 @@ pub(crate) fn neutralize_markers(v: &str) -> String {
         .replace("<think>", "<\\think>")
 }
 
+/// Strip C0 control characters (except the printable whitespace the bubbles
+/// use) from a streamed model chunk. Shared by the main tool loop and the
+/// subagent loop so both streams get identical hygiene.
+pub(crate) fn sanitize_stream_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' | '\r' | '\t' => out.push(c),
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 async fn openai_stream_round(
     client: &reqwest::Client,
     url: &str,
@@ -139,20 +154,9 @@ async fn openai_stream_round(
     // React/HTML renderers handle in surprising ways. Newlines and tabs are
     // preserved (the bubble uses them for layout).
     // Hoisted to a free fn (mi1) — the closure captured nothing anyway.
-    fn sanitize_model_text(s: &str) -> String {
-        let mut out = String::with_capacity(s.len());
-        for c in s.chars() {
-            match c {
-                // Keep the printable whitespace the bubble actually uses.
-                '\n' | '\r' | '\t' => out.push(c),
-                // Drop everything else in the C0 control range + DEL.
-                c if (c as u32) < 0x20 || (c as u32) == 0x7f => {}
-                c => out.push(c),
-            }
-        }
-        out
-    }
-    let sanitize = sanitize_model_text;
+    // Lives at module scope (`sanitize_stream_text`) so the subagent loop in
+    // dispatch.rs reuses the exact same stream hygiene.
+    let sanitize = sanitize_stream_text;
     // Per-index accumulation of (id, name, arguments).
     let mut calls: Vec<(String, String, String)> = Vec::new();
     let mut usage = RoundUsage::default();

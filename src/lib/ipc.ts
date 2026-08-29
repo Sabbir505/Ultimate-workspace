@@ -1781,6 +1781,13 @@ export interface ChatQuestionRequestPayload {
 export const listenChatQuestionRequest = (handler: (payload: ChatQuestionRequestPayload) => void) =>
   safeListen<ChatQuestionRequestPayload>("chat:question-request", handler);
 
+/** The model id the session's harness LAST actually ran (claude
+ *  message.model / opencode info.modelID) — custom/remapped harness setups
+ *  make the session's stored catalog id a lie. Null for built-in/local
+ *  sessions or before the first harness turn completes. */
+export const getAgentActualModel = (chatSessionId: string) =>
+  safeInvoke<string | null>("get_agent_actual_model", { chatSessionId });
+
 /** Answer a pending harness question. `answers` maps question text → chosen
  *  option label (string, or an array for multiSelect); `response` is an
  *  optional free-text reply that replaces the structured answers entirely. */

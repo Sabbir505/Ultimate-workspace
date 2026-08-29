@@ -1,12 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   API_CONTEXT_WINDOW,
+  catalogContextWindow,
   contextWindowFor,
   formatTokens,
   LOCAL_DEFAULT_CONTEXT,
 } from "../lib/contextWindow";
 
-describe("contextWindowFor (two-path sizing)", () => {
+afterEach(() => {
+  localStorage.clear();
+});
+
+describe("contextWindowFor", () => {
   it("uses the slider value for a local model when localCtx > 0", () => {
     expect(contextWindowFor("Llama-3-8B-Instruct-Q4_K_M.gguf", true, 8192)).toBe(8192);
     expect(contextWindowFor("anything", true, 131072)).toBe(131072);
@@ -19,10 +24,20 @@ describe("contextWindowFor (two-path sizing)", () => {
     );
   });
 
-  it("uses the flat 256K cap for API/cloud models regardless of model id", () => {
-    expect(contextWindowFor("claude-sonnet-4-5", false, undefined)).toBe(API_CONTEXT_WINDOW);
-    expect(contextWindowFor("gpt-4o", false, 0)).toBe(API_CONTEXT_WINDOW);
-    expect(contextWindowFor("some-unknown-model", false, undefined)).toBe(API_CONTEXT_WINDOW);
+  it("matches model families — harness catalog ids and dated variants", () => {
+    expect(catalogContextWindow("claude-opus-4-8")).toBe(200_000);
+    expect(catalogContextWindow("claude-sonnet-4-5-20250929")).toBe(200_000);
+    expect(catalogContextWindow("kimi-k3")).toBe(256_000);
+    expect(catalogContextWindow("glm-5.2")).toBe(200_000);
+    expect(catalogContextWindow("deepseek-v4-pro")).toBe(128_000);
+    expect(catalogContextWindow("gemini-3-pro")).toBe(1_000_000);
+    expect(catalogContextWindow("gpt-4.1-mini")).toBe(1_000_000);
+  });
+
+  it("unknown models keep the flat API default", () => {
+    expect(catalogContextWindow("totally-unknown-model")).toBeNull();
+    expect(contextWindowFor("totally-unknown-model", false, undefined)).toBe(API_CONTEXT_WINDOW);
+    expect(contextWindowFor(undefined, false)).toBe(API_CONTEXT_WINDOW);
   });
 
   it("ignores a stale localCtx on an API/cloud session (slider is global UI state)", () => {
@@ -30,8 +45,8 @@ describe("contextWindowFor (two-path sizing)", () => {
     // the global store when the user switches to an API session. It must not
     // bleed into the API meter — the auto-compact path is LocalGguf-only and
     // never reads this value, so honoring it here would just mislead the user.
-    expect(contextWindowFor("claude-sonnet-4-5", false, 8192)).toBe(API_CONTEXT_WINDOW);
-    expect(contextWindowFor("gpt-4o", false, 131072)).toBe(API_CONTEXT_WINDOW);
+    expect(contextWindowFor("claude-sonnet-4-5", false, 8192)).toBe(200_000);
+    expect(contextWindowFor("totally-unknown-model", false, 131072)).toBe(API_CONTEXT_WINDOW);
   });
 });
 

@@ -24,6 +24,7 @@ interface Props {
   contextMeter?: {
     usedTokens: number | null;
     model: string | undefined | null;
+    provider?: string | null;
     isLocal: boolean;
     localCtx?: number;
     liveMaxTokens?: number;
@@ -220,6 +221,7 @@ export function ComposerMetrics({ chatSessionId, streaming, variant = "row", con
             <ContextMeter
               usedTokens={contextMeter.usedTokens}
               model={contextMeter.model}
+              provider={contextMeter.provider}
               isLocal={contextMeter.isLocal}
               localCtx={contextMeter.localCtx}
               liveMaxTokens={contextMeter.liveMaxTokens}
@@ -243,6 +245,7 @@ export function ComposerMetrics({ chatSessionId, streaming, variant = "row", con
           <ContextMeter
             usedTokens={contextMeter.usedTokens}
             model={contextMeter.model}
+            provider={contextMeter.provider}
             isLocal={contextMeter.isLocal}
             localCtx={contextMeter.localCtx}
             liveMaxTokens={contextMeter.liveMaxTokens}

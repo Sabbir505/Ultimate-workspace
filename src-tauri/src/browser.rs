@@ -1101,12 +1101,21 @@ impl BrowserManager {
             let pane = self.get(label).ok()?;
             let (tx, rx) = std::sync::mpsc::channel();
             // with_webview runs the closure on the UI thread (the WebView2 API
-            // is thread-affine); the completed-handler's wait pumps the
-            // message loop, so the UI stays alive during the capture.
+            // is thread-affine). The closure must NOT wait there: blocking the
+            // main thread — with or without a message pump — re-enters the
+            // event loop and wedges WebView2. capture_webview_png_invoke only
+            // STARTS the capture; its completion handler delivers the PNG
+            // through the channel after the closure has returned.
             let _ = pane.webview.with_webview(move |platform_webview| {
-                let _ = tx.send(capture_webview_png(&platform_webview));
+                let _ = tx.send(capture_webview_png_invoke(&platform_webview));
             });
-            rx.recv_timeout(Duration::from_secs(15)).ok().flatten()
+            // Hop 1: the invoke closure hands back its completion receiver;
+            // hop 2: the completion handler delivers the PNG (a disconnected
+            // channel at either hop maps to None).
+            rx.recv_timeout(Duration::from_secs(15))
+                .ok()
+                .and_then(|png_rx| png_rx.recv_timeout(Duration::from_secs(15)).ok())
+                .unwrap_or(None)
         }
         #[cfg(not(windows))]
         {
@@ -1142,33 +1151,44 @@ impl BrowserManager {
         let pane = self.get(label)?;
         let method_h = HSTRING::from(method);
         let params_h = HSTRING::from(params_json);
-        let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+        let (result_tx, result_rx) = std::sync::mpsc::channel::<Result<String, String>>();
+        let (invoke_tx, invoke_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        // NEVER block or pump messages inside `with_webview` — the closure
+        // runs on the MAIN thread, and webview2-com's
+        // `wait_for_async_operation` helper would have spun a nested
+        // GetMessageA pump there (its `wait_with_pump`). Re-entering the
+        // event loop from inside a main-thread closure wedges WebView2's
+        // composition/dispatch: panes opened black and stuck in the loading
+        // state. So: invoke the CDP call here and return immediately; the
+        // completion handler delivers the JSON through the channel, and the
+        // CALLER (worker thread) does all the waiting.
         let _ = pane.webview.with_webview(move |platform_webview| {
-            let outcome = (|| -> Result<String, String> {
+            let _ = invoke_tx.send((|| -> Result<(), String> {
                 let core = unsafe { platform_webview.controller().CoreWebView2() }
                     .map_err(|e| format!("CoreWebView2 unavailable: {e}"))?;
-                let (rtx, rrx) = std::sync::mpsc::channel::<Result<String, String>>();
-                CallDevToolsProtocolMethodCompletedHandler::wait_for_async_operation(
-                    Box::new(move |handler| unsafe {
-                        core.CallDevToolsProtocolMethod(&method_h, &params_h, &handler)
-                    }
-                    .map_err(webview2_com::Error::WindowsError)),
-                    // Completed-handler args: (HRESULT → Result<()>, result
-                    // JSON → String). Forward the JSON out through the
-                    // channel; the closure itself must return Ok.
-                    Box::new(move |hr: windows::core::Result<()>, json: String| {
-                        let _ = rtx.send(hr.map(|_| json).map_err(|e| e.to_string()));
+                let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(
+                    move |hr: windows::core::Result<()>, json: String| {
+                        let _ = result_tx.send(hr.map(|_| json).map_err(|e| e.to_string()));
                         Ok(())
-                    }),
-                )
-                .map_err(|e| format!("cdp wait: {e}"))?;
-                rrx.recv()
-                    .map_err(|_| "cdp completed handler dropped".to_string())?
-            })();
-            let _ = tx.send(outcome);
+                    },
+                ));
+                unsafe { core.CallDevToolsProtocolMethod(&method_h, &params_h, &handler) }
+                    .map_err(|e| format!("CallDevToolsProtocolMethod failed: {e}"))?;
+                Ok(())
+            })());
         });
-        rx.recv_timeout(Duration::from_secs(20))
-            .unwrap_or_else(|_| Err("cdp call timed out".to_string()))
+        // Sync-phase failure (no webview / call rejected outright) surfaces
+        // immediately; otherwise the completion carries the result JSON.
+        match invoke_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err("cdp dispatch timed out".to_string()),
+        }
+        match result_rx.recv_timeout(Duration::from_secs(20)) {
+            Ok(result) => result,
+            // Disconnected = webview destroyed before completion.
+            Err(_) => Err("cdp call never completed (webview gone?)".to_string()),
+        }
     }
 
     #[cfg(not(windows))]
@@ -1988,37 +2008,66 @@ try {{
 
 // ---- Page capture (browser_screenshot) ------------------------------------
 
-/// WebView2 `CapturePreview` → PNG bytes. MUST run on the UI thread (the
-/// WebView2 API is thread-affine; `BrowserManager::capture_pane_png` does the
-/// marshalling via `with_webview`). `wait_for_async_operation` pumps this
-/// thread's message loop while the capture completes, which is what lets the
-/// completed-handler fire on the same thread without deadlocking the UI.
+/// WebView2 `CapturePreview` → PNG bytes, INVOKE-ONLY. MUST run on the UI
+/// thread (the WebView2 API is thread-affine; `BrowserManager::capture_pane_png`
+/// does the marshalling via `with_webview`) but must never WAIT there: the
+/// returned receiver delivers the PNG from the completion handler once the
+/// main thread's normal event loop dispatches it. The old implementation used
+/// `wait_for_async_operation`, whose nested GetMessage pump re-entered the
+/// event loop from inside the `with_webview` closure — the same wedge that
+/// left panes stuck in the loading state.
 #[cfg(windows)]
-fn capture_webview_png(webview: &tauri::webview::PlatformWebview) -> Option<Vec<u8>> {
+fn capture_webview_png_invoke(
+    webview: &tauri::webview::PlatformWebview,
+) -> std::sync::mpsc::Receiver<Option<Vec<u8>>> {
     use webview2_com::CapturePreviewCompletedHandler;
     use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG;
     use windows::Win32::Foundation::HGLOBAL;
     use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
     use windows::Win32::System::Com::IStream;
 
-    let core = unsafe { webview.controller().CoreWebView2() }.ok()?;
-    let stream: IStream = unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) }.ok()?;
-    let stream_for_call = stream.clone();
-    CapturePreviewCompletedHandler::wait_for_async_operation(
-        Box::new(move |handler| {
-            unsafe {
-                core.CapturePreview(
-                    COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
-                    &stream_for_call,
-                    &handler,
-                )
-            }
-            .map_err(webview2_com::Error::WindowsError)
-        }),
-        Box::new(|result| result),
-    )
-    .ok()?;
-    read_stream_to_end(&stream)
+    let (tx, rx) = std::sync::mpsc::channel::<Option<Vec<u8>>>();
+    // Prelude: any failure here means no completion will ever fire, so
+    // unblock the caller immediately.
+    let setup = (|| -> Option<(
+        webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
+        IStream,
+        IStream,
+    )> {
+        let core = unsafe { webview.controller().CoreWebView2() }.ok()?;
+        let stream: IStream = unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) }.ok()?;
+        Some((core, stream.clone(), stream))
+    })();
+    let Some((core, stream_for_call, stream_for_read)) = setup else {
+        let _ = tx.send(None);
+        return rx;
+    };
+    // The handler owns the stream read + the sender: it fires on the main
+    // thread's normal pump AFTER this closure returns, drains the stream,
+    // and hands the PNG (or None on failure) to the waiting caller.
+    let handler = CapturePreviewCompletedHandler::create(Box::new(move |result| {
+        let png = if result.is_ok() {
+            read_stream_to_end(&stream_for_read)
+        } else {
+            None
+        };
+        let _ = tx.send(png);
+        Ok(())
+    }));
+    if unsafe {
+        core.CapturePreview(
+            COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+            &stream_for_call,
+            &handler,
+        )
+    }
+    .is_err()
+    {
+        // Sync rejection after handler creation: the sender lives in the
+        // never-invoked handler; dropping it disconnects the channel, which
+        // the caller's recv_timeout maps to None.
+    }
+    rx
 }
 
 /// Drain a COM memory stream into a Vec. The stream's position is past the

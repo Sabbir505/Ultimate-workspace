@@ -2363,6 +2363,7 @@ export function ChatComposer({
           contextMeter={{
             usedTokens: usedTokens ?? null,
             model,
+            provider,
             isLocal: provider === "local_gguf",
             localCtx,
             liveMaxTokens,

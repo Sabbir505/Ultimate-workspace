@@ -34,7 +34,7 @@ const MessageBubble = lazy(() => import("./MessageBubble").then((m) => ({ defaul
 // edit-tool call. None of these appear on the empty welcome screen.
 const TaskProgressCard = lazy(() => import("./TaskProgressCard").then((m) => ({ default: m.TaskProgressCard })));
 const ArtifactProposalCard = lazy(() => import("./ArtifactProposalCard").then((m) => ({ default: m.ArtifactProposalCard })));
-import { listHarnessModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, deleteEmptyChatSessions, getLocalModelOverrides, setLocalModelOverrides, warmupLocalPrompt, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance } from "../../lib/ipc";
+import { listHarnessModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, deleteEmptyChatSessions, getLocalModelOverrides, setLocalModelOverrides, warmupLocalPrompt, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance, getAgentActualModel } from "../../lib/ipc";
 import { harnessModelCatalog } from "../../lib/harnessModels";
 import { setChatScrollToMessage } from "../../lib/chatScroll";
 import type { AgentModelSelection } from "./AgentModelPicker";
@@ -305,6 +305,31 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
     }
     return null;
   }, [messages]);
+
+  // The model the harness LAST actually ran (claude message.model / opencode
+  // info.modelID, persisted per turn). A custom/remapped harness setup makes
+  // the session's stored catalog id ("claude-opus-4-8", …) a lie — the meter
+  // shows the real model. Refetched whenever a turn lands (lastInputTokens
+  // flips) so the label tracks the harness's own reports.
+  const [actualHarnessModel, setActualHarnessModel] = useState<string | null>(null);
+  useEffect(() => {
+    if (!harnessAgent || !activeChatSessionId) {
+      setActualHarnessModel(null);
+      return;
+    }
+    let cancelled = false;
+    void getAgentActualModel(activeChatSessionId)
+      .then((m) => {
+        if (!cancelled) setActualHarnessModel(m ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setActualHarnessModel(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [harnessAgent, activeChatSessionId, lastInputTokens]);
+  const meterModel = harnessAgent ? (actualHarnessModel ?? resolvedModel) : resolvedModel;
 
   // Per-session streaming flag from the `streaming` map (the source of
   // truth). The legacy streamingChatSessionId scalar flips between
@@ -1688,7 +1713,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         onStop={handleStop}
         streaming={activeIsStreaming}
         disabled={false}
-        model={activeChatSessionId ? (resolvedModel ?? "") : undefined}
+        model={activeChatSessionId ? (meterModel ?? "") : undefined}
         modelLabels={
           harnessAgent
             ? Object.fromEntries(harnessModels.map((m) => [m.id, m.label]))

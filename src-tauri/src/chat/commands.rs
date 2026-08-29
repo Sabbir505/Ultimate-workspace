@@ -2632,6 +2632,38 @@ pub fn resolve_agent_question(
     Ok(())
 }
 
+/// The model id the session's harness LAST actually ran, straight from the
+/// harness's own stream (claude `message.model`, opencode `info.modelID`).
+/// Custom/remapped harness setups make the session's stored catalog id
+/// (`claude-opus-4-8`, …) a lie — the composer's context meter and window
+/// math should reflect the real model. `None` for built-in/local sessions or
+/// before the first harness turn completes.
+#[tauri::command]
+pub fn get_agent_actual_model(
+    chat_session_id: String,
+    db: State<'_, DbState>,
+) -> CmdResult<Option<String>> {
+    let agent = {
+        let conn = db.0.lock();
+        db::get_chat_session(&conn, &chat_session_id)
+            .ok()
+            .flatten()
+            .and_then(|cs| cs.agent)
+    };
+    let Some(agent) = agent else { return Ok(None) };
+    let Some(harness) = agent.strip_prefix("harness:") else {
+        return Ok(None);
+    };
+    let conn = db.0.lock();
+    Ok(db::get_setting(
+        &conn,
+        &crate::agent_sessions::actual_model_key(harness, &chat_session_id),
+    )
+    .ok()
+    .flatten()
+    .filter(|m| !m.trim().is_empty()))
+}
+
 // ---- Artifact preview ----
 
 /// Standard base64 encode (no external crate). `pub` so

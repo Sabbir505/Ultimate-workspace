@@ -493,6 +493,20 @@ fn persist_cli_session_id(
     }
 }
 
+/// DB key for the model id the harness LAST actually ran (assistant
+/// message.model / message info.modelID). Feeds the composer's context meter
+/// so it shows the real model — a custom/remapped harness setup used to keep
+/// showing the session's stale catalog alias (opus/sonnet).
+pub(crate) fn actual_model_key(harness: &str, sid: &str) -> String {
+    format!("agent.actual_model.{harness}.{sid}")
+}
+
+/// Persist the harness's actual turn model (best-effort — display only).
+pub(crate) fn persist_actual_model(db: &DbState, harness: &str, sid: &str, model: &str) {
+    let conn = db.0.lock();
+    let _ = crate::db::set_setting(&conn, &actual_model_key(harness, sid), model);
+}
+
 // ---------------------------------------------------------------- attachments
 
 /// Turn composer attachments into a prompt appendix for harness turns.
@@ -1093,7 +1107,7 @@ fn read_acp_stream(
                         // partial reply.
                         full.clear();
                     } else {
-                        finish_turn(app, db, sid, &mut full, None, None, None, &mut watches, started);
+                        finish_turn(app, db, sid, &mut full, None, None, None, &mut watches, started, None);
                     }
                     in_flight.store(false, Ordering::SeqCst);
                     pending_request_id = None;
@@ -1912,6 +1926,12 @@ fn read_claude_stream(
     // to the originating step. Lives across the loop; the pending queue drains
     // within each turn (every call gets its result before the turn's `result`).
     let mut tools = ToolTracker::new();
+    // The model id the CLI reports on its assistant messages (message.model) —
+    // the REAL model backing the turn, which can differ from the session's
+    // stored catalog id when the harness remaps aliases or runs a custom
+    // model. Persisted with the assistant row (model_key → correct pricing)
+    // and to app_settings so the composer's context meter shows the truth.
+    let mut actual_model: Option<String> = None;
     // Register a per-turn perf accumulator so `emit_token` can drive live
     // TTFT / tok/s in the composer row. Cleared in `finish_turn`. The split
     // between LLM and tool time isn't available for the harness CLI (it's a
@@ -2000,6 +2020,15 @@ fn read_claude_stream(
                     full.push_str("</think>");
                     emit_token(app, sid, "</think>");
                     in_think = false;
+                }
+                // The CLI's authoritative model id for this turn (remaps and
+                // custom setups can differ from the session's stored id).
+                if actual_model.is_none() {
+                    if let Some(m) = v.pointer("/message/model").and_then(|x| x.as_str()) {
+                        if !m.is_empty() {
+                            actual_model = Some(m.to_string());
+                        }
+                    }
                 }
                 if let Some(blocks) = v.pointer("/message/content").and_then(|c| c.as_array()) {
                     // No safety-net relay — CLI is in full-auto mode (no stdin
@@ -2098,7 +2127,20 @@ fn read_claude_stream(
                     let input = usage.and_then(|u| u.get("input_tokens")).and_then(|t| t.as_i64());
                     let output = usage.and_then(|u| u.get("output_tokens")).and_then(|t| t.as_i64());
                     let cost = v.get("total_cost_usd").and_then(|c| c.as_f64());
-                    finish_turn(app, db, sid, &mut full, input, output, cost, &mut watches, started_at);
+                    // Some CLI versions also report the model on the result
+                    // event itself — prefer it if we never saw an assistant
+                    // message with one.
+                    if actual_model.is_none() {
+                        if let Some(m) = v.get("model").and_then(|x| x.as_str()) {
+                            if !m.is_empty() {
+                                actual_model = Some(m.to_string());
+                            }
+                        }
+                    }
+                    if let Some(m) = actual_model.as_deref() {
+                        persist_actual_model(db, "claude_code", sid, m);
+                    }
+                    finish_turn(app, db, sid, &mut full, input, output, cost, &mut watches, started_at, actual_model.as_deref());
                 } else {
                     let msg = v
                         .get("error")
@@ -2419,7 +2461,9 @@ fn read_per_turn_stream(
     if cancelled.load(Ordering::SeqCst) {
         full.clear();
     } else {
-        finish_turn(app, db, sid, &mut full, input, output, cost, &mut watches, started_at);
+        // kimi/opencode fallback streams don't expose a model id on their
+        // events — the cost rollup falls back to the session's model.
+        finish_turn(app, db, sid, &mut full, input, output, cost, &mut watches, started_at, None);
     }
 }
 
@@ -2556,12 +2600,15 @@ fn send_opencode_turn(
         };
 
         match opencode_post_message(&base2, &oc_sid2, model_body, agent_body, &content2) {
-            Ok((input, output, cost)) => {
+            Ok((input, output, cost, actual)) => {
                 // The POST resolves when the turn completes but can race its
                 // last SSE flush — wait for a reader-quiet gap so the final
                 // text snapshot is inside `full` before persisting.
                 wait_for_reader_quiet(&quiet_cell, Duration::from_millis(2500));
                 close_opencode_think(Some(&app2), &sid2, &think_cell, &full_cell);
+                if let Some(m) = actual.as_deref() {
+                    persist_actual_model(&db2, "opencode", &sid2, m);
+                }
                 let mut full = full_cell.lock().unwrap_or_else(|e| e.into_inner());
                 finish_turn(
                     Some(&app2),
@@ -2573,6 +2620,7 @@ fn send_opencode_turn(
                     cost,
                     &mut watches,
                     started_at,
+                    actual.as_deref(),
                 );
             }
             Err(e) => {
@@ -2786,7 +2834,7 @@ fn opencode_post_message(
     model: Option<Value>,
     agent: Option<&str>,
     content: &str,
-) -> Result<(Option<i64>, Option<i64>, Option<f64>), String> {
+) -> Result<(Option<i64>, Option<i64>, Option<f64>, Option<String>), String> {
     tauri::async_runtime::block_on(async {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
@@ -2818,7 +2866,21 @@ fn opencode_post_message(
         let input = info.pointer("/tokens/input").and_then(|t| t.as_i64());
         let output = info.pointer("/tokens/output").and_then(|t| t.as_i64());
         let cost = info.get("cost").and_then(|c| c.as_f64());
-        Ok((input, output, cost))
+        // The model that ACTUALLY served the turn (opencode routes through
+        // whatever its config says — the session's stored id can be a stale
+        // catalog entry). modelID + providerID recombine into the canonical
+        // "provider/model" shape the cost rollup and meter match on.
+        let model = info
+            .get("modelID")
+            .and_then(|m| m.as_str())
+            .map(|m| {
+                let provider = info.get("providerID").and_then(|p| p.as_str());
+                match provider {
+                    Some(p) if !p.is_empty() => format!("{p}/{m}"),
+                    _ => m.to_string(),
+                }
+            });
+        Ok((input, output, cost, model))
     })
 }
 
@@ -4304,6 +4366,13 @@ fn finish_turn(
     // Unix-second instant the turn started (captured when the reader began),
     // persisted as `started_at` so the UI can show "Worked for Xs".
     started_at: i64,
+    // The model id the HARNESS actually ran this turn (from its own stream —
+    // claude's assistant message.model, opencode's message info.modelID).
+    // Persisted on the assistant row as model_key so the cost breakdown
+    // prices the REAL model — a custom/remapped harness model previously
+    // fell back to the session's stale catalog id and priced opus/sonnet
+    // rates for a completely different model.
+    model_key: Option<&str>,
 ) {
     // Persist the assistant message FIRST so we can attribute artifacts to it.
     let message_id: Option<i64> = if !full.is_empty() {
@@ -4328,7 +4397,7 @@ fn finish_turn(
         let (ttft, tok_s) = crate::chat::turn_perf::active_snapshot(sid)
             .map(|p| (p.ttft_ms, p.tokens_per_second))
             .unwrap_or((None, None));
-        crate::db::add_chat_message(&conn, sid, "assistant", full, input, output, cost, None, None, None, Some(provider), None, None, Some(started_at), Some(crate::db::now_ts()), None, None, ttft, tok_s)
+        crate::db::add_chat_message(&conn, sid, "assistant", full, input, output, cost, None, None, None, Some(provider), model_key, None, Some(started_at), Some(crate::db::now_ts()), None, None, ttft, tok_s)
             .ok()
             .map(|m| m.id)
     } else {

@@ -20,13 +20,17 @@
 // first turn completes.
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { contextWindowFor, formatTokens } from "../../lib/contextWindow";
+import { contextWindowFor, contextWindowForModel, formatTokens } from "../../lib/contextWindow";
 import { countContextBreakdown, type ContextBreakdown } from "../../lib/ipc";
 import { useUiStore } from "../../state/ui";
 
 interface Props {
   usedTokens: number | null;
   model: string | undefined | null;
+  /** Provider id of the active session ("openrouter", "anthropic", …) —
+   *  gates the live context-window derivation (OpenRouter's models endpoint
+   *  is the one major API that exposes per-model context_length). */
+  provider?: string | null;
   isLocal: boolean;
   localCtx?: number;
   /** Live context-window cap from the running llama-server. Takes precedence
@@ -57,15 +61,31 @@ interface Row {
   tokens: number;
 }
 
-export function ContextMeter({ usedTokens, model, isLocal, localCtx, liveMaxTokens, chatSessionId }: Props) {
+export function ContextMeter({ usedTokens, model, provider, isLocal, localCtx, liveMaxTokens, chatSessionId }: Props) {
   const used = usedTokens && usedTokens > 0 ? usedTokens : 0;
+  // Catalog cap for the model id (family rules; 256K fallback). For
+  // OpenRouter sessions the real window is then derived live from their
+  // models endpoint and refines the catalog figure when it resolves.
+  const catalogMax = contextWindowFor(model, isLocal, localCtx);
+  const [dynamicMax, setDynamicMax] = useState<number | null>(null);
+  useEffect(() => {
+    setDynamicMax(null);
+    if (isLocal) return;
+    let cancelled = false;
+    void contextWindowForModel(model, provider).then((w) => {
+      if (!cancelled && w && w > 0) setDynamicMax(w);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [model, provider, isLocal]);
   // Prefer the live cap (what llama-server was actually started with) over
   // the slider-derived cap. Falls back to the slider / 16K default for the
   // brief window before the first poll resolves, and for cloud sessions
   // where `liveMaxTokens` is 0.
   const max = (isLocal && liveMaxTokens && liveMaxTokens > 0)
     ? liveMaxTokens
-    : contextWindowFor(model, isLocal, localCtx);
+    : (dynamicMax ?? catalogMax);
   const pct = max > 0 ? Math.min(1, used / max) : 0;
   const level = pct >= PCT_CRIT ? "crit" : pct >= PCT_WARN ? "warn" : "ok";
   // Dash the circle so the filled portion grows from the top clockwise.

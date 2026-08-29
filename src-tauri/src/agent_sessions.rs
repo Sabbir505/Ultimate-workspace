@@ -2009,12 +2009,11 @@ fn read_claude_stream(
                         .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
                     {
                         if let Some((name, values)) = tool_meta_claude(b) {
-                            if name.eq_ignore_ascii_case("Task")
-                                || name.eq_ignore_ascii_case("task")
-                            {
-                                // Subagent Task: extract role/task/prompt and
-                                // emit a spawn event so the frontend opens the
-                                // subagent panel + inline strip immediately.
+                            if is_subagent_tool_name(&name) {
+                                // Subagent spawn (claude "Agent"/"Task"):
+                                // extract role/task/prompt and emit a spawn
+                                // event so the frontend opens the subagent
+                                // panel + inline strip immediately.
                                 let input = b.get("input").cloned().unwrap_or(json!({}));
                                 let role = input
                                     .get("subagent_type")
@@ -3183,7 +3182,7 @@ fn emit_opencode_tool(
             let out = state.get("output").and_then(|o| o.as_str());
             let err = state.get("error").and_then(|e| e.as_str());
             tools.tool_use_with_output(name, value, out, err)
-        } else if name.eq_ignore_ascii_case("Task") || name.eq_ignore_ascii_case("task") {
+        } else if is_subagent_tool_name(name) {
             let role = inp.get("subagent_type").and_then(|v| v.as_str()).unwrap_or("agent");
             let task = inp.get("description").and_then(|v| v.as_str()).unwrap_or("");
             let prompt = inp.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
@@ -3237,9 +3236,7 @@ fn handle_kimi_event(
             if let Some(calls) = v.get("tool_calls").and_then(|t| t.as_array()) {
                 for c in calls.iter() {
                     if let Some((name, values)) = tool_meta_kimi(c) {
-                        if name.eq_ignore_ascii_case("Task")
-                            || name.eq_ignore_ascii_case("task")
-                        {
+                        if is_subagent_tool_name(&name) {
                             let input = c.get("function").and_then(|f| f.get("arguments"));
                             let args = match input {
                                 Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(json!({})),
@@ -3423,8 +3420,9 @@ fn handle_opencode_event(
             // "Updating task list" marker.
             emit_todowrite_steps(app, sid, name, &inp);
             let value = tool_meta_generic(name, &inp);
-            if name.eq_ignore_ascii_case("Task") || name.eq_ignore_ascii_case("task") {
-                // Subagent Task: extract role/task/prompt and emit a spawn event.
+            if is_subagent_tool_name(name) {
+                // Subagent spawn (claude "Agent"/"Task"): extract
+                // role/task/prompt and emit a spawn event.
                 let role = inp.get("subagent_type").and_then(|v| v.as_str()).unwrap_or("agent").to_string();
                 let task = inp.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let prompt = inp.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -4007,6 +4005,16 @@ fn is_shell_name(name: &str) -> bool {
     )
 }
 
+/// True for the subagent-dispatch tool name across the harness CLIs: Claude
+/// Code 2.x renamed its `Task` tool to `Agent` (same input shape —
+/// subagent_type/description/prompt, verified in the CLI bundle); opencode
+/// calls it `task`; kimi still uses `Task`. Every harness path must treat
+/// both names as a subagent spawn, or the chip/sidebar/panel UI never sees
+/// the agent (the screenshot bug: "Running tool Agent" + empty AGENTS list).
+fn is_subagent_tool_name(name: &str) -> bool {
+    matches!(name.to_lowercase().as_str(), "task" | "agent")
+}
+
 /// Cap captured shell output so a huge dump can't bloat the stored message.
 /// Shell output is usually most useful at the tail, so keep the last lines.
 fn truncate_output(s: &str) -> String {
@@ -4100,7 +4108,12 @@ impl ToolTracker {
     fn subagent_use(&mut self, _name: &str, value: Value, app: Option<&AppHandle>, sid: &str, role: &str, task: &str, prompt: &str) -> String {
         let id = self.seq;
         self.seq += 1;
-        let sub_id = format!("sub-{id}");
+        // Unique across turns: `seq` resets every turn, so a plain `sub-0`
+        // would clobber the previous turn's sub-0 in the frontend store
+        // (same collision the built-in path fixed with a timestamp segment).
+        static SUB_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let sub_seq = SUB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let sub_id = format!("sub-{}-{sub_seq}", crate::db::now_ts());
         let mut v = value;
         if let Some(obj) = v.as_object_mut() {
             obj.insert("id".to_string(), json!(id));
@@ -4260,7 +4273,7 @@ pub(crate) fn tool_meta_generic(name: &str, input: &Value) -> Value {
             "WebSearch" | "web_search" => json!({ "kind": "search", "title": "Searching the web", "detail": s(&["query", "searchQuery"]) }),
             "WebFetch" | "web_fetch" | "fetch_url" => json!({ "kind": "web", "title": "Reading a web page", "detail": s(&["url", "uri"]) }),
             "TodoWrite" | "todowrite" => json!({ "kind": "tool", "title": "Updating task list" }),
-            "Task" | "task" => json!({
+            _ if is_subagent_tool_name(name) => json!({
                 "kind": "subagent",
                 "title": "Running subagent",
                 "detail": s(&["description", "task", "summary"]),
@@ -4436,6 +4449,27 @@ fn no_console_window(cmd: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_tool_is_recognized_as_subagent_spawn() {
+        // Claude Code 2.x renamed Task → Agent; both names must map to the
+        // subagent marker (kind "subagent"), NOT the generic "Running tool
+        // Agent" row — the alias gap left harness subagents invisible.
+        for name in ["Task", "task", "Agent", "agent"] {
+            assert!(is_subagent_tool_name(name), "{name} must be a subagent tool");
+        }
+        assert!(!is_subagent_tool_name("Bash"));
+        for name in ["Task", "Agent"] {
+            let meta = tool_meta_generic(name, &json!({
+                "subagent_type": "research",
+                "description": "Research inference",
+                "prompt": "Go deep"
+            }));
+            assert_eq!(meta["kind"], "subagent", "{name} marker kind");
+            assert_eq!(meta["role"], "research");
+            assert_eq!(meta["detail"], "Research inference");
+        }
+    }
 
     #[test]
     fn parse_oneshot_text_extracts_each_cli_shape() {

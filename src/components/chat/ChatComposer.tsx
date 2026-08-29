@@ -274,10 +274,12 @@ function flattenVoiceText(text: string): string {
  *  every store change re-render the composer). */
 const NO_QUEUED_MESSAGES: import("../../state/chat").QueuedChatMessage[] = [];
 
-/** One stacked queued message in the composer notch (Cursor-style): grip to
- *  drag-reorder, click the text to expand/collapse it, ↥ Steer sends it
- *  immediately (interrupting the running turn), the pencil edits it in
- *  place, the trash drops it. */
+/** One stacked queued message inside the composer notch (Cursor-style): the
+ *  grip drag-reorders via POINTER events (HTML5 drag-and-drop proved dead
+ *  inside the Electron webview — no dragstart ever fired), click the text to
+ *  expand/collapse it, ↥ Steer sends it immediately (interrupting the running
+ *  turn), the pencil edits it in place (compact — Save/Cancel stay on the
+ *  row), the trash drops it. */
 function QueuedMessageRow({
   message,
   index,
@@ -285,7 +287,7 @@ function QueuedMessageRow({
   onSteer,
   onEdit,
   onDelete,
-  onDropFrom,
+  onReorder,
 }: {
   message: import("../../state/chat").QueuedChatMessage;
   index: number;
@@ -293,13 +295,17 @@ function QueuedMessageRow({
   onSteer: () => void;
   onEdit: (text: string) => void;
   onDelete: () => void;
-  /** Drop: another row (source index) was dropped onto THIS row. */
-  onDropFrom: (from: number) => void;
+  /** Live reorder: source index → new index while the pointer drags. */
+  onReorder: (from: number, to: number) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(message.content);
-  const [dragOver, setDragOver] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  // Drag bookkeeping lives in a ref: the store reorder re-renders the list,
+  // but the pointer capture stays on the grip, so tracking survives.
+  const dragIndex = useRef(index);
+  const dragPointerId = useRef<number | null>(null);
 
   const label =
     message.content ||
@@ -311,42 +317,58 @@ function QueuedMessageRow({
     setEditing(false);
   };
 
+  const endDrag = () => {
+    dragPointerId.current = null;
+    setDragging(false);
+  };
+
+  const onGripPointerDown = (e: React.PointerEvent<HTMLSpanElement>) => {
+    if (editing) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragIndex.current = index;
+    dragPointerId.current = e.pointerId;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setDragging(true);
+  };
+
+  const onGripPointerMove = (e: React.PointerEvent<HTMLSpanElement>) => {
+    if (dragPointerId.current !== e.pointerId) return;
+    // Which row slot is the pointer over RIGHT NOW? Rects are queried live so
+    // the tracking survives the list re-rendering after each reorder.
+    const rows = document.querySelectorAll<HTMLDivElement>(".composer-queue-row");
+    let target = dragIndex.current;
+    rows.forEach((el, i) => {
+      const r = el.getBoundingClientRect();
+      if (e.clientY >= r.top && e.clientY <= r.bottom) target = i;
+    });
+    if (target !== dragIndex.current) {
+      const from = dragIndex.current;
+      dragIndex.current = target;
+      onReorder(from, target);
+    }
+  };
+
   return (
-    <div
-      className={`composer-queue-row${dragOver ? " drag-over" : ""}`}
-      draggable={!editing}
-      onDragStart={(e) => {
-        e.dataTransfer.effectAllowed = "move";
-        e.dataTransfer.setData("text/conduit-queue-index", String(index));
-      }}
-      onDragOver={(e) => {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = "move";
-        if (!dragOver) setDragOver(true);
-      }}
-      onDragLeave={() => setDragOver(false)}
-      onDrop={(e) => {
-        e.preventDefault();
-        setDragOver(false);
-        const from = Number(e.dataTransfer.getData("text/conduit-queue-index"));
-        if (!Number.isNaN(from) && from !== index) onDropFrom(from);
-      }}
-      onDragEnd={() => setDragOver(false)}
-    >
+    <div className={`composer-queue-row${dragging ? " dragging" : ""}`}>
       <span
         className="composer-queue-grip"
         title="Drag to reorder"
         aria-hidden="true"
+        onPointerDown={onGripPointerDown}
+        onPointerMove={onGripPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
       >
         <GripVertical size={12} strokeWidth={2} />
       </span>
       {editing ? (
-        <div className="composer-queue-edit">
+        <>
           <textarea
             autoFocus
             className="composer-queue-edit-input"
             value={draft}
-            rows={Math.min(6, Math.max(2, draft.split("\n").length))}
+            rows={Math.min(4, draft.split("\n").length)}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
@@ -359,22 +381,27 @@ function QueuedMessageRow({
               }
             }}
           />
-          <div className="composer-queue-edit-actions">
-            <button type="button" className="composer-queue-btn primary" onClick={commitEdit}>
-              Save
-            </button>
-            <button
-              type="button"
-              className="composer-queue-btn"
-              onClick={() => {
-                setDraft(message.content);
-                setEditing(false);
-              }}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
+          <button
+            type="button"
+            className="composer-queue-btn primary"
+            title="Save changes"
+            onClick={commitEdit}
+          >
+            Save
+          </button>
+          <button
+            type="button"
+            className="composer-queue-icon-btn"
+            title="Cancel editing"
+            aria-label="Cancel editing"
+            onClick={() => {
+              setDraft(message.content);
+              setEditing(false);
+            }}
+          >
+            <X size={13} strokeWidth={2.2} />
+          </button>
+        </>
       ) : (
         <>
           <button
@@ -1988,7 +2015,7 @@ export function ChatComposer({
               onSteer={() => void steerQueuedMessage(activeChatSessionId, m.id)}
               onEdit={(text) => editQueuedMessage(activeChatSessionId, m.id, text)}
               onDelete={() => removeQueuedMessage(activeChatSessionId, m.id)}
-              onDropFrom={(from) => moveQueuedMessage(activeChatSessionId, from, i)}
+              onReorder={(from, to) => moveQueuedMessage(activeChatSessionId, from, to)}
             />
           ))}
         </div>

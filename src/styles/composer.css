@@ -944,34 +944,35 @@
   background: var(--bg-tint);
 }
 
-/* Message queue — the notch stack above the composer card (Cursor-style).
-   One row per queued message: grip (drag to reorder), expandable text,
-   ↥ Steer (send now), pencil (edit), trash (delete). Rows sit flush on top
-   of the composer card like the plan/approval notches. */
+/* Message queue — ONE notch card above the composer (Cursor-style) holding
+   the whole stack: rows separated by hairline dividers, each with grip
+   (pointer drag to reorder), expandable text, ↥ Steer, pencil, trash. */
 .composer-queue {
   display: flex;
   flex-direction: column;
-  gap: 6px;
   margin-bottom: 6px;
-}
-.composer-queue-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 8px 7px 6px;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--surface-glass);
   backdrop-filter: blur(20px) saturate(140%);
   -webkit-backdrop-filter: blur(20px) saturate(140%);
   box-shadow: 0 4px 16px -10px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+.composer-queue-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px 7px 6px;
   font-size: 12.5px;
   color: var(--text-dim);
-  transition: border-color 120ms ease, background 120ms ease;
+  transition: background 120ms ease;
 }
-.composer-queue-row.drag-over {
-  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-  background: color-mix(in srgb, var(--accent) 7%, var(--surface-glass));
+.composer-queue-row + .composer-queue-row {
+  border-top: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+}
+.composer-queue-row.dragging {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
 }
 .composer-queue-grip {
   flex: none;
@@ -983,11 +984,12 @@
   color: var(--text-dim);
   opacity: 0.6;
   cursor: grab;
+  touch-action: none;
 }
 .composer-queue-row:hover .composer-queue-grip {
   opacity: 1;
 }
-.composer-queue-row:active .composer-queue-grip {
+.composer-queue-grip:active {
   cursor: grabbing;
 }
 .composer-queue-text {
@@ -1049,16 +1051,12 @@
   background: var(--surface-2);
   color: var(--text);
 }
-.composer-queue-edit {
+/* Inline edit stays ON the row: compact auto-height textarea + Save/× in the
+   same flex line — no second action row, no tall card. */
+.composer-queue-edit-input {
   flex: 1;
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.composer-queue-edit-input {
-  width: 100%;
-  padding: 6px 8px;
+  padding: 4px 8px;
   border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
   border-radius: 8px;
   background: var(--surface-2);
@@ -1066,16 +1064,14 @@
   font-size: 12.5px;
   font-family: inherit;
   line-height: 1.45;
-  resize: vertical;
+  resize: none;
+  overflow-y: auto;
+  max-height: 110px;
   outline: none;
 }
-.composer-queue-edit-actions {
-  display: flex;
-  gap: 6px;
-  justify-content: flex-end;
-}
 .composer-queue-btn {
-  padding: 3px 10px;
+  flex: none;
+  padding: 4px 10px;
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--surface-2);

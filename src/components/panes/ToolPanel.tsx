@@ -139,9 +139,14 @@ export function ToolPanel() {
   // Auto-open content when a tab is selected while empty — the Terminal and
   // Browser tabs spawn their own content instead of showing an "open" button.
   // The ref guards against double-spawns while the async spawn is in flight.
+  // `activeInstance` must exist: with NO chips open the panel shows the
+  // picker grid and activeKind falls back to "terminal" — spawning there
+  // made every panel expand phantom-open a Terminal chip (bug: opening the
+  // right panel auto-launched a terminal). Only an explicitly-activated,
+  // still-empty tab spawns content.
   const spawningRef = useRef(false);
   useEffect(() => {
-    if (collapsed || spawningRef.current) return;
+    if (collapsed || spawningRef.current || !activeInstance) return;
     if (activeKind === "terminal" && terminals.length === 0) {
       spawningRef.current = true;
       void openShellTerminal().finally(() => {
@@ -159,7 +164,7 @@ export function ToolPanel() {
         spawningRef.current = false;
       }, 0);
     }
-  }, [activeKind, collapsed, terminals.length, browsers.length, minimizedBrowsers.length]);
+  }, [activeKind, activeInstance, collapsed, terminals.length, browsers.length, minimizedBrowsers.length]);
 
   // Drag-to-resize: left-edge grab zone. The panel is docked right, so the
   // width grows as the pointer moves left. Doubles as the chat|panel splitter.

@@ -16,7 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import { toastError, toastSuccess, exportChatZip, popOutChat, getMobilePairingInfo, type MobilePairingInfo } from "../../lib/ipc";
+import { toastError, toastSuccess, exportChatZip, getMobilePairingInfo, type MobilePairingInfo } from "../../lib/ipc";
 import {
   ArrowLeft,
   ArrowRight,
@@ -235,9 +235,15 @@ export function Sidebar() {
       .catch((err) => toastError("Chat export failed", err));
   }, []);
 
-  // Pop a chat out into its own OS window (roadmap #17).
-  const handlePopOutChat = useCallback((id: string) => {
-    popOutChat(id).catch((err) => toastError("Could not open chat window", err));
+  // Open the chat in the split pane beside the main view; clicking the item
+  // for the already-split chat closes the pane (toggle).
+  const handleOpenSplitChat = useCallback((id: string) => {
+    const chat = useChatStore.getState();
+    if (chat.splitChatSessionId === id) {
+      chat.closeChatSplit();
+    } else {
+      chat.openChatSplit(id);
+    }
   }, []);
 
   useEffect(() => {
@@ -625,7 +631,7 @@ export function Sidebar() {
                     onToggleStar={handleToggleStar}
                     onSetUnread={handleSetUnread}
                     onExport={handleExportChat}
-                    onPopOut={handlePopOutChat}
+                    onOpenSplit={handleOpenSplitChat}
                   />
                 </div>
               );

@@ -79,9 +79,17 @@ const WELCOME_PROMPTS: Array<{ title: string; sub: string }> = [
   { title: "Research a topic", sub: "Gather and synthesize sources" },
 ];
 
-export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {}) {
-  const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
-  const messages = useChatStore((s) => s.messages);
+export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?: string; splitSessionId?: string } = {}) {
+  // Split view: `splitSessionId` pins this instance to ONE session regardless
+  // of the global selection — the pane beside the main chat. Everything below
+  // keys off the local `activeChatSessionId`, so per-session maps (streaming,
+  // status, artifacts, tasks, plans, subagents) resolve for the right session
+  // in both modes; only the message buffer needs an explicit split-aware
+  // selector (the store keeps two lists).
+  const storeActiveId = useChatStore((s) => s.activeChatSessionId);
+  const isSplitView = splitSessionId != null;
+  const activeChatSessionId = splitSessionId ?? storeActiveId;
+  const messages = useChatStore((s) => (isSplitView ? s.splitMessages : s.messages));
   const streaming = useChatStore((s) => s.streaming);
   const livePerf = useChatStore((s) => s.livePerf);
   const chatStatus = useChatStore((s) => s.chatStatus);
@@ -756,10 +764,12 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   // Entering chat with no session selected always starts a FRESH chat so the
   // user can type immediately. First sweep any empty "Untitled" rows — chats
   // opened but never typed into (including the auto-started one from the
-  // previous launch) — so they never accumulate in the sidebar.
+  // previous launch) — so they never accumulate in the sidebar. NEVER in the
+  // split pane: it always renders an existing session, and auto-creating (or
+  // sweeping) from there would hijack the main view's session list.
   const autoStarted = useRef(false);
   useEffect(() => {
-    if (!loaded || !config || activeChatSessionId || autoStarted.current) return;
+    if (!loaded || !config || isSplitView || activeChatSessionId || autoStarted.current) return;
     autoStarted.current = true;
     void deleteEmptyChatSessions().then((deleted) => {
       if (deleted) void loadSessions();
@@ -772,10 +782,18 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
     // to "" only when no default model is configured for the provider, in
     // which case the user must still pick one before sending.
     void newChat(provider, config.model ?? "");
-  }, [loaded, activeChatSessionId, config, newChat, loadSessions]);
+  }, [loaded, isSplitView, activeChatSessionId, config, newChat, loadSessions]);
+
+  // Split pane: load (or re-target) the pinned session's history whenever the
+  // pane opens on a different session.
+  useEffect(() => {
+    if (!isSplitView || !splitSessionId || !loaded) return;
+    void useChatStore.getState().loadSplitMessages(splitSessionId);
+  }, [isSplitView, splitSessionId, loaded]);
 
   const loadOlderMessages = useChatStore((s) => s.loadOlderMessages);
-  const hasMoreHistory = useChatStore((s) => s.hasMoreHistory);
+  const loadOlderSplitMessages = useChatStore((s) => s.loadOlderSplitMessages);
+  const hasMoreHistory = useChatStore((s) => (isSplitView ? s.splitHasMoreHistory : s.hasMoreHistory));
   const loadingOlderRef = useRef(false);
   // Patch-tail-then-pin, published by the follow effect below so the scroll
   // handler (flip back to "at bottom") and the mount pass can invoke it too.
@@ -818,7 +836,10 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
       loadingOlderRef.current = true;
       const prevHeight = container.scrollHeight;
       const prevTop = container.scrollTop;
-      void loadOlderMessages(activeChatSessionId).finally(() => {
+      const prepend = isSplitView
+        ? loadOlderSplitMessages(activeChatSessionId)
+        : loadOlderMessages(activeChatSessionId);
+      void prepend.finally(() => {
         loadingOlderRef.current = false;
         // Restore the visual anchor: prepended rows pushed everything down.
         requestAnimationFrame(() => {
@@ -827,7 +848,7 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
         });
       });
     }
-  }, [hasMoreHistory, activeChatSessionId, loadOlderMessages]);
+  }, [hasMoreHistory, activeChatSessionId, isSplitView, loadOlderMessages, loadOlderSplitMessages]);
 
   // Follow new messages / streaming tokens only while pinned to the bottom.
   // Writes scrollTop directly instead of scrollIntoView: scrollIntoView also
@@ -1043,11 +1064,13 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
       const m = /^\/(goal|loop)\s+(.+)$/s.exec(content);
       if (m) {
         const [, , goal] = m;
-        startLoop(goal);
+        startLoop(goal, activeChatSessionId ?? undefined);
       }
-      void sendMessage(content, attachments, forceResearch);
+      // Explicit session id: identical to the active session in the main
+      // view; the split pane's pinned session in split view.
+      void sendMessage(content, attachments, forceResearch, activeChatSessionId ?? undefined);
     },
-    [sendMessage, startLoop],
+    [sendMessage, startLoop, activeChatSessionId],
   );
 
   // Edit-to-fork submit (roadmap #9): retire this message's tail, then re-send
@@ -1056,19 +1079,19 @@ export function ChatView({ popoutSessionId }: { popoutSessionId?: string } = {})
   const handleSubmitEdit = useCallback(
     (messageId: number | undefined, newContent: string) => {
       if (messageId == null) return;
-      void editMessage(messageId, newContent);
+      void editMessage(messageId, newContent, activeChatSessionId ?? undefined);
     },
-    [editMessage],
+    [editMessage, activeChatSessionId],
   );
 
   const handleStop = useCallback(() => {
-    void cancelStream();
-  }, [cancelStream]);
+    void cancelStream(activeChatSessionId ?? undefined);
+  }, [cancelStream, activeChatSessionId]);
 
   const handleRepeat = useCallback(() => {
     stickToBottomRef.current = true;
-    void regenerate();
-  }, [regenerate]);
+    void regenerate(activeChatSessionId ?? undefined);
+  }, [regenerate, activeChatSessionId]);
 
   // --- Conversational Artifact Creation (Phase 1) ---
   // Handlers below use the card's `proposalId` (the wrapper ID in the store).
@@ -1207,9 +1230,9 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
   const handleDelete = useCallback(
     (messageId?: number) => {
       if (messageId == null) return;
-      void deleteMessage(messageId);
+      void deleteMessage(messageId, activeChatSessionId ?? undefined);
     },
-    [deleteMessage],
+    [deleteMessage, activeChatSessionId],
   );
 
   // Convert persisted messages for the bubble component.
@@ -1657,7 +1680,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
                 className="composer-queue-remove"
                 title="Stop the goal loop"
                 aria-label="Stop the goal loop"
-                onClick={() => stopLoop()}
+                onClick={() => stopLoop(activeChatSessionId ?? undefined)}
               >
                 ×
               </button>

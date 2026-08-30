@@ -687,6 +687,27 @@ export interface ChatState {
   /** True when the backend may still hold messages older than the buffer's
    *  first row (false after a short page or when nothing is loaded). */
   hasMoreHistory: boolean;
+  /** --- Split chat view -------------------------------------------------
+   *  A second, independent chat view beside the main one ("Open in split
+   *  view" in a session row's ⋮ menu). The split pane owns its own message
+   *  buffer so BOTH views render full-fidelity histories at once; streaming
+   *  was already session-keyed, so live turns work in both without extra
+   *  state. `splitChatSessionId === activeChatSessionId` is allowed — the
+   *  split pane then follows the main list and the split buffer stays idle. */
+  splitChatSessionId: string | null;
+  splitMessages: ChatMessageRecord[];
+  splitMessagesSessionId: string | null;
+  splitHasMoreHistory: boolean;
+  /** Open the split pane on a session (loading its history). */
+  openChatSplit: (chatSessionId: string) => void;
+  /** Close the split pane and drop its buffer. */
+  closeChatSplit: () => void;
+  loadSplitMessages: (chatSessionId: string) => Promise<void>;
+  loadOlderSplitMessages: (chatSessionId: string) => Promise<number>;
+  /** Reload the message buffer that displays `chatSessionId` — the main list
+   *  when it's the active session, the split buffer when it's the split
+   *  pane's session, nothing otherwise. */
+  reloadFor: (chatSessionId: string) => Promise<void>;
   loadConfig: (provider?: string) => Promise<void>;
   loadSessionMetrics: (chatSessionId: string) => Promise<void>;
   selectSession: (chatSessionId: string) => Promise<void>;
@@ -755,11 +776,12 @@ export interface ChatState {
    *  is active and no stream is running (sendMessage targets the active
    *  session; queued items for background sessions wait for selectSession). */
   drainQueue: (chatSessionId: string) => void;
-  /** Arm a goal loop for the active session (called when the user sends a
-   *  /goal or /loop message). Iterations tick in `onDone`. */
-  startLoop: (goal: string) => void;
-  /** Disarm the active session's loop (Stop button, or when the loop ends). */
-  stopLoop: () => void;
+  /** Arm a goal loop for a session (called when the user sends a /goal or
+   *  /loop message). Defaults to the active session; the split pane passes
+   *  its own. Iterations tick in `onDone`. */
+  startLoop: (goal: string, sessionIdOverride?: string) => void;
+  /** Disarm a session's loop (Stop button, or when the loop ends). */
+  stopLoop: (sessionIdOverride?: string) => void;
   /** Inspect the last assistant reply against the session's loop state and
    *  return the next action. Pure-ish: mutates loopState to advance/close it. */
   advanceLoop: (chatSessionId: string, lastReply: string) => LoopDecision;
@@ -767,6 +789,10 @@ export interface ChatState {
     content: string,
     attachments?: ChatAttachmentInput[],
     forceResearch?: boolean,
+    /** Target a specific session instead of the global active one — the
+     *  split pane sends with its own session id so both composers work
+     *  concurrently. */
+    sessionIdOverride?: string,
   ) => Promise<void>;
   /** Team broadcast (roadmap #18): send one prompt to N chat sessions at once.
    *  The active session goes through the normal send; background sessions get
@@ -777,18 +803,20 @@ export interface ChatState {
     content: string,
     forceResearch?: boolean,
   ) => Promise<void>;
-  /** Re-run the last user message to get a fresh assistant response. */
-  regenerate: () => Promise<void>;
+  /** Re-run the last user message to get a fresh assistant response. The
+   *  optional override targets the split pane's session (same semantics as
+   *  sendMessage's). */
+  regenerate: (sessionIdOverride?: string) => Promise<void>;
   /** Edit-to-fork (roadmap #9): retire this message's tail, reload, and send a
    *  fresh turn with `newContent`. The old branch stays in the timeline,
    *  dimmed, but no longer feeds the model. */
-  editMessage: (messageId: number, newContent: string) => Promise<void>;
+  editMessage: (messageId: number, newContent: string, sessionIdOverride?: string) => Promise<void>;
   /** Delete one message (user or assistant) from the active chat, both in
    *  the local state and the backend. The optimistic just-sent message has
    *  a negative id and the backend's DELETE matches zero rows; we still
    *  drop it locally so the bubble disappears immediately. */
-  deleteMessage: (messageId: number) => Promise<void>;
-  cancelStream: () => Promise<void>;
+  deleteMessage: (messageId: number, sessionIdOverride?: string) => Promise<void>;
+  cancelStream: (sessionIdOverride?: string) => Promise<void>;
   /** Open an artifact as its own named tab in the tool panel (delegates to
    *  the ui store's openArtifactTab, which dedupes by path). `null` is a
    *  no-op kept for call-site compatibility. */
@@ -900,6 +928,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   messagesSessionId: null,
   hasMoreHistory: false,
+  splitChatSessionId: null,
+  splitMessages: [],
+  splitMessagesSessionId: null,
+  splitHasMoreHistory: false,
   streaming: {},
   streamingChatSessionId: null,
   chatStatus: {},
@@ -1045,9 +1077,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }),
 
   drainQueue: (chatSessionId) => {
-    // sendMessage targets the ACTIVE session, so a background session's queue
-    // waits until the user opens it (selectSession calls drainQueue too).
-    if (get().activeChatSessionId !== chatSessionId) return;
+    // sendMessage takes a per-session override, so a background or split-pane
+    // session drains its own queue directly instead of stranding it until
+    // the user re-opens the chat.
     // Per-session check (not the shared streamingChatSessionId scalar):
     // sessions A and B can stream concurrently, and A's queued messages must
     // not strand just because B owns the scalar when A finishes.
@@ -1055,11 +1087,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const [next, ...rest] = get().messageQueue[chatSessionId] ?? [];
     if (!next) return;
     set((s) => ({ messageQueue: { ...s.messageQueue, [chatSessionId]: rest } }));
-    void get().sendMessage(next.content, next.attachments, next.forceResearch);
+    void get().sendMessage(next.content, next.attachments, next.forceResearch, chatSessionId);
   },
 
-  startLoop: (goal) => {
-    const id = get().activeChatSessionId;
+  startLoop: (goal, sessionIdOverride?) => {
+    const id = sessionIdOverride ?? get().activeChatSessionId;
     if (!id) return;
     set((s) => ({
       loopState: {
@@ -1069,8 +1101,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
-  stopLoop: () => {
-    const id = get().activeChatSessionId;
+  stopLoop: (sessionIdOverride?) => {
+    const id = sessionIdOverride ?? get().activeChatSessionId;
     if (!id) return;
     set((s) => {
       const cur = s.loopState[id];
@@ -1159,6 +1191,69 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
     });
     return older.length;
+  },
+
+  // --- Split chat view (session-row ⋮ → "Open in split view") ---
+  openChatSplit: (chatSessionId) => {
+    set((s) => ({
+      splitChatSessionId: chatSessionId,
+      // Reopening on the SAME session keeps the loaded buffer (scroll pos
+      // resets anyway); a different session starts a fresh buffer.
+      splitMessages:
+        s.splitMessagesSessionId === chatSessionId ? s.splitMessages : [],
+      splitMessagesSessionId:
+        s.splitMessagesSessionId === chatSessionId ? s.splitMessagesSessionId : null,
+      splitHasMoreHistory:
+        s.splitMessagesSessionId === chatSessionId ? s.splitHasMoreHistory : false,
+    }));
+  },
+
+  closeChatSplit: () => {
+    set({ splitChatSessionId: null, splitMessages: [], splitMessagesSessionId: null, splitHasMoreHistory: false });
+  },
+
+  loadSplitMessages: async (chatSessionId) => {
+    // Mirrors loadMessages but fills the SPLIT pane's buffer; guarded so a
+    // slow fetch for a pane the user already re-targeted can't clobber it.
+    const messages = await getChatMessages(chatSessionId, undefined, 200);
+    set((s) => ({
+      splitMessages:
+        s.splitChatSessionId === chatSessionId
+          ? mergeOptimistic(s.splitMessages, messages ?? [])
+          : s.splitMessages,
+      splitMessagesSessionId:
+        s.splitChatSessionId === chatSessionId ? chatSessionId : s.splitMessagesSessionId,
+      splitHasMoreHistory:
+        s.splitChatSessionId === chatSessionId ? (messages?.length ?? 0) >= 200 : s.splitHasMoreHistory,
+    }));
+  },
+
+  loadOlderSplitMessages: async (chatSessionId) => {
+    const first = get().splitMessages[0];
+    if (!first || first.id <= 0 || !get().splitHasMoreHistory) return 0;
+    const older = await getChatMessages(chatSessionId, first.id, 200);
+    if (!older || older.length === 0) {
+      if (get().splitChatSessionId === chatSessionId) {
+        set({ splitHasMoreHistory: false });
+      }
+      return 0;
+    }
+    set((s) => {
+      if (s.splitChatSessionId !== chatSessionId) return s;
+      const known = new Set(s.splitMessages.map((m) => m.id));
+      const fresh = older.filter((m) => !known.has(m.id));
+      return {
+        splitMessages: [...fresh, ...s.splitMessages],
+        splitHasMoreHistory: older.length >= 200,
+      };
+    });
+    return older.length;
+  },
+
+  reloadFor: async (chatSessionId) => {
+    const s = get();
+    if (s.activeChatSessionId === chatSessionId) await get().loadMessages(chatSessionId);
+    else if (s.splitChatSessionId === chatSessionId) await get().loadSplitMessages(chatSessionId);
   },
 
   loadConfig: async (provider?: string) => {
@@ -1398,6 +1493,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       messages: s.activeChatSessionId === chatSessionId ? [] : s.messages,
       messagesSessionId:
         s.activeChatSessionId === chatSessionId ? null : s.messagesSessionId,
+      // A deleted split-pane session closes the split view outright.
+      splitChatSessionId: s.splitChatSessionId === chatSessionId ? null : s.splitChatSessionId,
+      splitMessages: s.splitChatSessionId === chatSessionId ? [] : s.splitMessages,
+      splitMessagesSessionId:
+        s.splitChatSessionId === chatSessionId ? null : s.splitMessagesSessionId,
+      splitHasMoreHistory:
+        s.splitChatSessionId === chatSessionId ? false : s.splitHasMoreHistory,
     }));
   },
 
@@ -1423,6 +1525,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       activeChatSessionId: null,
       messages: [],
       messagesSessionId: null,
+      splitChatSessionId: null,
+      splitMessages: [],
+      splitMessagesSessionId: null,
+      splitHasMoreHistory: false,
       streaming: {},
       streamingChatSessionId: null,
       chatStatus: {},
@@ -1596,9 +1702,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setCodeExecEnabled: (codeExecEnabled) =>
     set(codeExecEnabled ? { codeExecEnabled, toolsEnabled: true } : { codeExecEnabled }),
 
-  sendMessage: async (content, attachments, forceResearch) => {
+  sendMessage: async (content, attachments, forceResearch, sessionIdOverride) => {
     const {
-      activeChatSessionId,
       messages,
       sessions,
       effort,
@@ -1606,6 +1711,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       codeExecEnabled,
       thinking,
     } = get();
+    // The split pane passes its own session id; without an override this is
+    // the plain active-session send. Every reference below keys off this
+    // local, so the whole action naturally targets the right session.
+    const activeChatSessionId = sessionIdOverride ?? get().activeChatSessionId;
     if (!activeChatSessionId) return;
     if (deletedSessions.has(activeChatSessionId)) return;
     // A turn is already running for this session: stack the message above
@@ -1678,14 +1787,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
       startedAt: null,
       completedAt: null,
     };
-    set({
-      messages: [...messages, userMsg],
-      streamingChatSessionId: activeChatSessionId,
-      streaming: { ...get().streaming, [activeChatSessionId]: "" },
-      chatStatus: { ...get().chatStatus, [activeChatSessionId]: { reason: "thinking", message: "" } },
-      // Start a fresh artifact buffer for this turn.
-      pendingArtifacts: { ...get().pendingArtifacts, [activeChatSessionId]: [] },
-      error: null,
+    set((s) => {
+      // A split-pane send (override names the split session, which is not
+      // the global active one) lands in the SPLIT buffer so the main view's
+      // list stays untouched; everything else appends to the active list.
+      const forSplit =
+        sessionIdOverride != null &&
+        sessionIdOverride === s.splitChatSessionId &&
+        sessionIdOverride !== s.activeChatSessionId;
+      return {
+        messages: forSplit ? s.messages : [...messages, userMsg],
+        splitMessages: forSplit ? [...s.splitMessages, userMsg] : s.splitMessages,
+        streamingChatSessionId: activeChatSessionId,
+        streaming: { ...get().streaming, [activeChatSessionId]: "" },
+        chatStatus: { ...get().chatStatus, [activeChatSessionId]: { reason: "thinking", message: "" } },
+        // Start a fresh artifact buffer for this turn.
+        pendingArtifacts: { ...get().pendingArtifacts, [activeChatSessionId]: [] },
+        error: null,
+      };
     });
 
     // Bump the session to top of the list. Re-read from state rather than
@@ -1873,20 +1992,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // Re-run the last user message to get a fresh assistant response. This is
   // branch-aware (roadmap #9): it retires the current tail first, so the model
   // doesn't keep seeing the stale answer being regenerated.
-  regenerate: async () => {
-    const { messages, activeChatSessionId } = get();
+  regenerate: async (sessionIdOverride) => {
+    const activeChatSessionId = sessionIdOverride ?? get().activeChatSessionId;
+    const list =
+      activeChatSessionId === get().splitChatSessionId && activeChatSessionId !== get().activeChatSessionId
+        ? get().splitMessages
+        : get().messages;
     // Don't regenerate mid-stream — per-session check (the legacy scalar can
     // name a different concurrently-streaming chat, which used to block
     // regenerate in an idle chat or allow it mid-stream in this one).
     if (activeChatSessionId && activeChatSessionId in get().streaming) return;
-    const active = messages.filter((m) => !m.supersededBy);
+    const active = list.filter((m) => !m.supersededBy);
     const lastUser = [...active].reverse().find((m) => m.role === "user");
     if (!lastUser) return;
     const clean = lastUser.content.replace(/\n\n\[Attached (?:image|file):[^\n]*\]/g, "");
     try {
       await supersedeChatTail(lastUser.id);
-      if (activeChatSessionId) await get().loadMessages(activeChatSessionId);
-      await get().sendMessage(clean);
+      if (activeChatSessionId) await get().reloadFor(activeChatSessionId);
+      // No override → call without the extra args (keeps the plain
+      // active-session send path byte-identical for tests and logging).
+      if (sessionIdOverride) await get().sendMessage(clean, undefined, undefined, sessionIdOverride);
+      else await get().sendMessage(clean);
     } catch (err) {
       toastError("Regenerate failed", err);
     }
@@ -1895,15 +2021,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // Edit-to-fork (roadmap #9): retire the branch at `messageId`, reload the
   // active message list, then send the edited text as a fresh turn. The old
   // branch stays in the timeline (dimmed) but no longer feeds the model.
-  editMessage: async (messageId, newContent) => {
-    const { activeChatSessionId } = get();
+  editMessage: async (messageId, newContent, sessionIdOverride) => {
+    const activeChatSessionId = sessionIdOverride ?? get().activeChatSessionId;
     // Per-session streaming guard (same reasoning as regenerate above).
     if (!activeChatSessionId || activeChatSessionId in get().streaming) return;
     try {
       await supersedeChatTail(messageId);
-      if (activeChatSessionId) await get().loadMessages(activeChatSessionId);
-      // Send the edited text as a new turn.
-      await get().sendMessage(newContent);
+      if (activeChatSessionId) await get().reloadFor(activeChatSessionId);
+      // Send the edited text as a new turn (override only when present —
+      // keeps the plain active-session call shape for the branch tests).
+      if (sessionIdOverride) await get().sendMessage(newContent, undefined, undefined, sessionIdOverride);
+      else await get().sendMessage(newContent);
     } catch (err) {
       toastError("Failed to edit message", err);
     }
@@ -1914,12 +2042,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // confirm. Persisted artifacts attributed to the message are detached
   // server-side (not deleted) so a user wiping a turn doesn't lose their
   // generated files — the artifact library still lists them.
-  deleteMessage: async (messageId) => {
+  deleteMessage: async (messageId, sessionIdOverride) => {
+    const activeChatSessionId = sessionIdOverride ?? get().activeChatSessionId;
+    const inSplit =
+      activeChatSessionId === get().splitChatSessionId && activeChatSessionId !== get().activeChatSessionId;
     set((s) => {
-      // Drop the bubble from the local list. Negative ids are optimistic
-      // just-sent bubbles that never round-tripped to the DB, so a missing
-      // match here is fine — the local filter simply doesn't remove anything.
-      const nextMessages = s.messages.filter((m) => m.id !== messageId);
+      // Drop the bubble from the list that shows it. Negative ids are
+      // optimistic just-sent bubbles that never round-tripped to the DB, so
+      // a missing match here is fine — the local filter simply doesn't
+      // remove anything.
+      const drop = (list: ChatMessageRecord[]) => list.filter((m) => m.id !== messageId);
+      if (inSplit) {
+        const nextSplit = drop(s.splitMessages);
+        if (nextSplit.length !== s.splitMessages.length) {
+          const nextByMessage = { ...s.artifactsByMessage };
+          delete nextByMessage[messageId];
+          return { splitMessages: nextSplit, artifactsByMessage: nextByMessage };
+        }
+        return {};
+      }
+      const nextMessages = drop(s.messages);
       // If the deleted message had attributed artifacts, clear the local
       // attribution map. The artifact rows/files stay (the backend detaches
       // them, not deletes) but the per-message chip row is gone.
@@ -1937,11 +2079,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // was already gone via another path). Re-fetch so the local list
       // matches persisted state instead of staying out of sync.
       toastError("Couldn't delete the message", err);
-      const activeChatSessionId = get().activeChatSessionId;
       if (activeChatSessionId) {
         try {
           const msgs = await getChatMessages(activeChatSessionId);
-          set({ messages: msgs ?? [], messagesSessionId: activeChatSessionId });
+          if (inSplit) set({ splitMessages: msgs ?? [], splitMessagesSessionId: activeChatSessionId });
+          else set({ messages: msgs ?? [], messagesSessionId: activeChatSessionId });
         } catch {
           /* best-effort rollback */
         }
@@ -2147,12 +2289,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   getOwnerSessionId: (chatSessionId) => get().ownerSessionByChatId[chatSessionId],
 
-  cancelStream: async () => {
-    // Cancel the ACTIVE session's stream (the one the user is looking at).
-    // The legacy scalar names whichever session last emitted a token — with
-    // concurrent streams it could point at a background chat, cancelling the
-    // wrong turn (or no-op when it's null before the first token lands).
-    const { activeChatSessionId } = get();
+  cancelStream: async (sessionIdOverride) => {
+    // Cancel the session the calling view is showing (the active one by
+    // default, the split pane's session via the override). The legacy scalar
+    // names whichever session last emitted a token — with concurrent streams
+    // it could point at a background chat, cancelling the wrong turn (or
+    // no-op when it's null before the first token lands).
+    const activeChatSessionId = sessionIdOverride ?? get().activeChatSessionId;
     if (activeChatSessionId && activeChatSessionId in get().streaming) {
       const streamingChatSessionId = activeChatSessionId;
       const session = get().sessions.find((s) => s.id === streamingChatSessionId);
@@ -2392,6 +2535,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // gated on the active session so two sessions finishing simultaneously
         // don't cross-contaminate.
         const isActiveSession = s.activeChatSessionId === chatSessionId;
+        const isSplitTarget = s.splitChatSessionId === chatSessionId && !isActiveSession;
         const pending = s.pendingArtifacts[chatSessionId] ?? [];
         const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
         const artifactsByMessage =
@@ -2406,6 +2550,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           hasMoreHistory: isActiveSession
             ? messages.length >= 200
             : s.hasMoreHistory,
+          // The split pane gets the same final-rows write-back for its own
+          // session so its history updates in place — no reload needed.
+          splitMessages: isSplitTarget ? mergeOptimistic(s.splitMessages, messages) : s.splitMessages,
+          splitMessagesSessionId: isSplitTarget ? chatSessionId : s.splitMessagesSessionId,
+          splitHasMoreHistory: isSplitTarget ? messages.length >= 200 : s.splitHasMoreHistory,
           artifactsByMessage,
           pendingArtifacts: nextPending,
         };

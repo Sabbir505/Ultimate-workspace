@@ -87,6 +87,15 @@ export default function App() {
       ? (s.sessions.find((x) => x.id === s.activeChatSessionId)?.title?.trim() || "New chat")
       : null,
   );
+  // Split chat view: a second full-fidelity ChatView beside the main one,
+  // pinned to the session picked via "Open in split view" in a session row's
+  // ⋮ menu (null = no split).
+  const splitChatId = useChatStore((s) => s.splitChatSessionId);
+  const splitChatTitle = useChatStore((s) =>
+    s.splitChatSessionId
+      ? (s.sessions.find((x) => x.id === s.splitChatSessionId)?.title?.trim() || "New chat")
+      : null,
+  );
 
   // Title-bar maximize glyph state: the toolbar doubles as the window title
   // bar (decorations:false), so the maximize button must track the real
@@ -297,7 +306,29 @@ export default function App() {
 
 {activeView === "chat" ? (
         <div className="grid-wrap chat-grid-wrap">
-          <ChatView />
+          <div className={splitChatId ? "chat-split-host split" : "chat-split-host"}>
+            <div className="chat-split-main">
+              <ChatView />
+            </div>
+            {splitChatId && (
+              <div className="chat-split-side">
+                <div className="chat-split-side-head">
+                  <span className="chat-split-side-title">
+                    {splitChatTitle ?? "Chat"}
+                  </span>
+                  <button
+                    className="ghost chat-split-close"
+                    title="Close split view"
+                    aria-label="Close split view"
+                    onClick={() => useChatStore.getState().closeChatSplit()}
+                  >
+                    ✕
+                  </button>
+                </div>
+                <ChatView splitSessionId={splitChatId} />
+              </div>
+            )}
+          </div>
           <Suspense fallback={null}>
             <ToolPanel />
           </Suspense>

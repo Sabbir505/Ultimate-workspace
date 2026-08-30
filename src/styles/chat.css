@@ -132,16 +132,28 @@
   padding: 6px;
   display: flex;
   flex-direction: column;
-  /* Items sit directly on the glass — a single frost panel like the
-     git-sidebar more-popover and the toolbar popovers, not boxed rows. */
+  /* Same liquid glass as the composer card: TRUE transparent body (rows
+     under the menu read as blurred shapes), heavy frost, soft shadow. */
   gap: 2px;
-  background: var(--surface-glass);
-  backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: var(--glass-rim, 0 0 0 1px rgba(255, 255, 255, 0.04)),
-    0 12px 32px -12px rgba(0, 0, 0, 0.6);
+  border-radius: 16px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 45%, transparent),
+    color-mix(in srgb, var(--surface-glass) 25%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: var(--glass-rim), 0 12px 32px -12px rgba(0, 0, 0, 0.35);
+}
+/* Light theme: a touch more body so text keeps contrast on bright backdrops
+   (same bump the composer card uses). */
+:root[data-theme="light"] .chat-session-menu {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 38%, transparent)
+  );
 }
 /* The sidebar's Chat History list is virtualized: every row lives inside an
  * absolutely-positioned, transformed wrapper div — the WRAPPER is the real
@@ -165,7 +177,7 @@ div[data-index]:has(.chat-session-row.menu-open) {
   bottom: 100%;
   margin-bottom: 2px;
   /* Invert the shadow direction so the shadow reads naturally above. */
-  box-shadow: var(--glass-rim-soft), 0 -8px 24px -8px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--glass-rim), 0 -8px 24px -8px rgba(0, 0, 0, 0.35);
 }
 .chat-session-menu button {
   display: flex;
@@ -183,7 +195,9 @@ div[data-index]:has(.chat-session-row.menu-open) {
   box-sizing: border-box;
 }
 .chat-session-menu button:hover {
-  background: var(--surface-3, var(--surface-2));
+  /* Translucent neutral overlay — reads as frost on the liquid glass in
+     both themes, unlike a solid surface fill. */
+  background: color-mix(in srgb, var(--text) 8%, transparent);
 }
 .chat-session-menu button.danger {
   color: var(--danger, #e5484d);

@@ -180,6 +180,18 @@ function visiblePaneCount(): number {
   return visibleCount(usePanesStore.getState().panes);
 }
 
+/** Surface the Browser tool-panel tab: activate an already-open Browser chip
+ *  when one exists (the panel's auto-open effect runs right AFTER the click
+ *  that added the chip) instead of stacking a second "Browser" chip next to
+ *  it; add one when there is none. Also expands the panel. */
+function surfaceBrowserTab(): void {
+  const ui = useUiStore.getState();
+  const existing = ui.openTabs.find((t) => t.kind === "browser");
+  if (existing) ui.activateTab(existing.instanceId);
+  else ui.addTab("browser");
+  ui.setToolPanelCollapsed(false);
+}
+
 /** Open a browser pane in the tool panel's Browser tab. Used to live on the
  *  toolbar globe button; now the Browser tab's empty state / "+" affordance
  *  calls it. */
@@ -194,9 +206,7 @@ export function openBrowserPane(): void {
   });
   // Browsers live in the right tool panel — surface it so the new pane is
   // immediately visible.
-  const ui = useUiStore.getState();
-  ui.addTab("browser");
-  ui.setToolPanelCollapsed(false);
+  surfaceBrowserTab();
 }
 
 /** Open a file artifact in the Browser tab. Adds a new tab (or focuses an
@@ -236,9 +246,7 @@ export function openArtifactInBrowserPane(path: string): void {
   } else {
     return; // grid full — silently skip
   }
-  const ui = useUiStore.getState();
-  ui.addTab("browser");
-  ui.setToolPanelCollapsed(false);
+  surfaceBrowserTab();
 }
 
 /** Restore the most-recently-used minimized browser pane (flips `collapsed`
@@ -251,9 +259,7 @@ export function restoreMinimizedBrowser(): void {
   if (visiblePaneCount() >= MAX_PANES) return;
   const target = minimized.reduce((a, b) => (a.lastUsedAt > b.lastUsedAt ? a : b));
   store.toggleBrowserCollapsed(target.paneId);
-  const ui = useUiStore.getState();
-  ui.addTab("browser");
-  ui.setToolPanelCollapsed(false);
+  surfaceBrowserTab();
 }
 
 /** Open a plain interactive shell pane (no agent) — the Terminal tab's

@@ -150,7 +150,14 @@ export function ToolPanel() {
     } else if (activeKind === "browser" && browsers.length === 0 && minimizedBrowsers.length === 0) {
       spawningRef.current = true;
       openBrowserPane();
-      spawningRef.current = false;
+      // openBrowserPane updates the panes store synchronously, but this
+      // component only sees the new pane on the NEXT render — release the
+      // guard on a later tick so a second effect pass in the same commit
+      // (batched tab+pane state, StrictMode) whose props still show zero
+      // browsers can't spawn a second pane.
+      setTimeout(() => {
+        spawningRef.current = false;
+      }, 0);
     }
   }, [activeKind, collapsed, terminals.length, browsers.length, minimizedBrowsers.length]);
 

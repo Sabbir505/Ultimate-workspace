@@ -28,6 +28,12 @@ function toEpoch(iso: string): number {
   return Number.isNaN(ms) ? 0 : Math.floor(ms / 1000);
 }
 
+const STATE_LABEL: Record<PrListState, string> = {
+  open: "Open",
+  closed: "Closed",
+  all: "All",
+};
+
 export function PullsPanel() {
   const projects = useProjectsStore((s) => s.projects);
   const selectedProjectId = useProjectsStore((s) => s.selectedProjectId);
@@ -102,6 +108,8 @@ function PrList({
   onCreate: () => void;
 }) {
   const [stateFilter, setStateFilter] = useState<PrListState>("open");
+  const [filterOpen, setFilterOpen] = useState(false);
+  const filterWrapRef = useRef<HTMLDivElement>(null);
   const cacheKey = prListCacheKey(projectId, stateFilter);
   const list = usePullRequestsStore((s) => s.lists[cacheKey]);
   const error = usePullRequestsStore((s) => s.listErrors[cacheKey]);
@@ -115,19 +123,61 @@ function PrList({
     return () => window.clearInterval(t);
   }, [refresh]);
 
+  // Close the scope menu on any outside click / Escape.
+  useEffect(() => {
+    if (!filterOpen) return;
+    const close = (e: MouseEvent) => {
+      if (filterWrapRef.current && !filterWrapRef.current.contains(e.target as Node)) {
+        setFilterOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setFilterOpen(false);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [filterOpen]);
+
   return (
     <>
       <div className="pulls-toolbar">
-        <select
-          className="pulls-filter"
-          value={stateFilter}
-          onChange={(e) => setStateFilter(e.target.value as typeof stateFilter)}
-          aria-label="Filter by state"
-        >
-          <option value="open">Open</option>
-          <option value="closed">Closed</option>
-          <option value="all">All</option>
-        </select>
+        {/* Custom glass dropdown (same liquid-glass menu as the composer) —
+            the native <select> popup couldn't be styled. */}
+        <div className="dev-diff-filter-wrap" ref={filterWrapRef}>
+          <button
+            type="button"
+            className="dev-diff-filter-btn"
+            onClick={() => setFilterOpen((o) => !o)}
+            aria-haspopup="menu"
+            aria-expanded={filterOpen}
+            aria-label="Filter by state"
+          >
+            {STATE_LABEL[stateFilter]}
+            <svg width={11} height={11} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <polyline points="4 6 8 10 12 6" />
+            </svg>
+          </button>
+          {filterOpen && (
+            <div className="dev-diff-filter-menu" role="menu">
+              {(["open", "closed", "all"] as const).map((k) => (
+                <button
+                  key={k}
+                  role="menuitem"
+                  className={`dev-diff-filter-item${stateFilter === k ? " active" : ""}`}
+                  onClick={() => {
+                    setStateFilter(k);
+                    setFilterOpen(false);
+                  }}
+                >
+                  <span className="dev-diff-filter-check">{stateFilter === k ? "✓" : ""}</span>
+                  {STATE_LABEL[k]}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <div className="pulls-toolbar-spacer" />
         <button type="button" className="ghost pulls-refresh" onClick={refresh} title="Refresh" disabled={loading}>
           {loading ? <span className="pulls-spinner" aria-hidden="true" /> : "⟳"}

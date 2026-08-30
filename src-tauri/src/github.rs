@@ -101,11 +101,38 @@ fn client(token: &str) -> Result<reqwest::Client, String> {
         reqwest::header::ACCEPT,
         "application/vnd.github+json".parse().unwrap(),
     );
-    reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .default_headers(headers)
-        .user_agent("conduit-desktop")
-        .build()
-        .map_err(|e| e.to_string())
+        .user_agent("conduit-desktop");
+    // Route API traffic through the same proxy the user's git uses. Many
+    // environments reach github.com ONLY via a local proxy (git push/pull
+    // work while api.github.com times out) — a desktop app launched from the
+    // shell doesn't inherit shell env vars, so read git's OWN proxy config:
+    // https.proxy first, then http.proxy (git applies http.proxy to https
+    // URLs too when no https.proxy is set).
+    if let Some(proxy) = git_config_proxy() {
+        // socks5:// proxies need reqwest's socks feature — if the URL scheme
+        // isn't supported, skip gracefully rather than breaking every call.
+        if let Ok(p) = reqwest::Proxy::all(&proxy) {
+            builder = builder.proxy(p);
+        }
+    }
+    builder.build().map_err(|e| format!("bad HTTP client: {e}"))
+}
+
+/// The user's git-configured HTTP(S) proxy, if any.
+fn git_config_proxy() -> Option<String> {
+    for key in ["https.proxy", "http.proxy"] {
+        let out = std::process::Command::new("git")
+            .args(["config", "--global", "--get", key])
+            .output()
+            .ok()?;
+        let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    None
 }
 
 /// Map a GitHub error response to a friendly string. 422s on create carry

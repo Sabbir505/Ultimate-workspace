@@ -207,7 +207,9 @@ describe("PullsPanel", () => {
     );
     render(<PullsPanel />);
     expect(await screen.findByText("feat: add the thing")).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Filter by state"), { target: { value: "closed" } });
+    // The filter is a custom glass dropdown: open it, pick "Closed".
+    fireEvent.click(screen.getByLabelText("Filter by state"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Closed" }));
     expect(screen.getByText("Loading…")).toBeTruthy();
     expect(document.querySelector(".pulls-spinner")).toBeTruthy();
     resolveClosed([{ ...PR, number: 7, state: "closed", title: "closed: fix the bug" }]);

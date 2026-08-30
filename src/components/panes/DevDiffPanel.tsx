@@ -142,6 +142,10 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   // rather than inheriting the previous pane's file list.
   const [filesByPane, setFilesByPane] = useState<Record<string, ChangedFile[]>>({});
   const [loading, setLoading] = useState(false);
+  // Manual-refresh counter: bumped by the Refresh button and scope switches
+  // so the polling effects re-run immediately. Declared before the poll
+  // effect (its deps array references it).
+  const [refreshNonce, setRefreshNonce] = useState(0);
   const diffPanelCollapsed = useUiStore((s) => s.diffPanelCollapsed);
   const toggleDiffPanel = useUiStore((s) => s.toggleDiffPanel);
   const diffPanelWidth = useUiStore((s) => s.diffPanelWidth);
@@ -154,10 +158,11 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   const sessions = useProjectsStore((s) => s.sessions);
   const projects = useProjectsStore((s) => s.projects);
   // Active chat session + its project binding — the embedded Files tab
-  // follows the CHAT, never the sidebar-selected project. Falling back to
-  // the global selection leaked the LAST project's changes into a brand-new
-  // (unbound) chat's Changes tab.
-  const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
+  // follows the CHAT, never the sidebar-selected project. In split view it
+  // follows the FOCUSED half (selectContextSessionId), matching the toolbar
+  // and git sidebar. Falling back to the global selection leaked the LAST
+  // project's changes into a brand-new (unbound) chat's Changes tab.
+  const activeChatSessionId = useChatStore(selectContextSessionId);
   const chatSessions = useChatStore((s) => s.sessions);
   const sessionProjects = useChatStore((s) => s.sessionProjects);
   const activeChatSession = useMemo(
@@ -333,7 +338,7 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
       cancelled = true;
       void listenReady.then((u) => u());
     };
-  }, [bindKey, cwd, projectPath]);
+  }, [bindKey, cwd, projectPath, refreshNonce]);
 
   // Prune cached file lists whose pane closed or whose fallback project was
   // removed, so we don't leak. This is rare (panes close infrequently) so a
@@ -399,7 +404,6 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   const setFilter = useUiStore((s) => s.setGitChangesFilter);
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
   const filterWrapRef = useRef<HTMLDivElement>(null);
-  const [refreshNonce, setRefreshNonce] = useState(0);
   // Close the scope menu on any outside click / Escape.
   useEffect(() => {
     if (!filterMenuOpen) return;
@@ -733,33 +737,55 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     : activeBoundProjectId ?? null;
 
   const sendPr = () => {
-    if (files.length === 0) return;
+    if (visibleFiles.length === 0) return;
     if (boundPane) {
       // Legacy terminal-pane flow: forward into the pane's pty exactly like
       // a user-typed message, then press Enter for the harness:
       // writePtySubmit writes the prompt and a separate "\r" (standalone
       // Enter), which is what actually submits TUI harnesses — a trailing
-      // \r merged into the same write does not.
+      // \r merged into the same write does not. The harness (with git/gh)
+      // then commits and opens the PR; its reply streams in that terminal.
       writePtySubmit(boundPane.paneId, SEND_PR_PROMPT);
+      useUiStore.getState().pushToast("info", "PR request typed into the terminal harness");
       return;
     }
     // Unified layout: there are no terminal panes to focus — the chat IS
-    // the agent surface. Send the PR prompt as a normal chat message; if a
-    // turn is already running it stacks in the FIFO queue. The backend
-    // scopes the turn to the selected project's directory, so the agent
-    // sees these exact changes.
-    void useChatStore.getState().sendMessage(SEND_PR_PROMPT);
+    // the agent surface. Send the PR prompt as a normal chat turn to the
+    // FOCUSED chat (the one whose project these changes belong to); if a
+    // turn is already running it stacks in the FIFO queue. The agent then
+    // commits the changes and opens the PR with its own git/gh tools.
+    const targetSession =
+      useChatStore.getState().focusedChatSessionId ??
+      useChatStore.getState().activeChatSessionId;
+    if (!targetSession) {
+      useUiStore.getState().pushToast("error", "Open (or focus) a chat first — there is no agent to run the PR");
+      return;
+    }
+    void useChatStore
+      .getState()
+      .sendMessage(SEND_PR_PROMPT, undefined, undefined, targetSession);
+    useUiStore.getState().pushToast("success", "PR request sent to the focused chat");
   };
 
   const reviewWholeTree = useCallback(async () => {
     if (!cwd || files.length === 0) return;
     setWholeTreeReviewLoading(true);
     try {
-      const chatId = useChatStore.getState().activeChatSessionId ?? undefined;
+      const chat = useChatStore.getState();
+      const chatId = chat.focusedChatSessionId ?? chat.activeChatSessionId ?? undefined;
       const text = await generateDiffReview(cwd, chatId, undefined);
+      if (!text) {
+        // The backend returns null when no provider is usable (no stored API
+        // key and no local model) — surface that instead of silently spinning
+        // to nothing.
+        useUiStore
+          .getState()
+          .pushToast("error", "No AI provider available for review — configure a chat API key or local model");
+        return;
+      }
       setWholeTreeReview(text);
-    } catch {
-      // Silent
+    } catch (e) {
+      useUiStore.getState().pushToast("error", "Diff review failed", String(e));
     } finally {
       setWholeTreeReviewLoading(false);
     }
@@ -930,13 +956,13 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
         <button
           className="dev-diff-send-pr"
           onClick={sendPr}
-          disabled={files.length === 0}
+          disabled={visibleFiles.length === 0}
           title={
-            files.length === 0
-              ? "No changes here yet"
+            visibleFiles.length === 0
+              ? "No changes in this scope yet"
               : boundPane
               ? `Forward into the pane's pty:\n"${SEND_PR_PROMPT}"`
-              : `Send to the chat:\n"${SEND_PR_PROMPT}"`
+              : `Send to the focused chat:\n"${SEND_PR_PROMPT}"`
           }
         >
           ⇧ Send PR
@@ -989,6 +1015,12 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
                       setFilter(key);
                       setSelectedFile(null);
                       setFilterMenuOpen(false);
+                      // Force an immediate re-scan for the new scope — the
+                      // spinner shows while it runs instead of stale data
+                      // snapping over.
+                      setLoading(true);
+                      setScopeLoading(true);
+                      setRefreshNonce((n) => n + 1);
                     }}
                   >
                     <span className="dev-diff-filter-check">{filter === key ? "✓" : ""}</span>

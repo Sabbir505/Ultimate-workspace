@@ -424,19 +424,30 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   // Tree the "Last turn" rows expand against: the checkpoint BEFORE the last
   // one (all-added empty tree when it's the first).
   const [lastTurnBase, setLastTurnBase] = useState<string>("empty");
+  // Scope fetch in flight (branch / last-turn list) — drives the list spinner
+  // so a slow scan shows a spinner instead of a premature "no changes".
+  const [scopeLoading, setScopeLoading] = useState(false);
 
   useEffect(() => {
     if (filter !== "branch" || !cwd) {
       setBranchChanges(null);
+      setScopeLoading(false);
       return;
     }
     let cancelled = false;
+    setScopeLoading(true);
     void getBranchChangedFiles(cwd)
       .then((r) => {
-        if (!cancelled) setBranchChanges(r ?? { files: [], mergeBase: "" });
+        if (!cancelled) {
+          setBranchChanges(r ?? { files: [], mergeBase: "" });
+          setScopeLoading(false);
+        }
       })
       .catch(() => {
-        if (!cancelled) setBranchChanges({ files: [], mergeBase: "" });
+        if (!cancelled) {
+          setBranchChanges({ files: [], mergeBase: "" });
+          setScopeLoading(false);
+        }
       });
     return () => {
       cancelled = true;
@@ -446,9 +457,11 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   useEffect(() => {
     if (filter !== "lastturn" || !focusedChatSessionId) {
       setLastTurnFiles(null);
+      setScopeLoading(false);
       return;
     }
     let cancelled = false;
+    setScopeLoading(true);
     void listChatCheckpoints(focusedChatSessionId)
       .then((cps) => {
         if (cancelled) return;
@@ -457,6 +470,7 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
         if (!last) {
           setLastTurnFiles([]);
           setLastTurnBase("empty");
+          setScopeLoading(false);
           return;
         }
         const prev = list.length >= 2 ? list[list.length - 2].treeSha : "empty";
@@ -471,9 +485,13 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
             deleted: 0,
           })),
         );
+        setScopeLoading(false);
       })
       .catch(() => {
-        if (!cancelled) setLastTurnFiles([]);
+        if (!cancelled) {
+          setLastTurnFiles([]);
+          setScopeLoading(false);
+        }
       });
     return () => {
       cancelled = true;
@@ -492,11 +510,9 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   }, [filter, branchChanges, lastTurnBase]);
 
 
-  // Diff-review state must also be declared above early returns so hook order
-  // stays stable when the panel is hidden or collapsed.
-  const [reviewLoading, setReviewLoading] = useState(false);
-  const [reviewText, setReviewText] = useState<string | null>(null);
-  const [reviewError, setReviewError] = useState<string | null>(null);
+  // Whole-tree review state (the "Review all" header action). The per-file
+  // review button was removed — its stats duplicated the row header and the
+  // whole-tree review covers the same need.
   const [wholeTreeReviewLoading, setWholeTreeReviewLoading] = useState(false);
   const [wholeTreeReview, setWholeTreeReview] = useState<string | null>(null);
 
@@ -622,22 +638,6 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     [diffText],
   );
 
-  // Per-file diff stats: count added vs deleted lines for the header bar.
-  // Computed from the parsed diff so the counter updates live as the
-  // 2s poll refreshes the diff text. No re-fetch needed — it's a pure
-  // reduce over the already-parsed lines.
-  const diffStats = useMemo(() => {
-    let added = 0;
-    let deleted = 0;
-    for (const file of diffFiles) {
-      for (const line of file.lines) {
-        if (line.type === "add") added += 1;
-        else if (line.type === "del") deleted += 1;
-      }
-    }
-    return { added, deleted };
-  }, [diffFiles]);
-
   // Re-resolve which files came from the pane (vs. project-root-only)
   // whenever the bind key or cwd changes. This is a cheap client-side
   // dedupe, not a re-fetch — we already polled both scopes; here we
@@ -751,26 +751,6 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     void useChatStore.getState().sendMessage(SEND_PR_PROMPT);
   };
 
-  // Diff-review state + callbacks. Whole-tree review and per-file review are
-  // independent. Callbacks use getState() to read activeChatSessionId at call
-  // time so they don't close over a stale value.
-  // (State hooks are declared above the early returns to preserve hook order.)
-
-  const reviewCurrentDiff = useCallback(async () => {
-    if (!diffCwd || !selectedFile) return;
-    setReviewLoading(true);
-    setReviewError(null);
-    try {
-      const chatId = useChatStore.getState().activeChatSessionId ?? undefined;
-      const text = await generateDiffReview(diffCwd, chatId, selectedFile);
-      setReviewText(text);
-    } catch (e) {
-      setReviewError(String(e));
-    } finally {
-      setReviewLoading(false);
-    }
-  }, [diffCwd, selectedFile]);
-
   const reviewWholeTree = useCallback(async () => {
     if (!cwd || files.length === 0) return;
     setWholeTreeReviewLoading(true);
@@ -785,12 +765,6 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     }
   }, [cwd, files.length]);
 
-  // Clear per-file review when the selection or cwd changes.
-  useEffect(() => {
-    setReviewText(null);
-    setReviewError(null);
-  }, [selectedFile, diffCwd]);
-
   // Clicking a row toggles its inline diff (accordion). The diff machinery
   // (diffText/diffFiles) is keyed to selectedFile, so "expanded" is simply
   // "this row's path is the selected file".
@@ -800,7 +774,10 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
 
   // The expanded row's inline diff body — shared by the accordion below.
   const diffBody = diffLoading ? (
-    <div className="dev-diff-empty">Loading diff…</div>
+    <div className="dev-diff-loading-row">
+      <span className="dev-diff-spinner" aria-hidden="true" />
+      Loading diff…
+    </div>
   ) : diffFiles.length === 0 ? (
     <div className="dev-diff-empty">No changes in {selectedFile}.</div>
   ) : (
@@ -831,7 +808,14 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   );
 
   const fileList = visibleFiles.length === 0 ? (
-    <div className="dev-diff-empty">{loading ? "Scanning…" : `No ${FILTER_LABEL[filter].toLowerCase()} changes`}</div>
+    loading || scopeLoading ? (
+      <div className="dev-diff-loading-row">
+        <span className="dev-diff-spinner" aria-hidden="true" />
+        Scanning {FILTER_LABEL[filter].toLowerCase()} changes…
+      </div>
+    ) : (
+      <div className="dev-diff-empty">No {FILTER_LABEL[filter].toLowerCase()} changes</div>
+    )
   ) : (
     <>
       <div className="dev-diff-file-list">
@@ -872,33 +856,7 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
               </div>
               {expanded && (
                 <div className="dev-diff-file-diff">
-                  <div className="dev-diff-file-diff-bar">
-                    {!diffLoading && diffFiles.length > 0 && (
-                      <span className="dev-diff-stats">
-                        {diffStats.added > 0 && <span className="dev-diff-stat-add">+{diffStats.added.toLocaleString()}</span>}
-                        {diffStats.deleted > 0 && <span className="dev-diff-stat-del">−{diffStats.deleted.toLocaleString()}</span>}
-                      </span>
-                    )}
-                    <button
-                      className="dev-diff-review-btn"
-                      onClick={() => void reviewCurrentDiff()}
-                      disabled={reviewLoading || diffLoading || diffFiles.length === 0}
-                      title={diffFiles.length === 0 ? "No diff loaded" : "Review this file's diff with AI"}
-                    >
-                      {reviewLoading ? "Reviewing…" : "🔍 Review"}
-                    </button>
-                  </div>
                   {diffBody}
-                  {reviewText && (
-                    <div className="dev-diff-review-card">
-                      <div className="dev-diff-review-card-header">
-                        <span className="dev-diff-review-card-title">AI Review</span>
-                        <button className="dev-diff-review-card-close" onClick={() => { setReviewText(null); setReviewError(null); }} title="Dismiss review">✕</button>
-                      </div>
-                      <pre className="dev-diff-review-card-body">{reviewText}</pre>
-                    </div>
-                  )}
-                  {reviewError && <div className="dev-diff-review-error">Review failed: {reviewError}</div>}
                 </div>
               )}
             </div>

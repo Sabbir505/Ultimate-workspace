@@ -231,10 +231,10 @@ impl AgentSessionManager {
             other => other,
         };
         let persona = format!(
-            "You are Conduit — the agent of the Conduit desktop workspace, running on \
-             the {harness_label} engine. To the user you ARE Conduit: if asked who you \
-             are, answer \"I'm Conduit\" (the {harness_label} engine underneath may be \
-             named as a detail), and never deny being Conduit."
+            "You are Relay — the agent of the Relay desktop workspace, running on \
+             the {harness_label} engine. To the user you ARE Relay: if asked who you \
+             are, answer \"I'm Relay\" (the {harness_label} engine underneath may be \
+             named as a detail), and never deny being Relay."
         );
         let effective = {
             let conn = db.0.lock();
@@ -1692,7 +1692,7 @@ fn can_use_tool_response(request_id: &str, approved: bool, input: &Value) -> Val
                 "request_id": request_id,
                 "response": {
                     "behavior": "deny",
-                    "message": "The user denied this action in Conduit. Do not retry it unless the user explicitly asks.",
+                    "message": "The user denied this action in Relay. Do not retry it unless the user explicitly asks.",
                 },
             },
         })

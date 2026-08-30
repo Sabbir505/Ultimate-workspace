@@ -70,7 +70,7 @@ pub fn build_instructions_md(project_path: &str, artifacts_dir: &str) -> String 
         format!("The project is at `{project_path}`.")
     };
     parts.push(format!(
-        "You are running inside Conduit. {location} \
+        "You are running inside Relay. {location} \
          Generated documents and diagrams must go to `{artifacts_dir}` via the \
          `conduit-tools` MCP tools (`generate_document`, `generate_diagram`, \
          `generate_file`) — do not hand-build docx/pptx/pdf yourself. Use \
@@ -153,7 +153,7 @@ pub fn build_claude_settings_json(
 /// harness instructions. Frontmatter per kimi-code's agent file format.
 pub fn build_kimi_agent_md(project_path: &str, artifacts_dir: &str) -> String {
     format!(
-        "---\nname: conduit\ndescription: Conduit-assisted agent with document generation skills\n---\n\n{}",
+        "---\nname: conduit\ndescription: Relay-assisted agent with document generation skills\n---\n\n{}",
         build_instructions_md(project_path, artifacts_dir)
     )
 }
@@ -426,7 +426,7 @@ mod tests {
     #[test]
     fn instructions_contain_preamble_and_skill_catalog() {
         let md = build_instructions_md("C:/work/proj", "C:/work/out");
-        assert!(md.contains("You are running inside Conduit"));
+        assert!(md.contains("You are running inside Relay"));
         assert!(md.contains("C:/work/proj"));
         assert!(md.contains("C:/work/out"));
         // Skill catalog from available_skills_segment (docx is a built-in).
@@ -469,7 +469,7 @@ mod tests {
         let md = build_kimi_agent_md("C:/work/proj", "C:/work/out");
         assert!(md.starts_with("---\n"));
         assert!(md.contains("name: conduit"));
-        assert!(md.contains("You are running inside Conduit"));
+        assert!(md.contains("You are running inside Relay"));
     }
 
     #[test]
@@ -622,7 +622,7 @@ mod tests {
         assert!(b.claude_settings.exists(), "claude settings written");
         assert!(b.kimi_agent.exists(), "kimi agent written");
         let md = std::fs::read_to_string(&b.claude_instructions).unwrap();
-        assert!(md.contains("You are running inside Conduit"));
+        assert!(md.contains("You are running inside Relay"));
         // The settings.json always has bypassPermissions under the new regime
         // (the CLI spawn uses --dangerously-skip-permissions, the settings file must agree).
         let settings: Value = serde_json::from_str(

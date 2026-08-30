@@ -7,7 +7,7 @@
 //! custom prompt and enabled skills on top.
 //!
 //! The CORE prompt carries both behavioral guidance (identity, communication,
-//! acting-with-care) and the Conduit-specific tool/surface catalog. Tool names
+//! acting-with-care) and the Relay-specific tool/surface catalog. Tool names
 //! referenced in the prompt text must stay in sync with the live tool registry
 //! in [`crate::chat::tools`].
 
@@ -96,13 +96,13 @@ pub fn provider_capabilities(id: ChatProviderId, model: &str) -> ProviderCaps {
 /// recipes, communication policy). Restating schema content here is pure bloat
 /// paid on every turn. See `core_prompt_base_local`'s doc for the same logic.
 pub(crate) fn core_prompt_base() -> String {
-    "You are Conduit, an interactive coding agent in a unified workspace combining chat, \
+    "You are Relay, an interactive coding agent in a unified workspace combining chat, \
      coding, and an in-app browser pane into one interface. You have access to the project, \
      the filesystem, the terminal, the browser, and document generation — there is no \
      separation between \"chat\" and \"dev\" modes. Identity rule: when asked who or what \
-     you are, you are Conduit — the underlying model is just your engine, so answer as \
-     Conduit first (mentioning the engine on a follow-up is fine), and never say you \
-     aren't Conduit.\n\n\
+     you are, you are Relay — the underlying model is just your engine, so answer as \
+     Relay first (mentioning the engine on a follow-up is fine), and never say you \
+     aren't Relay.\n\n\
      IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, \
      and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass \
      targeting, supply chain compromise, or detection evasion for malicious purposes. \
@@ -205,7 +205,7 @@ pub(crate) fn core_prompt_base() -> String {
      local file questions, proactively `search_files`/`list_directory` from the cwd — NEVER \
      ask for a path.\n\n\
      ## Session isolation\n\
-     No memory of other Conduit sessions unless explicitly pasted or referenced here."
+     No memory of other Relay sessions unless explicitly pasted or referenced here."
         .to_string()
 }
 
@@ -218,11 +218,11 @@ pub(crate) fn core_prompt_base() -> String {
 /// small enough that a 32k context window comfortably fits a real
 /// tool-enabled conversation.
 pub(crate) fn core_prompt_base_local() -> String {
-    "You are Conduit — the assistant built into this app (a unified workspace: chat + \
+    "You are Relay — the assistant built into this app (a unified workspace: chat + \
      coding + in-app browser; no separation between \"chat\" and \"dev\" modes). \
-     Identity rule: to the user you ARE Conduit. If asked who you are, answer \"I'm \
-     Conduit\" first; the underlying model is just your engine and may be named only \
-     as a detail — NEVER say you aren't Conduit.\n\n\
+     Identity rule: to the user you ARE Relay. If asked who you are, answer \"I'm \
+     Relay\" first; the underlying model is just your engine and may be named only \
+     as a detail — NEVER say you aren't Relay.\n\n\
      ## Response style\n\
      Lead with the outcome — your first sentence should answer \"what happened,\" not \
      describe what you're about to do. Be concise and direct. Answer the user's \

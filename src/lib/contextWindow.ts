@@ -16,12 +16,12 @@
 // The "used" figure (passed in by the meter consumer) is the input_tokens of
 // the last assistant turn — the full prompt size the provider counted.
 
-/** Fixed context-window cap for API/cloud models with no better answer.
- *  1M is the modern norm — Gemini, GPT-4.1/5, Qwen commercial tiers,
- *  MiniMax and most frontier releases ship 1M-class windows, so unknown
- *  models default there; the family table below carries the known smaller
- *  exceptions (Claude 200k, GPT-4o 128k, DeepSeek 128k, Kimi 256k, …). */
-export const API_CONTEXT_WINDOW = 1_000_000;
+/** Fixed context-window cap for API/cloud (and CLI-harness) models with no
+ *  better answer. 500k is the product default for the meter: unknown cloud
+ *  models and harness sessions show a 500k ring; the family table below
+ *  carries the known smaller exceptions (Claude 200k, GPT-4o 128k, DeepSeek
+ *  128k, Kimi 256k, …), which stay truthful. */
+export const API_CONTEXT_WINDOW = 500_000;
 
 /** Default context window for a local model when the slider is at "Auto" (0). */
 export const LOCAL_DEFAULT_CONTEXT = 16_384;
@@ -162,7 +162,9 @@ export async function openRouterContextWindows(): Promise<Record<string, number>
 /** Async refinement over the sync catalog: for OpenRouter sessions whose
  *  model has no catalog entry, derive the window from OpenRouter's models
  *  endpoint (exact id match, falling back to the model's bare suffix —
- *  a session id like "deepseek/deepseek-v4" matches "deepseek-v4" too). */
+ *  a session id like "deepseek/deepseek-v4" matches "deepseek-v4" too).
+ *  Capped at API_CONTEXT_WINDOW so the meter never shows more than the
+ *  product's 500k cloud ceiling even when a model advertises 1M+. */
 export async function contextWindowForModel(
   model: string | undefined | null,
   provider: string | undefined | null,
@@ -172,14 +174,15 @@ export async function contextWindowForModel(
   if (!m) return null;
   const windows = await openRouterContextWindows();
   if (!windows) return null;
-  if (windows[m]) return windows[m];
+  const cap = (n: number) => Math.min(n, API_CONTEXT_WINDOW);
+  if (windows[m]) return cap(windows[m]);
   const bare = m.includes("/") ? m.split("/").pop()! : m;
-  if (windows[bare]) return windows[bare];
+  if (windows[bare]) return cap(windows[bare]);
   // Suffix match for dated/distilled ids ("vendor/model-v4-0815").
   const hit = Object.entries(windows).find(
     ([id]) => id.endsWith(`/${bare}`) || bare.startsWith(id) || id.startsWith(bare),
   );
-  return hit ? hit[1] : null;
+  return hit ? cap(hit[1]) : null;
 }
 
 /** Format a token count compactly: 1234 -> "1.2k", 128000 -> "128k",

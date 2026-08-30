@@ -383,50 +383,112 @@ div[data-index]:has(.chat-session-row.menu-open) {
   to { opacity: 1; transform: translateY(0); }
 }
 .chat-welcome-greeting {
-  font-size: 22px;
-  font-weight: 600;
-  color: var(--text);
-  letter-spacing: -0.01em;
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+  /* Accent gradient text — the one expressive element on an otherwise
+     quiet screen; reads as the product's signature rather than a flat label. */
+  background: linear-gradient(
+    100deg,
+    var(--text) 20%,
+    var(--accent) 55%,
+    color-mix(in srgb, var(--accent) 45%, var(--text)) 85%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 .chat-welcome-question {
-  font-size: 14px;
+  font-size: 14.5px;
   color: var(--text-dim);
-  margin-bottom: 14px;
+  margin-bottom: 22px;
 }
 .chat-welcome-prompts {
   width: 100%;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 10px;
 }
 .chat-welcome-prompt {
   display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 12px 14px;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 14px;
   text-align: left;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: 12px;
   background: var(--surface-glass);
   backdrop-filter: blur(16px) saturate(140%);
   -webkit-backdrop-filter: blur(16px) saturate(140%);
   box-shadow: var(--glass-rim-soft);
   cursor: pointer;
-  transition: border-color 0.16s var(--ease), transform 0.16s var(--ease);
+  opacity: 0;
+  animation: chat-welcome-card 0.3s var(--ease) forwards;
+  transition: border-color 0.16s var(--ease), transform 0.16s var(--ease),
+    background 0.16s var(--ease);
+}
+@keyframes chat-welcome-card {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .chat-welcome-prompt:hover {
-  border-color: var(--accent);
-  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface-glass));
+  transform: translateY(-2px);
+}
+.chat-welcome-prompt-icon {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  transition: background 0.16s var(--ease);
+}
+.chat-welcome-prompt:hover .chat-welcome-prompt-icon {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.chat-welcome-prompt-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 .chat-welcome-prompt-title {
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text);
 }
 .chat-welcome-prompt-sub {
   font-size: 11.5px;
   color: var(--text-dim);
   line-height: 1.4;
+}
+.chat-welcome-prompt-arrow {
+  flex: none;
+  opacity: 0;
+  transform: translateX(-4px);
+  color: var(--accent);
+  transition: opacity 0.16s var(--ease), transform 0.16s var(--ease);
+}
+.chat-welcome-prompt:hover .chat-welcome-prompt-arrow {
+  opacity: 1;
+  transform: translateX(0);
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-welcome-prompt {
+    animation: none;
+    opacity: 1;
+  }
+  .chat-welcome-prompt-arrow {
+    transition: none;
+  }
 }
 
 /* Message bubbles â€” Claude style: user gets a compact rounded card on the

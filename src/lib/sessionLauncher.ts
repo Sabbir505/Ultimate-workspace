@@ -184,7 +184,7 @@ function visiblePaneCount(): number {
  *  when one exists (the panel's auto-open effect runs right AFTER the click
  *  that added the chip) instead of stacking a second "Browser" chip next to
  *  it; add one when there is none. Also expands the panel. */
-function surfaceBrowserTab(): void {
+export function surfaceBrowserTab(): void {
   const ui = useUiStore.getState();
   const existing = ui.openTabs.find((t) => t.kind === "browser");
   if (existing) ui.activateTab(existing.instanceId);

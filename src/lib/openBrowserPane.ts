@@ -3,19 +3,18 @@
 // event (chat:open-browser), the browser MCP roundtrip, pty URL detection,
 // and link clicks in chat markdown — so a URL ALWAYS lands in the in-app
 // pane instead of the system browser (Tauri's default for target=_blank).
+import { surfaceBrowserTab } from "./sessionLauncher";
 import { browserNavigateTab } from "./ipc";
 import { usePanesStore } from "../state/panes";
 import { useProjectsStore } from "../state/projects";
-import { useUiStore } from "../state/ui";
 
 export function openInBrowserPane(url: string): void {
   const panes = usePanesStore.getState();
-  const ui = useUiStore.getState();
   // Surface the Browser tab — every caller of this helper is a "show the user
   // a web page" path, so the panel must actually become visible (mirrors the
-  // canvas auto-open for generated artifacts).
-  ui.addTab("browser");
-  ui.setToolPanelCollapsed(false);
+  // canvas auto-open for generated artifacts). surfaceBrowserTab reuses the
+  // open Browser chip instead of stacking duplicates.
+  surfaceBrowserTab();
   const existing = panes.panes.find(
     (p) => p.data.kind === "browser" && !p.data.collapsed,
   );

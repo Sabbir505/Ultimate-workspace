@@ -1556,3 +1556,17 @@ button.git-sidebar-section-header:hover {
 .grid-wrap > .broadcast-bar {
   align-self: stretch;
 }
+/* Lazy overlay views (Settings / Skills / Cost) while their chunk loads —
+   a visible spinner instead of a blank app. */
+.overlay-loading {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--surface-solid, #101014) 60%, transparent);
+  z-index: 40;
+}

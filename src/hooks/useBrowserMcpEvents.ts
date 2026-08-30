@@ -13,17 +13,18 @@ import {
   listenBrowserOpenBrowserRequest,
   listenBrowserResolvePaneRequest,
 } from "../lib/ipc";
+import { surfaceBrowserTab } from "../lib/sessionLauncher";
 import { usePanesStore } from "../state/panes";
 import { useProjectsStore } from "../state/projects";
 import { useUiStore } from "../state/ui";
 
 /** Bring the Browser tab of the right tool panel into view — mirrors the
  *  canvas auto-open for generated artifacts. `paneId`, when known, is also
- *  focused so its webview gets the visible slot. */
+ *  focused so its webview gets the visible slot. REUSES the existing Browser
+ *  chip: this runs on EVERY agent browser tool call (read/click/type/…), and
+ *  a raw ui.addTab here stacked a brand-new "Browser" chip per tool call. */
 function surfaceBrowserPanel(paneId?: string | null): void {
-  const ui = useUiStore.getState();
-  ui.addTab("browser");
-  ui.setToolPanelCollapsed(false);
+  surfaceBrowserTab();
   if (paneId) {
     const panes = usePanesStore.getState();
     if (panes.panes.some((p) => p.paneId === paneId)) {

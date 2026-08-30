@@ -360,7 +360,12 @@ export default function App() {
 
         <LocalModelBanner />
 
-{activeView === "chat" ? (
+{/* Settings/Skills/Cost are OVERLAYS mounted on top of the chat — the chat
+    grid must stay MOUNTED for those views (only "automations" is a real
+    view swap). Unmounting here blanked the whole app and killed the
+    terminal/browser panes every time a footer icon was clicked; the panes
+    hide themselves via browserOcclusion (activeView !== "chat") instead. */}
+{activeView !== "automations" ? (
         <div
           ref={chatGridRef}
           className={`grid-wrap chat-grid-wrap${splitChatId ? ` split-active${splitFocus === "main" ? " split-focus-main" : ""}${splitResizing ? " split-resizing" : ""}` : ""}`}
@@ -411,17 +416,17 @@ export default function App() {
           downloads when the user actually opens it. The chat view is the
           default landing surface, so we keep it eager. */}
       {activeView === "settings" && (
-        <Suspense fallback={null}>
+        <Suspense fallback={<div className="overlay-loading"><span className="dev-diff-spinner" aria-hidden="true" /> Loading…</div>}>
           <SettingsView />
         </Suspense>
       )}
       {activeView === "skills" && (
-        <Suspense fallback={null}>
+        <Suspense fallback={<div className="overlay-loading"><span className="dev-diff-spinner" aria-hidden="true" /> Loading…</div>}>
           <SkillsLibrary />
         </Suspense>
       )}
       {activeView === "cost" && (
-        <Suspense fallback={null}>
+        <Suspense fallback={<div className="overlay-loading"><span className="dev-diff-spinner" aria-hidden="true" /> Loading…</div>}>
           <CostDashboard />
         </Suspense>
       )}

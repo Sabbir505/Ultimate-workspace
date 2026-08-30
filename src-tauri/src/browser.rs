@@ -781,6 +781,39 @@ fn attach_core_listeners(
     let mut start_token = 0i64;
     let _ = unsafe { core.add_NavigationStarting(&start_handler, &mut start_token) };
 
+    // target=_blank / window.open: WebView2's default is a SEPARATE popup
+    // window owned by the runtime — which reads as "the app spawned a
+    // window". Claim the request and navigate this pane instead (what an
+    // embedded browser should do).
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2NewWindowRequestedEventArgs;
+    use webview2_com::NewWindowRequestedEventHandler;
+    let app_newwin = app.clone();
+    let label_newwin = label.to_string();
+    let newwin_handler = NewWindowRequestedEventHandler::create(Box::new(
+        move |sender, args: Option<ICoreWebView2NewWindowRequestedEventArgs>| {
+            use webview2_com::take_pwstr;
+            if let Some(args) = args {
+                let mut pw = windows::core::PWSTR::null();
+                let uri = if unsafe { args.Uri(&mut pw) }.is_ok() {
+                    take_pwstr(pw)
+                } else {
+                    String::new()
+                };
+                let _ = unsafe { args.SetHandled(true) };
+                browser_log(
+                    &app_newwin,
+                    &format!("new-window label={label_newwin} uri={uri} -> same-tab navigate"),
+                );
+                if let (Some(core), false) = (sender, uri.is_empty()) {
+                    let _ = unsafe { core.Navigate(&windows::core::HSTRING::from(uri.as_str())) };
+                }
+            }
+            Ok(())
+        },
+    ));
+    let mut newwin_token = 0i64;
+    let _ = unsafe { core.add_NewWindowRequested(&newwin_handler, &mut newwin_token) };
+
     let app_complete = app.clone();
     let label_complete = label.to_string();
     let complete_handler = NavigationCompletedEventHandler::create(Box::new(
@@ -890,6 +923,11 @@ pub struct BrowserManager {
     /// Most-recently-created/navigated (pane_id, tab_id) per pane, so an explicit
     /// pane_id can resolve to the current active tab webview label.
     pane_active_tab: Mutex<HashMap<String /*pane_id*/, String /*tab_id*/>>,
+    /// Last applied visibility per webview label ("browser-{pane}-tab-{tab}").
+    /// The frontend's occlusion effect re-runs on every tabState change (i.e.
+    /// every address-bar keystroke); without this dedupe each re-run would
+    /// show() again and hand focus back to the main webview mid-typing.
+    tab_visible: Mutex<HashMap<String /*label*/, bool>>,
     /// Pending resolve-pane roundtrip request id -> sender.
     pane_resolve_pending: Mutex<HashMap<u64, oneshot::Sender<Option<String>>>>,
     next_resolve_req: AtomicU64,
@@ -909,6 +947,7 @@ impl BrowserManager {
             next_req: AtomicU64::new(1),
             project_pane_registry: Mutex::new(HashMap::new()),
             pane_visible: Mutex::new(HashMap::new()),
+            tab_visible: Mutex::new(HashMap::new()),
             pane_active_tab: Mutex::new(HashMap::new()),
             pane_resolve_pending: Mutex::new(HashMap::new()),
             next_resolve_req: AtomicU64::new(1),
@@ -1022,6 +1061,7 @@ impl BrowserManager {
             }
         }
         self.pane_visible.lock().insert(pane_id.to_string(), true);
+        self.tab_visible.lock().insert(label.clone(), true);
         self.pane_active_tab.lock().insert(pane_id.to_string(), tab_id.to_string());
 
         self.spawn_post_nav_inject(pane_id, tab_id);
@@ -1649,8 +1689,16 @@ impl BrowserManager {
     /// panes must hide their webview explicitly.
     pub fn set_visible(&self, pane_id: &str, tab_id: &str, visible: bool) -> Result<(), String> {
         ensure_supported()?;
-        self.pane_visible.lock().insert(pane_id.to_string(), visible);
         let label = browser_label(pane_id, tab_id);
+        // Dedupe: the frontend's occlusion effect re-runs on every tabState
+        // change — i.e. every address-bar keystroke — and each real show()
+        // ends by handing focus back to the main webview. Without this skip,
+        // every keystroke yanks focus out of the input mid-word.
+        if self.tab_visible.lock().get(&label).copied() == Some(visible) {
+            return Ok(());
+        }
+        self.pane_visible.lock().insert(pane_id.to_string(), visible);
+        self.tab_visible.lock().insert(label.clone(), visible);
         let pane = self
             .webviews
             .lock()
@@ -1687,6 +1735,7 @@ impl BrowserManager {
     pub fn close(&self, pane_id: &str, tab_id: &str) -> Result<(), String> {
         let label = browser_label(pane_id, tab_id);
         self.in_flight.lock().remove(&label);
+        self.tab_visible.lock().remove(&label);
         let pane = self.webviews.lock().remove(&label);
         if let Some(pane) = pane {
             pane.close().map_err(|e| e.to_string())?;
@@ -1708,6 +1757,7 @@ impl BrowserManager {
             .collect();
         for label in &labels {
             self.in_flight.lock().remove(label);
+            self.tab_visible.lock().remove(label);
             if let Some(pane) = self.webviews.lock().remove(label) {
                 // controller.Close() destroys the native child window — run
                 // it on the main thread (COM affinity). A dropped/dispatched
@@ -1719,6 +1769,8 @@ impl BrowserManager {
         // Clean up per-pane registries on close.
         self.project_pane_registry.lock().remove(pane_id);
         self.pane_visible.lock().remove(pane_id);
+        let prefix = format!("browser-{pane_id}-tab-");
+        self.tab_visible.lock().retain(|k, _| !k.starts_with(&prefix));
         self.pane_active_tab.lock().remove(pane_id);
         Ok(())
     }
@@ -2105,6 +2157,8 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
     pub fn unregister_browser_pane_project(&self, pane_id: &str) {
         self.project_pane_registry.lock().remove(pane_id);
         self.pane_visible.lock().remove(pane_id);
+        let prefix = format!("browser-{pane_id}-tab-");
+        self.tab_visible.lock().retain(|k, _| !k.starts_with(&prefix));
         self.pane_active_tab.lock().remove(pane_id);
     }
 

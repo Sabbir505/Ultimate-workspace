@@ -477,7 +477,7 @@ export function ToolPanel() {
             active; the webviews hide themselves through BrowserPane's
             occlusion inputs (toolPanelTab / toolPanelCollapsed). */}
         <div
-          className="tool-panel-pane-slot"
+          className="tool-panel-pane-slot browser-pane-slot"
           style={{ display: browserTabActive ? undefined : "none" }}
         >
           {browserTabActive && minimizedBrowsers.length > 0 && (

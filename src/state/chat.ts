@@ -704,6 +704,13 @@ export interface ChatState {
   closeChatSplit: () => void;
   loadSplitMessages: (chatSessionId: string) => Promise<void>;
   loadOlderSplitMessages: (chatSessionId: string) => Promise<number>;
+  /** Which chat the SHARED chrome (toolbar title, folder/git notches, git
+   *  sidebar) displays. Null = the plain active session (the main view). In
+   *  split view, interacting with the split half pins it to the split
+   *  session; interacting with the main half clears it — so everything in
+   *  the toolbar/git surface reflects the chat the user is working in. */
+  focusedChatSessionId: string | null;
+  setFocusedChatSession: (chatSessionId: string | null) => void;
   /** Reload the message buffer that displays `chatSessionId` — the main list
    *  when it's the active session, the split buffer when it's the split
    *  pane's session, nothing otherwise. */
@@ -921,6 +928,13 @@ export interface ChatState {
   onSubagentDone: (payload: SubagentDonePayload) => void;
 }
 
+/** The session whose context the shared UI should display: the split-pane
+ *  focus pin when set, else the plain active session. Toolbar title, folder/
+ *  git notches, and the git tools sidebar all select through this so their
+ *  data follows whichever chat the user is working in. */
+export const selectContextSessionId = (s: ChatState): string | null =>
+  s.focusedChatSessionId ?? s.activeChatSessionId;
+
 export const useChatStore = create<ChatState>((set, get) => ({
   loaded: false,
   sessions: [],
@@ -932,6 +946,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   splitMessages: [],
   splitMessagesSessionId: null,
   splitHasMoreHistory: false,
+  focusedChatSessionId: null,
   streaming: {},
   streamingChatSessionId: null,
   chatStatus: {},
@@ -1209,8 +1224,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   closeChatSplit: () => {
-    set({ splitChatSessionId: null, splitMessages: [], splitMessagesSessionId: null, splitHasMoreHistory: false });
+    set({ splitChatSessionId: null, splitMessages: [], splitMessagesSessionId: null, splitHasMoreHistory: false, focusedChatSessionId: null });
   },
+
+  setFocusedChatSession: (chatSessionId) => set({ focusedChatSessionId: chatSessionId }),
 
   loadSplitMessages: async (chatSessionId) => {
     // Mirrors loadMessages but fills the SPLIT pane's buffer; guarded so a
@@ -1495,6 +1512,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         s.activeChatSessionId === chatSessionId ? null : s.messagesSessionId,
       // A deleted split-pane session closes the split view outright.
       splitChatSessionId: s.splitChatSessionId === chatSessionId ? null : s.splitChatSessionId,
+      focusedChatSessionId:
+        s.splitChatSessionId === chatSessionId ? null : s.focusedChatSessionId,
       splitMessages: s.splitChatSessionId === chatSessionId ? [] : s.splitMessages,
       splitMessagesSessionId:
         s.splitChatSessionId === chatSessionId ? null : s.splitMessagesSessionId,
@@ -1529,6 +1548,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       splitMessages: [],
       splitMessagesSessionId: null,
       splitHasMoreHistory: false,
+      focusedChatSessionId: null,
       streaming: {},
       streamingChatSessionId: null,
       chatStatus: {},

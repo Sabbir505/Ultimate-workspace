@@ -118,6 +118,10 @@ export interface UiState {
   contextTipOpen: boolean;
   /** User-resized width of the tool panel, in pixels (280–640). */
   toolPanelWidth: number;
+  /** Split chat view: share of the chat area (excluding the tool panel)
+   *  given to the MAIN half, 0.2–0.8. Dragging the split divider updates it. */
+  chatSplitRatio: number;
+  setChatSplitRatio: (ratio: number) => void;
   /** Whether the Git tools sidebar (right-side vertical panel) is collapsed. */
   gitSidebarCollapsed: boolean;
   /** Per-section open/closed flags inside the expanded Git sidebar. These are
@@ -291,6 +295,7 @@ export const useUiStore = create<UiState>((set) => ({
   toolPanelCollapsed: true,
   contextTipOpen: false,
   toolPanelWidth: 532,
+  chatSplitRatio: 0.5,
   // Open by default — it's the primary git surface now.
   gitSidebarCollapsed: true,
   // All four sections open by default so first-time users see the full
@@ -584,6 +589,8 @@ export const useUiStore = create<UiState>((set) => ({
   setDiffPanelFile: (diffPanelFile, diffPanelCwd) => set({ diffPanelFile, diffPanelCwd }),
   setToolPanelWidth: (toolPanelWidth) =>
     set({ toolPanelWidth: Math.max(280, Math.min(900, toolPanelWidth)) }),
+  setChatSplitRatio: (chatSplitRatio) =>
+    set({ chatSplitRatio: Math.max(0.2, Math.min(0.8, chatSplitRatio)) }),
   pushToast: (kind, message, detail) => {
     const id = nextToastId++;
     // Cap the stack so a failing poll loop can't accumulate hundreds.

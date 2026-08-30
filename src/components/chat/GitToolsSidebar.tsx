@@ -18,7 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";import
   type BranchInfo,
 } from "../../lib/ipc";
 import { useProjectsStore } from "../../state/projects";
-import { useChatStore } from "../../state/chat";
+import { useChatStore, selectContextSessionId } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { BranchDropdown } from "./BranchDropdown";
 import { CommitModal } from "./CommitModal";
@@ -65,25 +65,25 @@ function SidebarMoreRow({
 }
 
 export function GitToolsSidebar() {
+  const activeChatSessionId = useChatStore(selectContextSessionId);
   const boundProjectId = useChatStore((s) =>
-    s.activeChatSessionId ? s.sessionProjects[s.activeChatSessionId] : undefined,
+    activeChatSessionId ? s.sessionProjects[activeChatSessionId] : undefined,
   );
-  const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
   const projects = useProjectsStore((s) => s.projects);
   const gitStatuses = useProjectsStore((s) => s.gitStatuses);
   const tasks = useChatStore((s) =>
-    s.activeChatSessionId ? (s.tasks[s.activeChatSessionId] ?? EMPTY_TASKS) : EMPTY_TASKS,
+    activeChatSessionId ? (s.tasks[activeChatSessionId] ?? EMPTY_TASKS) : EMPTY_TASKS,
   );
   const planSteps = useChatStore((s) =>
-    s.activeChatSessionId ? (s.planSteps[s.activeChatSessionId] ?? EMPTY_STEPS) : EMPTY_STEPS,
+    activeChatSessionId ? (s.planSteps[activeChatSessionId] ?? EMPTY_STEPS) : EMPTY_STEPS,
   );
   // APPROVED plan documents (present_plan → user accepted). These are the
   // sidebar Plans list; execution steps live in planSteps (Progress below).
   const acceptedPlans = useChatStore((s) =>
-    s.activeChatSessionId ? (s.sessionPlans[s.activeChatSessionId] ?? EMPTY_ACCEPTED) : EMPTY_ACCEPTED,
+    activeChatSessionId ? (s.sessionPlans[activeChatSessionId] ?? EMPTY_ACCEPTED) : EMPTY_ACCEPTED,
   );
   const subagents = useChatStore((s) =>
-    s.activeChatSessionId ? (s.subagents[s.activeChatSessionId] ?? EMPTY_SUBAGENTS) : EMPTY_SUBAGENTS,
+    activeChatSessionId ? (s.subagents[activeChatSessionId] ?? EMPTY_SUBAGENTS) : EMPTY_SUBAGENTS,
   );
 
   // Activate plan-step parsing and completion tracking
@@ -125,7 +125,7 @@ export function GitToolsSidebar() {
   // status/diff resolve against THAT dir — git is worktree-transparent, and
   // showing the project root's branch would mislead.
   const session = useChatStore((s) =>
-    s.activeChatSessionId ? s.sessions.find((x) => x.id === s.activeChatSessionId) : undefined,
+    activeChatSessionId ? s.sessions.find((x) => x.id === activeChatSessionId) : undefined,
   );
   const path = session?.worktreePath ?? project?.path ?? null;
   const gitStatus = projectId ? gitStatuses[projectId] : undefined;

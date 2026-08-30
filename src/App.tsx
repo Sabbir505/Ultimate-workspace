@@ -10,7 +10,7 @@
 // CommandPalette is also lazy: it pulls in fuzzy search + relative-time libs
 // (~6 KB) and is invisible until the user hits Cmd/Ctrl+K. Sidebar stays
 // eager because it's the first thing visible on every page.
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Modal } from "./components/common/Modal";
 import { ToastHost } from "./components/common/ToastHost";
@@ -80,26 +80,66 @@ export default function App() {
     gitPromptProjectId ? s.projects.find((p) => p.id === gitPromptProjectId) ?? null : null,
   );
   const markGitRepo = useProjectsStore((s) => s.markGitRepo);
-  // Chat header contents: the active session's title + the project/branch
-  // chips (chat view only — the toolbar is shared across views).
-  const chatTitle = useChatStore((s) =>
-    s.activeChatSessionId
-      ? (s.sessions.find((x) => x.id === s.activeChatSessionId)?.title?.trim() || "New chat")
-      : null,
-  );
-  // Split chat view: a second full-fidelity ChatView beside the main one,
-  // pinned to the session picked via "Open in split view" in a session row's
-  // ⋮ menu (null = no split).
+  // Chat header contents: the FOCUSED chat's title — in split view that's
+  // whichever half the user last interacted with; without a split, the plain
+  // active session. Project/git chips and the git sidebar follow the same
+  // session (selectContextSessionId), so all shared chrome reflects the chat
+  // the user is working in.
   const splitChatId = useChatStore((s) => s.splitChatSessionId);
-  const splitChatTitle = useChatStore((s) =>
-    s.splitChatSessionId
-      ? (s.sessions.find((x) => x.id === s.splitChatSessionId)?.title?.trim() || "New chat")
-      : null,
-  );
+  const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
   // Which split half the user last interacted with — the tool panel docks to
   // the RIGHT of that half (flex order), so each chat effectively carries its
   // own side panel. Pointer-down on a column updates it.
   const [splitFocus, setSplitFocus] = useState<"main" | "side">("side");
+  const focusedSessionId =
+    splitChatId && splitFocus === "side" ? splitChatId : activeChatSessionId;
+  const chatTitle = useChatStore((s) => {
+    const id = s.focusedChatSessionId ?? s.activeChatSessionId;
+    return id ? (s.sessions.find((x) => x.id === id)?.title?.trim() || "New chat") : null;
+  });
+  // Pin the shared chrome to the focused chat (null = main view's session).
+  useEffect(() => {
+    useChatStore.getState().setFocusedChatSession(
+      splitChatId && splitFocus === "side" ? splitChatId : null,
+    );
+  }, [splitChatId, splitFocus]);
+  // Draggable split width: ratio of the chat area (excluding the tool panel)
+  // given to the MAIN half. Persisted in the ui store across split sessions.
+  const splitRatio = useUiStore((s) => s.chatSplitRatio);
+  const setSplitRatio = useUiStore((s) => s.setChatSplitRatio);
+  const chatGridRef = useRef<HTMLDivElement>(null);
+  const [splitResizing, setSplitResizing] = useState(false);
+  // Live-drag the split divider: ratio = pointer X within the chat area
+  // (grid width minus the tool panel's own width). Clamped so neither half
+  // can collapse; released capture ends the drag.
+  const startSplitResize = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      const grid = chatGridRef.current;
+      if (!grid) return;
+      const handle = e.currentTarget;
+      handle.setPointerCapture(e.pointerId);
+      setSplitResizing(true);
+      const onMove = (ev: PointerEvent) => {
+        const panel = grid.querySelector<HTMLElement>(":scope > .tool-panel");
+        const panelW = panel ? panel.offsetWidth : 0;
+        const total = Math.max(240, grid.clientWidth - panelW);
+        const left = grid.getBoundingClientRect().left;
+        const ratio = (ev.clientX - left) / total;
+        setSplitRatio(Math.min(0.8, Math.max(0.2, ratio)));
+      };
+      const onUp = () => {
+        setSplitResizing(false);
+        handle.removeEventListener("pointermove", onMove);
+        handle.removeEventListener("pointerup", onUp);
+        handle.removeEventListener("pointercancel", onUp);
+      };
+      handle.addEventListener("pointermove", onMove);
+      handle.addEventListener("pointerup", onUp);
+      handle.addEventListener("pointercancel", onUp);
+    },
+    [setSplitRatio],
+  );
 
   // Title-bar maximize glyph state: the toolbar doubles as the window title
   // bar (decorations:false), so the maximize button must track the real
@@ -244,29 +284,17 @@ export default function App() {
               >
                 {chatTitle}
               </span>
-              {/* Split view: the second chat's title lives in the TOP toolbar
-                  (not on the pane) with a one-click close. A dim glyph marks
-                  which title is the split half. */}
+              {/* Split view: the title above already follows the FOCUSED half
+                  (main/split) — this is just the one-click close. */}
               {splitChatId && (
-                <>
-                  <span className="toolbar-split-divider" data-tauri-drag-region="" aria-hidden="true" />
-                  <span
-                    className={`toolbar-chat-title split-title${splitFocus === "side" ? " focused" : ""}`}
-                    data-tauri-drag-region=""
-                    title={splitChatTitle ?? undefined}
-                  >
-                    <span className="split-glyph" aria-hidden="true">⧉</span>
-                    {splitChatTitle}
-                  </span>
-                  <button
-                    className="ghost toolbar-split-close"
-                    onClick={() => useChatStore.getState().closeChatSplit()}
-                    title="Close split view"
-                    aria-label="Close split view"
-                  >
-                    ✕
-                  </button>
-                </>
+                <button
+                  className="ghost toolbar-split-close"
+                  onClick={() => useChatStore.getState().closeChatSplit()}
+                  title="Close split view"
+                  aria-label="Close split view"
+                >
+                  ⧉✕
+                </button>
               )}
               <FolderNotch />
               <GitHubNotch />
@@ -334,21 +362,34 @@ export default function App() {
 
 {activeView === "chat" ? (
         <div
-          className={`grid-wrap chat-grid-wrap${splitChatId ? ` split-active${splitFocus === "main" ? " split-focus-main" : ""}` : ""}`}
+          ref={chatGridRef}
+          className={`grid-wrap chat-grid-wrap${splitChatId ? ` split-active${splitFocus === "main" ? " split-focus-main" : ""}${splitResizing ? " split-resizing" : ""}` : ""}`}
         >
           <div
             className="chat-split-main"
+            style={splitChatId ? { flexGrow: splitRatio, flexBasis: 0 } : undefined}
             onPointerDownCapture={() => setSplitFocus("main")}
           >
             <ChatView />
           </div>
           {splitChatId && (
-            <div
-              className="chat-split-side"
-              onPointerDownCapture={() => setSplitFocus("side")}
-            >
-              <ChatView splitSessionId={splitChatId} />
-            </div>
+            <>
+              <div
+                className="chat-split-resizer"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Drag to resize the split chats"
+                title="Drag to resize"
+                onPointerDown={startSplitResize}
+              />
+              <div
+                className="chat-split-side"
+                style={{ flexGrow: 1 - splitRatio, flexBasis: 0 }}
+                onPointerDownCapture={() => setSplitFocus("side")}
+              >
+                <ChatView splitSessionId={splitChatId} />
+              </div>
+            </>
           )}
           <Suspense fallback={null}>
             <ToolPanel />

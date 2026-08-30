@@ -1731,6 +1731,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
       )}
 
       <ChatComposer
+        sessionId={activeChatSessionId}
         draft={draft}
         onSend={handleSend}
         onStop={handleStop}

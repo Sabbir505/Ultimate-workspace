@@ -18,7 +18,7 @@ import { ContextMeter } from "./ContextMeter";
 import { ComposerMetrics } from "./ComposerMetrics";
 import { BranchDropdown } from "./BranchDropdown";
 import { useUiStore } from "../../state/ui";
-import { useChatStore } from "../../state/chat";
+import { useChatStore, selectContextSessionId } from "../../state/chat";
 import { useProjectsStore } from "../../state/projects";
 import {
   listChatSkills,
@@ -458,20 +458,22 @@ function QueuedMessageRow({
  *  project selected). When the chat works in an isolated worktree a ⛓ chip
  *  sits beside the folder name — clicking it joins the main working tree. */
 export function FolderNotch() {
-  const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
+  // Shared chrome follows the FOCUSED chat (split-view aware), not the plain
+  // active session — see selectContextSessionId.
+  const activeChatSessionId = useChatStore(selectContextSessionId);
   const override = useChatStore((s) =>
-    s.activeChatSessionId ? s.cwdOverrides[s.activeChatSessionId] : undefined,
+    activeChatSessionId ? s.cwdOverrides[activeChatSessionId] : undefined,
   );
   const worktreePath = useChatStore((s) =>
-    s.activeChatSessionId
-      ? s.sessions.find((x) => x.id === s.activeChatSessionId)?.worktreePath
+    activeChatSessionId
+      ? s.sessions.find((x) => x.id === activeChatSessionId)?.worktreePath
       : undefined,
   );
   // The chat's own project binding wins over the global selection, so
   // switching chats shows each chat's project — not whichever project was
   // clicked last.
   const boundProjectId = useChatStore((s) =>
-    s.activeChatSessionId ? s.sessionProjects[s.activeChatSessionId] : undefined,
+    activeChatSessionId ? s.sessionProjects[activeChatSessionId] : undefined,
   );
   const project = useProjectsStore((s) =>
     s.projectById(boundProjectId ?? s.selectedProjectId),
@@ -512,16 +514,17 @@ export function GitHubNotch() {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
-  const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
+  // Same focused-chat rule as FolderNotch: split-view aware.
+  const activeChatSessionId = useChatStore(selectContextSessionId);
   const boundProjectId = useChatStore((s) =>
-    s.activeChatSessionId ? s.sessionProjects[s.activeChatSessionId] : undefined,
+    activeChatSessionId ? s.sessionProjects[activeChatSessionId] : undefined,
   );
   const override = useChatStore((s) =>
-    s.activeChatSessionId ? s.cwdOverrides[s.activeChatSessionId] : undefined,
+    activeChatSessionId ? s.cwdOverrides[activeChatSessionId] : undefined,
   );
   const worktreePath = useChatStore((s) =>
-    s.activeChatSessionId
-      ? s.sessions.find((x) => x.id === s.activeChatSessionId)?.worktreePath
+    activeChatSessionId
+      ? s.sessions.find((x) => x.id === activeChatSessionId)?.worktreePath
       : undefined,
   );
   const selectedProjectId = useProjectsStore((s) => s.selectedProjectId);
@@ -760,6 +763,10 @@ function readAsBase64(file: File): Promise<string> {
 }
 
 interface Props {
+  /** The chat session this composer writes to. Defaults to the global active
+   *  session; the split pane passes its pinned session so slash-command
+   *  artifacts (and any other store-bound path) land in the right chat. */
+  sessionId?: string | null;
   onSend: (content: string, attachments: ChatAttachment[], forceResearch?: boolean) => void;
   onStop?: () => void;
   streaming: boolean;
@@ -839,6 +846,7 @@ interface Props {
 }
 
 export function ChatComposer({
+  sessionId: sessionIdProp,
   onSend,
   onStop,
   streaming,
@@ -1637,7 +1645,9 @@ export function ChatComposer({
   // Persist the command-only message first, then generate the proposal. This
   // creates one real timeline user row without starting a normal chat turn.
   const triggerArtifactGeneration = useCallback(async (type: ArtifactType, instruction: string) => {
-    const sessionId = useChatStore.getState().activeChatSessionId;
+    // Explicit session wins — the split pane's composer must write to ITS
+    // chat, not whichever session the global active pointer names.
+    const sessionId = sessionIdProp ?? useChatStore.getState().activeChatSessionId;
     if (!sessionId) {
       toastError("No active chat session");
       return;
@@ -1652,6 +1662,13 @@ export function ChatComposer({
         useChatStore.setState((s) => ({
           messages: [...s.messages, message],
           messagesSessionId: sessionId,
+        }));
+      } else if (message && useChatStore.getState().splitChatSessionId === sessionId) {
+        // The split pane's chat: merge into the SPLIT buffer instead — the
+        // main list belongs to whichever session is globally active.
+        useChatStore.setState((s) => ({
+          splitMessages: [...s.splitMessages, message],
+          splitMessagesSessionId: sessionId,
         }));
       }
     } catch (e) {

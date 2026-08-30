@@ -583,7 +583,69 @@ fn create_environment_async(
 /// Kick off controller creation against `hwnd`; completion hands the
 /// controller (bounds already applied) to `on_controller`.
 #[cfg(windows)]
+/// Snapshot all descendant HWND addresses of `parent`. EnumChildWindows
+/// walks the whole subtree, which is fine — we only diff addresses.
+#[cfg(windows)]
+fn snapshot_child_hwnds(parent: windows::Win32::Foundation::HWND) -> Vec<isize> {
+    unsafe extern "system" fn proc(
+        hwnd: windows::Win32::Foundation::HWND,
+        lparam: windows::Win32::Foundation::LPARAM,
+    ) -> windows::core::BOOL {
+        let out = &mut *(lparam.0 as *mut Vec<isize>);
+        out.push(hwnd.0 as isize);
+        windows::core::BOOL::from(true)
+    }
+    let mut out: Vec<isize> = Vec::new();
+    let raw = &mut out as *mut Vec<isize>;
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::EnumChildWindows(
+            Some(parent),
+            Some(proc),
+            windows::Win32::Foundation::LPARAM(raw as isize),
+        );
+    }
+    out
+}
+
+/// WebView2 creates its child HWND(s) when the controller is created. Diff
+/// against `before`, force each NEW child to the top of the sibling Z-order
+/// (otherwise the app's main webview child can sit above them and the pane
+/// paints nothing), and log the ground truth — class, screen rect,
+/// IsWindowVisible — so a still-dark pane is diagnosable from browser.log.
+#[cfg(windows)]
+fn raise_and_log_new_children(
+    app: &AppHandle,
+    parent: windows::Win32::Foundation::HWND,
+    before: &[isize],
+) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetWindowRect, IsWindowVisible, SetWindowPos, HWND_TOP, SWP_NOMOVE, SWP_NOSIZE,
+    };
+    for addr in snapshot_child_hwnds(parent) {
+        if before.contains(&addr) {
+            continue;
+        }
+        let h = windows::Win32::Foundation::HWND(addr as *mut core::ffi::c_void);
+        let mut buf = [0u16; 64];
+        let n = unsafe { GetClassNameW(h, &mut buf) }.max(0) as usize;
+        let class = String::from_utf16_lossy(&buf[..n.min(buf.len())]);
+        let mut r = windows::Win32::Foundation::RECT::default();
+        let _ = unsafe { GetWindowRect(h, &mut r) };
+        let visible_before = unsafe { IsWindowVisible(h) }.as_bool();
+        let raised = unsafe { SetWindowPos(h, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE) }.is_ok();
+        let visible_after = unsafe { IsWindowVisible(h) }.as_bool();
+        browser_log(
+            app,
+            &format!(
+                "webview2 child hwnd=0x{addr:X} class={class} rect=({},{})-({},{}) visible_before={visible_before} raised={raised} visible_after={visible_after}",
+                r.left, r.top, r.right, r.bottom
+            ),
+        );
+    }
+}
+
 fn create_controller_async(
+    app: AppHandle,
     hwnd: windows::Win32::Foundation::HWND,
     env: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment,
     bounds: windows::Win32::Foundation::RECT,
@@ -595,6 +657,8 @@ fn create_controller_async(
     + 'static,
 ) -> Result<(), String> {
     use webview2_com::CreateCoreWebView2ControllerCompletedHandler;
+    let before = snapshot_child_hwnds(hwnd);
+    let parent = windows::Win32::Foundation::HWND(hwnd.0);
     let env2 = env.clone();
     let handler = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
         move |hr, controller| {
@@ -608,6 +672,13 @@ fn create_controller_async(
                     }
                 };
                 unsafe { controller.SetBounds(bounds) }.map_err(|e| e.to_string())?;
+                // Controllers are created INVISIBLE and stay that way until
+                // IsVisible is flipped (wry did this implicitly in the tauri
+                // path). Skipping it yields a dark pane that still logs
+                // successful navigations.
+                unsafe { controller.SetIsVisible(true) }
+                    .map_err(|e| format!("SetIsVisible(true) failed: {e}"))?;
+                raise_and_log_new_children(&app, parent, &before);
                 on_controller(controller)
             })();
             if let Err(e) = res {
@@ -1126,7 +1197,8 @@ impl BrowserManager {
                     // directly in the call would disjoint-capture the raw HWND
                     // field again and break the controller closure's Send.
                     let h = hwnd_wrap;
-                    create_controller_async(h.0, &env, bounds, done_ctrl.clone(), move |controller| {
+                    let app_log = app2.clone();
+                    create_controller_async(app_log, h.0, &env, bounds, done_ctrl.clone(), move |controller| {
                         let core = unsafe { controller.CoreWebView2() }
                             .map_err(|e| format!("CoreWebView2 unavailable: {e}"))?;
                         // Document-start bridge (visual overlay primitives) —
@@ -1594,6 +1666,14 @@ impl BrowserManager {
             let res = if visible { pane2.show() } else { pane2.hide() };
             res.map_err(|e| e.to_string())
         });
+        let outcome = match &out {
+            Ok(_) => "ok".to_string(),
+            Err(e) => e.clone(),
+        };
+        browser_log(
+            &self.app,
+            &format!("set_visible pane={pane_id} tab={tab_id} visible={visible} -> {outcome}"),
+        );
         if visible && out.is_ok() {
             // Showing the pane lets the WebView2 child grab keyboard focus —
             // hand it back to the main webview so the composer keeps typing.

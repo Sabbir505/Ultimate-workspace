@@ -428,29 +428,31 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   // Tree the "Last turn" rows expand against: the checkpoint BEFORE the last
   // one (all-added empty tree when it's the first).
   const [lastTurnBase, setLastTurnBase] = useState<string>("empty");
-  // Scope fetch in flight (branch / last-turn list) — drives the list spinner
-  // so a slow scan shows a spinner instead of a premature "no changes".
-  const [scopeLoading, setScopeLoading] = useState(false);
+  // Per-scope fetch flags (separate on purpose: the inactive scope's effect
+  // must not clear the active one's spinner — a shared flag got clobbered by
+  // the other effect's early return and the spinner died instantly).
+  const [branchLoading, setBranchLoading] = useState(false);
+  const [lastTurnLoading, setLastTurnLoading] = useState(false);
 
   useEffect(() => {
     if (filter !== "branch" || !cwd) {
       setBranchChanges(null);
-      setScopeLoading(false);
+      setBranchLoading(false);
       return;
     }
     let cancelled = false;
-    setScopeLoading(true);
+    setBranchLoading(true);
     void getBranchChangedFiles(cwd)
       .then((r) => {
         if (!cancelled) {
           setBranchChanges(r ?? { files: [], mergeBase: "" });
-          setScopeLoading(false);
+          setBranchLoading(false);
         }
       })
       .catch(() => {
         if (!cancelled) {
           setBranchChanges({ files: [], mergeBase: "" });
-          setScopeLoading(false);
+          setBranchLoading(false);
         }
       });
     return () => {
@@ -461,11 +463,11 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   useEffect(() => {
     if (filter !== "lastturn" || !focusedChatSessionId) {
       setLastTurnFiles(null);
-      setScopeLoading(false);
+      setLastTurnLoading(false);
       return;
     }
     let cancelled = false;
-    setScopeLoading(true);
+    setLastTurnLoading(true);
     void listChatCheckpoints(focusedChatSessionId)
       .then((cps) => {
         if (cancelled) return;
@@ -474,7 +476,7 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
         if (!last) {
           setLastTurnFiles([]);
           setLastTurnBase("empty");
-          setScopeLoading(false);
+          setLastTurnLoading(false);
           return;
         }
         const prev = list.length >= 2 ? list[list.length - 2].treeSha : "empty";
@@ -489,18 +491,23 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
             deleted: 0,
           })),
         );
-        setScopeLoading(false);
+        setLastTurnLoading(false);
       })
       .catch(() => {
         if (!cancelled) {
           setLastTurnFiles([]);
-          setScopeLoading(false);
+          setLastTurnLoading(false);
         }
       });
     return () => {
       cancelled = true;
     };
   }, [filter, focusedChatSessionId, refreshNonce]);
+
+  // The list spinner: the shared poll flag for unstaged/staged, the scope's
+  // own flag for branch/last-turn.
+  const scopeLoading =
+    (filter === "branch" && branchLoading) || (filter === "lastturn" && lastTurnLoading);
 
   // Which diff base the expanded row fetches against — the heart of making
   // each filter's rows expand to the RIGHT diff, not just list correctly.
@@ -894,15 +901,6 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
           </div>
         )}
       </div>
-      {wholeTreeReview && (
-        <div className="dev-diff-review-card">
-          <div className="dev-diff-review-card-header">
-            <span className="dev-diff-review-card-title">Whole-tree AI Review</span>
-            <button className="dev-diff-review-card-close" onClick={() => setWholeTreeReview(null)} title="Dismiss review">✕</button>
-          </div>
-          <pre className="dev-diff-review-card-body">{wholeTreeReview}</pre>
-        </div>
-      )}
     </>
   );
 
@@ -1017,9 +1015,9 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
                       setFilterMenuOpen(false);
                       // Force an immediate re-scan for the new scope — the
                       // spinner shows while it runs instead of stale data
-                      // snapping over.
+                      // snapping over. branch/last-turn raise their own
+                      // loading flags when their effects re-run.
                       setLoading(true);
-                      setScopeLoading(true);
                       setRefreshNonce((n) => n + 1);
                     }}
                   >
@@ -1045,6 +1043,18 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
             Refresh
           </button>
         </div>
+        {/* Review result renders ABOVE the list — at the bottom of a long
+            scrollable list it was below the fold and read as "nothing
+            happened". */}
+        {wholeTreeReview && (
+          <div className="dev-diff-review-card dev-diff-review-card-top">
+            <div className="dev-diff-review-card-header">
+              <span className="dev-diff-review-card-title">Whole-tree AI Review</span>
+              <button className="dev-diff-review-card-close" onClick={() => setWholeTreeReview(null)} title="Dismiss review">✕</button>
+            </div>
+            <pre className="dev-diff-review-card-body">{wholeTreeReview}</pre>
+          </div>
+        )}
         {fileList}
       </div>
     </div>

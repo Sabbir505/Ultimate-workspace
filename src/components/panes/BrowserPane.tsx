@@ -754,10 +754,10 @@ export function BrowserPane({ pane, visible = true }: Props) {
               if (addr) navigate(addr);
             }
           }}
-          onBlur={() => {
-            const addr = tabStates.get(activeTabId)?.address ?? "";
-            if (addr && normalizeUrl(addr) !== frameSrc) navigate(addr);
-          }}
+          // NO onBlur navigate: the native webview steals focus mid-typing
+          // (every navigation/bounds change), the input blurred after each
+          // character, and blur-navigate fired a search per KEYSTROKE
+          // ("g" → bing?q=g, "o" → bing?q=o…). Navigate on Enter only.
           // Select the whole URL on focus/click so a single keystroke replaces it
           // — matches a normal browser's address bar behavior.
           onFocus={(e) => e.currentTarget.select()}

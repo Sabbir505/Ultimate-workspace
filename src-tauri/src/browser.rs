@@ -380,6 +380,111 @@ pub(crate) fn browser_log(app: &tauri::AppHandle, msg: &str) {
         .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
 }
 
+// ---- Main-thread WebView2 access ------------------------------------------
+// ROOT CAUSE of the stuck-loading panes: from a worker thread, Tauri's
+// Webview::with_webview / navigate / eval messages ride the event-loop proxy
+// (Message::Webview) and were observed to NEVER execute for freshly-created
+// child panes — silently dropped, while run_on_main_thread closures always
+// ran (the log showed "navigate INVOKE OK" with no navigation ever starting).
+// On the MAIN thread, tauri's send_user_message short-circuits and executes
+// inline. So every WebView2 COM touch marshals through run_on_main_thread +
+// with_webview (which then runs inline), waits only for the synchronous part,
+// and lets async COM completions arrive via the normal pump.
+
+/// Run `f(core)` with the pane's CoreWebView2 on the main thread. `f` runs
+/// after `CoreWebView2()` resolves — synchronous COM only (invoke calls);
+/// async completions fire later on the main thread's pump. Safe to call from
+/// the main thread too (run_on_main_thread short-circuits inline).
+#[cfg(windows)]
+fn with_core_on_main<T: Send + 'static>(
+    app: &AppHandle,
+    label: &str,
+    what: &str,
+    f: impl FnOnce(
+        webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
+    ) -> Result<T, String>
+    + Send
+    + 'static,
+) -> Result<T, String> {
+    let (tx, rx) = mpsc::channel::<Result<T, String>>();
+    let (err_tx, err_rx) = mpsc::channel::<String>();
+    let label = label.to_string();
+    let app = app.clone();
+    let dispatcher = app.clone();
+    let dispatched = dispatcher.run_on_main_thread(move || {
+        let res = (|| -> Result<(), String> {
+            let w = app
+                .get_webview(&label)
+                .ok_or_else(|| format!("no webview labelled {label}"))?;
+            w.with_webview(move |pw| {
+                let res = (|| {
+                    let core = unsafe { pw.controller().CoreWebView2() }
+                        .map_err(|e| format!("CoreWebView2 unavailable: {e}"))?;
+                    f(core)
+                })();
+                let _ = tx.send(res);
+            })
+            .map_err(|e| format!("with_webview failed: {e}"))?;
+            Ok(())
+        })();
+        // Dispatch-level failure (no webview / with_webview refused): the
+        // result channel disconnects without a value — surface the reason.
+        if let Err(e) = res {
+            let _ = err_tx.send(e);
+        }
+    });
+    if dispatched.is_err() {
+        return Err(format!("{what}: main thread unavailable"));
+    }
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(res) => res,
+        Err(_) => Err(format!(
+            "{what}: closure never ran{}",
+            err_rx
+                .recv_timeout(Duration::ZERO)
+                .map(|e| format!(": {e}"))
+                .unwrap_or_default()
+        )),
+    }
+}
+
+/// Navigate the pane's webview via CoreWebView2.Navigate on the main thread.
+#[cfg(windows)]
+fn navigate_inline(app: &AppHandle, label: &str, url: &str) -> Result<(), String> {
+    let url = url.to_string();
+    with_core_on_main(app, label, "navigate", move |core| {
+        let url_h = windows::core::HSTRING::from(url);
+        unsafe { core.Navigate(&url_h) }.map_err(|e| format!("Navigate failed: {e}"))?;
+        Ok(())
+    })
+}
+
+#[cfg(not(windows))]
+fn navigate_inline(_app: &AppHandle, _label: &str, _url: &str) -> Result<(), String> {
+    Err("native browser pane requires the Windows WebView2 backend".to_string())
+}
+
+/// Evaluate JS via CoreWebView2.ExecuteScript on the main thread. Only the
+/// INVOKE is awaited; the script's result is not captured (fire-and-forget
+/// semantics, matching the old Webview::eval).
+#[cfg(windows)]
+fn eval_inline(app: &AppHandle, label: &str, js: &str) -> Result<(), String> {
+    let js = js.to_string();
+    with_core_on_main(app, label, "eval", move |core| {
+        use webview2_com::ExecuteScriptCompletedHandler;
+        let js_h = windows::core::HSTRING::from(js);
+        let handler = ExecuteScriptCompletedHandler::create(Box::new(|_, _| Ok(())));
+        unsafe { core.ExecuteScript(&js_h, &handler) }
+            .map_err(|e| format!("ExecuteScript failed: {e}"))?;
+        Ok(())
+    })
+}
+
+#[cfg(not(windows))]
+fn eval_inline(_app: &AppHandle, _label: &str, _js: &str) -> Result<(), String> {
+    Err("native browser pane requires the Windows WebView2 backend".to_string())
+}
+
 /// JS snippet that monkey-patches history.pushState / replaceState to call
 /// browser_push_state whenever the URL changes via same-document navigation.
 /// This catches Bing's Images/Videos/Maps tab clicks, SPA route changes, etc.
@@ -637,63 +742,65 @@ impl BrowserManager {
             let label_start = label.to_string();
             let app_complete = self.app.clone();
             let label_complete = label.to_string();
-            let _ = self.get(label).map(|pane| {
-                let _ = pane.webview.with_webview(move |platform_webview| {
-                    use webview2_com::take_pwstr;
-                    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_WEB_ERROR_STATUS;
-                    let Ok(core) = (unsafe { platform_webview.controller().CoreWebView2() }) else {
-                        return;
-                    };
-                    // NavigationStarting: every navigation attempt (URL +
-                    // whether wry's on_navigation allowed it).
-                    let start_handler = NavigationStartingEventHandler::create(Box::new(
-                        move |_sender, args: Option<ICoreWebView2NavigationStartingEventArgs>| {
-                            if let Some(args) = args {
-                                let mut pw = windows::core::PWSTR::null();
-                                if unsafe { args.Uri(&mut pw) }.is_ok() {
-                                    let uri = take_pwstr(pw);
-                                    browser_log(&app, &format!("nav START label={label_start} uri={uri}"));
-                                }
+            // Registration must marshal through run_on_main_thread: a
+            // with_webview dispatched from this (worker) thread was silently
+            // dropped, so the listeners never attached.
+            let attached = with_core_on_main(&self.app, label, "attach nav listeners", move |core| {
+                use webview2_com::take_pwstr;
+                use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_WEB_ERROR_STATUS;
+                // NavigationStarting: every navigation attempt (URL +
+                // whether wry's on_navigation allowed it).
+                let start_handler = NavigationStartingEventHandler::create(Box::new(
+                    move |_sender, args: Option<ICoreWebView2NavigationStartingEventArgs>| {
+                        if let Some(args) = args {
+                            let mut pw = windows::core::PWSTR::null();
+                            if unsafe { args.Uri(&mut pw) }.is_ok() {
+                                let uri = take_pwstr(pw);
+                                browser_log(&app, &format!("nav START label={label_start} uri={uri}"));
                             }
-                            Ok(())
-                        },
-                    ));
-                    let mut start_token = 0i64;
-                    let _ = unsafe { core.add_NavigationStarting(&start_handler, &mut start_token) };
-                    // NavigationCompleted: success/failure + the WebView2 error
-                    // code — the ground truth for "stuck loading" reports.
-                    let complete_handler = NavigationCompletedEventHandler::create(Box::new(
-                        move |_sender, args: Option<ICoreWebView2NavigationCompletedEventArgs>| {
-                            if let Some(args) = args {
-                                let mut success = windows::core::BOOL::default();
-                                let _ = unsafe { args.IsSuccess(&mut success) };
-                                let mut err = COREWEBVIEW2_WEB_ERROR_STATUS::default();
-                                let _ = unsafe { args.WebErrorStatus(&mut err) };
-                                browser_log(
-                                    &app_complete,
-                                    &format!(
-                                        "nav COMPLETE label={label_complete} success={} error={}",
-                                        success.as_bool(),
-                                        err.0
-                                    ),
+                        }
+                        Ok(())
+                    },
+                ));
+                let mut start_token = 0i64;
+                let _ = unsafe { core.add_NavigationStarting(&start_handler, &mut start_token) };
+                // NavigationCompleted: success/failure + the WebView2 error
+                // code — the ground truth for "stuck loading" reports.
+                let complete_handler = NavigationCompletedEventHandler::create(Box::new(
+                    move |_sender, args: Option<ICoreWebView2NavigationCompletedEventArgs>| {
+                        if let Some(args) = args {
+                            let mut success = windows::core::BOOL::default();
+                            let _ = unsafe { args.IsSuccess(&mut success) };
+                            let mut err = COREWEBVIEW2_WEB_ERROR_STATUS::default();
+                            let _ = unsafe { args.WebErrorStatus(&mut err) };
+                            browser_log(
+                                &app_complete,
+                                &format!(
+                                    "nav COMPLETE label={label_complete} success={} error={}",
+                                    success.as_bool(),
+                                    err.0
+                                ),
+                            );
+                            if success.as_bool() {
+                                // The navigation reached a real load end —
+                                // mirror it through an event the frontend
+                                // can use to clear `loading` truthfully.
+                                let _ = app_complete.emit(
+                                    "browser:load-completed",
+                                    label_complete.clone(),
                                 );
-                                if success.as_bool() {
-                                    // The navigation reached a real load end —
-                                    // mirror it through an event the frontend
-                                    // can use to clear `loading` truthfully.
-                                    let _ = app_complete.emit(
-                                        "browser:load-completed",
-                                        label_complete.clone(),
-                                    );
-                                }
                             }
-                            Ok(())
-                        },
-                    ));
-                    let mut complete_token = 0i64;
-                    let _ = unsafe { core.add_NavigationCompleted(&complete_handler, &mut complete_token) };
-                });
+                        }
+                        Ok(())
+                    },
+                ));
+                let mut complete_token = 0i64;
+                let _ = unsafe { core.add_NavigationCompleted(&complete_handler, &mut complete_token) };
+                Ok(())
             });
+            if let Err(e) = attached {
+                browser_log(&self.app, &format!("attach nav listeners FAILED label={label}: {e}"));
+            }
         }
         #[cfg(not(windows))]
         {
@@ -980,8 +1087,14 @@ impl BrowserManager {
                 return Err(e);
             }
         };
+        drop(pane);
         browser_log(app, &format!("navigate pane={pane_id} tab={tab_id} url={parsed}"));
-        let result = pane.webview.navigate(parsed.clone()).map_err(|e| e.to_string());
+        // Route through CoreWebView2.Navigate ON THE MAIN THREAD: the old
+        // Webview::navigate message rode the event-loop proxy and was
+        // silently dropped for freshly-created panes (queued "OK", nothing
+        // ever navigated).
+        let label = browser_label(pane_id, tab_id);
+        let result = navigate_inline(app, &label, parsed.as_str());
         match &result {
             Ok(_) => browser_log(app, &format!("navigate INVOKE OK url={parsed} — waiting for nav START/COMPLETE")),
             Err(e) => browser_log(app, &format!("navigate INVOKE FAILED url={parsed}: {e}")),
@@ -1087,11 +1200,18 @@ impl BrowserManager {
         };
         #[cfg(not(target_os = "linux"))]
         let (final_x, final_y) = (rect.x, rect.y);
-        pane.set_position_size(
-            LogicalPosition::new(final_x, final_y),
-            LogicalSize::new(rect.width, rect.height),
-        )
-        .map_err(|e| e.to_string())
+        // Bounds must apply ON the main thread: Webview::set_bounds from a
+        // worker rides the event-loop proxy and was silently dropped for
+        // freshly-created panes (resizes never applied).
+        let pane2 = pane;
+        self.run_main_thread_call(move || {
+            pane2
+                .set_position_size(
+                    LogicalPosition::new(final_x, final_y),
+                    LogicalSize::new(rect.width, rect.height),
+                )
+                .map_err(|e| e.to_string())
+        })
     }
 
     /// Occlusion control: native webviews float above the DOM, so overlays
@@ -1107,8 +1227,15 @@ impl BrowserManager {
             .get(&label)
             .cloned()
             .ok_or_else(|| format!("no browser webview with label {label}"))?;
-        let res = if visible { pane.show() } else { pane.hide() };
-        let out = res.map_err(|e| e.to_string());
+        // show/hide drive the controller's IsVisible — a dispatcher message
+        // that rides the proxy from a worker and can be silently dropped
+        // (pane stays invisible = black). Apply ON the main thread where it
+        // executes inline.
+        let pane2 = pane;
+        let out = self.run_main_thread_call(move || {
+            let res = if visible { pane2.show() } else { pane2.hide() };
+            res.map_err(|e| e.to_string())
+        });
         if visible && out.is_ok() {
             // Showing the pane lets the WebView2 child grab keyboard focus —
             // hand it back to the main webview so the composer keeps typing.
@@ -1165,8 +1292,7 @@ impl BrowserManager {
 
     fn eval(&self, label: &str, js: &str) -> Result<(), String> {
         ensure_supported()?;
-        let pane = self.get(label)?;
-        pane.webview.eval(js).map_err(|e| e.to_string())
+        eval_inline(&self.app, label, js)
     }
 
     // --- Agentic browser control ---------------------------------------
@@ -1247,32 +1373,11 @@ impl BrowserManager {
     /// it waits, so the UI stays alive during the capture. Returns `None` on
     /// failure and on platforms without a capture path (Linux/macOS today).
     pub fn capture_pane_png(&self, label: &str) -> Option<Vec<u8>> {
-        #[cfg(windows)]
-        {
-            let pane = self.get(label).ok()?;
-            let (tx, rx) = std::sync::mpsc::channel();
-            // with_webview runs the closure on the UI thread (the WebView2 API
-            // is thread-affine). The closure must NOT wait there: blocking the
-            // main thread — with or without a message pump — re-enters the
-            // event loop and wedges WebView2. capture_webview_png_invoke only
-            // STARTS the capture; its completion handler delivers the PNG
-            // through the channel after the closure has returned.
-            let _ = pane.webview.with_webview(move |platform_webview| {
-                let _ = tx.send(capture_webview_png_invoke(&platform_webview));
-            });
-            // Hop 1: the invoke closure hands back its completion receiver;
-            // hop 2: the completion handler delivers the PNG (a disconnected
-            // channel at either hop maps to None).
-            rx.recv_timeout(Duration::from_secs(15))
-                .ok()
-                .and_then(|png_rx| png_rx.recv_timeout(Duration::from_secs(15)).ok())
-                .unwrap_or(None)
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = label;
-            None
-        }
+        // The COM CapturePreview path captured from the calling thread via a
+        // with_webview that was silently dropped for freshly-created panes.
+        // The CDP screenshot path now routes through with_core_on_main
+        // (run_on_main_thread marshaling) and works from any thread.
+        self.capture_pane_png_via_cdp(label)
     }
 
     /// Capture the active chat-mode page (same as `capture_pane_png` but
@@ -1299,42 +1404,26 @@ impl BrowserManager {
         use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
         use windows::core::HSTRING;
 
-        let pane = self.get(label)?;
         let method_h = HSTRING::from(method);
         let params_h = HSTRING::from(params_json);
         let (result_tx, result_rx) = std::sync::mpsc::channel::<Result<String, String>>();
-        let (invoke_tx, invoke_rx) = std::sync::mpsc::channel::<Result<(), String>>();
-        // NEVER block or pump messages inside `with_webview` — the closure
-        // runs on the MAIN thread, and webview2-com's
-        // `wait_for_async_operation` helper would have spun a nested
-        // GetMessageA pump there (its `wait_with_pump`). Re-entering the
-        // event loop from inside a main-thread closure wedges WebView2's
-        // composition/dispatch: panes opened black and stuck in the loading
-        // state. So: invoke the CDP call here and return immediately; the
-        // completion handler delivers the JSON through the channel, and the
-        // CALLER (worker thread) does all the waiting.
-        let _ = pane.webview.with_webview(move |platform_webview| {
-            let _ = invoke_tx.send((|| -> Result<(), String> {
-                let core = unsafe { platform_webview.controller().CoreWebView2() }
-                    .map_err(|e| format!("CoreWebView2 unavailable: {e}"))?;
-                let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(
-                    move |hr: windows::core::Result<()>, json: String| {
-                        let _ = result_tx.send(hr.map(|_| json).map_err(|e| e.to_string()));
-                        Ok(())
-                    },
-                ));
-                unsafe { core.CallDevToolsProtocolMethod(&method_h, &params_h, &handler) }
-                    .map_err(|e| format!("CallDevToolsProtocolMethod failed: {e}"))?;
-                Ok(())
-            })());
-        });
-        // Sync-phase failure (no webview / call rejected outright) surfaces
-        // immediately; otherwise the completion carries the result JSON.
-        match invoke_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(e),
-            Err(_) => return Err("cdp dispatch timed out".to_string()),
-        }
+        // Invoke on the main thread via run_on_main_thread + with_webview
+        // (worker-dispatched with_webview messages were silently dropped).
+        // The completed handler delivers the result JSON through its own
+        // channel; the CALLING thread waits on it — so this must be called
+        // from a worker (Page.enable on the create path uses the no-wait
+        // page_enable variant instead).
+        with_core_on_main(&self.app, label, "cdp invoke", move |core| {
+            let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(
+                move |hr: windows::core::Result<()>, json: String| {
+                    let _ = result_tx.send(hr.map(|_| json).map_err(|e| e.to_string()));
+                    Ok(())
+                },
+            ));
+            unsafe { core.CallDevToolsProtocolMethod(&method_h, &params_h, &handler) }
+                .map_err(|e| format!("CallDevToolsProtocolMethod failed: {e}"))?;
+            Ok(())
+        })?;
         match result_rx.recv_timeout(Duration::from_secs(20)) {
             Ok(result) => result,
             // Disconnected = webview destroyed before completion.

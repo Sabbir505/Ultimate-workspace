@@ -3430,11 +3430,9 @@ button.chat-mermaid-open {
 .chat-split-side .chat-view-wrap {
   flex: 1;
 }
-/* Docking orders (grid-wrap is a flex row). */
+/* The tool panel is GLOBAL — always the last column at the far right, one
+   instance shared by both halves. No per-half docking. */
 .chat-grid-wrap.split-active > .chat-split-main { order: 0; }
-.chat-grid-wrap.split-active.split-focus-side > .chat-split-resizer { order: 1; }
-.chat-grid-wrap.split-active.split-focus-side > .chat-split-side { order: 1; }
-.chat-grid-wrap.split-active.split-focus-side > .tool-panel { order: 2; }
-.chat-grid-wrap.split-active.split-focus-main > .tool-panel { order: 1; }
-.chat-grid-wrap.split-active.split-focus-main > .chat-split-resizer { order: 2; }
-.chat-grid-wrap.split-active.split-focus-main > .chat-split-side { order: 2; }
+.chat-grid-wrap.split-active > .chat-split-resizer { order: 1; }
+.chat-grid-wrap.split-active > .chat-split-side { order: 1; }
+.chat-grid-wrap.split-active > .tool-panel { order: 2; }

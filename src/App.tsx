@@ -293,7 +293,7 @@ export default function App() {
                   title="Close split view"
                   aria-label="Close split view"
                 >
-                  ⧉✕
+                  ✕
                 </button>
               )}
               <FolderNotch />

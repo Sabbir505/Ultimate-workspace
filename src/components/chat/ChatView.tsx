@@ -89,6 +89,9 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   const storeActiveId = useChatStore((s) => s.activeChatSessionId);
   const isSplitView = splitSessionId != null;
   const activeChatSessionId = splitSessionId ?? storeActiveId;
+  // Split-view focus pin: which half the shared git rail belongs to (null =
+  // the main half). See the GitToolsSidebar render condition below.
+  const focusedPin = useChatStore((s) => s.focusedChatSessionId);
   const messages = useChatStore((s) => (isSplitView ? s.splitMessages : s.messages));
   const streaming = useChatStore((s) => s.streaming);
   const livePerf = useChatStore((s) => s.livePerf);
@@ -1427,7 +1430,13 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
     <div className="chat-view-wrap">
     <TurnNavigator />
     <div className={`chat-view${artifacts && artifacts.length > 0 ? " has-artifacts" : ""}`}>
-      <GitToolsSidebar />
+      {/* The git rail is mounted by exactly ONE view: in split view only the
+          FOCUSED half hosts it (the pin points at its session); without a
+          split, the main view does. Otherwise both halves would render their
+          own rail and toggling would open it on both. */}
+      {(isSplitView
+        ? focusedPin === splitSessionId
+        : focusedPin == null) && <GitToolsSidebar />}
       {!activeChatSessionId || hasItems ? (
         <div
           className="chat-messages"

@@ -118,6 +118,11 @@ export interface UiState {
   contextTipOpen: boolean;
   /** User-resized width of the tool panel, in pixels (280–640). */
   toolPanelWidth: number;
+  /** Files/Changes tab scope: which set of changed files the list shows.
+   *  Persisted across tab switches (the panel unmounts when its tab isn't
+   *  active, so component state would reset). */
+  gitChangesFilter: "unstaged" | "staged" | "branch" | "lastturn";
+  setGitChangesFilter: (filter: "unstaged" | "staged" | "branch" | "lastturn") => void;
   /** Split chat view: share of the chat area (excluding the tool panel)
    *  given to the MAIN half, 0.2–0.8. Dragging the split divider updates it. */
   chatSplitRatio: number;
@@ -296,6 +301,7 @@ export const useUiStore = create<UiState>((set) => ({
   contextTipOpen: false,
   toolPanelWidth: 532,
   chatSplitRatio: 0.5,
+  gitChangesFilter: "unstaged",
   // Open by default — it's the primary git surface now.
   gitSidebarCollapsed: true,
   // All four sections open by default so first-time users see the full
@@ -591,6 +597,7 @@ export const useUiStore = create<UiState>((set) => ({
     set({ toolPanelWidth: Math.max(280, Math.min(900, toolPanelWidth)) }),
   setChatSplitRatio: (chatSplitRatio) =>
     set({ chatSplitRatio: Math.max(0.2, Math.min(0.8, chatSplitRatio)) }),
+  setGitChangesFilter: (gitChangesFilter) => set({ gitChangesFilter }),
   pushToast: (kind, message, detail) => {
     const id = nextToastId++;
     // Cap the stack so a failing poll loop can't accumulate hundreds.

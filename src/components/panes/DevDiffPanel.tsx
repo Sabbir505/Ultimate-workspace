@@ -21,13 +21,47 @@
 // stand up a second one.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getChangedFiles, getGitFileDiff, safeListen, writePtySubmit, generateDiffReview } from "../../lib/ipc";
+import {
+  getBranchChangedFiles,
+  getChangedFiles,
+  getGitFileDiffScoped,
+  listChatCheckpoints,
+  safeListen,
+  writePtySubmit,
+  generateDiffReview,
+  type BranchChanges,
+} from "../../lib/ipc";
 import { parseUnifiedDiff } from "../../lib/diff";
-import { useChatStore } from "../../state/chat";
+import { useChatStore, selectContextSessionId } from "../../state/chat";
 import { usePanesStore } from "../../state/panes";
 import { useProjectsStore } from "../../state/projects";
 import { useUiStore } from "../../state/ui";
 import type { ChangedFile } from "../../types";
+
+/** The Files tab's scope dropdown: which set of changed files is listed.
+ *  unstaged/staged classify the porcelain status client-side; "branch" is
+ *  the merge-base diff vs the base branch; "lastturn" is the last chat
+ *  checkpoint's changed files. */
+type ChangesFilter = "unstaged" | "staged" | "branch" | "lastturn";
+const FILTER_LABEL: Record<ChangesFilter, string> = {
+  unstaged: "Unstaged",
+  staged: "Staged",
+  branch: "All branch changes",
+  lastturn: "Last turn",
+};
+const FILTER_ORDER: ChangesFilter[] = ["unstaged", "staged", "branch", "lastturn"];
+
+/** Porcelain XY: X = index side (staged), Y = worktree side. "??" = untracked
+ *  (unstaged by definition). */
+function isStagedFile(f: ChangedFile): boolean {
+  const x = f.status[0] ?? " ";
+  return f.status !== "??" && x !== " " && x !== "?";
+}
+function isUnstagedFile(f: ChangedFile): boolean {
+  if (f.status === "??") return true;
+  const y = f.status[1] ?? " ";
+  return y !== " " && y !== "?";
+}
 
 const POLL_MS = 4000;
 /** Live-refresh cadence for the inline diff view. The file list polls at
@@ -358,6 +392,106 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   const [diffText, setDiffText] = useState<string | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
 
+  // --- Filter dropdown (Unstaged / Staged / All branch changes / Last turn).
+  // The filter itself lives in the ui store (the panel unmounts on tab
+  // switch); the menu open flag and the manual-refresh counter are local.
+  const filter = useUiStore((s) => s.gitChangesFilter);
+  const setFilter = useUiStore((s) => s.setGitChangesFilter);
+  const [filterMenuOpen, setFilterMenuOpen] = useState(false);
+  const filterWrapRef = useRef<HTMLDivElement>(null);
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  // Close the scope menu on any outside click / Escape.
+  useEffect(() => {
+    if (!filterMenuOpen) return;
+    const close = (e: MouseEvent) => {
+      if (filterWrapRef.current && !filterWrapRef.current.contains(e.target as Node)) {
+        setFilterMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setFilterMenuOpen(false);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [filterMenuOpen]);
+
+  // --- Per-filter data sources.
+  const focusedChatSessionId = useChatStore(selectContextSessionId);
+  const [branchChanges, setBranchChanges] = useState<BranchChanges | null>(null);
+  const [lastTurnFiles, setLastTurnFiles] = useState<ChangedFile[] | null>(null);
+  // Tree the "Last turn" rows expand against: the checkpoint BEFORE the last
+  // one (all-added empty tree when it's the first).
+  const [lastTurnBase, setLastTurnBase] = useState<string>("empty");
+
+  useEffect(() => {
+    if (filter !== "branch" || !cwd) {
+      setBranchChanges(null);
+      return;
+    }
+    let cancelled = false;
+    void getBranchChangedFiles(cwd)
+      .then((r) => {
+        if (!cancelled) setBranchChanges(r ?? { files: [], mergeBase: "" });
+      })
+      .catch(() => {
+        if (!cancelled) setBranchChanges({ files: [], mergeBase: "" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [filter, cwd, refreshNonce]);
+
+  useEffect(() => {
+    if (filter !== "lastturn" || !focusedChatSessionId) {
+      setLastTurnFiles(null);
+      return;
+    }
+    let cancelled = false;
+    void listChatCheckpoints(focusedChatSessionId)
+      .then((cps) => {
+        if (cancelled) return;
+        const list = cps ?? [];
+        const last = list[list.length - 1];
+        if (!last) {
+          setLastTurnFiles([]);
+          setLastTurnBase("empty");
+          return;
+        }
+        const prev = list.length >= 2 ? list[list.length - 2].treeSha : "empty";
+        setLastTurnBase(prev || "empty");
+        setLastTurnFiles(
+          (last.files ?? []).map<ChangedFile>((f) => ({
+            status: f.status,
+            kind: f.status,
+            path: f.path,
+            oldPath: null,
+            added: 0,
+            deleted: 0,
+          })),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setLastTurnFiles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [filter, focusedChatSessionId, refreshNonce]);
+
+  // Which diff base the expanded row fetches against — the heart of making
+  // each filter's rows expand to the RIGHT diff, not just list correctly.
+  const diffScope = useMemo(() => {
+    if (filter === "staged") return "staged";
+    if (filter === "branch") {
+      return branchChanges?.mergeBase ? `base:${branchChanges.mergeBase}` : "worktree";
+    }
+    if (filter === "lastturn") return `base:${lastTurnBase}`;
+    return "worktree";
+  }, [filter, branchChanges, lastTurnBase]);
+
+
   // Diff-review state must also be declared above early returns so hook order
   // stays stable when the panel is hidden or collapsed.
   const [reviewLoading, setReviewLoading] = useState(false);
@@ -439,7 +573,7 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     const tick = () => {
       if (cancelled) return;
       if (firstLoad) setDiffLoading(true);
-      void getGitFileDiff(diffCwd, selectedFile).then((d) => {
+      void getGitFileDiffScoped(diffCwd, selectedFile, diffScope).then((d) => {
         if (cancelled) return;
         const next = d ?? "";
         // Skip the state update when the diff text is unchanged — a
@@ -480,7 +614,7 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
       cancelled = true;
       void listenReady.then((u) => u());
     };
-  }, [selectedFile, diffCwd]);
+  }, [selectedFile, diffCwd, diffScope, refreshNonce]);
   // Memoized: parseUnifiedDiff on a large diff is expensive, and this used
   // to re-run on EVERY panel render (each 4s file-list poll included).
   const diffFiles = useMemo(
@@ -567,6 +701,15 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
   }
 
   const files = filesByPane[bindKey] ?? [];
+  // The list the current scope filter shows. Unstaged/staged classify the
+  // porcelain status of the merged pane+project poll client-side; branch and
+  // last-turn have their own sources (fetched on filter enter / refresh).
+  const visibleFiles = useMemo(() => {
+    if (filter === "staged") return files.filter(isStagedFile);
+    if (filter === "branch") return branchChanges?.files ?? [];
+    if (filter === "lastturn") return lastTurnFiles ?? [];
+    return files.filter(isUnstagedFile);
+  }, [filter, files, branchChanges, lastTurnFiles]);
   // "Project extras": files surfaced by the project-root fetch that the
   // focused pane's cwd (typically a worktree) doesn't see. Render a tiny
   // hint in the header so the user knows these are coming from a wider
@@ -648,107 +791,125 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
     setReviewError(null);
   }, [selectedFile, diffCwd]);
 
-  const openFileDiff = (file: ChangedFile) => {
-    // Show the diff INLINE inside this side panel — the file list is
-    // replaced by the diff view for the clicked file. The user explicitly
-    // asked for the diff to appear in the diff pane, not over the pty.
-    if (!projectId) return;
-    setSelectedFile(file.path);
-  };
+  // Clicking a row toggles its inline diff (accordion). The diff machinery
+  // (diffText/diffFiles) is keyed to selectedFile, so "expanded" is simply
+  // "this row's path is the selected file".
+  const toggleFile = useCallback((file: ChangedFile) => {
+    setSelectedFile((prev) => (prev === file.path ? null : file.path));
+  }, []);
 
-  // Extract branches as named variables so the return JSX stays flat.
-  const diffDetail = selectedFile ? (
-    <div className="dev-diff-detail">
-      <button className="dev-diff-back" onClick={() => setSelectedFile(null)} title="Back to file list" aria-label="Back to file list">‹ Files</button>
-      <button
-        className="dev-diff-review-btn"
-        onClick={() => void reviewCurrentDiff()}
-        disabled={reviewLoading || diffLoading || diffFiles.length === 0}
-        title={diffFiles.length === 0 ? "No diff loaded" : "Review this file's diff with AI"}
-      >
-        {reviewLoading ? "Reviewing…" : "🔍 Review"}
-      </button>
-      <div className="dev-diff-detail-path" title={selectedFile}>
-        <span className="dev-diff-detail-path-name">{selectedFile}</span>
-        {!diffLoading && diffFiles.length > 0 && (
-          <span className="dev-diff-stats">
-            {diffStats.added > 0 && <span className="dev-diff-stat-add">+{diffStats.added.toLocaleString()}</span>}
-            {diffStats.deleted > 0 && <span className="dev-diff-stat-del">−{diffStats.deleted.toLocaleString()}</span>}
-          </span>
-        )}
-      </div>
-      {diffLoading ? (
-        <div className="dev-diff-empty">Loading diff…</div>
-      ) : diffFiles.length === 0 ? (
-        <div className="dev-diff-empty">No changes in {selectedFile}.</div>
-      ) : (
-        diffFiles.map((file, i) => {
-          const visibleLines = file.lines.filter((l) => l.type !== "meta");
-          const capped = visibleLines.length > DIFF_LINE_CAP;
-          const rows = capped ? visibleLines.slice(0, DIFF_LINE_CAP) : visibleLines;
+  // The expanded row's inline diff body — shared by the accordion below.
+  const diffBody = diffLoading ? (
+    <div className="dev-diff-empty">Loading diff…</div>
+  ) : diffFiles.length === 0 ? (
+    <div className="dev-diff-empty">No changes in {selectedFile}.</div>
+  ) : (
+    diffFiles.map((file, i) => {
+      const visibleLines = file.lines.filter((l) => l.type !== "meta");
+      const capped = visibleLines.length > DIFF_LINE_CAP;
+      const rows = capped ? visibleLines.slice(0, DIFF_LINE_CAP) : visibleLines;
+      return (
+        <div className="diff-file" key={`${file.newPath}-${i}`}>
+          {rows.map((line, j) => (
+            <div key={j} className={`diff-line ${line.type}`}>
+              <span className="diff-line-gutter diff-line-gutter-old">{line.oldLine ?? ""}</span>
+              <span className="diff-line-gutter diff-line-gutter-new">{line.newLine ?? ""}</span>
+              <span className="diff-line-content">
+                {line.type === "add" ? "+ " : line.type === "del" ? "- " : line.type === "hunk" ? "" : "  "}
+                {line.text}
+              </span>
+            </div>
+          ))}
+          {capped && (
+            <div className="diff-line meta">
+              <span className="diff-line-content">… {(visibleLines.length - DIFF_LINE_CAP).toLocaleString()} more lines not shown (large diff truncated)</span>
+            </div>
+          )}
+        </div>
+      );
+    })
+  );
+
+  const fileList = visibleFiles.length === 0 ? (
+    <div className="dev-diff-empty">{loading ? "Scanning…" : `No ${FILTER_LABEL[filter].toLowerCase()} changes`}</div>
+  ) : (
+    <>
+      <div className="dev-diff-file-list">
+        {visibleFiles.slice(0, FILE_ROW_CAP).map((f, i) => {
+          const expanded = selectedFile === f.path;
           return (
-            <div className="diff-file" key={`${file.newPath}-${i}`}>
-              {rows.map((line, j) => (
-                <div key={j} className={`diff-line ${line.type}`}>
-                  <span className="diff-line-gutter diff-line-gutter-old">{line.oldLine ?? ""}</span>
-                  <span className="diff-line-gutter diff-line-gutter-new">{line.newLine ?? ""}</span>
-                  <span className="diff-line-content">
-                    {line.type === "add" ? "+ " : line.type === "del" ? "- " : line.type === "hunk" ? "" : "  "}
-                    {line.text}
+            <div key={`${f.path}-${i}`} className={`dev-diff-row${expanded ? " expanded" : ""}`}>
+              <div
+                className={`dev-diff-file dev-diff-kind-${f.kind}`}
+                onClick={() => toggleFile(f)}
+                title={f.oldPath ? `${f.oldPath} → ${f.path}` : f.path}
+              >
+                <FileIcon path={f.path} />
+                <span className="dev-diff-file-path" title={f.path}>
+                  <FileNameLabel path={f.path} />
+                </span>
+                <span className="dev-diff-file-status">{f.kind}</span>
+                {(f.added ?? 0) + (f.deleted ?? 0) > 0 && (
+                  <span className="dev-diff-file-counter" title={`${f.path}: added / deleted lines`}>
+                    {(f.added ?? 0) > 0 && <span className="dev-diff-stat-add">+{(f.added ?? 0).toLocaleString()}</span>}
+                    {(f.deleted ?? 0) > 0 && <span className="dev-diff-stat-del">−{(f.deleted ?? 0).toLocaleString()}</span>}
                   </span>
-                </div>
-              ))}
-              {capped && (
-                <div className="diff-line meta">
-                  <span className="diff-line-content">… {(visibleLines.length - DIFF_LINE_CAP).toLocaleString()} more lines not shown (large diff truncated)</span>
+                )}
+                <svg
+                  className={`dev-diff-chevron${expanded ? " open" : ""}`}
+                  width={12}
+                  height={12}
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={1.6}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <polyline points="4 6 8 10 12 6" />
+                </svg>
+              </div>
+              {expanded && (
+                <div className="dev-diff-file-diff">
+                  <div className="dev-diff-file-diff-bar">
+                    {!diffLoading && diffFiles.length > 0 && (
+                      <span className="dev-diff-stats">
+                        {diffStats.added > 0 && <span className="dev-diff-stat-add">+{diffStats.added.toLocaleString()}</span>}
+                        {diffStats.deleted > 0 && <span className="dev-diff-stat-del">−{diffStats.deleted.toLocaleString()}</span>}
+                      </span>
+                    )}
+                    <button
+                      className="dev-diff-review-btn"
+                      onClick={() => void reviewCurrentDiff()}
+                      disabled={reviewLoading || diffLoading || diffFiles.length === 0}
+                      title={diffFiles.length === 0 ? "No diff loaded" : "Review this file's diff with AI"}
+                    >
+                      {reviewLoading ? "Reviewing…" : "🔍 Review"}
+                    </button>
+                  </div>
+                  {diffBody}
+                  {reviewText && (
+                    <div className="dev-diff-review-card">
+                      <div className="dev-diff-review-card-header">
+                        <span className="dev-diff-review-card-title">AI Review</span>
+                        <button className="dev-diff-review-card-close" onClick={() => { setReviewText(null); setReviewError(null); }} title="Dismiss review">✕</button>
+                      </div>
+                      <pre className="dev-diff-review-card-body">{reviewText}</pre>
+                    </div>
+                  )}
+                  {reviewError && <div className="dev-diff-review-error">Review failed: {reviewError}</div>}
                 </div>
               )}
             </div>
           );
-        })
-      )}
-      {reviewText && (
-        <div className="dev-diff-review-card">
-          <div className="dev-diff-review-card-header">
-            <span className="dev-diff-review-card-title">AI Review</span>
-            <button className="dev-diff-review-card-close" onClick={() => { setReviewText(null); setReviewError(null); }} title="Dismiss review">✕</button>
+        })}
+        {visibleFiles.length > FILE_ROW_CAP && (
+          <div className="dev-diff-file dev-diff-file-out-of-scope">
+            <span className="dev-diff-file-path">… {(visibleFiles.length - FILE_ROW_CAP).toLocaleString()} more files not shown</span>
           </div>
-          <pre className="dev-diff-review-card-body">{reviewText}</pre>
-        </div>
-      )}
-      {reviewError && <div className="dev-diff-review-error">Review failed: {reviewError}</div>}
-    </div>
-  ) : null;
-
-  const fileList = files.length === 0 ? (
-    <div className="dev-diff-empty">{loading ? "Scanning…" : "No changes yet"}</div>
-  ) : (
-    <>
-      <ul className="dev-diff-file-list">
-        {files.slice(0, FILE_ROW_CAP).map((f, i) => (
-          <li
-            key={`${f.path}-${i}`}
-            className={`dev-diff-file dev-diff-kind-${f.kind}${panePaths && !panePaths.has(f.path) ? " dev-diff-file-out-of-scope" : ""}`}
-            onClick={() => openFileDiff(f)}
-            title={f.oldPath ? `${f.oldPath} → ${f.path}` : panePaths && !panePaths.has(f.path) ? `${f.path} (outside the focused pane's working tree)` : f.path}
-          >
-            <span className="dev-diff-file-icon" aria-hidden="true">{iconFor(f.kind)}</span>
-            <span className="dev-diff-file-path">{f.path}</span>
-            <span className="dev-diff-file-status">{f.status}</span>
-            {(f.added ?? 0) + (f.deleted ?? 0) > 0 && (
-              <span className="dev-diff-file-counter" title={`${f.path}: added / deleted lines`}>
-                {(f.added ?? 0) > 0 && <span className="dev-diff-stat-add">+{(f.added ?? 0).toLocaleString()}</span>}
-                {(f.deleted ?? 0) > 0 && <span className="dev-diff-stat-del">−{(f.deleted ?? 0).toLocaleString()}</span>}
-              </span>
-            )}
-          </li>
-        ))}
-        {files.length > FILE_ROW_CAP && (
-          <li className="dev-diff-file dev-diff-file-out-of-scope">
-            <span className="dev-diff-file-path">… {(files.length - FILE_ROW_CAP).toLocaleString()} more files not shown</span>
-          </li>
         )}
-      </ul>
+      </div>
       {wholeTreeReview && (
         <div className="dev-diff-review-card">
           <div className="dev-diff-review-card-header">
@@ -842,33 +1003,138 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
         )}
       </div>
       <div className="dev-diff-panel-body">
-        {/* The detail view REPLACES the file list while a file is selected
-            (matches .dev-diff-detail's "replaces the file list" design and
-            the "‹ Files" back button) — rendering both stacked made the
-            list peek out below an open diff. */}
-        {diffDetail ?? fileList}
+        {/* Scope toolbar: the filter dropdown (Unstaged / Staged / All branch
+            changes / Last turn) on the left, manual Refresh on the right —
+            matching the reference design. The accordion list follows. */}
+        <div className="dev-diff-toolbar">
+          <div className="dev-diff-filter-wrap" ref={filterWrapRef}>
+            <button
+              className="dev-diff-filter-btn"
+              onClick={() => setFilterMenuOpen((o) => !o)}
+              aria-haspopup="menu"
+              aria-expanded={filterMenuOpen}
+              title="Which changes to list"
+            >
+              {FILTER_LABEL[filter]}
+              <svg width={11} height={11} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <polyline points="4 6 8 10 12 6" />
+              </svg>
+            </button>
+            {filterMenuOpen && (
+              <div className="dev-diff-filter-menu" role="menu">
+                {FILTER_ORDER.map((key) => (
+                  <button
+                    key={key}
+                    role="menuitem"
+                    className={`dev-diff-filter-item${filter === key ? " active" : ""}`}
+                    onClick={() => {
+                      setFilter(key);
+                      setSelectedFile(null);
+                      setFilterMenuOpen(false);
+                    }}
+                  >
+                    <span className="dev-diff-filter-check">{filter === key ? "✓" : ""}</span>
+                    {FILTER_LABEL[key]}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <button
+            className="dev-diff-refresh"
+            onClick={() => {
+              setLoading(true);
+              setRefreshNonce((n) => n + 1);
+            }}
+            title="Re-scan for changes"
+          >
+            <svg width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <polyline points="23 4 23 10 17 10" />
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+            </svg>
+            Refresh
+          </button>
+        </div>
+        {fileList}
       </div>
     </div>
   );
 }
 
-function iconFor(kind: string): string {
-  switch (kind) {
-    case "M":
-      return "●";
-    case "A":
-      return "+";
-    case "D":
-      return "−";
-    case "R":
-      return "→";
-    case "C":
-      return "⎘";
-    case "U":
-      return "?";
-    default:
-      return "·";
-  }
+/** Per-extension file badge — a tiny colored tile with the language's usual
+ *  mark, so a Python file reads as Python at a glance (reference design).
+ *  Dependency-free: extension → [label, hue]. */
+const FILE_TYPE_BADGES: Record<string, { label: string; color: string }> = {
+  py: { label: "Py", color: "#4B8BBE" },
+  js: { label: "JS", color: "#B8860B" },
+  mjs: { label: "JS", color: "#B8860B" },
+  cjs: { label: "JS", color: "#B8860B" },
+  jsx: { label: "JX", color: "#61dafb" },
+  ts: { label: "TS", color: "#3178C6" },
+  tsx: { label: "TX", color: "#3178C6" },
+  rs: { label: "Rs", color: "#DEA584" },
+  go: { label: "Go", color: "#00ADD8" },
+  rb: { label: "Rb", color: "#CC342D" },
+  java: { label: "Jv", color: "#B07219" },
+  kt: { label: "Kt", color: "#A97BFF" },
+  c: { label: "C", color: "#555555" },
+  h: { label: "H", color: "#8884c8" },
+  cpp: { label: "C+", color: "#f34b7d" },
+  cs: { label: "C#", color: "#178600" },
+  md: { label: "MD", color: "#8fa6d0" },
+  mdx: { label: "MX", color: "#8fa6d0" },
+  json: { label: "{}", color: "#cbcb41" },
+  toml: { label: "TM", color: "#9c8f7f" },
+  yaml: { label: "Y", color: "#cb171e" },
+  yml: { label: "Y", color: "#cb171e" },
+  html: { label: "<>", color: "#e34c26" },
+  css: { label: "#", color: "#563d7c" },
+  scss: { label: "SC", color: "#c6538c" },
+  sh: { label: "$", color: "#89e051" },
+  sql: { label: "SQ", color: "#e38c00" },
+  txt: { label: "T", color: "#8a919e" },
+  png: { label: "▣", color: "#a074c4" },
+  jpg: { label: "▣", color: "#a074c4" },
+  jpeg: { label: "▣", color: "#a074c4" },
+  gif: { label: "▣", color: "#a074c4" },
+  svg: { label: "▣", color: "#ffb13b" },
+  webp: { label: "▣", color: "#a074c4" },
+  pdf: { label: "PDF", color: "#e2574c" },
+};
+
+function fileBadgeFor(path: string): { label: string; color: string } {
+  const name = path.split("/").pop() ?? path;
+  const dot = name.lastIndexOf(".");
+  const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+  return FILE_TYPE_BADGES[ext] ?? { label: "•", color: "#8a919e" };
+}
+
+/** Colored per-file-type icon for a change row. */
+function FileIcon({ path }: { path: string }) {
+  const badge = fileBadgeFor(path);
+  return (
+    <span
+      className="dev-file-badge"
+      style={{ color: badge.color, borderColor: badge.color }}
+      aria-hidden="true"
+    >
+      {badge.label}
+    </span>
+  );
+}
+
+/** Repo path with the directory dimmed and the basename strong — long paths
+ *  stay scannable (the reference design shows plain basenames; the dimmed
+ *  directory keeps same-named files distinguishable). */
+function FileNameLabel({ path }: { path: string }) {
+  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  if (slash < 0) return <>{path}</>;
+  return (
+    <>
+      <span className="dev-diff-file-dir">{path.slice(0, slash + 1)}</span>
+      <span className="dev-diff-file-name">{path.slice(slash + 1)}</span>
+    </>
+  );
 }
 
 /** Strip a repo-root prefix off an externally supplied (usually absolute)

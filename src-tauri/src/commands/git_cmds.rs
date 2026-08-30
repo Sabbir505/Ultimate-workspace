@@ -117,6 +117,29 @@ pub fn get_git_file_diff(path: String, file_path: String, db: State<DbState>) ->
     git::get_git_file_diff(Path::new(&path), &file_path)
 }
 
+/// Per-file diff against a chosen base — backs the Changes panel's filters:
+/// "worktree" (default per-file diff), "staged" (HEAD vs index), and
+/// "base:<tree-sha>" (<sha> vs worktree; "base:empty" = the empty tree).
+#[tauri::command]
+pub fn get_git_file_diff_scoped(
+    path: String,
+    file_path: String,
+    scope: String,
+    db: State<DbState>,
+) -> CmdResult<String> {
+    verify_project_path(Path::new(&path), &db)?;
+    git::get_git_file_diff_scoped(Path::new(&path), &file_path, &scope)
+}
+
+/// Every change on the current branch vs its base (merge-base vs working
+/// tree + untracked), with line counts and the merge-base sha the UI can
+/// expand individual files against.
+#[tauri::command]
+pub fn get_branch_changed_files(path: String, db: State<DbState>) -> CmdResult<git::BranchChanges> {
+    verify_project_path(Path::new(&path), &db)?;
+    git::get_branch_changed_files(Path::new(&path))
+}
+
 // ---- Branch management ----
 
 #[tauri::command]

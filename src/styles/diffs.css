@@ -159,6 +159,182 @@
   margin: 0;
   padding: 0;
 }
+/* The list container became a plain div (rows are divs so an expanded diff
+   can live inside the same row wrapper). */
+.dev-diff-file-list {
+  overflow-y: auto;
+}
+
+/* --- Scope toolbar: filter dropdown (left) + Refresh (right) --- */
+.dev-diff-toolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px 6px;
+}
+.dev-diff-filter-wrap {
+  position: relative;
+}
+.dev-diff-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.dev-diff-filter-btn:hover {
+  background: var(--surface-3, var(--surface-2));
+}
+.dev-diff-filter-btn svg {
+  opacity: 0.65;
+}
+.dev-diff-filter-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  min-width: 176px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--glass-rim, 0 0 0 1px rgba(255, 255, 255, 0.04)),
+    0 12px 32px -12px rgba(0, 0, 0, 0.6);
+}
+.dev-diff-filter-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 9px;
+  font-size: 12.5px;
+  text-align: left;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.dev-diff-filter-item:hover {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+.dev-diff-filter-item.active {
+  font-weight: 600;
+}
+.dev-diff-filter-check {
+  width: 14px;
+  flex: none;
+  text-align: center;
+  color: var(--accent);
+}
+.dev-diff-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.dev-diff-refresh:hover {
+  color: var(--text);
+  background: var(--surface-3, var(--surface-2));
+}
+
+/* --- File rows: type badge + dir-dimmed name + chevron accordion --- */
+.dev-file-badge {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  border: 1px solid;
+  border-radius: 5px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  user-select: none;
+}
+.dev-diff-file-path {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.dev-diff-file-dir {
+  /* The directory clips from the LEFT (rtl ellipsis) so the segments nearest
+     the file survive; the basename never clips. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  direction: rtl;
+  text-align: left;
+  color: var(--text-dim);
+  opacity: 0.6;
+}
+.dev-diff-file-name {
+  flex: none;
+  color: var(--text);
+  font-weight: 600;
+}
+.dev-diff-file-status {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  opacity: 0.7;
+}
+.dev-diff-chevron {
+  flex: none;
+  opacity: 0.55;
+  transition: transform 0.15s var(--ease);
+}
+.dev-diff-chevron.open {
+  transform: rotate(180deg);
+}
+.dev-diff-row {
+  border-left: 2px solid transparent;
+}
+.dev-diff-row.expanded {
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+.dev-diff-row .dev-diff-file:hover {
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+.dev-diff-file-diff {
+  padding: 0 6px 8px 10px;
+  overflow-x: auto;
+}
+.dev-diff-file-diff .diff-file {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.dev-diff-file-diff-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 2px 0 4px;
+}
 .dev-diff-file {
   display: flex;
   align-items: center;

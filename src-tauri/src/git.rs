@@ -384,6 +384,200 @@ pub fn get_git_file_diff(path: &Path, file_path: &str) -> Result<String, String>
     run_git(path, &["diff", "HEAD", "--", file_path])
 }
 
+/// The working-tree diff of ONE file against a chosen base — backs the
+/// Changes panel's per-filter rows:
+///   - "worktree"   → the classic per-file diff (index+HEAD vs worktree)
+///   - "staged"     → HEAD vs index (`git diff --cached -- <file>`)
+///   - "base:<sha>" → <sha> vs worktree (`git diff <sha> -- <file>`) — the
+///     "All branch changes" filter expands against the merge-base, "Last
+///     turn" against the previous checkpoint's tree ("base:empty" = the
+///     empty tree, i.e. all-added, for the very first checkpoint).
+pub fn get_git_file_diff_scoped(
+    path: &Path,
+    file_path: &str,
+    scope: &str,
+) -> Result<String, String> {
+    validate_repo_relative(path, file_path)?;
+    if scope == "staged" {
+        return run_git(path, &["diff", "--cached", "--", file_path]);
+    }
+    if let Some(raw_base) = scope.strip_prefix("base:") {
+        let base = raw_base.trim();
+        let base = if base.eq_ignore_ascii_case("empty") {
+            empty_tree_sha().to_string()
+        } else {
+            base.to_string()
+        };
+        // The sha flows straight into a git argv — constrain it to hex, the
+        // full or abbreviated length git accepts.
+        if base.is_empty() || base.len() > 40 || !base.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err("invalid base tree sha".to_string());
+        }
+        return run_git(path, &["diff", base.as_str(), "--", file_path]);
+    }
+    get_git_file_diff(path, file_path)
+}
+
+/// All changes on the current branch relative to its base: the merge-base
+/// diff against the WORKING TREE (so committed + uncommitted both show)
+/// plus untracked files. Backs the Changes panel's "All branch changes"
+/// filter. Returns the merge-base too, so the UI can expand any file into
+/// a `git diff <merge-base> -- <file>` view.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchChanges {
+    pub files: Vec<ChangedFile>,
+    pub merge_base: String,
+}
+
+pub fn get_branch_changed_files(path: &Path) -> Result<BranchChanges, String> {
+    const MAX_CHANGED_FILES: usize = 1000;
+    const MAX_UNTRACKED_LINE_COUNTS: usize = 50;
+    if !path.is_dir() || !is_git_repo(path) {
+        return Ok(BranchChanges { files: Vec::new(), merge_base: String::new() });
+    }
+
+    // Base branch: origin's HEAD when set, else the local main, else master.
+    // No recognizable base → empty result (the filter shows "nothing").
+    let base = {
+        let origin_head = git_command(
+            path,
+            &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+            &[],
+        )
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+        match origin_head {
+            Some(r) => r,
+            None => {
+                let mut picked = String::new();
+                for cand in ["main", "master"] {
+                    let verified = git_command(
+                        path,
+                        &["show-ref", "--verify", "--quiet", &format!("refs/heads/{cand}")],
+                        &[],
+                    )
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                    if verified {
+                        picked = cand.to_string();
+                        break;
+                    }
+                }
+                if picked.is_empty() {
+                    return Ok(BranchChanges { files: Vec::new(), merge_base: String::new() });
+                }
+                picked
+            }
+        }
+    };
+    let merge_base = run_git(path, &["merge-base", "HEAD", base.as_str()])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if merge_base.is_empty() {
+        return Ok(BranchChanges { files: Vec::new(), merge_base: String::new() });
+    }
+
+    let mut files: Vec<ChangedFile> = Vec::new();
+
+    // Tracked changes: merge-base vs the working tree (name-status pairs).
+    let ns = run_git(path, &[
+        "diff",
+        "--name-status",
+        "--no-renames",
+        "-z",
+        merge_base.as_str(),
+    ])?;
+    let mut fields = ns.split('\0');
+    while let (Some(status), Some(p)) = (fields.next(), fields.next()) {
+        if files.len() >= MAX_CHANGED_FILES {
+            break;
+        }
+        if status.is_empty() || p.is_empty() {
+            continue;
+        }
+        // Status may carry a score suffix ("M100"); keep the letter.
+        let letter = status.chars().next().unwrap_or('M').to_string();
+        files.push(ChangedFile {
+            status: letter.clone(),
+            kind: letter,
+            path: p.to_string(),
+            old_path: None,
+            added: 0,
+            deleted: 0,
+        });
+    }
+
+    // Untracked files never appear in `git diff` — take them from status and
+    // count a handful with the cheap --no-index trick (same caps as
+    // get_changed_files: a huge unignored tree must not spawn thousands of
+    // git subprocesses).
+    let st = git_command(
+        path,
+        &["status", "--porcelain", "--untracked-files=all", "-z"],
+        &[],
+    )
+    .map_err(|e| format!("failed to run git: {e}"))?;
+    let st_out = String::from_utf8_lossy(&st.stdout).to_string();
+    let mut untracked_counted = 0usize;
+    let mut toks = st_out.split('\0');
+    while let Some(entry) = toks.next() {
+        if files.len() >= MAX_CHANGED_FILES {
+            break;
+        }
+        if entry.len() < 3 {
+            continue;
+        }
+        if !entry.starts_with("??") {
+            // Consume the rename/copies' second token so entries stay aligned.
+            if entry.starts_with('R') || entry.starts_with('C') {
+                toks.next();
+            }
+            continue;
+        }
+        let p = entry[3..].to_string();
+        let mut added = 0u32;
+        let mut deleted = 0u32;
+        if untracked_counted < MAX_UNTRACKED_LINE_COUNTS {
+            if let Some((a, d)) = no_index_numstat(&path.join(&p)) {
+                added = a;
+                deleted = d;
+                untracked_counted += 1;
+            }
+        }
+        files.push(ChangedFile {
+            status: "??".to_string(),
+            kind: "U".to_string(),
+            path: p,
+            old_path: None,
+            added,
+            deleted,
+        });
+    }
+
+    // Per-file line counts for the tracked changes: one numstat pass over
+    // the merge-base diff, zipped by path (-z: "a\t\t\d\t\path\0").
+    let ns2 = run_git(path, &["diff", "--numstat", "-z", merge_base.as_str()])?;
+    for rec in ns2.split('\0') {
+        if rec.is_empty() {
+            continue;
+        }
+        let mut parts = rec.splitn(3, '\t');
+        let (a, d, p) = match (parts.next(), parts.next(), parts.next()) {
+            (Some(a), Some(d), Some(p)) => (a, d, p),
+            _ => continue,
+        };
+        if let Some(f) = files.iter_mut().find(|f| f.path == p) {
+            f.added = if a == "-" { 0 } else { a.parse().unwrap_or(0) };
+            f.deleted = if d == "-" { 0 } else { d.parse().unwrap_or(0) };
+        }
+    }
+
+    Ok(BranchChanges { files, merge_base })
+}
+
 /// One changed file in the working tree, as parsed from `git status --porcelain`.
 /// `status` is the 2-char porcelain code (" M", "M ", "??", "A ", "D ", "R ", …).
 /// `path` is the path relative to the repo root; renames carry the new path.

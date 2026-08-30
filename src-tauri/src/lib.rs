@@ -300,6 +300,8 @@ pub fn run() {
             commands::git_cmds::create_worktree,
             commands::git_cmds::get_git_diff,
             commands::git_cmds::get_git_file_diff,
+            commands::git_cmds::get_git_file_diff_scoped,
+            commands::git_cmds::get_branch_changed_files,
             commands::git_cmds::list_git_branches,
             commands::git_cmds::create_git_branch,
             commands::git_cmds::checkout_git_branch,

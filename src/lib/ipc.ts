@@ -270,6 +270,20 @@ export const getGitDiff = (path: string) => safeInvoke<string | null>("get_git_d
  *  ToolPanel's Changes tab — we want THAT file's diff, not the whole tree. */
 export const getGitFileDiff = (path: string, filePath: string) =>
   safeInvoke<string | null>("get_git_file_diff", { path, filePath });
+/** Per-file diff against a chosen base — backs the Changes panel's filters:
+ *  "worktree" (the classic per-file diff), "staged" (HEAD vs index), and
+ *  "base:<tree-sha>" (<sha> vs worktree; "base:empty" = the empty tree). */
+export const getGitFileDiffScoped = (path: string, filePath: string, scope: string) =>
+  safeInvoke<string | null>("get_git_file_diff_scoped", { path, filePath, scope });
+/** Every change on the current branch vs its base (merge-base vs working
+ *  tree + untracked files), plus the merge-base sha the UI can expand any
+ *  file against ("base:<mergeBase>"). */
+export interface BranchChanges {
+  files: ChangedFile[];
+  mergeBase: string;
+}
+export const getBranchChangedFiles = (path: string) =>
+  safeInvoke<BranchChanges | null>("get_branch_changed_files", { path });
 /** Per-pane change list for the Changes panel. The argument is the
  *  pane's actual working directory (project root or worktree path), not the
  *  project root alone — worktree-scoped sessions (PRD §7.10) must see the

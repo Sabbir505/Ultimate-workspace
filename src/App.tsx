@@ -96,6 +96,10 @@ export default function App() {
       ? (s.sessions.find((x) => x.id === s.splitChatSessionId)?.title?.trim() || "New chat")
       : null,
   );
+  // Which split half the user last interacted with — the tool panel docks to
+  // the RIGHT of that half (flex order), so each chat effectively carries its
+  // own side panel. Pointer-down on a column updates it.
+  const [splitFocus, setSplitFocus] = useState<"main" | "side">("side");
 
   // Title-bar maximize glyph state: the toolbar doubles as the window title
   // bar (decorations:false), so the maximize button must track the real
@@ -240,6 +244,30 @@ export default function App() {
               >
                 {chatTitle}
               </span>
+              {/* Split view: the second chat's title lives in the TOP toolbar
+                  (not on the pane) with a one-click close. A dim glyph marks
+                  which title is the split half. */}
+              {splitChatId && (
+                <>
+                  <span className="toolbar-split-divider" data-tauri-drag-region="" aria-hidden="true" />
+                  <span
+                    className={`toolbar-chat-title split-title${splitFocus === "side" ? " focused" : ""}`}
+                    data-tauri-drag-region=""
+                    title={splitChatTitle ?? undefined}
+                  >
+                    <span className="split-glyph" aria-hidden="true">⧉</span>
+                    {splitChatTitle}
+                  </span>
+                  <button
+                    className="ghost toolbar-split-close"
+                    onClick={() => useChatStore.getState().closeChatSplit()}
+                    title="Close split view"
+                    aria-label="Close split view"
+                  >
+                    ✕
+                  </button>
+                </>
+              )}
               <FolderNotch />
               <GitHubNotch />
             </>
@@ -305,30 +333,23 @@ export default function App() {
         <LocalModelBanner />
 
 {activeView === "chat" ? (
-        <div className="grid-wrap chat-grid-wrap">
-          <div className={splitChatId ? "chat-split-host split" : "chat-split-host"}>
-            <div className="chat-split-main">
-              <ChatView />
-            </div>
-            {splitChatId && (
-              <div className="chat-split-side">
-                <div className="chat-split-side-head">
-                  <span className="chat-split-side-title">
-                    {splitChatTitle ?? "Chat"}
-                  </span>
-                  <button
-                    className="ghost chat-split-close"
-                    title="Close split view"
-                    aria-label="Close split view"
-                    onClick={() => useChatStore.getState().closeChatSplit()}
-                  >
-                    ✕
-                  </button>
-                </div>
-                <ChatView splitSessionId={splitChatId} />
-              </div>
-            )}
+        <div
+          className={`grid-wrap chat-grid-wrap${splitChatId ? ` split-active${splitFocus === "main" ? " split-focus-main" : ""}` : ""}`}
+        >
+          <div
+            className="chat-split-main"
+            onPointerDownCapture={() => setSplitFocus("main")}
+          >
+            <ChatView />
           </div>
+          {splitChatId && (
+            <div
+              className="chat-split-side"
+              onPointerDownCapture={() => setSplitFocus("side")}
+            >
+              <ChatView splitSessionId={splitChatId} />
+            </div>
+          )}
           <Suspense fallback={null}>
             <ToolPanel />
           </Suspense>

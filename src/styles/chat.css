@@ -319,6 +319,42 @@ div[data-index]:has(.chat-session-row.menu-open) {
   bottom: auto;
   top: calc(100% + 4px);
 }
+/* Split view in the toolbar: divider + the split chat's title (glyph-marked)
+   + a one-click close. The title dims when its half isn't the focused one. */
+.toolbar-split-divider {
+  flex: none;
+  width: 1px;
+  height: 16px;
+  margin: 0 10px;
+  background: var(--border);
+}
+.toolbar-chat-title.split-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  opacity: 0.75;
+}
+.toolbar-chat-title.split-title.focused {
+  color: var(--text);
+  opacity: 1;
+}
+.toolbar-chat-title.split-title .split-glyph {
+  flex: none;
+  opacity: 0.7;
+}
+.toolbar-split-close {
+  flex: none;
+  padding: 2px 7px;
+  font-size: 12px;
+  line-height: 1;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+}
+.toolbar-split-close:hover {
+  color: var(--text);
+  background: var(--surface-3, var(--surface-2));
+}
 
 /* Scrollable message list */
 .chat-messages {
@@ -3360,21 +3396,18 @@ button.chat-mermaid-open {
 
 /* ---------- Split chat view ----------
    Two full-fidelity chat views side by side ("Open in split view" in a
-   session row's ⋮ menu). The host takes the single view's place as the
-   grid-wrap flex child; each half pins its own ChatView. */
-.chat-split-host {
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-}
+   session row's ⋮ menu). main/side are SIBLINGS of the tool panel inside the
+   chat grid so the panel can DOCK to whichever half the user last interacted
+   with (flex order): focus main → [main | panel | side], focus side →
+   [main | side | panel]. Each chat therefore works with its own right-side
+   panel. The split chat's title lives in the TOP toolbar, not on the pane. */
 .chat-split-main {
   flex: 1 1 50%;
   min-width: 0;
   min-height: 0;
   display: flex;
 }
-.chat-split-host.split .chat-split-side {
+.chat-split-side {
   flex: 1 1 50%;
   min-width: 0;
   min-height: 0;
@@ -3382,32 +3415,12 @@ button.chat-mermaid-open {
   flex-direction: column;
   border-left: 1px solid var(--border);
 }
-.chat-split-side-head {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 10px;
-  border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg, var(--surface-glass-2), var(--surface-2));
-}
-.chat-split-side-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--text);
-}
-.chat-split-close {
-  flex: none;
-  padding: 2px 8px;
-  font-size: 13px;
-  line-height: 1;
-  border-radius: var(--radius-sm);
-}
 .chat-split-side .chat-view-wrap {
   flex: 1;
 }
+/* Docking orders (grid-wrap is a flex row). */
+.chat-grid-wrap.split-active > .chat-split-main { order: 0; }
+.chat-grid-wrap.split-active.split-focus-side > .chat-split-side { order: 1; }
+.chat-grid-wrap.split-active.split-focus-side > .tool-panel { order: 2; }
+.chat-grid-wrap.split-active.split-focus-main > .tool-panel { order: 1; }
+.chat-grid-wrap.split-active.split-focus-main > .chat-split-side { order: 2; }

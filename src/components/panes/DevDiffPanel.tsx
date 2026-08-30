@@ -21,6 +21,8 @@
 // stand up a second one.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   getBranchChangedFiles,
   getChangedFiles,
@@ -1052,7 +1054,9 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
               <span className="dev-diff-review-card-title">Whole-tree AI Review</span>
               <button className="dev-diff-review-card-close" onClick={() => setWholeTreeReview(null)} title="Dismiss review">✕</button>
             </div>
-            <pre className="dev-diff-review-card-body">{wholeTreeReview}</pre>
+            <div className="dev-diff-review-card-body dev-diff-review-md">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{wholeTreeReview}</ReactMarkdown>
+            </div>
           </div>
         )}
         {fileList}

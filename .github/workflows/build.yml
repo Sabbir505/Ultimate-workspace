@@ -109,20 +109,27 @@ jobs:
           }
 
       # Sidecar build: resources exist now, so the build script won't fail.
+      # BOTH sidecar placeholders must exist before the FIRST cargo build —
+      # the sidecars share the main package, so its build script runs during
+      # any cargo build and validates every externalBin path in tauri.conf.json.
+      - name: Stage sidecar placeholders
+        working-directory: src-tauri
+        run: |
+          New-Item -ItemType Directory -Force "binaries" | Out-Null
+          New-Item -ItemType File -Force "binaries/conduit-browser-mcp-x86_64-pc-windows-msvc.exe" | Out-Null
+          New-Item -ItemType File -Force "binaries/conduit-automation-x86_64-pc-windows-msvc.exe" | Out-Null
+
       - name: Build browser-mcp sidecar
         working-directory: src-tauri
         run: |
-          New-Item -ItemType File -Force "binaries/conduit-browser-mcp-x86_64-pc-windows-msvc.exe" | Out-Null
           cargo build --release --bin conduit-browser-mcp
           node ../scripts/stage-browser-mcp.mjs
 
       # Headless automation runner (the "Run while closed" Task Scheduler
-      # target). Same placeholder-first dance: the Tauri build script
-      # validates externalBin paths before compiling anything.
+      # target). Placeholder already staged above.
       - name: Build automation sidecar
         working-directory: src-tauri
         run: |
-          New-Item -ItemType File -Force "binaries/conduit-automation-x86_64-pc-windows-msvc.exe" | Out-Null
           cargo build --release --bin conduit-automation
           node ../scripts/stage-automation.mjs
 

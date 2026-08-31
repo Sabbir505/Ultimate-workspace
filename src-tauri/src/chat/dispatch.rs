@@ -34,6 +34,19 @@ use crate::db;
 /// back to `app.emit("chat:token", ...)` when no consumer is registered
 /// (tests, headless dev, transient drops).
 pub(crate) fn emit_token(app: &AppHandle, sid: &str, token: &str, full: &mut String) {
+    emit_chunk(app, sid, token, full, true);
+}
+
+/// Emit a structural marker (`<tool>` block markup, result cards, epilogues):
+/// updates the message buffer and the UI exactly like `emit_token`, but does
+/// NOT feed the perf accumulator — markers are UI scaffolding, not model
+/// tokens, so counting them inflated the live OUT/tok/s and could capture
+/// TTFT at a tool-card render instead of the model's first token.
+pub(crate) fn emit_marker(app: &AppHandle, sid: &str, token: &str, full: &mut String) {
+    emit_chunk(app, sid, token, full, false);
+}
+
+fn emit_chunk(app: &AppHandle, sid: &str, token: &str, full: &mut String, record: bool) {
     if token.is_empty() {
         return;
     }
@@ -45,7 +58,9 @@ pub(crate) fn emit_token(app: &AppHandle, sid: &str, token: &str, full: &mut Str
     if !stream_events::try_send(sid, &payload) {
         let _ = app.emit("chat:token", payload);
     }
-    crate::chat::turn_perf::record_active_token(sid);
+    if record {
+        crate::chat::turn_perf::record_active_token(sid);
+    }
 }
 
 /// Setting key for the user-configured artifacts directory (Settings →

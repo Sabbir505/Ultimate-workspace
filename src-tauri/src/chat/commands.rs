@@ -1133,12 +1133,12 @@ pub fn get_chat_session_metrics(
     let mut tool_ms = 0i64;
     let mut ttft_sum = 0i64;
     let mut ttft_n = 0i64;
-    let mut tok_wsum = 0.0; // Σ tok_s * output_tokens (weighting)
+    let mut tok_wsum = 0.0; // Σ tok_s * output_tokens
+    let mut tok_wout = 0i64; // Σ output_tokens over rows WITH tok/s — the weighted average's denominator (kept separate from the raw output total below)
     let mut output_sum = 0i64;
     let mut input_sum = 0i64;
-    let mut cache_read = 0i64;
-    let mut cache_creation = 0i64;
-    let mut uncached_in = 0i64;
+    let mut cache_read_sum = 0i64;
+    let mut total_prompt_sum = 0i64; // Σ per-row normalized total billed prompt
     let mut turn_count = 0i64;
 
     for m in &all {
@@ -1159,44 +1159,41 @@ pub fn get_chat_session_metrics(
         if let (Some(ts), Some(out)) = (m.tokens_per_second, m.output_tokens) {
             if out > 0 {
                 tok_wsum += ts * out as f64;
-                output_sum += out;
+                tok_wout += out;
             }
         }
         input_sum += m.input_tokens.unwrap_or(0);
         output_sum += m.output_tokens.unwrap_or(0);
-        cache_read += m.cache_read_input_tokens.unwrap_or(0);
-        cache_creation += m.cache_creation_input_tokens.unwrap_or(0);
 
-        // Azure/OpenAI style providers report `input_tokens` already including
-        // cache reads; Anthropic reports *uncached* input separately. To avoid
-        // double counting, approximate uncached input as (cached_read present →
-        // input is uncached, else input already includes it). We keep input_sum
-        // as the provider's own input delimiter and compute the hit rate from
-        // cache_read / total below using only cache_read + cache_creation.
-        let _ = &mut uncached_in;
+        // Cache-hit corpus: only rows whose provider actually reported cache
+        // fields contribute. Providers split the prompt two ways —
+        // OpenAI-style `prompt_tokens` is INCLUSIVE of cached tokens,
+        // Anthropic reports uncached input with the cache fields separate —
+        // so normalize per row to the total billed prompt before summing
+        // (same math as `turn_perf::cache_hit_rate`, so a session's
+        // aggregate converges on the per-turn values).
+        let read = m.cache_read_input_tokens.unwrap_or(0);
+        let creation = m.cache_creation_input_tokens.unwrap_or(0);
+        if read > 0 || creation > 0 {
+            let reported_input = m.input_tokens.unwrap_or(0);
+            let uncached = if provider_input_includes_cache(m.provider.as_deref()) {
+                (reported_input - read).max(0)
+            } else {
+                reported_input
+            };
+            cache_read_sum += read;
+            total_prompt_sum += uncached + read + creation;
+        }
     }
 
-    let _total_prompt = cache_read + cache_creation + input_sum.min(0).max(0);
-    // Cache-hit rate uses cache_read over the whole billed prompt corpus.
-    // We don't know each turn's uncached-vs-inclusive split, so treat the
-    // aggregate conservatively: hit = cache_read / max(1, cache_read +
-    // cache_creation + input_sum) only when input_sum looks uncached
-    // (input_sum < cache_read). Otherwise (inclusive), cache_read /
-    // (cache_read + cache_creation + cache_read + input_sum) is wrong;
-    // default to None when the shape is ambiguous.
-    let cache_hit = if cache_read > 0 {
-        let denom = cache_read + cache_creation + input_sum;
-        if denom > 0 {
-            Some(cache_read as f64 / denom as f64)
-        } else {
-            None
-        }
+    let cache_hit = if cache_read_sum > 0 && total_prompt_sum > 0 {
+        Some(cache_read_sum as f64 / total_prompt_sum as f64)
     } else {
         None
     };
 
-    let tokens_per_second = if output_sum > 0 {
-        Some(tok_wsum / output_sum as f64)
+    let tokens_per_second = if tok_wout > 0 {
+        Some(tok_wsum / tok_wout as f64)
     } else {
         None
     };
@@ -1214,6 +1211,18 @@ pub fn get_chat_session_metrics(
         output_tokens: output_sum,
         turn_count,
     })
+}
+
+/// True when the provider's persisted `input_tokens` already INCLUDES the
+/// cached-prompt tokens (OpenAI-style: `prompt_tokens` ⊇
+/// `prompt_tokens_details.cached_tokens`). Anthropic-style providers (and
+/// unknown/harness labels, which follow the Claude Code convention) report
+/// uncached input with cache fields billed separately.
+fn provider_input_includes_cache(provider: Option<&str>) -> bool {
+    matches!(
+        provider,
+        Some("openai") | Some("openai_compatible") | Some("openrouter") | Some("local_gguf")
+    )
 }
 
 #[tauri::command]

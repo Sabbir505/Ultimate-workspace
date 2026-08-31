@@ -78,6 +78,8 @@ describe("ComposerMetrics HUD", () => {
           tokensPerSecond: 12,
           outputTokens: 96,
           elapsedMs: 1200,
+          inputTokens: null,
+          cacheHitRate: null,
         },
       },
       sessionMetrics: {},
@@ -91,6 +93,36 @@ describe("ComposerMetrics HUD", () => {
     expect(speedChip?.className).toContain("is-live");
     // TTFT renders when present.
     expect(within(row).getByText("350 ms")).toBeTruthy();
+    // No IN/CACHE chips until the provider reports round usage.
+    expect(within(row).queryByText("in")).toBeNull();
+    expect(within(row).queryByText("cache")).toBeNull();
+  });
+
+  it("shows IN and CACHE live once round-boundary usage lands", () => {
+    useChatStore.setState({
+      livePerf: {
+        s1: {
+          chatSessionId: "s1",
+          llmTimeMs: 2000,
+          toolTimeMs: 600,
+          ttftMs: 410,
+          tokensPerSecond: 55,
+          outputTokens: 110,
+          elapsedMs: 3200,
+          inputTokens: 15400,
+          cacheHitRate: 0.66,
+        },
+      },
+      sessionMetrics: {},
+    });
+    render(<ComposerMetrics chatSessionId="s1" streaming={true} variant="hud" />);
+    const row = screen.getByRole("status");
+    // IN renders the accumulated round usage (15400 → 15k tok) with the
+    // token tone, CACHE renders the normalized hit rate.
+    const inChip = within(row).getByText("15k tok").closest(".composer-metrics-chip");
+    expect(inChip?.className).toContain("tone-tokens");
+    const cacheChip = within(row).getByText("66%").closest(".composer-metrics-chip");
+    expect(cacheChip?.className).toContain("tone-cache");
   });
 
   it("renders a hover tooltip on every chip", () => {

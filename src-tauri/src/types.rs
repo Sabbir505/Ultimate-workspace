@@ -541,16 +541,18 @@ pub struct ChatDonePayload {
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub cost_usd: Option<f64>,
-    /// Cumulative wall-clock the model spent actively generating text (ms).
+    /// Cumulative wall-clock the model round was in flight (ms): connect +
+    /// prompt eval + decode, across all rounds of the turn.
     #[serde(default)]
     pub llm_time_ms: Option<i64>,
     /// Cumulative wall-clock spent executing tools (ms), excluding approval waits.
     #[serde(default)]
     pub tool_time_ms: Option<i64>,
-    /// Time from turn start to the first emitted token (ms).
+    /// Time from the first model request to the first streamed token (ms).
     #[serde(default)]
     pub ttft_ms: Option<i64>,
-    /// Generation speed = output_tokens / llm_time_ms (tokens per second).
+    /// Decode throughput = output_tokens / decode_time (tokens per second);
+    /// prefill and connection time excluded.
     #[serde(default)]
     pub tokens_per_second: Option<f64>,
     /// Prompt/KV-cache hit rate (0.0–1.0), computed from usage cache fields.
@@ -565,18 +567,25 @@ pub struct ChatDonePayload {
 #[serde(rename_all = "camelCase")]
 pub struct ChatPerfPayload {
     pub chat_session_id: String,
-    /// Cumulative model-generation time so far (ms).
+    /// Cumulative model-round time so far (ms): connect + prefill + decode.
     pub llm_time_ms: i64,
     /// Cumulative tool-execution time so far (ms).
     pub tool_time_ms: i64,
-    /// Time from turn start to the first emitted token (ms), if known yet.
+    /// Time from the first model request to the first streamed token (ms),
+    /// if known yet.
     pub ttft_ms: Option<i64>,
-    /// Running generation speed = output_tokens_generated / llm_time_ms.
+    /// Running decode throughput = output_tokens / decode_time.
     pub tokens_per_second: Option<f64>,
-    /// Output tokens generated so far in this turn.
+    /// Output tokens generated so far in this turn (text-delta estimate).
     pub output_tokens: i64,
     /// Wall-clock elapsed since turn start (ms).
     pub elapsed_ms: i64,
+    /// Prompt tokens billed so far (accumulated at each tool-loop round
+    /// boundary from the provider's usage). `None` until a round reports.
+    pub input_tokens: Option<i64>,
+    /// Live prompt-cache hit rate from the round usage so far. `None` when
+    /// the provider hasn't reported cache fields.
+    pub cache_hit_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

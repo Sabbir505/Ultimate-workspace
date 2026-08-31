@@ -582,6 +582,10 @@ impl ChatManager {
 
             match result {
                 Ok((full_response, usage)) => {
+                    // Fold any window a code path forgot to close (defensive —
+                    // successful turns close them via end_gen/end_tool) so the
+                    // final metrics below see complete spans.
+                    perf.close_open_windows();
                     // Persist the assistant message with usage.
                     // The turn's message id escapes this block for the
                     // post-done checkpoint (chip attaches to this message).
@@ -680,6 +684,10 @@ impl ChatManager {
                                     u.cache_read_input_tokens,
                                     u.cache_creation_input_tokens,
                                     u.input_tokens,
+                                    // OpenAI-style prompt_tokens already
+                                    // includes the cached tokens; Anthropic
+                                    // bills them separately.
+                                    is_openai,
                                 )
                             }),
                         },
@@ -904,6 +912,11 @@ pub(crate) async fn run_chat_stream(
         .build_request(client, req, api_key, base_url)
         .map_err(|e| format!("failed to build request: {e}"))?;
 
+    // Open the generation window BEFORE the request is issued, matching the
+    // tool loops: TTFT (anchored at this instant) then covers connect +
+    // prompt eval, and llm time means the same thing with tools on or off.
+    perf.begin_gen();
+
     // B-10: bound time-to-headers — a blackholed connect otherwise hangs the
     // turn forever (OS TCP timeouts can be minutes). The B-9 watchdog below
     // covers the body.
@@ -940,9 +953,6 @@ pub(crate) async fn run_chat_stream(
     // Genuine `{"error": …}` provider events (surfaced as "provider error:"
     // by the parser) still fail immediately.
     let mut parse_failures: u32 = 0;
-    // Open the generation window: all tokens flowing from this SSE read are
-    // model-generation time (not tool time or approval waits).
-    perf.begin_gen();
 
     loop {
         // B-9: 60s stall watchdog — a silent connection must fail the turn,
@@ -1058,6 +1068,8 @@ pub(crate) async fn run_chat_stream(
 
     if in_think {
         full_text.push_str("</think>");
+        // Structural closer, not a model token — emit without recording so
+        // the live OUT/tok/s aren't bumped by UI scaffolding.
         let payload = ChatTokenPayload {
                 chat_session_id: chat_session_id.to_string(),
                 token: "</think>".to_string(),
@@ -1065,8 +1077,6 @@ pub(crate) async fn run_chat_stream(
             if !crate::chat::stream_events::try_send(chat_session_id, &payload) {
                 let _ = app.emit("chat:token", payload);
             }
-            perf.record_token();
-            perf.maybe_emit_perf();
     }
 
     let usage = provider.parse_usage(&buf);

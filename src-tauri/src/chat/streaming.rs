@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use tauri::AppHandle;
 
 use crate::chat::{permission, tools, ChatManager};
-use crate::chat::dispatch::{artifacts_dir, emit_token, run_tool};
+use crate::chat::dispatch::{artifacts_dir, emit_marker, emit_token, run_tool};
 use crate::chat::proto::{
     next_synthetic_tool_id, openai_message_json, anthropic_message_json, parse_hermes_tool_calls,
     parse_tool_args, strip_hermes_tool_calls, tool_block,
@@ -296,10 +296,14 @@ async fn openai_stream_round(
                 Some(d) => d,
                 None => continue,
             };
+            // First provider delta of any shape (text, reasoning, or
+            // tool-call args) captures TTFT and anchors the round's decode
+            // span — a tool-call-only round is still real token time.
+            crate::chat::turn_perf::record_active_stream_delta(sid);
             if let Some(c) = delta.get("content").and_then(|x| x.as_str()) {
                 if !c.is_empty() {
                     if in_think {
-                        emit_token(app, sid, "</think>", full);
+                        emit_marker(app, sid, "</think>", full);
                         in_think = false;
                     }
                     let clean = sanitize(c);
@@ -357,7 +361,7 @@ async fn openai_stream_round(
             {
                 if !r.is_empty() {
                     if !in_think {
-                        emit_token(app, sid, "<think>", full);
+                        emit_marker(app, sid, "<think>", full);
                         in_think = true;
                     }
                     let clean = sanitize(r);
@@ -402,7 +406,7 @@ async fn openai_stream_round(
     }
 
     if in_think {
-        emit_token(app, sid, "</think>", full);
+        emit_marker(app, sid, "</think>", full);
     }
     // A held-back partial-opener tail that never resolved into a marker is
     // ordinary prose — flush it so the UI and the persisted message keep it.
@@ -599,6 +603,9 @@ async fn anthropic_stream_round(
                     blocks[idx].name = name;
                 }
                 "content_block_delta" => {
+                    // First delta of any kind (text/thinking/tool-args JSON)
+                    // captures TTFT and anchors the round's decode span.
+                    crate::chat::turn_perf::record_active_stream_delta(sid);
                     let idx = p.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
                     let delta = p.get("delta");
                     let dtype = delta
@@ -609,7 +616,7 @@ async fn anthropic_stream_round(
                         "text_delta" => {
                             if let Some(t) = delta.and_then(|d| d.get("text")).and_then(|x| x.as_str()) {
                                 if in_think {
-                                    emit_token(app, sid, "</think>", full);
+                                    emit_marker(app, sid, "</think>", full);
                                     in_think = false;
                                 }
                                 if let Some(b) = blocks.get_mut(idx) {
@@ -632,7 +639,7 @@ async fn anthropic_stream_round(
                                 delta.and_then(|d| d.get("thinking")).and_then(|x| x.as_str())
                             {
                                 if !in_think {
-                                    emit_token(app, sid, "<think>", full);
+                                    emit_marker(app, sid, "<think>", full);
                                     in_think = true;
                                 }
                                 // Accumulate as well as stream: with extended
@@ -702,7 +709,7 @@ async fn anthropic_stream_round(
     }
 
     if in_think {
-        emit_token(app, sid, "</think>", full);
+        emit_marker(app, sid, "</think>", full);
     }
 
     let content: Vec<Value> = blocks
@@ -908,6 +915,10 @@ pub(crate) async fn run_openai_tool_loop(
                 round_usage.input, round_usage.output
             );
         }
+        // Fold round-boundary usage into the live snapshot so the composer's
+        // IN/CACHE chips update before chat:done. OpenAI-style prompt_tokens
+        // already includes cached tokens (inclusive).
+        perf.note_round_usage(round_usage.input, round_usage.cache_read, round_usage.cache_creation, true);
         total.add(round_usage);
 
         let tool_calls = message
@@ -1010,7 +1021,7 @@ pub(crate) async fn run_openai_tool_loop(
                 let args = parse_tool_args(args_str);
                 let block = tool_block(&name, &args);
                 let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
-                emit_token(app, sid, &open, &mut full);
+                emit_marker(app, sid, &open, &mut full);
                 deferred[idx] = Some(crate::chat::dispatch::spawn_run_tool(
                     client.clone(),
                     art_dir.to_path_buf(),
@@ -1049,7 +1060,7 @@ pub(crate) async fn run_openai_tool_loop(
                 if !is_deferred {
                     let block = tool_block(&name, &args);
                     let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
-                    emit_token(app, sid, &open, &mut full);
+                    emit_marker(app, sid, &open, &mut full);
                 }
                 perf.begin_tool();
                 let result = if let Some(handle) = deferred[idx].take() {
@@ -1062,7 +1073,7 @@ pub(crate) async fn run_openai_tool_loop(
                 perf.end_tool();
                 let block = tool_block(&name, &args);
                 if block.ends_with("</tool>") {
-                    emit_token(app, sid, "</tool>", &mut full);
+                    emit_marker(app, sid, "</tool>", &mut full);
                 }
                 // Attach the captured terminal output to the shell step so the
                 // UI shows a collapsible preview under the command. The title
@@ -1078,7 +1089,7 @@ pub(crate) async fn run_openai_tool_loop(
                         "result": neutralize_markers(&result),
                     });
                     let rm = format!("<tool>{result_marker}</tool>");
-                    emit_token(app, sid, &rm, &mut full);
+                    emit_marker(app, sid, &rm, &mut full);
                 }
                 messages.push(json!({
                     "role": "tool",
@@ -1105,7 +1116,7 @@ pub(crate) async fn run_openai_tool_loop(
         return Ok((full, build_usage(true, total)));
     }
 
-    emit_token(
+    emit_marker(
         app,
         sid,
         "\n\n_Stopped after reaching the tool-call limit._",
@@ -1189,6 +1200,10 @@ pub(crate) async fn run_anthropic_tool_loop(
         let (content, round_usage) =
             anthropic_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?;
         perf.end_gen();
+        // Fold round-boundary usage into the live snapshot so the composer's
+        // IN/CACHE chips update before chat:done. Anthropic's input_tokens is
+        // the uncached portion (cache fields billed separately — exclusive).
+        perf.note_round_usage(round_usage.input, round_usage.cache_read, round_usage.cache_creation, false);
         total.add(round_usage);
 
         let tool_uses: Vec<&Value> = content
@@ -1212,7 +1227,7 @@ pub(crate) async fn run_anthropic_tool_loop(
                 let args = tu.get("input").cloned().unwrap_or_else(|| json!({}));
                 let block = tool_block(name, &args);
                 let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
-                emit_token(app, sid, &open, &mut full);
+                emit_marker(app, sid, &open, &mut full);
                 deferred[idx] = Some(crate::chat::dispatch::spawn_run_tool(
                     client.clone(),
                     art_dir.to_path_buf(),
@@ -1236,7 +1251,7 @@ pub(crate) async fn run_anthropic_tool_loop(
                 if deferred[idx].is_none() {
                     let block = tool_block(&name, &args);
                     let open = block.strip_suffix("</tool>").unwrap_or(&block).to_string();
-                    emit_token(app, sid, &open, &mut full);
+                    emit_marker(app, sid, &open, &mut full);
                 }
                 perf.begin_tool();
                 let result = if let Some(handle) = deferred[idx].take() {
@@ -1249,7 +1264,7 @@ pub(crate) async fn run_anthropic_tool_loop(
                 perf.end_tool();
                 let block = tool_block(&name, &args);
                 if block.ends_with("</tool>") {
-                    emit_token(app, sid, "</tool>", &mut full);
+                    emit_marker(app, sid, "</tool>", &mut full);
                 }
                 if name == tools::RUN_SHELL && !result.trim().is_empty() {
                     let result_marker = json!({
@@ -1259,7 +1274,7 @@ pub(crate) async fn run_anthropic_tool_loop(
                         "result": neutralize_markers(&result),
                     });
                     let rm = format!("<tool>{result_marker}</tool>");
-                    emit_token(app, sid, &rm, &mut full);
+                    emit_marker(app, sid, &rm, &mut full);
                 }
                 results.push(json!({
                     "type": "tool_result",
@@ -1280,7 +1295,7 @@ pub(crate) async fn run_anthropic_tool_loop(
         return Ok((full, build_usage(false, total)));
     }
 
-    emit_token(
+    emit_marker(
         app,
         sid,
         "\n\n_Stopped after reaching the tool-call limit._",

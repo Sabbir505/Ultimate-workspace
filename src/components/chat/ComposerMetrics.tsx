@@ -130,17 +130,31 @@ export function ComposerMetrics({ chatSessionId, streaming, variant = "row", con
       value: fmtTokPerSecond(live.tokensPerSecond ?? undefined) ?? "0 tok/s",
       live: true,
       tone: "speed",
-      hint: "Live generation rate — output tokens divided by model time",
+      hint: "Live decode rate — output tokens divided by generation time (prefill excluded)",
     });
     const llm = fmtMs(live.llmTimeMs);
-    if (llm) chips.push({ label: "llm", value: llm, hint: "Model generation time this turn" });
+    if (llm) chips.push({ label: "llm", value: llm, hint: "Model round time this turn (connect + prompt eval + generation)" });
     if (live.toolTimeMs > 0) {
       const t = fmtMs(live.toolTimeMs);
       if (t) chips.push({ label: "tools", value: t, hint: "Tool execution time this turn, excluding approval waits" });
     }
     if (live.ttftMs != null) {
       const ttft = fmtMs(live.ttftMs);
-      if (ttft) chips.push({ label: "ttft", value: ttft, hint: "Time from turn start to the first streamed token" });
+      if (ttft) chips.push({ label: "ttft", value: ttft, hint: "Time from the model request to the first streamed token" });
+    }
+    // IN/CACHE go live at each tool-loop round boundary, when the provider
+    // reports that round's usage. Round N re-sends the conversation, so IN
+    // accumulates billed prompt tokens across rounds (matching chat:done).
+    const inp = fmtTokens(live.inputTokens ?? undefined);
+    if (inp) chips.push({ label: "in", value: inp, tone: "tokens", hint: "Prompt tokens billed so far — accumulates at each tool round" });
+    const liveCache = fmtPct(live.cacheHitRate ?? undefined);
+    if (liveCache) {
+      chips.push({
+        label: "cache",
+        value: liveCache,
+        tone: "cache",
+        hint: `${liveCache} of the prompt tokens so far were served from the prompt cache`,
+      });
     }
     const elapsed = fmtMs(live.elapsedMs);
     if (elapsed) chips.push({ label: "elapsed", value: elapsed, live: true, hint: "Wall-clock time since this turn started" });
@@ -149,7 +163,7 @@ export function ComposerMetrics({ chatSessionId, streaming, variant = "row", con
     // "Worked for Xs" label on the bubble above. Falls through to the
     // session aggregate when no turn has completed in this app run.
     const inp = fmtTokens(last.inputTokens);
-    if (inp) chips.push({ label: "in", value: inp, tone: "tokens", hint: "Input tokens of the last completed turn" });
+    if (inp) chips.push({ label: "in", value: inp, tone: "tokens", hint: "Prompt tokens billed across all rounds of the last completed turn" });
     const out = fmtTokens(last.outputTokens) ?? "0 tok";
     chips.push({ label: "out", value: out, tone: "tokens", hint: "Output tokens of the last completed turn" });
     const llm = fmtMs(last.llmTimeMs);
@@ -159,9 +173,9 @@ export function ComposerMetrics({ chatSessionId, streaming, variant = "row", con
       if (t) chips.push({ label: "tools", value: t, hint: "Tool execution time of the last completed turn, excluding approval waits" });
     }
     const ttft = fmtMs(last.ttftMs ?? undefined);
-    if (ttft) chips.push({ label: "ttft", value: ttft, hint: "Time to first token of the last completed turn" });
+    if (ttft) chips.push({ label: "ttft", value: ttft, hint: "Time from the model request to the first streamed token of the last completed turn" });
     const tokS = fmtTokPerSecond(last.tokensPerSecond ?? undefined);
-    if (tokS) chips.push({ label: "speed", value: tokS, tone: "speed", hint: "Generation rate of the last completed turn" });
+    if (tokS) chips.push({ label: "speed", value: tokS, tone: "speed", hint: "Decode rate of the last completed turn (prefill excluded)" });
     const cache = fmtPct(last.cacheHitRate ?? undefined);
     if (cache) {
       chips.push({
@@ -185,10 +199,10 @@ export function ComposerMetrics({ chatSessionId, streaming, variant = "row", con
     }
     if (agg.ttftAvgMs != null) {
       const ttft = fmtMs(agg.ttftAvgMs ?? undefined);
-      if (ttft) chips.push({ label: "ttft", value: ttft, hint: "Average time to first token across this session" });
+      if (ttft) chips.push({ label: "ttft", value: ttft, hint: "Average time from model request to first streamed token across this session" });
     }
     const tokS = fmtTokPerSecond(agg.tokensPerSecond ?? undefined);
-    if (tokS) chips.push({ label: "speed", value: tokS, tone: "speed", hint: "Average generation rate, weighted by output tokens" });
+    if (tokS) chips.push({ label: "speed", value: tokS, tone: "speed", hint: "Average decode rate (prefill excluded), weighted by output tokens" });
     const cache = fmtPct(agg.cacheHitRate ?? undefined);
     if (cache) {
       chips.push({

@@ -721,9 +721,10 @@ export interface ChatDonePayload {
   llmTimeMs: number | null;
   /** Cumulative wall-clock spent executing tools (ms), excluding approval waits. */
   toolTimeMs: number | null;
-  /** Time from turn start to the first emitted token (ms). */
+  /** Time from the first model request to the first streamed token (ms). */
   ttftMs: number | null;
-  /** Generation speed = outputTokens / llmTimeMs (tokens per second). */
+  /** Decode throughput = outputTokens / decode time (tokens per second);
+   *  prefill and connection time excluded. */
   tokensPerSecond: number | null;
   /** Prompt/KV-cache hit rate (0.0–1.0), computed from usage cache fields. */
   cacheHitRate: number | null;
@@ -734,18 +735,24 @@ export interface ChatDonePayload {
  *  without waiting for `chat:done`. */
 export interface ChatPerfPayload {
   chatSessionId: string;
-  /** Cumulative model-generation time so far (ms). */
+  /** Cumulative model-round time so far (ms): connect + prefill + decode. */
   llmTimeMs: number;
   /** Cumulative tool-execution time so far (ms). */
   toolTimeMs: number;
-  /** Time from turn start to the first emitted token (ms), if known yet. */
+  /** Time from the first model request to the first streamed token (ms), if known yet. */
   ttftMs: number | null;
-  /** Running generation speed = outputTokens / llmTimeMs. */
+  /** Running decode throughput = outputTokens / decode time. */
   tokensPerSecond: number | null;
-  /** Output tokens generated so far in this turn. */
+  /** Output tokens generated so far in this turn (text-delta estimate). */
   outputTokens: number;
   /** Wall-clock elapsed since turn start (ms). */
   elapsedMs: number;
+  /** Prompt tokens billed so far (accumulated at each tool-loop round
+   *  boundary). null until the provider reports its first round usage. */
+  inputTokens: number | null;
+  /** Live prompt-cache hit rate from the round usage so far; null when the
+   *  provider hasn't reported cache fields. */
+  cacheHitRate: number | null;
 }
 export interface ChatArtifactPayload {
   chatSessionId: string;

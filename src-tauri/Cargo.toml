@@ -1,6 +1,6 @@
 [package]
 name = "conduit"
-version = "0.4.1"
+version = "0.4.2"
 description = "Conduit — a local-first, multi-pane desktop shell for AI coding agents"
 authors = ["you"]
 edition = "2021"

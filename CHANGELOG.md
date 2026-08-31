@@ -11,7 +11,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.4.2] — 2026-08-31
+
 ### Added
+- **Boot splash + onboarding modal** — Brand logo shown during app startup; first-run local-model onboarding modal ([7321d69](https://github.com/Conduit-official/Conduit/commit/7321d69))
+- **Parallel subagents with tools** — Subagents can now use tools in parallel; agent chips appear everywhere ([8476da2](https://github.com/Conduit-official/Conduit/commit/8476da2))
+- **CDP execution layer** — Phase 1 of the Chrome DevTools Protocol layer for the in-app browser; subagent rounds raised to 100 ([6f5e452](https://github.com/Conduit-official/Conduit/commit/6f5e452))
+- **Queued messages notch stack** — Steer, edit, delete, and drag-reorder pending messages before they're sent ([1c5bae6](https://github.com/Conduit-official/Conduit/commit/1c5bae6))
+- **Subagent pane at chat-view fidelity** — Ordered segments, streamed thinking, and DiffCards in the agent pane ([d541f3d](https://github.com/Conduit-official/Conduit/commit/d541f3d))
+- **Structured plan tracking** — Model-declared plans surface in chat with a Plan posture; harness-native modes ([19e63f2](https://github.com/Conduit-official/Conduit/commit/19e63f2))
+- **Split chat view** — Full-fidelity second ChatView with glass session menu and a draggable split divider; tool panel docks beside the focused half ([e63de9c](https://github.com/Conduit-official/Conduit/commit/e63de9c), [5aed56c](https://github.com/Conduit-official/Conduit/commit/5aed56c), [c0e7b21](https://github.com/Conduit-official/Conduit/commit/c0e7b21))
+- **Git file viewer with inline diffs** — Per-type file icons, click-to-expand inline diffs, Unstaged/Staged/All-branch/Last-turn filters, styled review cards with full markdown prose ([f4f9b21](https://github.com/Conduit-official/Conduit/commit/f4f9b21), [332ce72](https://github.com/Conduit-official/Conduit/commit/332ce72), [bcd7de1](https://github.com/Conduit-official/Conduit/commit/bcd7de1))
+- **GitHub pull requests — liquid glass scope dropdown** — Scope selector uses liquid glass; GitHub API routes through git's proxy config ([bc605d0](https://github.com/Conduit-official/Conduit/commit/bc605d0))
+- **Welcome screen refresh** — Time-aware greeting, icon cards, 500k context ceiling for cloud/harness meter ([2e85de8](https://github.com/Conduit-official/Conduit/commit/2e85de8))
+- **Relay branding in agent prompts** — Agent self-identifies as Relay across cloud, local, and harness system prompts ([0b6e4e3](https://github.com/Conduit-official/Conduit/commit/0b6e4e3))
+- **Full-fidelity document pipeline** — Browser-grade PDF via WebView2 + Paged.js, docx npm + PptxGenJS generation, pdf.js + docx-preview viewers; built-in `/docx`, `/pptx`, `/pdf` skills rewritten ([3c7b60e](https://github.com/Conduit-official/Conduit/commit/3c7b60e))
+- **Fold same-tool rows** — Compact edit rows, sidebar more-popovers; 1M context default ([449183d](https://github.com/Conduit-official/Conduit/commit/449183d))
+
+### Fixed
+- **Audit sweep** — Relay auth fail-open, browser pane results, stream watchdogs, lifecycle wedges, data integrity ([7a5d6f3](https://github.com/Conduit-official/Conduit/commit/7a5d6f3))
+- **Agent browser calls** — Reuse the existing Browser chip instead of stacking a duplicate; settings/skills/cost keep the chat mounted ([2495c8a](https://github.com/Conduit-official/Conduit/commit/2495c8a), [960bf75](https://github.com/Conduit-official/Conduit/commit/960bf75))
+- **WebView2 controller ownership** — Own WebView2 controller via webview2-com; touch marshals through main thread; controllers created invisible then shown ([18f33f0](https://github.com/Conduit-official/Conduit/commit/18f33f0), [cfa8eb8](https://github.com/Conduit-official/Conduit/commit/cfa8eb8), [d4ccfdb](https://github.com/Conduit-official/Conduit/commit/d4ccfdb), [9d3158e](https://github.com/Conduit-official/Conduit/commit/9d3158e))
+- **Browser pane wedge** — Fixed nested message pump; per-model context windows; real harness model in meter/cost ([8ee0742](https://github.com/Conduit-official/Conduit/commit/8ee0742))
+- **Harness subagent visibility** — Recognize Claude Code's Agent tool (renamed from Task); permission modes actually apply; harness questions get answerable cards ([08aade6](https://github.com/Conduit-official/Conduit/commit/08aade6), [8178ea6](https://github.com/Conduit-official/Conduit/commit/8178ea6))
+- **Agent cursor/typing visuals** — Now appear on every browser page ([d509d11](https://github.com/Conduit-official/Conduit/commit/d509d11))
+- **Inline subagent chips** — Render correctly during parallel fan-out; click opens one agent pane ([91da3e2](https://github.com/Conduit-official/Conduit/commit/91da3e2))
+- **Queue notch polish** — One container, compact inline edit, pointer-based reorder ([2d81808](https://github.com/Conduit-official/Conduit/commit/2d81808))
+- **Subagent research stack** — Subagents get the full read-side research stack; proxy-proof fetch guards ([d342804](https://github.com/Conduit-official/Conduit/commit/d342804))
+- **Stale turn timer** — Background-chat spinners, harness mode reset, camelCase tool args ([e109475](https://github.com/Conduit-official/Conduit/commit/e109475))
+- **Web app preview** — Models can now open/preview built web apps in the in-app browser ([75dc0a6](https://github.com/Conduit-official/Conduit/commit/75dc0a6))
+- **TypeScript fallbacks** — Chat-store fallbacks clear 48 `TS18046 unknown` errors ([c6f4e11](https://github.com/Conduit-official/Conduit/commit/c6f4e11))
+- **Metrics HUD accuracy** — Provider-aware cache rate, decode tok/s, request-anchored TTFT, marker-free token counts, live IN/CACHE display ([9df118b](https://github.com/Conduit-official/Conduit/commit/9df118b))
+- **Artifact gallery cards** — Uniform heights; agent-gated pane auto-open ([76d023b](https://github.com/Conduit-official/Conduit/commit/76d023b))
+- **Split/tool panel** — Global tool panel (no docking); git rail only in the focused half; ✕-only split close ([95a3a74](https://github.com/Conduit-official/Conduit/commit/95a3a74))
+- **Folded/edit row buttons** — Kill global button skin; rim shadow + hover background ([52e50cf](https://github.com/Conduit-official/Conduit/commit/52e50cf))
+- **Git file spinners** — Spinner on scope switch; Send PR/Review-all scoped to focused chat with real feedback ([487ec66](https://github.com/Conduit-official/Conduit/commit/487ec66), [eb483ff](https://github.com/Conduit-official/Conduit/commit/eb483ff))
+- **Docx preview overflow** — Scale pages to fit pane width (fit-to-width) ([0e951c4](https://github.com/Conduit-official/Conduit/commit/0e951c4))
+
+### Changed
+- **Welcome screen** — Time-aware greeting with icon cards; 500k context ceiling for cloud/harness meter ([2e85de8](https://github.com/Conduit-official/Conduit/commit/2e85de8))
+- **GitHub pull requests** — GitHub API routes through git's proxy config ([bc605d0](https://github.com/Conduit-official/Conduit/commit/bc605d0))
+- **Chat message text** — Dimmed with new `--chat-text` token, scoped to bubbles ([fad62ea](https://github.com/Conduit-official/Conduit/commit/fad62ea))
+- **Git file view** — Compact diff gutters, liquid-glass filter menu, loading spinners ([eb483ff](https://github.com/Conduit-official/Conduit/commit/eb483ff))
+- **Session menu** — Uses the composer's liquid glass (true-transparent body, blur24/sat160, 16px) ([b4ea2cc](https://github.com/Conduit-official/Conduit/commit/b4ea2cc))
+- **Browser pane** — Edge-to-edge layout, no glass-card inset; page owns the panel like docs/html ([e255dd3](https://github.com/Conduit-official/Conduit/commit/e255dd3))
+- **UI animations** — Smooth expand/collapse animations matching the tool-panel slide ([3c1aa27](https://github.com/Conduit-official/Conduit/commit/3c1aa27))
+
+---
+
+## [0.4.1] — 2026-08-17
 - **Full-fidelity document pipeline (doc/ppt/pdf)** — New generation + preview engines across every document format:
   - **PDF generation via a real browser engine** — `generate_document` for pdf now takes `language: "html"` (default): the model authors styled HTML, which renders in a hidden WebView2 window with the Paged.js polyfill (real `@page` margin boxes, page numbers, running headers) and prints with `ICoreWebView2_7::PrintToPdf` — full CSS/SVG/Unicode/CJK support, replacing the hand-rolled Latin-1-only PDF writer
   - **DOCX generation via the `docx` npm library** (default `language: "javascript"`) — the model's program runs in a sandboxed iframe (`DocCodeRunner`) with the library preloaded, delivering real editable OOXML (headings, tables, numbering, styles) with no Python dependency; Python/`conduit_docgen` remains as fallback

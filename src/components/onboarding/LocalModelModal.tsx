@@ -1,13 +1,15 @@
 // First-run local-model onboarding (roadmap P0 §4.1): when no GGUF is
 // installed anywhere and the user hasn't seen/dismissed the nudge, point
-// them at the Model Market with a VRAM-aware hint. Deep-links straight to
-// Settings → Local Models → market tab. Dismissal (and the first successful
-// market download completing — see ModelMarket's onDownloadComplete →
-// runScan path) persists via the `localModels.onboarded` KV, so it shows at
-// most once per install.
+// them at the Model Market with a VRAM-aware hint — as a centered modal
+// (it used to be a banner pinned over the chat). Deep-links straight to
+// Settings → Local Models → market tab. Dismissal ("Not now", Escape, or an
+// overlay click) — and the first successful market download completing (see
+// ModelMarket's onDownloadComplete → runScan path) — persists via the
+// `localModels.onboarded` KV, so it shows at most once per install.
 import { useEffect, useState } from "react";
 import { getGpuVram, getSetting, scanLocalModels, setSetting, type GpuVramInfo } from "../../lib/ipc";
 import { useUiStore } from "../../state/ui";
+import { Modal } from "../common/Modal";
 
 function fmtGb(bytes: number | undefined | null): string | null {
   if (!bytes || bytes <= 0) return null;
@@ -15,7 +17,7 @@ function fmtGb(bytes: number | undefined | null): string | null {
   return gb >= 10 ? String(Math.round(gb)) : gb.toFixed(1);
 }
 
-export function LocalModelBanner() {
+export function LocalModelModal() {
   const [state, setState] = useState<"pending" | "hidden" | "show">("pending");
   const [vram, setVram] = useState<GpuVramInfo | null>(null);
 
@@ -48,7 +50,7 @@ export function LocalModelBanner() {
   const dismiss = () => {
     setState("hidden");
     void setSetting("localModels.onboarded", "1").catch(() => {
-      /* best-effort — worst case the banner returns next launch */
+      /* best-effort — worst case the modal returns next launch */
     });
   };
   const openMarket = () => {
@@ -59,24 +61,25 @@ export function LocalModelBanner() {
   };
 
   return (
-    <div className="onboarding-banner">
-      <button
-        className="onboarding-banner-close"
-        onClick={dismiss}
-        title="Dismiss"
-        aria-label="Dismiss notification"
-      >
-        ×
-      </button>
-      <strong>Run models locally — free and private</strong>
-      <div className="hint">
+    <Modal
+      title="Run models locally — free and private"
+      onClose={dismiss}
+      actions={
+        <>
+          <button type="button" className="ghost" onClick={dismiss}>
+            Not now
+          </button>
+          <button type="button" onClick={openMarket}>
+            Browse the Model Market
+          </button>
+        </>
+      }
+    >
+      <p>
         Relay can run GGUF models on your machine via the bundled llama.cpp
         server{vramGb ? ` — picks sized for your ${vramGb} GB of VRAM` : " — sized to your hardware"}{" "}
         are marked <em>Recommended</em> in the Model Market.
-      </div>
-      <div>
-        <button onClick={openMarket}>Browse the Model Market</button>
-      </div>
-    </div>
+      </p>
+    </Modal>
   );
 }

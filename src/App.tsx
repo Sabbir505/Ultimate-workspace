@@ -16,7 +16,7 @@ import { Modal } from "./components/common/Modal";
 import { ToastHost } from "./components/common/ToastHost";
 import { OnboardingBanner } from "./components/onboarding/OnboardingBanner";
 import { WorktreeNudgeBanner } from "./components/onboarding/WorktreeNudgeBanner";
-import { LocalModelBanner } from "./components/onboarding/LocalModelBanner";
+import { LocalModelModal } from "./components/onboarding/LocalModelModal";
 // ToolPanel (right-side tool/agents/artifact panel) statically imports
 // react-markdown via SubagentPanel — lazy so it leaves the entry chunk
 // (PERFORMANCE_AUDIT.md item 12).
@@ -358,7 +358,7 @@ export default function App() {
 
         <WorktreeNudgeBanner />
 
-        <LocalModelBanner />
+        <LocalModelModal />
 
 {/* Settings/Skills/Cost are OVERLAYS mounted on top of the chat — the chat
     grid must stay MOUNTED for those views (only "automations" is a real

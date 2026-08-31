@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <link rel="icon" type="image/png" href="/logo.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -11,9 +11,130 @@
       rel="stylesheet"
     />
     <title>Relay</title>
+    <style>
+      /* ── Boot splash ─────────────────────────────────────────────────────
+         Static markup + CSS so the brand is on screen the instant the
+         webview paints — no JS, no React, no font wait. main.tsx holds it
+         ~2.4s after React mounts behind it, then fades + removes it.
+         Colors mirror the dark theme (--bg-tint) so the reveal blends. */
+      #splash {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: grid;
+        place-items: center;
+        background: #181818;
+        transition: opacity 0.45s ease;
+        user-select: none;
+      }
+      #splash.is-done {
+        opacity: 0;
+        pointer-events: none;
+      }
+      .splash-inner {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 18px;
+      }
+      .splash-logo {
+        width: 96px;
+        height: 96px;
+        animation: splash-pop 0.7s cubic-bezier(0.2, 0.9, 0.3, 1.2) both,
+          splash-glow 2.2s ease-in-out 0.5s;
+      }
+      .splash-name {
+        font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+        font-weight: 700;
+        font-size: 30px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: #f5efe6;
+        animation: splash-rise 0.6s ease 0.3s both;
+      }
+      .splash-bar {
+        width: 128px;
+        height: 2px;
+        border-radius: 2px;
+        background: rgba(255, 255, 255, 0.08);
+        overflow: hidden;
+        animation: splash-fade 0.5s ease 0.6s both;
+      }
+      .splash-bar span {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: linear-gradient(90deg, #f59e0b, #ffb347);
+        transform-origin: left;
+        animation: splash-fill 1.7s cubic-bezier(0.3, 0, 0.4, 1) 0.6s both;
+      }
+      @keyframes splash-pop {
+        from {
+          opacity: 0;
+          transform: scale(0.82);
+        }
+        to {
+          opacity: 1;
+          transform: scale(1);
+        }
+      }
+      @keyframes splash-glow {
+        0%,
+        100% {
+          filter: drop-shadow(0 6px 28px rgba(245, 158, 11, 0.25));
+        }
+        50% {
+          filter: drop-shadow(0 6px 44px rgba(245, 158, 11, 0.55));
+        }
+      }
+      @keyframes splash-rise {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      @keyframes splash-fade {
+        from {
+          opacity: 0;
+        }
+        to {
+          opacity: 1;
+        }
+      }
+      @keyframes splash-fill {
+        from {
+          transform: scaleX(0);
+        }
+        to {
+          transform: scaleX(1);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .splash-logo,
+        .splash-name,
+        .splash-bar,
+        .splash-bar span {
+          animation: none;
+        }
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+    <!-- Boot splash — sits above #root; main.tsx fades + removes it. -->
+    <div id="splash" role="presentation">
+      <div class="splash-inner">
+        <!-- The real brand asset (public/logo.png — same file AppLogo.tsx
+             renders; copied from src-tauri/icons/128x128@2x.png). -->
+        <img class="splash-logo" src="/logo.png" alt="" />
+        <div class="splash-name">Relay</div>
+        <div class="splash-bar"><span></span></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

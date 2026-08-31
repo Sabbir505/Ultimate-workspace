@@ -5,7 +5,7 @@
 //      sub-modal with the full tweak set (incl. Context); the draft seeds
 //      from the persisted overrides, "Load model" passes the merged draft,
 //      and closing the sub-modal discards an unapplied draft.
-//   3. LocalModelBanner: shows for model-less installs with a VRAM hint,
+//   3. LocalModelModal: shows for model-less installs with a VRAM hint,
 //      deep-links to Settings → Local Models → market, hides once the
 //      onboarded KV is set or models exist, and dismissal persists the KV.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -35,7 +35,7 @@ vi.mock("../lib/ipc", async (importOriginal) => {
 
 import { AgentModelPicker } from "../components/chat/AgentModelPicker";
 import { LlamaAdvancedFields } from "../components/chat/LlamaAdvancedFields";
-import { LocalModelBanner } from "../components/onboarding/LocalModelBanner";
+import { LocalModelModal } from "../components/onboarding/LocalModelModal";
 import { useUiStore } from "../state/ui";
 import type { GgufModel, LlamaOverrides } from "../lib/ipc";
 
@@ -195,11 +195,11 @@ describe("AgentModelPicker per-model gear sub-modal", () => {
   });
 });
 
-describe("LocalModelBanner (first-run onboarding)", () => {
+describe("LocalModelModal (first-run onboarding)", () => {
   it("shows for model-less installs with a VRAM hint and deep-links to the market", async () => {
     scanLocalModelsMock.mockResolvedValue([]);
     getGpuVramMock.mockResolvedValue({ totalVramBytes: 8 * 1024 * 1024 * 1024, deviceName: "RTX" });
-    render(<LocalModelBanner />);
+    render(<LocalModelModal />);
 
     expect(await screen.findByText(/Run models locally/i)).toBeTruthy();
     expect(screen.getByText(/8\.0 GB of VRAM/i)).toBeTruthy();
@@ -213,7 +213,7 @@ describe("LocalModelBanner (first-run onboarding)", () => {
 
   it("is hidden once the onboarded KV is set or a local model exists", async () => {
     getSettingMock.mockResolvedValue("1");
-    const { unmount } = render(<LocalModelBanner />);
+    const { unmount } = render(<LocalModelModal />);
     await waitFor(() => {
       expect(screen.queryByText(/Run models locally/i)).toBeNull();
     });
@@ -221,15 +221,15 @@ describe("LocalModelBanner (first-run onboarding)", () => {
 
     getSettingMock.mockResolvedValue(null);
     scanLocalModelsMock.mockResolvedValue([{ id: "x" } as never]);
-    render(<LocalModelBanner />);
+    render(<LocalModelModal />);
     await waitFor(() => {
       expect(screen.queryByText(/Run models locally/i)).toBeNull();
     });
   });
 
   it("dismiss persists the onboarded KV", async () => {
-    render(<LocalModelBanner />);
-    fireEvent.click(await screen.findByRole("button", { name: "Dismiss notification" }));
+    render(<LocalModelModal />);
+    fireEvent.click(await screen.findByRole("button", { name: "Not now" }));
     await waitFor(() => {
       expect(setSettingMock).toHaveBeenCalledWith("localModels.onboarded", "1");
     });

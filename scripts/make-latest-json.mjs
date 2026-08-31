@@ -60,14 +60,43 @@ if (!existsSync(keyPath)) {
 }
 
 // --- changelog notes ---
+// The update banner renders this markdown directly, so it must contain ONLY
+// the released version's section — never the whole file (header, naming note,
+// legend and all). Keep a Changelog sections look like `## [0.4.2] — 2026-08-31`.
+function extractSection(md, ver) {
+  const versionHeading = new RegExp(`^##\\s\\[${ver.replace(/\./g, "\\.")}\\]`);
+  const clean = (body) =>
+    body
+      .filter((line) => !/^-{3,}\s*$/.test(line))
+      .join("\n")
+      .trim();
+
+  // Split the file into `## ` sections, ignoring any preamble before them.
+  const sections = [];
+  for (const line of md.replace(/\r\n/g, "\n").split("\n")) {
+    if (/^##\s/.test(line)) {
+      sections.push({ title: line, body: [] });
+    } else if (sections.length > 0) {
+      sections[sections.length - 1].body.push(line);
+    }
+  }
+
+  // Prefer this version's section; fall back to the first non-empty one
+  // (e.g. a release cut straight from a still-populated [Unreleased]).
+  const wanted = sections.find((s) => versionHeading.test(s.title));
+  return (
+    (wanted && clean(wanted.body)) ||
+    sections.map((s) => clean(s.body)).find(Boolean) ||
+    md.trim()
+  );
+}
+
 let notes = argValue("--notes");
 const notesFile = argValue("--notes-file");
 if (!notes && notesFile) {
   const p = join(root, notesFile);
   if (existsSync(p)) {
-    const cl = readFileSync(p, "utf8");
-    const top = cl.match(/^##\s.*\n([\s\S]*?)(?=\n##\s|$)/);
-    notes = top ? top[1].trim() : cl.trim();
+    notes = extractSection(readFileSync(p, "utf8"), version);
   }
 }
 if (!notes) {

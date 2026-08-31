@@ -40,6 +40,7 @@ import { MessageAttachments, parseAttachments } from "./MessageAttachments";
 import { useSyntaxTheme } from "../../hooks/useSyntaxTheme";
 import type { SyntaxHighlighterProps, SyntaxStyle } from "../../lib/syntaxHighlighter";
 import { loadSyntaxHighlighter } from "../../lib/syntaxHighlighter";
+import { SmoothReveal } from "../common/SmoothReveal";
 
 type SyntaxHighlighterComponent = (props: SyntaxHighlighterProps) => React.ReactNode;
 
@@ -354,8 +355,10 @@ function CompactedContextMarker({ summary }: { summary: string }) {
         earlier context compacted
         <span className={`chat-thinking-chevron${open ? " open" : ""}`}>›</span>
       </button>
-      {open && summary && (
-        <div className="chat-compacted-summary">{summary}</div>
+      {summary && (
+        <SmoothReveal open={open}>
+          <div className="chat-compacted-summary">{summary}</div>
+        </SmoothReveal>
       )}
     </div>
   );
@@ -472,11 +475,11 @@ export function ThinkingBlock({ thinking, done }: { thinking: string; done: bool
         <span className={`chat-thinking-icon${open ? " open" : ""}`}>›</span>
         {done ? "Thinking" : "Thinking…"}
       </button>
-      {open && (
+      <SmoothReveal open={open}>
         <div className="chat-thinking-body">
           {thinking}
         </div>
-      )}
+      </SmoothReveal>
     </div>
   );
 }
@@ -828,7 +831,9 @@ function ProcessSummary({
           ›
         </span>
       </button>
-      {open && <div className="chat-process-body">{children}</div>}
+      <SmoothReveal open={open}>
+        <div className="chat-process-body">{children}</div>
+      </SmoothReveal>
     </div>
   );
 }
@@ -919,7 +924,7 @@ function FoldedStepGroup({
           ›
         </span>
       </button>
-      {open && (
+      <SmoothReveal open={open}>
         <div className="chat-fold-body chat-activity-steps">
           {steps.map((step, j) => (
             <ActivityStepRow
@@ -929,7 +934,7 @@ function FoldedStepGroup({
             />
           ))}
         </div>
-      )}
+      </SmoothReveal>
     </div>
   );
 }
@@ -1000,8 +1005,10 @@ function EditFileRow({ step }: { step: ActivityStep }) {
           ›
         </span>
       </button>
-      {open && edit && path && (
-        <DiffCard path={path} edit={edit} done={step.done} />
+      {edit && path && (
+        <SmoothReveal open={open}>
+          <DiffCard path={path} edit={edit} done={step.done} />
+        </SmoothReveal>
       )}
     </div>
   );

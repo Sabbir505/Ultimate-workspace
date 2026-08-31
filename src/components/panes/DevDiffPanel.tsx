@@ -23,6 +23,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { SmoothReveal } from "../common/SmoothReveal";
 import {
   getBranchChangedFiles,
   getChangedFiles,
@@ -890,9 +891,11 @@ export function DevDiffPanel({ embedded = false }: { embedded?: boolean }) {
                 </svg>
               </div>
               {expanded && (
-                <div className="dev-diff-file-diff">
-                  {diffBody}
-                </div>
+                <SmoothReveal open className="dev-diff-reveal">
+                  <div className="dev-diff-file-diff">
+                    {diffBody}
+                  </div>
+                </SmoothReveal>
               )}
             </div>
           );

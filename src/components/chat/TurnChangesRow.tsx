@@ -22,6 +22,7 @@
 //    right-side tool panel (recovering the path when it's stale).
 import { useState } from "react";
 import { Modal } from "../common/Modal";
+import { SmoothReveal } from "../common/SmoothReveal";
 import {
   findFileByBasename,
   getGitStatus,
@@ -342,7 +343,7 @@ export function TurnChangesRow({
           </button>
         )}
       </div>
-      {open && (
+      <SmoothReveal open={open}>
         <div className="chat-turn-changes-body">
           {fileCount === 0 && checkpointOnlyFiles.length === 0 ? (
             <div className="chat-checkpoint-empty">No file changes captured in this snapshot.</div>
@@ -369,7 +370,7 @@ export function TurnChangesRow({
             </ul>
           )}
         </div>
-      )}
+      </SmoothReveal>
       {confirming && latest && (
         <Modal
           title="Undo this turn?"

@@ -9,11 +9,27 @@ import { parseUnifiedDiff } from "../../lib/diff";
 import { useProjectsStore } from "../../state/projects";
 import { useUiStore } from "../../state/ui";
 
+/** Must match the close animation length on .peek-overlay.closing (views.css). */
+const PEEK_CLOSE_MS = 230;
+
 export function PeekPanel() {
   const peek = useUiStore((s) => s.peek);
   const closePeek = useUiStore((s) => s.closePeek);
   const openPeek = useUiStore((s) => s.openPeek);
   const project = useProjectsStore((s) => s.projectById(peek.projectId));
+
+  // The sheet stays mounted while the slide-out plays, then unmounts —
+  // same delayed-unmount recipe as SmoothReveal / .tool-panel.collapsed.
+  const [render, setRender] = useState(peek.open);
+
+  useEffect(() => {
+    if (peek.open) {
+      setRender(true);
+      return;
+    }
+    const t = window.setTimeout(() => setRender(false), PEEK_CLOSE_MS);
+    return () => window.clearTimeout(t);
+  }, [peek.open]);
 
   const [fileText, setFileText] = useState<string | null>(null);
   const [diffText, setDiffText] = useState<string | null>(null);
@@ -45,7 +61,8 @@ export function PeekPanel() {
     }
   }, [peek.open, peek.mode, peek.filePath, peek.cwd, project]);
 
-  if (!peek.open) return null;
+  if (!render) return null;
+  const closing = !peek.open;
 
   const pickFile = async () => {
     try {
@@ -67,7 +84,10 @@ export function PeekPanel() {
   const diffFiles = diffText !== null ? parseUnifiedDiff(diffText) : [];
 
   return (
-    <div className="view-overlay" onPointerDown={(e) => e.target === e.currentTarget && closePeek()}>
+    <div
+      className={`view-overlay peek-overlay${closing ? " closing" : ""}`}
+      onPointerDown={(e) => e.target === e.currentTarget && closePeek()}
+    >
       <div className="peek-panel">
         <div className="view-header">
           <h2>

@@ -1,0 +1,168 @@
+/* motion — Shared animation primitives for surfaces that previously snapped.
+   The app's reference feel is the right tool panel's expand/collapse
+   (.tool-panel: 0.28s slide on --ease + opacity fade + delayed visibility),
+   and the always-mounted grid-rows collapse (.git-section-collapse /
+   .sidebar-projects-collapse). These primitives extend that feel to the
+   chat disclosures, the peek sheet, and the popover menus that used to
+   pop in and out with no transition. */
+@keyframes dropdown-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes overlay-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes overlay-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes slide-out-right {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+
+@keyframes artifact-sheet-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+/* Two-way animated collapse wrapper (paired with components/common/SmoothReveal.tsx).
+   Same recipe as .git-section-collapse: the wrapper is a grid whose single row
+   animates 0fr↔1fr, so variable-height content slides without JS measuring.
+   The inner div clips (overflow) while sliding and keeps margins/borders from
+   fighting the row track. */
+.smooth-reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  /* Focusables inside a closing body leave the tab order only after the
+     slide (same delayed-visibility recipe as .tool-panel.collapsed). */
+  visibility: hidden;
+  transition: grid-template-rows 0.26s var(--ease), opacity 0.2s var(--ease),
+    visibility 0s linear 0.26s;
+}
+.smooth-reveal.open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+  transition: grid-template-rows 0.26s var(--ease), opacity 0.2s var(--ease),
+    visibility 0s;
+}
+.smooth-reveal-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Peek sheet: slides in from the right edge like the tool panel expanding,
+   and plays the reverse slide while unmounting (PeekPanel holds it mounted
+   through the close, PEEK_CLOSE_MS pairs with slide-out-right's duration). */
+.peek-overlay {
+  animation: overlay-fade 0.2s var(--ease);
+}
+.peek-overlay .peek-panel {
+  animation: slide-in-right 0.26s var(--ease);
+}
+.peek-overlay.closing {
+  animation: overlay-fade-out 0.2s var(--ease) forwards;
+  pointer-events: none;
+}
+.peek-overlay.closing .peek-panel {
+  animation: slide-out-right 0.22s var(--ease) forwards;
+}
+
+/* Popover menus that used to pop with no transition. Mount-only: menus are
+   small and dismiss instantly, which reads as intentional.
+   (.git-menu-popover and .composer-notch-github-popover keep their existing
+   branch-popover-fade; the .branch-dropdown nested inside them is suppressed
+   so the card doesn't animate twice.) */
+.tool-panel-picker-menu,
+.dev-diff-filter-menu,
+.row-menu,
+.composer-attach-menu,
+.automations-notify-panel,
+.permission-mode-popup,
+.artifacts-menu-dropdown,
+.branch-dropdown,
+.local-row-advanced,
+.composer-template-picker {
+  animation: dropdown-in 0.16s var(--ease);
+}
+.composer-notch-github-popover .branch-dropdown,
+.git-menu-popover .branch-dropdown {
+  animation: none;
+}
+.artifact-type-scrim {
+  animation: overlay-fade 0.16s var(--ease);
+}
+/* The artifact sheet centers itself with transform:translate(-50%,-50%), so
+   it can't use dropdown-in — the animation's transform would drop the
+   centering for its duration and the sheet would jump to the top-left. */
+.artifact-type-selector {
+  animation: artifact-sheet-in 0.18s var(--ease);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .smooth-reveal {
+    transition: none;
+  }
+  .peek-overlay,
+  .peek-overlay .peek-panel,
+  .peek-overlay.closing,
+  .peek-overlay.closing .peek-panel,
+  .tool-panel-picker-menu,
+  .dev-diff-filter-menu,
+  .row-menu,
+  .composer-attach-menu,
+  .automations-notify-panel,
+  .git-menu-popover,
+  .permission-mode-popup,
+  .artifacts-menu-dropdown,
+  .branch-dropdown,
+  .local-row-advanced,
+  .composer-template-picker,
+  .artifact-type-selector,
+  .artifact-type-scrim {
+    animation: none;
+  }
+}

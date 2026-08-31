@@ -357,6 +357,9 @@
 .update-modal-icon svg {
   flex-shrink: 0;
 }
+.update-modal-icon img {
+  flex-shrink: 0;
+}
 .update-modal-title {
   margin: 0;
   font-size: 18px;

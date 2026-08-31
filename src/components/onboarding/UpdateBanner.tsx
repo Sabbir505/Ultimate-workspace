@@ -10,6 +10,7 @@
 // shows the raw release notes as a fallback while the chunk downloads.
 import { lazy, Suspense, useMemo, useState } from "react";
 import { useUpdaterStore } from "../../state/updater";
+import { AppLogo } from "../common/AppLogo";
 
 /** Self-contained markdown renderer. Imported lazily; the parent's Suspense
  *  boundary shows the raw notes for one frame if it's the first render. */
@@ -65,12 +66,7 @@ export function UpdateBanner() {
         {/* Header */}
         <div className="update-modal-header">
           <div className="update-modal-icon">
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
-              <path d="M3 3v5h5"/>
-              <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
-              <path d="M16 21h5v-5"/>
-            </svg>
+            <AppLogo size={40} />
           </div>
           <h2 className="update-modal-title">A new version is available</h2>
           {update?.version && (

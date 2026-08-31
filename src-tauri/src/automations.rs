@@ -255,6 +255,37 @@ fn stamp_skipped_once(db: &Arc<Mutex<Connection>>, automation: &Automation) {
     }
 }
 
+/// B-28: is `pid` a live process? Windows-only — other platforms fall back
+/// to the age-based staleness heuristic.
+#[cfg(windows)]
+fn pid_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    const STILL_ACTIVE: u32 = 259;
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code: u32 = 0;
+        let ok = GetExitCodeProcess(handle, &mut code) != 0;
+        let _ = CloseHandle(handle);
+        // STILL_ACTIVE can also be returned for a dead process whose exit
+        // code happens to be 259 — vanishingly unlikely and only errs on the
+        // cautious side (we keep waiting for the age heuristic).
+        ok && code == STILL_ACTIVE
+    }
+}
+
+#[cfg(not(windows))]
+fn pid_alive(_pid: u32) -> bool {
+    // No cheap liveness probe wired up for non-Windows; the age fallback
+    // covers it.
+    true
+}
+
 /// Inner recursion with a depth limit to prevent unbounded recursion
 /// if a misbehaving process repeatedly recreates the lock file.
 fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, source: RunSource, depth: u32) -> Result<Option<PreparedRun>, String> {
@@ -270,22 +301,37 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
         }
     }
     // Guard 2: across processes (app vs conduit-automation binary). The lock
-    // file lives next to the DB; create_new fails atomically if another
-    // process holds it. A stale lock from a crash blocks one run, then the
-    // next prepare succeeds after the stale file is removed — we unlink a
-    // lock older than 6h as a self-heal.
+    // file lives next to the DB and records the owning PID; create_new fails
+    // atomically if another process holds it. Staleness (B-28): a lock whose
+    // PID is dead is stale IMMEDIATELY — the old age-only check (6h) left a
+    // crashed run blocking every tick for up to 6 hours. A lock without a
+    // parsable PID (pre-PID file, or a foreign writer) falls back to the 6h
+    // age heuristic. A LIVE pid is never stale: run_one_shot is bounded at
+    // 2h, so a long legitimate run must keep excluding other processes.
     let mut lock_path = None;
     {
         let conn = db.lock();
         if let Some(path) = lock_file_path(&conn, &automation.id) {
             match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(_) => lock_path = Some(path),
+                Ok(_) => {
+                    // Record the owner so a crashed run's lock is recognizable
+                    // as stale (B-28).
+                    let _ = std::fs::write(&path, std::process::id().to_string());
+                    lock_path = Some(path);
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let stale = std::fs::metadata(&path)
+                    let recorded_pid = std::fs::read_to_string(&path)
+                        .ok()
+                        .and_then(|t| t.trim().parse::<u32>().ok());
+                    let age_stale = std::fs::metadata(&path)
                         .and_then(|m| m.modified())
                         .ok()
                         .and_then(|t| t.elapsed().ok())
                         .is_some_and(|age| age > Duration::from_secs(6 * 3600));
+                    let stale = match recorded_pid {
+                        Some(pid) => !pid_alive(pid) || age_stale,
+                        None => age_stale,
+                    };
                     drop(conn);
                     RUNNING.lock().remove(&automation.id);
                     if stale {
@@ -716,6 +762,16 @@ fn summarize(status: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn pid_alive_rejects_dead_pid() {
+        // A PID of 4 billion is vanishingly unlikely to exist; the API must
+        // report it dead (B-28 stale-lock path).
+        assert!(!pid_alive(4_000_000_000));
+        // The current process is obviously alive.
+        assert!(pid_alive(std::process::id()));
+    }
 
     #[test]
     fn five_field_cron_is_accepted_and_due_math_works() {

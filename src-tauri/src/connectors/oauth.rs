@@ -433,7 +433,10 @@ impl OAuthFlows {
             client.client_id, client.token_endpoint_auth_method
         );
         // Register the pending flow so accept_one_callback can validate the
-        // returned `state` parameter against what we sent.
+        // returned `state` parameter against what we sent. E-8: a guard owns
+        // the removal — the early returns below (bind failure, browser-open
+        // failure) used to skip the explicit `flows.remove` and leak the
+        // entry for the process lifetime.
         {
             let mut flows = self.flows.lock();
             flows.insert(state.clone(), PendingFlow {
@@ -441,6 +444,10 @@ impl OAuthFlows {
                 state: state.clone(),
             });
         }
+        let _flow_guard = FlowEntryGuard {
+            flows: &self.flows,
+            state: state.clone(),
+        };
 
         // The connector's `redirect_uri` doubles as the callback server
         // config: it must be an `http://localhost:<fixed-port>/…` URL that is
@@ -534,11 +541,8 @@ impl OAuthFlows {
             tokio::task::spawn_blocking(move || accept_one_callback(&listener, &expected_state)),
         ).await;
 
-        // Remove the pending flow entry regardless of outcome.
-        {
-            let mut flows = self.flows.lock();
-            flows.remove(&state);
-        }
+        // (The pending flow entry is removed by `_flow_guard` on drop —
+        // every path from here on is covered.)
 
         let code = match result {
             Ok(Ok(Ok(c))) => {
@@ -672,6 +676,19 @@ impl OAuthFlows {
     }
 }
 
+/// E-8: removes one pending-flow entry on drop, so every exit path of
+/// `run_flow` (bind failure, browser-open failure, timeout, success) unregisters.
+struct FlowEntryGuard<'a> {
+    flows: &'a parking_lot::Mutex<std::collections::HashMap<String, PendingFlow>>,
+    state: String,
+}
+
+impl Drop for FlowEntryGuard<'_> {
+    fn drop(&mut self) {
+        self.flows.lock().remove(&self.state);
+    }
+}
+
 /// Accept a single HTTP connection, respond with a browser-friendly page, and
 /// extract the OAuth `code` (or `error`) from the query string. Validates that
 /// the returned `state` parameter matches the one sent in the authorize URL
@@ -708,6 +725,14 @@ fn accept_one_callback(listener: &TcpListener, expected_state: &str) -> Result<S
     let (mut stream, _addr) = listener
         .accept()
         .map_err(|e| format!("loopback accept failed: {e}"))?;
+    // E-8: bound the read — a local process that connects and stalls used to
+    // block this thread (and the listener/port with it) until app exit.
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .map_err(|e| format!("loopback set_read_timeout failed: {e}"))?;
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .map_err(|e| format!("loopback set_write_timeout failed: {e}"))?;
     let mut reader = BufReader::new(&mut stream);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)
@@ -1056,9 +1081,14 @@ fn store_exchanged(
         eprintln!("[conduit:oauth] store_exchanged {connector_id}: keychain refresh_token");
         secrets::set_connector_token(&conn, connector_id, "refresh_token", rt)?;
     } else {
-        // No refresh token — clear any stale one so we don't try to refresh
-        // with a token from a previous connection.
-        let _ = secrets::delete_connector_tokens(&conn, connector_id);
+        // No refresh token — clear BOTH tokens first so we never refresh with
+        // a stale token from a previous connection (E-9f: the old order wrote
+        // the access token, then best-effort deleted both — a failed delete
+        // left a stale refresh token behind and later spurious invalid_grant
+        // disconnects; the failure was also invisible).
+        if let Err(e) = secrets::delete_connector_tokens(&conn, connector_id) {
+            eprintln!("[conduit:oauth] store_exchanged {connector_id}: token delete failed: {e}");
+        }
         secrets::set_connector_token(&conn, connector_id, "access_token", &token.access_token)?;
     }
     eprintln!("[conduit:oauth] store_exchanged {connector_id}: credential row");

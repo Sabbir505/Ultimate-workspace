@@ -27,6 +27,33 @@ permissions:
   contents: write
 
 jobs:
+  # B-2: compile-only check on macOS. The browser-pane module and several
+  # platform helpers broke macOS compilation silently (CI built Windows
+  # only); this job catches cross-platform breakage at check time without
+  # producing a release bundle.
+  check-macos:
+    name: Check (macOS, compile-only)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('src-tauri/Cargo.lock', 'src-tauri/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-
+
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check --workspace
+
   build-windows:
     name: Build (Windows)
     runs-on: windows-latest

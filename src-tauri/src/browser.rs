@@ -102,6 +102,62 @@ pub struct SendCore(pub webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebV
 unsafe impl Send for SendCore {}
 
 impl BrowserPane {
+    /// Eval JS in this pane's page — non-Windows fallback (B-2). The Windows
+    /// path marshals through `with_core_on_main` instead (raw controller).
+    #[cfg(not(windows))]
+    pub(crate) fn eval_js(&self, js: &str) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            return self.webview.eval(js).map_err(|e| e.to_string());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            return self.window.eval(js).map_err(|e| e.to_string());
+        }
+        #[allow(unreachable_code)]
+        Err("browser panes are not supported on this platform".to_string())
+    }
+
+    /// Navigate this pane — non-Windows fallback (B-2). There is no
+    /// reachable Navigate binding on tauri-managed child panes, so drive
+    /// `location.href` (a fresh history entry; acceptable for the fallback).
+    #[cfg(not(windows))]
+    pub(crate) fn navigate_to(&self, url: &str) -> Result<(), String> {
+        let esc = serde_json::to_string(url).unwrap_or_else(|_| "\"about:blank\"".to_string());
+        self.eval_js(&format!("location.href = {esc};"))
+    }
+
+    /// Toggle the native DevTools window — non-Windows fallback (B-2).
+    #[cfg(not(windows))]
+    pub(crate) fn open_devtools_pane(&self) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            #[cfg(debug_assertions)]
+            {
+                self.webview.open_devtools();
+                return Ok(());
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                return Err("devtools require a debug build or tauri's `devtools` feature".into());
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            #[cfg(debug_assertions)]
+            {
+                self.window.open_devtools();
+                return Ok(());
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                return Err("devtools require a debug build or tauri's `devtools` feature".into());
+            }
+        }
+        #[allow(unreachable_code)]
+        Err("browser panes are not supported on this platform".to_string())
+    }
+
     fn show(&self) -> Result<(), String> {
         #[cfg(windows)]
         {
@@ -449,7 +505,6 @@ pub(crate) type WebviewsMap = std::sync::Arc<Mutex<HashMap<String, BrowserPane>>
 
 /// Run `f(&core)` for the pane ON THE MAIN THREAD. Synchronous COM only in
 /// `f`; async completions fire later on the main thread's pump.
-#[cfg(windows)]
 fn with_core_on_main<T: Send + 'static>(
     app: &AppHandle,
     webviews: WebviewsMap,
@@ -496,17 +551,6 @@ fn with_core_on_main<T: Send + 'static>(
                 .unwrap_or_default()
         )),
     }
-}
-
-#[cfg(not(windows))]
-fn with_core_on_main<T: Send + 'static>(
-    _app: &AppHandle,
-    _webviews: WebviewsMap,
-    _label: &str,
-    what: &str,
-    _f: impl FnOnce() -> Result<T, String> + Send + 'static,
-) -> Result<T, String> {
-    Err(format!("{what}: requires the Windows WebView2 backend"))
 }
 
 // ---- Direct WebView2 creation (Windows) ------------------------------------
@@ -852,12 +896,21 @@ fn pushstate_injection_js(pane_id: &str, tab_id: &str) -> String {
     if (window.__conduit_pushstate_patched) return;
     window.__conduit_pushstate_patched = true;
     var emit = function() {{
+        var args = {{ paneId: '{pane}', tabId: '{tab}', url: location.href }};
         try {{
-            window.__TAURI_INTERNALS__.invoke('browser_push_state', {{
-                paneId: '{pane}',
-                tabId: '{tab}',
-                url: location.href
-            }}).catch(function() {{}});
+            if (window.chrome && window.chrome.webview &&
+                typeof window.chrome.webview.postMessage === 'function') {{
+                // B-3: raw WebView2 panes have no Tauri IPC — report through
+                // the WebMessageReceived bridge instead.
+                args.__conduit = 'push_state';
+                args.cmd = 'browser_push_state';
+                window.chrome.webview.postMessage(JSON.stringify(args));
+                return;
+            }}
+        }} catch(e) {{}}
+        try {{
+            window.__TAURI_INTERNALS__.invoke('browser_push_state', args)
+                .catch(function() {{}});
         }} catch(e) {{}}
     }};
     var origPush = history.pushState;
@@ -876,6 +929,68 @@ fn pushstate_injection_js(pane_id: &str, tab_id: &str) -> String {
         pane = pane_id,
         tab = tab_id
     )
+}
+
+/// B-3: page→host bridge for RAW WebView2 panes. Tauri injects
+/// `__TAURI_INTERNALS__` only into webviews it manages, so the injected
+/// bridge JS on these panes had no way to report action results or
+/// pushState changes — every agentic browser op waited out its 45s timeout.
+/// WebView2's native `window.chrome.webview.postMessage` fills that gap:
+/// `add_WebMessageReceived` fires with the posted string, which we parse as
+/// our envelope and route to the same handlers the tauri commands use.
+#[cfg(windows)]
+fn attach_web_message_bridge(
+    app: &AppHandle,
+    core: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
+) {
+    use webview2_com::WebMessageReceivedEventHandler;
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2WebMessageReceivedEventArgs;
+
+    let app = app.clone();
+    let handler = WebMessageReceivedEventHandler::create(Box::new(
+        move |_sender, args: Option<ICoreWebView2WebMessageReceivedEventArgs>| {
+            let Some(args) = args else { return Ok(()) };
+            let mut pw = windows::core::PWSTR::null();
+            if unsafe { args.TryGetWebMessageAsString(&mut pw) }.is_err() {
+                return Ok(());
+            }
+            let raw = webview2_com::take_pwstr(pw);
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                // Not our envelope (page posted its own data) — ignore.
+                return Ok(());
+            };
+            match v.get("__conduit").and_then(|k| k.as_str()) {
+                Some("action_result") => {
+                    let req_id = v.get("reqId").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let nonce = v.get("nonce").and_then(|x| x.as_str()).unwrap_or("");
+                    let result = v
+                        .get("result")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if let Some(state) = app.try_state::<crate::BrowserState>() {
+                        state.0.resolve_action_verified(req_id, nonce, result);
+                    }
+                }
+                Some("push_state") => {
+                    // Mirror the `browser_push_state` command for raw panes.
+                    let pane_id = v.get("paneId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let tab_id = v.get("tabId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let url = v.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    if !url.trim().to_lowercase().starts_with("javascript:") {
+                        let _ = app.emit(
+                            "browser:navigated",
+                            BrowserNavigatedEvent { pane_id, tab_id, url },
+                        );
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        },
+    ));
+    let mut token = 0i64;
+    let _ = unsafe { core.add_WebMessageReceived(&handler, &mut token) };
 }
 
 /// RAII guard for the `in_flight` create marker: removes the label on drop so
@@ -910,10 +1025,16 @@ pub struct BrowserManager {
     /// the agentic `browser_*` chat tools act on ("the page the user is
     /// looking at").
     active: Mutex<Option<(String, String)>>,
-    /// In-flight agentic actions: request id -> result sender. The action's
-    /// injected JS calls back `browser_action_result` with the id, which
-    /// resolves the matching oneshot so the async tool call can return.
-    pending: Mutex<HashMap<u64, oneshot::Sender<String>>>,
+    /// In-flight agentic actions: request id -> sender + one-time nonce. The
+    /// action's injected JS calls back (via the pane's WebMessageReceived
+    /// bridge on Windows raw panes, or the `browser_action_result` command on
+    /// tauri-managed panes) with the id AND the nonce, which resolves the
+    /// matching oneshot so the async tool call can return. The nonce exists
+    /// because browser panes load ARBITRARY external pages: req ids are
+    /// sequential and guessable, and every page in the pane can post
+    /// messages — without the shared secret, a hostile page could spoof a
+    /// result for an in-flight action.
+    pending: Mutex<HashMap<u64, PendingAction>>,
     next_req: AtomicU64,
     /// Maps pane_id -> project_id so the MCP WS dispatch (Task #4) can
     /// resolve a project_id to its browser panes.
@@ -934,6 +1055,13 @@ pub struct BrowserManager {
     /// Pending open-browser roundtrip request id -> sender.
     pane_open_pending: Mutex<HashMap<u64, oneshot::Sender<Option<String>>>>,
     next_open_req: AtomicU64,
+}
+
+/// One in-flight agentic action (see `BrowserManager.pending`).
+struct PendingAction {
+    tx: oneshot::Sender<String>,
+    /// Per-action shared secret the page must echo back (anti-spoofing).
+    nonce: String,
 }
 
 impl BrowserManager {
@@ -1249,6 +1377,9 @@ impl BrowserManager {
                         unsafe { core.AddScriptToExecuteOnDocumentCreated(&overlay_h, &script_handler) }
                             .map_err(|e| format!("AddScriptToExecuteOnDocumentCreated failed: {e}"))?;
                         attach_core_listeners(&app2, self_webviews.clone(), &label2, &core);
+                        // B-3: page→host bridge for the raw pane (no Tauri IPC
+                        // here) — action results + pushState reports.
+                        attach_web_message_bridge(&app2, &core);
                         // Navigate straight to the target — no about:blank hop.
                         unsafe { core.Navigate(&HSTRING::from(url2)) }
                             .map_err(|e| format!("initial Navigate failed: {e}"))?;
@@ -1544,16 +1675,29 @@ impl BrowserManager {
         // silently dropped for these panes).
         let label = browser_label(pane_id, tab_id);
         let url2 = parsed.to_string();
-        let result = with_core_on_main(app, self.webviews.clone(), &label, "navigate", move |core| {
-            let url_h = windows::core::HSTRING::from(url2);
-            unsafe { core.Navigate(&url_h) }.map_err(|e| format!("Navigate failed: {e}"))?;
-            Ok(())
-        });
-        match &result {
-            Ok(_) => browser_log(app, &format!("navigate INVOKE OK url={parsed} — waiting for nav START/COMPLETE")),
-            Err(e) => browser_log(app, &format!("navigate INVOKE FAILED url={parsed}: {e}")),
+        #[cfg(windows)]
+        {
+            let result = with_core_on_main(app, self.webviews.clone(), &label, "navigate", move |core| {
+                let url_h = windows::core::HSTRING::from(url2);
+                unsafe { core.Navigate(&url_h) }.map_err(|e| format!("Navigate failed: {e}"))?;
+                Ok(())
+            });
+            match &result {
+                Ok(_) => browser_log(app, &format!("navigate INVOKE OK url={parsed} — waiting for nav START/COMPLETE")),
+                Err(e) => browser_log(app, &format!("navigate INVOKE FAILED url={parsed}: {e}")),
+            }
+            result?;
         }
-        result?;
+        #[cfg(not(windows))]
+        {
+            // B-2: tauri-managed panes — eval-based navigation fallback.
+            let pane = self.get(&label)?;
+            if let Err(e) = pane.navigate_to(&url2) {
+                browser_log(app, &format!("navigate INVOKE FAILED url={parsed}: {e}"));
+                return Err(e);
+            }
+            browser_log(app, &format!("navigate INVOKE OK url={parsed} — waiting for nav START/COMPLETE"));
+        }
         self.spawn_post_nav_inject(pane_id, tab_id);
         self.refocus_main_webview();
         Ok(())
@@ -1564,10 +1708,23 @@ impl BrowserManager {
     pub fn open_devtools(&self, pane_id: &str, tab_id: &str) -> Result<(), String> {
         ensure_supported()?;
         let label = browser_label(pane_id, tab_id);
-        with_core_on_main(&self.app, self.webviews.clone(), &label, "open_devtools", move |core| {
-            unsafe { core.OpenDevToolsWindow() };
-            Ok(())
-        })
+        #[cfg(windows)]
+        {
+            with_core_on_main(&self.app, self.webviews.clone(), &label, "open_devtools", move |core| {
+                unsafe { core.OpenDevToolsWindow() };
+                Ok(())
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            let pane = self
+                .webviews
+                .lock()
+                .get(&label)
+                .cloned()
+                .ok_or_else(|| format!("no browser webview labelled {label}"))?;
+            pane.open_devtools_pane()
+        }
     }
 
     /// Shared first half of `navigate`: validate the URL, mark the pane active
@@ -1787,14 +1944,27 @@ impl BrowserManager {
     fn eval(&self, label: &str, js: &str) -> Result<(), String> {
         ensure_supported()?;
         let js = js.to_string();
-        with_core_on_main(&self.app, self.webviews.clone(), label, "eval", move |core| {
-            use webview2_com::ExecuteScriptCompletedHandler;
-            let js_h = windows::core::HSTRING::from(js);
-            let handler = ExecuteScriptCompletedHandler::create(Box::new(|_, _| Ok(())));
-            unsafe { core.ExecuteScript(&js_h, &handler) }
-                .map_err(|e| format!("ExecuteScript failed: {e}"))?;
-            Ok(())
-        })
+        #[cfg(windows)]
+        {
+            with_core_on_main(&self.app, self.webviews.clone(), label, "eval", move |core| {
+                use webview2_com::ExecuteScriptCompletedHandler;
+                let js_h = windows::core::HSTRING::from(js);
+                let handler = ExecuteScriptCompletedHandler::create(Box::new(|_, _| Ok(())));
+                unsafe { core.ExecuteScript(&js_h, &handler) }
+                    .map_err(|e| format!("ExecuteScript failed: {e}"))?;
+                Ok(())
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            let pane = self
+                .webviews
+                .lock()
+                .get(label)
+                .cloned()
+                .ok_or_else(|| format!("no browser webview labelled {label}"))?;
+            pane.eval_js(&js)
+        }
     }
 
     // --- Agentic browser control ---------------------------------------
@@ -1805,10 +1975,27 @@ impl BrowserManager {
 
     /// Resolve a pending agentic action (called by the `browser_action_result`
     /// command from the injected JS). Unknown ids are ignored (already timed
-    /// out or resolved).
+    /// out or resolved). NOTE: unverified — prefer `resolve_action_verified`
+    /// from any caller that can carry the per-action nonce.
     pub fn resolve_action(&self, req_id: u64, result: String) {
-        if let Some(tx) = self.pending.lock().remove(&req_id) {
-            let _ = tx.send(result);
+        if let Some(p) = self.pending.lock().remove(&req_id) {
+            let _ = p.tx.send(result);
+        }
+    }
+
+    /// Same as `resolve_action` but requires the per-action nonce echoed by
+    /// the injected JS. A hostile page in the pane can post arbitrary
+    /// messages with guessed sequential req ids; only the wrapper that
+    /// launched the action knows the nonce.
+    pub fn resolve_action_verified(&self, req_id: u64, nonce: &str, result: String) {
+        let known = {
+            let map = self.pending.lock();
+            map.get(&req_id).map(|p| p.nonce == nonce).unwrap_or(false)
+        };
+        if known {
+            if let Some(p) = self.pending.lock().remove(&req_id) {
+                let _ = p.tx.send(result);
+            }
         }
     }
 
@@ -1847,25 +2034,39 @@ impl BrowserManager {
         ensure_supported()?;
         let pane = self.get(label)?;
         let req_id = self.next_req.fetch_add(1, Ordering::SeqCst);
+        let nonce = format!("{:016x}", rand::random::<u64>());
         let (tx, rx) = oneshot::channel::<String>();
-        self.pending.lock().insert(req_id, tx);
-        let js = action_wrapper_js(req_id, body, &opts);
+        self.pending
+            .lock()
+            .insert(req_id, PendingAction { tx, nonce: nonce.clone() });
+        let js = action_wrapper_js(req_id, &nonce, body, &opts);
         let eval_res = {
-            let js = js.clone();
-            with_core_on_main(
-                &self.app,
-                self.webviews.clone(),
-                label,
-                "action eval",
-                move |core| {
-                    use webview2_com::ExecuteScriptCompletedHandler;
-                    let js_h = windows::core::HSTRING::from(js);
-                    let handler = ExecuteScriptCompletedHandler::create(Box::new(|_, _| Ok(())));
-                    unsafe { core.ExecuteScript(&js_h, &handler) }
-                        .map_err(|e| format!("ExecuteScript failed: {e}"))?;
-                    Ok(())
-                },
-            )
+            #[cfg(windows)]
+            {
+                let js = js.clone();
+                with_core_on_main(
+                    &self.app,
+                    self.webviews.clone(),
+                    label,
+                    "action eval",
+                    move |core| {
+                        use webview2_com::ExecuteScriptCompletedHandler;
+                        let js_h = windows::core::HSTRING::from(js);
+                        let handler = ExecuteScriptCompletedHandler::create(Box::new(|_, _| Ok(())));
+                        unsafe { core.ExecuteScript(&js_h, &handler) }
+                            .map_err(|e| format!("ExecuteScript failed: {e}"))?;
+                        Ok(())
+                    },
+                )
+            }
+            #[cfg(not(windows))]
+            {
+                // B-2: tauri-managed panes (macOS/Linux) — fire-and-forget
+                // eval; the result comes back via the `browser_action_result`
+                // command over tauri's IPC (the wrapper picks that transport
+                // when window.chrome.webview is absent).
+                pane.eval_js(&js)
+            }
         };
         if let Err(e) = eval_res {
             self.pending.lock().remove(&req_id);
@@ -2490,8 +2691,16 @@ fn build_resolve_js(desc: &str, action: &str) -> String {
 
 /// Wrap an agentic action `body` (a JS block that `return`s a string OR a
 /// Promise that resolves to a string) so it runs in the page and reports its
-/// result — or an error message — back to the backend via the
-/// `browser_action_result` command keyed by `req_id`.
+/// result — or an error message — back to the backend, keyed by `req_id`.
+///
+/// Transport (B-3): Windows panes are RAW WebView2 controllers — Tauri never
+/// injects `__TAURI_INTERNALS__` there, so the old invoke-only wrapper
+/// silently never reported and every action burned its 45 s timeout. The
+/// wrapper now prefers `window.chrome.webview.postMessage` (WebView2's
+/// native page→host bridge, handled by `attach_web_message_bridge`) and
+/// falls back to Tauri IPC on tauri-managed panes (macOS/Linux). The
+/// `nonce` must be echoed either way — pages in the pane are untrusted and
+/// req ids are guessable.
 ///
 /// The wrapper is promise-aware: if the body returns a thenable, the wrapper
 /// awaits it before reporting. This lets the visual-feedback layer (Task 2)
@@ -2506,7 +2715,7 @@ fn build_resolve_js(desc: &str, action: &str) -> String {
 /// follow the action at a comfortable pace. The delay gates the final report
 /// (race guard): the caller reading the tool result knows the action AND
 /// pacing both completed.
-fn action_wrapper_js(req_id: u64, body: &str, opts: &ActionOpts) -> String {
+fn action_wrapper_js(req_id: u64, nonce: &str, body: &str, opts: &ActionOpts) -> String {
     let watch_mode = opts.watch_mode;
     let pane_delay_ms = opts.pane_delay_ms;
     format!(
@@ -2514,11 +2723,23 @@ fn action_wrapper_js(req_id: u64, body: &str, opts: &ActionOpts) -> String {
     var WATCH_MODE = {watch_mode};
     var PANE_DELAY_MS = {pane_delay_ms};
     var __report = function(res) {{
+        var args = {{
+            reqId: {req_id},
+            nonce: '{nonce}',
+            result: res === undefined ? 'undefined' : String(res)
+        }};
         try {{
-            window.__TAURI_INTERNALS__.invoke('browser_action_result', {{
-                reqId: {req_id},
-                result: res === undefined ? 'undefined' : String(res)
-            }}).catch(function() {{}});
+            if (window.chrome && window.chrome.webview &&
+                typeof window.chrome.webview.postMessage === 'function') {{
+                args.__conduit = 'action_result';
+                args.cmd = 'browser_action_result';
+                window.chrome.webview.postMessage(JSON.stringify(args));
+                return;
+            }}
+        }} catch(e) {{}}
+        try {{
+            window.__TAURI_INTERNALS__.invoke('browser_action_result', args)
+                .catch(function() {{}});
         }} catch(e) {{}}
     }};
     var __finish = function(res) {{
@@ -2777,10 +2998,16 @@ mod tests {
 
     #[test]
     fn action_wrapper_reports_via_command_with_req_id() {
-        let js = action_wrapper_js(42, "return 'hi';", &ActionOpts::default());
+        let js = action_wrapper_js(42, "abc123def4567890", "return 'hi';", &ActionOpts::default());
         assert!(js.contains("browser_action_result"));
         assert!(js.contains("reqId: 42"));
+        // B-3: the per-action nonce must ride along (anti-spoofing) ...
+        assert!(js.contains("nonce: 'abc123def4567890'"));
         assert!(js.contains("return 'hi';"));
+        // ... and the raw-WebView2 transport (postMessage) is preferred with
+        // the Tauri invoke kept as the tauri-managed-pane fallback.
+        assert!(js.contains("chrome.webview.postMessage"));
+        assert!(js.contains("__TAURI_INTERNALS__"));
         // Errors are reported too, not swallowed.
         assert!(js.contains("'ERROR: '"));
     }
@@ -2789,7 +3016,12 @@ mod tests {
     fn action_wrapper_awaits_promise_results() {
         // A body that returns a Promise (the visual-feedback path) must be
         // detected and awaited, not reported as "[object Promise]".
-        let js = action_wrapper_js(7, "return new Promise(function(r){ r('done'); });", &ActionOpts::default());
+        let js = action_wrapper_js(
+            7,
+            "feedfacedeadbeef",
+            "return new Promise(function(r){ r('done'); });",
+            &ActionOpts::default(),
+        );
         assert!(js.contains("typeof __result.then === 'function'"));
         assert!(js.contains("browser_action_result"));
         assert!(js.contains("reqId: 7"));
@@ -2800,7 +3032,7 @@ mod tests {
     #[test]
     fn action_wrapper_includes_pacing_when_watch_mode_true() {
         let opts = ActionOpts { watch_mode: true, pane_delay_ms: 600 };
-        let js = action_wrapper_js(1, "return 'ok';", &opts);
+        let js = action_wrapper_js(1, "0123456789abcdef", "return 'ok';", &opts);
         // The JS must interpolate WATCH_MODE = true and PANE_DELAY_MS = 600
         // as literal values, not strings.
         assert!(js.contains("var WATCH_MODE = true;"));
@@ -2813,7 +3045,7 @@ mod tests {
     #[test]
     fn action_wrapper_skips_pacing_when_watch_mode_false() {
         let opts = ActionOpts::default();
-        let js = action_wrapper_js(1, "return 'ok';", &opts);
+        let js = action_wrapper_js(1, "0123456789abcdef", "return 'ok';", &opts);
         assert!(js.contains("var WATCH_MODE = false;"));
         assert!(js.contains("var PANE_DELAY_MS = 250;"));
         assert!(js.contains("if (WATCH_MODE)"));

@@ -194,14 +194,23 @@ pub fn replace_file_chunks(
     kind: &str,
     chunks: &[(String, Vec<f32>)],
 ) -> DbResult<()> {
-    delete_chunks_for_file(conn, corpus_id, path)?;
+    // B-29: the delete-then-insert sweep must be atomic. A crash midway used
+    // to leave partial chunks behind while doc_files.mtime recorded a fresh
+    // state — the incremental indexer then considered the file current and
+    // never re-embedded it: silently missing from search forever.
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM doc_chunks WHERE corpus_id = ?1 AND path = ?2",
+        params![corpus_id, path],
+    )?;
     for (i, (content, embedding)) in chunks.iter().enumerate() {
-        conn.execute(
+        tx.execute(
             "INSERT INTO doc_chunks (corpus_id, path, chunk_index, kind, content, embedding)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![corpus_id, path, i as i64, kind, content, f32_slice_to_blob(embedding)],
         )?;
     }
+    tx.commit()?;
     Ok(())
 }
 

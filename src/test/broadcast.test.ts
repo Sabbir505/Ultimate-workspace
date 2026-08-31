@@ -46,6 +46,10 @@ afterEach(() => {
     chatStatus: {},
     messageQueue: {},
     pendingArtifacts: {},
+    // The tools-flags test flips these; restore the store defaults (true/true)
+    // so the flip cannot leak into other tests in this file.
+    toolsEnabled: true,
+    codeExecEnabled: true,
   });
 });
 
@@ -62,9 +66,11 @@ describe("broadcastToSessions", () => {
 
     // Active session went through the normal send path.
     expect(sendMessage).toHaveBeenCalledWith("hello team", undefined, undefined);
-    // Background sessions got direct sends.
-    expect(sendChatMessageMock).toHaveBeenCalledWith("b", "hello team", undefined, undefined, undefined, undefined, undefined, undefined, undefined);
-    expect(sendChatMessageMock).toHaveBeenCalledWith("c", "hello team", undefined, undefined, undefined, undefined, undefined, undefined, undefined);
+    // Background sessions got direct sends — carrying the store's tool flags
+    // (audit B-22: omitted flags map to `false` in ipc.ts, which silently
+    // disabled tools for every background target).
+    expect(sendChatMessageMock).toHaveBeenCalledWith("b", "hello team", undefined, true, true, undefined, undefined, undefined, undefined);
+    expect(sendChatMessageMock).toHaveBeenCalledWith("c", "hello team", undefined, true, true, undefined, undefined, undefined, undefined);
     // Both are marked streaming (session-keyed, concurrent).
     const s = useChatStore.getState();
     expect("b" in s.streaming).toBe(true);
@@ -100,5 +106,25 @@ describe("broadcastToSessions", () => {
     sendChatMessageMock.mockRejectedValue(new Error("boom"));
     await useChatStore.getState().broadcastToSessions(["b"], "hello");
     expect("b" in useChatStore.getState().streaming).toBe(false);
+  });
+
+  it("passes the store's current toolsEnabled/codeExecEnabled to background sessions (audit B-22)", async () => {
+    // Store defaults: tools + code exec ON — background targets must get the
+    // same flags the single-session sendMessage path uses, not `false`.
+    useChatStore.setState({
+      activeChatSessionId: "a",
+      sessions: [session("a"), session("b")],
+      streaming: {},
+    });
+    await useChatStore.getState().broadcastToSessions(["b"], "hello");
+    expect(sendChatMessageMock).toHaveBeenCalledWith("b", "hello", undefined, true, true, undefined, undefined, undefined, undefined);
+
+    // A user who toggled tools off broadcasts that posture too.
+    sendChatMessageMock.mockClear();
+    // Reset streaming: the first broadcast left "b" marked streaming, and
+    // broadcastToSessions skips in-flight sessions.
+    useChatStore.setState({ toolsEnabled: false, codeExecEnabled: false, streaming: {} });
+    await useChatStore.getState().broadcastToSessions(["b"], "hello again");
+    expect(sendChatMessageMock).toHaveBeenCalledWith("b", "hello again", undefined, false, false, undefined, undefined, undefined, undefined);
   });
 });

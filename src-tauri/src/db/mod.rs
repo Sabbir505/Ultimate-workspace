@@ -56,6 +56,15 @@ pub fn chat_db_path(app: &tauri::AppHandle) -> std::io::Result<std::path::PathBu
         .path()
         .app_data_dir()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()))?;
+    Ok(resolve_db_path(&default_dir))
+}
+
+/// Pure core of [`chat_db_path`]: resolve the DB path given the DEFAULT app
+/// data dir. Public so the headless automation binary (which has no
+/// AppHandle) resolves the SAME database as the GUI — it used to hardcode
+/// the default location and silently read a stale/empty DB whenever
+/// `storage.dbDir` was set (B-27).
+pub fn resolve_db_path(default_dir: &std::path::Path) -> std::path::PathBuf {
     let default = default_dir.join("conduit.db");
     // The setting lives IN the DB, so resolve it by peeking at the default
     // location's DB (which always exists — it's created at first launch).
@@ -63,11 +72,11 @@ pub fn chat_db_path(app: &tauri::AppHandle) -> std::io::Result<std::path::PathBu
         if let Ok(Some(dir)) = settings::get_setting(&conn, "storage.dbDir") {
             let dir = dir.trim();
             if !dir.is_empty() {
-                return Ok(std::path::PathBuf::from(dir).join("conduit.db"));
+                return std::path::PathBuf::from(dir).join("conduit.db");
             }
         }
     }
-    Ok(default)
+    default
 }
 
 /// One-time cleanup for rows written before the \\?\ prefix fix: early
@@ -242,6 +251,18 @@ fn migrate_chat_session_worktree(conn: &Connection) -> DbResult<()> {
 /// their Send button. It must NOT run on every startup: chats created after
 /// the migration are inserted with NULL on purpose, and re-backfilling would
 /// clobber that intentional "unselected" state (M14).
+/// B-30: marker-backed migrations persist "backfill done" in `app_settings`.
+/// `init_schema` normally creates that table before migrations run; this
+/// no-op guard keeps isolated/test schemas working too.
+fn ensure_settings_table(conn: &Connection) {
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )",
+    );
+}
+
 fn migrate_chat_session_agent(conn: &Connection) -> DbResult<()> {
     let sql = "ALTER TABLE chat_sessions ADD COLUMN agent TEXT";
     let column_added = match conn.execute(sql, []) {
@@ -254,11 +275,22 @@ fn migrate_chat_session_agent(conn: &Connection) -> DbResult<()> {
             }
         }
     };
-    if column_added {
+    // B-30: the backfill used to fire only when the ALTER actually added the
+    // column — a crash between the ALTER (autocommitted) and this UPDATE
+    // permanently skipped the backfill (the column exists on every later
+    // start, so `column_added` stays false). Gate on a persisted marker
+    // instead: the backfill runs until it has observably COMPLETED once.
+    ensure_settings_table(conn);
+    let backfill_done = settings::get_setting(conn, "db.migration.agent.backfilled")
+        .ok()
+        .flatten()
+        .is_some();
+    if column_added || !backfill_done {
         conn.execute(
             "UPDATE chat_sessions SET agent = CASE WHEN provider = 'local_gguf' THEN 'local' ELSE 'builtin' END WHERE agent IS NULL",
             [],
         )?;
+        settings::set_setting(conn, "db.migration.agent.backfilled", "1")?;
     }
     Ok(())
 }
@@ -358,7 +390,16 @@ pub fn migrate_cost_v2(conn: &Connection) -> DbResult<()> {
             [], |r| r.get(0),
         )
         .unwrap_or(false);
-    if source_added && has_last_synced {
+    // B-30: gate the one-time backfills on a persisted marker rather than on
+    // `source_added` — a crash between the ALTER and the UPDATEs used to
+    // skip them forever (the column exists from then on, so source_added
+    // never became true again).
+    ensure_settings_table(conn);
+    let cost_backfill_done = settings::get_setting(conn, "db.migration.cost_v2.backfilled")
+        .ok()
+        .flatten()
+        .is_some();
+    if (source_added || !cost_backfill_done) && has_last_synced {
         conn.execute(
             "UPDATE cost_events
                 SET source = 'on_disk'
@@ -379,6 +420,7 @@ pub fn migrate_cost_v2(conn: &Connection) -> DbResult<()> {
                 AND s.harness IN ('claude_code', 'kimi_code')",
             [],
         )?;
+        settings::set_setting(conn, "db.migration.cost_v2.backfilled", "1")?;
     }
 
     // DROP COLUMN: gated on the column existing. Older SQLite (< 3.35) may

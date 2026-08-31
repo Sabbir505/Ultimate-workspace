@@ -895,12 +895,17 @@ export function ChatComposer({
   // notch stack above the composer card: one row per message with grip
   // (drag to reorder), expandable text, Steer (send now), Edit and Delete.
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);
+  // Split view renders one composer per pane (audit B-21): the queue UI, the
+  // working-folder picker and the queue actions below must address THIS
+  // pane's session, not the globally active one. The prop wins — same
+  // precedence the send path uses.
+  const effectiveSessionId = sessionIdProp ?? activeChatSessionId;
   // Team broadcast (roadmap #18): the session list + the broadcast action.
   const broadcastSessions = useChatStore((s) => s.sessions);
   const broadcastToSessions = useChatStore((s) => s.broadcastToSessions);
   const queuedMessages = useChatStore((s) =>
-    s.activeChatSessionId
-      ? (s.messageQueue[s.activeChatSessionId] ?? NO_QUEUED_MESSAGES)
+    effectiveSessionId
+      ? (s.messageQueue[effectiveSessionId] ?? NO_QUEUED_MESSAGES)
       : NO_QUEUED_MESSAGES,
   );
   const removeQueuedMessage = useChatStore((s) => s.removeQueuedMessage);
@@ -918,11 +923,11 @@ export function ChatComposer({
       multiple: false,
       title: "Choose working folder",
     });
-    if (typeof picked === "string" && activeChatSessionId) {
-      setCwdOverride(activeChatSessionId, picked);
+    if (typeof picked === "string" && effectiveSessionId) {
+      setCwdOverride(effectiveSessionId, picked);
     }
     textareaRef.current?.focus();
-  }, [activeChatSessionId, setCwdOverride]);
+  }, [effectiveSessionId, setCwdOverride]);
 
   // Slash-command skill popup: typing "/" as the first character opens a list
   // of every available skill (on-disk harness skills + the built-in
@@ -2021,7 +2026,7 @@ export function ChatComposer({
               </div>
             </div>
           )}
-      {queuedMessages.length > 0 && activeChatSessionId && (
+      {queuedMessages.length > 0 && effectiveSessionId && (
         <div className="composer-queue" aria-label="Queued messages">
           {queuedMessages.map((m, i) => (
             <QueuedMessageRow
@@ -2029,10 +2034,10 @@ export function ChatComposer({
               message={m}
               index={i}
               count={queuedMessages.length}
-              onSteer={() => void steerQueuedMessage(activeChatSessionId, m.id)}
-              onEdit={(text) => editQueuedMessage(activeChatSessionId, m.id, text)}
-              onDelete={() => removeQueuedMessage(activeChatSessionId, m.id)}
-              onReorder={(from, to) => moveQueuedMessage(activeChatSessionId, from, to)}
+              onSteer={() => void steerQueuedMessage(effectiveSessionId, m.id)}
+              onEdit={(text) => editQueuedMessage(effectiveSessionId, m.id, text)}
+              onDelete={() => removeQueuedMessage(effectiveSessionId, m.id)}
+              onReorder={(from, to) => moveQueuedMessage(effectiveSessionId, from, to)}
             />
           ))}
         </div>

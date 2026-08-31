@@ -131,7 +131,16 @@ pub(crate) struct LateAttach {
 impl ChatManager {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            // B-10: this client serves every stream round, compaction
+            // tokenize/summarize, and context counting — a blackholed connect
+            // (misconfigured base_url at a firewalled IP) used to hang all of
+            // them for the OS TCP timeout (minutes). 20s connect bound; body
+            // reads stay unbounded (streams are guarded by the B-9 stall
+            // watchdog instead).
+            client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(20))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             streams: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             pending_questions: Mutex::new(HashMap::new()),
@@ -855,10 +864,14 @@ pub(crate) async fn compute_docs_retrieval(
         .into_iter()
         .take(MAX_HITS)
         .map(|(path, content, score)| {
-            let text = if content.len() > MAX_CHUNK {
-                format!("{}…", &content[..MAX_CHUNK])
+            // Char-safe cap: a raw byte slice panics when MAX_CHUNK lands
+            // mid-codepoint (any CJK/emoji corpus) — and this runs inside the
+            // spawned turn task, where a panic kills the turn silently (B-1).
+            let text = crate::util::truncate_chars(&content, MAX_CHUNK);
+            let text = if content.chars().count() > MAX_CHUNK {
+                format!("{text}…")
             } else {
-                content
+                text
             };
             format!("[{} · score={:.2}]\n{}", path, score, text)
         })
@@ -891,10 +904,16 @@ pub(crate) async fn run_chat_stream(
         .build_request(client, req, api_key, base_url)
         .map_err(|e| format!("failed to build request: {e}"))?;
 
-    let response = request
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
+    // B-10: bound time-to-headers — a blackholed connect otherwise hangs the
+    // turn forever (OS TCP timeouts can be minutes). The B-9 watchdog below
+    // covers the body.
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        request.send(),
+    )
+    .await
+    .map_err(|_| "request timed out waiting for response headers (60s)".to_string())?
+    .map_err(|e| format!("request failed: {e}"))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -902,7 +921,8 @@ pub(crate) async fn run_chat_stream(
         return Err(format!("HTTP {status}: {body}"));
     }
 
-    use futures_util::StreamExt;
+    // (stream reads go through stream_next_with_watchdog, which brings its
+    // own StreamExt — no local import.)
 
     let mut stream = response.bytes_stream();
     let mut buf = String::new(); // SSE buffer passed to provider parser
@@ -910,26 +930,56 @@ pub(crate) async fn run_chat_stream(
     // arbitrarily, and feeding half a line into parse_sse_chunk is fatal
     // (its serde_json::from_str fails and kills the whole turn). Only
     // complete, newline-terminated lines may be parsed — same pattern the
-    // tool-loop rounds use in streaming.rs.
-    let mut pending = String::new();
+    // tool-loop rounds use in streaming.rs. B-14: byte-buffered, so a
+    // multi-byte char split across reads is never corrupted.
+    let mut pending = crate::util::SseLineBuffer::new();
     let mut full_text = String::new();
     let mut in_think = false;
+    // B-18: tolerate scattered malformed lines like the tool loops do
+    // (MAX_PARSE_FAILURES) instead of killing the turn on the first one.
+    // Genuine `{"error": …}` provider events (surfaced as "provider error:"
+    // by the parser) still fail immediately.
+    let mut parse_failures: u32 = 0;
     // Open the generation window: all tokens flowing from this SSE read are
     // model-generation time (not tool time or approval waits).
     perf.begin_gen();
 
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.map_err(|e| format!("stream read error: {e}"))?;
-        pending.push_str(&String::from_utf8_lossy(&chunk));
+    loop {
+        // B-9: 60s stall watchdog — a silent connection must fail the turn,
+        // not park it forever.
+        let chunk = match crate::chat::streaming::stream_next_with_watchdog(
+            &mut stream,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        {
+            Ok(Some(c)) => c,
+            Ok(None) => break,
+            Err(e) => return Err(e),
+        };
 
-        let mut complete_lines: Vec<String> = Vec::new();
-        while let Some(nl) = pending.find('\n') {
-            complete_lines.push(pending.drain(..=nl).collect());
-        }
+        let complete_lines = pending.push(&chunk);
 
         for line in complete_lines {
             let line = line.trim_end();
-            match provider.parse_sse_chunk(line, &mut buf)? {
+            let (token, done) = match provider.parse_sse_chunk(line, &mut buf) {
+                Ok(pair) => {
+                    parse_failures = 0;
+                    pair
+                }
+                Err(e) if e.starts_with("provider error:") => return Err(e),
+                Err(_) => {
+                    parse_failures += 1;
+                    if parse_failures >= crate::chat::streaming::MAX_PARSE_FAILURES {
+                        return Err(format!(
+                            "SSE parse stalled: {} consecutive JSON parse failures",
+                            crate::chat::streaming::MAX_PARSE_FAILURES
+                        ));
+                    }
+                    continue;
+                }
+            };
+            match (token, done) {
                 (Some(token), false) => {
                     // Reasoning tokens are sentinel-prefixed by the parser;
                     // wrap contiguous runs in <think>…</think> so the UI can
@@ -973,8 +1023,11 @@ pub(crate) async fn run_chat_stream(
     // behavior did so via str::lines. Parse failures here are tolerated, not
     // fatal: the stream has already ended, and erroring now would throw away
     // a turn whose tokens were all delivered.
-    let trailing = pending.trim_end().to_string();
-    if !trailing.is_empty() {
+    for trailing in pending.finish() {
+        let trailing = trailing.trim_end().to_string();
+        if trailing.is_empty() {
+            continue;
+        }
         if let Ok((Some(token), _)) = provider.parse_sse_chunk(&trailing, &mut buf) {
             let mut out = String::new();
             if let Some(reasoning) = token.strip_prefix(REASONING_PREFIX) {

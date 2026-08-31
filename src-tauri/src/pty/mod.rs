@@ -662,18 +662,28 @@ impl PtyManager {
             cmd.env(k, v);
         }
 
-        let child = pair
+        let mut child = pair
             .slave
             .spawn_command(cmd)
             .map_err(|e| format!("failed to spawn `{}`: {e}", spec.program))?;
-        let mut reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| format!("failed to clone pty reader: {e}"))?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| format!("failed to take pty writer: {e}"))?;
+        let mut reader = match pair.master.try_clone_reader() {
+            Ok(r) => r,
+            Err(e) => {
+                // E-9b: the child is already running — don't orphan it when
+                // the pane can't be built.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("failed to clone pty reader: {e}"));
+            }
+        };
+        let writer = match pair.master.take_writer() {
+            Ok(w) => w,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("failed to take pty writer: {e}"));
+            }
+        };
         // Dropping the slave side lets the reader observe EOF when the child
         // exits; keeping it open can make the read loop hang forever.
         drop(pair.slave);
@@ -938,6 +948,7 @@ impl PtyManager {
             let pane = Arc::clone(&pane);
             let app = self.app.clone();
             let session_to_pane = Arc::clone(&self.session_to_pane);
+            let panes = Arc::clone(&self.panes);
             thread::spawn(move || {
                 // Poll try_wait rather than a blocking wait: a blocking wait
                 // would hold the child lock and prevent kill_pty from getting
@@ -950,20 +961,41 @@ impl PtyManager {
                     }
                 };
                 pane.exited.store(true, Ordering::Relaxed);
-                // Drop any session→pane mapping pointing at this pane so the
-                // mobile relay stops reporting the dead session as live (and
-                // SendToSession stops writing into the void). kill_pane is
-                // covered too: the kill makes try_wait return, landing here.
-                session_to_pane.lock().retain(|_, v| *v != pane.id);
+                // B-7 ownership gate: `spawn()` respawns the SAME pane id by
+                // killing the old pane first and inserting a NEW Pane instance
+                // ~10-50ms later. The old pane's waiter (120ms poll) almost
+                // always wakes AFTER that insert, so an unconditional cleanup
+                // used to strip the NEW pane's session mapping and flash a
+                // spurious `pty:exit` over a live terminal. Only reap when
+                // this instance is still the registered one — or when the id
+                // is gone entirely (a real close: kill_pane removed it and
+                // relies on THIS emit for the exit event). A newer instance
+                // owning the id means the mapping and the exit event belong
+                // to it, not to us.
+                let still_owner = match panes.lock().get(&pane.id).cloned() {
+                    Some(current) => Arc::ptr_eq(&current, &pane),
+                    None => true,
+                };
+                if still_owner {
+                    // Drop any session→pane mapping pointing at this pane so
+                    // the mobile relay stops reporting the dead session as
+                    // live (and SendToSession stops writing into the void).
+                    // kill_pane is covered too: the kill makes try_wait
+                    // return, landing here.
+                    session_to_pane.lock().retain(|_, v| *v != pane.id);
+                }
                 // Dropping the sender closes the writer thread's channel.
+                // Per-instance (this Arc), so always safe.
                 pane.writer_tx.lock().take();
-                let _ = app.emit(
-                    "pty:exit",
-                    PtyExitEvent {
-                        pane_id: pane.id.clone(),
-                        code,
-                    },
-                );
+                if still_owner {
+                    let _ = app.emit(
+                        "pty:exit",
+                        PtyExitEvent {
+                            pane_id: pane.id.clone(),
+                            code,
+                        },
+                    );
+                }
             });
         }
 

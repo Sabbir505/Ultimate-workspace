@@ -504,22 +504,22 @@ export const useUiStore = create<UiState>((set) => ({
   // duplicate tabs for the same file.
   openArtifactTab: (artifact) =>
     set((s) => {
-      // Dedupe by path when it's an on-disk artifact.
-      if (artifact.path && !artifact.inline) {
+      // Dedupe by path — inline artifacts (mermaid/jsx) included (audit E-9):
+      // exempting them made every re-open stack a duplicate tab and left the
+      // refresh branch below dead code.
+      if (artifact.path) {
         const existing = s.openTabs.find(
           (t) => t.kind === "artifact" && t.artifactPath === artifact.path,
         );
         if (existing) {
-          // Refresh the inline payload when provided: an inline artifact's
-          // content may have been re-rendered (e.g. the same mermaid diagram
+          // Refresh the payload unconditionally: an inline artifact's content
+          // may have been re-rendered (e.g. the same mermaid diagram
           // re-rendered) since the tab first opened.
-          const openTabs = artifact.inline
-            ? s.openTabs.map((t) =>
-                t.instanceId === existing.instanceId
-                  ? { ...t, artifactInline: artifact.inline }
-                  : t,
-              )
-            : s.openTabs;
+          const openTabs = s.openTabs.map((t) =>
+            t.instanceId === existing.instanceId
+              ? { ...t, artifactPath: artifact.path, artifactInline: artifact.inline }
+              : t,
+          );
           return {
             openTabs,
             activeTabId: existing.instanceId,

@@ -466,16 +466,13 @@ async fn handle_connection(
         },
     ));
     let (conn_tx, conn_rx) = super::relay_ws::make_channel();
-    // Register for broadcast pushes (automation-finished notices) — removed
-    // by the cleanup guard when this handler exits, on any path.
+    // B-25: broadcast registration is DEFERRED until pairing succeeds (the
+    // insert used to happen here, so any peer that opened the socket and
+    // idled in the pairing window received every automation/budget push).
+    // Removed by the cleanup guard when this handler exits, on any path.
     let conn_id = {
         static NEXT_CONN_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         NEXT_CONN_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    };
-    conn_registry.lock().insert(conn_id, conn_tx.clone());
-    let _conn_cleanup = ConnCleanup {
-        map: Arc::clone(&conn_registry),
-        id: conn_id,
     };
     {
         let pump_write = Arc::clone(&write);
@@ -552,10 +549,25 @@ async fn handle_connection(
             return Err("first frame was not a Pair message".into());
         }
     };
+    // B-24: which pairing mode won — E2E connections must reject plaintext
+    // Text command frames (relay_ws's protocol doc promises exactly that).
+    let used_e2e = proof.is_some();
     match (proof, legacy_token) {
         // E2E path: proof-only. Verify the HMAC against the expected token,
         // then both sides derive the same session key from the shared PSK.
         (Some(p), _) => {
+            // S-1: fail closed when no pairing token is configured — with an
+            // empty token the proof is HMAC("") and publicly computable.
+            // (verify_pair_proof now also rejects empty tokens itself; this
+            // check just gives the honest error message.)
+            if expected_token.is_empty() {
+                let err = DesktopMessage::ChatError {
+                    chat_session_id: "pair".into(),
+                    error: "pairing failed: no pairing token configured".into(),
+                };
+                let _ = send_msg(&write, &err).await;
+                return Err("pairing failed: no pairing token configured".into());
+            }
             if !super::relay_crypto::verify_pair_proof(&expected_token, &p) {
                 let err = DesktopMessage::ChatError {
                     chat_session_id: "pair".into(),
@@ -596,6 +608,15 @@ async fn handle_connection(
             return Err("pairing failed: Pair frame carried neither proof nor token".into());
         }
     }
+
+    // B-25: pairing succeeded — NOW register for broadcast pushes. Every
+    // failure path above returned before this line, so unauthenticated peers
+    // never enter the registry.
+    conn_registry.lock().insert(conn_id, conn_tx.clone());
+    let _conn_cleanup = ConnCleanup {
+        map: Arc::clone(&conn_registry),
+        id: conn_id,
+    };
 
     // Keepalive: ping the phone on a fixed cadence and treat the connection
     // as dead if NO inbound frame (message or pong) arrives within
@@ -643,7 +664,23 @@ async fn handle_connection(
         // protocol. Application payloads arrive as Binary (E2E-encrypted) or
         // Text (legacy plaintext connections).
         let text = match msg {
-            Message::Text(t) => t,
+            Message::Text(t) => {
+                if used_e2e {
+                    // B-24: an E2E-paired connection must not accept
+                    // plaintext command frames — that would reduce E2E to
+                    // response-only confidentiality (a replayed proof plus
+                    // plaintext commands would fully control the desktop).
+                    // relay_ws's protocol doc already declares Text frames a
+                    // protocol violation in E2E mode; enforce it.
+                    let err = DesktopMessage::ChatError {
+                        chat_session_id: "pair".into(),
+                        error: "protocol violation: plaintext frame on an E2E connection".into(),
+                    };
+                    let _ = send_msg(&write, &err).await;
+                    continue;
+                }
+                t
+            }
             Message::Binary(b) => {
                 let plain = match super::relay_ws::decrypt_binary(&write, &b).await {
                     Some(p) => p,
@@ -724,19 +761,81 @@ async fn handle_connection(
                 effort,
                 gguf_path,
             } => {
-                match handle_chat_turn(
-                    provider_id, model, messages, system, effort, gguf_path,
-                    &app, &db, &chat_mgr, &write,
-                )
-                .await
-                {
-                    Ok(()) => {}
-                    Err(e) => {
-                        let err = DesktopMessage::ChatError {
-                            chat_session_id: "unknown".to_string(),
-                            error: e,
-                        };
-                        let _ = send_msg(&write, &err).await;
+                // B-26: run the turn on its own task and keep polling the
+                // socket — an inline await used to make CancelChatTurn sit
+                // unread in the socket for the whole stream, so the phone's
+                // stop button did nothing mid-turn. Everything the turn needs
+                // is cheaply cloneable (Arcs + AppHandle).
+                let turn_app = app.clone();
+                let turn_db = Arc::clone(&db);
+                let turn_mgr = Arc::clone(&chat_mgr);
+                let turn_write = Arc::clone(&write);
+                let mut turn = tokio::spawn(async move {
+                    handle_chat_turn(
+                        provider_id, model, messages, system, effort, gguf_path,
+                        &turn_app, &turn_db, &turn_mgr, &turn_write,
+                    )
+                    .await
+                });
+                loop {
+                    tokio::select! {
+                        res = &mut turn => {
+                            if let Ok(Err(e)) = res {
+                                let err = DesktopMessage::ChatError {
+                                    chat_session_id: "unknown".to_string(),
+                                    error: e,
+                                };
+                                let _ = send_msg(&write, &err).await;
+                            }
+                            break;
+                        }
+                        next = read.next() => {
+                            match next {
+                                Some(Ok(Message::Text(t))) => {
+                                    match serde_json::from_str::<MobileMessage>(&t) {
+                                        Ok(MobileMessage::CancelChatTurn { chat_session_id }) => {
+                                            eprintln!("[mobile-relay] CancelChatTurn mid-turn (B-26)");
+                                            chat_mgr.cancel(&chat_session_id);
+                                            let resp = DesktopMessage::ChatDone {
+                                                chat_session_id,
+                                                usage: None,
+                                            };
+                                            let _ = send_msg(&write, &resp).await;
+                                        }
+                                        Ok(_) => {
+                                            // One turn at a time: queueing other
+                                            // commands mid-stream would need the
+                                            // full dispatch loop reentrant; tell
+                                            // the phone honestly.
+                                            let err = DesktopMessage::ChatError {
+                                                chat_session_id: "unknown".to_string(),
+                                                error: "busy: a chat turn is in flight".into(),
+                                            };
+                                            let _ = send_msg(&write, &err).await;
+                                        }
+                                        Err(e) => {
+                                            let err = DesktopMessage::ChatError {
+                                                chat_session_id: "unknown".to_string(),
+                                                error: format!("malformed request: {e}"),
+                                            };
+                                            let _ = send_msg(&write, &err).await;
+                                        }
+                                    }
+                                }
+                                Some(Ok(Message::Ping(p))) => {
+                                    let _ = write.lock().await.sink.send(Message::Pong(p)).await;
+                                }
+                                Some(Ok(_)) => {}
+                                Some(Err(e)) => {
+                                    turn.abort();
+                                    return Err(format!("ws read failed: {e}"));
+                                }
+                                None => {
+                                    turn.abort();
+                                    return Err("connection closed mid-turn".into());
+                                }
+                            }
+                        }
                     }
                 }
             }

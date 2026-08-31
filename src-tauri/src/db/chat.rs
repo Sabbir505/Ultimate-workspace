@@ -633,18 +633,30 @@ pub fn list_active_chat_messages(
 /// or expired on the normal 30-day sweep, so a user who deletes the last
 /// assistant message of a turn doesn't lose generated files.
 pub fn delete_chat_message(conn: &Connection, message_id: i64) -> DbResult<bool> {
-    let changed = conn.execute(
+    // B-29/B-31: one transaction — delete the row, detach artifact links, AND
+    // release any compaction fold pointing at it. `superseded_by` has no FK,
+    // so deleting the summary row used to leave the folded messages pointing
+    // at a ghost id — permanently excluded from `list_active_chat_messages`
+    // (the model's context) while still rendering in the timeline.
+    let tx = conn.unchecked_transaction()?;
+    let changed = tx.execute(
         "DELETE FROM chat_messages WHERE id = ?1",
         params![message_id],
     )?;
     if changed > 0 {
         // Drop any FK-style link to this message; the artifact row/file
         // itself stays (see doc comment above).
-        let _ = conn.execute(
+        let _ = tx.execute(
             "UPDATE artifacts SET chat_message_id = NULL WHERE chat_message_id = ?1",
             params![message_id],
         );
+        // B-31: un-fold messages whose anchor was this (summary) row.
+        tx.execute(
+            "UPDATE chat_messages SET superseded_by = NULL WHERE superseded_by = ?1",
+            params![message_id],
+        )?;
     }
+    tx.commit()?;
     Ok(changed > 0)
 }
 

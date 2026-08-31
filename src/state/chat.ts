@@ -1061,13 +1061,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (chatSessionId in get().streaming) {
       // Steering = interrupt. Stop the in-flight turn, then dispatch the
       // steered message as the very next turn (the partial reply survives
-      // via the cancel path's partial persist).
-      await get().cancelStream();
+      // via the cancel path's partial persist). Both calls take the session
+      // id explicitly — without it they'd cancel/send into whichever chat is
+      // globally active, not the one being steered (audit B-21).
+      await get().cancelStream(chatSessionId);
     }
     // Put the not-yet-sent messages back — they drain FIFO once the steered
     // turn finishes (onDone → drainQueue).
     set((s) => ({ messageQueue: { ...s.messageQueue, [chatSessionId]: remaining } }));
-    void get().sendMessage(steered.content, steered.attachments, steered.forceResearch);
+    void get().sendMessage(steered.content, steered.attachments, steered.forceResearch, chatSessionId);
   },
 
   editQueuedMessage: (chatSessionId, id, content) =>
@@ -1986,7 +1988,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
             projectsState.selectedProjectId ?? undefined,
           );
         } else {
-          await sendChatMessage(sid, content, undefined, undefined, undefined, undefined, forceResearch, undefined, workingDir);
+          // Pass the store's tool flags (audit B-22): ipc.ts maps omitted
+          // flags to false, which silently ran every background turn with
+          // tools off. Same values the single-session sendMessage path uses.
+          await sendChatMessage(
+            sid,
+            content,
+            undefined,
+            state.toolsEnabled,
+            state.codeExecEnabled,
+            undefined,
+            forceResearch,
+            undefined,
+            workingDir,
+          );
         }
       } catch (err) {
         // Clear this session's streaming state so its dot doesn't wedge.
@@ -2101,9 +2116,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
       toastError("Couldn't delete the message", err);
       if (activeChatSessionId) {
         try {
-          const msgs = await getChatMessages(activeChatSessionId);
-          if (inSplit) set({ splitMessages: msgs ?? [], splitMessagesSessionId: activeChatSessionId });
-          else set({ messages: msgs ?? [], messagesSessionId: activeChatSessionId });
+          // Same 200-row page cap as loadMessages (M10 / audit B-23) — the
+          // rollback refetch must not pull the full history.
+          const msgs = await getChatMessages(activeChatSessionId, undefined, 200);
+          if (inSplit)
+            set({
+              splitMessages: msgs ?? [],
+              splitMessagesSessionId: activeChatSessionId,
+              splitHasMoreHistory: (msgs?.length ?? 0) >= 200,
+            });
+          else
+            set({
+              messages: msgs ?? [],
+              messagesSessionId: activeChatSessionId,
+              hasMoreHistory: (msgs?.length ?? 0) >= 200,
+            });
         } catch {
           /* best-effort rollback */
         }
@@ -2375,11 +2402,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // mergeOptimistic keeps the just-drained queued message's bubble: the
       // refetch snapshot can predate that send's DB persist.
       try {
-        const messages = await getChatMessages(streamingChatSessionId);
+        // Same 200-row page cap as loadMessages (M10 / audit B-23): the
+        // unbounded refetch deserialized the FULL history and desynced
+        // hasMoreHistory. The guard above already scoped this write to the
+        // active session, so the flag follows the buffer it feeds.
+        const messages = await getChatMessages(streamingChatSessionId, undefined, 200);
         if (messages && get().activeChatSessionId === streamingChatSessionId) {
           set((s) => ({
             messages: mergeOptimistic(s.messages, messages),
             messagesSessionId: streamingChatSessionId,
+            hasMoreHistory: messages.length >= 200,
           }));
         }
       } catch {
@@ -2405,6 +2437,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // ---- Event handlers (called by useChatEvents) ----
 
   onToken: (chatSessionId, token) => {
+    // Ignore stragglers (same guard as onPerf): a token emitted just before
+    // an abort can cross IPC AFTER done/cancel/error cleared the entry, and
+    // the write below would resurrect the key — a stuck "working" dot until
+    // the next terminal event. Safe to early-out because onToken never
+    // CREATES the turn's entry: sendMessage and broadcastToSessions
+    // pre-create it (as "") before the first token can arrive.
+    if (!(chatSessionId in get().streaming)) return;
     set((s) => {
       const nextStatus = { ...s.chatStatus };
       delete nextStatus[chatSessionId];
@@ -2584,14 +2623,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Refresh the session list (title may have been updated by the backend).
     // Also re-seed sessionProjects from the refreshed sessions so any
     // project-bound chats stay nested under their project after onDone.
-    const sessions = await listChatSessions();
-    if (sessions) {
-      const clean = withoutDeleted(sessions);
-      const nextProjects = { ...get().sessionProjects };
-      for (const s of clean) {
-        if (s.projectId) nextProjects[s.id] = s.projectId;
+    // Best-effort: a rejection here must not abort onDone before the queue
+    // drain + goal-loop advance below (that stranded queued messages until
+    // the user manually sent).
+    try {
+      const sessions = await listChatSessions();
+      if (sessions) {
+        const clean = withoutDeleted(sessions);
+        const nextProjects = { ...get().sessionProjects };
+        for (const s of clean) {
+          if (s.projectId) nextProjects[s.id] = s.projectId;
+        }
+        set({ sessions: clean, sessionProjects: nextProjects });
       }
-      set({ sessions: clean, sessionProjects: nextProjects });
+    } catch {
+      /* best-effort relist */
     }
     // Turn finished — send the next queued message, if any (FIFO).
     get().drainQueue(chatSessionId);
@@ -2726,6 +2772,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   onError: (chatSessionId, message, code) => {
+    // Persist the streamed partial the same way the cancel path does (audit
+    // B-19): the backend's error path discards its buffer WITHOUT persisting,
+    // so this is the only chance to keep the text the user already watched.
+    // Gated on the streaming entry still existing — the cleanup below deletes
+    // the key synchronously, so a duplicate chat:error for one turn cannot
+    // double-persist (the backend never persists on error, so there is no
+    // other dedupe to race with).
+    const partial = get().streaming[chatSessionId] ?? "";
+    if (chatSessionId in get().streaming && partial.trim().length > 0) {
+      void persistPartialChatMessage(chatSessionId, partial).catch(() => {
+        /* best-effort: the error itself is still surfaced below */
+      });
+    }
     // Clear streaming state and surface the error for the active session.
     // Also drop this session's live-perf chip and pending-artifact buffer —
     // onDone clears both, and an errored turn must not leave them stuck

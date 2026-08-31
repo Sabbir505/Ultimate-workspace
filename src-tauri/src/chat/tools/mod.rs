@@ -186,12 +186,14 @@ pub struct ToolCaps {
     /// model's `run_code` calls are constrained to the sandbox rather than
     /// any system interpreter path.
     ///
-    /// Currently plumbed end-to-end but not yet branched on: code execution
-    /// already routes through the bundled sandboxed Python unconditionally
-    /// (`chat::python_runtime`), so there is no non-sandbox path to gate
-    /// against yet. The field is part of the capability contract so a future
-    /// host-execution path can be constrained for local models without
-    /// restructuring how capabilities are passed down.
+    /// Currently plumbed end-to-end but not yet branched on. NOTE: there is
+    /// NO OS-level sandbox anywhere on this path today — `codeexec::run_code`
+    /// runs the interpreter (bundled Python when shipped, else the system
+    /// one) with full user privileges and says so in its result text
+    /// (audit E-1). "Bundled" means relocatable/offline, NOT confined.
+    /// The field is part of the capability contract so a future sandboxed
+    /// execution path can be gated for local models without restructuring
+    /// how capabilities are passed down.
     #[allow(dead_code)]
     pub requires_local_sandbox: bool,
     /// Connectors attached to THIS turn only (per-conversation opt-in). Each
@@ -545,7 +547,7 @@ const RUN_SHELL_DESC: &str = "Run a native shell command (cmd.exe / sh) with \
     the user's privileges and return combined stdout/stderr — CLI tools like \
     git, pip, ffmpeg work as in a terminal. One-shot commands only (nothing \
     long-running like a dev server). ALWAYS approval-gated. Prefer \
-    `download_file` for plain URL downloads and `run_code` for sandboxed \
+    `download_file` for plain URL downloads and `run_code` for short \
     snippets. NEVER use this to open/launch a file for the user (no `start`, \
     `open`, `xdg-open`) — that is exactly what the `open_file` tool does, \
     and shell quoting around `start` only produces Windows 'cannot find' \

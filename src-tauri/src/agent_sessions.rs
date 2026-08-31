@@ -88,6 +88,17 @@ struct AgentChild {
     cli_session_id: Arc<Mutex<Option<String>>>,
     /// Set while a turn is streaming; cleared on result/exit.
     turn_in_flight: Arc<AtomicBool>,
+    /// Whether a reader thread is still draining the current process's
+    /// stdout. Cleared by a RAII guard on EVERY reader exit path; `send_*`
+    /// respawns when this is `false` even though `child` is still Some —
+    /// a handshake-failed or crashed CLI used to leave `child` occupied
+    /// with no reader alive, wedging every later send (B-4/B-5).
+    reader_alive: Arc<AtomicBool>,
+    /// Incremented on every (re)spawn. A reader thread captures its value
+    /// and may only clear `turn_in_flight` while it still matches — an old
+    /// reader's late EOF must not clobber a turn already started on the
+    /// respawned process (E-5).
+    proc_generation: Arc<AtomicU64>,
     /// Set by `cancel` for the CURRENT turn/process only. Replaced with a
     /// fresh flag on every (re)spawn, so a late-finishing reader thread from
     /// a cancelled turn still sees `true` (skips persisting the partial
@@ -174,6 +185,8 @@ impl AgentSessionManager {
                     spawned_mode: None,
                     cli_session_id: Arc::new(Mutex::new(stored)),
                     turn_in_flight: Arc::new(AtomicBool::new(false)),
+                    reader_alive: Arc::new(AtomicBool::new(false)),
+                    proc_generation: Arc::new(AtomicU64::new(0)),
                     cancelled: Arc::new(AtomicBool::new(false)),
                     stdin: Arc::new(Mutex::new(None)),
                     acp_pending: Arc::new(Mutex::new(None)),
@@ -184,6 +197,15 @@ impl AgentSessionManager {
                     oc_last_event_ms: Arc::new(AtomicU64::new(0)),
                 }
             });
+        // Check turn-in-flight BEFORE persisting the user message, so a
+        // rejected send doesn't leave an orphan user message in the DB
+        // with no assistant reply (which would survive restarts). (E-4:
+        // also BEFORE the harness-switch teardown below — the teardown used
+        // to run first, killing the in-flight turn's process tree and only
+        // then rejecting the send.)
+        if entry.turn_in_flight.load(Ordering::SeqCst) {
+            return Err("a turn is already running for this chat".to_string());
+        }
         // Harness switch on an existing chat: kill the old CLI's process and
         // drop its resume id — a kimi session id means nothing to opencode.
         if entry.harness != harness {
@@ -196,12 +218,6 @@ impl AgentSessionManager {
             if let Ok(mut g) = entry.cli_session_id.lock() {
                 *g = None;
             }
-        }
-        // Check turn-in-flight BEFORE persisting the user message, so a
-        // rejected send doesn't leave an orphan user message in the DB
-        // with no assistant reply (which would survive restarts).
-        if entry.turn_in_flight.load(Ordering::SeqCst) {
-            return Err("a turn is already running for this chat".to_string());
         }
         entry.model = model.to_string();
 
@@ -285,7 +301,10 @@ impl AgentSessionManager {
     /// persist the partial reply or emit a second `chat:done`. State is
     /// dropped only when the chat itself is deleted (`remove_session`).
     pub fn cancel(&self, app: &AppHandle, chat_session_id: &str) -> Result<(), String> {
-        let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
+        // E-6: poison recovery like `send` — the panic that poisoned the lock
+        // is exactly when children most need to be killed, so teardown must
+        // not silently no-op behind `if let Ok(...)`.
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = sessions.get_mut(chat_session_id) {
             entry.cancelled.store(true, Ordering::SeqCst);
             // ACP: best-effort graceful cancel — notify the agent which
@@ -307,6 +326,18 @@ impl AgentSessionManager {
                 kill_child_tree(&mut child);
             }
             entry.turn_in_flight.store(false, Ordering::SeqCst);
+            // B-6: a cancelled opencode turn's partial reply lives on in the
+            // shared SSE buffer — it would otherwise be prefixed to the NEXT
+            // turn's persisted message (and survive restarts). The turn
+            // thread's cancelled branch clears the same cells; this is the
+            // backstop for the case where that thread already died with the
+            // server and never reached its branch.
+            entry
+                .oc_full
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            *entry.oc_in_think.lock().unwrap_or_else(|e| e.into_inner()) = false;
         }
         // A turn paused on a can_use_tool approval card must not outlive the
         // cancel: dropping the pendings resolves the oneshot to a deny, the
@@ -365,12 +396,13 @@ impl AgentSessionManager {
     /// forget the in-memory CLI session id (the persisted app_settings keys
     /// are removed by the delete_chat_session command).
     pub fn remove_session(&self, chat_session_id: &str) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            if let Some(mut entry) = sessions.remove(chat_session_id) {
-                entry.cancelled.store(true, Ordering::SeqCst);
-                if let Some(mut child) = entry.child.take() {
-                    kill_child_tree(&mut child);
-                }
+        // E-6: poison recovery, same as send/cancel — the child tree must be
+        // killed even (especially) after a panic poisoned the lock.
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(mut entry) = sessions.remove(chat_session_id) {
+            entry.cancelled.store(true, Ordering::SeqCst);
+            if let Some(mut child) = entry.child.take() {
+                kill_child_tree(&mut child);
             }
         }
     }
@@ -387,11 +419,12 @@ impl AgentSessionManager {
 
     /// Kill all children (app shutdown).
     pub fn kill_all(&self) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            for (_, mut c) in sessions.drain() {
-                if let Some(mut child) = c.child.take() {
-                    kill_child_tree(&mut child);
-                }
+        // E-6: poison recovery, same as send/cancel — shutdown must kill
+        // every child even when a panic poisoned the lock.
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        for (_, mut c) in sessions.drain() {
+            if let Some(mut child) = c.child.take() {
+                kill_child_tree(&mut child);
             }
         }
     }
@@ -468,6 +501,28 @@ fn kill_child_tree(child: &mut Child) {
     // ends when the stdout pipe closes — without this a stale stdin
     // reference can keep the pipe alive on some platforms.
     drop(child.stdin.take());
+}
+
+/// RAII guard for a reader thread's liveness (B-4/B-5): drops
+/// `reader_alive` to `false` on EVERY exit path from the reader — EOF, an
+/// early `return` (mid-handshake failures), or a panic unwinding through
+/// the thread body. `send_claude_turn`/`send_acp_turn` respawn when the
+/// flag is down; scattering `.store(false)` at each return site would miss
+/// the panic path and permanently wedge the chat.
+struct ReaderAliveGuard(Arc<AtomicBool>);
+
+impl Drop for ReaderAliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// E-5: a reader may only clear `turn_in_flight` while its process is still
+/// the session's CURRENT generation. A respawned process runs with a new
+/// generation, so an old reader's late EOF must leave the flag (it belongs
+/// to a turn already streaming on the new process) alone.
+fn should_clear_in_flight(current_generation: u64, reader_generation: u64) -> bool {
+    current_generation == reader_generation
 }
 
 /// DB key for the per-chat, per-harness CLI session id (kimi `--session`,
@@ -669,13 +724,22 @@ fn send_claude_turn(
     // via set_permission_mode where the running CLI supports it; this is the
     // deterministic backstop for that best-effort path.)
     let current_mode = chat_permission_mode_label(db, sid);
+    // B-5: a CLI that died between turns leaves `child` Some holding a dead
+    // pipe — its reader's RAII guard dropped `reader_alive`, so respawn on
+    // that too instead of failing every later send with a broken-pipe error
+    // (same intent as the opencode path's opencode_server_alive probe).
     if entry.child.is_none()
+        || !entry.reader_alive.load(Ordering::SeqCst)
         || entry.spawned_model.as_deref() != Some(entry.model.as_str())
         || entry.spawned_mode.as_deref() != Some(current_mode.as_str())
     {
         if let Some(mut old) = entry.child.take() {
             kill_child_tree(&mut old);
         }
+        // The dead process's stdin is a broken pipe — drop it so a respawn
+        // failure can't leave a stale handle behind (B-4/B-5 hygiene).
+        let mut guard = entry.stdin.lock().map_err(|e| e.to_string())?;
+        *guard = None;
         // Fresh per-process cancel flag: a respawn after cancel() must not
         // inherit the previous process's `true`.
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -690,6 +754,8 @@ fn send_claude_turn(
             &entry.turn_in_flight,
             &entry.cli_session_id,
             &cancelled,
+            &entry.reader_alive,
+            &entry.proc_generation,
             &entry.stdin,
             connectors,
         )?;
@@ -807,7 +873,20 @@ fn send_acp_turn(
         crate::acp_agents::find_agent(&conn, acp_id)
     }
     .ok_or_else(|| format!("ACP agent '{acp_id}' is not registered"))?;
-    if entry.child.is_none() {
+    // B-4/B-5: respawn when the previous reader is dead even though `child`
+    // is still Some — a handshake failure returns from read_acp_stream early
+    // and used to leave the child cell occupied with no reader alive, so the
+    // queued turn was never drained and every later send was rejected.
+    if entry.child.is_none() || !entry.reader_alive.load(Ordering::SeqCst) {
+        if let Some(mut old) = entry.child.take() {
+            kill_child_tree(&mut old);
+        }
+        // The dead process's stdin is a broken pipe — drop it with the rest
+        // of the old state before respawning fresh.
+        {
+            let mut guard = entry.stdin.lock().map_err(|e| e.to_string())?;
+            *guard = None;
+        }
         // Fresh per-process cancel flag: a respawn after cancel() must not
         // inherit the previous process's `true`.
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -870,7 +949,16 @@ fn send_acp_turn(
         let stdin2 = Arc::clone(&entry.stdin);
         let pending2 = Arc::clone(&entry.acp_pending);
         let request_id2 = Arc::clone(&entry.acp_request_id);
+        // B-4/B-5/E-5: new process generation — arm `reader_alive` (the
+        // thread's RAII guard clears it on every exit path, including the
+        // mid-handshake early returns) and stamp the generation the reader
+        // may clear `turn_in_flight` for.
+        let generation = entry.proc_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        entry.reader_alive.store(true, Ordering::SeqCst);
+        let reader_alive2 = Arc::clone(&entry.reader_alive);
+        let generation_cell2 = Arc::clone(&entry.proc_generation);
         std::thread::spawn(move || {
+            let _alive = ReaderAliveGuard(reader_alive2);
             read_acp_stream(
                 Some(&app2),
                 &db2,
@@ -882,6 +970,8 @@ fn send_acp_turn(
                 stdin2,
                 &pending2,
                 &request_id2,
+                &generation_cell2,
+                generation,
                 watches,
             );
         });
@@ -942,6 +1032,8 @@ fn read_acp_stream(
     shared_stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
     pending: &Arc<Mutex<Option<String>>>,
     request_id_cell: &Arc<Mutex<Option<u64>>>,
+    proc_generation: &AtomicU64,
+    my_generation: u64,
     mut watches: Vec<DirWatch>,
 ) {
     let mut full = String::new();
@@ -980,16 +1072,40 @@ fn read_acp_stream(
                         .get("message")
                         .and_then(|m| m.as_str())
                         .unwrap_or("unknown JSON-RPC error");
-                    if !handshake_done || Some(id) == pending_request_id {
-                        // Handshake or first-turn request failed → the turn
-                        // is over before it streamed anything.
+                    // B-13: the first turn's id lives in pending_request_id;
+                    // later turns' ids are stored by send_acp_turn in
+                    // request_id_cell. A matching error response fails the
+                    // CURRENT turn — ignoring it left turn_in_flight set
+                    // forever from turn 2 on (same wedge as B-4).
+                    let current_turn_id = request_id_cell.lock().ok().and_then(|g| *g);
+                    if !handshake_done
+                        || Some(id) == pending_request_id
+                        || current_turn_id == Some(id)
+                    {
+                        // Handshake or in-flight turn request failed → the
+                        // turn is over before it streamed anything.
                         emit_error(
                             app,
                             sid,
                             &format!("ACP request failed: {msg}"),
                         );
                         full.clear();
-                        in_flight.store(false, Ordering::SeqCst);
+                        if should_clear_in_flight(
+                            proc_generation.load(Ordering::SeqCst),
+                            my_generation,
+                        ) {
+                            in_flight.store(false, Ordering::SeqCst);
+                        }
+                        // Consume the failed id so a duplicate error
+                        // response can't re-fail the next turn.
+                        if Some(id) == pending_request_id {
+                            pending_request_id = None;
+                        }
+                        if let Ok(mut g) = request_id_cell.lock() {
+                            if *g == Some(id) {
+                                *g = None;
+                            }
+                        }
                         if !handshake_done {
                             return;
                         }
@@ -1030,7 +1146,17 @@ fn read_acp_stream(
                             "ACP agent returned no sessionId for session/new",
                         );
                         full.clear();
-                        in_flight.store(false, Ordering::SeqCst);
+                        // B-4: returning here used to leave `entry.child`
+                        // occupied with a live agent and no reader — the next
+                        // send queued into the void. The RAII guard below
+                        // drops `reader_alive`, and the generation gate keeps
+                        // this late clear from clobbering a respawned turn.
+                        if should_clear_in_flight(
+                            proc_generation.load(Ordering::SeqCst),
+                            my_generation,
+                        ) {
+                            in_flight.store(false, Ordering::SeqCst);
+                        }
                         return;
                     };
                     // Store the session id and, if a turn is already queued
@@ -1109,16 +1235,34 @@ fn read_acp_stream(
                     } else {
                         finish_turn(app, db, sid, &mut full, None, None, None, &mut watches, started, None);
                     }
-                    in_flight.store(false, Ordering::SeqCst);
+                    if should_clear_in_flight(
+                        proc_generation.load(Ordering::SeqCst),
+                        my_generation,
+                    ) {
+                        in_flight.store(false, Ordering::SeqCst);
+                    }
                     pending_request_id = None;
+                    // Consume the turn id too: a stale error response after
+                    // the finish must not fail the NEXT turn (B-13).
+                    if let Ok(mut g) = request_id_cell.lock() {
+                        *g = None;
+                    }
                 }
                 "session/error" => {
                     if let AcpEvent::Failed(m) = crate::acp::events::translate_session_error(&params) {
                         emit_error(app, sid, &m);
                     }
                     full.clear();
-                    in_flight.store(false, Ordering::SeqCst);
+                    if should_clear_in_flight(
+                        proc_generation.load(Ordering::SeqCst),
+                        my_generation,
+                    ) {
+                        in_flight.store(false, Ordering::SeqCst);
+                    }
                     pending_request_id = None;
+                    if let Ok(mut g) = request_id_cell.lock() {
+                        *g = None;
+                    }
                 }
                 "session/prompt" => {
                     // Out of scope v1 — surface a note instead of silently
@@ -1129,15 +1273,17 @@ fn read_acp_stream(
                 }
                 _ => {}
             },
-            AcpLine::Request { .. } => {
+            AcpLine::Request { id, .. } => {
                 // Server-initiated requests (e.g. session/prompt as a request)
                 // — out of scope v1. Respond with a method-not-found error so
                 // the agent doesn't wait on us.
                 // (The notification form above is the common one; this is a
                 // safety net for agents that send the request form.)
+                // B-12: echo the request's own id — a hardcoded 0 let the
+                // agent's JSON-RPC client wait forever on its real id.
                 let err = json!({
                     "jsonrpc": "2.0",
-                    "id": 0,
+                    "id": id,
                     "error": { "code": -32601, "message": "Method not supported by Conduit ACP v1" },
                 });
                 let _ = write_line_shared(&shared_stdin, &err.to_string());
@@ -1153,10 +1299,17 @@ fn read_acp_stream(
             sid,
             "ACP agent exited before completing the handshake — is it running with ACP over stdio?",
         );
-        in_flight.store(false, Ordering::SeqCst);
+        if should_clear_in_flight(proc_generation.load(Ordering::SeqCst), my_generation) {
+            in_flight.store(false, Ordering::SeqCst);
+        }
         return;
     }
-    if in_flight.swap(false, Ordering::SeqCst) && !cancelled.load(Ordering::SeqCst) {
+    // E-5: gate on the generation — a respawned process may already be
+    // streaming a new turn that this stale reader must not clobber.
+    if should_clear_in_flight(proc_generation.load(Ordering::SeqCst), my_generation)
+        && in_flight.swap(false, Ordering::SeqCst)
+        && !cancelled.load(Ordering::SeqCst)
+    {
         emit_error(app, sid, "ACP agent exited mid-turn");
     }
 }
@@ -1513,6 +1666,8 @@ fn spawn_claude(
     in_flight: &Arc<AtomicBool>,
     session_cell: &Arc<Mutex<Option<String>>>,
     cancelled: &Arc<AtomicBool>,
+    reader_alive: &Arc<AtomicBool>,
+    proc_generation: &Arc<AtomicU64>,
     shared_stdin: &Arc<Mutex<Option<std::process::ChildStdin>>>,
     connectors: &[crate::connectors::HarnessMcpServer],
 ) -> Result<(Child, String), String> {
@@ -1640,7 +1795,16 @@ fn spawn_claude(
     let session_cell2 = Arc::clone(session_cell);
     let cancelled2 = Arc::clone(cancelled);
     let stdin2 = Arc::clone(shared_stdin);
+    // B-4/B-5/E-5: this spawn is a new process generation — arm the
+    // reader-liveness flag (the thread's RAII guard clears it on every exit
+    // path, letting the next send respawn a dead reader) and stamp the
+    // generation the reader may clear `turn_in_flight` for.
+    let generation = proc_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    reader_alive.store(true, Ordering::SeqCst);
+    let reader_alive2 = Arc::clone(reader_alive);
+    let generation_cell2 = Arc::clone(proc_generation);
     std::thread::spawn(move || {
+        let _alive = ReaderAliveGuard(reader_alive2);
         read_claude_stream(
             Some(&app2),
             &db2,
@@ -1651,6 +1815,8 @@ fn spawn_claude(
             &cancelled2,
             stdin2,
             watches,
+            &generation_cell2,
+            generation,
         );
     });
     // The mode label the flags above were built from — the caller records it
@@ -1901,6 +2067,7 @@ Continue with your best judgment and state any assumption you make.",
 }
 
 /// Reader loop for the persistent claude process: one JSON event per line.
+#[allow(clippy::too_many_arguments)]
 fn read_claude_stream(
     app: Option<&AppHandle>,
     db: &DbState,
@@ -1911,12 +2078,16 @@ fn read_claude_stream(
     cancelled: &AtomicBool,
     shared_stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
     mut watches: Vec<DirWatch>,
+    proc_generation: &AtomicU64,
+    my_generation: u64,
 ) {
     let mut full = String::new();
     // Capture the turn's start instant for the "Worked for Xs" label. The
     // reader is invoked right after the prompt is sent to the persistent CLI,
     // so this is a close lower bound on the turn's wall-clock window.
-    let started_at = crate::db::now_ts();
+    // E-9a: reset after each `result` so turn 2+ gets its own window instead
+    // of an ever-inflating "Worked for" reading (mirrors the ACP reader).
+    let mut started_at = crate::db::now_ts();
     // Whether a thinking block is currently streaming: thinking deltas are
     // wrapped in `<think>…</think>` markers (the frontend renders them as a
     // collapsible block), mirroring anthropic_stream_round in
@@ -2110,7 +2281,14 @@ fn read_claude_stream(
                     persist_cli_session_id(db, "claude_code", sid, session_cell);
                 }
                 let ok = v.get("subtype").and_then(|s| s.as_str()) == Some("success");
-                in_flight.store(false, Ordering::SeqCst);
+                // E-5: only the current process generation may clear the flag.
+                if should_clear_in_flight(proc_generation.load(Ordering::SeqCst), my_generation) {
+                    in_flight.store(false, Ordering::SeqCst);
+                }
+                // E-9a: this turn's window is closed — capture it and start
+                // the next one now, so a later turn isn't timed from here.
+                let turn_started = started_at;
+                started_at = crate::db::now_ts();
                 if cancelled.load(Ordering::SeqCst) {
                     // Turn was cancelled while in flight: discard the partial
                     // reply — cancel() already emitted `chat:done`.
@@ -2140,7 +2318,7 @@ fn read_claude_stream(
                     if let Some(m) = actual_model.as_deref() {
                         persist_actual_model(db, "claude_code", sid, m);
                     }
-                    finish_turn(app, db, sid, &mut full, input, output, cost, &mut watches, started_at, actual_model.as_deref());
+                    finish_turn(app, db, sid, &mut full, input, output, cost, &mut watches, turn_started, actual_model.as_deref());
                 } else {
                     let msg = v
                         .get("error")
@@ -2185,7 +2363,12 @@ fn read_claude_stream(
         emit_token(app, sid, "</think>");
     }
     persist_cli_session_id(db, "claude_code", sid, session_cell);
-    if in_flight.swap(false, Ordering::SeqCst) && !cancelled.load(Ordering::SeqCst) {
+    // E-5: a respawned process may already be streaming a new turn — an old
+    // reader's EOF must not clear its flag (nor emit a spurious exit error).
+    if should_clear_in_flight(proc_generation.load(Ordering::SeqCst), my_generation)
+        && in_flight.swap(false, Ordering::SeqCst)
+        && !cancelled.load(Ordering::SeqCst)
+    {
         emit_error(app, sid, "Claude Code exited mid-turn");
     }
 }
@@ -2243,6 +2426,9 @@ fn spawn_per_turn(
                 "stream-json".into(),
             ];
             if !entry.model.is_empty() {
+                // E-9c: the model id rides the cmd.exe wrapper line via an
+                // unquoted `%*` — reject cmd metacharacters up front.
+                crate::harness_adapters::ensure_cmd_safe_model(&entry.model)?;
                 flags.push("-m".into());
                 flags.push(entry.model.clone());
             }
@@ -2288,6 +2474,9 @@ End your reply with the plan and wait for the user's approval.]"
             // arrives via the wrapper's delayed-expansion env read (M12).
             let mut flags: Vec<String> = vec![];
             if !entry.model.is_empty() {
+                // E-9c: the model id rides the cmd.exe wrapper line via an
+                // unquoted `%*` — reject cmd metacharacters up front.
+                crate::harness_adapters::ensure_cmd_safe_model(&entry.model)?;
                 flags.push("-m".into());
                 flags.push(entry.model.clone());
             }
@@ -2635,8 +2824,14 @@ fn send_opencode_turn(
                     }
                     emit_error(Some(&app2), &sid2, &format!("OpenCode turn failed: {e}"));
                 } else {
-                    // Cancelled: refresh nothing — each turn snapshots its own
-                    // watch baselines, so dropping these is correct.
+                    // Cancelled: discard the partial reply — the shared cells
+                    // outlive the killed server and would otherwise prefix
+                    // the NEXT turn's persisted message with this turn's
+                    // fragment (B-6; cancel() clears them too, defense in
+                    // depth). Each turn snapshots its own watch baselines,
+                    // so dropping these is correct.
+                    full_cell.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                    *think_cell.lock().unwrap_or_else(|e| e.into_inner()) = false;
                     drop(watches);
                 }
             }
@@ -3612,8 +3807,10 @@ pub fn run_one_shot(
             None => Err("failed to open CLI stdin".to_string()),
         };
         if let Err(e) = write_result {
-            let _ = child.kill();
-            let _ = child.wait();
+            // E-7: kill the WHOLE tree — on Windows `child.kill()` only
+            // terminates the cmd.exe /C wrapper and the CLI grandchild
+            // survives (see kill_child_tree).
+            kill_child_tree(&mut child);
             return Err(e);
         }
     }
@@ -3642,10 +3839,13 @@ pub fn run_one_shot(
         // resumed, so both cells are throwaway; the readers still persist any
         // captured id, which is harmless (keyed by harness + chat id).
         let never_cancelled = AtomicBool::new(false);
+        // One-shot readers have no respawn race: the generation cell is a
+        // throwaway that always "matches" (E-5 helper needs the params).
+        let generation = AtomicU64::new(1);
         if is_claude {
             let cell = Arc::new(Mutex::new(None));
             let dummy_stdin = Arc::new(Mutex::new(None));
-            read_claude_stream(app2.as_ref(), &db2, &sid2, stdout, &in_flight2, &cell, &never_cancelled, dummy_stdin, watches);
+            read_claude_stream(app2.as_ref(), &db2, &sid2, stdout, &in_flight2, &cell, &never_cancelled, dummy_stdin, watches, &generation, 1);
         } else {
             let cell = Arc::new(Mutex::new(None));
             read_per_turn_stream(app2.as_ref(), &db2, &sid2, stdout, &in_flight2, &cell, is_kimi, &never_cancelled, watches);
@@ -3761,6 +3961,9 @@ fn harness_oneshot_blocking(
         "kimi_code" => {
             let mut flags: Vec<String> = vec!["--output-format".into(), "stream-json".into()];
             if !model.is_empty() {
+                // E-9c: the model id rides the cmd.exe wrapper line via an
+                // unquoted `%*` — reject cmd metacharacters up front.
+                crate::harness_adapters::ensure_cmd_safe_model(model)?;
                 flags.push("-m".into());
                 flags.push(model.into());
             }
@@ -3774,6 +3977,9 @@ fn harness_oneshot_blocking(
         "opencode" => {
             let mut flags: Vec<String> = Vec::new();
             if !model.is_empty() {
+                // E-9c: the model id rides the cmd.exe wrapper line via an
+                // unquoted `%*` — reject cmd metacharacters up front.
+                crate::harness_adapters::ensure_cmd_safe_model(model)?;
                 flags.push("-m".into());
                 flags.push(model.into());
             }
@@ -3836,8 +4042,10 @@ fn harness_oneshot_blocking(
         match child.try_wait().map_err(|e| e.to_string())? {
             Some(_) => break,
             None if std::time::Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
+                // E-7: kill the WHOLE tree — on Windows `child.kill()` only
+                // terminates the cmd.exe /C wrapper and the CLI grandchild
+                // survives, keeps running (and spending) (see kill_child_tree).
+                kill_child_tree(&mut child);
                 return Err(format!(
                     "{harness_id} generation timed out after {}s",
                     ONESHOT_GEN_TIMEOUT.as_secs()
@@ -3955,6 +4163,9 @@ fn one_shot_spec(harness: &str, prompt: &str, model: &str) -> Result<(CommandSpe
                 "stream-json".into(),
             ];
             if !model.is_empty() {
+                // E-9c: the model id rides the cmd.exe wrapper line via an
+                // unquoted `%*` — reject cmd metacharacters up front.
+                crate::harness_adapters::ensure_cmd_safe_model(model)?;
                 flags.push("-m".into());
                 flags.push(model.into());
             }
@@ -3970,6 +4181,9 @@ fn one_shot_spec(harness: &str, prompt: &str, model: &str) -> Result<(CommandSpe
             // assembly preserves that invariant.
             let mut flags: Vec<String> = vec![];
             if !model.is_empty() {
+                // E-9c: the model id rides the cmd.exe wrapper line via an
+                // unquoted `%*` — reject cmd metacharacters up front.
+                crate::harness_adapters::ensure_cmd_safe_model(model)?;
                 flags.push("-m".into());
                 flags.push(model.into());
             }

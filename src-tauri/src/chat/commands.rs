@@ -584,6 +584,15 @@ pub async fn openai_oneshot(
         .send()
         .await
         .map_err(|e| e.to_string())?;
+    // B-16: check the status BEFORE parsing — an error body has no `choices`,
+    // so an unchecked 401/429/5xx used to come back as a silent "" (titles,
+    // commit messages, automations all recorded blank successes).
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let snippet = crate::util::truncate_chars(body.trim(), 500);
+        return Err(format!("HTTP {status}: {snippet}"));
+    }
     let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     Ok(v["choices"][0]["message"]["content"]
         .as_str()
@@ -620,6 +629,14 @@ pub async fn anthropic_oneshot(
         .send()
         .await
         .map_err(|e| e.to_string())?;
+    // B-16: same as the OpenAI oneshot — surface HTTP errors instead of
+    // silently returning "".
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let snippet = crate::util::truncate_chars(body.trim(), 500);
+        return Err(format!("HTTP {status}: {snippet}"));
+    }
     let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     Ok(v["content"][0]["text"].as_str().unwrap_or("").to_string())
 }
@@ -703,7 +720,13 @@ pub async fn generate_chat_title(
     let user = format!("Conversation:\n{transcript}\nTitle:");
 
     let base_url = base_url.filter(|b| !b.trim().is_empty());
-    let client = reqwest::Client::new();
+    // B-10: these are one-shot JSON calls — a total timeout is safe here and
+    // bounds a wedged endpoint instead of hanging the async command forever.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
     let raw = match provider_str.as_str() {
         "openai" => {
             let base = base_url.as_deref().unwrap_or(OpenAIProvider::DEFAULT_BASE);
@@ -824,7 +847,13 @@ pub async fn generate_commit_message(
     let user = format!("Diff:\n{diff}\nCommit subject:");
 
     let base_url = base_url.filter(|b| !b.trim().is_empty());
-    let client = reqwest::Client::new();
+    // B-10: these are one-shot JSON calls — a total timeout is safe here and
+    // bounds a wedged endpoint instead of hanging the async command forever.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
     let raw = match provider_str.as_str() {
         "openai" => {
             let base = base_url.as_deref().unwrap_or(OpenAIProvider::DEFAULT_BASE);
@@ -1011,7 +1040,13 @@ pub async fn generate_diff_review(
     let user = format!("Please review this diff:\n\n{diff}");
 
     let base_url = base_url.filter(|b| !b.trim().is_empty());
-    let client = reqwest::Client::new();
+    // B-10: these are one-shot JSON calls — a total timeout is safe here and
+    // bounds a wedged endpoint instead of hanging the async command forever.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
     let raw = match provider_str.as_str() {
         "openai" => {
             let base = base_url.as_deref().unwrap_or(OpenAIProvider::DEFAULT_BASE);
@@ -2248,7 +2283,14 @@ pub(crate) async fn run_prompt_warmup(
         );
         body["tools"] = serde_json::to_value(specs).unwrap_or_default();
     }
-    let client = reqwest::Client::new();
+    // B-10: these are one-shot JSON calls — a total timeout is safe here and
+    // bounds a wedged endpoint instead of hanging the async command forever.
+    // (Builder failure falls back to the plain client — this fn returns ().)
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let url = format!("{base_url}/v1/chat/completions");
     let res = tokio::time::timeout(
         std::time::Duration::from_secs(90),
@@ -3450,7 +3492,13 @@ pub async fn list_chat_models(
 
     let url = format!("{base}/v1/models");
 
-    let client = reqwest::Client::new();
+    // B-10: these are one-shot JSON calls — a total timeout is safe here and
+    // bounds a wedged endpoint instead of hanging the async command forever.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
     let req = client.get(&url);
 
     let req = match provider.as_str() {

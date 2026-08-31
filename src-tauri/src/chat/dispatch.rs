@@ -735,7 +735,11 @@ async fn run_task_subagent(
     // Build the streaming request. OpenAI-style providers use /v1/chat/completions;
     // Anthropic uses /v1/messages with a different body shape.
     let is_anthropic = matches!(provider_str.as_str(), "anthropic" | "anthropic_compatible");
-    let client = reqwest::Client::new();
+    // B-10: bounded connect; stream reads are guarded by the stall watchdog.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     let result: Result<String, String> = if is_anthropic {
         let base = base_url
@@ -945,7 +949,15 @@ async fn run_subagent_loop(
         } else {
             req = req.header("Authorization", format!("Bearer {api_key}"));
         }
-        let resp = req.send().await.map_err(|e| format!("request failed: {e}"))?;
+        // B-10: bound time-to-headers (a hung subagent request used to hang
+        // the whole parent turn).
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            req.send(),
+        )
+        .await
+        .map_err(|_| "subagent request timed out waiting for response headers (60s)".to_string())?
+        .map_err(|e| format!("request failed: {e}"))?;
         let status = resp.status();
         if !status.is_success() {
             let b = resp.text().await.unwrap_or_default();
@@ -953,7 +965,7 @@ async fn run_subagent_loop(
         }
 
         let mut stream = resp.bytes_stream();
-        let mut pending = String::new();
+        let mut pending = crate::util::SseLineBuffer::new();
         // Round accumulators.
         let mut round_text = String::new();
         // Reasoning streams display-only into the pane wrapped in
@@ -964,14 +976,30 @@ async fn run_subagent_loop(
         let mut oai_calls: BTreeMap<i64, (String, String, String)> = BTreeMap::new();
         // Anthropic: block index → (id, name, partial-json-accumulated).
         let mut ant_calls: BTreeMap<i64, (String, String, String)> = BTreeMap::new();
+        // B-11: Anthropic thinking blocks (index → (raw text, signature)).
+        // With extended thinking enabled, rounds 2+ MUST echo the thinking
+        // block back or the API 400s ("Expected thinking or redacted_thinking
+        // …"). These are display-captured separately from `output` (which
+        // wraps them in <think> for the pane).
+        let mut ant_think: BTreeMap<i64, (String, String)> = BTreeMap::new();
 
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| format!("stream read error: {e}"))?;
-            pending.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(nl) = pending.find('\n') {
-                let line: String = pending.drain(..=nl).collect();
+        loop {
+            // B-9: same 60s stall watchdog as the main loops — a stuck
+            // subagent stream must not wedge the parent turn.
+            let chunk = match crate::chat::streaming::stream_next_with_watchdog(
+                &mut stream,
+                std::time::Duration::from_secs(60),
+            )
+            .await
+            {
+                Ok(Some(c)) => c,
+                Ok(None) => break,
+                Err(e) => return Err(e),
+            };
+            for line in pending.push(&chunk) {
                 let line = line.trim_end();
-                let data = match line.strip_prefix("data: ") {
+                // B-18: tolerate `data:` without the trailing space.
+                let data = match line.strip_prefix("data:").map(|s| s.trim_start()) {
                     Some(d) => d,
                     None => continue,
                 };
@@ -984,7 +1012,17 @@ async fn run_subagent_loop(
                 };
                 if is_anthropic {
                     match v.get("type").and_then(|t| t.as_str()) {
+                        Some("error") => {
+                            // B-17: fail the subagent on a mid-stream provider
+                            // error instead of returning truncated text.
+                            let msg = v
+                                .pointer("/error/message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("provider returned an error event");
+                            return Err(format!("provider error: {msg}"));
+                        }
                         Some("content_block_delta") => {
+                            let idx = v.get("index").and_then(|i| i.as_i64()).unwrap_or(0);
                             let dtype = v.pointer("/delta/type").and_then(|x| x.as_str());
                             if dtype == Some("thinking_delta") {
                                 // Extended-thinking delta: open the <think>
@@ -998,11 +1036,29 @@ async fn run_subagent_loop(
                                             emit("<think>");
                                             in_think = true;
                                         }
+                                        // B-11: accumulate raw for the round-2 echo.
+                                        ant_think
+                                            .entry(idx)
+                                            .or_insert_with(|| (String::new(), String::new()))
+                                            .0
+                                            .push_str(c);
                                         let clean =
                                             crate::chat::streaming::sanitize_stream_text(c);
                                         output.push_str(&clean);
                                         emit(&clean);
                                     }
+                                }
+                            } else if dtype == Some("signature_delta") {
+                                // B-11: the signature rides with the thinking
+                                // block in the round-2 echo.
+                                if let Some(s) =
+                                    v.pointer("/delta/signature").and_then(|x| x.as_str())
+                                {
+                                    ant_think
+                                        .entry(idx)
+                                        .or_insert_with(|| (String::new(), String::new()))
+                                        .1
+                                        .push_str(s);
                                 }
                             } else if let Some(c) =
                                 v.pointer("/delta/text").and_then(|x| x.as_str())
@@ -1055,6 +1111,15 @@ async fn run_subagent_loop(
                     }
                 } else {
                     // OpenAI-style deltas.
+                    // B-17: a mid-stream {"error": …} event fails the round
+                    // instead of silently truncating the subagent answer.
+                    if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
+                        let msg = err
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("provider returned an error event");
+                        return Err(format!("provider error: {msg}"));
+                    }
                     // Reasoning-first providers (DeepSeek, OpenRouter
                     // reasoning models) stream `reasoning_content` / `reasoning`
                     // alongside content — wrap in <think> like the main loop.
@@ -1143,8 +1208,17 @@ async fn run_subagent_loop(
         }
 
         if is_anthropic {
-            // Echo the assistant turn: text blocks + tool_use blocks.
+            // Echo the assistant turn: thinking blocks (B-11 — required when
+            // extended thinking is enabled, in block order, BEFORE anything
+            // else), then text blocks + tool_use blocks.
             let mut blocks: Vec<Value> = Vec::new();
+            for (_idx, (text, sig)) in ant_think.iter() {
+                if !text.is_empty() {
+                    blocks.push(
+                        json!({ "type": "thinking", "thinking": text, "signature": sig }),
+                    );
+                }
+            }
             if !round_text.trim().is_empty() {
                 blocks.push(json!({ "type": "text", "text": round_text }));
             }
@@ -1449,9 +1523,11 @@ pub(crate) async fn run_tool(
     let plan_mode = {
         let plan = app.state::<crate::chat::plan::PlanState>();
         if crate::chat::plan::is_plan_tool(name) {
+            // E-9d: an unknown plan tool returned "" (looked like success).
+            // Surface it like every other tool family's error text.
             return crate::chat::plan::run_plan_tool(&plan, mgr, app, sid, name, args)
                 .await
-                .unwrap_or_default();
+                .unwrap_or_else(|| format!("Error: unknown plan tool {name}"));
         }
         plan.plan_mode(sid)
     };
@@ -1929,8 +2005,10 @@ async fn run_search_docs_tool(app: &AppHandle, _name: &str, args: &Value) -> Str
                 hit.score,
             )
         } else {
-            let content = if hit.content.len() > MAX_CHUNK {
-                format!("{}…", &hit.content[..MAX_CHUNK])
+            // Char-safe cap — a byte slice panics mid-codepoint (B-1), and
+            // this runs inline in the tool loop, killing the whole turn.
+            let content = if hit.content.chars().count() > MAX_CHUNK {
+                format!("{}…", crate::util::truncate_chars(&hit.content, MAX_CHUNK))
             } else {
                 hit.content.clone()
             };

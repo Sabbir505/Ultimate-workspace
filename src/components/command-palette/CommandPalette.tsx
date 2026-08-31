@@ -5,7 +5,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { fuzzyFilter } from "../../lib/fuzzy";
-import { searchChatMessages, type ChatSearchResult } from "../../lib/ipc";
+import { searchChatMessages, toastError, type ChatSearchResult } from "../../lib/ipc";
 import { relativeTime } from "../../lib/relativeTime";
 import { sessionDisplayTitle } from "../../lib/sessionTitle";
 import { defaultHarness, newSessionFlow, openSession } from "../../lib/sessionLauncher";
@@ -177,7 +177,12 @@ export function CommandPalette() {
     hint: hit.snippet ?? (hit.messageId == null ? "Title match" : undefined),
     run: () => {
       setPaletteOpen(false);
-      void useChatStore.getState().selectSession(hit.chatSessionId);
+      // selectSession hits the DB and can reject (e.g. a brief lock) — same
+      // toast as the sidebar's open path instead of an unhandled rejection.
+      void useChatStore
+        .getState()
+        .selectSession(hit.chatSessionId)
+        .catch((err) => toastError("Couldn't open that chat", err));
     },
   }));
 

@@ -151,7 +151,7 @@ tempfile = "3"
 keyring = { version = "3", features = ["windows-native"] }
 # NVML dynamic-load entry points for free-VRAM probing (see chat/local_models.rs).
 # Feature flags match the small surface we actually use.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Threading"] }
 # WebView2 CapturePreview for the browser_screenshot tool (browser.rs). Versions
 # pinned to what tauri 2.11 already links so no duplicate windows crate lands.
 webview2-com = "0.38"

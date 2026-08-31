@@ -101,10 +101,10 @@ fn interpreter(language: &str) -> Option<(String, &'static str)> {
     match language.to_lowercase().as_str() {
         // `python` and friends resolve to a real Python interpreter.
         "python" | "py" | "python3" => Some((super::python_runtime::interpreter(), "py")),
-        // node and bash — note that the sandbox profile above denies network
-        // and restricts the writable FS to the temp dir. node + bash still
-        // work inside that constraint; the user gets a "no sandbox" note
-        // if the platform can't enforce it.
+        // node and bash — plain system interpreters. `apply_sandbox` above is
+        // a NO-OP on every platform today, so these run with FULL user
+        // privileges (including network); `run_code` appends the honest
+        // "no OS-level sandbox" warning to the result for that reason.
         "javascript" | "js" | "node" => Some(("node".to_string(), "js")),
         "bash" | "sh" | "shell" => Some(("bash".to_string(), "sh")),
         _ => None,

@@ -16,8 +16,9 @@
 //! this subcommand applies the app's own due-math (due_automations), so cron
 //! semantics stay identical between app-open and app-closed runs.
 //!
-//! The DB lives at the same app-data location the GUI uses
-//! (<data_dir>/dev.conduit.app/conduit.db).
+//! The DB is resolved exactly like the GUI resolves it: default
+//! (<data_dir>/dev.conduit.app/conduit.db) unless the GUI's `storage.dbDir`
+//! setting relocates it (B-27).
 //!
 //! Windows builds use the GUI subsystem (`windows_subsystem = "windows"`) so
 //! Task Scheduler ticks never allocate a console window (the old
@@ -87,10 +88,13 @@ fn attach_parent_console() {
 }
 
 fn db_path() -> std::path::PathBuf {
-    dirs::data_dir()
+    // B-27: honor the GUI's `storage.dbDir` override — hardcoding the default
+    // location made `run-due` read a different (stale/empty) database than
+    // the app whenever Settings → Data had relocated it.
+    let default_dir = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("dev.conduit.app")
-        .join("conduit.db")
+        .join("dev.conduit.app");
+    db::resolve_db_path(&default_dir)
 }
 
 fn main() -> ExitCode {

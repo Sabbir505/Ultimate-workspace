@@ -40,7 +40,7 @@ const RESEARCH_MAX_TOOL_ITERS: usize = 96;
 /// Consecutive SSE JSON parse failures before treating the stream as stalled.
 /// A single malformed line is normal (partial chunk); sustained failures mean
 /// the provider's SSE format has diverged or data is irrecoverably corrupt.
-const MAX_PARSE_FAILURES: u32 = 50;
+pub(crate) const MAX_PARSE_FAILURES: u32 = 50;
 
 /// Upper bound on tool-call / content-block indexes accepted from the wire.
 /// The index is network-controlled (OpenAI/Anthropic-compatible base URLs are
@@ -49,6 +49,36 @@ const MAX_PARSE_FAILURES: u32 = 50;
 /// allocate billions of entries — instant memory exhaustion mid-turn. Real
 /// rounds use a handful of blocks; 64 is generous.
 const MAX_STREAM_BLOCK_INDEX: usize = 64;
+
+/// Read the next chunk off an SSE stream with a stall watchdog (B-9).
+///
+/// reqwest's interactive client has no overall timeout, so a half-open
+/// connection (proxy blackhole, upstream idle after headers) parks the read
+/// forever: the turn task never finishes, no `chat:done`/`chat:error` fires,
+/// and the UI spinner spins until the user restarts. `openai_stream_round`
+/// inlined this guard; this is the shared form used by the Anthropic round,
+/// the non-tool path, and the subagent loop. The timeout covers
+/// connect+headers+next-chunk only — long streams between chunks are fine as
+/// long as bytes keep flowing.
+pub(crate) async fn stream_next_with_watchdog<S, E, T>(
+    stream: &mut S,
+    grace: std::time::Duration,
+) -> Result<Option<T>, String>
+where
+    S: futures_util::Stream<Item = Result<T, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    match tokio::time::timeout(grace, futures_util::StreamExt::next(stream)).await {
+        Ok(Some(chunk)) => chunk
+            .map(Some)
+            .map_err(|e| format!("stream read error: {e}")),
+        Ok(None) => Ok(None),
+        Err(_) => Err(format!(
+            "stream stalled: no data received for {}s",
+            grace.as_secs()
+        )),
+    }
+}
 
 /// Token usage parsed from one streaming round, including the v2 detail
 /// fields (cache + reasoning) the cost model bills on. The tool loops sum
@@ -116,14 +146,22 @@ async fn openai_stream_round(
 ) -> Result<(Value, RoundUsage), String> {
     use futures_util::StreamExt;
 
-    let resp = client
-        .post(url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("content-type", "application/json")
-        .json(body)
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
+    // B-10: bound time-to-headers (send() resolves at the header) WITHOUT a
+    // total request timeout — reqwest's `.timeout()` covers the whole body
+    // read, which would kill long streams. The stall watchdog below guards
+    // the body.
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        client
+            .post(url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("content-type", "application/json")
+            .json(body)
+            .send(),
+    )
+    .await
+    .map_err(|_| "request timed out waiting for response headers (60s)".to_string())?
+    .map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status();
     if !status.is_success() {
         let b = resp.text().await.unwrap_or_default();
@@ -138,7 +176,7 @@ async fn openai_stream_round(
     }
 
     let mut stream = resp.bytes_stream();
-    let mut pending = String::new();
+    let mut pending = crate::util::SseLineBuffer::new();
 
     let mut content = String::new();
     let mut suppress = false;
@@ -199,9 +237,7 @@ async fn openai_stream_round(
         }
     } {
         let chunk = chunk.map_err(|e| format!("stream read error: {e}"))?;
-        pending.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(nl) = pending.find('\n') {
-            let line: String = pending.drain(..=nl).collect();
+        for line in pending.push(&chunk) {
             let line = line.trim_end();
             // Tolerate `data:[DONE]` (no space) and trailing `\r` from some
             // OpenAI-compatible aggregators (OpenRouter, vLLM) — a strict
@@ -229,6 +265,15 @@ async fn openai_stream_round(
                     continue;
                 }
             };
+            // B-17: a mid-stream {"error": …} event must fail the round, not
+            // silently truncate the answer.
+            if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
+                let msg = err
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("provider returned an error event");
+                return Err(format!("provider error: {msg}"));
+            }
             if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
                 usage.input = u.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(usage.input);
                 usage.output = u
@@ -420,17 +465,24 @@ async fn anthropic_stream_round(
     sid: &str,
     full: &mut String,
 ) -> Result<(Vec<Value>, RoundUsage), String> {
-    use futures_util::StreamExt;
+    // (B-9 moved stream reads onto stream_next_with_watchdog, which brings
+    // its own StreamExt — no local import needed.)
 
-    let resp = client
-        .post(url)
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(body)
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
+    // B-10: bound time-to-headers (see the OpenAI round for why there is no
+    // total `.timeout()` on a streaming request).
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        client
+            .post(url)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(body)
+            .send(),
+    )
+    .await
+    .map_err(|_| "request timed out waiting for response headers (60s)".to_string())?
+    .map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status();
     if !status.is_success() {
         let b = resp.text().await.unwrap_or_default();
@@ -455,13 +507,21 @@ async fn anthropic_stream_round(
     let mut parse_failures: u32 = 0;
 
     let mut stream = resp.bytes_stream();
-    let mut pending = String::new();
+    let mut pending = crate::util::SseLineBuffer::new();
 
-    'outer: while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("stream read error: {e}"))?;
-        pending.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(nl) = pending.find('\n') {
-            let line: String = pending.drain(..=nl).collect();
+    'outer: loop {
+        // B-9: 60s stall watchdog — a half-open connection must fail the
+        // turn (surfaced as chat:error), not park it forever.
+        let chunk = match stream_next_with_watchdog(&mut stream, std::time::Duration::from_secs(60))
+            .await
+        {
+            Ok(Some(c)) => c,
+            Ok(None) => break 'outer,
+            Err(e) => return Err(e),
+        };
+        // B-14: byte-buffered line assembly — lossy-converting each raw chunk
+        // independently corrupted multi-byte chars split across TCP reads.
+        for line in pending.push(&chunk) {
             let line = line.trim_end();
             let data = match line.strip_prefix("data: ") {
                 Some(d) => d,
@@ -626,6 +686,16 @@ async fn anthropic_stream_round(
                     }
                 }
                 "message_stop" => break 'outer,
+                "error" => {
+                    // B-17: a mid-stream error event (after 200 OK — OpenRouter
+                    // overload, credit exhaustion) used to be ignored, so the
+                    // turn "completed" with silently truncated text.
+                    let msg = p
+                        .pointer("/error/message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("provider returned an error event");
+                    return Err(format!("provider error: {msg}"));
+                }
                 _ => {}
             }
         }
@@ -1104,12 +1174,14 @@ pub(crate) async fn run_anthropic_tool_loop(
         // Extended thinking on the tool path too — previously only the
         // non-tool request builder (providers.rs) sent this, so the
         // composer's brain toggle was a no-op with tools on (the default).
-        // Anthropic requires budget_tokens < max_tokens.
+        // Anthropic requires budget_tokens < max_tokens (E-3: a caller-set
+        // max_tokens <= 1024 would violate that — floor the cap like
+        // providers.rs does).
         if req.thinking == Some(true) {
-            let max_tokens = req.max_tokens.unwrap_or(4096);
+            let max_tokens = req.max_tokens.unwrap_or(4096).max(3072);
             body["thinking"] = json!({
                 "type": "enabled",
-                "budget_tokens": (max_tokens - 1024).max(1024),
+                "budget_tokens": (max_tokens - 1024).clamp(1024, max_tokens - 1),
             });
         }
 

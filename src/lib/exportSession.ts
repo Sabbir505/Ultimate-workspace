@@ -8,11 +8,18 @@ import { sessionDisplayTitle } from "../lib/sessionTitle";
 import { usePanesStore } from "../state/panes";
 import { useProjectsStore } from "../state/projects";
 
+/** Local-date "YYYY-MM-DD" for export filenames. toISOString() is UTC —
+ *  between local midnight and UTC midnight it stamped YESTERDAY's date. */
+export function formatLocalDate(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 function defaultFileName(sessionId: string): string {
   const store = useProjectsStore.getState();
   const session = store.sessions.find((s) => s.id === sessionId);
   const project = store.projectById(session?.projectId ?? null);
-  const date = new Date().toISOString().slice(0, 10);
+  const date = formatLocalDate(new Date());
   const slug = (s: string) =>
     s
       .toLowerCase()

@@ -46,6 +46,54 @@ pub fn home_dir() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+/// Byte-buffered SSE line assembler (B-14). The streaming readers used to
+/// `String::from_utf8_lossy` each network chunk independently, so a code point
+/// split across two TCP reads — routine for long CJK/emoji/typographic answers
+/// over TLS — became two permanent U+FFFD replacements in the live stream AND
+/// the persisted message. This buffers the raw BYTES and converts only
+/// complete lines (split on `\n`), so a multi-byte sequence always arrives
+/// whole. Returned lines include the trailing newline, matching what the
+/// previous `drain(..=nl)` produced — callers keep their `trim_end()`.
+pub struct SseLineBuffer {
+    buf: Vec<u8>,
+}
+
+impl Default for SseLineBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SseLineBuffer {
+    pub fn new() -> Self {
+        Self { buf: Vec::new() }
+    }
+
+    /// Append raw bytes and drain every COMPLETE line as lossy UTF-8
+    /// (newline included). A trailing partial line stays buffered until its
+    /// newline arrives.
+    pub fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.buf.extend_from_slice(chunk);
+        let mut lines = Vec::new();
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let drained: Vec<u8> = self.buf.drain(..=pos).collect();
+            lines.push(String::from_utf8_lossy(&drained).into_owned());
+        }
+        lines
+    }
+
+    /// EOF flush: any buffered bytes without a final newline as one line
+    /// (some servers close mid-line; the last event is still parseable).
+    /// Drains the buffer — a subsequent `push` starts a fresh line.
+    pub fn finish(&mut self) -> Vec<String> {
+        if self.buf.is_empty() {
+            return Vec::new();
+        }
+        let rest = std::mem::take(&mut self.buf);
+        vec![String::from_utf8_lossy(&rest).into_owned()]
+    }
+}
+
 /// Containment check: is `path` equal to or nested under `prefix`?
 ///
 /// Component-wise (via `Path::starts_with`) and case-insensitive on Windows.

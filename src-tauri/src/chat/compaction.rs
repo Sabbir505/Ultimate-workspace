@@ -62,8 +62,10 @@ fn adaptive_compaction_threshold(n_ctx: u32, user_threshold: f64) -> f64 {
         // 0.75 at 8K, linearly increasing to 0.80 at 16K
         0.75 + (n_ctx as f64 - 8192.0) / (16384.0 - 8192.0) * (0.80 - 0.75)
     } else {
-        // 0.80 at 16K, capping at 0.85 for 32K+
-        0.80_f64.min(0.85)
+        // 0.80 at 16K, linearly increasing to 0.85 at 32K, capped at 0.85.
+        // (E-2a: this branch used to be the constant `0.80_f64.min(0.85)` —
+        // the documented interpolation never happened.)
+        0.80 + ((n_ctx as f64 - 16384.0) / (32768.0 - 16384.0) * 0.05).min(0.05)
     };
     // Blend with user override: user threshold dominates if explicitly set.
     if user_threshold == DEFAULT_THRESHOLD {
@@ -595,15 +597,17 @@ pub async fn maybe_compact(
     // comfortable fit. The summarization call dumps the whole `to_compact`
     // head into ONE user message, and llama-server 400s when that user
     // content alone exceeds the model's context window. We cap the user
-    // content at ¾ of the sidecar's n_ctx (rough char/token ratio of 4 chars
-    // per token is plenty for a safety margin). Pin ordering already keeps
-    // the most recent tail verbatim, so truncating from the OLD end of
-    // to_compact is the right direction — we lose the oldest summarized
-    // detail, not the recent context.
+    // content at ¾ of the window IN TOKENS, converted at the rough 4
+    // chars/token ratio → n_ctx * 3 CHARS. (E-2b: the old `n_ctx * 3 / 4`
+    // mixed the units and capped at ~19% of the intended budget, silently
+    // discarding most of the aged-out history on every re-compaction.)
+    // Pin ordering already keeps the most recent tail verbatim, so
+    // truncating from the OLD end of to_compact is the right direction — we
+    // lose the oldest summarized detail, not the recent context.
     let mut to_compact_truncated: Vec<&CompactionEntry> = Vec::new();
     let mut chars: usize = 0;
     {
-        let max_chars = ((n_ctx as usize) * 3 / 4).max(1024);
+        let max_chars = n_ctx.saturating_mul(3).max(1024) as usize;
         // Iterate from OLDEST → NEWEST, but we want to KEEP the NEWEST, so
         // reverse-walk and add while we have headroom.
         for e in to_compact.iter().rev() {

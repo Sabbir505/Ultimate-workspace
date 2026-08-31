@@ -2,6 +2,8 @@
 //! chat sessions whose `agent` is a CLI harness; the built-in chat commands
 //! (chat_cmds) keep serving `builtin`/`local` sessions.
 
+use std::sync::Arc;
+
 use tauri::{AppHandle, State};
 
 use crate::agent_sessions::AgentSessionState;
@@ -73,13 +75,21 @@ pub async fn send_agent_chat_message(
 }
 
 /// Cancel the in-flight turn (kills the CLI process; next send respawns).
+///
+/// Runs on a blocking worker rather than as a sync command: `cancel` blocks on
+/// the global `sessions` mutex, which `send` holds for its whole (potentially
+/// many-second) turn setup — a sync command would block the MAIN thread and
+/// freeze the window for that entire window (audit B-8).
 #[tauri::command]
-pub fn cancel_agent_chat_message(
+pub async fn cancel_agent_chat_message(
     app: AppHandle,
     state: State<'_, AgentSessionState>,
     chat_session_id: String,
 ) -> Result<(), String> {
-    state.0.cancel(&app, &chat_session_id)
+    let mgr = Arc::clone(&state.0);
+    tauri::async_runtime::spawn_blocking(move || mgr.cancel(&app, &chat_session_id))
+        .await
+        .map_err(|e| format!("cancel task panicked: {e}"))?
 }
 
 /// The models/endpoint discovered in the CLI harness's own config files

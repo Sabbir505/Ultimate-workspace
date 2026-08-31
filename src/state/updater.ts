@@ -60,6 +60,8 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
         // App is current — clear any stale banner (e.g. after an update).
         if (get().install === "idle") set({ update: null });
       }
+    } catch {
+      /* offline / endpoint error — stay quiet */
     } finally {
       set({ checking: false });
     }

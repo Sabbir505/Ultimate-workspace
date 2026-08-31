@@ -456,6 +456,34 @@ pub fn parse_usage_common(output: &str) -> Option<UsageInfo> {
     }
 }
 
+// ---- cmd.exe metacharacter guard (E-9c) -------------------------------------
+//
+// On Windows every harness spawn is wrapped in `cmd.exe /C <shim> %*`, and the
+// turn flags (currently `-m <model>`) ride that line UNQUOTED through `%*` —
+// cmd re-parses them, so a model id like `a&b` executes `b` as a second
+// command. Rather than trying to quote through cmd's `%*` expansion (fragile),
+// validate the model id against a conservative allowlist before it reaches a
+// spawn line. Real ids (`claude-sonnet-4-5`, `anthropic/claude-3.5-sonnet`,
+// `@cf/meta/llama-3.1-8b`, `gpt-4o:latest`, `Qwen2.5-7B-Instruct`) all pass.
+
+/// Reject a model identifier that could act as a command separator when it is
+/// forwarded through the cmd.exe `%*` wrapper. Returns `Err(message)` when the
+/// id contains anything outside the safe set.
+pub fn ensure_cmd_safe_model(model: &str) -> Result<(), String> {
+    let ok = |c: char| {
+        c.is_ascii_alphanumeric() || "._-@/:+~ ".contains(c)
+    };
+    if model.chars().all(ok) {
+        Ok(())
+    } else {
+        Err(format!(
+            "model id {model:?} contains characters that are not safe to pass \
+             through the command wrapper — use a plain model id (letters, \
+             digits, . _ - @ / : + ~)"
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,5 +668,25 @@ mod tests {
         assert!(get_adapter("kimi_code").is_some());
         assert!(get_adapter("opencode").is_some());
         assert!(get_adapter("nope").is_none());
+    }
+
+    #[test]
+    fn cmd_safe_model_allows_real_ids() {
+        for id in [
+            "claude-sonnet-4-5",
+            "anthropic/claude-3.5-sonnet",
+            "@cf/meta/llama-3.1-8b",
+            "gpt-4o:latest",
+            "Qwen2.5-7B-Instruct",
+        ] {
+            assert!(ensure_cmd_safe_model(id).is_ok(), "{id} should pass");
+        }
+    }
+
+    #[test]
+    fn cmd_safe_model_rejects_metacharacters() {
+        for id in ["a&b", "x|y", "$(rm -rf)", "a>b", "100%^", "a!b", "a\nb"] {
+            assert!(ensure_cmd_safe_model(id).is_err(), "{id} must be rejected");
+        }
     }
 }

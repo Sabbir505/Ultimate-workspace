@@ -121,18 +121,28 @@ fn client(token: &str) -> Result<reqwest::Client, String> {
 }
 
 /// The user's git-configured HTTP(S) proxy, if any.
+///
+/// E-9g: cached for the process lifetime — this spawns up to two `git`
+/// subprocesses per call, and `client()` runs per command (per page of a
+/// file diff). The global git config doesn't change mid-session often
+/// enough to matter; re-reads were pure subprocess churn.
 fn git_config_proxy() -> Option<String> {
-    for key in ["https.proxy", "http.proxy"] {
-        let out = std::process::Command::new("git")
-            .args(["config", "--global", "--get", key])
-            .output()
-            .ok()?;
-        let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !v.is_empty() {
-            return Some(v);
-        }
-    }
-    None
+    static PROXY_CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    PROXY_CACHE
+        .get_or_init(|| {
+            for key in ["https.proxy", "http.proxy"] {
+                let out = std::process::Command::new("git")
+                    .args(["config", "--global", "--get", key])
+                .output()
+                .ok()?;
+            let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+            }
+            None
+        })
+        .clone()
 }
 
 /// Map a GitHub error response to a friendly string. 422s on create carry

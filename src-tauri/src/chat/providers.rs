@@ -178,6 +178,15 @@ struct OpenAIWireBody {
     /// become multimodal content arrays (vision); plain messages stay strings.
     messages: Vec<serde_json::Value>,
     stream: bool,
+    /// Generation cap (E-2c): `ChatRequest.max_tokens` was silently dropped
+    /// on every OpenAI-family request, making output length (and cost)
+    /// unbounded while the Anthropic path honored it. Skipped for OpenAI
+    /// REASONING models (o1/o3/o4/gpt-5*): those endpoints reject the
+    /// deprecated `max_tokens` field outright (they require
+    /// `max_completion_tokens`), so leaving it off preserves today's working
+    /// behavior for them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
     /// Qwen3 / DeepSeek-R1 (and other GGUF chat templates that look for this
@@ -199,6 +208,20 @@ struct ChatTemplateKwargs {
     enable_thinking: bool,
 }
 
+/// E-2c: the `max_tokens` cap for OpenAI-family wire requests — sent whenever
+/// the caller set one, EXCEPT for OpenAI reasoning models whose API rejects
+/// the deprecated `max_tokens` field (they want `max_completion_tokens`).
+/// Name heuristic: o1/o3/o4-prefixed and gpt-5-prefixed ids.
+fn openai_wire_max_tokens(req: &ChatRequest) -> Option<u32> {
+    let m = req.model.to_ascii_lowercase();
+    let reasoning_model =
+        m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") || m.starts_with("gpt-5");
+    if reasoning_model {
+        return None;
+    }
+    req.max_tokens.map(|t| t as u32)
+}
+
 /// Build the Anthropic `/v1/messages` streaming request. Both
 /// `AnthropicProvider` and `AnthropicCompatibleProvider` route through here.
 fn anthropic_request(
@@ -208,12 +231,15 @@ fn anthropic_request(
     base: &str,
 ) -> reqwest::RequestBuilder {
     let url = format!("{base}/v1/messages");
-    let max_tokens = req.max_tokens.unwrap_or(4096);
+    // E-3: a caller-set max_tokens <= 1024 would make budget_tokens >=
+    // max_tokens, which Anthropic rejects outright (budget must be strictly
+    // smaller). Floor the cap so the thinking-enabled request stays valid.
+    let max_tokens = req.max_tokens.unwrap_or(4096).max(3072);
     // Reserve at least 1024 tokens for the visible answer; cap the thinking
     // budget at the rest. Anthropic requires `budget_tokens < max_tokens`.
     let thinking = req.thinking.unwrap_or(false).then(|| AnthropicThinking {
         kind: "enabled",
-        budget_tokens: (max_tokens - 1024).max(1024),
+        budget_tokens: (max_tokens - 1024).clamp(1024, max_tokens - 1),
     });
     let mut messages: Vec<serde_json::Value> = Vec::new();
     if !req.local_docs_retrieval.is_empty() {
@@ -276,6 +302,7 @@ fn openai_request(
         model: req.model.clone(),
         messages,
         stream: true,
+        max_tokens: openai_wire_max_tokens(req),
         reasoning_effort: req.effort.clone(),
         chat_template_kwargs: req.thinking.map(|t| ChatTemplateKwargs {
             enable_thinking: t,
@@ -335,16 +362,22 @@ impl ChatProvider for AnthropicProvider {
             buf.push('\n');
         }
 
-        // Anthropic SSE: lines prefixed with "event:" and "data:"
-        if line.starts_with("data: ") {
-            let data = &line[6..];
-
+        // Anthropic SSE: lines prefixed with "event:" and "data:".
+        // B-18: tolerate `data:` without the trailing space (OpenRouter-style
+        // aggregators emit it; the tool loops already accept both forms).
+        let data = if let Some(d) = line.strip_prefix("data:") {
+            d.strip_prefix(' ').unwrap_or(d)
+        } else {
+            "" // not a data line — nothing below runs
+        };
+        if !data.is_empty() || line.starts_with("data:") {
             #[derive(Deserialize)]
             struct SsePayload {
                 #[serde(rename = "type")]
                 event_type: String,
                 delta: Option<Delta>,
                 usage: Option<serde_json::Value>,
+                error: Option<serde_json::Value>,
             }
 
             #[derive(Deserialize)]
@@ -381,6 +414,20 @@ impl ChatProvider for AnthropicProvider {
                     // Usage will be in the payload; we keep it in buf.
                     return Ok((None, true));
                 }
+                "error" => {
+                    // B-17: a mid-stream error event (after 200 OK) must fail
+                    // the turn, not "complete" it with truncated text. The
+                    // "provider error:" prefix tells run_chat_stream this is
+                    // fatal (not a recoverable parse failure).
+                    let msg = payload
+                        .error
+                        .as_ref()
+                        .and_then(|e| e.get("message"))
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("provider returned an error event")
+                        .to_string();
+                    return Err(format!("provider error: {msg}"));
+                }
                 "ping" => {}
                 _ => {}
             }
@@ -390,40 +437,64 @@ impl ChatProvider for AnthropicProvider {
     }
 
     fn parse_usage(&self, buf: &str) -> Option<ChatUsage> {
-        // Usage in Anthropic appears in the message_delta or message_stop
-        // events. Search backwards through the buffer for the event that
-        // carries usage.
-        for line in buf.lines().rev() {
-            if let Some(data) = line.strip_prefix("data: ") {
-                #[derive(Deserialize)]
-                struct UsageEvent {
-                    usage: Option<UsageData>,
-                }
-                #[derive(Deserialize)]
-                struct UsageData {
-                    input_tokens: Option<i64>,
-                    output_tokens: Option<i64>,
-                    cache_creation_input_tokens: Option<i64>,
-                    cache_read_input_tokens: Option<i64>,
-                }
-                if let Ok(ev) = serde_json::from_str::<UsageEvent>(data) {
-                    if let Some(u) = ev.usage {
-                        let input = u.input_tokens.unwrap_or(0);
-                        let output = u.output_tokens.unwrap_or(0);
-                        let cost = calculate_anthropic_cost(input, output);
-                        return Some(ChatUsage {
-                            input_tokens: input,
-                            output_tokens: output,
-                            cost_usd: cost,
-                            cache_creation_input_tokens: u.cache_creation_input_tokens.unwrap_or(0),
-                            cache_read_input_tokens: u.cache_read_input_tokens.unwrap_or(0),
-                            reasoning_tokens: 0, // Anthropic doesn't surface reasoning_tokens on message_delta yet
-                        });
-                    }
+        // B-15: Anthropic splits usage across the stream — `message_start`
+        // carries input_tokens (+ the cache fields) and only `message_delta`
+        // carries the final output_tokens. The old backward scan always
+        // landed on message_delta, so input (and all cache accounting) was
+        // recorded as 0 on the non-tool path. Merge instead: input/cache from
+        // the FIRST usage-bearing event, output from the LAST.
+        #[derive(Deserialize)]
+        struct UsageEvent {
+            usage: Option<UsageData>,
+        }
+        #[derive(Deserialize)]
+        struct UsageData {
+            input_tokens: Option<i64>,
+            output_tokens: Option<i64>,
+            cache_creation_input_tokens: Option<i64>,
+            cache_read_input_tokens: Option<i64>,
+        }
+
+        let mut first_input: Option<(i64, i64, i64)> = None; // (input, cache_creation, cache_read)
+        let mut last_output: i64 = 0;
+        for line in buf.lines() {
+            let Some(data) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:"))
+            else {
+                continue;
+            };
+            let Ok(ev) = serde_json::from_str::<UsageEvent>(data) else {
+                continue;
+            };
+            let Some(u) = ev.usage else { continue };
+            if first_input.is_none() {
+                if let Some(i) = u.input_tokens {
+                    first_input = Some((
+                        i,
+                        u.cache_creation_input_tokens.unwrap_or(0),
+                        u.cache_read_input_tokens.unwrap_or(0),
+                    ));
                 }
             }
+            if let Some(o) = u.output_tokens {
+                last_output = o;
+            }
         }
-        None
+        let (input, cache_creation, cache_read) = match first_input {
+            Some(v) => v,
+            // Degenerate stream with only a message_delta usage: keep the old
+            // behavior of reporting at least the output count.
+            None if last_output > 0 => (0, 0, 0),
+            None => return None,
+        };
+        let cost = calculate_anthropic_cost(input, last_output);
+        Some(ChatUsage {
+            input_tokens: input,
+            output_tokens: last_output,
+            cost_usd: cost,
+            cache_creation_input_tokens: cache_creation,
+            cache_read_input_tokens: cache_read,
+            reasoning_tokens: 0, // Anthropic doesn't surface reasoning_tokens on message_delta yet
+        })
     }
 }
 
@@ -479,8 +550,10 @@ impl ChatProvider for OpenAIProvider {
             buf.push('\n');
         }
 
-        if line.starts_with("data: ") {
-            let data = &line[6..];
+        // B-18: tolerate `data:` without the trailing space (OpenRouter /
+        // vLLM emit it; the tool loops already accept both forms).
+        if let Some(rest) = line.strip_prefix("data:") {
+            let data = rest.strip_prefix(' ').unwrap_or(rest);
 
             if data == "[DONE]" {
                 return Ok((None, true));
@@ -490,6 +563,7 @@ impl ChatProvider for OpenAIProvider {
             struct SsePayload {
                 choices: Option<Vec<Choice>>,
                 usage: Option<serde_json::Value>,
+                error: Option<serde_json::Value>,
             }
 
             #[derive(Deserialize)]
@@ -509,6 +583,17 @@ impl ChatProvider for OpenAIProvider {
 
             let payload: SsePayload =
                 serde_json::from_str(data).map_err(|e| format!("SSE parse error: {e}"))?;
+
+            // B-17: mid-stream error events (OpenRouter overload, credit
+            // exhaustion — sent as {"error": …} after 200 OK) used to be
+            // ignored, so the turn "completed" with truncated text.
+            if let Some(err) = payload.error {
+                let msg = err
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("provider returned an error event");
+                return Err(format!("provider error: {msg}"));
+            }
 
             // Check for final chunk (may have usage, may have finish_reason).
             let mut is_done = false;

@@ -50,11 +50,22 @@ pub fn compute_pair_proof(token: &str) -> String {
 
 /// Verify a phone-presented pairing proof in constant time against the
 /// desktop's own derived proof for the expected token.
+///
+/// S-1: FAIL CLOSED on an empty expected token. The proof is
+/// `HMAC(key=token, "E2E")` — with an empty token that is a deterministic,
+/// publicly computable constant, so an unguarded verify would pair ANY peer
+/// whenever the stored `mobile.pairing_token` row is missing or unreadable.
+/// (The legacy raw-token compare had this guard; the E2E path was missed.)
 pub fn verify_pair_proof(expected_token: &str, presented: &str) -> bool {
+    if expected_token.is_empty() {
+        return false;
+    }
     let ours = compute_pair_proof(expected_token);
     // Constant-time compare via subtle.
     ours.as_bytes().ct_eq(presented.as_bytes()).into()
 }
+
+
 
 /// Build a 24-byte nonce from a per-direction counter: 16 zero bytes + the
 /// counter as big-endian u64. Matches the mobile-side layout exactly.
@@ -108,6 +119,22 @@ mod tests {
         let k3 = derive_session_key("token-two-0000000000000000000000");
         assert_ne!(k1, k3);
         assert_eq!(k1.len(), 32);
+    }
+
+    #[test]
+    fn pair_proof_round_trip() {
+        let proof = compute_pair_proof("secret-token");
+        assert!(verify_pair_proof("secret-token", &proof));
+        assert!(!verify_pair_proof("other-token", &proof));
+    }
+
+    #[test]
+    fn pair_proof_fails_closed_on_empty_token() {
+        // S-1: with the token missing, the well-known HMAC("") proof must
+        // NOT pair — and neither may any other proof.
+        assert!(!verify_pair_proof("", &compute_pair_proof("")));
+        let proof = compute_pair_proof("attacker");
+        assert!(!verify_pair_proof("", &proof));
     }
 
     #[test]

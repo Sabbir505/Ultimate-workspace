@@ -82,10 +82,18 @@ pub fn browser_push_state(
 #[tauri::command]
 pub fn browser_action_result(
     req_id: u64,
+    nonce: Option<String>,
     result: String,
     browser: State<BrowserState>,
 ) -> CmdResult<()> {
-    browser.0.resolve_action(req_id, result);
+    // B-3: verify the per-action nonce when the caller supplied one (the
+    // injected wrapper always does). Pages loaded in a browser pane are
+    // untrusted and req ids are sequential/guessable — the nonce is the
+    // shared secret only the wrapper that launched the action knows.
+    match nonce {
+        Some(n) => browser.0.resolve_action_verified(req_id, &n, result),
+        None => browser.0.resolve_action(req_id, result),
+    }
     Ok(())
 }
 

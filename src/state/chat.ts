@@ -196,6 +196,27 @@ function markManuallyRenamed(sid: string) {
  *  re-prompting.) */
 const fullAccessConfirmed = new Set<string>();
 
+/** Extensions that auto-open a tool-panel tab when the agent produces them.
+ *  Deliberately ONLY finished, viewable deliverables (a diagram PNG, a PDF
+ *  report, an office doc). Everything else — html/tsx/jsx/css/json/… source
+ *  files the agent writes — lands in the Artifacts gallery WITHOUT popping a
+ *  tab: coding sessions used to open a pane per file write, which was noisy.
+ *  The agent shows those deliberately via the `open_file` tool, and svg
+ *  renders inline in the bubble (handled separately in onArtifact). */
+const AUTO_OPEN_ARTIFACT_EXTS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "bmp",
+  "pdf",
+  "docx",
+  "xlsx",
+  "pptx",
+  "csv",
+]);
+
 function markFullAccessConfirmed(sid: string) {
   fullAccessConfirmed.add(sid);
   if (fullAccessConfirmed.size > SET_CAP) {
@@ -2694,10 +2715,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // SVG renders inline in the chat bubble — no pane, no browser.
     if (ext === "svg") return;
 
-    // Every other artifact opens as its own top-level tab in the right-side
-    // tool panel — just like Terminal/Browser/Agents, with the filename as
-    // the tab label. Code/html render a live preview inside; images, pdf,
-    // markdown, csv, office docs render in ArtifactPreviewPane.
+    // Only viewable deliverables (images/pdf/office/csv) open as their own
+    // top-level tab in the right-side tool panel. Source-code writes
+    // (html/tsx/jsx/…) stay in the Artifacts gallery; the agent opens them
+    // deliberately via `open_file` when the user actually needs to see one.
+    if (!AUTO_OPEN_ARTIFACT_EXTS.has(ext ?? "")) return;
+
+    // Images, pdf, csv, office docs render in ArtifactPreviewPane, with the
+    // filename as the tab label.
     const ui = useUiStore.getState();
     ui.openArtifactTab({ path, filename });
     ui.setToolPanelCollapsed(false);

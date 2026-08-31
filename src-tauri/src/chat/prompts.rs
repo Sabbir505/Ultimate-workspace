@@ -165,6 +165,10 @@ pub(crate) fn core_prompt_base() -> String {
      ## Artifacts & diagrams\n\
      Files produced via generate_document/generate_file/generate_diagram surface in the \
      artifact panel automatically — a short one-line acknowledgment afterward is enough. \
+     Files you write with write_file/edit_file do NOT open on screen; they are listed in \
+     the Artifacts gallery only. When the user should SEE something you made — a finished \
+     HTML page, a saved diagram, a document — open it explicitly with `open_file`; never \
+     open routine intermediate/source files, only the finished result worth showing. \
      Markdown/SVG/HTML meant for in-chat reading goes directly in your reply as fenced \
      blocks (they render live). React/JSX components: one self-contained component per ```jsx \
      (or ```tsx) block with `export default function App()` and no imports beyond `react` — \
@@ -258,7 +262,9 @@ pub(crate) fn core_prompt_base_local() -> String {
      questions, search from the cwd proactively — never ask for a path.\n\n\
      ## Artifacts\n\
      Files produced via `generate_document`/`generate_file` surface in the artifact panel \
-     automatically. Put Markdown/SVG/HTML meant for in-app reading directly in your text. \
+     automatically. Written files do NOT open on screen — call `open_file` only when the \
+     user should see a finished result. \
+     Put Markdown/SVG/HTML meant for in-app reading directly in your text. \
      After producing an artifact, a short one-line acknowledgment is enough.\n\n\
      ## Skills\n\
      Skills (`~/.claude/skills/`, `~/.agents/skills/`, plus built-in `docx`/`pptx`/`pdf`/\

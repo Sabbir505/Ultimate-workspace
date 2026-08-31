@@ -111,6 +111,11 @@
   position: relative;
   display: flex;
   flex-direction: column;
+  /* Uniform silhouette: every card the SAME height no matter how long its
+     snippet, so one verbose artifact can't stretch its whole grid row and
+     leave dead space under the shorter cards' footers. Matches the
+     virtualizer's row estimate in ArtifactLibrary.tsx (estimateSize 240). */
+  height: 240px;
   /* Cut the top-right corner for the "folded page" silhouette. The fold
      triangle (::after) sits inside this cut and is a shade lighter. */
   clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%);
@@ -177,10 +182,14 @@
 }
 
 /* Upper thumbnail area â€” ~60% of the card, dark gray backdrop. */
+/* Upper thumbnail area — fills the card above the body. `flex: 1 1 auto`
+   (not a percentage basis: against a content-driven height that resolved to
+   the snippet's own size and grew unbounded) — long text is clipped here
+   instead of inflating the card. */
 .doc-card-thumb {
   position: relative;
-  flex: 0 0 60%;
-  min-height: 110px;
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   align-items: stretch;
   justify-content: stretch;
@@ -188,12 +197,16 @@
   border-bottom: 1px solid var(--border);
   overflow: hidden;
 }
-/* Faint formatted text snippet for text/markdown/code/json/csv. */
+/* Faint formatted text snippet for text/markdown/code/json/csv. Clipped to
+   the thumb with a fade so truncation reads as intentional. */
 .doc-card-snippet {
   width: 100%;
+  height: 100%;
   padding: 12px 14px;
   box-sizing: border-box;
   overflow: hidden;
+  -webkit-mask-image: linear-gradient(180deg, #000 78%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 78%, transparent 100%);
 }
 .doc-card-snippet pre {
   margin: 0;

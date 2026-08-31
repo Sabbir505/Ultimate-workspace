@@ -518,14 +518,16 @@ fn previewable_in_app(ext: &str) -> bool {
     ) || crate::chat::commands::classify_text_ext(ext).is_some()
 }
 
-const OPEN_FILE_DESC: &str = "Open a file the user asked to see. Previewable files \
-    (code/text/markdown/html/mermaid diagrams/csv/json/images/pdf) open INSIDE \
-    the app in the right-side preview panel — prefer this for anything you \
-    created (e.g. a saved .mmd/.svg/.html diagram); the user sees it \
-    immediately, no external app involved. Anything else (.exe, .docx, media \
-    the app can't render) opens with the OS default application. Pass the \
-    file's ABSOLUTE path. Never use run_shell/start to open files — this tool \
-    is the way; for web pages use open_url instead (it is http(s)-only).";
+const OPEN_FILE_DESC: &str = "Show a file to the user by opening it in the app. \
+    Previewable files (code/text/markdown/html/mermaid diagrams/csv/json/images/pdf) \
+    open INSIDE the app in the right-side preview panel; anything else (.exe, media \
+    the app can't render) opens with the OS default application. This is the \
+    DELIBERATE 'show the user' action: file writes do not open anything on their \
+    own, so call this only for a finished result worth seeing (a built web page, \
+    a saved diagram, a generated document) — not for every file you edited along \
+    the way. Pass the file's ABSOLUTE path. Never use run_shell/start to open \
+    files — this tool is the way; for web pages use open_url instead (it is \
+    http(s)-only).";
 
 const DOWNLOAD_FILE_DESC: &str = "Stream a file from an http(s) URL to an \
     absolute local path on this machine (e.g. model weights such as \

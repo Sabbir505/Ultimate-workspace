@@ -250,7 +250,12 @@ impl AgentSessionManager {
             "You are Relay — the agent of the Relay desktop workspace, running on \
              the {harness_label} engine. To the user you ARE Relay: if asked who you \
              are, answer \"I'm Relay\" (the {harness_label} engine underneath may be \
-             named as a detail), and never deny being Relay."
+             named as a detail), and never deny being Relay.\n\n\
+             Files you create or modify are listed in the app's Artifacts gallery but \
+             do NOT open on screen. When the user should see a finished result (an \
+             HTML page, a report, a diagram), open it explicitly with the open_file \
+             tool — and only then: never open routine source files you edited along \
+             the way."
         );
         let effective = {
             let conn = db.0.lock();

@@ -42,8 +42,10 @@ function argValue(name) {
 const PLATFORMS = {
   "windows-x86_64": {
     dir: "nsis",
-    pattern: new RegExp(`^Conduit_${version.replace(/\./g, "\\.")}_x64-setup\\.exe$`),
-    fallbackPattern: /^Conduit_[\d.]+_x64-setup\\.exe$/,
+    // Accept both the pre-rebrand `Conduit_` installer name and the current
+    // `Relay_` one (productName in tauri.conf.json drives the NSIS filename).
+    pattern: new RegExp(`^(?:Conduit|Relay)_${version.replace(/\./g, "\\.")}_x64-setup\\.exe$`),
+    fallbackPattern: /^(?:Conduit|Relay)_[\d.]+_x64-setup\.exe$/,
     sign: true,
   },
 };
@@ -69,7 +71,7 @@ if (!notes && notesFile) {
   }
 }
 if (!notes) {
-  notes = `Conduit ${version}. See release notes on GitHub.`;
+  notes = `Relay ${version}. See release notes on GitHub.`;
 }
 
 const pubDate = new Date().toISOString();

@@ -11,22 +11,29 @@
 //
 // Collapsed state: a thin ~50px strip showing just the last plan header in
 //   one sentence — the git icon toggles this. Section state is preserved.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";import {
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
   getChangedFiles,
   listGitBranches,
   safeListen,
   type BranchInfo,
+  type SubagentInfo,
 } from "../../lib/ipc";
 import { useProjectsStore } from "../../state/projects";
 import { useChatStore, selectContextSessionId } from "../../state/chat";
+import type { ChatTaskProgress, PlanStep } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { BranchDropdown } from "./BranchDropdown";
 import { CommitModal } from "./CommitModal";
 import { usePlanTracker } from "../../hooks/usePlanTracker";
 
-const EMPTY_TASKS: Record<string, unknown> = {};
-const EMPTY_STEPS: unknown[] = [];
-const EMPTY_SUBAGENTS: Record<string, unknown> = {};
+// Typed with the store's value types, NOT `unknown`: these fallbacks flow
+// through the zustand selectors below, and an `unknown` fallback unions the
+// whole selector's return type down to `unknown` (every later .filter/.map
+// on tasks/planSteps/subagents then fails to compile).
+const EMPTY_TASKS: Record<string, ChatTaskProgress> = {};
+const EMPTY_STEPS: PlanStep[] = [];
+const EMPTY_SUBAGENTS: Record<string, SubagentInfo> = {};
 const EMPTY_ACCEPTED: import("../../lib/ipc").ChatPlanRecord[] = [];
 
 const SIDEBAR_VISIBLE_CAP = 4;

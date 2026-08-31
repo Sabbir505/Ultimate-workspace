@@ -3,8 +3,13 @@
 // dedicated tool-panel tab). Empty state when there are no running/completed
 // tasks for the session.
 import { useChatStore } from "../../state/chat";
+import type { ChatTaskProgress } from "../../state/chat";
 
-const EMPTY_TASKS: Record<string, unknown> = {};
+// Typed with the store's value type, NOT `unknown`: this fallback flows
+// through the zustand selector below, and an `unknown` fallback unions the
+// selector's return type down to `unknown` (every t.field below then fails
+// to compile).
+const EMPTY_TASKS: Record<string, ChatTaskProgress> = {};
 
 export function ProgressPanel() {
   const activeChatSessionId = useChatStore((s) => s.activeChatSessionId);

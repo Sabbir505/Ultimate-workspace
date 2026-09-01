@@ -2200,6 +2200,18 @@ Continue with your best judgment and state any assumption you make.",
     })
 }
 
+/// Suffix of `final_text` that the streamed deltas never delivered, or None
+/// when there is nothing to recover (deltas already delivered everything, or
+/// the stream diverged from the final text — e.g. a mid-turn API retry
+/// replaced the answer — where appending would double-print text).
+fn unstreamed_suffix<'a>(streamed: &str, final_text: &'a str) -> Option<&'a str> {
+    if final_text.len() > streamed.len() && final_text.starts_with(streamed) {
+        Some(&final_text[streamed.len()..])
+    } else {
+        None
+    }
+}
+
 /// Reader loop for the persistent claude process: one JSON event per line.
 #[allow(clippy::too_many_arguments)]
 fn read_claude_stream(
@@ -2216,6 +2228,10 @@ fn read_claude_stream(
     my_generation: u64,
 ) {
     let mut full = String::new();
+    // Answer text accumulated from `stream_event` deltas ONLY (no think
+    // markers, no tool markers). The `result` fallback below diffs it against
+    // `result.result` to recover text the CLI never streamed.
+    let mut answer_text = String::new();
     // Capture the turn's start instant for the "Worked for Xs" label. The
     // reader is invoked right after the prompt is sent to the persistent CLI,
     // so this is a close lower bound on the turn's wall-clock window.
@@ -2281,6 +2297,7 @@ fn read_claude_stream(
                                 in_think = false;
                             }
                             full.push_str(text);
+                            answer_text.push_str(text);
                             emit_token(app, sid, text);
                         }
                     }
@@ -2406,6 +2423,9 @@ fn read_claude_stream(
                 }
             }
             Some("result") => {
+                // Answer text streamed so far this turn; taken here so the
+                // next turn starts from a clean accumulator.
+                let streamed_answer = std::mem::take(&mut answer_text);
                 // Capture the CLI's session id so a later respawn can
                 // `--resume` this conversation instead of starting blank.
                 if let Some(id) = v.get("session_id").and_then(|s| s.as_str()) {
@@ -2434,6 +2454,18 @@ fn read_claude_stream(
                         full.push_str("</think>");
                         emit_token(app, sid, "</think>");
                         in_think = false;
+                    }
+                    // Some successful turns complete WITHOUT any stream_event
+                    // deltas — the CLI falls back to non-streaming under API
+                    // retries, and the answer arrives only on this `result`
+                    // event. Without this recovery the turn finishes as an
+                    // empty bubble (`full` empty → finish_turn persists
+                    // nothing) while usage is still billed.
+                    if let Some(final_text) = v.get("result").and_then(|r| r.as_str()) {
+                        if let Some(suffix) = unstreamed_suffix(&streamed_answer, final_text) {
+                            full.push_str(suffix);
+                            emit_token(app, sid, suffix);
+                        }
                     }
                     let usage = v.get("usage");
                     let input = usage.and_then(|u| u.get("input_tokens")).and_then(|t| t.as_i64());
@@ -4890,6 +4922,68 @@ mod tests {
         assert!(!p.contains("open_file"), "persona must not reference the built-in-chat open_file tool");
         assert!(!p.contains("open_url"), "persona must not reference the built-in-chat open_url tool");
         assert!(p.contains("Artifacts gallery"));
+    }
+
+    #[test]
+    fn unstreamed_suffix_recovers_result_text_the_deltas_never_delivered() {
+        // No partials streamed (CLI non-streaming fallback under API retries):
+        // the whole result text is recovered.
+        assert_eq!(unstreamed_suffix("", "hello"), Some("hello"));
+        // Deltas streamed a strict prefix: only the remainder is recovered.
+        assert_eq!(unstreamed_suffix("hel", "hello"), Some("lo"));
+        // Deltas delivered everything: nothing to do.
+        assert_eq!(unstreamed_suffix("hello", "hello"), None);
+        // Diverged stream (mid-turn retry replaced the answer): refuse rather
+        // than double-print.
+        assert_eq!(unstreamed_suffix("first answer", "hello"), None);
+        assert_eq!(unstreamed_suffix("hello!", "hello"), None);
+        // Thinking-only turns stream no answer text but full carries think
+        // markers — the suffix check runs against the delta accumulator, not
+        // the marker-laden buffer, so the answer still lands whole.
+        assert_eq!(unstreamed_suffix("", "reasoned answer"), Some("reasoned answer"));
+    }
+
+    /// Observed live (2026-09): a CLI turn can succeed WITHOUT any
+    /// stream_event partials — under API retries the CLI falls back to
+    /// non-streaming and the answer arrives only on the `result` event. The
+    /// reader must recover it; before the `unstreamed_suffix` fallback the
+    /// turn finished as an empty bubble (no assistant row persisted).
+    #[test]
+    fn claude_turn_without_partial_deltas_still_persists_the_result_text() {
+        let conn = crate::db::mem();
+        let cs = crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None)
+            .unwrap();
+        let db = DbState(Arc::new(parking_lot::Mutex::new(conn)));
+
+        // Transcript with NO stream_event lines: text rides only the closing
+        // `result` event, exactly like the failing probe run.
+        let transcript = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"cli-abc"}"#, "\n",
+            r#"{"type":"assistant","message":{"model":"claude-x","content":[{"type":"text","text":"the answer"}]}}"#, "\n",
+            r#"{"type":"result","subtype":"success","result":"the answer","session_id":"cli-abc","usage":{"input_tokens":10,"output_tokens":5},"total_cost_usd":0.001}"#, "\n",
+        );
+        let never = AtomicBool::new(false);
+        let generation = AtomicU64::new(1);
+        read_claude_stream(
+            None,
+            &db,
+            &cs.id,
+            std::io::Cursor::new(transcript),
+            &never,
+            &Arc::new(std::sync::Mutex::new(None)),
+            &never,
+            Arc::new(std::sync::Mutex::new(None)),
+            Vec::new(),
+            &generation,
+            1,
+        );
+
+        let conn = db.0.lock();
+        let rows = crate::db::list_chat_messages(&conn, &cs.id).unwrap();
+        let assistant: Vec<_> = rows.iter().filter(|m| m.role == "assistant").collect();
+        assert_eq!(assistant.len(), 1, "the recovered text must be persisted");
+        assert_eq!(assistant[0].content, "the answer");
+        assert_eq!(assistant[0].output_tokens, Some(5));
     }
 
     /// Minimal persisted-message row for primer tests (only role/content are

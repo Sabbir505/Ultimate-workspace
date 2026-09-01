@@ -35,6 +35,13 @@
 //! sanitizer already parse (see chat/proto.rs). The frontend needed no new
 //! rendering: only send/cancel routing.
 //!
+//! Engine handoff: when a turn goes to a CLI that is starting a brand-new
+//! session (first harness turn of the chat, a mid-chat harness switch, or an
+//! ACP respawn — ACP has no resume), the first prompt carries a **context
+//! primer**: a compact transcript rebuilt from the persisted chat history, so
+//! switching engines mid-chat preserves the conversation the same way the
+//! built-in providers (which replay DB history every turn) always have.
+//!
 //! A third entry point, `run_one_shot`, runs one blocking self-contained
 //! turn (no persistent process, no CLI session resume) and works with or
 //! without a Tauri AppHandle — it backs scheduled automations, both from the
@@ -221,6 +228,26 @@ impl AgentSessionManager {
         }
         entry.model = model.to_string();
 
+        // Context primer for a fresh CLI session (see the module-level notes):
+        // gated on cli_session_id AFTER the harness-switch teardown above — the
+        // teardown is exactly what turns the id to None on an engine switch, so
+        // the gate must be evaluated afterwards. Built BEFORE the user message
+        // below is persisted, so the transcript covers only prior turns; this
+        // turn's message rides in `content` verbatim.
+        let context_primer = if entry.cli_session_id.lock().ok().and_then(|g| g.clone()).is_none() {
+            let primer = build_context_primer(db, chat_session_id);
+            if !primer.is_empty() {
+                eprintln!(
+                    "[context] harness primer: session={} chars={} (fresh CLI session — replaying DB history)",
+                    chat_session_id,
+                    primer.len()
+                );
+            }
+            primer
+        } else {
+            String::new()
+        };
+
         // Mirror the built-in chat: the user message is persisted up front so
         // history survives a crash mid-turn. Done AFTER the turn-in-flight
         // check so a rejected turn can't orphan a user message.
@@ -267,6 +294,10 @@ impl AgentSessionManager {
                 base.push_str(&sp);
             }
             base.push_str("\n\n---\n\n");
+            if !context_primer.is_empty() {
+                base.push_str(&context_primer);
+                base.push_str("\n\n---\n\n");
+            }
             base.push_str(content);
             if attach_prompt.is_empty() {
                 base
@@ -552,6 +583,91 @@ fn persist_cli_session_id(
         let _ = crate::db::set_setting(&conn, &cli_session_key(harness, sid), &id);
     }
 }
+
+// ---- Context primer (mid-chat engine handoff) ----
+//
+// A CLI harness keeps its own conversation memory across turns (claude
+// `--resume`, kimi `--session`, opencode's server-side session). But a CLI
+// that is starting a BRAND-NEW session — the chat's first harness turn, a
+// harness switch (the teardown drops the previous engine's resume id, which
+// would be meaningless to the new CLI anyway), or an ACP respawn (ACP has no
+// resume at all) — knows nothing about what was said before. Without a
+// handoff, switching engines mid-chat silently loses the whole conversation;
+// the built-in cloud/local providers never had this problem because they
+// rebuild history from the DB on every turn.
+//
+// The primer rebuilds that same DB history as a compact labeled transcript
+// and is prepended to the FIRST prompt of the fresh CLI session only (gated
+// on `cli_session_id == None`; turns 2+ ride the CLI's own context).
+
+/// Total character budget for the primer transcript (~6k tokens — a compact
+/// handoff, not a full replay; very long chats keep their newest turns).
+const CONTEXT_PRIMER_MAX_CHARS: usize = 24_000;
+/// Per-message cap so one giant artifact-dump reply can't eat the budget.
+const CONTEXT_PRIMER_MESSAGE_CAP: usize = 4_000;
+
+/// DB fetch half of the primer. MUST run before this turn's user message is
+/// persisted so the transcript is exactly "the conversation so far" — the new
+/// message itself is forwarded verbatim in `content`.
+fn build_context_primer(db: &DbState, chat_session_id: &str) -> String {
+    let records = {
+        let conn = db.0.lock();
+        // Same rows the built-in providers would re-send (compaction folds and
+        // forked-away tails excluded), so the handoff matches what a built-in
+        // turn would have seen.
+        crate::db::list_active_chat_messages(&conn, chat_session_id).unwrap_or_default()
+    };
+    context_primer_from_records(&records)
+}
+
+/// Pure transcript builder behind `build_context_primer`.
+///
+/// Newest-first accumulation within the char budget keeps the most recent
+/// turns — the ones the next reply most depends on — when a long chat must be
+/// truncated. Returns "" when there is nothing to hand over (fresh chat, or
+/// history made up entirely of display-only markup).
+fn context_primer_from_records(records: &[crate::types::ChatMessageRecord]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    for r in records.iter().rev() {
+        // `<think>`/`<tool>` blocks are display-only narration (tool JSON the
+        // new CLI never ran) — strip them exactly like the built-in history
+        // path does.
+        let text = crate::chat::commands::strip_think_blocks(&r.content);
+        if text.is_empty() {
+            continue;
+        }
+        let who = match r.role.as_str() {
+            "user" => "User",
+            "assistant" => "Relay",
+            _ => "System", // compaction summaries and other meta rows
+        };
+        let mut body: String = text.chars().take(CONTEXT_PRIMER_MESSAGE_CAP).collect();
+        if text.chars().count() > CONTEXT_PRIMER_MESSAGE_CAP {
+            body.push_str("…[truncated]");
+        }
+        let line = format!("[{who}]: {body}");
+        let cost = line.len() + 2; // "\n\n" join overhead
+        if !lines.is_empty() && used + cost > CONTEXT_PRIMER_MAX_CHARS {
+            break;
+        }
+        used += cost;
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    lines.reverse();
+    let mut out = String::from(
+        "[Context handoff] The earlier part of this conversation ran on a different \
+         engine. The transcript below is everything said so far, oldest first. \
+         Continue the conversation naturally — the user's new message follows \
+         after the separator.\n\n",
+    );
+    out.push_str(&lines.join("\n\n"));
+    out
+}
+
 
 /// DB key for the model id the harness LAST actually ran (assistant
 /// message.model / message info.modelID). Feeds the composer's context meter
@@ -4593,6 +4709,17 @@ fn finish_turn(
     // rates for a completely different model.
     model_key: Option<&str>,
 ) {
+    // Context-chain trace: the harness's own per-turn report — the model it
+    // actually ran and the prompt size it counted, which the frontend meter
+    // renders as "used" against its cap (lib/contextWindow.ts). No context
+    // limit crosses this boundary; the CLI enforces its own window.
+    eprintln!(
+        "[context] harness turn: session={} model='{}' in={} out={}",
+        sid,
+        model_key.unwrap_or("—"),
+        input.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+        output.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+    );
     // Persist the assistant message FIRST so we can attribute artifacts to it.
     let message_id: Option<i64> = if !full.is_empty() {
         let conn = db.0.lock();
@@ -4737,6 +4864,91 @@ fn no_console_window(cmd: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Minimal persisted-message row for primer tests (only role/content are
+    /// read by the builder; the rest is display/telemetry metadata).
+    fn primer_record(role: &str, content: &str) -> crate::types::ChatMessageRecord {
+        crate::types::ChatMessageRecord {
+            id: 1,
+            chat_session_id: "s".into(),
+            role: role.into(),
+            content: content.into(),
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            created_at: 0,
+            superseded_by: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_output_tokens: None,
+            provider: None,
+            model_key: None,
+            pricing_estimated_usd: None,
+            started_at: None,
+            completed_at: None,
+            llm_time_ms: None,
+            tool_time_ms: None,
+            ttft_ms: None,
+            tokens_per_second: None,
+        }
+    }
+
+    #[test]
+    fn context_primer_hands_off_history_for_a_fresh_cli_session() {
+        let records = vec![
+            primer_record("user", "Create a quarterly report from my notes."),
+            primer_record(
+                "assistant",
+                "Done — <tool>{\"name\":\"generate_file\"}</tool>quarterly_report.html is in Artifacts.",
+            ),
+            primer_record("user", "Now add a summary section."),
+            primer_record(
+                "assistant",
+                "<think>reasoning is display-only, never re-sent</think>Added the summary section.",
+            ),
+        ];
+        let primer = context_primer_from_records(&records);
+        assert!(primer.starts_with("[Context handoff]"), "{primer}");
+        assert!(primer.contains("[User]: Create a quarterly report"));
+        assert!(primer.contains("[Relay]: Done — quarterly_report.html is in Artifacts."));
+        assert!(primer.contains("[Relay]: Added the summary section."));
+        // Display-only markup must not leak into the handoff: the new CLI
+        // would otherwise see tool-call JSON for tools it never ran.
+        assert!(!primer.contains("<tool>"));
+        assert!(!primer.contains("<think>"));
+        // Oldest first, so the transcript reads as a conversation.
+        let first = primer.find("Create a quarterly report").unwrap();
+        let last = primer.find("Added the summary section").unwrap();
+        assert!(first < last);
+    }
+
+    #[test]
+    fn context_primer_empty_for_fresh_chat_or_markup_only_history() {
+        // Brand-new chat: nothing to hand over, no header either.
+        assert_eq!(context_primer_from_records(&[]), "");
+        // Rows that are entirely think/tool markup carry no handoff content.
+        let markup_only = vec![
+            primer_record("assistant", "<think>hmm</think>"),
+            primer_record("assistant", "<tool>{\"name\":\"bash\"}</tool>"),
+        ];
+        assert_eq!(context_primer_from_records(&markup_only), "");
+    }
+
+    #[test]
+    fn context_primer_budget_keeps_the_newest_turns() {
+        let mut records = Vec::new();
+        for i in 0..200 {
+            records.push(primer_record("user", &format!("old message {i} {}", "x".repeat(200))));
+            records.push(primer_record("assistant", &format!("old reply {i} {}", "y".repeat(200))));
+        }
+        let primer = context_primer_from_records(&records);
+        // Header + join overhead ride outside the per-line accounting.
+        assert!(primer.len() <= CONTEXT_PRIMER_MAX_CHARS + 512, "{}", primer.len());
+        // Newest turns survive truncation; the oldest fall out.
+        assert!(primer.contains("old message 199"));
+        assert!(primer.contains("old reply 199"));
+        assert!(!primer.contains("old message 0 "));
+    }
 
     #[test]
     fn agent_tool_is_recognized_as_subagent_spawn() {

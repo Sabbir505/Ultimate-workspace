@@ -19,8 +19,9 @@ pub(crate) type CmdResult<T> = Result<T, String>;
 
 /// Removes display-only process blocks — `<think>…</think>` reasoning and
 /// `<tool>…</tool>` tool-call narration — from a message before it is sent
-/// back to the API as conversation history.
-fn strip_think_blocks(content: &str) -> String {
+/// back to the API as conversation history. Also used by the harness context
+/// primer (agent_sessions.rs) when handing a chat over to a fresh CLI session.
+pub(crate) fn strip_think_blocks(content: &str) -> String {
     strip_tagged_blocks(&strip_tagged_blocks(content, "think"), "tool")
 }
 

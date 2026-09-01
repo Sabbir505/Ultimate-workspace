@@ -316,6 +316,12 @@ pub(crate) fn is_mutating_tool(name: &str) -> bool {
     if crate::chat::permission::is_mutating_fs_tool(name) {
         return true;
     }
+    // Scheduling/deleting an automation changes persisted state (and a run
+    // fires unattended), so plan mode refuses it like every other mutation.
+    // The read-only list_automations stays allowed during research.
+    if crate::chat::tools::is_mutating_automation_tool(name) {
+        return true;
+    }
     matches!(
         name,
         "run_shell" | "shell" | "RunShell"

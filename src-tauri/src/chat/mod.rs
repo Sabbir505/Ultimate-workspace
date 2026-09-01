@@ -1237,17 +1237,17 @@ mod tests {
         assert!(is_research_request("Deep dive on CRDTs please"));
     }
 
-    /// 8k-token budget guard (attach-on-demand): a fresh tool-enabled turn
+    /// Fresh-turn budget guard (attach-on-demand): a fresh tool-enabled turn
     /// ships only core prompt + skills catalog + attach manifest + built-in
     /// tool specs — no connector/MCP schemas until an attach. Char proxy:
     /// the specs JSON measured ≈4.1 chars/token against llama-server's
     /// /tokenize (description-dense JSON) and prompt prose ≈3.3, so the
-    /// assembled baseline must stay under ~30k chars to keep prompt_tokens
-    /// < 8k. The live `[prompt-audit]` logs are ground truth; a regression
+    /// assembled baseline must stay under ~60k chars to keep prompt_tokens
+    /// < 15k. The live `[prompt-audit]` logs are ground truth; a regression
     /// here almost certainly re-inlined a schema or guide that every turn
     /// pays for (see DOC_STYLE_GUIDE for the moved-out example).
     #[test]
-    fn fresh_turn_baseline_under_10k_budget() {
+    fn fresh_turn_baseline_under_15k_budget() {
         let caps = tools::ToolCaps {
             // Reflect a real fresh turn: attachable sources present → the
             // attach meta-tools are advertised too.
@@ -1303,10 +1303,12 @@ mod tests {
             specs.len(),
             total
         );
-        // ≈10k tokens at ~4 chars/token. 38_200 (not 40_000) leaves headroom
+        // ≈15k tokens at ~4 chars/token. 58_200 (not 60_000) leaves headroom
         // for the per-turn date anchor, whose rendered length varies with the
-        // weekday/UTC-offset strings.
-        assert!(total < 38_200, "fresh-turn baseline over 10k budget: {total} chars");
+        // weekday/UTC-offset strings. The last real jump was the automation
+        // tool family (5 specs, ≈2.5k chars) — the capability must be
+        // model-visible, so it's paid in the baseline rather than hidden.
+        assert!(total < 58_200, "fresh-turn baseline over 15k budget: {total} chars");
     }
 
     #[test]

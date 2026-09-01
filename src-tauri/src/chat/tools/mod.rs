@@ -38,6 +38,16 @@ mod specs;
 /// `tools::openai_tool_specs` / `tools::anthropic_tool_specs`.
 pub use specs::{anthropic_tool_specs, openai_tool_specs};
 
+/// Automation tool implementations (list/create/update/delete/run-now).
+/// They need the AppHandle (DbState + the scheduler's launch path), so
+/// `execute_tool` — which is provider-agnostic and app-optional — does NOT
+/// dispatch them; `dispatch::run_automation_tool` does, exactly like the
+/// source-ledger tools. See the automations family block above.
+mod automations;
+pub(crate) use automations::{
+    execute_automation_tool, is_automation_tool, is_mutating_automation_tool,
+};
+
 /// Names of every tool the model may call. Kept in one place so the specs and
 /// the dispatcher can't drift apart.
 pub const WEB_SEARCH: &str = "web_search";
@@ -127,6 +137,26 @@ pub const GET_SOURCE_LEDGER: &str = "get_source_ledger";
 /// Clear the source ledger for this chat session — call at the start of every
 /// new research task so a fresh question begins from a clean ledger.
 pub const RESET_SOURCE_LEDGER: &str = "reset_source_ledger";
+
+// ---- Automations (scheduled headless agent runs) ----
+//
+// The app's Automations feature (crate::automations) is also a model-visible
+// capability: without these tools the model answers "I can't schedule things"
+// even though Relay schedules headless runs on every supported agent. They
+// dispatch in dispatch.rs (AppHandle → DbState), like the ledger tools.
+// `list_automations` is read-only; the rest change persisted state and are
+// schema-stripped under the read_only sandbox like the mutating FS tools.
+
+/// List every stored automation (id, name, schedule, enabled, next fire).
+pub const LIST_AUTOMATIONS: &str = "list_automations";
+/// Create an automation: a prompt + 5-field cron schedule + agent engine.
+pub const CREATE_AUTOMATION: &str = "create_automation";
+/// Edit an existing automation's fields (partial update by id).
+pub const UPDATE_AUTOMATION: &str = "update_automation";
+/// Delete an automation by id.
+pub const DELETE_AUTOMATION: &str = "delete_automation";
+/// Fire one run of an automation immediately (same path the scheduler uses).
+pub const RUN_AUTOMATION_NOW: &str = "run_automation_now";
 
 // ---- Filesystem tools (the "filesystem tool-use" layer) ----
 //
@@ -285,14 +315,14 @@ impl ToolOutcome {
 const WEB_SEARCH_DESC: &str = "Search the public web for up-to-date information. \
     Returns a list of result titles, URLs and snippets. This is the DEFAULT \
     search tool: a bare request like \"search X\", \"look up X\", or \"find \
-    out about X\" means the WEB, not the user's files â€” use this, not \
+    out about X\" means the WEB, not the user's files — use this, not \
     search_files, unless the user explicitly named a local file/extension/path. \
     Your training data has a cutoff, so CALL THIS before answering any \
     question whose answer may have changed since then: software/library/framework \
     versions or 'latest'/'current' releases, API signatures/behavior, recent \
     events or news, current prices, stats, or anything about \
     'now'/'today'/'recently'. For stable knowledge or pure reasoning (math, \
-    definitions, mature syntax), do NOT search â€” just answer. For a \
+    definitions, mature syntax), do NOT search — just answer. For a \
     single-fact question, one targeted search is enough; only escalate to a \
     multi-source research flow if the user asked for research.";
 
@@ -383,7 +413,7 @@ const READ_FILE_DESC: &str = "Read a file's text contents and return them \
 const SEARCH_FILES_DESC: &str = "Recursively find LOCAL files under a directory whose \
     path/name contains a substring (case-insensitive). Returns matching paths, \
     capped to a reasonable number. Read-only. Use this ONLY for the user's local \
-    files â€” NOT for web/knowledge lookups; a bare topic like \"cow\" is a web \
+    files — NOT for web/knowledge lookups; a bare topic like \"cow\" is a web \
     search, not a file search. Call web_search instead unless the user named a \
     file/extension/path or clearly means local content. For searching the \
     **contents** of files (where is X defined / used), prefer `search_content`.";
@@ -1131,6 +1161,46 @@ mod tests {
         // can't even attempt it there.
         assert!(!openai_names(&ToolCaps::default(), SandboxPolicy::ReadOnly)
             .contains(&OPEN_FILE.to_string()));
+    }
+
+    /// The Automations feature must be model-visible: `list_automations`
+    /// (read-only) in every wire format and mode, the CRUD/run tools only
+    /// where mutating tools ship. Both wire formats must agree — a missing
+    /// entry on one provider is the "model claims it can't automate" bug class.
+    #[test]
+    fn automation_tools_exposed_and_gated_consistently() {
+        let anthropic_ro: Vec<String> = anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::ReadOnly)
+            .iter()
+            .map(|s| s["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            anthropic_ro.contains(&LIST_AUTOMATIONS.to_string()),
+            "read-only list_automations missing from the anthropic schema"
+        );
+        assert!(
+            openai_names(&ToolCaps::default(), SandboxPolicy::ReadOnly)
+                .contains(&LIST_AUTOMATIONS.to_string()),
+            "read-only list_automations missing from the openai schema"
+        );
+        let openai = openai_names(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite);
+        let anthropic: Vec<String> = anthropic_tool_specs(&ToolCaps::default(), SandboxPolicy::WorkspaceWrite)
+            .iter()
+            .map(|s| s["name"].as_str().unwrap().to_string())
+            .collect();
+        for name in [
+            LIST_AUTOMATIONS,
+            CREATE_AUTOMATION,
+            UPDATE_AUTOMATION,
+            DELETE_AUTOMATION,
+            RUN_AUTOMATION_NOW,
+        ] {
+            assert!(openai.contains(&name.to_string()), "openai schema missing {name}");
+            assert!(anthropic.contains(&name.to_string()), "anthropic schema missing {name}");
+        }
+        let ro = openai_names(&ToolCaps::default(), SandboxPolicy::ReadOnly);
+        for name in [CREATE_AUTOMATION, UPDATE_AUTOMATION, DELETE_AUTOMATION, RUN_AUTOMATION_NOW] {
+            assert!(!ro.contains(&name.to_string()), "{name} must be stripped under read_only");
+        }
     }
 
     #[test]

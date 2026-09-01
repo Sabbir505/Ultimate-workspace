@@ -1354,6 +1354,73 @@ async fn run_gated_system_tool(
     execute_system_tool(app, sid, name, args).await
 }
 
+/// Human-facing summary for an automation tool approval card. The card is the
+/// only guard on create/delete/run-now in the safer modes, so it must name
+/// what will change.
+fn automation_tool_summary(name: &str, args: &Value) -> String {
+    let id = args.get("automation_id").and_then(|v| v.as_str()).unwrap_or("");
+    let label = |v: &Value| {
+        v.get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or(id)
+            .to_string()
+    };
+    match name {
+        tools::CREATE_AUTOMATION => format!(
+            "Create automation \"{}\" on schedule \"{}\"",
+            label(args),
+            args.get("schedule").and_then(|v| v.as_str()).unwrap_or("?")
+        ),
+        tools::UPDATE_AUTOMATION => format!("Update automation \"{id}\""),
+        tools::DELETE_AUTOMATION => format!("Delete automation \"{id}\""),
+        tools::RUN_AUTOMATION_NOW => format!("Run automation \"{id}\" now"),
+        other => other.to_string(),
+    }
+}
+
+/// Execute an automation tool that the permission gate flagged for approval.
+/// Mirrors `run_gated_system_tool`: register the pending approval, pause on
+/// the oneshot until the UI resolves, then run the real handler.
+async fn run_gated_automation_tool(
+    mgr: &Arc<ChatManager>,
+    app: &AppHandle,
+    sid: &str,
+    name: &str,
+    args: &Value,
+) -> String {
+    let summary = automation_tool_summary(name, args);
+    let (pending_id, rx) = mgr.register_pending_approval(sid, name, args.clone(), summary.clone());
+
+    let _ = app.emit(
+        "chat:approval-request",
+        ChatApprovalRequestPayload {
+            chat_session_id: sid.to_string(),
+            pending_id: pending_id.clone(),
+            tool: name.to_string(),
+            summary,
+            args: args.clone(),
+        },
+    );
+
+    let approved = rx.await.unwrap_or(false);
+    let _ = app.emit(
+        "chat:approval-resolved",
+        ChatApprovalResolvedPayload {
+            chat_session_id: sid.to_string(),
+            pending_id,
+            approved,
+        },
+    );
+
+    if !approved {
+        return format!(
+            "The user denied the {name} action. Do not retry it unless the user explicitly asks."
+        );
+    }
+
+    tools::execute_automation_tool(app, name, args).await
+}
+
 /// Run a tool and, if it produced a file, notify the UI. Returns the text to
 /// feed back to the model.
 ///
@@ -1569,6 +1636,39 @@ pub(crate) async fn run_tool(
     // provider-agnostic execute_tool dispatcher.
     if let Some(text) = run_ledger_tool(app, sid, name, args).await {
         return text;
+    }
+
+    // Automation tools (list/create/update/delete/run-now) — DB + scheduler
+    // via the AppHandle, like the ledger tools above. The list is read-only
+    // and auto-runs; the rest mutate persisted state / spawn unattended runs,
+    // so they follow the connector-write posture (approval under read_only/
+    // manual, auto-run under auto_edit/full_auto), with delete held to the
+    // stricter delete_file posture (gated unless full_auto). Plan mode has
+    // already refused the mutating ones above via is_mutating_tool.
+    if tools::is_automation_tool(name) {
+        let decision = if name == tools::LIST_AUTOMATIONS {
+            permission::PermissionDecision::AutoRun
+        } else if name == tools::DELETE_AUTOMATION {
+            if matches!(approval, permission::ApprovalPolicy::FullAccess) {
+                permission::PermissionDecision::AutoRun
+            } else {
+                permission::PermissionDecision::NeedsApproval
+            }
+        } else if !sandbox.allows_mutating_tools() {
+            // Schema-stripped under read_only; a call reaching here anyway
+            // fails closed.
+            permission::PermissionDecision::NeedsApproval
+        } else {
+            permission::check_connector_permission(
+                sandbox,
+                approval,
+                permission::ConnectorToolKind::Write,
+            )
+        };
+        if matches!(decision, permission::PermissionDecision::NeedsApproval) {
+            return run_gated_automation_tool(mgr, app, sid, name, args).await;
+        }
+        return tools::execute_automation_tool(app, name, args).await;
     }
 
     // Local-docs search: needs both DB (corpora + chunks) and the embedding

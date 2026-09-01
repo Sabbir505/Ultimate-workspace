@@ -3,13 +3,13 @@
 //! Powers the agentic "do it for me" tools that must NOT block the
 //! conversation turn:
 //!
-//!   * `download_file` â€” stream a file from a URL to an absolute local path
+//!   * `download_file` — stream a file from a URL to an absolute local path
 //!     (e.g. `.safetensors` / `.bin` model weights straight from Hugging
 //!     Face). Chunked streaming writes straight to disk (no whole-file
 //!     memory buffering), with resume (`.part` file + `Range`), transient
 //!     retries, speed tracking and per-chunk progress events.
-//!   * `run_shell` â€” native shell execution on the host (unsandboxed by
-//!     design â€” this is the "run CLI tools like huggingface-cli download"
+//!   * `run_shell` — native shell execution on the host (unsandboxed by
+//!     design — this is the "run CLI tools like huggingface-cli download"
 //!     escape hatch). Runs as a background task with streaming output so a
 //!     long-running command doesn't lock the chat.
 //!
@@ -19,7 +19,7 @@
 //! events so the chat tab can render live progress cards without polling.
 //!
 //! Security posture: downloads accept any http(s) URL and any absolute
-//! destination path â€” unrestricted filesystem access is the point (writing
+//! destination path — unrestricted filesystem access is the point (writing
 //! to D:\models etc. without a virtual workspace boundary). The permission
 //! gate in `permission::check_system_permission` decides whether the call
 //! auto-runs or surfaces an approval card before the task is even created.
@@ -48,7 +48,7 @@ use crate::types::ChatTaskProgressPayload;
 const TERMINAL_TASK_TTL: Duration = Duration::from_secs(60 * 60);
 /// Max bytes of a shell task's captured output kept for the model.
 const SHELL_OUTPUT_CAP: usize = 200_000;
-/// Throttle for progress events (downloads) â€” ~7/s max.
+/// Throttle for progress events (downloads) — ~7/s max.
 const PROGRESS_EMIT_MIN: Duration = Duration::from_millis(150);
 /// Throttle for shell output events.
 const SHELL_EMIT_MIN: Duration = Duration::from_millis(250);
@@ -89,7 +89,7 @@ pub struct TaskSnapshot {
 }
 
 impl TaskSnapshot {
-    /// Percentage of the total downloaded (0.0â€“100.0), or `None` when the
+    /// Percentage of the total downloaded (0.0–100.0), or `None` when the
     /// total size is unknown (e.g. streaming without Content-Length).
     #[allow(dead_code)] // used by the frontend via serialized fields; kept for tests
     pub fn percent(&self) -> Option<f64> {
@@ -234,7 +234,7 @@ impl TaskManager {
             Some(entry) => {
                 if let Some(tx) = entry.cancel.lock().take() {
                     let _ = tx.send(());
-                    format!("Cancelling task {task_id}â€¦")
+                    format!("Cancelling task {task_id}…")
                 } else {
                     let state = entry.snapshot.lock().state;
                     match state {
@@ -519,7 +519,7 @@ async fn download_task<R: tauri::Runtime>(
             sid,
             entry,
             TaskState::Completed,
-            format!("Already present at {dest} â€” nothing to download."),
+            format!("Already present at {dest} — nothing to download."),
         );
         return Ok(());
     }
@@ -542,7 +542,7 @@ async fn download_task<R: tauri::Runtime>(
                     snap.state = TaskState::Cancelled;
                     snap.speed_bps = 0;
                     snap.message = format!(
-                        "Cancelled at {} â€” the .part file was kept for resume.",
+                        "Cancelled at {} — the .part file was kept for resume.",
                         human_bytes(resume_from)
                     );
                 }
@@ -577,8 +577,8 @@ async fn download_task<R: tauri::Runtime>(
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(format!(
-                "HTTP {status} â€” this file is likely gated; open it on huggingface.co to accept \
-                 the license, or set a Hugging Face access token in Settings â†’ Local Models."
+                "HTTP {status} — this file is likely gated; open it on huggingface.co to accept \
+                 the license, or set a Hugging Face access token in Settings → Local Models."
             ));
         }
         if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -611,9 +611,9 @@ async fn download_task<R: tauri::Runtime>(
             snap.total = total;
             snap.dest_path = Some(dest.to_string());
             snap.message = if resuming {
-                format!("Resuming from {} bytesâ€¦", human_bytes(start))
+                format!("Resuming from {} bytes…", human_bytes(start))
             } else {
-                "Downloadingâ€¦".to_string()
+                "Downloading…".to_string()
             };
         }
         TaskManager::emit(app, sid, entry);
@@ -637,7 +637,7 @@ async fn download_task<R: tauri::Runtime>(
                         snap.state = TaskState::Cancelled;
                         snap.speed_bps = 0;
                         snap.message = format!(
-                            "Cancelled at {} â€” the .part file was kept for resume.",
+                            "Cancelled at {} — the .part file was kept for resume.",
                             human_bytes(downloaded)
                         );
                     }
@@ -723,7 +723,7 @@ async fn download_task<R: tauri::Runtime>(
 
 /// Run a native shell command, streaming output lines as progress events.
 /// No sandbox, no wall-clock timeout (long CLI runs like
-/// `huggingface-cli download` are the point) â€” cancel_task kills it.
+/// `huggingface-cli download` are the point) — cancel_task kills it.
 async fn shell_task<R: tauri::Runtime>(
     app: Option<&AppHandle<R>>,
     sid: &str,
@@ -814,7 +814,7 @@ async fn shell_task<R: tauri::Runtime>(
                     let mut snap = entry.snapshot.lock();
                     snap.state = TaskState::Cancelled;
                     snap.speed_bps = 0;
-                    snap.message = "Cancelled â€” process killed.".to_string();
+                    snap.message = "Cancelled — process killed.".to_string();
                 }
                 TaskManager::emit(app, sid, entry);
                 return;
@@ -1039,7 +1039,7 @@ mod tests {
     #[test]
     fn cancel_keeps_part_file_for_resume() {
         std::env::set_var("CONDUIT_ALLOW_PRIVATE_DOWNLOADS", "1");
-        // 64KiB chunks at 5ms each â‰ˆ 5s of streaming â€” guaranteed still
+        // 64KiB chunks at 5ms each ≈ 5s of streaming — guaranteed still
         // in flight when the test cancels.
         let body: &'static [u8] = &[0u8; 1024 * 1024 * 64];
         let url = tauri::async_runtime::block_on(serve(body, true, Duration::from_millis(5)));

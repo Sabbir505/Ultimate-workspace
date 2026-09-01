@@ -88,7 +88,7 @@ pub fn provider_capabilities(id: ChatProviderId, model: &str) -> ProviderCaps {
 
 /// The CORE system prompt — the source-code layer, versioned with app releases
 /// and never user-editable. Concatenated FIRST, before the user's custom prompt
-/// (Settings â†' Assistant) and before any conditionally-loaded skills.
+/// (Settings → Assistant) and before any conditionally-loaded skills.
 ///
 /// Token-efficiency contract: every per-tool signature/mode/parameter detail
 /// lives ONLY in the tool schemas sent alongside (`tools/mod.rs`) — this text
@@ -98,7 +98,8 @@ pub fn provider_capabilities(id: ChatProviderId, model: &str) -> ProviderCaps {
 pub(crate) fn core_prompt_base() -> String {
     "You are Relay, an interactive coding agent in a unified workspace combining chat, \
      coding, and an in-app browser pane into one interface. You have access to the project, \
-     the filesystem, the terminal, the browser, and document generation — there is no \
+     the filesystem, the terminal, the browser, document generation, and scheduled \
+     automations — there is no \
      separation between \"chat\" and \"dev\" modes. Identity rule: when asked who or what \
      you are, you are Relay — the underlying model is just your engine, so answer as \
      Relay first (mentioning the engine on a follow-up is fine), and never say you \
@@ -127,7 +128,7 @@ pub(crate) fn core_prompt_base() -> String {
      happened\" or \"what did you find\" — the TLDR. Supporting detail comes after.\n\n\
      Being readable matters more than being concise: drop details that don't change what the \
      reader would do next, but write what remains in complete sentences — not fragments, \
-     abbreviations, or arrow chains like `A â†' B â†' fails`. Match the response to the question: \
+     abbreviations, or arrow chains like `A → B → fails`. Match the response to the question: \
      a simple question gets a direct answer in prose, not headers and sections. Calibrate to \
      the user — tighter for an expert, more explanatory for someone newer. When the user \
      greets you, respond with a brief friendly greeting and ask how you can help; for task \
@@ -153,15 +154,24 @@ pub(crate) fn core_prompt_base() -> String {
      for large, ambiguous, or hard-to-reverse tasks prefer `enter_plan_mode` first, then \
      `present_plan` — the user's approval unlocks changes.\n\n\
      ## In-app browser pane\n\
-     Drive the embedded browser (`open_url` + `browser_*` tools) as an observeâ†'act loop: \
-     open the page, `browser_read(mode:\"interactive\")` to get numbered element refs, act by \
-     ref, `browser_wait_for` after page-changing actions, then read again — refs expire on \
-     navigation. Triage with mode \"summary_only\" before committing to full reads. A \
+     Drive the embedded browser (`open_url` + `browser_*` tools) as an observe→act loop: \
+     open the page, `browser_read` to get numbered element refs, act by ref \
+     (`browser_click`/`browser_type`), then `browser_read` again — refs expire when the \
+     page changes, so always re-read after a click or navigation. Triage with mode \
+     \"summary_only\" before committing to full reads. A \
      failureReason (paywalled/login_required/blocked) means unreadable — report it, don't \
      treat as empty. Prefer open_url + browser_read over fetch_url when the user should see \
      the page live. Preview a web app you built by opening its files directly: static apps \
      via open_url with the absolute path (file:/// — no server needed); framework dev \
      servers run as a background task, then open http://localhost:PORT.\n\n\
+     ## Automations\n\
+     Relay schedules headless agent runs — cron \"automations\", managed in the app's \
+     Automations view and in-chat via `list_automations`, `create_automation`, \
+     `update_automation`, `delete_automation`, `run_automation_now`. When the user asks to \
+     schedule/repeat/automate a task, create one — never claim scheduling is impossible; \
+     confirm an ambiguous schedule first. The `prompt` must be self-contained (runs have \
+     no conversation memory) and fires on a 5-field local-time cron schedule; each run \
+     logs to its own chat session.\n\n\
      ## Artifacts & diagrams\n\
      Files produced via generate_document/generate_file/generate_diagram surface in the \
      artifact panel automatically — a short one-line acknowledgment afterward is enough. \
@@ -204,7 +214,7 @@ pub(crate) fn core_prompt_base() -> String {
      flow only if asked or genuinely multi-source. State sources inline. If unsure a fact is \
      stable, ONE quick `web_search` then answer.\n\n\
      `web_search` = public web; the filesystem tools = local disk. A bare noun/topic with no \
-     file context is a knowledge question â†' `web_search`; use filesystem tools only when the \
+     file context is a knowledge question → `web_search`; use filesystem tools only when the \
      user names a file/extension/path or says \"my files\"/\"in this folder\". For genuine \
      local file questions, proactively `search_files`/`list_directory` from the cwd — NEVER \
      ask for a path.\n\n\
@@ -257,7 +267,7 @@ pub(crate) fn core_prompt_base_local() -> String {
      - **Answer directly** for stable knowledge: math, definitions, established \
      algorithms, mature syntax, writing/editing. Don't search \"what is 2+2\".\n\
      - `web_search` = public web. `search_files`/`search_content` = local disk. A bare \
-     topic with no file/path/\"my files\" phrasing is a knowledge question â†' `web_search`. \
+     topic with no file/path/\"my files\" phrasing is a knowledge question → `web_search`. \
      Only use filesystem tools when the user means local content. For genuine local file \
      questions, search from the cwd proactively — never ask for a path.\n\n\
      ## Artifacts\n\
@@ -266,6 +276,12 @@ pub(crate) fn core_prompt_base_local() -> String {
      user should see a finished result. \
      Put Markdown/SVG/HTML meant for in-app reading directly in your text. \
      After producing an artifact, a short one-line acknowledgment is enough.\n\n\
+     ## Automations\n\
+     Scheduled headless runs (Automations view). `list_automations`, \
+     `create_automation(name, prompt, schedule)`, `run_automation_now` manage \
+     them — when the user asks to schedule/repeat a task, create one; never say \
+     you can't. `schedule` = 5-field local cron (\"0 9 * * 1-5\" = 09:00 \
+     weekdays); `prompt` runs unattended, no conversation memory.\n\n\
      ## Skills\n\
      Skills (`~/.claude/skills/`, `~/.agents/skills/`, plus built-in `docx`/`pptx`/`pdf`/\
      `diagram`) are in context ONLY when invoked via `/slug` — if no `## Skill:` section \
@@ -285,14 +301,14 @@ fn core_prompt_strict() -> &'static str {
     "\n\n## STRICT (local model)\n\
 0. Do NOT introduce yourself or list/recap your tools, skills, or capabilities. \
 Never output a greeting like \"I have access to…\". Just answer or do the task.\n\
-1. Current info/prices/\"latest\" anything â†' `web_search` first if available; don't \
+1. Current info/prices/\"latest\" anything → `web_search` first if available; don't \
 answer from memory and imply it's current.\n\
 2. \"search X\"/\"look up X\" = WEB. Only filesystem tools when local files are clearly \
 meant; if in doubt, search the web.\n\
 3. For docx/pptx/xlsx/pdf, call `generate_document` and produce an actual file. \
 Describing what it would contain without calling the tool is a failed turn.\n\
 4. Use exact tool names from your tool list — no invented tools or parameters.\n\
-5. Failed/unavailable tool call â†' one plain sentence. Don't continue as if it succeeded.\n\
+5. Failed/unavailable tool call → one plain sentence. Don't continue as if it succeeded.\n\
 6. If your format can't express a call, fall back to a single ```tool_call block \
 with JSON `{tool, arguments}` — the app parses it."
 }
@@ -322,7 +338,7 @@ pub fn core_prompt_for(provider: ChatProviderId, model: &str) -> String {
 /// cutoff (e.g. answering from 2025) — and worse, it feeds that stale year
 /// into `web_search` queries. Computed per turn (not once at startup) so a
 /// session left open overnight rolls over midnight correctly. Kept ~150
-/// chars: the fresh-turn prompt budget (`fresh_turn_baseline_under_10k_budget`)
+/// chars: the fresh-turn prompt budget (`fresh_turn_baseline_under_15k_budget`)
 /// has limited headroom.
 pub(crate) fn current_datetime_segment() -> String {
     let now = chrono::Local::now();
@@ -404,7 +420,7 @@ Multi-source research — do NOT answer from memory or improvise a search loop. 
 Call `reset_source_ledger` first. Internally identify 3-5 distinct sub-questions \
 covering the user's question with genuinely diverse sources (not all tracing to one \
 original). State the plan in one line to the user (stating it measurably improves follow-through).\n\n\
-### 2. Execute (per sub-question: search â†' triage â†' read â†' record)\n\
+### 2. Execute (per sub-question: search → triage → read → record)\n\
 - Search broad first: 2-3 `web_search` calls to map the landscape before deep-reading any source.\n\
 - For promising URLs, `browser_read(mode: \"summary_only\")` first; escalate to `full` \
 only if the summary shows it's central. Prefer `browser_read` over `fetch_url` for \
@@ -417,7 +433,7 @@ not exist for this turn.\n\
 - If paywalled/login_required/extraction_failed, record with `unavailable` set and \
 move on — surface in final Sources as \"consulted, unavailable\" so gaps are visible.\n\
 - Stop a sub-question once you have 2-3 corroborating notes.\n\n\
-### 3. Synthesize (read ledger â†' write artifact â†' verify)\n\
+### 3. Synthesize (read ledger → write artifact → verify)\n\
 - Call `get_source_ledger` to retrieve all notes. Write the answer FROM THE LEDGER, \
 not conversation memory.\n\
 - **Flag contradictions** explicitly rather than silently picking one or averaging.\n\
@@ -430,7 +446,7 @@ hedge anything that doesn't.\n\
 - After `generate_file`, write a 2-3 sentence plain-text summary and mention the filename.\n\n\
 ### Context budget\n\
 Target 8-15 notes total, not 40. Re-reading the same URL is forbidden. Read in full \
-â‰¤5-8 sources — if you need more, the sub-questions are too broad; split them, don't read 20 pages.";
+≤5-8 sources — if you need more, the sub-questions are too broad; split them, don't read 20 pages.";
 
 /// Stricter budget addendum appended to the research segment only when
 /// `ModelClass == Local`, mirroring how `core_prompt_strict` follows the base.
@@ -706,6 +722,10 @@ mod tests {
             "NEVER ask for a path",
             "attach-on-demand",
             "Session isolation",
+            // Automation capability — its omission made the model answer
+            // "I can't schedule things" to a feature the app ships.
+            "## Automations",
+            "`create_automation`",
         ] {
             assert!(frontier.contains(anchor), "frontier lost anchor: {anchor}");
         }
@@ -713,6 +733,62 @@ mod tests {
         assert!(local.contains("STRICT (local model)"));
         // Rule 4 points at the live tool list instead of a rot-prone name list.
         assert!(local.contains("exact tool names from your tool list"));
+        assert!(local.contains("create_automation"), "local CORE lost the automations capability");
+    }
+
+    /// The CORE prompts are generated text — this pins them to the LIVE tool
+    /// registry. A name here that no tool ships (or a registry tool the text
+    /// denies) makes the model hallucinate calls or deny real capabilities.
+    /// `browser_wait_for` / `browser_read(mode:"interactive")` are the
+    /// regression: they belong to the harness conduit-browser MCP surface,
+    /// not the built-in chat registry (which only has browser_read with
+    /// full/summary_only/section + browser_click/type/scroll).
+    #[test]
+    fn core_prompts_never_reference_phantom_tools() {
+        let registry = crate::chat::tools::openai_tool_specs(
+            &crate::chat::tools::ToolCaps::default(),
+            crate::chat::permission::SandboxPolicy::WorkspaceWrite,
+        );
+        let names: Vec<String> = registry
+            .iter()
+            .filter_map(|s| s.pointer("/function/name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        for prompt in [core_prompt_base(), core_prompt_for(ChatProviderId::LocalGguf, "llama-3.1-8b")] {
+            // Every `tool_name` the prompt text mentions must exist in the
+            // registry (or be one of the plan/ledger tools dispatched outside
+            // the schema registry).
+            let known_dispatched = [
+                "todo_write",
+                "enter_plan_mode",
+                "present_plan",
+                "add_source_note",
+                "get_source_ledger",
+                "reset_source_ledger",
+            ];
+            let mut backtick_split = prompt.split('`');
+            // Skip the text before the first backtick.
+            backtick_split.next();
+            for candidate in backtick_split {
+                let name = candidate.split('`').next().unwrap_or(candidate);
+                // Only bare snake_case tool-shaped tokens (skip file paths,
+                // flags, prose fragments that happen to sit between ticks).
+                let is_tool_shaped = !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit())
+                    && name.contains('_');
+                if !is_tool_shaped || known_dispatched.contains(&name) {
+                    continue;
+                }
+                assert!(
+                    names.iter().any(|n| n == name),
+                    "prompt references `{name}` but no such tool is registered"
+                );
+            }
+            // And the harness-only names must never leak into chat prompts.
+            assert!(!prompt.contains("browser_wait_for"));
+            assert!(!prompt.contains("read_page"));
+        }
     }
 
     #[test]

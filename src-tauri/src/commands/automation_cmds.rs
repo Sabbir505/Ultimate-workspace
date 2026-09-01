@@ -32,14 +32,20 @@ fn validate(input: &AutomationInput) -> Result<(), String> {
     if input.prompt.trim().is_empty() {
         return Err("prompt is required".into());
     }
-    // local_gguf is also valid — checked separately to keep the const small
-    if !ALLOWED_AGENTS.contains(&input.harness.as_str()) && input.harness != "local_gguf" {
+    if !is_allowed_automation_agent(&input.harness) {
         return Err(format!(
             "agent '{}' cannot run automations (supported: CLI agents, cloud APIs, local GGUF)",
             input.harness,
         ));
     }
     automations::validate_schedule(&input.schedule)
+}
+
+/// Shared with the chat tool layer (chat/tools/automations.rs) so the model's
+/// `create_automation` / `update_automation` accept exactly the same agent set
+/// as the Automations form — one list, no drift.
+pub(crate) fn is_allowed_automation_agent(harness: &str) -> bool {
+    ALLOWED_AGENTS.contains(&harness) || harness == "local_gguf"
 }
 
 #[tauri::command]

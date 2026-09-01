@@ -273,17 +273,7 @@ impl AgentSessionManager {
             "opencode" => "OpenCode",
             other => other,
         };
-        let persona = format!(
-            "You are Relay — the agent of the Relay desktop workspace, running on \
-             the {harness_label} engine. To the user you ARE Relay: if asked who you \
-             are, answer \"I'm Relay\" (the {harness_label} engine underneath may be \
-             named as a detail), and never deny being Relay.\n\n\
-             Files you create or modify are listed in the app's Artifacts gallery but \
-             do NOT open on screen. When the user should see a finished result (an \
-             HTML page, a report, a diagram), open it explicitly with the open_file \
-             tool — and only then: never open routine source files you edited along \
-             the way."
-        );
+        let persona = harness_persona(harness_label);
         let effective = {
             let conn = db.0.lock();
             let custom: Option<String> =
@@ -605,6 +595,29 @@ fn persist_cli_session_id(
 const CONTEXT_PRIMER_MAX_CHARS: usize = 24_000;
 /// Per-message cap so one giant artifact-dump reply can't eat the budget.
 const CONTEXT_PRIMER_MESSAGE_CAP: usize = 4_000;
+
+/// The identity + artifact-behavior preamble prepended to every harness turn
+/// (see the send path's comment for ordering). Extracted from the send path
+/// so a test can pin its tool references: the persona must only name tools
+/// that actually exist in harness sessions — the conduit-tools MCP whitelist
+/// (generate_document/diagram/file, get_skill, list_skills, search_docs) and
+/// the conduit-browser MCP family. It must NOT reference built-in-chat-only
+/// tools like `open_file`, which the CLI cannot call (that phantom reference
+/// used to make harness models promise to "open" files and then fail or
+/// improvise).
+fn harness_persona(harness_label: &str) -> String {
+    format!(
+        "You are Relay — the agent of the Relay desktop workspace, running on \
+         the {harness_label} engine. To the user you ARE Relay: if asked who you \
+         are, answer \"I'm Relay\" (the {harness_label} engine underneath may be \
+         named as a detail), and never deny being Relay.\n\n\
+         Files you create or modify are listed in the app's Artifacts gallery \
+         after the turn, but do NOT open on screen. When the user should see a \
+         finished result (an HTML page, a report, a diagram), name it in your \
+         reply with its path so they can open it from the gallery — there is no \
+         open-file tool in this session."
+    )
+}
 
 /// DB fetch half of the primer. MUST run before this turn's user message is
 /// persisted so the transcript is exactly "the conversation so far" — the new
@@ -4864,6 +4877,20 @@ fn no_console_window(cmd: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The harness persona must never reference a tool the CLI session
+    /// doesn't have. `open_file` is a built-in-chat tool — not bridged through
+    /// the conduit-tools MCP whitelist (see mcp_tools_bridge) — so a persona
+    /// mention makes harness models promise an action they cannot take.
+    /// See the doc on `harness_persona` for the whitelist rationale.
+    #[test]
+    fn harness_persona_only_names_bridgable_tools() {
+        let p = harness_persona("Claude Code");
+        assert!(p.contains("I'm Relay"));
+        assert!(!p.contains("open_file"), "persona must not reference the built-in-chat open_file tool");
+        assert!(!p.contains("open_url"), "persona must not reference the built-in-chat open_url tool");
+        assert!(p.contains("Artifacts gallery"));
+    }
 
     /// Minimal persisted-message row for primer tests (only role/content are
     /// read by the builder; the rest is display/telemetry metadata).

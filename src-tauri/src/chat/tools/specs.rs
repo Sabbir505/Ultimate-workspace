@@ -48,6 +48,10 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         openai_fn(READ_FILE, READ_FILE_DESC, read_file_parameters()),
         openai_fn(SEARCH_FILES, SEARCH_FILES_DESC, search_files_parameters()),
         openai_fn(SEARCH_CONTENT, SEARCH_CONTENT_DESC, search_content_parameters()),
+        // Automations — list is read-only and always on; the CRUD/run tools
+        // below follow the mutating-tool gating (see tools/mod.rs family
+        // block). Without them the model denies an app capability it has.
+        openai_fn(LIST_AUTOMATIONS, LIST_AUTOMATIONS_DESC, no_parameters()),
     ]);
     // Local-docs search — only exposed when the embedding sidecar is up and at
     // least one corpus is indexed (computed per turn into ToolCaps.local_docs).
@@ -69,6 +73,16 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         specs.push(openai_fn(DOWNLOAD_FILE, DOWNLOAD_FILE_DESC, download_file_parameters()));
         specs.push(openai_fn(RUN_SHELL, RUN_SHELL_DESC, run_shell_parameters()));
         specs.push(openai_fn(OPEN_FILE, OPEN_FILE_DESC, path_parameters()));
+    }
+    // Automation CRUD/run tools — mutating (persisted schedule + unattended
+    // runs), stripped under read_only like the filesystem writes. Schemas
+    // mirror commands::automation_cmds::validate so a call the model makes
+    // cannot be rejected for shape reasons.
+    if sandbox.allows_mutating_tools() {
+        specs.push(openai_fn(CREATE_AUTOMATION, CREATE_AUTOMATION_DESC, create_automation_parameters()));
+        specs.push(openai_fn(UPDATE_AUTOMATION, UPDATE_AUTOMATION_DESC, update_automation_parameters()));
+        specs.push(openai_fn(DELETE_AUTOMATION, DELETE_AUTOMATION_DESC, automation_id_parameters()));
+        specs.push(openai_fn(RUN_AUTOMATION_NOW, RUN_AUTOMATION_NOW_DESC, automation_id_parameters()));
     }
     specs.push(openai_fn(DOWNLOAD_PROGRESS, DOWNLOAD_PROGRESS_DESC, task_id_parameters()));
     specs.push(openai_fn(GET_TASK_STATUS, GET_TASK_STATUS_DESC, task_id_parameters()));
@@ -189,6 +203,8 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
         anthropic_fn(READ_FILE, READ_FILE_DESC, read_file_parameters()),
         anthropic_fn(SEARCH_FILES, SEARCH_FILES_DESC, search_files_parameters()),
         anthropic_fn(SEARCH_CONTENT, SEARCH_CONTENT_DESC, search_content_parameters()),
+        // Automations — read-only list always on (mirror of the OpenAI block).
+        anthropic_fn(LIST_AUTOMATIONS, LIST_AUTOMATIONS_DESC, no_parameters()),
     ]);
     if caps.local_docs {
         specs.push(anthropic_fn(SEARCH_DOCS, SEARCH_DOCS_DESC, search_docs_parameters()));
@@ -204,6 +220,13 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
         specs.push(anthropic_fn(DOWNLOAD_FILE, DOWNLOAD_FILE_DESC, download_file_parameters()));
         specs.push(anthropic_fn(RUN_SHELL, RUN_SHELL_DESC, run_shell_parameters()));
         specs.push(anthropic_fn(OPEN_FILE, OPEN_FILE_DESC, path_parameters()));
+    }
+    // Automation CRUD/run tools — mirror of the OpenAI block above.
+    if sandbox.allows_mutating_tools() {
+        specs.push(anthropic_fn(CREATE_AUTOMATION, CREATE_AUTOMATION_DESC, create_automation_parameters()));
+        specs.push(anthropic_fn(UPDATE_AUTOMATION, UPDATE_AUTOMATION_DESC, update_automation_parameters()));
+        specs.push(anthropic_fn(DELETE_AUTOMATION, DELETE_AUTOMATION_DESC, automation_id_parameters()));
+        specs.push(anthropic_fn(RUN_AUTOMATION_NOW, RUN_AUTOMATION_NOW_DESC, automation_id_parameters()));
     }
     specs.push(anthropic_fn(DOWNLOAD_PROGRESS, DOWNLOAD_PROGRESS_DESC, task_id_parameters()));
     specs.push(anthropic_fn(GET_TASK_STATUS, GET_TASK_STATUS_DESC, task_id_parameters()));
@@ -568,6 +591,119 @@ fn task_id_parameters() -> Value {
             }
         },
         "required": ["task_id"],
+    })
+}
+
+// ---- Automation tool descriptions + schemas ----
+//
+// Kept in sync with commands::automation_cmds::validate: same agent set, same
+// 5-field-cron rule, same required fields. The execution side
+// (chat/tools/automations.rs) re-validates, so a stale schema degrades into
+// an error message, never a bad row.
+
+const LIST_AUTOMATIONS_DESC: &str = "List the user's scheduled automations (cron \
+    headless agent runs): id, name, agent, schedule, next fire, last status. \
+    Call before update/delete/run to get ids.";
+
+const CREATE_AUTOMATION_DESC: &str = "Create a scheduled automation: `prompt` runs \
+    unattended on a 5-field local-time cron `schedule` via the chosen agent. \
+    Use when the user asks to schedule/repeat/automate a task — never claim \
+    scheduling is impossible; confirm an ambiguous schedule first. Runs have \
+    no conversation memory.";
+
+const UPDATE_AUTOMATION_DESC: &str = "Update an automation by id (from \
+    list_automations). Only passed fields change; `enabled` toggles it.";
+
+const DELETE_AUTOMATION_DESC: &str = "Delete an automation by id, permanently and \
+    with its run history.";
+
+const RUN_AUTOMATION_NOW_DESC: &str = "Fire one run of an automation immediately; \
+    it executes in the background and lands in the run history.";
+
+/// Agent enum for the automation create/update schemas — mirrors
+/// commands::automation_cmds::ALLOWED_AGENTS (+ local_gguf).
+const AUTOMATION_AGENTS: [&str; 8] = [
+    "claude_code",
+    "opencode",
+    "anthropic",
+    "openai",
+    "openrouter",
+    "anthropic_compatible",
+    "openai_compatible",
+    "local_gguf",
+];
+
+fn create_automation_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Short name, e.g. \"Morning news digest\".",
+            },
+            "prompt": {
+                "type": "string",
+                "description": "FULL instruction run unattended — self-contained, \
+                    no reference to this conversation.",
+            },
+            "schedule": {
+                "type": "string",
+                "description": "5-field cron in LOCAL time, minute-first \
+                    (\"0 9 * * 1-5\" = 09:00 weekdays).",
+            },
+            "agent": {
+                "type": "string",
+                "enum": AUTOMATION_AGENTS,
+                "description": "Agent engine. Default claude_code.",
+            },
+            "enabled": {
+                "type": "boolean",
+                "description": "Active. Default true.",
+            },
+        },
+        "required": ["name", "prompt", "schedule"],
+    })
+}
+
+fn update_automation_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "automation_id": {
+                "type": "string",
+                "description": "The id from list_automations.",
+            },
+            "name": { "type": "string", "description": "New name (optional)." },
+            "prompt": { "type": "string", "description": "New prompt (optional)." },
+            "schedule": {
+                "type": "string",
+                "description": "New 5-field local-time cron (optional).",
+            },
+            "agent": {
+                "type": "string",
+                "description": "New agent engine (optional) — one of \
+                    create_automation's agent values.",
+            },
+            "enabled": {
+                "type": "boolean",
+                "description": "Turn on/off (optional).",
+            },
+        },
+        "required": ["automation_id"],
+    })
+}
+
+/// Schema for the id-taking automation tools (delete / run-now).
+fn automation_id_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "automation_id": {
+                "type": "string",
+                "description": "The automation id from list_automations.",
+            }
+        },
+        "required": ["automation_id"],
     })
 }
 

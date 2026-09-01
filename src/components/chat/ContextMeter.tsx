@@ -13,14 +13,23 @@
 // Sizing:
 //  - Local LLM (local_gguf): the cap is the context size from the composer's
 //    Context slider (localCtx); 0/Auto falls back to a default.
-//  - API/cloud models: a flat 256K cap.
+//  - API/cloud + harness models: flat 500k product default for every model
+//    id, refined live by OpenRouter where the provider publishes the real
+//    window (capped at 500k) (lib/contextWindow). The final decision —
+//    which layer won and the value in use — is traced under the console
+//    "[context] meter" channel.
 //
 // The "used" figure is the input_tokens of the last assistant turn (the full
 // prompt size the provider counted), passed in from ChatView. 0 until the
 // first turn completes.
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { contextWindowFor, contextWindowForModel, formatTokens } from "../../lib/contextWindow";
+import {
+  contextWindowFor,
+  contextWindowForModel,
+  debugContext,
+  formatTokens,
+} from "../../lib/contextWindow";
 import { countContextBreakdown, type ContextBreakdown } from "../../lib/ipc";
 import { useUiStore } from "../../state/ui";
 
@@ -63,10 +72,10 @@ interface Row {
 
 export function ContextMeter({ usedTokens, model, provider, isLocal, localCtx, liveMaxTokens, chatSessionId }: Props) {
   const used = usedTokens && usedTokens > 0 ? usedTokens : 0;
-  // Catalog cap for the model id (family rules; 256K fallback). For
+  // Cloud/harness sessions resolve to the flat 500k product default. For
   // OpenRouter sessions the real window is then derived live from their
-  // models endpoint and refines the catalog figure when it resolves.
-  const catalogMax = contextWindowFor(model, isLocal, localCtx);
+  // models endpoint and refines that figure when it resolves.
+  const baseMax = contextWindowFor(model, isLocal, localCtx);
   const [dynamicMax, setDynamicMax] = useState<number | null>(null);
   useEffect(() => {
     setDynamicMax(null);
@@ -83,13 +92,29 @@ export function ContextMeter({ usedTokens, model, provider, isLocal, localCtx, l
   // the slider-derived cap. Falls back to the slider / 16K default for the
   // brief window before the first poll resolves, and for cloud sessions
   // where `liveMaxTokens` is 0.
-  const max = (isLocal && liveMaxTokens && liveMaxTokens > 0)
-    ? liveMaxTokens
-    : (dynamicMax ?? catalogMax);
+  const liveSidecar = !!(isLocal && liveMaxTokens && liveMaxTokens > 0);
+  const max = liveSidecar ? liveMaxTokens! : (dynamicMax ?? baseMax);
+  // Which layer produced `max` — logged on change and shown in the hover
+  // panel so the actual limit in use is visible without devtools.
+  const capSource: string = liveSidecar
+    ? "sidecar-live"
+    : dynamicMax != null
+      ? "openrouter-live"
+      : isLocal
+        ? "local-default"
+        : "product-default";
   const pct = max > 0 ? Math.min(1, used / max) : 0;
   const level = pct >= PCT_CRIT ? "crit" : pct >= PCT_WARN ? "warn" : "ok";
   // Dash the circle so the filled portion grows from the top clockwise.
   const dash = CIRC * pct;
+
+  // Trace the final cap decision (deduped — prints only when it changes).
+  useEffect(() => {
+    debugContext(
+      "meter",
+      `cap=${max} (${capSource}) used=${used} model='${model ?? "—"}' provider='${provider ?? "—"}' isLocal=${isLocal}`,
+    );
+  }, [max, capSource, used, model, provider, isLocal]);
 
   // Rich breakdown panel state — fetched lazily on hover so we don't pay the
   // tokenize round-trips on every render/poll. For local models we use real

@@ -586,6 +586,20 @@ impl ChatManager {
                     // successful turns close them via end_gen/end_tool) so the
                     // final metrics below see complete spans.
                     perf.close_open_windows();
+                    // Context-chain trace ([context] in devtools on the
+                    // frontend side): what the provider actually counted for
+                    // this turn — the figure the meter renders as "used".
+                    // There is deliberately NO context limit on this boundary;
+                    // the cap lives in the meter (lib/contextWindow.ts).
+                    eprintln!(
+                        "[context] provider turn: provider={} model='{}' in={} out={} cache_create={} cache_read={}",
+                        provider_id.as_str(),
+                        chat_req.model,
+                        usage.as_ref().map(|u| u.input_tokens).unwrap_or(0),
+                        usage.as_ref().map(|u| u.output_tokens).unwrap_or(0),
+                        usage.as_ref().map(|u| u.cache_creation_input_tokens).unwrap_or(0),
+                        usage.as_ref().map(|u| u.cache_read_input_tokens).unwrap_or(0),
+                    );
                     // Persist the assistant message with usage.
                     // The turn's message id escapes this block for the
                     // post-done checkpoint (chip attaches to this message).

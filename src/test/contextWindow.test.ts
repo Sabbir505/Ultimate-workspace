@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   API_CONTEXT_WINDOW,
-  catalogContextWindow,
   contextWindowFor,
+  debugContext,
   formatTokens,
   LOCAL_DEFAULT_CONTEXT,
 } from "../lib/contextWindow";
@@ -24,30 +24,17 @@ describe("contextWindowFor", () => {
     );
   });
 
-  it("matches model families — harness catalog ids and dated variants", () => {
-    expect(catalogContextWindow("claude-opus-4-8")).toBe(200_000);
-    expect(catalogContextWindow("claude-sonnet-4-5-20250929")).toBe(200_000);
-    expect(catalogContextWindow("kimi-k3")).toBe(256_000);
-    expect(catalogContextWindow("glm-5.2")).toBe(200_000);
-    expect(catalogContextWindow("glm-4.6-air")).toBe(200_000);
-    expect(catalogContextWindow("glm-4-flash")).toBe(128_000);
-    expect(catalogContextWindow("deepseek-v4-pro")).toBe(128_000);
-    expect(catalogContextWindow("mixtral-8x7b")).toBe(32_768);
-  });
-
-  it("unknown cloud/harness models default to the 500k product ceiling", () => {
-    expect(catalogContextWindow("totally-unknown-model")).toBeNull();
-    expect(contextWindowFor("totally-unknown-model", false, undefined)).toBe(API_CONTEXT_WINDOW);
+  it("every cloud/harness model resolves to the flat 500k product default", () => {
+    // 2026-09 product decision: the window is the provider's business — no
+    // per-family guessing. Dated ids, harness aliases, relay-remapped names,
+    // and unknowns all show the same ceiling.
+    expect(contextWindowFor("claude-sonnet-4-5-20250929", false)).toBe(API_CONTEXT_WINDOW);
+    expect(contextWindowFor("glm-5.2", false)).toBe(API_CONTEXT_WINDOW);
+    expect(contextWindowFor("kimi-k3", false)).toBe(API_CONTEXT_WINDOW);
+    expect(contextWindowFor("gpt-4o", false)).toBe(API_CONTEXT_WINDOW);
+    expect(contextWindowFor("deepseek-v4-pro", false)).toBe(API_CONTEXT_WINDOW);
+    expect(contextWindowFor("totally-unknown-model", false)).toBe(API_CONTEXT_WINDOW);
     expect(contextWindowFor(undefined, false)).toBe(API_CONTEXT_WINDOW);
-  });
-
-  it("known smaller windows stay catalog-pinned (exceptions to the 500k default)", () => {
-    expect(catalogContextWindow("gpt-4o")).toBe(128_000);
-    expect(catalogContextWindow("kimi-k3")).toBe(256_000);
-    expect(catalogContextWindow("qwen2.5-7b")).toBe(128_000);
-    // 1M-class families resolve through the 500k default.
-    expect(catalogContextWindow("gpt-4.1-mini")).toBeNull();
-    expect(catalogContextWindow("gemini-3-pro")).toBeNull();
   });
 
   it("ignores a stale localCtx on an API/cloud session (slider is global UI state)", () => {
@@ -55,9 +42,25 @@ describe("contextWindowFor", () => {
     // the global store when the user switches to an API session. It must not
     // bleed into the API meter — the auto-compact path is LocalGguf-only and
     // never reads this value, so honoring it here would just mislead the user.
-    expect(contextWindowFor("claude-sonnet-4-5", false, 8192)).toBe(200_000);
+    expect(contextWindowFor("claude-sonnet-4-5", false, 8192)).toBe(API_CONTEXT_WINDOW);
     expect(contextWindowFor("totally-unknown-model", false, 131072)).toBe(API_CONTEXT_WINDOW);
-    expect(contextWindowFor("gpt-4.1", false, 8192)).toBe(API_CONTEXT_WINDOW);
+    expect(contextWindowFor(undefined, false, 4096)).toBe(API_CONTEXT_WINDOW);
+  });
+});
+
+describe("debugContext (context-chain instrumentation)", () => {
+  it("prints a deduped [context] line per channel", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      debugContext("meter", "cap=500000");
+      debugContext("meter", "cap=500000"); // same message — deduped
+      debugContext("meter", "cap=200000"); // changed — printed
+      debugContext("window", "cap=500000"); // other channel — printed
+      expect(info).toHaveBeenCalledTimes(3);
+      expect(info.mock.calls.every((c) => String(c[0]).startsWith("[context]"))).toBe(true);
+    } finally {
+      info.mockRestore();
+    }
   });
 });
 

@@ -426,7 +426,7 @@ Skills gallery:      mcp_gallery_list, mcp_gallery_install, mcp_gallery_remove,
 | `lib/syntaxTheme.ts` | Shiki / Prism theme binding to the app's light/dark tokens |
 | `lib/syntaxHighlighter.ts` | wraps Shiki/Prism with the project theme + a small set of languages |
 | `lib/modelLabel.ts` | id → human label lookup for the model dropdown |
-| `lib/contextWindow.ts` | context-meter math (color tier, percentage) |
+| `lib/contextWindow.ts` | context-meter math — flat 500k cloud/harness default (no per-family catalog since 2026-09), OpenRouter live window (capped), local slider/auto; `[context]` debug trace |
 | `lib/sound.ts` | notification chime (opt-in, settings toggle) |
 | `lib/relativeTime.ts` | "3h ago" timestamps |
 

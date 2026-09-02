@@ -12,6 +12,7 @@
 // Collapsed state: a thin ~50px strip showing just the last plan header in
 //   one sentence — the git icon toggles this. Section state is preserved.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   getChangedFiles,
   listGitBranches,
@@ -41,7 +42,16 @@ const SIDEBAR_VISIBLE_CAP = 4;
 /** "more X" affordance for sidebar sections: shows the first
  *  SIDEBAR_VISIBLE_CAP rows inline; hovering (or focusing) the more-row opens
  *  a small glass popover — same visual language as the branch menu — listing
- *  the remaining rows with their normal click behavior. */
+ *  the remaining rows with their normal click behavior.
+ *
+ *  The popover opens to the LEFT of the git sidebar (not on top of the row)
+ *  via a body portal with fixed viewport coords, exactly like the branch
+ *  dropdown: the shell's overflow:hidden would clip an in-tree popover
+ *  extending past the panel edge, and its backdrop-filter would re-anchor
+ *  fixed descendants inside the 260px panel. A short close delay bridges
+ *  the 8px gap between the row and the popover so crossing it doesn't
+ *  dismiss the menu; focus events bubble in React, so onFocus/onBlur on the
+ *  containers cover keyboard navigation too. */
 function SidebarMoreRow({
   count,
   label,
@@ -52,21 +62,64 @@ function SidebarMoreRow({
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const closeTimer = useRef<number | null>(null);
+
+  const openNow = useCallback(() => {
+    if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+    closeTimer.current = null;
+    setOpen(true);
+  }, []);
+
+  const scheduleClose = useCallback(() => {
+    if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+    closeTimer.current = window.setTimeout(() => setOpen(false), 160);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+    },
+    [],
+  );
+
+  // Anchor (branch popover's formula): right edge 8px left of the row's
+  // LEFT edge. Vertically aligned with the row, clamped so a popover near
+  // the viewport's top/bottom stays fully visible (max-height 240px).
+  const btnRect = open ? btnRef.current?.getBoundingClientRect() : undefined;
+  const popTop = btnRect
+    ? Math.max(8, Math.min(btnRect.top - 4, window.innerHeight - 252))
+    : 0;
+  const popRight = btnRect ? window.innerWidth - btnRect.left + 8 : 0;
+
   return (
-    <div
-      className="git-sidebar-more"
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
-    >
+    <div className="git-sidebar-more" onMouseEnter={openNow} onMouseLeave={scheduleClose}>
       <button
+        ref={btnRef}
         type="button"
         className="git-sidebar-more-btn"
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
+        onFocus={openNow}
+        onBlur={scheduleClose}
       >
         more {count} {label}
       </button>
-      {open && <div className="git-sidebar-more-pop">{children}</div>}
+      {open &&
+        btnRect &&
+        createPortal(
+          <div
+            className="git-sidebar-more-pop"
+            style={{ position: "fixed", top: popTop, right: popRight, zIndex: 9999 }}
+            onMouseEnter={openNow}
+            onMouseLeave={scheduleClose}
+            onFocus={openNow}
+            onBlur={scheduleClose}
+          >
+            {children}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

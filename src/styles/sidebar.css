@@ -741,12 +741,16 @@ button.sidebar-section-label:hover {
 .git-sidebar-more-btn:hover {
   color: var(--text);
 }
+/* Positioning is inline in SidebarMoreRow (position:fixed via a body
+   portal): the popover opens to the LEFT of the git sidebar — right edge
+   8px left of the row's left edge, the same anchor formula as the branch
+   popover — because the shell's overflow:hidden clips an in-tree popover
+   extending past the panel edge and its backdrop-filter re-anchors fixed
+   descendants inside the 260px panel. */
 .git-sidebar-more-pop {
-  position: absolute;
-  left: 8px;
-  right: 8px;
-  bottom: calc(100% + 6px);
-  z-index: 60;
+  width: max-content;
+  min-width: 180px;
+  max-width: 280px;
   max-height: 240px;
   overflow-y: auto;
   padding: 6px;
@@ -760,4 +764,5 @@ button.sidebar-section-label:hover {
   backdrop-filter: blur(24px) saturate(160%);
   -webkit-backdrop-filter: blur(24px) saturate(160%);
   box-shadow: var(--glass-rim), 0 12px 32px -12px rgba(0, 0, 0, 0.35);
+  animation: branch-popover-fade 0.15s var(--ease);
 }

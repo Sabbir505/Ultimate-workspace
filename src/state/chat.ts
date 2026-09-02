@@ -813,7 +813,12 @@ export interface ChatState {
   reloadFor: (chatSessionId: string) => Promise<void>;
   loadConfig: (provider?: string) => Promise<void>;
   loadSessionMetrics: (chatSessionId: string) => Promise<void>;
-  selectSession: (chatSessionId: string) => Promise<void>;
+  /** Open a chat. Records the switch in the ui store's nav timeline unless
+   *  `recordNav: false` (nav Back/Forward restores use that). */
+  selectSession: (chatSessionId: string, opts?: { recordNav?: boolean }) => Promise<void>;
+  /** Start a new chat. When `projectId` is omitted, the new chat inherits
+   *  the previously active chat's project binding (independent when that
+   *  chat has none); an explicit projectId (project-row "+") wins. */
   newChat: (provider: string, model: string, projectId?: string | null) => Promise<ChatSession | null>;
   deleteChat: (chatSessionId: string) => Promise<void>;
   /** Delete EVERY chat session + message (Settings → Data). Uses the backend
@@ -1390,7 +1395,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 
-  selectSession: async (chatSessionId) => {
+  selectSession: async (chatSessionId, opts) => {
     // Ignore selects for sessions deleted this run (stale sidebar row, in-
     // flight click). The tombstone is the source of truth until restart.
     if (deletedSessions.has(chatSessionId)) return;
@@ -1418,6 +1423,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ),
     }));
     if (wasUnread) void setChatSessionUnread(chatSessionId, false);
+    // Record the switch in the ui store's browser-style nav timeline so
+    // Back/Forward return to the chat the user was reading, not just the
+    // view. Restore-driven switches (nav Back/Forward) skip recording.
+    if (opts?.recordNav !== false && outgoingId !== chatSessionId) {
+      useUiStore.getState().recordChatNav(chatSessionId);
+    }
     // Follow the chat's project binding: switching to a chat that was working
     // on a different project moves the global selection (and with it the
     // composer notch, Files tab, and the working directory) to that project.
@@ -1558,8 +1569,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return active;
     }
 
-    const session = await createChatSession(provider, model, projectId ?? null);
+    // Project/folder inheritance: a caller that doesn't pass an explicit
+    // projectId ("+" on a project row passes one) creates the chat in the
+    // SAME project as the previously active chat; when that chat is
+    // unbound, the new chat is independent (null). Matches the empty-chat
+    // reuse path above, which already adopts active.projectId.
+    const inheritedProjectId =
+      projectId !== undefined ? projectId : (active?.projectId ?? null);
+
+    const session = await createChatSession(provider, model, inheritedProjectId);
     if (session) {
+      // Record the new chat in the nav timeline: Back should return to the
+      // chat the user came from.
+      useUiStore.getState().recordChatNav(session.id);
       // Insert at the top so it appears immediately in the sidebar (below
       // any starred chats).
       set((s) => ({

@@ -69,12 +69,23 @@ export interface PendingReplace {
   lruPaneId: string;
 }
 
+/** One browser-history entry: the visited view plus the chat session that
+ *  was open when the entry was recorded. Chat switches ARE navigation —
+ *  back/forward must return to the chat the user was reading, not just the
+ *  view. `chatSessionId` is null for non-chat views (and the pre-boot
+ *  placeholder before any session exists). */
+export interface ViewNavEntry {
+  view: ActiveView;
+  chatSessionId: string | null;
+}
+
 export interface UiState {
   activeView: ActiveView;
-  /** Browser-style back/forward history over visited views. `viewIndex`
-   *  points into `viewHistory`; back/forward move it instead of pushing.
-   *  Written only by setActiveView / navBack / navForward. */
-  viewHistory: ActiveView[];
+  /** Browser-style back/forward history over visited views AND visited
+   *  chats (see ViewNavEntry). `viewIndex` points into `viewHistory`;
+   *  back/forward move it instead of pushing. Written by setActiveView /
+   *  recordChatNav / navBack / navForward. */
+  viewHistory: ViewNavEntry[];
   viewIndex: number;
   paletteOpen: boolean;
   peek: PeekState;
@@ -156,10 +167,18 @@ export interface UiState {
   updateModelDownload: (p: ModelDownloadProgress) => void;
 
   setActiveView: (view: ActiveView) => void;
-  /** Step one entry back through the visited views (no-op at the start). */
-  navBack: () => void;
-  /** Step one entry forward through the visited views (no-op at the end). */
-  navForward: () => void;
+  /** Record a chat switch in the nav timeline (called by the chat store when
+   *  the active session changes). A chat pick always lands in the chat view;
+   *  a chat-less chat-view top entry (boot auto-start, fresh view push) is
+   *  replaced in place so the auto-created session doesn't add a dead Back
+   *  step. */
+  recordChatNav: (chatSessionId: string) => void;
+  /** Step one entry back through the visited views/chats. Returns the entry
+   *  landed on (null = already at the start) so callers can restore the
+   *  entry's chat session. */
+  navBack: () => ViewNavEntry | null;
+  /** Step one entry forward through the visited views/chats (see navBack). */
+  navForward: () => ViewNavEntry | null;
   /** Conversational artifact creation: form data to prefill when the editor opens.
    *  This is a transient bridge between the proposal card "Edit" action and the
    *  SkillsLibrary/AutomationsView forms. The `chatSessionId` / `proposalId`
@@ -270,9 +289,9 @@ let nextToastId = 1;
  *  what failed; successes are just confirmations. */
 const TOAST_TTL_MS: Record<ToastKind, number> = { error: 9000, info: 5000, success: 4000 };
 
-export const useUiStore = create<UiState>((set) => ({
+export const useUiStore = create<UiState>((set, get) => ({
   activeView: "chat",
-  viewHistory: ["chat"],
+  viewHistory: [{ view: "chat", chatSessionId: null }],
   viewIndex: 0,
   pendingArtifactFormData: null,
   paletteOpen: false,
@@ -347,25 +366,57 @@ export const useUiStore = create<UiState>((set) => ({
   setActiveView: (activeView) =>
     set((s) => {
       // Same-view re-selects don't create history entries.
-      if (s.viewHistory[s.viewIndex] === activeView) return {};
+      if (s.viewHistory[s.viewIndex]?.view === activeView) return {};
       // A new navigation truncates the forward branch (browser semantics),
       // and the log is capped so endless switching can't grow it forever.
-      let history = [...s.viewHistory.slice(0, s.viewIndex + 1), activeView];
+      let history = [
+        ...s.viewHistory.slice(0, s.viewIndex + 1),
+        { view: activeView, chatSessionId: null } satisfies ViewNavEntry,
+      ];
       if (history.length > 50) history = history.slice(history.length - 50);
       return { activeView, viewHistory: history, viewIndex: history.length - 1 };
     }),
-  navBack: () =>
+
+  recordChatNav: (chatSessionId) =>
     set((s) => {
-      if (s.viewIndex <= 0) return {};
-      const viewIndex = s.viewIndex - 1;
-      return { activeView: s.viewHistory[viewIndex], viewIndex };
+      const top = s.viewHistory[s.viewIndex];
+      const entry: ViewNavEntry = { view: "chat", chatSessionId };
+      if (top?.view === "chat") {
+        // Re-selecting the chat already at the top is not a navigation.
+        if (top.chatSessionId === chatSessionId) return {};
+        let history: ViewNavEntry[];
+        if (top.chatSessionId === null) {
+          // Replace in place: the boot auto-started session (or a fresh
+          // chat-view push) shouldn't leave a chat-less dead step behind.
+          history = [...s.viewHistory.slice(0, s.viewIndex), entry];
+        } else {
+          history = [...s.viewHistory.slice(0, s.viewIndex + 1), entry];
+        }
+        if (history.length > 50) history = history.slice(history.length - 50);
+        return { viewHistory: history, viewIndex: history.length - 1 };
+      }
+      // Chat picked from a non-chat view (palette, artifacts, …): push.
+      let history = [...s.viewHistory.slice(0, s.viewIndex + 1), entry];
+      if (history.length > 50) history = history.slice(history.length - 50);
+      return { viewHistory: history, viewIndex: history.length - 1 };
     }),
-  navForward: () =>
-    set((s) => {
-      if (s.viewIndex >= s.viewHistory.length - 1) return {};
-      const viewIndex = s.viewIndex + 1;
-      return { activeView: s.viewHistory[viewIndex], viewIndex };
-    }),
+
+  navBack: () => {
+    const s = get();
+    if (s.viewIndex <= 0) return null;
+    const viewIndex = s.viewIndex - 1;
+    const entry = s.viewHistory[viewIndex];
+    set({ activeView: entry.view, viewIndex });
+    return entry;
+  },
+  navForward: () => {
+    const s = get();
+    if (s.viewIndex >= s.viewHistory.length - 1) return null;
+    const viewIndex = s.viewIndex + 1;
+    const entry = s.viewHistory[viewIndex];
+    set({ activeView: entry.view, viewIndex });
+    return entry;
+  },
   setPendingArtifactFormData: (pendingArtifactFormData) => set({ pendingArtifactFormData }),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
   togglePalette: () => set((s) => ({ paletteOpen: !s.paletteOpen })),

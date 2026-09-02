@@ -23,6 +23,7 @@ import {
   DollarSign,
   Folder,
   Library,
+  MessageCirclePlus,
   MessageSquare,
   Plus,
   Search,
@@ -35,6 +36,8 @@ import { useProjectsStore } from "../../state/projects";
 import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { useArtifactsStore } from "../../state/artifacts";
+import { useNewChatAction } from "../../hooks/useNewChatAction";
+import { useViewNav } from "../../hooks/useViewNav";
 import { ArtifactLibrary } from "./ArtifactLibrary";
 import { ChatSessionRowMemo as ChatSessionRow, type ChatSessionRowData } from "../chat/ChatSessionRow";
 import { relativeTime, shortRelativeTime } from "../../lib/relativeTime";
@@ -60,11 +63,9 @@ export function Sidebar() {
   const setPaletteOpen = useUiStore((s) => s.setPaletteOpen);
   const setGitPromptProjectId = useUiStore((s) => s.setGitPromptProjectId);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
-  // Browser-style back/forward over visited views.
-  const viewHistory = useUiStore((s) => s.viewHistory);
-  const viewIndex = useUiStore((s) => s.viewIndex);
-  const navBack = useUiStore((s) => s.navBack);
-  const navForward = useUiStore((s) => s.navForward);
+  // Browser-style back/forward over views AND visited chats (shared with
+  // the collapsed rail so both clusters behave identically).
+  const { back: navBack, forward: navForward, canBack, canForward } = useViewNav();
 
   // Chat store
   const chatSessions = useChatStore((s) => s.sessions);
@@ -145,12 +146,7 @@ export function Sidebar() {
     seedFakeUpdate();
   }, []);
 
-  const handleNewChat = useCallback(() => {
-    const provider = chatConfig?.provider ?? "openai_compatible";
-    void newChat(provider, chatConfig?.model ?? "").then((session) => {
-      if (session) setActiveView("chat");
-    });
-  }, [newChat, chatConfig, setActiveView]);
+  const handleNewChat = useNewChatAction();
 
   const handleProjectClick = useCallback(
     (projectId: string) => {
@@ -315,6 +311,11 @@ export function Sidebar() {
     getScrollElement: () => chatListRef.current,
     estimateSize: () => 60,
     overscan: 8,
+    // Key cached row measurements by session id, not list index. Switching
+    // chats or creating one re-sorts the sessions array; with index-keyed
+    // measurements the cached heights attach to whatever rows moved into
+    // those index slots, leaving tall phantom gaps between history rows.
+    getItemKey: (index) => chatRowData[index].id,
   });
 
   return (
@@ -339,7 +340,7 @@ export function Sidebar() {
               type="button"
               className="sidebar-nav-btn"
               onClick={navBack}
-              disabled={viewIndex <= 0}
+              disabled={!canBack}
               title="Back"
               aria-label="Back"
             >
@@ -349,7 +350,7 @@ export function Sidebar() {
               type="button"
               className="sidebar-nav-btn"
               onClick={navForward}
-              disabled={viewIndex >= viewHistory.length - 1}
+              disabled={!canForward}
               title="Forward"
               aria-label="Forward"
             >
@@ -588,7 +589,7 @@ export function Sidebar() {
             title="New Chat"
             aria-label="New Chat"
           >
-            <Plus size={13} strokeWidth={2} />
+            <MessageCirclePlus size={14} strokeWidth={1.8} />
           </button>
         </div>
       </div>

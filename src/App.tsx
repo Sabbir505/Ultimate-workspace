@@ -12,6 +12,7 @@
 // eager because it's the first thing visible on every page.
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { ArrowLeft, ArrowRight, MessageCirclePlus } from "lucide-react";
 import { Modal } from "./components/common/Modal";
 import { ToastHost } from "./components/common/ToastHost";
 import { OnboardingBanner } from "./components/onboarding/OnboardingBanner";
@@ -43,6 +44,8 @@ import { useKeybindings } from "./hooks/useKeybindings";
 import { useModelDownloadEvents } from "./hooks/useModelDownloadEvents";
 import { usePtyEvents } from "./hooks/usePtyEvents";
 import { usePaneMemory } from "./hooks/usePaneMemory";
+import { useNewChatAction } from "./hooks/useNewChatAction";
+import { useViewNav } from "./hooks/useViewNav";
 import { useTheme } from "./hooks/useTheme";
 import { confirmReplaceLru } from "./lib/sessionLauncher";
 import { initWorkspacePersistence } from "./lib/workspaceRestore";
@@ -69,9 +72,12 @@ export default function App() {
   const projectSettingsFor = useUiStore((s) => s.projectSettingsFor);
   const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
-  // View back/forward, exposed in the collapsed rail (and expanded sidebar header).
-  // View nav (back/forward) lives in the sidebar's header now — the toolbar
-  // carries no navigation of its own.
+  // View + chat back/forward, exposed in the collapsed rail (and expanded
+  // sidebar header) — restores both the view and the chat that was open.
+  const { back: navBack, forward: navForward, canBack, canForward } = useViewNav();
+  // New Chat from the collapsed rail — same action as the sidebar's "+"
+  // (shared hook so both entry points stay in lockstep).
+  const handleNewChat = useNewChatAction();
   const toolPanelCollapsed = useUiStore((s) => s.toolPanelCollapsed);
   const toggleToolPanel = useUiStore((s) => s.toggleToolPanel);
   const setToolPanelCollapsed = useUiStore((s) => s.setToolPanelCollapsed);
@@ -269,6 +275,39 @@ export default function App() {
                 aria-label="Show sidebar"
               >
                 <AppLogo size={20} />
+              </button>
+              {/* View + chat back/forward stay reachable while the sidebar
+                  is hidden — same buttons as the expanded header. */}
+              <button
+                type="button"
+                className="sidebar-nav-btn"
+                onClick={navBack}
+                disabled={!canBack}
+                title="Back"
+                aria-label="Back"
+              >
+                <ArrowLeft size={14} strokeWidth={1.8} />
+              </button>
+              <button
+                type="button"
+                className="sidebar-nav-btn"
+                onClick={navForward}
+                disabled={!canForward}
+                title="Forward"
+                aria-label="Forward"
+              >
+                <ArrowRight size={14} strokeWidth={1.8} />
+              </button>
+              {/* New Chat: inherits the previous chat's project/folder
+                  binding (store-side); independent when there is none. */}
+              <button
+                type="button"
+                className="sidebar-nav-btn"
+                onClick={handleNewChat}
+                title="New Chat"
+                aria-label="New Chat"
+              >
+                <MessageCirclePlus size={15} strokeWidth={1.8} />
               </button>
             </div>
           )}

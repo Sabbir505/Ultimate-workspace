@@ -591,6 +591,10 @@ export interface ChatState {
   chatStatus: Record<string, { reason: string; message: string }>;
   config: ChatConfigPayload | null;
   error: string | null;
+  /** Machine-readable classification of the last chat:error for the active
+   *  session ("context_overflow", …) — null when unclassified. Cleared with
+   *  `error` everywhere `error` is cleared. */
+  errorCode: string | null;
   /** Reasoning effort sent with messages ("" = provider default). */
   effort: string;
   /** Per-session extended-thinking toggle. `true` enables the thinking
@@ -973,6 +977,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   chatStatus: {},
   config: null,
   error: null,
+  errorCode: null,
   effort: "",
   // null = no override (provider default). The composer's "brain" button
   // flips this to true/false and resets to null on session change.
@@ -1334,6 +1339,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({
       activeChatSessionId: chatSessionId,
       error: null,
+      errorCode: null,
       thinking: null,
       sessions: s.sessions.map((sess) =>
         sess.id === chatSessionId && sess.unread ? { ...sess, unread: false } : sess,
@@ -1473,6 +1479,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 Object.entries(s.sessionProjects).filter(([id]) => id !== active.id),
               ),
         error: null,
+        errorCode: null,
       }));
       // Give the (possibly just rebound) chat its own worktree, fire-and-forget.
       void maybeEnsureWorktree(get().sessions.find((s) => s.id === active.id));
@@ -1489,6 +1496,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         messages: [],
         messagesSessionId: session.id,
         error: null,
+        errorCode: null,
         // Seed the in-memory binding cache from the persisted value so the
         // composer notch + working-dir resolution work before first send.
         sessionProjects:
@@ -1847,6 +1855,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // Start a fresh artifact buffer for this turn.
         pendingArtifacts: { ...get().pendingArtifacts, [activeChatSessionId]: [] },
         error: null,
+        errorCode: null,
       };
     });
 
@@ -1918,6 +1927,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           streaming,
           chatStatus,
           error: String(err),
+          errorCode: null,
         });
         return;
       }
@@ -1956,6 +1966,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         streaming,
         chatStatus,
         error: String(err),
+        errorCode: null,
       });
     }
   },
@@ -2837,6 +2848,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
         error:
           s.activeChatSessionId === chatSessionId ? message : s.error,
+        errorCode:
+          s.activeChatSessionId === chatSessionId ? (code ?? null) : s.errorCode,
       };
     });
     // Turn ended (in error) — keep the queue moving rather than stranding it.

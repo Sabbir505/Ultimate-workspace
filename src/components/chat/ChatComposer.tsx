@@ -18,6 +18,7 @@ import { ContextMeter } from "./ContextMeter";
 import { ComposerMetrics } from "./ComposerMetrics";
 import { BranchDropdown } from "./BranchDropdown";
 import { useUiStore } from "../../state/ui";
+import { useSettingsStore } from "../../state/settings";
 import { useChatStore, selectContextSessionId } from "../../state/chat";
 import { useProjectsStore } from "../../state/projects";
 import {
@@ -28,6 +29,8 @@ import {
   transcribeAudio,
   toastError,
   toastInfo,
+  toastSuccess,
+  compactNow,
   generateArtifact,
   persistChatCommandMessage,
   addSessionConnector,
@@ -914,6 +917,18 @@ export function ChatComposer({
   const moveQueuedMessage = useChatStore((s) => s.moveQueuedMessage);
   const setCwdOverride = useChatStore((s) => s.setCwdOverride);
 
+  // Cloud window resolution for the meter: the active model's PINNED window
+  // is AUTHORITATIVE (the user's explicit choice — it may RAISE a model
+  // above the registry's guess, e.g. a 1M glm served through a remapped
+  // endpoint); without a pin, the global cloud context-limit CAP applies
+  // (a cap only shrinks). The backend's meter poll + compaction trigger
+  // resolve the same way (effective_session_window), so meter and trigger
+  // can never disagree about how much room is left.
+  const cloudContextLimit = useSettingsStore((s) => s.cloudContextLimit);
+  const modelWindowFor = useSettingsStore((s) => s.modelWindowFor);
+  const pinnedWindow = modelWindowFor(provider ?? "", model);
+  const contextLimitOverride = cloudContextLimit || undefined;
+
   // Open the native (OS) folder dialog so any drive/folder can be picked as
   // the chat session's custom working folder (shown in the FolderNotch).
   const pickWorkingFolder = useCallback(async () => {
@@ -1021,7 +1036,32 @@ export function ChatComposer({
   // Static slash commands shown alongside skills/prompt templates. `/create`
   // is included so it appears when typing `/`, and subtype-prefixed entries
   // (`/create skill`, etc.) let the user pick the artifact type directly.
+  // Harness-session commands: forwarded VERBATIM to the CLI as a normal
+  // turn — Claude Code (and compatible CLIs) interpret them as their own
+  // context-management commands, and the reply reports the compaction.
+  // Relay-side compaction doesn't manage the CLI's internal window, so this
+  // is the manual lever for that side of the wall.
+  const isHarnessSession = !!agent && (agent.startsWith("harness:") || agent.startsWith("acp:"));
+  const harnessSlashCommands: SlashItem[] = isHarnessSession
+    ? [
+        {
+          kind: "command",
+          name: "Microcompact (CLI)",
+          slug: "microcompact",
+          description: "Clear old tool results from the CLI's context (lighter than compact)",
+        },
+      ]
+    : [];
+
   const staticSlashCommands: SlashItem[] = [
+    {
+      kind: "command",
+      name: "Compact context",
+      slug: "compact",
+      description: isHarnessSession
+        ? "Ask the CLI engine to run its native context compaction"
+        : "Summarize older turns to free context window",
+    },
     {
       kind: "command",
       name: "Create artifact",
@@ -1067,6 +1107,7 @@ export function ChatComposer({
         description: `Prompt template: ${t.body.slice(0, 60) || ""}`,
       })),
     ...staticSlashCommands,
+    ...harnessSlashCommands,
   ];
 
   const slashFiltered = slashQuery !== null
@@ -1716,6 +1757,26 @@ export function ChatComposer({
     const trimmed = (commandPill ? `/${commandPill.slug} ${content}` : content).trim();
     if (!trimmed && attachments.length === 0) return;
 
+    // --- /compact: universal context compaction, routed by engine ---
+    // CLI harness sessions: forwarded verbatim — the CLI runs its own
+    // native /compact. Cloud and local sessions: Relay's own compaction
+    // (chat_compact_now — pin+summarize via the session's provider or the
+    // sidecar) instead of sending the literal text to the model.
+    if (/^\/compact/.test(trimmed) && !isHarnessSession) {
+      setContent("");
+      setCommandPill(null);
+      setAttachments([]);
+      setAttachError(null);
+      setForceResearch(false);
+      const ta = textareaRef.current;
+      if (ta) ta.style.height = "auto";
+      if (!effectiveSessionId) return;
+      void compactNow(effectiveSessionId)
+        .then((msg) => toastSuccess(msg || "Context compacted"))
+        .catch((e) => toastError("Compact failed", e));
+      return;
+    }
+
     // --- /create slash command: deterministic route to artifact generation ---
     const createCmd = parseCreateCommand(trimmed);
     if (createCmd) {
@@ -1777,7 +1838,7 @@ export function ChatComposer({
     if (ta) {
       ta.style.height = "auto";
     }
-  }, [content, commandPill, attachments, onSend, needsModel, agentLocked, forceResearch, detectArtifactIntent, triggerArtifactGeneration]);
+  }, [content, commandPill, attachments, onSend, needsModel, agentLocked, forceResearch, detectArtifactIntent, triggerArtifactGeneration, isHarnessSession, effectiveSessionId]);
 
   // Handle ArtifactTypeSelector selection
   const handleCreateTypeSelect = useCallback((type: ArtifactType, instruction?: string) => {
@@ -2390,6 +2451,8 @@ export function ChatComposer({
             localCtx,
             liveMaxTokens,
             chatSessionId: activeChatSessionId,
+            contextLimitOverride,
+            pinnedWindow: pinnedWindow > 0 ? pinnedWindow : undefined,
           }}
         />
       </div>

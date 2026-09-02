@@ -842,7 +842,7 @@ pub use chat::{
     delete_chat_messages_after,
     delete_chat_session, delete_chat_sessions_for_project, delete_empty_chat_sessions,
     get_chat_session, list_active_chat_messages, list_chat_messages, list_chat_messages_page,
-    list_chat_sessions,
+    list_chat_sessions, list_messages_superseded_by,
     list_chat_session_connectors, latest_local_session_working_root,
     mark_branch_superseded, mark_superseded, search_chat_messages,
     chat_worktree_paths,

@@ -849,6 +849,15 @@ pub struct ChatModel {
     pub object: String,
     pub created: i64,
     pub owned_by: String,
+    /// The provider's own context-window figure for this model, when its
+    /// models API publishes one — Anthropic returns `context_window`,
+    /// OpenRouter `context_length`; most OpenAI-compatible endpoints return
+    /// neither (None → the frontend falls back to the static registry).
+    /// This is the DYNAMIC half of the window story: the badge in the
+    /// provider's model list and the meter's cap both prefer it over the
+    /// hardcoded registry table.
+    #[serde(default)]
+    pub context_window: Option<u64>,
 }
 
 // ---- Local models (GGUF scan / sidecar status) ----

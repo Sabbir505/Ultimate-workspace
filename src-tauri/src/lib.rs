@@ -442,6 +442,10 @@ pub fn run() {
             commands::chat_cmds::detect_llama_server_path,
             commands::chat_cmds::count_context_tokens,
             commands::chat_cmds::count_context_breakdown,
+            commands::chat_cmds::chat_compact_now,
+            commands::chat_cmds::list_compacted_messages,
+            commands::chat_cmds::fetch_provider_model_windows,
+            commands::chat_cmds::set_selected_models,
             // connectors (OAuth + remote MCP): Settings → Connectors + per-chat attach
             commands::connectors_cmds::list_connectors,
             commands::connectors_cmds::connector_connect,

@@ -11,6 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Cloud context compaction (P1)** — Cloud/API sessions now compact like local ones: pre-send estimate against a per-model window triggers the same pin+summarize engine, with the session's OWN provider writing the summary; persisted `[compacted context]` rows supersede folded turns. A provider context-overflow rejection is now classified (`context_overflow`), auto-compacted, and retried once instead of dying as a raw 400 banner.
+- **Per-model context-window registry (P0)** — The flat 500k ceiling is retired for the meter: a per-model registry (mirrored backend/frontend) resolves real windows (Claude 200k, GPT-5 400k, GPT-4.1 1M, Gemini 1M, …) with the 500k figure as fallback; OpenRouter's live `context_length` is no longer capped. Cloud/harness meters poll a live backend estimate (system + history + tool schema) and take the max with the provider-counted last turn, so warn/crit can actually fire before an overflow. The hover breakdown is estimated per category from real content (no more fabricated 15/70/10/5 split).
+- **Overflow error classification (P0)** — `chat:error` carries a machine-readable `code`; provider phrasings across Anthropic/OpenAI/OpenRouter/llama-server/Google map to `context_overflow`, with actionable banner copy instead of a raw provider blob.
+- **"Compact now" (P1)** — Manual forced compaction for the active session from the context-meter panel (`chat_compact_now`), cloud and local.
+- **Context recovery UI (P2)** — The `[compacted context]` marker gains a "show folded turns" disclosure: the raw turns a summary folded away are fetched from the DB on demand (the summary is lossy; the rows are the restorable source) via `list_compacted_messages`.
+- **Structured summary schema (P2)** — The shared summarization prompt now produces the 9-section schema (primary request/intent, decisions, files & code, errors & fixes, all user messages, pending tasks, current work, next step, pointers), tuned recall-first — errors are kept as evidence, never discarded. Per-message head+tail trimming protects the summarizer budget from single oversized turns.
+- **Map-reduce summarization (P4)** — Local compaction no longer silently drops the aged-out turns that don't fit the summarizer budget: they're chunked, map-summarized, and folded into the main call; summary output cap raised 1024 → 2048.
+- **Summarizer override + rebuild-from-raw (P4)** — `chat.local_gguf.compaction_summarizer = "cloud"` routes local summaries through a configured cloud provider; rebuild-from-raw re-derives each new summary from the ORIGINAL folded turns instead of stacking summary-on-summary.
+- **Harness context observability (P3)** — Claude Code's own auto-compact (`compact_boundary`) persists a boundary marker and refreshes the meter; `/compact` and `/microcompact` are offered in the composer for harness sessions (forwarded verbatim to the CLI).
+- **Harness primer upgrade + resume-gap fix (P3)** — The engine-switch context primer now carries a cloud-summarized digest of the turns that exceed its (raised) 32k-char tail budget; a stale `--resume` id that kills the CLI before any turn activity is detected, dropped, and the next send replays the primer instead of resuming blank.
+
+### Changed
+- Compaction settings consolidated: one "Compaction (advanced)" panel covers local (threshold, pin, summarizer, rebuild-from-raw) and cloud (enabled, threshold, pin) engines; cloud overflow-retry runs regardless of the master switch.
+
 ---
 
 ## [0.4.2] — 2026-08-31

@@ -29,6 +29,11 @@ interface Props {
     localCtx?: number;
     liveMaxTokens?: number;
     chatSessionId?: string | null;
+    /** User's cloud context-window cap (tokens, 0/undefined = auto). */
+    contextLimitOverride?: number;
+    /** The active model's PINNED window (Settings → Model list) —
+     *  authoritative: it replaces the registry/live figure entirely. */
+    pinnedWindow?: number;
   };
 }
 
@@ -240,6 +245,8 @@ export function ComposerMetrics({ chatSessionId, streaming, variant = "row", con
               localCtx={contextMeter.localCtx}
               liveMaxTokens={contextMeter.liveMaxTokens}
               chatSessionId={contextMeter.chatSessionId}
+              contextLimitOverride={contextMeter.contextLimitOverride}
+              pinnedWindow={contextMeter.pinnedWindow}
             />
           </div>
         )}
@@ -264,6 +271,8 @@ export function ComposerMetrics({ chatSessionId, streaming, variant = "row", con
             localCtx={contextMeter.localCtx}
             liveMaxTokens={contextMeter.liveMaxTokens}
             chatSessionId={contextMeter.chatSessionId}
+            contextLimitOverride={contextMeter.contextLimitOverride}
+            pinnedWindow={contextMeter.pinnedWindow}
           />
         </div>
       )}

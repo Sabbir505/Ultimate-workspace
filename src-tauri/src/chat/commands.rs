@@ -538,7 +538,7 @@ fn clean_title(raw: &str) -> String {
 /// "Compacted 8.2k → 1.1k tokens"). Mirrors the frontend's `formatTokens`
 /// but is kept as a free function so the backend doesn't have to depend on
 /// the lib crate. 0 returns "0".
-fn format_compact_token_count(n: i64) -> String {
+pub(crate) fn format_compact_token_count(n: i64) -> String {
     let n = n.max(0) as u64;
     if n >= 1_000_000 {
         let v = n as f64 / 1_000_000.0;
@@ -1781,22 +1781,7 @@ pub async fn send_chat_message(
             // per-turn inside the send task, so this estimate covers the
             // built-in set only; the slack is margin.
             let reserved_tokens: u32 = if tools_on {
-                let pcaps = crate::chat::prompts::provider_capabilities(provider_id.clone(), &model);
-                let caps = crate::chat::tools::ToolCaps {
-                    code_exec: code_exec_enabled.unwrap_or(false),
-                    fs_roots: Vec::new(),
-                    web_search: pcaps.native_web_search,
-                    requires_local_sandbox: pcaps.requires_local_sandbox,
-                    attached_connectors: std::sync::Arc::new(Vec::new()),
-                    local_docs: false,
-                    mcp_tools: std::sync::Arc::new(Vec::new()),
-                    attachable_connectors: std::sync::Arc::new(Vec::new()),
-                    attachable_mcp: std::sync::Arc::new(Vec::new()),
-                    local_model: false,
-                    fs_rules: Vec::new(),
-                };
-                let specs = crate::chat::tools::openai_tool_specs(&caps, crate::chat::permission::SandboxPolicy::WorkspaceWrite);
-                let json = serde_json::to_string(&specs).unwrap_or_default();
+                let json = builtin_tool_specs_json(&provider_id, &model, code_exec_enabled.unwrap_or(false));
                 // Cached (B1): the schema JSON is constant until tool flags
                 // change, so turns 2..N skip this /tokenize round-trip.
                 let n = crate::chat::compaction::count_json_tokens_cached(
@@ -1840,19 +1825,117 @@ pub async fn send_chat_message(
                 },
             );
 
+            // P4 summarizer override: `chat.local_gguf.compaction_summarizer =
+            // "cloud"` routes the summary call through the first configured
+            // cloud provider instead of the sidecar — summary quality no
+            // longer scales with the weakest model on the path. Falls back
+            // to the sidecar when nothing is configured.
+            let route = {
+                let wants_cloud = {
+                    let conn = db.0.lock();
+                    db::get_setting(&conn, "chat.local_gguf.compaction_summarizer")
+                        .ok()
+                        .flatten()
+                        .map(|v| v.trim().eq_ignore_ascii_case("cloud"))
+                        .unwrap_or(false)
+                };
+                if wants_cloud {
+                    match {
+                        let conn = db.0.lock();
+                        resolve_cloud_summarizer(&conn)
+                    } {
+                        Some((provider_id, base, api_key, cloud_model)) => {
+                            eprintln!(
+                                "[local-compaction] summarizer override: cloud {} model={}",
+                                provider_id.as_str(),
+                                cloud_model
+                            );
+                            crate::chat::compaction::SummarizerRoute::Cloud {
+                                provider_id,
+                                base,
+                                api_key,
+                                model: cloud_model,
+                            }
+                        }
+                        None => {
+                            eprintln!(
+                                "[local-compaction] summarizer override 'cloud' requested but no provider configured; using sidecar"
+                            );
+                            crate::chat::compaction::SummarizerRoute::Sidecar
+                        }
+                    }
+                } else {
+                    crate::chat::compaction::SummarizerRoute::Sidecar
+                }
+            };
+
+            // P4 rebuild-from-raw: when the trigger has fired AND a prior
+            // summary exists, re-feed its raw source rows (still in the DB)
+            // into the compaction input so the new summary is re-derived from
+            // the ORIGINAL turns instead of stacking summary-on-summary.
+            // Injected ONLY into the compaction input — a passthrough turn
+            // must never re-send superseded rows.
+            let mut compact_entries = messages.clone();
+            let mut injected_raw = false;
+            if cfg.rebuild_from_raw
+                && crate::chat::compaction::compaction_would_trigger(
+                    status.n_ctx,
+                    &cfg,
+                    reserved_tokens,
+                    pre_compact_tokens,
+                )
+            {
+                let prior_id = messages
+                    .iter()
+                    .find(|e| crate::chat::compaction::is_compacted_summary(&e.message))
+                    .map(|e| e.id)
+                    .filter(|id| *id != 0);
+                if let Some(pid) = prior_id {
+                    let raw_rows = {
+                        let conn = db.0.lock();
+                        db::list_messages_superseded_by(&conn, pid).unwrap_or_default()
+                    };
+                    let mut raw_chars = 0usize;
+                    let raw_entries: Vec<crate::chat::compaction::CompactionEntry> = raw_rows
+                        .iter()
+                        .map(|r| {
+                            raw_chars += r.content.len();
+                            crate::chat::compaction::CompactionEntry {
+                                id: r.id,
+                                message: ChatMessage {
+                                    role: r.role.clone(),
+                                    content: strip_think_blocks(&r.content),
+                                    images: Vec::new(),
+                                },
+                            }
+                        })
+                        .collect();
+                    if !raw_entries.is_empty() && raw_chars < 200_000 {
+                        injected_raw = true;
+                        eprintln!(
+                            "[local-compaction] rebuild-from-raw: re-fed {} raw row(s) ({} chars)",
+                            raw_entries.len(),
+                            raw_chars
+                        );
+                        compact_entries.splice(0..0, raw_entries);
+                    }
+                }
+            }
+
             let outcome = crate::chat::compaction::maybe_compact(
                 &chat_mgr.client,
                 &status.base_url,
                 status.n_ctx,
                 &model,
                 &system,
-                &messages,
+                &compact_entries,
                 &cfg,
                 reserved_tokens,
-                // Reuse the count above — identical assembly. On tokenize
-                // failure, pass None so maybe_compact's own fallback path
-                // (passthrough with a log) still runs.
-                pre_count_result.ok(),
+                // Reuse the count above — identical assembly. When raw rows
+                // were injected the assembly changed, so pass None and let
+                // maybe_compact re-count.
+                if injected_raw { None } else { pre_count_result.ok() },
+                &route,
             )
             .await;
             match outcome {
@@ -1960,7 +2043,168 @@ pub async fn send_chat_message(
             messages.iter().map(|e| e.message.clone()).collect()
         }
     } else {
-        messages.into_iter().map(|e| e.message).collect()
+        // 6c. Cloud pre-send compaction — the same pin+summarize engine the
+        // local path uses, with two cloud substitutions: the trigger is an
+        // ESTIMATED request size (cloud APIs have no /tokenize endpoint)
+        // against the model-registry window, and the summarizer is the
+        // session's OWN provider called non-streaming. Historically cloud
+        // sessions shipped their full history every turn and an over-window
+        // request died as a raw 400 with no recovery.
+        let cfg = {
+            let conn = db.0.lock();
+            crate::chat::cloud_compact::load_cloud_compaction_config(&conn)
+        };
+        // Endpoint resolution mirrors the turn task's `tool_base`: a stored
+        // base_url wins; native providers fall back to their default.
+        // Compatible providers REQUIRE a stored base_url (no default exists)
+        // — without one there is no endpoint to summarize against, so
+        // compaction is skipped and the turn proceeds as before.
+        let base = base_url
+            .clone()
+            .filter(|b| !b.trim().is_empty())
+            .unwrap_or_else(|| match provider_id {
+                ChatProviderId::OpenRouter => OpenRouterProvider::DEFAULT_BASE.to_string(),
+                ChatProviderId::Anthropic => AnthropicProvider::DEFAULT_BASE.to_string(),
+                _ => OpenAIProvider::DEFAULT_BASE.to_string(),
+            });
+        let base_ready = !base_url.as_deref().unwrap_or("").trim().is_empty()
+            || !matches!(
+                provider_id,
+                ChatProviderId::OpenAICompatible | ChatProviderId::AnthropicCompatible
+            );
+        let window = {
+            let conn = db.0.lock();
+            effective_session_window(&conn, &provider_str, &model)
+        };
+        let reserved_tokens: u32 = if tools_on {
+            estimate_tokens(&builtin_tool_specs_json(
+                &provider_id,
+                &model,
+                code_exec_enabled.unwrap_or(false),
+            ))
+        } else {
+            0
+        };
+        let pre_tokens = crate::chat::cloud_compact::estimate_request_tokens(
+            &system,
+            &messages,
+            reserved_tokens,
+        )
+        .saturating_add(crate::chat::compaction::RESPONSE_HEADROOM);
+        let trigger = ((window as f64) * cfg.threshold) as u32;
+
+        if cfg.enabled && base_ready && pre_tokens >= trigger {
+            // Same spinner contract as the local path: the summarizer call
+            // can take seconds and must not look like a frozen composer.
+            let _ = app.emit(
+                "chat:status",
+                crate::types::ChatStatusPayload {
+                    chat_session_id: chat_session_id.clone(),
+                    reason: "context_compacting".to_string(),
+                    message: "Compacting earlier context…".to_string(),
+                },
+            );
+            // Rebuild-from-raw (same contract as the local path): when a
+            // prior summary exists, re-feed its raw source rows into the
+            // COMPACTION INPUT only — the passthrough arms below must never
+            // re-send superseded rows.
+            let mut compact_entries = messages.clone();
+            if cfg.rebuild_from_raw {
+                let prior_id = messages
+                    .iter()
+                    .find(|e| crate::chat::compaction::is_compacted_summary(&e.message))
+                    .map(|e| e.id)
+                    .filter(|id| *id != 0);
+                if let Some(pid) = prior_id {
+                    let raw_rows = {
+                        let conn = db.0.lock();
+                        db::list_messages_superseded_by(&conn, pid).unwrap_or_default()
+                    };
+                    let mut raw_chars = 0usize;
+                    let raw_entries: Vec<crate::chat::compaction::CompactionEntry> = raw_rows
+                        .iter()
+                        .map(|r| {
+                            raw_chars += r.content.len();
+                            crate::chat::compaction::CompactionEntry {
+                                id: r.id,
+                                message: ChatMessage {
+                                    role: r.role.clone(),
+                                    content: strip_think_blocks(&r.content),
+                                    images: Vec::new(),
+                                },
+                            }
+                        })
+                        .collect();
+                    if !raw_entries.is_empty() && raw_chars < 200_000 {
+                        eprintln!(
+                            "[cloud-compaction] rebuild-from-raw: re-fed {} raw row(s) ({} chars)",
+                            raw_entries.len(),
+                            raw_chars
+                        );
+                        compact_entries.splice(0..0, raw_entries);
+                    }
+                }
+            }
+            let run = crate::chat::cloud_compact::run_cloud_compaction(
+                &chat_mgr.client,
+                provider_id,
+                &base,
+                &api_key,
+                &model,
+                &system,
+                &compact_entries,
+                cfg.pin_exchanges,
+            )
+            .await;
+            match run {
+                Ok(run) => {
+                    let summary_id = {
+                        let conn = db.0.lock();
+                        crate::chat::cloud_compact::persist_summary_row(
+                            &conn,
+                            &chat_session_id,
+                            &run,
+                        )
+                        .unwrap_or_else(|e| {
+                            eprintln!("[cloud-compaction] persist failed: {e}");
+                            0
+                        })
+                    };
+                    eprintln!(
+                        "[cloud-compaction] compacted {} exchange(s) into summary row {} (~{}→{} est. tokens)",
+                        run.compacted_exchange_count,
+                        summary_id,
+                        run.pre_tokens,
+                        run.post_tokens,
+                    );
+                    compacted_system_notice = Some((
+                        "context_compacted".to_string(),
+                        format!(
+                            "Compacted {} → {} tokens (estimated)",
+                            format_compact_token_count(run.pre_tokens as i64),
+                            format_compact_token_count(run.post_tokens as i64),
+                        ),
+                    ));
+                    run.messages
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[cloud-compaction] failed ({e}); sending history unchanged"
+                    );
+                    let _ = app.emit(
+                        "chat:status",
+                        crate::types::ChatStatusPayload {
+                            chat_session_id: chat_session_id.clone(),
+                            reason: "".to_string(),
+                            message: String::new(),
+                        },
+                    );
+                    messages.into_iter().map(|e| e.message).collect()
+                }
+            }
+        } else {
+            messages.into_iter().map(|e| e.message).collect()
+        }
     };
 
     // Emit the compaction marker (if any) before the stream starts so the
@@ -3546,6 +3790,15 @@ pub async fn list_chat_models(
 
     // Try standard OpenAI shape first ({ data: [...] }). Only `id` is
     // required — many compatible providers omit object/created/owned_by.
+    // Per-model context window: Anthropic publishes `context_window`,
+    // OpenRouter `context_length` — accept either. Absent → None (the
+    // frontend's registry fallback stands).
+    let model_window = |v: &serde_json::Value| -> Option<u64> {
+        v.get("context_window")
+            .and_then(|w| w.as_u64())
+            .or_else(|| v.get("context_length").and_then(|w| w.as_u64()))
+            .filter(|w| *w > 0)
+    };
     let models: Vec<crate::types::ChatModel> = if let Some(data) = json.get("data").and_then(|v| v.as_array()) {
         data.iter()
             .filter_map(|v| {
@@ -3561,7 +3814,13 @@ pub async fn list_chat_models(
                     .and_then(|o| o.as_str())
                     .unwrap_or("")
                     .to_string();
-                Some(crate::types::ChatModel { id, object, created, owned_by })
+                Some(crate::types::ChatModel {
+                    id,
+                    object,
+                    created,
+                    owned_by,
+                    context_window: model_window(v),
+                })
             })
             .collect()
     } else if let Some(arr) = json.as_array() {
@@ -3574,6 +3833,7 @@ pub async fn list_chat_models(
                     object: "model".to_string(),
                     created: 0,
                     owned_by: "".to_string(),
+                    context_window: None,
                 })
             })
             .collect()
@@ -3931,6 +4191,342 @@ if cfg!(windows) {
 /// API flat-256K behaviour). No-sidecar / errored-tokenize returns
 /// `used_tokens: null` so the meter keeps showing whatever the last known
 /// value was instead of snapping to 0.
+/// In-memory cache for `fetch_provider_model_windows`: provider → (fetched_at,
+/// id → context_window). 24h TTL — model catalogs change slowly, and the
+/// meter re-reads this on every resolve.
+static MODEL_WINDOWS_CACHE: std::sync::OnceLock<
+    parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, std::collections::HashMap<String, u32>)>>,
+> = std::sync::OnceLock::new();
+
+const MODEL_WINDOWS_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Live per-model context windows for a cloud provider, straight from the
+/// provider's own models API — the dynamic half of the window registry (the
+/// static table in `context_windows.rs` is only the fallback). Anthropic's
+/// `/v1/models` publishes `context_window` per model id and the backend
+/// holds the API key, so the fetch happens here, not in the webview.
+/// OpenRouter's public endpoint is fetched by the frontend directly (no
+/// key needed); OpenAI publishes no window data on any keyed API, so an
+/// empty map is returned and the registry fallback stands.
+///
+/// Results are cached in memory for 24h; a failed fetch returns the stale
+/// cache when present, else an empty map (callers treat that as "no dynamic
+/// data, registry wins").
+#[tauri::command]
+pub async fn fetch_provider_model_windows(
+    provider: String,
+    db: State<'_, DbState>,
+) -> CmdResult<std::collections::HashMap<String, u32>> {
+    let cache = MODEL_WINDOWS_CACHE.get_or_init(|| {
+        parking_lot::Mutex::new(std::collections::HashMap::new())
+    });
+    if let Some((at, table)) = cache.lock().get(&provider) {
+        if at.elapsed() < MODEL_WINDOWS_TTL {
+            return Ok(table.clone());
+        }
+    }
+
+    let table: std::collections::HashMap<String, u32> = match provider.as_str() {
+        "anthropic" => {
+            let (api_key, base) = {
+                let conn = db.0.lock();
+                let key = crate::secrets::get_chat_api_key(&conn, "anthropic");
+                let base = db::get_setting(&conn, "chat.anthropic.base_url")
+                    .ok()
+                    .flatten()
+                    .filter(|b| !b.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        crate::chat::providers::AnthropicProvider::DEFAULT_BASE.to_string()
+                    });
+                (key, base)
+            };
+            let Some(api_key) = api_key else {
+                return Ok(std::collections::HashMap::new());
+            };
+            let client = reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|e| e.to_string())?;
+            let resp = client
+                .get(format!("{base}/v1/models?limit=1000"))
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", "2023-06-01")
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                // Stale cache beats a live failure.
+                if let Some((_, table)) = cache.lock().get(&provider) {
+                    eprintln!("[context-windows] anthropic fetch failed ({status}); using stale cache");
+                    return Ok(table.clone());
+                }
+                return Err(format!("models fetch returned {status}: {}", crate::util::truncate_chars(body.trim(), 300)));
+            }
+            let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            let mut table = std::collections::HashMap::new();
+            for m in v
+                .get("data")
+                .and_then(|d| d.as_array())
+                .into_iter().flatten()
+            {
+                let Some(id) = m.get("id").and_then(|i| i.as_str()) else { continue };
+                let Some(w) = m.get("context_window").and_then(|w| w.as_u64()) else { continue };
+                if w > 0 {
+                    table.insert(id.to_ascii_lowercase(), w as u32);
+                }
+            }
+            eprintln!(
+                "[context-windows] anthropic live table: {} model(s) with context_window",
+                table.len()
+            );
+            table
+        }
+        // OpenRouter: the frontend fetches the public endpoint directly (no
+        // key). OpenAI: no window data on any keyed API. Both keep the
+        // registry fallback.
+        _ => std::collections::HashMap::new(),
+    };
+
+    cache.lock().insert(provider.clone(), (std::time::Instant::now(), table.clone()));
+    Ok(table)
+}
+
+/// One entry of a provider's curated model list (`chat.<provider>.
+/// selected_models`). `context_window` is the per-model window the user
+/// pinned in Settings (0/None = auto — live API figure, else the static
+/// registry). When the list is non-empty it IS the provider's model picker
+/// content; empty/absent = show everything the /v1/models fetch returns.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectedModel {
+    pub id: String,
+    #[serde(default)]
+    pub context_window: u64,
+}
+
+fn selected_models_key(provider: &str) -> String {
+    format!("chat.{provider}.selected_models")
+}
+
+/// Load a provider's curated model list. `None` = nothing curated (the
+/// picker shows every model the /v1/models fetch returns).
+pub(crate) fn load_selected_models(
+    conn: &rusqlite::Connection,
+    provider: &str,
+) -> Option<Vec<SelectedModel>> {
+    let raw = crate::db::get_setting(conn, &selected_models_key(provider))
+        .ok()
+        .flatten()?;
+    let list: Vec<SelectedModel> = serde_json::from_str(&raw).ok()?;
+    if list.is_empty() {
+        None
+    } else {
+        Some(list)
+    }
+}
+
+/// Persist a provider's curated model list (Settings → API provider →
+/// Model list). An empty list clears the curation.
+#[tauri::command]
+pub fn set_selected_models(
+    provider: String,
+    models: Vec<SelectedModel>,
+    db: State<'_, DbState>,
+) -> CmdResult<()> {
+    let conn = db.0.lock();
+    if models.is_empty() {
+        crate::db::delete_setting(&conn, &selected_models_key(&provider))
+            .map_err(|e| e.to_string())?;
+    } else {
+        let json = serde_json::to_string(&models).map_err(|e| e.to_string())?;
+        crate::db::set_setting(&conn, &selected_models_key(&provider), &json)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// The per-model window override for a specific model id — the value the
+/// user pinned on its row in the provider's Model list. This is the
+/// AUTHORITATIVE figure when set (the user's explicit choice for that
+/// model, e.g. a remapped backend serving a different window than the id
+/// suggests); it wins over both the live API figure and the registry.
+/// Returns None when the model has no pinned window.
+pub(crate) fn load_model_window_override(
+    conn: &rusqlite::Connection,
+    provider: &str,
+    model: &str,
+) -> Option<u32> {
+    let list = load_selected_models(conn, provider)?;
+    let m = model.trim().to_ascii_lowercase();
+    list.iter()
+        .find(|e| e.id.trim().to_ascii_lowercase() == m)
+        .and_then(|e| {
+            if e.context_window > 0 {
+                u32::try_from(e.context_window).ok()
+            } else {
+                None
+            }
+        })
+}
+
+/// The effective window for a cloud/harness session model, resolving in
+/// order: per-model pinned window (authoritative) → registry/dynamic
+/// window capped by the global context-limit override. Shared by the meter
+/// paths and the compaction trigger so they can never disagree.
+pub(crate) fn effective_session_window(
+    conn: &rusqlite::Connection,
+    provider_str: &str,
+    model: &str,
+) -> u32 {
+    if let Some(pinned) = load_model_window_override(conn, provider_str, model) {
+        return pinned;
+    }
+    let global_cap = crate::chat::context_windows::load_context_limit_override(conn);
+    crate::chat::context_windows::effective_cloud_window(model, global_cap)
+}
+
+/// Parse a chat_sessions.provider string into the provider enum. The send
+/// path matches inline (it must hard-fail on unknown providers); the meter
+/// paths need the tolerant variant — they render for whatever the session
+/// store holds, including harness ids.
+pub(crate) fn parse_provider_id(s: &str) -> Option<ChatProviderId> {
+    match s {
+        "anthropic" => Some(ChatProviderId::Anthropic),
+        "openai" => Some(ChatProviderId::OpenAI),
+        "anthropic_compatible" => Some(ChatProviderId::AnthropicCompatible),
+        "openai_compatible" => Some(ChatProviderId::OpenAICompatible),
+        "openrouter" => Some(ChatProviderId::OpenRouter),
+        "local_gguf" => Some(ChatProviderId::LocalGguf),
+        _ => None,
+    }
+}
+
+/// True for CLI-harness session providers ("harness:claude_code", "acp:<id>").
+/// Relay sends these sessions one content string per turn — no Relay-built
+/// system prompt, no tool-schema JSON — so their context estimates count DB
+/// history only.
+fn is_harness_provider(provider_str: &str) -> bool {
+    provider_str.starts_with("harness:") || provider_str.starts_with("acp:")
+}
+
+/// Serialize the BUILT-IN tool schema — the reserve basis for every
+/// compaction budget (local `/tokenize`d, cloud char-estimated). Connector
+/// and MCP tools attach per-turn inside the send task and are covered by the
+/// threshold's margin, exactly as the local block documented.
+fn builtin_tool_specs_json(provider_id: &ChatProviderId, model: &str, code_exec: bool) -> String {
+    let pcaps = crate::chat::prompts::provider_capabilities(provider_id.clone(), model);
+    let caps = crate::chat::tools::ToolCaps {
+        code_exec: code_exec,
+        fs_roots: Vec::new(),
+        web_search: pcaps.native_web_search,
+        requires_local_sandbox: pcaps.requires_local_sandbox,
+        attached_connectors: std::sync::Arc::new(Vec::new()),
+        local_docs: false,
+        mcp_tools: std::sync::Arc::new(Vec::new()),
+        attachable_connectors: std::sync::Arc::new(Vec::new()),
+        attachable_mcp: std::sync::Arc::new(Vec::new()),
+        local_model: false,
+        fs_rules: Vec::new(),
+    };
+    serde_json::to_string(&crate::chat::tools::openai_tool_specs(
+        &caps,
+        crate::chat::permission::SandboxPolicy::WorkspaceWrite,
+    ))
+    .unwrap_or_default()
+}
+
+/// Resolve the CLOUD SUMMARIZER: the first configured cloud provider
+/// (anthropic → openai → openrouter), its endpoint, API key, and model
+/// (the provider's configured model, else its catalog default). Shared by
+/// the compaction summarizer-override, the harness primer summary, and the
+/// manual compact — one place decides "which cloud brain summarizes".
+pub(crate) fn resolve_cloud_summarizer(
+    conn: &rusqlite::Connection,
+) -> Option<(ChatProviderId, String, String, String)> {
+    for (p, default_base) in [
+        ("anthropic", crate::chat::providers::AnthropicProvider::DEFAULT_BASE),
+        ("openai", crate::chat::providers::OpenAIProvider::DEFAULT_BASE),
+        ("openrouter", crate::chat::providers::OpenRouterProvider::DEFAULT_BASE),
+    ] {
+        if crate::secrets::get_chat_api_key(conn, p).is_none() {
+            continue;
+        }
+        let base = db::get_setting(conn, &format!("chat.{p}.base_url"))
+            .ok()
+            .flatten()
+            .filter(|b| !b.trim().is_empty())
+            .unwrap_or_else(|| default_base.to_string());
+        let model = db::get_setting(conn, &format!("chat.{p}.model"))
+            .ok()
+            .flatten()
+            .filter(|m| !m.trim().is_empty());
+        let provider_id = parse_provider_id(p)?;
+        let model = match model {
+            Some(m) => m,
+            None => provider_id.default_model_id().to_string(),
+        };
+        let api_key = crate::secrets::get_chat_api_key(conn, p)?;
+        return Some((provider_id, base, api_key, model));
+    }
+    None
+}
+
+/// Rough char-based token estimate (~4 chars/token, rounded up) for providers
+/// with no tokenizer endpoint Relay can call. Mirrors the frontend's
+/// `charsToTokens` so both sides agree on what an estimate means.
+pub(crate) fn estimate_tokens(text: &str) -> u32 {
+    (text.chars().count() as u32 + 3) / 4
+}
+
+/// Category totals (in estimated tokens) for the cloud/harness context
+/// breakdown. `total` = system + messages (same shape as the local
+/// breakdown's total); the tool schema is reported separately because the
+/// request carries it as its own field. Pure so the tests can pin the math.
+fn estimate_usage_parts(
+    system: &str,
+    messages: &[ChatMessage],
+    tool_specs: &str,
+) -> (u32, u32, u32, u32) {
+    let system_tokens = estimate_tokens(system);
+    let messages_tokens: u32 = messages.iter().map(|m| estimate_tokens(&m.content)).sum();
+    let tools_tokens = estimate_tokens(tool_specs);
+    (
+        system_tokens + messages_tokens,
+        system_tokens,
+        messages_tokens,
+        tools_tokens,
+    )
+}
+
+/// The model id whose window a cloud/harness session's meter should use.
+/// Harness sessions report the model their CLI LAST actually ran (persisted
+/// as `agent.actual_model.<harness>.<sid>`); falling back to the session's
+/// stored id keeps the window resolvable before the first harness turn.
+fn meter_model_for_session(conn: &rusqlite::Connection, provider_str: &str, model_str: &str, sid: &str) -> String {
+    if let Some(harness) = provider_str.strip_prefix("harness:") {
+        let key = crate::agent_sessions::actual_model_key(harness, sid);
+        if let Ok(Some(actual)) = crate::db::get_setting(conn, &key) {
+            if !actual.trim().is_empty() {
+                return actual;
+            }
+        }
+    }
+    model_str.to_string()
+}
+
+/// Live context-window usage for the active chat session. Local sessions ask
+/// the running llama-server to tokenize the assembled (system + active
+/// history) conversation and return the count alongside the sidecar's `-c`
+/// cap. Cloud and harness sessions return a char-based estimate of what the
+/// send path would assemble (system + history + tool schema) against the
+/// model registry's window — live figures the meter can warn with before an
+/// overflow, instead of waiting for the next chat:done.
+///
+/// No-sidecar / errored-tokenize returns `used_tokens: null` so the meter
+/// keeps showing whatever the last known value was instead of snapping to 0.
 #[tauri::command]
 pub async fn count_context_tokens(
     chat_session_id: String,
@@ -3939,13 +4535,6 @@ pub async fn count_context_tokens(
     db: State<'_, DbState>,
     app: tauri::AppHandle,
 ) -> CmdResult<crate::types::ContextUsagePayload> {
-    let Some(status) = local.0.status() else {
-        return Ok(crate::types::ContextUsagePayload {
-            used_tokens: None,
-            max_tokens: 0,
-        });
-    };
-
     let (provider_str, model_str) = {
         let conn = db.0.lock();
         let cs = db::get_chat_session(&conn, &chat_session_id)
@@ -3954,15 +4543,131 @@ pub async fn count_context_tokens(
         (cs.provider, cs.model)
     };
 
-    // Only local sessions are tokenizable via llama-server; cloud sessions
-    // use the meter's 256K fallback. Return a zero-cap so the consumer can
-    // distinguish "no data" from "API session".
+    // Cloud and harness sessions have no sidecar to /tokenize — estimate
+    // from char counts (~4 chars/token) so their meter is live too. The
+    // estimate is fresher than the last assistant turn's input_tokens (it
+    // includes the just-sent user message and any compaction immediately),
+    // and ChatView takes the max of the two so a provider-counted prompt
+    // always wins when it is larger.
     if provider_str != "local_gguf" {
+        let records = {
+            let conn = db.0.lock();
+            db::list_active_chat_messages(&conn, &chat_session_id).map_err(|e| e.to_string())?
+        };
+        let last_id = records.last().map(|r| r.id).unwrap_or(0);
+        let n_records = records.len();
+        let messages: Vec<ChatMessage> = records
+            .into_iter()
+            .map(|r| ChatMessage {
+                role: r.role,
+                content: strip_think_blocks(&r.content),
+                images: Vec::new(),
+            })
+            .collect();
+
+        let (system_str, tool_specs_json) = if is_harness_provider(&provider_str) {
+            // Harness turns carry no Relay-built system prompt or tool schema.
+            (String::new(), String::new())
+        } else {
+            // Same builders as the local breakdown, but with the session's
+            // own provider so the estimate mirrors what the send path would
+            // assemble. LOCKING: attach_availability re-locks DbState — same
+            // rule as the local path, never while `conn` is held.
+            let (custom, attached_c, attached_m): (Option<String>, Vec<String>, Vec<String>) = {
+                let conn = db.0.lock();
+                let custom = db::get_setting(&conn, "assistant.systemPrompt")
+                    .map_err(|e| e.to_string())?;
+                let (c, m): (Vec<String>, Vec<String>) =
+                    db::list_chat_session_connectors(&conn, &chat_session_id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .partition(|r| !r.starts_with("mcp:"));
+                (custom, c, m)
+            };
+            let attached_m: Vec<String> = attached_m
+                .iter()
+                .filter_map(|r| r.strip_prefix("mcp:").map(|s| s.to_string()))
+                .collect();
+            let system_str: String = {
+                let provider_id = parse_provider_id(&provider_str).unwrap_or(ChatProviderId::OpenAI);
+                let (avail_c, avail_m) = attach_availability(&app, &attached_c, &attached_m);
+                let manifest = crate::chat::prompts::attach_manifest_segment(&avail_c, &avail_m);
+                crate::chat::build_system_prompt(
+                    provider_id,
+                    &model_str,
+                    custom.as_deref(),
+                    &[],
+                    true,
+                    false,
+                    false,
+                    manifest.as_deref(),
+                )
+                .unwrap_or_default()
+            };
+            let caps = crate::chat::tools::ToolCaps {
+                code_exec: true,
+                fs_roots: Vec::new(),
+                web_search: false,
+                requires_local_sandbox: false,
+                attached_connectors: std::sync::Arc::new(Vec::new()),
+                local_docs: false,
+                mcp_tools: std::sync::Arc::new(Vec::new()),
+                attachable_connectors: std::sync::Arc::new(Vec::new()),
+                attachable_mcp: std::sync::Arc::new(Vec::new()),
+                local_model: false,
+                fs_rules: Vec::new(),
+            };
+            let tool_specs_json = serde_json::to_string(
+                &crate::chat::tools::openai_tool_specs(
+                    &caps,
+                    crate::chat::permission::SandboxPolicy::WorkspaceWrite,
+                ),
+            )
+            .unwrap_or_default();
+            (system_str, tool_specs_json)
+        };
+
+        let max_tokens = {
+            let conn = db.0.lock();
+            let meter_model =
+                meter_model_for_session(&conn, &provider_str, &model_str, &chat_session_id);
+            effective_session_window(&conn, &provider_str, &meter_model)
+        };
+
+        // Cache hit: same transcript + prompt + model → same estimate. The
+        // estimate itself is cheap, but the system-prompt build above scans
+        // the skills directory — not something the 2s meter poll should do
+        // forever while idle (same rationale as the local path's PERF B11).
+        let fingerprint = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            system_str.hash(&mut h);
+            provider_str.hash(&mut h);
+            model_str.hash(&mut h);
+            format!("{:x}:{last_id}:{n_records}", h.finish())
+        };
+        if let Some(tokens) = chat_state.0.cached_context_tokens(&chat_session_id, &fingerprint) {
+            return Ok(crate::types::ContextUsagePayload {
+                used_tokens: if tokens > 0 || n_records > 0 { Some(tokens) } else { None },
+                max_tokens,
+            });
+        }
+
+        let (total, _sys, _msgs, tools) =
+            estimate_usage_parts(&system_str, &messages, &tool_specs_json);
+        chat_state.0.store_context_tokens(&chat_session_id, fingerprint, total + tools);
+        return Ok(crate::types::ContextUsagePayload {
+            used_tokens: Some(total + tools),
+            max_tokens,
+        });
+    }
+
+    let Some(status) = local.0.status() else {
         return Ok(crate::types::ContextUsagePayload {
             used_tokens: None,
             max_tokens: 0,
         });
-    }
+    };
 
     // Build the system + active-history exactly the way send_chat_message
     // does, so the count matches what the model would actually see. Only
@@ -4101,9 +4806,6 @@ pub async fn count_context_breakdown(
     db: State<'_, DbState>,
     app: tauri::AppHandle,
 ) -> CmdResult<Option<crate::types::ContextBreakdownPayload>> {
-    let Some(status) = local.0.status() else {
-        return Ok(None);
-    };
     let (provider_str, model_str) = {
         let conn = db.0.lock();
         let cs = db::get_chat_session(&conn, &chat_session_id)
@@ -4111,9 +4813,119 @@ pub async fn count_context_breakdown(
             .ok_or_else(|| "chat session not found".to_string())?;
         (cs.provider, cs.model)
     };
+
+    // Cloud/harness sessions have no sidecar — estimate per category from
+    // char counts so the tooltip shows real proportions (derived from the
+    // actual content) instead of the hardcoded 15/70/10/5 split it used to
+    // fabricate.
     if provider_str != "local_gguf" {
-        return Ok(None);
+        let (messages, meta_tokens) = {
+            let conn = db.0.lock();
+            let rows = db::list_active_chat_messages(&conn, &chat_session_id)
+                .map_err(|e| e.to_string())?;
+            let meta: u32 = rows
+                .iter()
+                .filter(|r| {
+                    r.role == "system"
+                        && r.content
+                            .trim_start()
+                            .starts_with(crate::chat::compaction::COMPACTED_PREFIX)
+                })
+                .map(|r| estimate_tokens(&strip_think_blocks(&r.content)))
+                .sum();
+            let messages: Vec<ChatMessage> = rows
+                .into_iter()
+                .map(|r| ChatMessage {
+                    role: r.role,
+                    content: strip_think_blocks(&r.content),
+                    images: Vec::new(),
+                })
+                .collect();
+            (messages, meta)
+        };
+        let (system_str, tool_specs_json) = if is_harness_provider(&provider_str) {
+            (String::new(), String::new())
+        } else {
+            // Mirrors count_context_tokens' cloud branch (same builders, same
+            // locking rule).
+            let (custom, attached_c, attached_m): (Option<String>, Vec<String>, Vec<String>) = {
+                let conn = db.0.lock();
+                let custom = db::get_setting(&conn, "assistant.systemPrompt")
+                    .map_err(|e| e.to_string())?;
+                let (c, m): (Vec<String>, Vec<String>) =
+                    db::list_chat_session_connectors(&conn, &chat_session_id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .partition(|r| !r.starts_with("mcp:"));
+                (custom, c, m)
+            };
+            let attached_m: Vec<String> = attached_m
+                .iter()
+                .filter_map(|r| r.strip_prefix("mcp:").map(|s| s.to_string()))
+                .collect();
+            let system_str: String = {
+                let provider_id = parse_provider_id(&provider_str).unwrap_or(ChatProviderId::OpenAI);
+                let (avail_c, avail_m) = attach_availability(&app, &attached_c, &attached_m);
+                let manifest = crate::chat::prompts::attach_manifest_segment(&avail_c, &avail_m);
+                crate::chat::build_system_prompt(
+                    provider_id,
+                    &model_str,
+                    custom.as_deref(),
+                    &[],
+                    true,
+                    false,
+                    false,
+                    manifest.as_deref(),
+                )
+                .unwrap_or_default()
+            };
+            let caps = crate::chat::tools::ToolCaps {
+                code_exec: true,
+                fs_roots: Vec::new(),
+                web_search: false,
+                requires_local_sandbox: false,
+                attached_connectors: std::sync::Arc::new(Vec::new()),
+                local_docs: false,
+                mcp_tools: std::sync::Arc::new(Vec::new()),
+                attachable_connectors: std::sync::Arc::new(Vec::new()),
+                attachable_mcp: std::sync::Arc::new(Vec::new()),
+                local_model: false,
+                fs_rules: Vec::new(),
+            };
+            let tool_specs_json = serde_json::to_string(
+                &crate::chat::tools::openai_tool_specs(
+                    &caps,
+                    crate::chat::permission::SandboxPolicy::WorkspaceWrite,
+                ),
+            )
+            .unwrap_or_default();
+            (system_str, tool_specs_json)
+        };
+        let (total, system_prompt_tokens, messages_tokens, tool_specs_tokens) =
+            estimate_usage_parts(&system_str, &messages, &tool_specs_json);
+        let max_tokens = {
+            let conn = db.0.lock();
+            let meter_model =
+                meter_model_for_session(&conn, &provider_str, &model_str, &chat_session_id);
+            effective_session_window(&conn, &provider_str, &meter_model)
+        };
+        return Ok(Some(crate::types::ContextBreakdownPayload {
+            total_tokens: total,
+            max_tokens,
+            system_prompt_tokens,
+            messages_tokens,
+            tool_specs_tokens,
+            // Live connector sessions are per-turn; nothing persisted to
+            // estimate here (same as the local path).
+            connector_tools_tokens: 0,
+            skills_tokens: 0,
+            metacontext_tokens: meta_tokens,
+        }));
     }
+
+    let Some(status) = local.0.status() else {
+        return Ok(None);
+    };
     let client = chat_state.0.client.clone();
     let base_url = &status.base_url;
 
@@ -4240,6 +5052,249 @@ pub async fn count_context_breakdown(
     }))
 }
 
+/// Context recovery for the `[compacted context]` marker: returns the raw
+/// turns a summary row folded away (they stay in the DB forever — the
+/// summary is lossy, the rows are the restorable source). The summary row
+/// must belong to the given session; think/tool display blocks are stripped
+/// so the folded turns read like the rest of the timeline.
+#[tauri::command]
+pub fn list_compacted_messages(
+    chat_session_id: String,
+    summary_id: i64,
+    db: State<'_, DbState>,
+) -> CmdResult<Vec<crate::types::ChatMessageRecord>> {
+    let conn = db.0.lock();
+    let rows = db::list_messages_superseded_by(&conn, summary_id).map_err(|e| e.to_string())?;
+    // Keep only rows belonging to the requested session — a mismatched
+    // session/summary pair returns empty rather than another chat's history.
+    let owned: Vec<crate::types::ChatMessageRecord> = rows
+        .into_iter()
+        .filter(|r| r.chat_session_id == chat_session_id)
+        .map(|mut r| {
+            r.content = strip_think_blocks(&r.content);
+            r
+        })
+        .collect();
+    Ok(owned)
+}
+
+/// Manual compaction ("Compact now" in the context-meter panel). Forces a
+/// compaction pass for the session regardless of the configured threshold —
+/// cloud sessions summarize via their own provider, local sessions via the
+/// running sidecar. Emits the same status events as the automatic paths so
+/// the meter and timeline refresh. Errors when there is nothing to compact.
+#[tauri::command]
+pub async fn chat_compact_now(
+    chat_session_id: String,
+    chat_state: State<'_, crate::ChatState>,
+    local: State<'_, local_models::LocalModelState>,
+    db: State<'_, DbState>,
+    app: tauri::AppHandle,
+) -> CmdResult<String> {
+    let (provider_str, model_str) = {
+        let conn = db.0.lock();
+        let cs = db::get_chat_session(&conn, &chat_session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "chat session not found".to_string())?;
+        (cs.provider, cs.model)
+    };
+    let entries: Vec<crate::chat::compaction::CompactionEntry> = {
+        let conn = db.0.lock();
+        db::list_active_chat_messages(&conn, &chat_session_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|r| crate::chat::compaction::CompactionEntry {
+                id: r.id,
+                message: ChatMessage {
+                    role: r.role,
+                    content: strip_think_blocks(&r.content),
+                    images: Vec::new(),
+                },
+            })
+            .collect()
+    };
+    let (custom, attached_c, attached_m): (Option<String>, Vec<String>, Vec<String>) = {
+        let conn = db.0.lock();
+        let custom =
+            db::get_setting(&conn, "assistant.systemPrompt").map_err(|e| e.to_string())?;
+        let (c, m): (Vec<String>, Vec<String>) =
+            db::list_chat_session_connectors(&conn, &chat_session_id)
+                .unwrap_or_default()
+                .into_iter()
+                .partition(|r| !r.starts_with("mcp:"));
+        (custom, c, m)
+    };
+    let attached_m: Vec<String> = attached_m
+        .iter()
+        .filter_map(|r| r.strip_prefix("mcp:").map(|s| s.to_string()))
+        .collect();
+
+    let _ = app.emit(
+        "chat:status",
+        crate::types::ChatStatusPayload {
+            chat_session_id: chat_session_id.clone(),
+            reason: "context_compacting".to_string(),
+            message: "Compacting earlier context…".to_string(),
+        },
+    );
+
+    let run = if provider_str == "local_gguf" {
+        let Some(status) = local.0.status() else {
+            return Err("local model is not running".to_string());
+        };
+        // Force: a threshold of 0 makes the trigger comparison always fire.
+        let mut cfg = {
+            let conn = db.0.lock();
+            crate::chat::compaction::load_compaction_config(&conn)
+        };
+        cfg.threshold = 0.0;
+        let system = {
+            let (avail_c, avail_m) = attach_availability(&app, &attached_c, &attached_m);
+            let manifest = crate::chat::prompts::attach_manifest_segment(&avail_c, &avail_m);
+            crate::chat::build_system_prompt(
+                ChatProviderId::LocalGguf,
+                &model_str,
+                custom.as_deref(),
+                &[],
+                true,
+                false,
+                false,
+                manifest.as_deref(),
+            )
+            .unwrap_or_default()
+        };
+        let system = if system.trim().is_empty() { None } else { Some(system) };
+        // Honor the summarizer override here too — "Compact now" should
+        // produce the same quality the automatic path would.
+        let route = match {
+            let conn = db.0.lock();
+            resolve_cloud_summarizer(&conn)
+        } {
+            Some((provider_id, base, api_key, cloud_model))
+                if {
+                    let conn = db.0.lock();
+                    db::get_setting(&conn, "chat.local_gguf.compaction_summarizer")
+                        .ok()
+                        .flatten()
+                        .map(|v| v.trim().eq_ignore_ascii_case("cloud"))
+                        .unwrap_or(false)
+                } =>
+            {
+                crate::chat::compaction::SummarizerRoute::Cloud {
+                    provider_id,
+                    base,
+                    api_key,
+                    model: cloud_model,
+                }
+            }
+            _ => crate::chat::compaction::SummarizerRoute::Sidecar,
+        };
+        let outcome = crate::chat::compaction::maybe_compact(
+            &chat_state.0.client,
+            &status.base_url,
+            status.n_ctx,
+            &model_str,
+            &system,
+            &entries,
+            &cfg,
+            0,
+            None,
+            &route,
+        )
+        .await?;
+        if !outcome.did_compact {
+            return Err("nothing to compact yet".to_string());
+        }
+        crate::chat::cloud_compact::CloudCompactionRun {
+            messages: outcome.messages,
+            summary_text: outcome.summary_text,
+            summary_input_tokens: outcome.summary_input_tokens,
+            summary_output_tokens: outcome.summary_output_tokens,
+            superseded_ids: outcome.superseded_ids,
+            compacted_exchange_count: outcome.compacted_exchange_count,
+            pre_tokens: 0,
+            post_tokens: 0,
+        }
+    } else {
+        let provider_id = parse_provider_id(&provider_str)
+            .ok_or_else(|| format!("unknown provider: {provider_str}"))?;
+        let cfg = {
+            let conn = db.0.lock();
+            crate::chat::cloud_compact::load_cloud_compaction_config(&conn)
+        };
+        let api_key = {
+            let conn = db.0.lock();
+            secrets::get_chat_api_key(&conn, &provider_str)
+                .ok_or_else(|| format!("no API key configured for provider: {provider_str}"))?
+        };
+        let base_url = {
+            let conn = db.0.lock();
+            db::get_setting(&conn, &format!("chat.{provider_str}.base_url"))
+                .map_err(|e| e.to_string())?
+        };
+        let base = base_url
+            .filter(|b| !b.trim().is_empty())
+            .unwrap_or_else(|| match provider_id {
+                ChatProviderId::OpenRouter => OpenRouterProvider::DEFAULT_BASE.to_string(),
+                ChatProviderId::Anthropic => AnthropicProvider::DEFAULT_BASE.to_string(),
+                _ => OpenAIProvider::DEFAULT_BASE.to_string(),
+            });
+        let system = {
+            let (avail_c, avail_m) = attach_availability(&app, &attached_c, &attached_m);
+            let manifest = crate::chat::prompts::attach_manifest_segment(&avail_c, &avail_m);
+            crate::chat::build_system_prompt(
+                provider_id,
+                &model_str,
+                custom.as_deref(),
+                &[],
+                true,
+                false,
+                false,
+                manifest.as_deref(),
+            )
+            .unwrap_or_default()
+        };
+        let system = if system.trim().is_empty() { None } else { Some(system) };
+        crate::chat::cloud_compact::run_cloud_compaction(
+            &chat_state.0.client,
+            provider_id,
+            &base,
+            &api_key,
+            &model_str,
+            &system,
+            &entries,
+            cfg.pin_exchanges,
+        )
+        .await?
+    };
+
+    let summary_id = {
+        let conn = db.0.lock();
+        crate::chat::cloud_compact::persist_summary_row(&conn, &chat_session_id, &run)
+            .map_err(|e| e.to_string())?
+    };
+    eprintln!(
+        "[compact-now] compacted {} exchange(s) into summary row {}",
+        run.compacted_exchange_count, summary_id,
+    );
+    let _ = app.emit(
+        "chat:status",
+        crate::types::ChatStatusPayload {
+            chat_session_id: chat_session_id.clone(),
+            reason: "context_compacted".to_string(),
+            message: format!(
+                "Compacted {} exchange(s) — {} messages now active",
+                run.compacted_exchange_count,
+                run.messages.len(),
+            ),
+        },
+    );
+    Ok(format!(
+        "Compacted {} exchange(s)",
+        run.compacted_exchange_count
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4260,6 +5315,86 @@ mod tests {
 
         // Plain content is untouched (aside from trimming).
         assert_eq!(strip_think_blocks("  just text  "), "just text");
+    }
+
+    #[test]
+    fn estimate_tokens_is_chars_over_four_rounded_up() {
+        assert_eq!(estimate_tokens(""), 0);
+        assert_eq!(estimate_tokens("abcd"), 1);
+        assert_eq!(estimate_tokens("abcde"), 2); // 5 chars → ceil(1.25) = 2
+        assert_eq!(estimate_tokens("    "), 1); // trimmed whitespace still counts
+        // Unicode counts by chars, not bytes (10 chars → ceil(2.5) = 3).
+        assert_eq!(estimate_tokens("你好你你好你好你好"), 3);
+    }
+
+    #[test]
+    fn estimate_usage_parts_sums_categories() {
+        let msgs = vec![
+            ChatMessage { role: "user".into(), content: "abcd".into(), images: Vec::new() },      // 1
+            ChatMessage { role: "assistant".into(), content: "abcd".repeat(4).into(), images: Vec::new() }, // 4
+        ];
+        let (total, sys, msgs_tok, tools) = estimate_usage_parts("abcdabcd", &msgs, "abcd"); // 2 + 1
+        assert_eq!(sys, 2);
+        assert_eq!(msgs_tok, 5);
+        assert_eq!(tools, 1);
+        assert_eq!(total, 7);
+    }
+
+    #[test]
+    fn harness_provider_detection() {
+        assert!(is_harness_provider("harness:claude_code"));
+        assert!(is_harness_provider("harness:opencode"));
+        assert!(is_harness_provider("acp:some-agent"));
+        assert!(!is_harness_provider("anthropic"));
+        assert!(!is_harness_provider("local_gguf"));
+        assert!(!is_harness_provider("harness")); // bare prefix — not a harness id
+    }
+
+    #[test]
+    fn parse_provider_id_round_trips_known_ids() {
+        for s in [
+            "anthropic",
+            "openai",
+            "anthropic_compatible",
+            "openai_compatible",
+            "openrouter",
+            "local_gguf",
+        ] {
+            assert_eq!(parse_provider_id(s).map(|p| p.as_str()), Some(s));
+        }
+        assert!(parse_provider_id("harness:claude_code").is_none());
+        assert!(parse_provider_id("acp:x").is_none());
+    }
+
+    #[test]
+    fn meter_model_prefers_harness_actual_model() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        crate::db::set_setting(&conn, "agent.actual_model.claude_code.s1", "claude-opus-4-8")
+            .unwrap();
+        assert_eq!(
+            meter_model_for_session(&conn, "harness:claude_code", "claude-sonnet-4-5", "s1"),
+            "claude-opus-4-8"
+        );
+        // Cloud sessions (and harnesses with no recorded model) use the
+        // session's stored id.
+        assert_eq!(
+            meter_model_for_session(&conn, "anthropic", "claude-sonnet-4-5", "s2"),
+            "claude-sonnet-4-5"
+        );
+        assert_eq!(
+            meter_model_for_session(&conn, "harness:claude_code", "claude-sonnet-4-5", "s3"),
+            "claude-sonnet-4-5"
+        );
+    }
+
+    #[test]
+    fn meter_model_resolves_through_the_window_registry() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        let model = meter_model_for_session(&conn, "harness:claude_code", "claude-sonnet-4-5", "s9");
+        let window = crate::chat::context_windows::cloud_window_for_model(&model);
+        assert_eq!(window, 200_000);
     }
 
     #[test]

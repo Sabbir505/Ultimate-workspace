@@ -60,6 +60,13 @@ pub async fn send_agent_chat_message(
         }
         _ => (content, String::new()),
     };
+    // Primer summary (engine-switch handoff): when a fresh CLI session is
+    // about to lose older turns to the primer's char budget, pre-summarize
+    // them with the shared cloud summarizer — properly awaited here so the
+    // network round-trip never blocks the sync spawn path inside send().
+    // Failure/None → send() falls back to the truncate-only primer.
+    let primer_summary =
+        crate::agent_sessions::build_primer_summary(&db, &chat_session_id, &harness_id).await;
     state.0.send(
         &app,
         &db,
@@ -71,6 +78,7 @@ pub async fn send_agent_chat_message(
         cwd.as_deref(),
         project_id.as_deref(),
         &connectors,
+        primer_summary.as_deref(),
     )
 }
 

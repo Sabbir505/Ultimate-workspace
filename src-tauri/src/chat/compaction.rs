@@ -83,7 +83,7 @@ pub const DEFAULT_PIN_EXCHANGES: usize = 6;
 /// before comparing against the threshold, so a turn that would itself push
 /// the window over the line triggers compaction a step early rather than
 /// overflowing on the response.
-const RESPONSE_HEADROOM: u32 = 512;
+pub(crate) const RESPONSE_HEADROOM: u32 = 512;
 
 /// Per-session compaction config, loaded from the key/value settings store.
 #[derive(Debug, Clone)]
@@ -92,6 +92,11 @@ pub struct CompactionConfig {
     pub threshold: f64,
     /// Number of recent *exchanges* (user+assistant pairs) pinned verbatim.
     pub pin_exchanges: usize,
+    /// Rebuild-from-raw: when a prior summary exists, re-feed its raw source
+    /// rows (they stay in the DB) into the next compaction input, so each
+    /// new summary is re-derived from the ORIGINAL turns instead of stacking
+    /// summary-on-summary — the compounding-loss reset from the redesign.
+    pub rebuild_from_raw: bool,
 }
 
 impl Default for CompactionConfig {
@@ -99,6 +104,7 @@ impl Default for CompactionConfig {
         Self {
             threshold: DEFAULT_THRESHOLD,
             pin_exchanges: DEFAULT_PIN_EXCHANGES,
+            rebuild_from_raw: true,
         }
     }
 }
@@ -124,6 +130,10 @@ pub fn load_compaction_config(conn: &Connection) -> CompactionConfig {
                 cfg.pin_exchanges = v;
             }
         }
+    }
+    if let Ok(Some(raw)) = crate::db::get_setting(conn, "chat.local_gguf.compaction_rebuild_from_raw")
+    {
+        cfg.rebuild_from_raw = !matches!(raw.trim(), "false" | "0" | "off");
     }
     cfg
 }
@@ -332,7 +342,7 @@ pub async fn count_json_tokens_cached(
 /// `role == "system"` and content starting with the `[compacted context]`
 /// sentinel. Pulled out of the pin/compact split and folded into the new
 /// summarization call instead.
-fn is_compacted_summary(m: &ChatMessage) -> bool {
+pub(crate) fn is_compacted_summary(m: &ChatMessage) -> bool {
     m.role == "system" && m.content.trim_start().starts_with(COMPACTED_PREFIX)
 }
 
@@ -355,7 +365,7 @@ fn strip_compacted_prefix(content: &str) -> String {
 ///   (i.e. aged-out real turns). These get summarized.
 ///
 /// Returns `None` when there's nothing to compact (no `to_compact`).
-fn split_for_compaction(
+pub(crate) fn split_for_compaction(
     messages: &[CompactionEntry],
     pin_exchanges: usize,
 ) -> Option<(
@@ -393,24 +403,77 @@ fn split_for_compaction(
     Some((prior, to_compact, pinned))
 }
 
-/// The summarization system instruction, written for a small/local model:
-/// explicit, listy, no preamble — consistent with the STRICT-addendum voice in
-/// `chat/prompts.rs`.
-fn summarization_system_prompt() -> &'static str {
+/// The summarization system instruction, shared by the local sidecar path
+/// and the cloud-provider path (`cloud_compact.rs`).
+///
+/// Structured schema (the headings every summary must carry — the de-facto
+/// template popularized by Claude Code's compaction), tuned RECALL-FIRST per
+/// Anthropic's guidance: omitting something important is the worst failure,
+/// so the prompt accepts verbosity and explicitly forbids dropping user
+/// messages or errors. Note the deliberate inversion of the earlier draft:
+/// dead-end troubleshooting is now KEPT (an error is evidence — erasing it
+/// removes the evidence the model needs to avoid repeating it).
+pub(crate) fn summarization_system_prompt() -> &'static str {
     "You are a conversation-summarizing assistant. You will be given an \
-    excerpt of an earlier conversation (and optionally a prior summary of even \
-    earlier turns). Produce ONE tight summary that preserves, in bullet-like \
-    prose: key facts stated, decisions made, and any file paths, code \
-    snippets, URLs, or identifiers mentioned. Explicitly DISCARD resolved \
-    back-and-forth, troubleshooting that reached a dead end, and pleasantries. \
-    Do not add commentary, do not ask questions, do not mention that you are \
-    summarizing. Output the summary only."
+    excerpt of an earlier conversation (and optionally a prior summary of \
+    even earlier turns). Produce ONE summary that lets work continue with \
+    as little context loss as possible. RECALL FIRST: keep maximum detail — \
+    omitting something important is the worst failure, being verbose is not. \
+    Organize the summary under exactly these headings:\n\n\
+    Primary request and intent:\n\
+    Key decisions and concepts:\n\
+    Files, paths, and code:\n\
+    Errors and fixes:\n\
+    All user messages:\n\
+    Pending tasks:\n\
+    Current work:\n\
+    Next step:\n\
+    Pointers:\n\n\
+    Rules: \"Files, paths, and code\" must include every file path, command, \
+    URL, and identifier mentioned, with short verbatim code excerpts where \
+    they matter. \"All user messages\" lists each user request in order, \
+    condensed but never dropped. \"Errors and fixes\" keeps failures and \
+    what was learned from them — an error is evidence, not noise. \
+    \"Pointers\" lists anything re-readable (paths, URLs, ids) exactly as \
+    written. Drop ONLY: pleasantries, resolved small talk, and detail \
+    already covered by the prior summary. Output ONLY the summary with the \
+    headings above — no commentary, no questions, no mention that you are \
+    summarizing."
+}
+
+/// Per-message cap (chars) applied to each turn fed to the summarizer —
+/// the ladder's cheapest rung. One oversized pasted log or file dump can
+/// otherwise consume the summarizer's entire input budget and crowd out the
+/// rest of the head; trimming keeps head + tail of the entry and marks the
+/// middle as trimmed. ~3k tokens at the usual 4 chars/token.
+pub(crate) const SUMMARY_ENTRY_CHAR_CAP: usize = 12_000;
+
+/// Trim one entry's content for the summarizer input, keeping the head and
+/// tail (both ends carry signal: the start says what it is, the end says
+/// where it landed) with a `…[trimmed N chars]` marker between. Pure; tests
+/// pin the behavior.
+pub(crate) fn trim_entry_content(content: &str, cap: usize) -> String {
+    if content.chars().count() <= cap {
+        return content.to_string();
+    }
+    // Split the budget, reserving room for the marker line.
+    let marker_budget = 32;
+    let half = (cap.saturating_sub(marker_budget)) / 2;
+    let head: String = content.chars().take(half).collect();
+    let tail: String = content
+        .chars()
+        .skip(content.chars().count() - half)
+        .collect();
+    let dropped = content.chars().count() - head.chars().count() - tail.chars().count();
+    format!("{head}\n…[trimmed {dropped} chars]\n{tail}")
 }
 
 /// Build the user content for the summarization call: the prior running
 /// summary (if any) followed by the aged-out turns to condense, rendered in a
-/// chat-template-ish form so the model can tell roles apart.
-fn summarization_user_content(
+/// chat-template-ish form so the model can tell roles apart. Each entry is
+/// per-message trimmed (see [`trim_entry_content`]) so a single oversized
+/// turn cannot starve the rest of the head.
+pub(crate) fn summarization_user_content(
     to_compact: &[&CompactionEntry],
     prior_summary: Option<&str>,
 ) -> String {
@@ -422,22 +485,58 @@ fn summarization_user_content(
     }
     s.push_str("Conversation excerpt to condense into the summary above:\n");
     for e in to_compact {
-        s.push_str(&format!("\n[{}]\n{}\n", e.message.role, e.message.content));
+        s.push_str(&format!(
+            "\n[{}]\n{}\n",
+            e.message.role,
+            trim_entry_content(&e.message.content, SUMMARY_ENTRY_CHAR_CAP)
+        ));
     }
     s
 }
 
-/// Run a non-streaming `/v1/chat/completions` summarization call against the
-/// same sidecar. Returns `(summary_text, input_tokens, output_tokens)`.
-/// `model` is the active local model id (used only so llama-server picks the
-/// loaded model; it ignores the value otherwise).
+/// Where the summarization call runs. Default: the same sidecar serving the
+/// session (no extra auth, zero config). `Cloud` routes through the shared
+/// provider summarizer — the "summarizer override" from the redesign: a
+/// small local model can lean on a configured cloud key for its summaries,
+/// because summary quality otherwise scales with the weakest model on the
+/// path (the one that already needed help).
+#[derive(Debug, Clone)]
+pub(crate) enum SummarizerRoute {
+    Sidecar,
+    Cloud {
+        provider_id: crate::chat::providers::ChatProviderId,
+        base: String,
+        api_key: String,
+        model: String,
+    },
+}
+
+/// Run a non-streaming summarization call (sidecar or cloud route). Returns
+/// `(summary_text, input_tokens, output_tokens)`. `model` is the active
+/// local model id (llama-server ignores the value; it keeps the loaded
+/// model).
 async fn summarize(
     client: &reqwest::Client,
     base_url: &str,
     model: &str,
     to_compact: &[&CompactionEntry],
     prior_summary: Option<&str>,
+    max_tokens: u32,
+    route: &SummarizerRoute,
 ) -> Result<(String, i64, i64), String> {
+    let cloud = match route {
+        SummarizerRoute::Sidecar => None,
+        SummarizerRoute::Cloud { provider_id, base, api_key, model } => {
+            Some((*provider_id, base.clone(), api_key.clone(), model.clone()))
+        }
+    };
+    if let Some((provider_id, cloud_base, cloud_key, cloud_model)) = cloud {
+        return crate::chat::cloud_compact::summarize_via_provider(
+            client, provider_id, &cloud_base, &cloud_key, &cloud_model, to_compact,
+            prior_summary,
+        )
+        .await;
+    }
     // Truncate the user content defensively. llama-server will 400 on a
     // summarization request whose user content alone overflows the model's
     // context window — and the entire to_compact head (the oldest half of
@@ -457,7 +556,7 @@ async fn summarize(
     let body = json!({
         "model": model,
         "stream": false,
-        "max_tokens": 1024,
+        "max_tokens": max_tokens,
         "messages": [
             { "role": "system", "content": summarization_system_prompt() },
             { "role": "user", "content": summarization_user_content(to_compact, prior_summary) },
@@ -506,6 +605,28 @@ async fn summarize(
     Ok((text, in_tok, out_tok))
 }
 
+/// Whether a compaction pass would fire for the given token count — the
+/// same trigger `maybe_compact` applies, exposed so the send path can build
+/// the rebuild-from-raw input ONLY when compaction is actually going to run
+/// (a below-threshold turn must never see injected raw rows).
+pub(crate) fn compaction_would_trigger(
+    n_ctx: u32,
+    cfg: &CompactionConfig,
+    reserved_tokens: u32,
+    tokens: u32,
+) -> bool {
+    if n_ctx == 0 {
+        return false;
+    }
+    let effective_ctx = n_ctx.saturating_sub(reserved_tokens);
+    if effective_ctx == 0 {
+        return false;
+    }
+    let trigger =
+        ((effective_ctx as f64) * adaptive_compaction_threshold(n_ctx, cfg.threshold)) as u32;
+    tokens.saturating_add(RESPONSE_HEADROOM) >= trigger
+}
+
 /// Orchestrator. Called once per local-model turn, after history is rebuilt
 /// from the DB and cleaned.
 ///
@@ -533,6 +654,7 @@ pub async fn maybe_compact(
     cfg: &CompactionConfig,
     reserved_tokens: u32,
     pre_counted: Option<u32>,
+    route: &SummarizerRoute,
 ) -> Result<CompactionOutcome, String> {
     // Lazy materialization of the owned passthrough Vec: the entries are only
     // cloned (image payloads included) on paths that actually RETURN them
@@ -568,8 +690,7 @@ pub async fn maybe_compact(
         },
     };
 
-    let trigger = ((effective_ctx as f64) * adaptive_compaction_threshold(n_ctx, cfg.threshold)) as u32;
-    if tokens.saturating_add(RESPONSE_HEADROOM) < trigger {
+    if !compaction_would_trigger(n_ctx, cfg, reserved_tokens, tokens) {
         return Ok(CompactionOutcome::passthrough(wire_messages()));
     }
 
@@ -630,8 +751,75 @@ pub async fn maybe_compact(
         );
     }
 
-    let prior_text = prior.as_ref().map(|(_, t)| t.as_str());
-    let (summary, in_tok, out_tok) = match summarize(client, base_url, model, &to_compact_truncated, prior_text).await {
+    // Map-reduce: entries that did NOT fit the summarizer budget used to be
+    // silently dropped (the failure mode the redesign called out). Chunk the
+    // dropped OLDEST span, map-summarize each chunk into a short partial,
+    // and fold the partials into the main call alongside the prior summary —
+    // nothing is lost to the budget anymore, only condensed one level
+    // deeper. A failing partial is logged and skipped (best effort), never
+    // fatal.
+    let mut prior_parts: Vec<String> =
+        prior.as_ref().map(|(_, t)| t.clone()).into_iter().collect();
+    if to_compact_truncated.len() < to_compact.len() {
+        let dropped_count = to_compact.len() - to_compact_truncated.len();
+        let dropped = &to_compact[..dropped_count];
+        let max_chars = n_ctx.saturating_mul(3).max(1024) as usize;
+        let mut chunks: Vec<Vec<&CompactionEntry>> = Vec::new();
+        let mut cur: Vec<&CompactionEntry> = Vec::new();
+        let mut cur_chars = 0usize;
+        for e in dropped {
+            let len = e.message.content.len();
+            if !cur.is_empty() && cur_chars + len > max_chars {
+                chunks.push(std::mem::take(&mut cur));
+                cur_chars = 0;
+            }
+            cur.push(e);
+            cur_chars += len;
+        }
+        if !cur.is_empty() {
+            chunks.push(cur);
+        }
+        // Keep the NEWEST 8 partials at most — each adds a reduce-call input
+        // and the oldest detail is the most expendable.
+        if chunks.len() > 8 {
+            chunks = chunks.split_off(chunks.len() - 8);
+        }
+        for (i, chunk) in chunks.iter().enumerate() {
+            match summarize(client, base_url, model, chunk, None, 512, route).await {
+                Ok((partial, _, _)) => {
+                    prior_parts.push(format!("[Earlier part {}]
+{}", i + 1, partial));
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[local-compaction] map-summarize part {} failed ({e}); continuing"
+                    , i + 1);
+                }
+            }
+        }
+        eprintln!(
+            "[local-compaction] map-reduce: {dropped_count} dropped entries -> {} partial summaries",
+            chunks.len()
+        );
+    }
+    let prior_text = if prior_parts.is_empty() {
+        None
+    } else {
+        Some(prior_parts.join("
+
+"))
+    };
+    let (summary, in_tok, out_tok) = match summarize(
+        client,
+        base_url,
+        model,
+        &to_compact_truncated,
+        prior_text.as_deref(),
+        2048,
+        route,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
@@ -750,6 +938,44 @@ mod tests {
     }
 
     #[test]
+    fn trim_entry_keeps_short_content_verbatim() {
+        assert_eq!(trim_entry_content("short", SUMMARY_ENTRY_CHAR_CAP), "short");
+        // Boundary: exactly at the cap is untouched.
+        let exact: String = "a".repeat(SUMMARY_ENTRY_CHAR_CAP);
+        assert_eq!(trim_entry_content(&exact, SUMMARY_ENTRY_CHAR_CAP), exact);
+    }
+
+    #[test]
+    fn trim_entry_keeps_head_and_tail_with_marker() {
+        let content = format!("HEAD{}\n{}\nTAIL{}", "x", "middle".repeat(5000), "y");
+        let trimmed = trim_entry_content(&content, 1000);
+        assert!(trimmed.starts_with("HEAD"));
+        assert!(trimmed.ends_with("TAILy"));
+        assert!(trimmed.contains("…[trimmed "));
+        // The output respects the cap (plus the marker line).
+        assert!(trimmed.chars().count() <= 1000 + 64);
+        assert!(trimmed.chars().count() < content.chars().count());
+    }
+
+    #[test]
+    fn structured_prompt_carries_the_schema_headings() {
+        let p = summarization_system_prompt();
+        for heading in [
+            "Primary request and intent:",
+            "Files, paths, and code:",
+            "All user messages:",
+            "Errors and fixes:",
+            "Pending tasks:",
+            "Next step:",
+            "Pointers:",
+        ] {
+            assert!(p.contains(heading), "missing heading: {heading}");
+        }
+        // Recall-first: the prompt must never instruct dropping errors.
+        assert!(!p.to_lowercase().contains("discard"));
+    }
+
+    #[test]
     fn load_config_defaults_when_absent() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
@@ -767,6 +993,41 @@ mod tests {
         let cfg = load_compaction_config(&conn);
         assert_eq!(cfg.threshold, 0.8);
         assert_eq!(cfg.pin_exchanges, 3);
+    }
+
+    #[test]
+    fn compaction_would_trigger_respects_threshold_and_headroom() {
+        let cfg = CompactionConfig::default();
+        // 8k window, zero reserved: trigger = 8192*0.75 = 6144; 6000+512 < 6144
+        // → no trigger; 6000+512 boundary at 5632+512 = 6144 → trigger.
+        assert!(!compaction_would_trigger(8192, &cfg, 0, 5631));
+        assert!(compaction_would_trigger(8192, &cfg, 0, 5632));
+        // Reserved tokens shrink the effective window: 8192-4096 = 4096 left,
+        // trigger = 4096*0.75 = 3072 → 3000+512 fires where the full window
+        // wouldn't.
+        assert!(!compaction_would_trigger(8192, &cfg, 0, 3000));
+        assert!(compaction_would_trigger(8192, &cfg, 4096, 3000));
+        // Degenerate inputs never trigger.
+        assert!(!compaction_would_trigger(0, &cfg, 0, u32::MAX));
+        assert!(!compaction_would_trigger(8192, &cfg, 8192, u32::MAX));
+    }
+
+    #[test]
+    fn rebuild_from_raw_defaults_on_and_parses_off_values() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        assert!(load_compaction_config(&conn).rebuild_from_raw);
+        for off in ["false", "0", "off"] {
+            crate::db::set_setting(&conn, "chat.local_gguf.compaction_rebuild_from_raw", off)
+                .unwrap();
+            assert!(!load_compaction_config(&conn).rebuild_from_raw, "{off}");
+            crate::db::delete_setting(&conn, "chat.local_gguf.compaction_rebuild_from_raw")
+                .unwrap();
+        }
+        // Anything else means on (same off-list contract as the cloud knob).
+        crate::db::set_setting(&conn, "chat.local_gguf.compaction_rebuild_from_raw", "yes")
+            .unwrap();
+        assert!(load_compaction_config(&conn).rebuild_from_raw);
     }
 
     #[test]

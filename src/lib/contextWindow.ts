@@ -4,28 +4,70 @@
 //  - Local LLM (local_gguf): the cap is the context size the user picked on
 //    the composer's Context slider (`localCtx`). That's the sidecar's real -c
 //    ceiling. 0 means "Auto" — fall back to a sane default.
-//  - API / cloud models (incl. CLI-harness sessions): flat 500k, period.
-//    Product decision (2026-09): every cloud/harness meter shows the same
-//    500k ceiling regardless of model id. Harness ids, custom provider
-//    names, and dated ids all collapse to the same number — the underlying
-//    window is the provider's business, not ours to approximate (a
-//    remapped relay setup makes any per-family guess a lie anyway).
-//  - OpenRouter is the one exception: their public /api/v1/models endpoint
-//    publishes `context_length` per model id, so the REAL window is derived
-//    live (cached in localStorage for 24h) and capped at the 500k product
-//    ceiling. OpenAI, Anthropic etc. publish windows only in docs, not on
-//    any API the key can query — those stay on the flat default.
+//  - API / cloud + CLI-harness models: resolved through the per-model
+//    REGISTRY below (same table the backend send path uses, mirrored in
+//    src-tauri/src/chat/context_windows.rs). Unknown ids fall back to the
+//    500k default. The old "flat 500k for everything" rule was retired: a
+//    200k-window Claude showed ~40% when actually full, so the warn/crit
+//    levels could never fire before a real overflow.
+//  - OpenRouter is refined live: their public /api/v1/models endpoint
+//    publishes `context_length` per model id, cached in localStorage for
+//    24h. The live figure wins over the registry (it's the provider's own
+//    number) and is no longer capped at 500k — a model that really has 1M
+//    tokens should show 1M.
 //
-// The "used" figure (passed in by the meter consumer) is the input_tokens of
-// the last assistant turn — the full prompt size the provider counted.
+// The "used" figure (passed in by the meter consumer) combines the
+// backend's live estimate with the input_tokens of the last assistant turn.
 
-/** Flat context-window cap (tokens) shown for every API/cloud and
- *  CLI-harness model (2026-09 product decision). OpenRouter's live
- *  derivation is capped here too, so the meter never exceeds it. */
+/** Fallback context window (tokens) for model ids the registry doesn't
+ *  recognize. Mirrors the backend's DEFAULT_CLOUD_WINDOW. */
 export const API_CONTEXT_WINDOW = 500_000;
 
 /** Default context window for a local model when the slider is at "Auto" (0). */
 export const LOCAL_DEFAULT_CONTEXT = 16_384;
+
+// ---- Per-model registry ----------------------------------------------------------
+//
+// `(substring of the model id, window)`, most-specific first — matching is a
+// lowercase substring scan so dated ids ("claude-sonnet-4-5-20250929"),
+// vendor-qualified ids ("openai/gpt-5-mini"), and harness-reported ids all
+// resolve without enumerating aliases. Keep in sync with the backend table
+// (src-tauri/src/chat/context_windows.rs).
+const MODEL_CONTEXT_RULES: ReadonlyArray<readonly [string, number]> = [
+  ["claude", 200_000],
+  ["gpt-5", 400_000],
+  ["gpt-4.1", 1_000_000],
+  ["o1-mini", 128_000],
+  ["o3", 200_000],
+  ["o4-mini", 200_000],
+  ["o1", 200_000],
+  ["gpt-4o", 128_000],
+  ["gpt-4", 128_000],
+  ["gemini", 1_000_000],
+  ["grok-4", 256_000],
+  ["grok", 131_072],
+  ["deepseek", 128_000],
+  ["qwen", 131_072],
+  ["kimi", 256_000],
+  ["llama-4", 1_000_000],
+  ["llama-3", 131_072],
+  ["mistral", 131_072],
+  ["glm-5", 200_000],
+  ["glm", 128_000],
+  ["command-a", 256_000],
+  ["command", 128_000],
+];
+
+/** Registry lookup for a cloud/harness model id. `null` when the id matches
+ *  no rule — the caller applies the flat fallback. */
+export function registryWindowFor(model: string | undefined | null): number | null {
+  const m = (model ?? "").trim().toLowerCase();
+  if (!m) return null;
+  for (const [needle, window] of MODEL_CONTEXT_RULES) {
+    if (m.includes(needle)) return window;
+  }
+  return null;
+}
 
 // ---- Runtime instrumentation -----------------------------------------------------
 //
@@ -54,13 +96,19 @@ export function debugContext(channel: string, msg: string): void {
 /** Resolve the max context window (tokens) for the active model.
  *  - isLocal true, localCtx > 0: the slider value (the sidecar's real -c).
  *  - isLocal true, slider at Auto (0/undefined): LOCAL_DEFAULT_CONTEXT.
- *  - isLocal false: the flat API_CONTEXT_WINDOW for every cloud/harness
- *    model id. A stale `localCtx` from a previous local session is
- *    intentionally ignored — the slider is global UI state, not per-session. */
+ *  - isLocal false: the per-model registry, falling back to the flat
+ *    API_CONTEXT_WINDOW for unknown ids, then capped by `overrideLimit`
+ *    when set (a user cap only SHRINKS the window — it never raises a
+ *    model above its real capacity). Mirrors the backend's
+ *    `effective_cloud_window` so the meter and the compaction trigger can
+ *    never disagree. A stale `localCtx` from a previous local session is
+ *    intentionally ignored — the slider is global UI state, not
+ *    per-session. */
 export function contextWindowFor(
   model: string | undefined | null,
   isLocal: boolean,
   localCtx?: number,
+  overrideLimit?: number,
 ): number {
   if (isLocal) {
     if (localCtx && localCtx > 0) {
@@ -70,11 +118,20 @@ export function contextWindowFor(
     debugContext("window", `local auto → ${LOCAL_DEFAULT_CONTEXT} (model '${model ?? "—"}')`);
     return LOCAL_DEFAULT_CONTEXT;
   }
-  // Cloud/harness: flat 500k for every model id — the window is the
-  // provider's business. The OpenRouter live refinement (contextWindowForModel)
-  // may lower it afterwards for that one provider.
-  debugContext("window", `cloud '${model ?? "—"}' → ${API_CONTEXT_WINDOW} (flat product default)`);
-  return API_CONTEXT_WINDOW;
+  const registered = registryWindowFor(model) ?? API_CONTEXT_WINDOW;
+  const effective =
+    overrideLimit && overrideLimit > 0
+      ? Math.min(registered, overrideLimit)
+      : registered;
+  if (effective !== registered) {
+    debugContext(
+      "window",
+      `cloud '${model ?? "—"}' → ${effective} (registry ${registered}, user cap ${overrideLimit})`,
+    );
+  } else {
+    debugContext("window", `cloud '${model ?? "—"}' → ${effective} (registry)`);
+  }
+  return effective;
 }
 
 // ---- OpenRouter live derivation ------------------------------------------------
@@ -139,53 +196,112 @@ export async function openRouterContextWindows(): Promise<Record<string, number>
   }
 }
 
-/** Live refinement for OpenRouter sessions: derive the window from
- *  OpenRouter's models endpoint (exact id match, falling back to the
- *  model's bare suffix — a session id like "deepseek/deepseek-v4" matches
- *  "deepseek-v4" too). Returns null for every other provider/miss, in which
- *  case the flat API_CONTEXT_WINDOW stands. Capped at API_CONTEXT_WINDOW so
- *  the meter never shows more than the product's 500k cloud ceiling even
- *  when a model advertises 1M+. */
+// ---- Anthropic live derivation --------------------------------------------------
+
+const ANTHROPIC_CACHE_KEY = "conduit.anthropicContextWindows";
+const ANTHROPIC_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+function readGenericCache(key: string, ttlMs: number): Record<string, number> | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { ts: number; windows: Record<string, number> };
+    if (!parsed || typeof parsed.ts !== "number" || Date.now() - parsed.ts > ttlMs) {
+      return null;
+    }
+    return parsed.windows;
+  } catch {
+    return null;
+  }
+}
+
+function writeGenericCache(key: string, windows: Record<string, number>) {
+  try {
+    localStorage.setItem(key, JSON.stringify({ ts: Date.now(), windows }));
+  } catch {
+    /* storage full/blocked — the meter just stays on the catalog */
+  }
+}
+
+/** Anthropic's live model table, fetched through the backend (it holds the
+ *  API key — the webview never does) and cached in localStorage for 24h,
+ *  same contract as the OpenRouter table. Null when the provider has no key
+ *  or the fetch failed with no stale cache. */
+export async function anthropicContextWindows(): Promise<Record<string, number> | null> {
+  const cached = readGenericCache(ANTHROPIC_CACHE_KEY, ANTHROPIC_CACHE_TTL_MS);
+  if (cached) return cached;
+  try {
+    const { fetchProviderModelWindows } = await import("./ipc");
+    const windows = await fetchProviderModelWindows("anthropic");
+    if (windows && Object.keys(windows).length > 0) {
+      writeGenericCache(ANTHROPIC_CACHE_KEY, windows);
+      return windows;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Match a model id against a live id→window table: exact id, then bare
+ *  suffix ("vendor/model-v4" matches "model-v4"), then fuzzy prefix/suffix
+ *  for dated/distilled ids. Shared by the OpenRouter and Anthropic paths. */
+function matchLiveWindow(
+  windows: Record<string, number>,
+  m: string,
+): number | null {
+  if (windows[m]) return windows[m];
+  const bare = m.includes("/") ? m.split("/").pop()! : m;
+  if (windows[bare]) return windows[bare];
+  const hit = Object.entries(windows).find(
+    ([id]) => id.endsWith(`/${bare}`) || bare.startsWith(id) || id.startsWith(bare),
+  );
+  return hit ? hit[1] : null;
+}
+
+/** Live refinement for cloud sessions: derive the window from the
+ *  provider's own models API — OpenRouter's public endpoint (fetched
+ *  directly) or Anthropic's keyed one (fetched via the backend, cached).
+ *  Exact id match, falling back to the model's bare suffix. Returns null
+ *  for providers without live data, in which case the registry (or its
+ *  flat fallback) stands. The live figure is NOT capped here: it's the
+ *  provider's own number. The user's context-limit override is applied on
+ *  top by the caller (see `contextWindowFor`). */
 export async function contextWindowForModel(
   model: string | undefined | null,
   provider: string | undefined | null,
 ): Promise<number | null> {
-  if ((provider ?? "").toLowerCase() !== "openrouter") return null;
+  const p = (provider ?? "").toLowerCase();
   const m = (model ?? "").toLowerCase();
   if (!m) return null;
-  const windows = await openRouterContextWindows();
-  if (!windows) {
-    debugContext("openrouter", `'${model}' → no live table (offline/no cache), flat default stands`);
+  if (p === "openrouter") {
+    const windows = await openRouterContextWindows();
+    if (!windows) {
+      debugContext("openrouter", `'${model}' → no live table (offline/no cache), registry stands`);
+      return null;
+    }
+    const hit = matchLiveWindow(windows, m);
+    if (hit != null) {
+      debugContext("openrouter", `'${model}' → live ${hit}`);
+      return hit;
+    }
+    debugContext("openrouter", `'${model}' → no live entry, registry stands`);
     return null;
   }
-  const cap = (n: number) => Math.min(n, API_CONTEXT_WINDOW);
-  if (windows[m]) {
-    debugContext(
-      "openrouter",
-      `'${model}' → live ${windows[m]} → capped ${cap(windows[m])} (exact id match)`,
-    );
-    return cap(windows[m]);
+  if (p === "anthropic" || p === "anthropic_compatible") {
+    const windows = await anthropicContextWindows();
+    if (!windows) {
+      debugContext("anthropic", `'${model}' → no live table (no key/offline), registry stands`);
+      return null;
+    }
+    const hit = matchLiveWindow(windows, m);
+    if (hit != null) {
+      debugContext("anthropic", `'${model}' → live ${hit}`);
+      return hit;
+    }
+    debugContext("anthropic", `'${model}' → no live entry, registry stands`);
+    return null;
   }
-  const bare = m.includes("/") ? m.split("/").pop()! : m;
-  if (windows[bare]) {
-    debugContext(
-      "openrouter",
-      `'${model}' → live ${windows[bare]} → capped ${cap(windows[bare])} (bare-suffix match '${bare}')`,
-    );
-    return cap(windows[bare]);
-  }
-  // Suffix match for dated/distilled ids ("vendor/model-v4-0815").
-  const hit = Object.entries(windows).find(
-    ([id]) => id.endsWith(`/${bare}`) || bare.startsWith(id) || id.startsWith(bare),
-  );
-  if (hit) {
-    debugContext(
-      "openrouter",
-      `'${model}' → live ${hit[1]} → capped ${cap(hit[1])} (fuzzy match '${hit[0]}')`,
-    );
-    return cap(hit[1]);
-  }
-  debugContext("openrouter", `'${model}' → no live entry, flat default stands`);
   return null;
 }
 

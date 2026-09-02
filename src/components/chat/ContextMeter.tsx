@@ -6,22 +6,24 @@
 //
 // On hover a rich breakdown panel appears showing the model name and usage
 // stats on the same row, a slider visualizing fill (always visible even at 0),
-// and per-category rows. For local models the breakdown is token-accurate;
-// for cloud models it's an approximation (≈4 chars/token) so the user still
-// gets a sense of which components dominate regardless of provider.
+// and per-category rows. For local models the breakdown is token-accurate
+// (/tokenize); for cloud/harness models the backend estimates each category
+// from the actual content (~4 chars/token) — real proportions, not constants.
 //
 // Sizing:
 //  - Local LLM (local_gguf): the cap is the context size from the composer's
 //    Context slider (localCtx); 0/Auto falls back to a default.
-//  - API/cloud + harness models: flat 500k product default for every model
-//    id, refined live by OpenRouter where the provider publishes the real
-//    window (capped at 500k) (lib/contextWindow). The final decision —
-//    which layer won and the value in use — is traced under the console
-//    "[context] meter" channel.
+//  - API/cloud + harness models: resolved through the per-model registry
+//    (lib/contextWindow, mirrored backend-side in
+//    chat/context_windows.rs), refined live by OpenRouter where the
+//    provider publishes the real window. The final decision — which layer
+//    won and the value in use — is traced under the console "[context]
+//    meter" channel.
 //
-// The "used" figure is the input_tokens of the last assistant turn (the full
-// prompt size the provider counted), passed in from ChatView. 0 until the
-// first turn completes.
+// The "used" figure combines the backend's live estimate (polled by
+// useContextMeter — fresh after every sent message or compaction) with the
+// input_tokens of the last assistant turn (the full prompt size the
+// provider counted), taking the larger. 0 until the first turn completes.
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -29,6 +31,7 @@ import {
   contextWindowForModel,
   debugContext,
   formatTokens,
+  registryWindowFor,
 } from "../../lib/contextWindow";
 import { countContextBreakdown, type ContextBreakdown } from "../../lib/ipc";
 import { useUiStore } from "../../state/ui";
@@ -50,6 +53,15 @@ interface Props {
   liveMaxTokens?: number;
   /** Active chat session, used to fetch the per-category token breakdown. */
   chatSessionId?: string | null;
+  /** User's cloud context-limit cap (tokens, 0/undefined = auto). Caps the
+   *  EFFECTIVE window below the model's own — the same figure the backend's
+   *  compaction trigger uses, so meter and trigger agree. */
+  contextLimitOverride?: number;
+  /** The active model's PINNED window (Settings → Model list) —
+   *  authoritative. When set it REPLACES the registry/live figure entirely
+   *  (it may raise a model above the registry's guess, e.g. a 1M glm on a
+   *  remapped endpoint); the live refinement is skipped. */
+  pinnedWindow?: number;
 }
 
 const PCT_WARN = 0.7;
@@ -70,24 +82,46 @@ interface Row {
   tokens: number;
 }
 
-export function ContextMeter({ usedTokens, model, provider, isLocal, localCtx, liveMaxTokens, chatSessionId }: Props) {
+export function ContextMeter({
+  usedTokens,
+  model,
+  provider,
+  isLocal,
+  localCtx,
+  liveMaxTokens,
+  chatSessionId,
+  contextLimitOverride,
+  pinnedWindow,
+}: Props) {
   const used = usedTokens && usedTokens > 0 ? usedTokens : 0;
-  // Cloud/harness sessions resolve to the flat 500k product default. For
-  // OpenRouter sessions the real window is then derived live from their
-  // models endpoint and refines that figure when it resolves.
-  const baseMax = contextWindowFor(model, isLocal, localCtx);
+  // Cloud/harness sessions resolve through the per-model registry (falling
+  // back to the flat default for unknown ids). For OpenRouter sessions the
+  // real window is then derived live from their models endpoint and refines
+  // that figure when it resolves.
+  const pinned = pinnedWindow && pinnedWindow > 0 ? pinnedWindow : null;
+  const baseMax = pinned ?? contextWindowFor(model, isLocal, localCtx, contextLimitOverride);
   const [dynamicMax, setDynamicMax] = useState<number | null>(null);
   useEffect(() => {
     setDynamicMax(null);
     if (isLocal) return;
+    // A pinned window IS the answer — no live refinement can override it.
+    if (pinned) return;
     let cancelled = false;
     void contextWindowForModel(model, provider).then((w) => {
-      if (!cancelled && w && w > 0) setDynamicMax(w);
+      if (!cancelled && w && w > 0) {
+        // The user's cap shrinks the live figure too — same min() contract
+        // as the registry path (a cap never RAISES a window).
+        setDynamicMax(
+          contextLimitOverride && contextLimitOverride > 0
+            ? Math.min(w, contextLimitOverride)
+            : w,
+        );
+      }
     });
     return () => {
       cancelled = true;
     };
-  }, [model, provider, isLocal]);
+  }, [model, provider, isLocal, contextLimitOverride, pinned]);
   // Prefer the live cap (what llama-server was actually started with) over
   // the slider-derived cap. Falls back to the slider / 16K default for the
   // brief window before the first poll resolves, and for cloud sessions
@@ -98,11 +132,15 @@ export function ContextMeter({ usedTokens, model, provider, isLocal, localCtx, l
   // panel so the actual limit in use is visible without devtools.
   const capSource: string = liveSidecar
     ? "sidecar-live"
-    : dynamicMax != null
-      ? "openrouter-live"
-      : isLocal
-        ? "local-default"
-        : "product-default";
+    : pinned != null
+      ? "pinned"
+      : dynamicMax != null
+        ? "openrouter-live"
+        : isLocal
+          ? "local-default"
+          : registryWindowFor(model) != null
+            ? "registry"
+            : "registry-fallback";
   const pct = max > 0 ? Math.min(1, used / max) : 0;
   const level = pct >= PCT_CRIT ? "crit" : pct >= PCT_WARN ? "warn" : "ok";
   // Dash the circle so the filled portion grows from the top clockwise.
@@ -156,26 +194,13 @@ export function ContextMeter({ usedTokens, model, provider, isLocal, localCtx, l
     }
     setShowPanel(true);
     if (breakdown === undefined && chatSessionId) {
-      if (isLocal) {
-        countContextBreakdown(chatSessionId)
-          .then((b) => setBreakdown(b))
-          .catch(() => setBreakdown(null));
-      } else {
-        // Cloud model: approximate breakdown from the used-token count.
-        // We split the total into rough categories by character length so
-        // the user still sees relative weights (messages dominate, etc.).
-        const approx: ContextBreakdown = {
-          totalTokens: used,
-          maxTokens: max,
-          systemPromptTokens: Math.round(used * 0.15),
-          messagesTokens: Math.round(used * 0.70),
-          toolSpecsTokens: Math.round(used * 0.10),
-          connectorToolsTokens: 0,
-          skillsTokens: 0,
-          metacontextTokens: Math.round(used * 0.05),
-        };
-        setBreakdown(approx);
-      }
+      // Every provider resolves through the backend now: local sessions
+      // return exact /tokenize counts, cloud/harness sessions return a
+      // char-based estimate per category (system prompt, history, tool
+      // schema — whatever that path actually sends).
+      countContextBreakdown(chatSessionId)
+        .then((b) => setBreakdown(b))
+        .catch(() => setBreakdown(null));
     }
   };
 
@@ -276,6 +301,7 @@ export function ContextMeter({ usedTokens, model, provider, isLocal, localCtx, l
               })}
             </div>
           )}
+
         </div>,
         document.body,
       )}

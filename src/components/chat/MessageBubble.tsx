@@ -17,8 +17,8 @@ import rehypeKatex from "rehype-katex";
 // NOTE: katex.min.css is imported at app entry (src/main.tsx) so this file
 // does NOT re-import it — see PERFORMANCE_AUDIT.md C8. Doing it twice would
 // ship two copies in the lazy MessageBubble chunk.
-import type { ChatMessage, ChatPerfPayload } from "../../lib/ipc";
-import { readArtifactPreview } from "../../lib/ipc";
+import type { ChatMessage, ChatMessageRecord, ChatPerfPayload } from "../../lib/ipc";
+import { listCompactedMessages, readArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
@@ -90,6 +90,9 @@ interface Props {
   /** Numeric message id, emitted as `data-msg-id` on the root bubble so the
    *  TurnNavigator can scroll to it. Omitted on the live streaming bubble. */
   msgId?: number;
+  /** Active chat session id — lets the compaction marker fetch the folded
+   *  turns for its context-recovery disclosure. Omitted on the live bubble. */
+  chatSessionId?: string | null;
   /** Live perf snapshot (elapsedMs, etc.) from `chat:perf` for the streaming
    *  bubble — used to show "Working for Xs" while the turn is in flight. */
   livePerf?: ChatPerfPayload | null;
@@ -338,11 +341,36 @@ function MessageActions({
 export { TypingIndicator } from "./TypingIndicator";
 
 /** Low-weight, tappable marker shown in the timeline where older context was
- *  condensed by the local-model compaction framework. Expands to reveal the
- *  actual summary that replaced the original turns. Reuses the muted aesthetic
- *  of `.chat-status-notice` / `.chat-activity-done`. */
-function CompactedContextMarker({ summary }: { summary: string }) {
+ *  condensed by the compaction framework (local or cloud). Expands to reveal
+ *  the actual summary that replaced the original turns, plus — context
+ *  recovery — the raw folded turns themselves, fetched on demand from the DB
+ *  (the summary is lossy by design; the rows are the restorable source).
+ *  Reuses the muted aesthetic of `.chat-status-notice` / `.chat-activity-done`. */
+function CompactedContextMarker({
+  summary,
+  messageId,
+  chatSessionId,
+}: {
+  summary: string;
+  messageId?: number;
+  chatSessionId?: string | null;
+}) {
   const [open, setOpen] = useState(false);
+  const [turnsOpen, setTurnsOpen] = useState(false);
+  const [turns, setTurns] = useState<ChatMessageRecord[] | null>(null);
+  const [turnsError, setTurnsError] = useState(false);
+
+  const canRecover = messageId != null && messageId > 0 && !!chatSessionId;
+  const toggleTurns = () => {
+    const next = !turnsOpen;
+    setTurnsOpen(next);
+    if (next && turns === null && canRecover) {
+      listCompactedMessages(chatSessionId!, messageId!)
+        .then((rows) => setTurns(rows ?? []))
+        .catch(() => setTurnsError(true));
+    }
+  };
+
   return (
     <div className="chat-compacted-marker">
       <button
@@ -359,6 +387,43 @@ function CompactedContextMarker({ summary }: { summary: string }) {
         <SmoothReveal open={open}>
           <div className="chat-compacted-summary">{summary}</div>
         </SmoothReveal>
+      )}
+      {canRecover && (
+        <>
+          <button
+            type="button"
+            className="chat-compacted-recover-toggle"
+            aria-expanded={turnsOpen}
+            onClick={toggleTurns}
+          >
+            show folded turns
+            <span className={`chat-thinking-chevron${turnsOpen ? " open" : ""}`}>›</span>
+          </button>
+          <SmoothReveal open={turnsOpen}>
+            <div className="chat-compacted-turns">
+              {turnsError ? (
+                <div className="chat-compacted-turn-note">Couldn't load the folded turns.</div>
+              ) : turns === null ? (
+                <div className="chat-compacted-turn-note">Loading…</div>
+              ) : turns.length === 0 ? (
+                <div className="chat-compacted-turn-note">No folded turns recorded for this summary.</div>
+              ) : (
+                turns.map((t) => (
+                  <div className="chat-compacted-turn" key={t.id}>
+                    <span className={`chat-compacted-turn-role is-${t.role}`}>
+                      {t.role === "user" ? "You" : t.role === "assistant" ? "Relay" : "System"}
+                    </span>
+                    <span className="chat-compacted-turn-text">
+                      {t.content.length > 2000
+                        ? `${t.content.slice(0, 2000)}…[truncated]`
+                        : t.content}
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+          </SmoothReveal>
+        </>
       )}
     </div>
   );
@@ -1538,6 +1603,7 @@ function MessageBubbleInner({
   artifacts,
   onPreviewArtifact,
   msgId,
+  chatSessionId,
   livePerf,
 }: Props) {
   const isUser = message.role === "user";
@@ -1615,7 +1681,13 @@ function MessageBubbleInner({
   const COMPACTED_PREFIX = "[compacted context]";
   if (message.role === "system" && message.content.trimStart().startsWith(COMPACTED_PREFIX)) {
     const summary = message.content.trimStart().slice(COMPACTED_PREFIX.length).replace(/^[\s:\n]+/, "");
-    return <CompactedContextMarker summary={summary} />;
+    return (
+      <CompactedContextMarker
+        summary={summary}
+        messageId={msgId}
+        chatSessionId={chatSessionId ?? null}
+      />
+    );
   }
 
   // Partition the assistant turn into [process blocks] [text]. Process kinds

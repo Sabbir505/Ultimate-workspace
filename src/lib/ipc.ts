@@ -1582,16 +1582,39 @@ export const getChatConfig = (provider?: string) =>
 export const setChatDefaultModel = (provider: string, model: string) =>
   safeInvoke<void>("set_chat_default_model", { provider, model });
 
+export interface ChatModelInfo {
+  id: string;
+  object: string;
+  created: number;
+  ownedBy: string;
+  /** The provider's own context-window figure when its models API publishes
+   *  one (Anthropic `context_window`, OpenRouter `context_length`); null
+   *  otherwise — the registry fallback applies. */
+  contextWindow?: number | null;
+}
+
 export const listChatModels = (
   provider: string,
   baseUrl?: string,
   apiKey?: string,
 ) =>
-  safeInvoke<{ id: string; object: string; created: number; ownedBy: string }[] | null>("list_chat_models", {
+  safeInvoke<ChatModelInfo[] | null>("list_chat_models", {
     provider,
     baseUrl: baseUrl ?? null,
     apiKey: apiKey ?? null,
   });
+
+/** One entry of a provider's curated Model list (Settings → API provider).
+ *  `contextWindow` is the per-model window the user pinned (0 = auto —
+ *  live API figure, else the registry). A non-empty list IS the provider's
+ *  model picker content. Mirrors the Rust SelectedModel. */
+export interface SelectedModelEntry {
+  id: string;
+  contextWindow: number;
+}
+
+export const setSelectedModels = (provider: string, models: SelectedModelEntry[]) =>
+  safeInvoke<void>("set_selected_models", { provider, models });
 
 // ---- Local models (GGUF scan / llama-server sidecar) ----
 
@@ -1750,6 +1773,29 @@ export interface ContextBreakdown {
 
 export const countContextBreakdown = (chatSessionId: string) =>
   safeInvoke<ContextBreakdown | null>("count_context_breakdown", { chatSessionId });
+
+/** Force a compaction pass for the session ("Compact now" in the context
+ *  meter). Cloud sessions summarize via their own provider; local sessions
+ *  via the running sidecar. Returns a short human-facing result line. */
+export const compactNow = (chatSessionId: string) =>
+  safeInvoke<string>("chat_compact_now", { chatSessionId });
+
+/** Context recovery: the raw turns a `[compacted context]` summary row
+ *  folded away. They stay in the DB forever — the summary is lossy, the
+ *  rows are the restorable source. Empty when the summary id doesn't belong
+ *  to the session. */
+export const listCompactedMessages = (chatSessionId: string, summaryId: number) =>
+  safeInvoke<ChatMessageRecord[]>("list_compacted_messages", {
+    chatSessionId,
+    summaryId,
+  });
+
+/** Live per-model context windows from a provider's own models API (the
+ *  backend holds the API key and caches for 24h). Anthropic publishes
+ *  `context_window` per model id; providers without a keyed models API
+ *  return an empty map (the static registry fallback stands). */
+export const fetchProviderModelWindows = (provider: string) =>
+  safeInvoke<Record<string, number>>("fetch_provider_model_windows", { provider });
 
 export const listenChatToken = (handler: (payload: ChatTokenPayload) => void) =>
   safeListen<ChatTokenPayload>("chat:token", handler);

@@ -26,6 +26,7 @@ import { listHarnesses, listAcpAgents, listHarnessModels, listChatModels, scanLo
 import type { HarnessStatus, AcpAgentStatus } from "../../types";
 import { fuzzyFilter, type FuzzyResult } from "../../lib/fuzzy";
 import { shortModelName } from "../../lib/modelLabel";
+import { useSettingsStore } from "../../state/settings";
 import { harnessModelCatalog } from "../../lib/harnessModels";
 import { LlamaAdvancedFields } from "./LlamaAdvancedFields";
 import {
@@ -416,6 +417,14 @@ export function AgentModelPicker({
     }
     setQuery("");
     setActiveIndex(0);
+    // Provider panes refetch on every open: their content is curated in
+    // Settings (Model list) and reported live by the provider's models API,
+    // so a cached pane could show a list the user just edited. Local and
+    // harness panes keep their cache (GGUF scans and CLI configs change
+    // far less often).
+    for (const key of Array.from(paneCache.keys())) {
+      if (key.startsWith("provider:")) paneCache.delete(key);
+    }
     // Default to the session's entry; fall back to the first enabled one so
     // the right pane is never empty on first open.
     const fallback = railSections.flat().find((e) => e.enabled)?.key ?? "local";
@@ -460,21 +469,40 @@ export function AgentModelPicker({
         );
     } else if (railKey.startsWith("provider:")) {
       const p = railKey.slice("provider:".length);
+      // Curated Model list (Settings → API provider → Model list): when the
+      // user pinned a set of models for this provider, the picker shows ONLY
+      // those — in curated order, each labeled with its pinned context
+      // window (falling back to the provider-reported one). An empty or
+      // absent list keeps the old behavior: every model the /v1/models
+      // fetch returns.
+      const curated = useSettingsStore.getState().providerModels[p] ?? [];
+      const toRows = (ids: string[]): { id: string; label: string }[] =>
+        ids.map((id) => ({ id, label: id }));
       void listChatModels(p)
         .then((list) => {
-          const ids = dedupeIds((list ?? []).map((m) => m.id));
-          store({
-            status: "ready",
-            rows: ids.map((id) => ({ id, label: id })),
-          });
+          // Curated list wins when present (picker shows ONLY those, in
+          // curated order); otherwise every model the fetch returned. The
+          // per-model context windows ride along invisibly — the meter and
+          // compaction trigger consume them, the labels stay clean.
+          const ids =
+            curated.length > 0
+              ? curated.map((e) => e.id)
+              : dedupeIds((list ?? []).map((m) => m.id));
+          store({ status: "ready", rows: toRows(ids) });
         })
-        .catch((err: unknown) =>
+        .catch((err: unknown) => {
+          // Fetch failed (offline / no key yet) — a curated list still gives
+          // the picker content; only without one do we surface the error.
+          if (curated.length > 0) {
+            store({ status: "ready", rows: toRows(curated.map((e) => e.id)) });
+            return;
+          }
           store({
             status: "error",
             rows: [],
             error: err instanceof Error ? err.message : String(err),
-          }),
-        );
+          });
+        });
     } else if (railKey === "local") {
       void scanLocalModels()
         .then((list: GgufModel[] | null) => {

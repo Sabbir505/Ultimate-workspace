@@ -362,11 +362,10 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     return stored;
   })();
 
-  // Context meter "used" figure: prefer the live count from llama-server's
-  // /tokenize (driven by `useContextMeter`, polled while a local_gguf session
-  // is active), and fall back to the input_tokens of the most recent
-  // assistant turn for cloud sessions or before the first poll resolves.
-  // Both values represent the full prompt size the model saw.
+  // Context meter "used" figure, last-assistant-turn half: the input_tokens
+  // of the most recent assistant turn is the one provider-counted number
+  // Relay has. It's combined with the live polled estimate below (see the
+  // usedTokens comment).
   const lastInputTokens = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
@@ -412,6 +411,9 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   // meter ticks down right after compaction instead of waiting up to 2s for
   // the next interval.
   const compactionRevision = useChatStore((s) => s.compactionRevision);
+  // Classified chat:error code for the active session — keys the overflow
+  // banner's actionable copy (see the chat-error block below).
+  const errorCode = useChatStore((s) => s.errorCode);
   const liveUsage = useContextMeter({
     chatSessionId: activeChatSessionId,
     isLocal,
@@ -419,12 +421,16 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     messagesRevision: messages.length,
     compactionRevision,
   });
-  // Live count wins for local sessions; the persisted last-turn value is the
-  // fallback for cloud sessions and the brief window before the first poll
-  // resolves. Either way, the meter's percentage is a real number.
+  // Live count wins for local sessions (exact /tokenize). For cloud and
+  // harness sessions the polled backend estimate is live (it includes the
+  // just-sent user message and reflects compaction immediately) while the
+  // last assistant turn's input_tokens is provider-counted — take the
+  // larger of the two so neither a stale figure nor an underestimate can
+  // hide a filling window. Either way, the meter's percentage is a real
+  // number, never fabricated.
   const usedTokens = isLocal
     ? (liveUsage.usedTokens ?? lastInputTokens)
-    : lastInputTokens;
+    : Math.max(liveUsage.usedTokens ?? 0, lastInputTokens ?? 0) || lastInputTokens;
 
   // Spawn/swap the local-model sidecar for a scanned GGUF record. Returns the
   // error text on failure (surfaced by the callers via the chat error banner)
@@ -1604,6 +1610,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
                         message={item}
                         live={item.live}
                         msgId={item.id}
+                        chatSessionId={activeChatSessionId}
                         onEdit={item.role === "user" ? item.onEdit : undefined}
                         onRepeat={
                           item.role === "assistant" && item.key === lastAssistantKey
@@ -1656,9 +1663,18 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
             </div>
           )}
           {error && (
-            <div className="chat-error">
+            <div className="chat-error" data-code={errorCode ?? undefined}>
               <span className="chat-error-icon">⚠</span>
-              <span className="chat-error-text">{formatChatError(error)}</span>
+              <span className="chat-error-text">
+                {errorCode === "context_overflow" ? (
+                  <>
+                    This conversation has outgrown the model&apos;s context window. Start a new
+                    chat, or edit an earlier message to trim the history, then retry.
+                  </>
+                ) : (
+                  formatChatError(error)
+                )}
+              </span>
             </div>
           )}
           <div ref={messagesEndRef} />

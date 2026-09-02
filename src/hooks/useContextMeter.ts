@@ -1,17 +1,19 @@
-// Live context-window token count for a local-model session.
+// Live context-window token count for the active chat session.
 //
-// Polls `count_context_tokens` while a `local_gguf` chat is active so the
-// composer's circular meter is always current — including the moment the
-// session is sitting idle and the user is composing their next message.
-// The meter previously only updated on chat:done (when the *next* assistant
-// turn's `inputTokens` arrived), so the ring went stale the moment any
-// turn ended and never reflected a compaction until the next reply.
+// Polls `count_context_tokens` while a chat is active so the composer's
+// circular meter is always current — including the moment the session is
+// sitting idle and the user is composing their next message. The meter
+// previously only updated on chat:done (when the *next* assistant turn's
+// `inputTokens` arrived), so the ring went stale the moment any turn ended
+// and never reflected a compaction until the next reply.
 //
-// Polling is debounced to 2s — /tokenize is a network round-trip to the
-// sidecar and we don't need sub-second resolution to make the meter useful.
-// Pauses while a stream is in flight (the send path is already doing its
-// own /tokenize for the compaction check) and only resumes once the
-// session is idle again.
+// Local (local_gguf) sessions get exact counts from the sidecar's
+// /tokenize; cloud and harness sessions get a char-based backend estimate
+// (~4 chars/token) — no tokenizer endpoint exists for those, and a live
+// estimate beats the one-turn-stale input_tokens for warning before an
+// overflow. The meter is debounced to 2s (for local that's a network
+// round-trip to the sidecar; for cloud it's pure backend math), and pauses
+// while a stream is in flight.
 //
 // The meter MUST update immediately when the active history shortens due to
 // compaction (to_compact is folded into a summary row, dropping N messages
@@ -80,10 +82,14 @@ export function useContextMeter({
   streamingRef.current = isStreaming;
 
   useEffect(() => {
-    // Only local sessions have a sidecar to query. Cloud sessions should
-    // keep using the last assistant turn's inputTokens (passed in from
-    // ChatView's `lastInputTokens`), so we don't need to poll anything.
-    if (!chatSessionId || !isLocal) {
+    // Every provider polls now: local sessions get exact counts from
+    // llama-server's /tokenize, cloud and harness sessions get a char-based
+    // backend estimate (system + history + tool schema). The estimate is
+    // what makes the meter live for cloud — the last assistant turn's
+    // input_tokens is one turn stale and never reflects a just-sent user
+    // message or a compaction. ChatView takes the max of the two figures so
+    // a provider-counted prompt wins when it is larger.
+    if (!chatSessionId) {
       setState({ usedTokens: null, maxTokens: 0 });
       return;
     }

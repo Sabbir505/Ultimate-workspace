@@ -168,6 +168,10 @@ impl AgentSessionManager {
         cwd: Option<&str>,
         project_id: Option<&str>,
         connectors: &[crate::connectors::HarnessMcpServer],
+        // Optional structured summary of the turns the primer's char budget
+        // drops (built async by the send command via `build_primer_summary`
+        // before this sync path runs). Empty/None → truncate-only primer.
+        primer_summary: Option<&str>,
     ) -> Result<(), String> {
         // Poison-recoverable: a panic in a prior send must not wedge every
         // future send behind a permanently-poisoned lock.
@@ -235,7 +239,14 @@ impl AgentSessionManager {
         // below is persisted, so the transcript covers only prior turns; this
         // turn's message rides in `content` verbatim.
         let context_primer = if entry.cli_session_id.lock().ok().and_then(|g| g.clone()).is_none() {
-            let primer = build_context_primer(db, chat_session_id);
+            // `primer_summary` (when the async command managed to pre-build
+            // one) carries a structured summary of the turns that don't fit
+            // the tail budget; without it the primer is truncate-only.
+            let primer = build_context_primer(
+                db,
+                chat_session_id,
+                primer_summary.filter(|s| !s.trim().is_empty()),
+            );
             if !primer.is_empty() {
                 eprintln!(
                     "[context] harness primer: session={} chars={} (fresh CLI session — replaying DB history)",
@@ -592,9 +603,14 @@ fn persist_cli_session_id(
 
 /// Total character budget for the primer transcript (~6k tokens — a compact
 /// handoff, not a full replay; very long chats keep their newest turns).
-const CONTEXT_PRIMER_MAX_CHARS: usize = 24_000;
+const CONTEXT_PRIMER_MAX_CHARS: usize = 32_000;
 /// Per-message cap so one giant artifact-dump reply can't eat the budget.
-const CONTEXT_PRIMER_MESSAGE_CAP: usize = 4_000;
+const CONTEXT_PRIMER_MESSAGE_CAP: usize = 6_000;
+/// When the turns that DON'T fit the tail budget carry at least this many
+/// chars, the send command pre-summarizes them with the shared cloud
+/// summarizer (see `build_primer_summary`) instead of silently dropping
+/// them — long engine-switched chats keep a digest of their older span.
+const CONTEXT_PRIMER_SUMMARY_TRIGGER_CHARS: usize = 8_000;
 
 /// The identity + artifact-behavior preamble prepended to every harness turn
 /// (see the send path's comment for ordering). Extracted from the send path
@@ -621,8 +637,14 @@ fn harness_persona(harness_label: &str) -> String {
 
 /// DB fetch half of the primer. MUST run before this turn's user message is
 /// persisted so the transcript is exactly "the conversation so far" — the new
-/// message itself is forwarded verbatim in `content`.
-fn build_context_primer(db: &DbState, chat_session_id: &str) -> String {
+/// message itself is forwarded verbatim in `content`. `summary` (built async
+/// by the send command when the dropped head was large enough) rides on top
+/// of the verbatim tail.
+fn build_context_primer(
+    db: &DbState,
+    chat_session_id: &str,
+    summary: Option<&str>,
+) -> String {
     let records = {
         let conn = db.0.lock();
         // Same rows the built-in providers would re-send (compaction folds and
@@ -630,55 +652,213 @@ fn build_context_primer(db: &DbState, chat_session_id: &str) -> String {
         // turn would have seen.
         crate::db::list_active_chat_messages(&conn, chat_session_id).unwrap_or_default()
     };
-    context_primer_from_records(&records)
+    context_primer_from_records(&records, summary)
+}
+
+/// One rendered primer line (`[Who]: body`) from a record. Display-only
+/// `<think>`/`<tool>` markup is stripped (tool JSON the new CLI never ran),
+/// per-message capped, and role-labeled.
+fn primer_line(r: &crate::types::ChatMessageRecord) -> Option<String> {
+    let text = crate::chat::commands::strip_think_blocks(&r.content);
+    if text.is_empty() {
+        return None;
+    }
+    let who = match r.role.as_str() {
+        "user" => "User",
+        "assistant" => "Relay",
+        _ => "System", // compaction summaries and other meta rows
+    };
+    let mut body: String = text.chars().take(CONTEXT_PRIMER_MESSAGE_CAP).collect();
+    if text.chars().count() > CONTEXT_PRIMER_MESSAGE_CAP {
+        body.push_str("…[truncated]");
+    }
+    Some(format!("[{who}]: {body}"))
+}
+
+/// Which records the newest-first tail budget keeps, and what's left over.
+/// Returns the tail IN CHRONOLOGICAL ORDER plus (count, chars) of the head —
+/// the older turns the tail budget dropped. Drives both the primer rendering
+/// and the pre-send head summarization (`build_primer_summary`), so the two
+/// always split the history at exactly the same point.
+fn primer_tail_and_head(
+    records: &[crate::types::ChatMessageRecord],
+) -> (Vec<&crate::types::ChatMessageRecord>, usize, usize) {
+    let mut tail_rev: Vec<&crate::types::ChatMessageRecord> = Vec::new();
+    let mut used = 0usize;
+    for r in records.iter().rev() {
+        let cost = primer_line(r).map(|l| l.len() + 2).unwrap_or(0); // join overhead
+        if cost == 0 {
+            continue;
+        }
+        if !tail_rev.is_empty() && used + cost > CONTEXT_PRIMER_MAX_CHARS {
+            break;
+        }
+        used += cost;
+        tail_rev.push(r);
+    }
+    tail_rev.reverse();
+    let tail_len = tail_rev.len();
+    // Head = everything before the first tail record (records with no
+    // rendered line are display-only and belong to neither side).
+    let first_tail_id = tail_rev.first().map(|r| r.id);
+    let head: Vec<&crate::types::ChatMessageRecord> = records
+        .iter()
+        .take_while(|r| Some(r.id) != first_tail_id)
+        .collect();
+    let head_chars: usize = head
+        .iter()
+        .filter_map(|r| primer_line(r))
+        .map(|l| l.len() + 2)
+        .sum();
+    (tail_rev, head.len(), head_chars)
 }
 
 /// Pure transcript builder behind `build_context_primer`.
 ///
 /// Newest-first accumulation within the char budget keeps the most recent
 /// turns — the ones the next reply most depends on — when a long chat must be
-/// truncated. Returns "" when there is nothing to hand over (fresh chat, or
-/// history made up entirely of display-only markup).
-fn context_primer_from_records(records: &[crate::types::ChatMessageRecord]) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    let mut used = 0usize;
-    for r in records.iter().rev() {
-        // `<think>`/`<tool>` blocks are display-only narration (tool JSON the
-        // new CLI never ran) — strip them exactly like the built-in history
-        // path does.
-        let text = crate::chat::commands::strip_think_blocks(&r.content);
-        if text.is_empty() {
-            continue;
-        }
-        let who = match r.role.as_str() {
-            "user" => "User",
-            "assistant" => "Relay",
-            _ => "System", // compaction summaries and other meta rows
-        };
-        let mut body: String = text.chars().take(CONTEXT_PRIMER_MESSAGE_CAP).collect();
-        if text.chars().count() > CONTEXT_PRIMER_MESSAGE_CAP {
-            body.push_str("…[truncated]");
-        }
-        let line = format!("[{who}]: {body}");
-        let cost = line.len() + 2; // "\n\n" join overhead
-        if !lines.is_empty() && used + cost > CONTEXT_PRIMER_MAX_CHARS {
-            break;
-        }
-        used += cost;
-        lines.push(line);
-    }
-    if lines.is_empty() {
+/// truncated. `summary` (when present) carries a structured summary of the
+/// turns that did NOT fit the budget, so a long chat loses nothing: summary
+/// for the old span, verbatim transcript for the recent tail. Returns ""
+/// when there is nothing to hand over (fresh chat, or history made up
+/// entirely of display-only markup).
+fn context_primer_from_records(
+    records: &[crate::types::ChatMessageRecord],
+    summary: Option<&str>,
+) -> String {
+    let (tail, _, _) = primer_tail_and_head(records);
+    let lines: Vec<String> = tail.iter().filter_map(|r| primer_line(r)).collect();
+    if lines.is_empty() && summary.is_none() {
         return String::new();
     }
-    lines.reverse();
     let mut out = String::from(
         "[Context handoff] The earlier part of this conversation ran on a different \
-         engine. The transcript below is everything said so far, oldest first. \
-         Continue the conversation naturally — the user's new message follows \
+         engine. Continue the conversation naturally — the user's new message follows \
          after the separator.\n\n",
     );
-    out.push_str(&lines.join("\n\n"));
+    if let Some(s) = summary {
+        out.push_str("[Summary of the earlier turns]\n");
+        out.push_str(s);
+        out.push_str("\n\n");
+    }
+    if !lines.is_empty() {
+        if summary.is_some() {
+            out.push_str("[Recent transcript, verbatim]\n");
+        } else {
+            out.push_str("The transcript below is everything said so far, oldest first.\n\n");
+        }
+        out.push_str(&lines.join("\n\n"));
+    }
     out
+}
+
+/// Summarize the older turns that the primer's char budget would drop, using
+/// the shared cloud summarizer (the first configured cloud provider —
+/// `resolve_cloud_summarizer`). Called by `send_agent_chat_message` (async)
+/// BEFORE the sync spawn path, so the network round-trip never blocks or
+/// freezes the spawn flow; `send` just receives the finished summary.
+///
+/// Returns `None` when: the CLI session already exists (no primer needed),
+/// the cloud-summarizer switch is off, the dropped head is under the trigger
+/// size, no provider is configured, or the call fails — every case falls
+/// back to the truncate-only primer, which is exactly the pre-upgrade
+/// behavior.
+pub(crate) async fn build_primer_summary(
+    db: &DbState,
+    chat_session_id: &str,
+    harness: &str,
+) -> Option<String> {
+    // Same gate the send path uses for the primer itself: a CLI session that
+    // will be resumed doesn't need a handoff at all.
+    let existing_session = {
+        let conn = db.0.lock();
+        crate::db::get_setting(&conn, &cli_session_key(harness, chat_session_id))
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+    };
+    if existing_session.is_some() {
+        return None;
+    }
+    // The summarized handoff rides the cloud-compaction switch: one knob
+    // governs "may Relay spend cloud tokens on summarization".
+    let enabled = {
+        let conn = db.0.lock();
+        crate::db::get_setting(&conn, "chat.cloud.compaction_enabled")
+            .ok()
+            .flatten()
+            .map(|v| !matches!(v.trim(), "false" | "0" | "off"))
+            .unwrap_or(true)
+    };
+    if !enabled {
+        return None;
+    }
+
+    let records = {
+        let conn = db.0.lock();
+        crate::db::list_active_chat_messages(&conn, chat_session_id).unwrap_or_default()
+    };
+    let (_, head_count, head_chars) = primer_tail_and_head(&records);
+    if head_count == 0 || head_chars < CONTEXT_PRIMER_SUMMARY_TRIGGER_CHARS {
+        return None;
+    }
+
+    // Resolve the summarizer: the first configured cloud provider.
+    let (provider_id, base, api_key, model) = {
+        let conn = db.0.lock();
+        crate::chat::commands::resolve_cloud_summarizer(&conn)?
+    };
+
+    // Render the head with the same primer lines the tail uses, then let the
+    // shared summarizer condense it (per-message trimming included).
+    let head_records: Vec<crate::types::ChatMessageRecord> = {
+        let (tail, _, _) = primer_tail_and_head(&records);
+        let first_tail_id = tail.first().map(|r| r.id);
+        records
+            .iter()
+            .take_while(|r| Some(r.id) != first_tail_id)
+            .cloned()
+            .collect()
+    };
+    if head_records.is_empty() {
+        return None;
+    }
+    let mut head_text = String::new();
+    for r in &head_records {
+        if let Some(line) = primer_line(r) {
+            head_text.push_str(&line);
+            head_text.push_str("\n\n");
+        }
+    }
+    let head_entry = crate::chat::compaction::CompactionEntry {
+        id: 0,
+        message: crate::chat::providers::ChatMessage {
+            role: "user".to_string(),
+            content: head_text,
+            images: Vec::new(),
+        },
+    };
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_default();
+    let (summary, _, _) = crate::chat::cloud_compact::summarize_via_provider(
+        &client,
+        provider_id,
+        &base,
+        &api_key,
+        &model,
+        &std::iter::once(&head_entry).collect::<Vec<&crate::chat::compaction::CompactionEntry>>(),
+        None,
+    )
+    .await
+    .ok()?;
+    eprintln!(
+        "[context] harness primer: summarized {head_count} older turn(s) ({head_chars} chars) via {}/{model}",
+        provider_id.as_str(),
+    );
+    Some(summary)
 }
 
 
@@ -2232,6 +2412,11 @@ fn read_claude_stream(
     // markers, no tool markers). The `result` fallback below diffs it against
     // `result.result` to recover text the CLI never streamed.
     let mut answer_text = String::new();
+    // Whether the CLI showed any sign of turn activity (streamed text, an
+    // assistant message, or a result). Drives the stale-resume-id recovery
+    // at EOF below: a process that dies with ZERO activity while a resume id
+    // was in play is the signature of `--resume` failing on a stale id.
+    let mut saw_turn_activity = false;
     // Capture the turn's start instant for the "Worked for Xs" label. The
     // reader is invoked right after the prompt is sent to the persistent CLI,
     // so this is a close lower bound on the turn's wall-clock window.
@@ -2281,6 +2466,7 @@ fn read_claude_stream(
             // Token streaming (requires --include-partial-messages): raw
             // deltas wrapped in stream_event.
             Some("stream_event") => {
+                saw_turn_activity = true;
                 let delta = v.pointer("/event/delta");
                 match delta
                     .and_then(|d| d.get("type"))
@@ -2338,6 +2524,7 @@ fn read_claude_stream(
             // dangerous tools before the CLI waits for stdin; this path is
             // a safety net for cases where the stream event wasn't caught.
             Some("assistant") => {
+                saw_turn_activity = true;
                 if in_think {
                     full.push_str("</think>");
                     emit_token(app, sid, "</think>");
@@ -2423,6 +2610,7 @@ fn read_claude_stream(
                 }
             }
             Some("result") => {
+                saw_turn_activity = true;
                 // Answer text streamed so far this turn; taken here so the
                 // next turn starts from a clean accumulator.
                 let streamed_answer = std::mem::take(&mut answer_text);
@@ -2514,6 +2702,19 @@ fn read_claude_stream(
                 }
             }
 
+            // System events: {"type":"system","subtype":"init|compact_boundary|…"}. A
+            // compact_boundary marks Claude Code's OWN native auto-compact —
+            // the CLI condensed its context mid-session. Relay persists a
+            // boundary marker so the timeline shows where detail was
+            // condensed and the meter refreshes; the summary text itself
+            // stays inside the CLI session (the event carries no content).
+            Some("system") => {
+                let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+                if subtype.contains("compact") {
+                    let conn = db.0.lock();
+                    emit_harness_compact(&conn, app, sid, "Claude Code");
+                }
+            }
             // system(init/hooks/status), user (tool results), rate_limit, …
             // — not needed for rendering.
             _ => {}
@@ -2529,6 +2730,38 @@ fn read_claude_stream(
         emit_token(app, sid, "</think>");
     }
     persist_cli_session_id(db, "claude_code", sid, session_cell);
+    // Stale-resume-id recovery: a process that died with ZERO turn activity
+    // while a resume id was in play is the signature of `--resume` failing
+    // on a stale id (expired / GC'd / CLI version change). Without this the
+    // next send would resume-fail forever AND the fresh session would start
+    // blank despite the full DB history existing. Drop the id so the next
+    // send takes the context-primer path instead. Cancels are excluded (they
+    // set `cancelled`); a false positive only costs one primer replay.
+    if !saw_turn_activity
+        && !cancelled.load(Ordering::SeqCst)
+        && session_cell.lock().ok().and_then(|g| g.clone()).is_some()
+    {
+        if let Ok(mut g) = session_cell.lock() {
+            *g = None;
+        }
+        {
+            let conn = db.0.lock();
+            let _ = crate::db::delete_setting(&conn, &cli_session_key("claude_code", sid));
+        }
+        eprintln!(
+            "[context] claude_code resume failed (no turn activity); dropping stale CLI              session id — the next send replays the context primer"
+        );
+        if let Some(app) = app {
+            let _ = app.emit(
+                "chat:status",
+                json!({
+                    "chatSessionId": sid,
+                    "reason": "context_primer_pending",
+                    "message": "CLI session expired — the next send replays the conversation context",
+                }),
+            );
+        }
+    }
     // E-5: a respawned process may already be streaming a new turn — an old
     // reader's EOF must not clear its flag (nor emit a spurious exit error).
     if should_clear_in_flight(proc_generation.load(Ordering::SeqCst), my_generation)
@@ -4884,9 +5117,53 @@ fn emit_done(app: Option<&AppHandle>, sid: &str, input: Option<i64>, output: Opt
 
 fn emit_error(app: Option<&AppHandle>, sid: &str, message: &str) {
     if let Some(app) = app {
+        // Classify harness errors too: a remapped harness backend rejecting a
+        // turn for window overflow must reach the same recoverable-error UX
+        // as the built-in providers, not the generic failure banner.
+        let code = crate::chat::error_class::classify_error(message);
         let _ = app.emit(
             "chat:error",
-            json!({ "chatSessionId": sid, "message": message, "code": null }),
+            json!({ "chatSessionId": sid, "message": message, "code": code }),
+        );
+    }
+}
+
+/// Persist a "harness-side auto-compact" boundary row + emit the meter
+/// refresh. Each harness surfaces its own native auto-compact differently:
+/// Claude Code emits `{"type":"system","subtype":"compact_boundary"}` —
+/// detected in its stream reader and forwarded here. OpenCode/Kimi don't
+/// emit an observable event; their compactions stay invisible and the meter
+/// reflects the drop via the next turn's input_tokens (the /compact slash
+/// command remains the manual lever for those engines).
+///
+/// Takes a locked DB connection so the caller (already parsing the stream
+/// with one) can pass it in without a second lock acquisition.
+fn emit_harness_compact(
+    conn: &rusqlite::Connection,
+    app: Option<&AppHandle>,
+    sid: &str,
+    source: &str,
+) {
+    let marker = format!(
+        "{}\n\nThe {source} engine condensed its own context here \
+         (harness-side auto-compact). The summary remains inside the CLI \
+         session; Relay records the boundary so nothing looks like it \
+         silently vanished.",
+        crate::chat::compaction::COMPACTED_PREFIX
+    );
+    let _ = crate::db::add_chat_message(
+        conn, sid, "system", &marker,
+        None, None, None, None, None, None, None, None, None,
+        None, None, None, None, None, None,
+    );
+    if let Some(app) = app {
+        let _ = app.emit(
+            "chat:status",
+            json!({
+                "chatSessionId": sid,
+                "reason": "context_compacted",
+                "message": "Harness context compacted",
+            }),
         );
     }
 }
@@ -4909,6 +5186,83 @@ fn no_console_window(cmd: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn record(id: i64, role: &str, content: &str) -> crate::types::ChatMessageRecord {
+        crate::types::ChatMessageRecord {
+            id,
+            chat_session_id: "s".into(),
+            role: role.into(),
+            content: content.into(),
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            created_at: 0,
+            superseded_by: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_output_tokens: None,
+            provider: None,
+            model_key: None,
+            pricing_estimated_usd: None,
+            started_at: None,
+            completed_at: None,
+            llm_time_ms: None,
+            tool_time_ms: None,
+            ttft_ms: None,
+            tokens_per_second: None,
+        }
+    }
+
+    /// The tail/head split must keep the NEWEST turns inside the char budget
+    /// and classify everything older as head — the head is what the primer
+    /// summarizer covers.
+    #[test]
+    fn primer_tail_and_head_splits_by_budget() {
+        // 40 short turns ≈ well under the 32k budget → all tail, no head.
+        let small: Vec<_> = (0..40)
+            .map(|i| record(i, if i % 2 == 0 { "user" } else { "assistant" }, "turn text here"))
+            .collect();
+        let (tail, head_count, head_chars) = primer_tail_and_head(&small);
+        assert_eq!(tail.len(), 40);
+        assert_eq!((head_count, head_chars), (0, 0));
+        assert_eq!(tail.first().unwrap().id, 0);
+        assert_eq!(tail.last().unwrap().id, 39);
+
+        // 2_000 turns ≈ 80k chars — the tail must cap at ~32k and the rest is
+        // head, keeping the NEWEST turns.
+        let big: Vec<_> = (0..2_000)
+            .map(|i| record(i, if i % 2 == 0 { "user" } else { "assistant" }, "turn text here"))
+            .collect();
+        let (tail, head_count, head_chars) = primer_tail_and_head(&big);
+        assert!(head_count > 0);
+        assert_eq!(tail.len() + head_count, 2_000);
+        assert_eq!(tail.last().unwrap().id, 1_999);
+        assert!(tail.first().unwrap().id > 0);
+        assert!(head_chars > CONTEXT_PRIMER_SUMMARY_TRIGGER_CHARS);
+    }
+
+    /// With a summary, the primer renders the summary section ABOVE the
+    /// verbatim tail with distinct labels; without one it keeps the legacy
+    /// everything-said-so-far wording.
+    #[test]
+    fn primer_renders_summary_and_tail_sections() {
+        let records: Vec<_> = (0..4)
+            .map(|i| record(i, if i % 2 == 0 { "user" } else { "assistant" }, "hello"))
+            .collect();
+        let with = context_primer_from_records(&records, Some("User asked for X; done."));
+        assert!(with.contains("[Summary of the earlier turns]"));
+        assert!(with.contains("User asked for X; done."));
+        assert!(with.contains("[Recent transcript, verbatim]"));
+
+        let without = context_primer_from_records(&records, None);
+        assert!(!without.contains("[Summary of the earlier turns]"));
+        assert!(without.contains("everything said so far"));
+        assert!(without.contains("[User]: hello"));
+
+        // Display-only history + no summary → empty handoff (unchanged rule).
+        let thinky = vec![record(0, "assistant", "<think>internal</think>")];
+        assert_eq!(context_primer_from_records(&thinky, None), "");
+    }
 
     /// The harness persona must never reference a tool the CLI session
     /// doesn't have. `open_file` is a built-in-chat tool — not bridged through
@@ -5028,7 +5382,7 @@ mod tests {
                 "<think>reasoning is display-only, never re-sent</think>Added the summary section.",
             ),
         ];
-        let primer = context_primer_from_records(&records);
+        let primer = context_primer_from_records(&records, None);
         assert!(primer.starts_with("[Context handoff]"), "{primer}");
         assert!(primer.contains("[User]: Create a quarterly report"));
         assert!(primer.contains("[Relay]: Done — quarterly_report.html is in Artifacts."));
@@ -5046,13 +5400,13 @@ mod tests {
     #[test]
     fn context_primer_empty_for_fresh_chat_or_markup_only_history() {
         // Brand-new chat: nothing to hand over, no header either.
-        assert_eq!(context_primer_from_records(&[]), "");
+        assert_eq!(context_primer_from_records(&[], None), "");
         // Rows that are entirely think/tool markup carry no handoff content.
         let markup_only = vec![
             primer_record("assistant", "<think>hmm</think>"),
             primer_record("assistant", "<tool>{\"name\":\"bash\"}</tool>"),
         ];
-        assert_eq!(context_primer_from_records(&markup_only), "");
+        assert_eq!(context_primer_from_records(&markup_only, None), "");
     }
 
     #[test]
@@ -5062,7 +5416,7 @@ mod tests {
             records.push(primer_record("user", &format!("old message {i} {}", "x".repeat(200))));
             records.push(primer_record("assistant", &format!("old reply {i} {}", "y".repeat(200))));
         }
-        let primer = context_primer_from_records(&records);
+        let primer = context_primer_from_records(&records, None);
         // Header + join overhead ride outside the per-line accounting.
         assert!(primer.len() <= CONTEXT_PRIMER_MAX_CHARS + 512, "{}", primer.len());
         // Newest turns survive truncation; the oldest fall out.

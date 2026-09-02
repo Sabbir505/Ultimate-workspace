@@ -19,6 +19,22 @@ pub enum ChatProviderId {
 }
 
 impl ChatProviderId {
+    /// Catalog default model id for this provider (the `default_model` of the
+    /// provider struct it routes to). Inherent so callers without a provider
+    /// INSTANCE (e.g. the harness primer summarizer, which only knows the
+    /// provider string) can still resolve a sane default model.
+    pub fn default_model_id(&self) -> &'static str {
+        match self {
+            ChatProviderId::Anthropic | ChatProviderId::AnthropicCompatible => {
+                AnthropicProvider.default_model()
+            }
+            ChatProviderId::OpenAI
+            | ChatProviderId::OpenAICompatible
+            | ChatProviderId::OpenRouter => OpenRouterProvider.default_model(),
+            ChatProviderId::LocalGguf => LocalGgufProvider.default_model(),
+        }
+    }
+
     /// Stable string used as the chat_messages.provider value (and thus the
     /// rollup's `chat:<provider>` grouping, spec §8).
     pub fn as_str(&self) -> &'static str {

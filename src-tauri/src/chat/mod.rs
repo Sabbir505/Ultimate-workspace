@@ -7,12 +7,15 @@ pub mod artifacts;
 pub mod jsdocgen;
 pub mod pdfprint;
 pub mod codeexec;
+pub mod cloud_compact;
 pub mod compaction;
 pub mod commands;
+pub mod context_windows;
 pub mod dispatch;
 pub mod docs;
 pub mod docs_images;
 pub mod export;
+pub mod error_class;
 pub mod local_models;
 pub mod office;
 pub mod permission;
@@ -556,28 +559,56 @@ impl ChatManager {
                 }
             }
 
-            let result = if tools_enabled && is_openai {
-                run_openai_tool_loop(
-                    &client, &tool_base, &api_key, &chat_req, caps, sandbox, approval, &mgr, &sid, &app, research_mode, perf.clone(),
-                )
-                .await
-            } else if tools_enabled && is_anthropic {
-                run_anthropic_tool_loop(
-                    &client, &tool_base, &api_key, &chat_req, caps, sandbox, approval, &mgr, &sid, &app, research_mode, perf.clone(),
-                )
-                .await
-            } else {
-                run_chat_stream(
-                    &client,
-                    provider.as_ref(),
-                    &sid,
-                    &chat_req,
-                    &api_key,
-                    base_url.as_deref(),
-                    &app,
-                    &perf,
-                )
-                .await
+            // ── Turn execution, with ONE compact-and-retry on context
+            // overflow. A provider rejecting the request for exceeding its
+            // window is recoverable: force a cloud compaction pass over the
+            // session's DB history and re-run the turn with the rewritten
+            // request. A second failure — or a session that cannot shrink —
+            // surfaces the original error unchanged.
+            let mut retried_after_compaction = false;
+            let result = loop {
+                let attempt = if tools_enabled && is_openai {
+                    run_openai_tool_loop(
+                        &client, &tool_base, &api_key, &chat_req, caps.clone(), sandbox, approval, &mgr, &sid, &app, research_mode, perf.clone(),
+                    )
+                    .await
+                } else if tools_enabled && is_anthropic {
+                    run_anthropic_tool_loop(
+                        &client, &tool_base, &api_key, &chat_req, caps.clone(), sandbox, approval, &mgr, &sid, &app, research_mode, perf.clone(),
+                    )
+                    .await
+                } else {
+                    run_chat_stream(
+                        &client,
+                        provider.as_ref(),
+                        &sid,
+                        &chat_req,
+                        &api_key,
+                        base_url.as_deref(),
+                        &app,
+                        &perf,
+                    )
+                    .await
+                };
+                let overflow = matches!(&attempt, Err(e) if crate::chat::error_class::classify_error(e) == Some(crate::chat::error_class::CODE_CONTEXT_OVERFLOW));
+                if overflow
+                    && !retried_after_compaction
+                    && !matches!(provider_id, ChatProviderId::LocalGguf)
+                {
+                    retried_after_compaction = true;
+                    match compact_and_retry(
+                        &db, &client, provider_id, &tool_base, &api_key, &sid, &chat_req, &app,
+                    )
+                    .await
+                    {
+                        Some(rebuilt) => {
+                            chat_req = rebuilt;
+                            continue;
+                        }
+                        None => break attempt,
+                    }
+                }
+                break attempt;
             };
 
             match result {
@@ -735,12 +766,16 @@ impl ChatManager {
                     // version, and some errors (e.g. llama-server 400 bodies)
                     // name the exact rejected field.
                     eprintln!("[chat:stream] turn failed for {sid}: {e}");
+                    // Classify before moving the message into the payload: a
+                    // context-overflow rejection is recoverable and the
+                    // frontend keys its "compact / new chat" copy off the code.
+                    let code = crate::chat::error_class::classify_error(&e);
                     let _ = app.emit(
                         "chat:error",
                         ChatErrorPayload {
                             chat_session_id: sid.clone(),
                             message: e,
-                            code: None,
+                            code: code.map(|c| c.to_string()),
                         },
                     );
                 }
@@ -1098,6 +1133,93 @@ pub(crate) async fn run_chat_stream(
     // round's prompt build) falls outside LLM time.
     perf.end_gen();
     Ok((full_text, usage))
+}
+
+/// Force one cloud compaction pass over the session's DB history and rebuild
+/// the turn request from the rewritten history. Used exclusively by the
+/// compact-and-retry path when the provider rejected the original request
+/// with a context-overflow error. Returns `None` when there is nothing to
+/// compact, the summarizer failed, or persistence failed — the caller then
+/// surfaces the original error instead of retrying.
+///
+/// Locking: `db` guards must never span an await; every lock here is scoped
+/// to a sync block (same rule as the send path's compaction block).
+#[allow(clippy::too_many_arguments)]
+async fn compact_and_retry(
+    db: &Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    client: &reqwest::Client,
+    provider_id: ChatProviderId,
+    base: &str,
+    api_key: &str,
+    sid: &str,
+    chat_req: &ChatRequest,
+    app: &AppHandle,
+) -> Option<ChatRequest> {
+    let cfg = {
+        let conn = db.lock();
+        crate::chat::cloud_compact::load_cloud_compaction_config(&conn)
+    };
+    // Rebuild the active history exactly the way the send path does — the
+    // oversized request's rows are all already persisted (the user message
+    // before send, any tool rounds during it).
+    let entries: Vec<crate::chat::compaction::CompactionEntry> = {
+        let conn = db.lock();
+        db::list_active_chat_messages(&conn, sid).ok()?
+    }
+    .into_iter()
+    .map(|r| crate::chat::compaction::CompactionEntry {
+        id: r.id,
+        message: ChatMessage {
+            role: r.role,
+            content: crate::chat::commands::strip_think_blocks(&r.content),
+            images: Vec::new(),
+        },
+    })
+    .collect();
+
+    let _ = app.emit(
+        "chat:status",
+        ChatStatusPayload {
+            chat_session_id: sid.to_string(),
+            reason: "context_compacting".to_string(),
+            message: "Context window full — compacting and retrying…".to_string(),
+        },
+    );
+    let run = crate::chat::cloud_compact::run_cloud_compaction(
+        client,
+        provider_id,
+        base,
+        api_key,
+        &chat_req.model,
+        &chat_req.system,
+        &entries,
+        cfg.pin_exchanges,
+    )
+    .await
+    .ok()?;
+    {
+        let conn = db.lock();
+        crate::chat::cloud_compact::persist_summary_row(&conn, sid, &run).ok()?;
+    }
+    eprintln!(
+        "[cloud-compaction] overflow retry: compacted {} exchange(s) (~{}→{} est. tokens)",
+        run.compacted_exchange_count, run.pre_tokens, run.post_tokens,
+    );
+    let _ = app.emit(
+        "chat:status",
+        ChatStatusPayload {
+            chat_session_id: sid.to_string(),
+            reason: "context_compacted".to_string(),
+            message: format!(
+                "Context compacted (~{} → {} tokens, estimated) — retrying…",
+                crate::chat::commands::format_compact_token_count(run.pre_tokens as i64),
+                crate::chat::commands::format_compact_token_count(run.post_tokens as i64),
+            ),
+        },
+    );
+    let mut rebuilt = chat_req.clone();
+    rebuilt.messages = run.messages;
+    Some(rebuilt)
 }
 
 /// Headless one-shot for automations with API providers / local GGUF.

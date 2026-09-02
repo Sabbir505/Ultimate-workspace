@@ -36,6 +36,45 @@ const K_LOCAL_PIN_EXCHANGES = "chat.local_gguf.compaction_pin_exchanges";
 export const DEFAULT_LOCAL_COMPACTION_THRESHOLD = 0.75;
 export const DEFAULT_LOCAL_PIN_EXCHANGES = 6;
 
+// Cloud/API context-compaction (advanced). Same pin+summarize engine as the
+// local path, triggered by an ESTIMATED request size against the model
+// registry's window; the summarizer is the session's own provider. Defaults
+// mirror the Rust loader in chat/cloud_compact.rs.
+const K_CLOUD_COMPACTION_ENABLED = "chat.cloud.compaction_enabled";
+const K_CLOUD_COMPACTION_THRESHOLD = "chat.cloud.compaction_threshold";
+const K_CLOUD_PIN_EXCHANGES = "chat.cloud.compaction_pin_exchanges";
+export const DEFAULT_CLOUD_COMPACTION_THRESHOLD = 0.75;
+export const DEFAULT_CLOUD_PIN_EXCHANGES = 6;
+
+// Cloud context-limit override: cap the EFFECTIVE window below what the
+// model advertises (cost control, or a remapped backend that serves less
+// than the model id suggests). 0 = auto (the model's own window). Mirrors
+// chat/context_windows.rs::load_context_limit_override.
+const K_CLOUD_CONTEXT_LIMIT = "chat.cloud.context_limit";
+
+// Per-provider curated model lists: provider id -> ordered entries with an
+// optional per-model context-window pin (0 = auto). A non-empty list IS the
+// provider's model picker content; absent/empty = show everything the
+// /v1/models fetch returns. Key shape mirrors the backend's
+// chat.<provider>.selected_models.
+export interface ProviderModelEntry {
+  id: string;
+  contextWindow: number;
+}
+const selectedModelsKey = (provider: string) => `chat.${provider}.selected_models`;
+/** Index of providers that HAVE a curated list (stored lists are never
+ *  deleted — an empty list is the cleared signal the backend's
+ *  load_selected_models already treats as "nothing curated"). */
+const SELECTED_MODELS_INDEX_KEY = "chat.selected_models_index";
+
+// Local compaction quality knobs (P4 of the compaction redesign): route the
+// summary call through a configured cloud provider instead of the (small)
+// sidecar model, and re-derive each new summary from the ORIGINAL turns a
+// prior summary folded away (rebuild-from-raw) instead of stacking
+// summary-on-summary. Keys mirror chat/compaction.rs's loader.
+const K_LOCAL_COMPACTION_SUMMARIZER = "chat.local_gguf.compaction_summarizer";
+const K_LOCAL_COMPACTION_REBUILD_FROM_RAW = "chat.local_gguf.compaction_rebuild_from_raw";
+
 interface BrowserUrlState {
   global: string;
   perProject: Record<string, string>;
@@ -80,6 +119,23 @@ interface SettingsState {
   localCompactionThreshold: number;
   /** Local-GGUF: recent exchanges (user+assistant pairs) pinned verbatim. */
   localPinExchanges: number;
+  /** Local-GGUF: which model writes the summary — the sidecar itself or the
+   *  first configured cloud provider ("sidecar" | "cloud"). */
+  localCompactionSummarizer: "sidecar" | "cloud";
+  /** Local-GGUF: re-derive each new summary from the original folded turns. */
+  localCompactionRebuildFromRaw: boolean;
+  /** Cloud/API: compaction master switch (overflow retry always stays on). */
+  cloudCompactionEnabled: boolean;
+  /** Cloud/API: fraction of the model window that triggers compaction. */
+  cloudCompactionThreshold: number;
+  /** Cloud/API: recent exchanges pinned verbatim. */
+  cloudPinExchanges: number;
+  /** Cloud/API: user cap on the effective context window, tokens. 0 = auto
+   *  (the model's own — dynamic where the API publishes it, registry else).
+   *  A cap only SHRINKS; it never raises a model above its real window. */
+  cloudContextLimit: number;
+  /** Per-provider curated model lists with per-model window pins. */
+  providerModels: Record<string, ProviderModelEntry[]>;
 
   load: () => Promise<void>;
   setTheme: (theme: ThemeSetting) => void;
@@ -101,6 +157,16 @@ interface SettingsState {
   restoreBrowserPaneTabs: (paneId: string) => { tabs: PersistedTabData[]; activeTabIndex: number } | null;
   setLocalCompactionThreshold: (threshold: number) => void;
   setLocalPinExchanges: (exchanges: number) => void;
+  setCloudCompactionEnabled: (enabled: boolean) => void;
+  setCloudCompactionThreshold: (threshold: number) => void;
+  setCloudPinExchanges: (exchanges: number) => void;
+  setCloudContextLimit: (limit: number) => void;
+  /** Replace a provider's curated model list (persisted + in-memory). */
+  setProviderModels: (provider: string, models: ProviderModelEntry[]) => void;
+  /** The pinned window for a specific provider+model, 0 when unset. */
+  modelWindowFor: (provider: string, model: string | null | undefined) => number;
+  setLocalCompactionSummarizer: (which: "sidecar" | "cloud") => void;
+  setLocalCompactionRebuildFromRaw: (on: boolean) => void;
 }
 
 function persistKeybindings(map: KeybindingMap) {
@@ -127,9 +193,16 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   browserPaneState: { paneTabs: {} },
   localCompactionThreshold: DEFAULT_LOCAL_COMPACTION_THRESHOLD,
   localPinExchanges: DEFAULT_LOCAL_PIN_EXCHANGES,
+  cloudCompactionEnabled: true,
+  cloudCompactionThreshold: DEFAULT_CLOUD_COMPACTION_THRESHOLD,
+  cloudPinExchanges: DEFAULT_CLOUD_PIN_EXCHANGES,
+  cloudContextLimit: 0,
+  providerModels: {},
+  localCompactionSummarizer: "sidecar",
+  localCompactionRebuildFromRaw: true,
 
   load: async () => {
-    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault, checkpointsEnabled] = await Promise.all([
+    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault, checkpointsEnabled, cloudEnabled, cloudThreshold, cloudPin, summarizer, rebuildRaw, cloudContextLimit] = await Promise.all([
       getSetting(K_THEME),
       getSetting(K_DND),
       getSetting(K_NOTIFY_SOUND),
@@ -143,7 +216,44 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       getSetting(K_CUSTOM_THEME_ID),
       getSetting(K_WORKTREE_DEFAULT),
       getSetting(K_CHECKPOINTS_ENABLED),
+      getSetting(K_CLOUD_COMPACTION_ENABLED),
+      getSetting(K_CLOUD_COMPACTION_THRESHOLD),
+      getSetting(K_CLOUD_PIN_EXCHANGES),
+      getSetting(K_LOCAL_COMPACTION_SUMMARIZER),
+      getSetting(K_LOCAL_COMPACTION_REBUILD_FROM_RAW),
+      getSetting(K_CLOUD_CONTEXT_LIMIT),
     ]);
+    // Per-provider curated model lists: the index names the providers that
+    // have one; each list is then read from its own key. A missing or
+    // malformed list simply doesn't populate the map (the UI then shows
+    // everything the /v1/models fetch returns).
+    const providerModels: Record<string, ProviderModelEntry[]> = {};
+    try {
+      // The index names providers with a curated list, but lists saved
+      // before an index write (or by older builds) still exist under their
+      // provider key — probe the known cloud ids as well so they self-heal.
+      const indexRaw = await getSetting(SELECTED_MODELS_INDEX_KEY);
+      const indexed: string[] = indexRaw ? JSON.parse(indexRaw) : [];
+      const known = [
+        "anthropic",
+        "openai",
+        "openrouter",
+        "anthropic_compatible",
+        "openai_compatible",
+      ];
+      const providers = Array.from(new Set([...indexed, ...known]));
+      for (const p of providers) {
+        if (typeof p !== "string" || !p) continue;
+        try {
+          const raw = await getSetting(selectedModelsKey(p));
+          if (!raw) continue;
+          const parsed = JSON.parse(raw) as ProviderModelEntry[];
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            providerModels[p] = parsed.filter((e) => e && typeof e.id === "string");
+          }
+        } catch { /* skip malformed list */ }
+      }
+    } catch { /* no index — nothing curated */ }
     set((state) => {
       const next = { ...state, loaded: true };
       if (theme === "light" || theme === "dark" || theme === "system") next.theme = theme;
@@ -204,6 +314,27 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       if (pin) {
         const v = Number(pin);
         if (Number.isInteger(v) && v >= 1 && v <= 50) next.localPinExchanges = v;
+      }
+      // Cloud context-limit override (0 = auto).
+      if (cloudContextLimit) {
+        const v = Number(cloudContextLimit);
+        if (Number.isFinite(v) && v >= 0) next.cloudContextLimit = Math.floor(v);
+      }
+      // Per-provider curated model lists (fetched above, before set()).
+      next.providerModels = providerModels;
+      // Local compaction quality knobs.
+      if (summarizer === "cloud" || summarizer === "sidecar") next.localCompactionSummarizer = summarizer;
+      if (rebuildRaw === "true" || rebuildRaw === "false") next.localCompactionRebuildFromRaw = rebuildRaw === "true";
+      // Cloud compaction: same clamps as the local knobs; enabled parses
+      // anything not in the off-list as on (mirrors the Rust loader).
+      if (cloudEnabled != null) next.cloudCompactionEnabled = !["false", "0", "off"].includes(cloudEnabled.trim());
+      if (cloudThreshold) {
+        const v = Number(cloudThreshold);
+        if (Number.isFinite(v) && v >= 0.25 && v <= 0.99) next.cloudCompactionThreshold = v;
+      }
+      if (cloudPin) {
+        const v = Number(cloudPin);
+        if (Number.isInteger(v) && v >= 1 && v <= 50) next.cloudPinExchanges = v;
       }
       return next;
     });
@@ -319,5 +450,73 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     if (!Number.isInteger(exchanges) || exchanges < 1 || exchanges > 50) return;
     set({ localPinExchanges: exchanges });
     void setSetting(K_LOCAL_PIN_EXCHANGES, String(exchanges));
+  },
+
+  setCloudCompactionEnabled: (enabled) => {
+    set({ cloudCompactionEnabled: enabled });
+    void setSetting(K_CLOUD_COMPACTION_ENABLED, String(enabled));
+  },
+
+  setCloudCompactionThreshold: (threshold) => {
+    if (!Number.isFinite(threshold) || threshold < 0.25 || threshold > 0.99) return;
+    set({ cloudCompactionThreshold: threshold });
+    void setSetting(K_CLOUD_COMPACTION_THRESHOLD, String(threshold));
+  },
+
+  setCloudPinExchanges: (exchanges) => {
+    if (!Number.isInteger(exchanges) || exchanges < 1 || exchanges > 50) return;
+    set({ cloudPinExchanges: exchanges });
+    void setSetting(K_CLOUD_PIN_EXCHANGES, String(exchanges));
+  },
+
+  setCloudContextLimit: (limit) => {
+    if (!Number.isFinite(limit) || limit < 0) return;
+    const v = Math.floor(limit);
+    set({ cloudContextLimit: v });
+    void setSetting(K_CLOUD_CONTEXT_LIMIT, String(v));
+  },
+
+  setProviderModels: (provider, models) => {
+    const cleaned = models
+      .filter((e) => e && typeof e.id === "string" && e.id.trim())
+      .map((e) => ({
+        id: e.id.trim(),
+        contextWindow: Math.max(0, Math.floor(e.contextWindow || 0)),
+      }));
+    set((s) => ({
+      providerModels: { ...s.providerModels, [provider]: cleaned },
+    }));
+    // An empty list persists as [] — the backend's load_selected_models
+    // treats that as "nothing curated" (picker shows all fetched models).
+    void setSetting(selectedModelsKey(provider), JSON.stringify(cleaned));
+    // Maintain the index so load() knows which keys exist.
+    void (async () => {
+      try {
+        const indexRaw = await getSetting(SELECTED_MODELS_INDEX_KEY);
+        const providers: string[] = indexRaw ? JSON.parse(indexRaw) : [];
+        if (!providers.includes(provider)) {
+          providers.push(provider);
+          void setSetting(SELECTED_MODELS_INDEX_KEY, JSON.stringify(providers));
+        }
+      } catch { /* index write is best-effort; the list itself still lands */ }
+    })();
+  },
+
+  modelWindowFor: (provider, model) => {
+    if (!model) return 0;
+    const list = get().providerModels[provider];
+    if (!list) return 0;
+    const m = model.trim().toLowerCase();
+    return list.find((e) => e.id.trim().toLowerCase() === m)?.contextWindow ?? 0;
+  },
+
+  setLocalCompactionSummarizer: (which) => {
+    set({ localCompactionSummarizer: which });
+    void setSetting(K_LOCAL_COMPACTION_SUMMARIZER, which);
+  },
+
+  setLocalCompactionRebuildFromRaw: (on) => {
+    set({ localCompactionRebuildFromRaw: on });
+    void setSetting(K_LOCAL_COMPACTION_REBUILD_FROM_RAW, String(on));
   },
 }));

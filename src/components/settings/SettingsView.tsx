@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
-import { getSetting, setSetting, type ChatProvider, listChatModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel, getDataPaths, setChatDbDir, type DataPaths, getChatConfig, type ChatConfigPayload, exportProjectZip, importChatZip, toastError, toastSuccess, getLocalModelOverrides, setLocalModelOverrides, type LlamaOverrides, installHarness, getLlamaServerPath, detectGpuPower } from "../../lib/ipc";
+import { getSetting, setSetting, type ChatProvider, listChatModels, setChatDefaultModel, type SelectedModelEntry, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, type GgufModel, type StartedModel, type ActiveLocalModel, listConnectors, connectorConnect, connectorConnectFamily, connectorDisconnect, listenOAuthCallback, type ConnectorWithStatus, type OAuthCallbackPayload, deleteDownloadedModel, getDataPaths, setChatDbDir, type DataPaths, getChatConfig, type ChatConfigPayload, exportProjectZip, importChatZip, toastError, toastSuccess, getLocalModelOverrides, setLocalModelOverrides, type LlamaOverrides, installHarness, getLlamaServerPath, detectGpuPower } from "../../lib/ipc";
 import { runLoginFlow } from "../../lib/sessionLauncher";
 import type { HarnessId } from "../../types";
 import { shortModelName } from "../../lib/modelLabel";
@@ -883,12 +883,15 @@ function LocalModelsPanel() {
       </div>
 
       {/* Compaction + Electricity Cost — surfaced near the top so users
-          don't scroll past the model list to reach them. */}
+          don't scroll past the model list to reach them. One compaction
+          panel covers both engines: local (GGUF sidecar) and cloud (the
+          session's own provider). */}
       {tab === "models" && (
         <div className="local-model-settings-row">
           <details className="model-advanced local-compaction-advanced">
             <summary>Compaction (advanced)</summary>
             <LocalCompactionControls />
+            <CloudCompactionControls />
           </details>
           <LocalElectricitySettings />
         </div>
@@ -1279,10 +1282,42 @@ function LocalElectricitySettings() {
 function LocalCompactionControls() {
   const threshold = useSettingsStore((s) => s.localCompactionThreshold);
   const pin = useSettingsStore((s) => s.localPinExchanges);
+  const summarizer = useSettingsStore((s) => s.localCompactionSummarizer);
+  const rebuildFromRaw = useSettingsStore((s) => s.localCompactionRebuildFromRaw);
   const setThreshold = useSettingsStore((s) => s.setLocalCompactionThreshold);
   const setPin = useSettingsStore((s) => s.setLocalPinExchanges);
+  const setSummarizer = useSettingsStore((s) => s.setLocalCompactionSummarizer);
+  const setRebuildFromRaw = useSettingsStore((s) => s.setLocalCompactionRebuildFromRaw);
   return (
     <div className="model-advanced-fields">
+      <label>
+        Summarizer
+        <select
+          value={summarizer}
+          onChange={(e) => setSummarizer(e.target.value === "cloud" ? "cloud" : "sidecar")}
+        >
+          <option value="sidecar">Sidecar model (default)</option>
+          <option value="cloud">Cloud provider (needs an API key)</option>
+        </select>
+        <span className="local-compaction-hint">
+          which model writes the summary — a small sidecar model can lean on a
+          configured cloud key for better quality
+        </span>
+      </label>
+      <label>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={rebuildFromRaw}
+            onChange={(e) => setRebuildFromRaw(e.target.checked)}
+          />
+          <span>Rebuild summaries from the original turns</span>
+        </div>
+        <span className="local-compaction-hint">
+          re-derives each new summary from the folded raw turns instead of
+          stacking summary-on-summary (prevents compounding loss)
+        </span>
+      </label>
       <label>
         Threshold
         <input
@@ -1309,6 +1344,85 @@ function LocalCompactionControls() {
         />
         <span className="local-compaction-hint">
           recent user+assistant pairs kept verbatim (default 6)
+        </span>
+      </label>
+    </div>
+  );
+}
+
+/** Context-compaction controls for cloud/API sessions. Same engine as the
+ *  local path; the trigger is an estimated request size against the model
+ *  registry's window and the summarizer is the session's own provider.
+ *  Defaults and clamping mirror the Rust loader in chat/cloud_compact.rs. */
+function CloudCompactionControls() {
+  const enabled = useSettingsStore((s) => s.cloudCompactionEnabled);
+  const threshold = useSettingsStore((s) => s.cloudCompactionThreshold);
+  const pin = useSettingsStore((s) => s.cloudPinExchanges);
+  const contextLimit = useSettingsStore((s) => s.cloudContextLimit);
+  const setEnabled = useSettingsStore((s) => s.setCloudCompactionEnabled);
+  const setThreshold = useSettingsStore((s) => s.setCloudCompactionThreshold);
+  const setPin = useSettingsStore((s) => s.setCloudPinExchanges);
+  const setContextLimit = useSettingsStore((s) => s.setCloudContextLimit);
+  return (
+    <div className="model-advanced-fields">
+      <label>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+          />
+          <span>Compact cloud conversations automatically</span>
+        </div>
+        <span className="local-compaction-hint">
+          summarizes older turns when the estimated request approaches the model's
+          window; a context-overflow rejection is compacted and retried regardless
+        </span>
+      </label>
+      <label>
+        Threshold
+        <input
+          type="number"
+          min={0.25}
+          max={0.99}
+          step={0.05}
+          value={threshold}
+          disabled={!enabled}
+          onChange={(e) => setThreshold(Number(e.target.value))}
+        />
+        <span className="local-compaction-hint">
+          fraction of the model window that triggers compaction (default 0.75)
+        </span>
+      </label>
+      <label>
+        Pin exchanges
+        <input
+          type="number"
+          min={1}
+          max={50}
+          step={1}
+          value={pin}
+          disabled={!enabled}
+          onChange={(e) => setPin(Math.floor(Number(e.target.value)))}
+        />
+        <span className="local-compaction-hint">
+          recent user+assistant pairs kept verbatim (default 6)
+        </span>
+      </label>
+      <label>
+        Context limit (tokens)
+        <input
+          type="number"
+          min={0}
+          step={10000}
+          placeholder="0 = model default"
+          value={contextLimit}
+          onChange={(e) => setContextLimit(Number(e.target.value))}
+        />
+        <span className="local-compaction-hint">
+          cap the effective window below the model's own — 0 uses the model's
+          real window (fetched live from Anthropic/OpenRouter where available);
+          a cap only shrinks, never raises
         </span>
       </label>
     </div>
@@ -1642,7 +1756,16 @@ function ApiKeysPanel() {
   const [saving, setSaving] = useState(false);
   const formDirtyRef = useRef(false);
   const [fetchingModels, setFetchingModels] = useState(false);
-  const [fetchedModels, setFetchedModels] = useState<Array<{ id: string; object: string; created: number; ownedBy: string }>>([]);
+  const [fetchedModels, setFetchedModels] = useState<Array<{ id: string; object: string; created: number; ownedBy: string; contextWindow?: number | null }>>([]);
+  // Curated Model list (persisted per provider): the rows the composer's
+  // model picker offers for this provider, each with an optional per-model
+  // context-window pin (0 = auto: live API figure, else the registry).
+  const [curatedModels, setCuratedModels] = useState<SelectedModelEntry[]>([]);
+  const [editingWindow, setEditingWindow] = useState<string | null>(null);
+  const [windowDraft, setWindowDraft] = useState("");
+  const [addingRow, setAddingRow] = useState(false);
+  const [addId, setAddId] = useState("");
+  const [addWindow, setAddWindow] = useState("");
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [addingNew, setAddingNew] = useState(false);
 
@@ -1709,17 +1832,51 @@ function ApiKeysPanel() {
     }
   }, [config, provider]);
 
-  // When the user switches provider, load that provider's config so hasKey
-  // is always accurate for the selected provider. Fields are pre-filled by
-  // the config effect above when the response arrives.
-  const onProviderChange = (v: ChatProvider) => {
-    setProvider(v);
-    setApiKey("");
-    setFetchedModels([]);
-    setFetchError(null);
-    setAddingNew(false);
-    formDirtyRef.current = false; // fresh provider — allow config pre-fill
-    void loadConfigFn(v);
+  // Curated Model list: load the provider's persisted rows whenever the
+  // selected provider changes.
+  useEffect(() => {
+    let cancelled = false;
+    void getSetting(`chat.${provider}.selected_models`).then((raw) => {
+      if (cancelled) return;
+      try {
+        const parsed = raw ? (JSON.parse(raw) as SelectedModelEntry[]) : [];
+        setCuratedModels(Array.isArray(parsed) ? parsed.filter((e) => e && e.id) : []);
+      } catch {
+        setCuratedModels([]);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [provider]);
+
+  // Persist the curated list (the backend's contract: [] = no curation) and
+  // mirror it locally. The FIRST entry becomes the provider's default model
+  // (what new chats seed with) — it replaces the removed standalone Model
+  // field, so there's one source of truth for "which models this provider
+  // offers".
+  const persistCurated = (list: SelectedModelEntry[]) => {
+    const cleaned = list
+      .map((e) => ({ id: e.id.trim(), contextWindow: Math.max(0, Math.floor(e.contextWindow || 0)) }))
+      .filter((e) => e.id);
+    // Route through the settings STORE action — it persists the key AND
+    // updates the in-memory providerModels map (which the composer's model
+    // picker and the context meter read) and maintains the load-time index.
+    // Writing only the DB key here used to leave the store stale: the picker
+    // kept showing every fetched model and the meter ignored the pinned
+    // window.
+    useSettingsStore.getState().setProviderModels(provider, cleaned);
+    setCuratedModels(cleaned);
+    if (cleaned.length > 0) {
+      setModel(cleaned[0].id);
+      void setChatDefaultModel(provider, cleaned[0].id);
+    }
+  };
+
+  const formatWindowBadge = (n: number | null | undefined): string | null => {
+    if (!n || n <= 0) return null;
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`;
+    return `${Math.round(n / 1000)}K`;
   };
 
   const handleFetchModels = async () => {
@@ -1806,6 +1963,19 @@ function ApiKeysPanel() {
 
   const clearSelectedProvider = async () => {
     await handleClear();
+  };
+
+  // When the user switches provider, load that provider's config so hasKey
+  // is always accurate for the selected provider. Fields are pre-filled by
+  // the config effect above when the response arrives.
+  const onProviderChange = (v: ChatProvider) => {
+    setProvider(v);
+    setApiKey("");
+    setFetchedModels([]);
+    setFetchError(null);
+    setAddingNew(false);
+    formDirtyRef.current = false; // fresh provider — allow config pre-fill
+    void loadConfigFn(v);
   };
 
   return (
@@ -1984,16 +2154,107 @@ function ApiKeysPanel() {
             )}
             <div className="api-model-section">
               <div className="api-model-section-head">
-                <label htmlFor="api-model-input">Model</label>
+                <label>Model list</label>
                 {fetchedModels.length > 0 && <span>{fetchedModels.length} available</span>}
               </div>
-              {fetchedModels.length > 0 ? (
-                <GlassSelect<string> value={model} options={fetchedModels.map((m) => ({ value: m.id, label: m.id }))} onChange={(v) => { formDirtyRef.current = true; setModel(v); }} aria-label="Model" />
-              ) : (
-                <input id="api-model-input" type="text" value={model} onChange={(e) => { formDirtyRef.current = true; setModel(e.target.value); }} placeholder="e.g. claude-sonnet-5" />
-              )}
+              {/* The rows the composer's model picker offers for this
+                  provider, each with its own context-window pin (0 = auto:
+                  live API figure, else the built-in registry). The FIRST
+                  row is the default model for new chats. */}
+              <div className="api-model-list">
+                {curatedModels.map((entry) => (
+                  <div className="api-model-row" key={entry.id}>
+                    <span className="api-model-row-name" title={entry.id}>{entry.id}</span>
+                    <span className="api-model-row-badges">
+                      {formatWindowBadge(entry.contextWindow) && (
+                        <span className="api-model-badge">{formatWindowBadge(entry.contextWindow)}</span>
+                      )}
+                      {!entry.contextWindow && (() => {
+                        const live = fetchedModels.find((m) => m.id === entry.id)?.contextWindow;
+                        return formatWindowBadge(live) ? <span className="api-model-badge is-live">{formatWindowBadge(live)}</span> : null;
+                      })()}
+                    </span>
+                    {editingWindow === entry.id ? (
+                      <span className="api-model-row-edit">
+                        <input
+                          type="number"
+                          min={0}
+                          step={1000}
+                          autoFocus
+                          value={windowDraft}
+                          placeholder="0 = auto"
+                          onChange={(e) => setWindowDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              persistCurated(curatedModels.map((m) =>
+                                m.id === entry.id ? { ...m, contextWindow: Math.max(0, Math.floor(Number(windowDraft) || 0)) } : m,
+                              ));
+                              setEditingWindow(null);
+                            }
+                            if (e.key === "Escape") setEditingWindow(null);
+                          }}
+                        />
+                        <button type="button" className="api-text-button" onClick={() => {
+                          persistCurated(curatedModels.map((m) =>
+                            m.id === entry.id ? { ...m, contextWindow: Math.max(0, Math.floor(Number(windowDraft) || 0)) } : m,
+                          ));
+                          setEditingWindow(null);
+                        }}>Save</button>
+                      </span>
+                    ) : (
+                      <span className="api-model-row-actions">
+                        <button type="button" className="api-icon-button" title="Edit context window" onClick={() => {
+                          setEditingWindow(entry.id);
+                          setWindowDraft(entry.contextWindow ? String(entry.contextWindow) : "");
+                        }}><Pencil size={13} /></button>
+                        <button type="button" className="api-icon-button" title="Remove from list" onClick={() => persistCurated(curatedModels.filter((m) => m.id !== entry.id))}>✕</button>
+                      </span>
+                    )}
+                  </div>
+                ))}
+                {addingRow && (
+                  <div className="api-model-row is-adding">
+                    {fetchedModels.length > 0 ? (
+                      <GlassSelect<string>
+                        value={addId}
+                        options={[{ value: "", label: "Pick a model…" }, ...fetchedModels
+                          .filter((m) => !curatedModels.some((c) => c.id === m.id))
+                          .map((m) => ({ value: m.id, label: m.id }))]}
+                        onChange={(v) => setAddId(v)}
+                        aria-label="Model to add"
+                      />
+                    ) : (
+                      <input
+                        type="text"
+                        value={addId}
+                        placeholder="model-id"
+                        onChange={(e) => setAddId(e.target.value)}
+                      />
+                    )}
+                    <input
+                      className="api-model-add-window"
+                      type="number"
+                      min={0}
+                      step={1000}
+                      value={addWindow}
+                      placeholder="context (0 = auto)"
+                      onChange={(e) => setAddWindow(e.target.value)}
+                    />
+                    <button type="button" className="api-text-button" disabled={!addId.trim()} onClick={() => {
+                      persistCurated([...curatedModels, {
+                        id: addId.trim(),
+                        contextWindow: Math.max(0, Math.floor(Number(addWindow) || 0)),
+                      }]);
+                      setAddId("");
+                      setAddWindow("");
+                      setAddingRow(false);
+                    }}>Add</button>
+                    <button type="button" className="api-text-button" onClick={() => { setAddingRow(false); setAddId(""); setAddWindow(""); }}>Cancel</button>
+                  </div>
+                )}
+              </div>
               <div className="api-model-actions">
-                <button type="button" className="api-add-model-button" onClick={() => document.getElementById("api-model-input")?.focus()}><Plus size={15} /> Add model</button>
+                <button type="button" className="api-add-model-button" onClick={() => setAddingRow((v) => !v)}><Plus size={15} /> Add model</button>
               </div>
             </div>
             <div className="api-form-actions">

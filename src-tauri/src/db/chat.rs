@@ -626,6 +626,20 @@ pub fn list_active_chat_messages(
     rows.collect()
 }
 
+/// The turns a compaction summary folded away — every row superseded BY the
+/// given summary row. Backs the context-recovery affordance on the
+/// `[compacted context]` marker: the summary is lossy by design, but the raw
+/// turns stay in the DB and must stay reachable ("restorable compression").
+pub fn list_messages_superseded_by(
+    conn: &Connection,
+    summary_id: i64,
+) -> DbResult<Vec<ChatMessageRecord>> {
+    let mut stmt = conn
+        .prepare("SELECT * FROM chat_messages WHERE superseded_by = ?1 ORDER BY id")?;
+    let rows = stmt.query_map(params![summary_id], map_chat_message)?;
+    rows.collect()
+}
+
 /// Delete a single chat message row by id. Returns `true` if a row was
 /// removed, `false` if the id was unknown. Artifacts attributed to this
 /// message are detached (their `chat_message_id` is nulled) rather than

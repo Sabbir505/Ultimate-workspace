@@ -976,6 +976,92 @@
 }
 
 /* Model section */
+/* Curated per-provider Model list (Settings → API provider): rows of
+   selected models with context-window badges, per-row edit/remove, and an
+   inline add row — mirrors the mock's "GLM-5.3 [500K] ✎ ✕" list. */
+.api-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+.api-model-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.api-model-row.is-adding {
+  background: transparent;
+  border-style: dashed;
+}
+.api-model-row.is-adding input,
+.api-model-row.is-adding .glass-select {
+  flex: 1;
+  min-width: 0;
+}
+.api-model-row-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+.api-model-row-badges {
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.api-model-badge {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  background: var(--surface-3, rgba(255, 255, 255, 0.04));
+}
+.api-model-badge.is-live {
+  opacity: 0.7;
+  border-style: dashed;
+}
+.api-model-row-actions,
+.api-model-row-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.api-model-row-edit input {
+  width: 110px;
+  padding: 3px 6px;
+  font-size: 11px;
+}
+.api-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: 0;
+}
+.api-icon-button:hover {
+  color: var(--text);
+  background: var(--surface-3, rgba(255, 255, 255, 0.06));
+}
+.api-model-add-window {
+  width: 130px;
+}
+
 .api-model-section {
   display: flex;
   flex-direction: column;

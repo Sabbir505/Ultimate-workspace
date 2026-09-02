@@ -19,6 +19,8 @@ vi.mock("../lib/ipc", () => ({
   saveApiKey: (...a: unknown[]) => saveApiKeyMock(...a),
   deleteChatApiKey: (...a: unknown[]) => clearApiKeyMock(...a),
   listChatModels: (...a: unknown[]) => listChatModelsMock(...a),
+  setSelectedModels: vi.fn().mockResolvedValue(undefined),
+  setChatDefaultModel: vi.fn().mockResolvedValue(undefined),
   setSetting: (...a: unknown[]) => setSettingMock(...a),
   getSetting: (...a: unknown[]) => getSettingMock(...a),
   listChatSessions: vi.fn().mockResolvedValue([]),
@@ -254,7 +256,7 @@ describe("API Keys Panel", () => {
     expect(screen.getByText("Use manual input")).toBeTruthy();
   });
 
-  it("manual fallback clears error and switches to text input", async () => {
+  it("manual fallback clears error and switches the add-model row to text input", async () => {
     getChatConfigMock.mockResolvedValue({ provider: "openai_compatible", hasKey: true, baseUrl: "https://api.example.com/v1", model: "" });
     listChatModelsMock.mockRejectedValue(new Error("Network error"));
     render(<SettingsView />);
@@ -264,7 +266,11 @@ describe("API Keys Panel", () => {
     await waitFor(() => expect(screen.getByText("Use manual input")).toBeTruthy(), { timeout: 2000 });
     fireEvent.click(screen.getByText("Use manual input"));
     expect(screen.queryByText("Network error")).toBeFalsy();
-    expect(screen.getByPlaceholderText(/e.g. claude-sonnet-5/)).toBeTruthy();
+    // The standalone Model field is gone — manual entry lives in the
+    // Model list's Add-model row, which falls back to a free-text id
+    // input when the fetch failed (no fetched options to pick from).
+    fireEvent.click(within(container).getByText("Add model"));
+    expect(screen.getByPlaceholderText("model-id")).toBeTruthy();
   });
 
   it("save clears API key input after success and shows transient success", async () => {

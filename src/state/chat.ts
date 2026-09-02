@@ -154,14 +154,28 @@ function withoutDeleted(sessions: ChatSession[]): ChatSession[] {
  * optimistic row is kept only when no fetched row carries the same
  * role+content (its just-persisted twin), so the finished turn's bubble is
  * never duplicated.
+ *
+ * The twin test compares the text BEFORE any attachment block, not the full
+ * content: the optimistic note for docs is `[Attached file: NAME]`, while
+ * the backend persists `Attached file: NAME` + a fenced block with the
+ * EXTRACTED body — text we cannot reproduce client-side. Exact matching
+ * stranded the optimistic row next to its persisted twin, so every
+ * doc/text send showed the same message twice once the turn's refetch
+ * landed (the stale optimistic row is re-appended after the fetched
+ * history — user card, assistant turn, user card again).
  */
-function mergeOptimistic(
+function attachmentBaseText(content: string): string {
+  const idx = content.search(/\n\n\[?Attached (?:image|file) ?/);
+  return idx === -1 ? content : content.slice(0, idx);
+}
+
+export function mergeOptimistic(
   current: ChatMessageRecord[],
   fetched: ChatMessageRecord[],
 ): ChatMessageRecord[] {
   const optimistic = current.filter((m) => m.id < 0);
   if (optimistic.length === 0) return fetched;
-  const key = (m: ChatMessageRecord) => `${m.role}\u0000${m.content}`;
+  const key = (m: ChatMessageRecord) => `${m.role}\u0000${attachmentBaseText(m.content)}`;
   const fetchedKeys = new Set(fetched.map(key));
   const missing = optimistic.filter((o) => !fetchedKeys.has(key(o)));
   return missing.length > 0 ? [...fetched, ...missing] : fetched;
@@ -434,6 +448,56 @@ export interface QueuedChatMessage {
  *  BY ID (the collision made steer remove both rows). In-memory only, so a
  *  plain counter is sufficient. */
 let NEXT_QUEUE_ID = 1;
+
+/**
+ * In-memory image bytes for SENT messages. Attachments are persisted as text
+ * markers inside `content` (the backend never stores the bytes), so a
+ * persisted user row renders attachment cards WITHOUT image data — the real
+ * thumbnail existed only on the optimistic bubble and vanished the moment a
+ * refetch replaced it with the persisted twin (the "thumbnail disappears when
+ * the reply arrives" bug). sendMessage remembers the live attachments under
+ * the same role+content equality mergeOptimistic matches on, and MessageBubble
+ * consults the cache, so image cards keep their thumbnail for the whole app
+ * session. Restart loses it (by design — bytes never leave the turn), and the
+ * card degrades to its name+badge glyph, same as history from older builds.
+ */
+const liveAttachmentCache = new Map<string, ChatAttachmentInput[]>();
+const LIVE_ATTACHMENT_CACHE_CAP = 100;
+
+function liveAttachmentKey(
+  chatSessionId: string | null | undefined,
+  content: string,
+): string {
+  return `${chatSessionId}\u0000${content}`;
+}
+
+/** Remember the live (byte-carrying) attachments of a send under the exact
+ *  content the backend will persist — see liveAttachmentCache. */
+export function rememberLiveAttachments(
+  chatSessionId: string,
+  content: string,
+  attachments: ChatAttachmentInput[],
+): void {
+  if (attachments.length === 0) return;
+  liveAttachmentCache.set(liveAttachmentKey(chatSessionId, content), attachments);
+  while (liveAttachmentCache.size > LIVE_ATTACHMENT_CACHE_CAP) {
+    const oldest = liveAttachmentCache.keys().next().value;
+    if (oldest === undefined) break;
+    liveAttachmentCache.delete(oldest);
+  }
+}
+
+/** Live attachment bytes for a message, when THIS app run sent it. Undefined
+ *  for history loaded from the DB (or after eviction) — callers fall back to
+ *  the marker-derived card without a thumbnail. */
+export function liveAttachmentsForMessage(
+  message: { chatSessionId: string | null | undefined; content: string },
+): ChatAttachmentInput[] | undefined {
+  const hit = liveAttachmentCache.get(
+    liveAttachmentKey(message.chatSessionId, message.content),
+  );
+  return hit && hit.length > 0 ? hit : undefined;
+}
 
 /** A per-session goal-driven loop (/goal / /loop). The host auto-issues a
  *  follow-up turn whenever the last reply said `LOOP_STATUS: continue`, up to
@@ -1822,12 +1886,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // Optimistic bubble mirrors what the backend will persist: the typed text
     // plus a compact note per attachment (the model gets the real content).
+    // Optimistic bubble mirrors what the backend will persist. Mirror
+    // process_attachments folding EXACTLY where the frontend can: text
+    // attachments inline the body in the same fenced block the backend
+    // writes, so the optimistic card even shows the same preview. Docs keep
+    // the compact bracket note (extraction is backend-side) and rely on
+    // mergeOptimistic's base-text twin match.
     const attachNote = (attachments ?? [])
-      .map((a) =>
-        a.kind === "image" ? `\n\n[Attached image: ${a.name}]` : `\n\n[Attached file: ${a.name}]`,
-      )
+      .map((a) => {
+        if (a.kind === "image") return `\n\n[Attached image: ${a.name}]`;
+        if (a.kind === "text" && a.text) {
+          return `\n\nAttached file: ${a.name}\n\`\`\`\n${a.text}\n\`\`\``;
+        }
+        return `\n\n[Attached file: ${a.name}]`;
+      })
       .join("");
     const displayContent = `${content}${attachNote}`;
+    // Remember the real bytes under the persisted content so the sent message
+    // keeps its image thumbnails after the optimistic bubble is swapped for
+    // the persisted row (see liveAttachmentCache).
+    rememberLiveAttachments(activeChatSessionId, displayContent, attachments ?? []);
 
     // Optimistically append the user message.
     const userMsg: ChatMessageRecord = {

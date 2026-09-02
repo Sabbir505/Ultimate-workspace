@@ -654,6 +654,38 @@ div[data-index]:has(.chat-session-row.menu-open) {
   width: 26px;
   height: 26px;
 }
+/* Text/doc cards have no image tile — render as a compact document row
+   (small glyph left, name + badge beside it, preview clamped under). The
+   media-tile layout put an 88px empty block above every attached or pasted
+   document, blowing the user bubble out of proportion. */
+.msg-attachment-card.no-thumb {
+  width: 224px;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 7px 8px;
+}
+.msg-attachment-card.no-thumb .msg-attachment-thumb {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  background: transparent;
+  border-radius: var(--radius-xs);
+}
+.msg-attachment-card.no-thumb .msg-attachment-thumb svg {
+  width: 16px;
+  height: 16px;
+}
+.msg-attachment-card.no-thumb .msg-attachment-meta {
+  flex: 1;
+  min-width: 0;
+}
+.msg-attachment-card.no-thumb .msg-attachment-preview {
+  width: 100%;
+  max-height: 10.2em; /* ~7 mono lines */
+  padding: 4px 6px;
+}
 .msg-attachment-meta {
   display: flex;
   align-items: center;

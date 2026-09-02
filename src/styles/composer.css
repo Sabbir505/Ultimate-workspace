@@ -125,9 +125,13 @@
 
 .composer-slash-menu {
   position: absolute;
-  bottom: calc(100% + 6px);
-  left: 0;
-  right: 0;
+  /* Notch of the composer card: grows straight out of its top edge — flush
+     (the card's 10px top padding), exactly the card's width (cancels the
+     card's 12px side padding), square bottom corners and no bottom border so
+     the card's own top edge reads as the seam. */
+  bottom: calc(100% + 10px);
+  left: -12px;
+  right: -12px;
   z-index: 20;
   display: flex;
   flex-direction: column;
@@ -135,10 +139,26 @@
   padding: 6px;
   max-height: 240px;
   overflow-y: auto;
-  background: var(--surface);
+  /* Same liquid glass as the composer card itself. */
   border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.5);
+  border-bottom: none;
+  border-radius: 16px 16px 0 0;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 55%, transparent),
+    color-mix(in srgb, var(--surface-glass) 35%, transparent)
+  );
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: var(--glass-rim), 0 12px 32px -12px rgba(0, 0, 0, 0.35);
+}
+/* Light theme: match the card's brighter body so rows keep contrast. */
+:root[data-theme="light"] .composer-slash-menu {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface-glass) 70%, transparent),
+    color-mix(in srgb, var(--surface-glass) 55%, transparent)
+  );
 }
 .composer-slash-item {
   display: flex;
@@ -148,9 +168,23 @@
   border-radius: var(--radius-xs);
   text-align: left;
   cursor: pointer;
+  /* Flat rows: the global button skin (tokens.css paints a glass pill with a
+     border + rim on EVERY button) must not show here. A row gets a background
+     only while it is the active one — keyboard highlight or mouse hover. */
+  background: transparent;
+  border: 1px solid transparent;
+  box-shadow: none;
+  /* Kill the global button skin's 0.18s background/border transition — the
+     highlight must snap to each arrow keypress, not trail it. */
+  transition: none;
 }
+.composer-slash-item:hover,
 .composer-slash-item.active {
-  background: var(--surface-2);
+  /* A translucent veil of the text color — clearly visible through the
+     menu's translucent glass in both themes, where --surface-2/-glass-2
+     steps are too subtle to read as a highlight. */
+  background: color-mix(in srgb, var(--text) 13%, transparent);
+  border-color: transparent;
 }
 .composer-slash-cmd {
   font-family: var(--font-mono);

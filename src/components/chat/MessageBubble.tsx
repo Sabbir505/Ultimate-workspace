@@ -20,7 +20,7 @@ import rehypeKatex from "rehype-katex";
 import type { ChatMessage, ChatMessageRecord, ChatPerfPayload } from "../../lib/ipc";
 import { listCompactedMessages, readArtifactPreview } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
-import { useChatStore } from "../../state/chat";
+import { liveAttachmentsForMessage, useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { useProjectsStore } from "../../state/projects";
 import { parseUnifiedDiff } from "../../lib/diff";
@@ -1729,12 +1729,19 @@ function MessageBubbleInner({
 
   // Parse attachment markers (e.g. "[Attached image: x]") out of the content
   // so they render as visual cards above the text instead of inline strings.
-  // Live attachments (optimistic message) carry image base64 for thumbnails.
+  // Live attachments (optimistic message) carry image base64 for thumbnails;
+  // for persisted rows the chat store's cache supplies the bytes this app run
+  // sent, so thumbnails survive the optimistic → persisted swap and refetches
+  // instead of collapsing to name+badge glyphs when the reply arrives.
   // Memoized: the multi-regex pass runs on EVERY render otherwise (each
   // streaming flush re-renders the parent list).
   const { attachments: msgAttachments, text: cleanContent } = useMemo(
-    () => parseAttachments(message.content, message.attachments),
-    [message.content, message.attachments],
+    () =>
+      parseAttachments(
+        message.content,
+        message.attachments ?? liveAttachmentsForMessage({ chatSessionId, content: message.content }),
+      ),
+    [message.content, message.attachments, chatSessionId],
   );
 
   // PERF (PERFORMANCE_AUDIT.md F8): memoize the parse → group chain by

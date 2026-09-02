@@ -161,14 +161,16 @@ function FileGlyph({ kind }: { kind: ParsedAttachment["kind"] }) {
 }
 
 /** A single attachment preview card. Images with a live thumbnail show it;
- *  otherwise a file card with an icon, name, ext/label badge, and an optional
- *  content preview. */
+ *  otherwise a compact file row (small glyph, name, ext/label badge, and an
+ *  optional content preview) — a full-height image tile on a text/doc card
+ *  rendered as a huge empty block that broke the bubble layout. */
 function AttachmentPreviewCard({ att }: { att: ParsedAttachment }) {
   const isImage = att.kind === "image";
+  const hasThumb = isImage && !!att.thumbDataUri;
   return (
-    <div className="msg-attachment-card" title={att.name}>
+    <div className={`msg-attachment-card${hasThumb ? "" : " no-thumb"}`} title={att.name}>
       <div className="msg-attachment-thumb">
-        {isImage && att.thumbDataUri ? (
+        {hasThumb ? (
           <img src={att.thumbDataUri} alt={att.name} loading="lazy" />
         ) : (
           <FileGlyph kind={att.kind} />

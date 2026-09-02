@@ -6,7 +6,9 @@
 // Enter sends; Shift+Enter inserts a newline.
 // Attachments: images are sent as vision input, docx/pptx/xlsx/pdf and legacy
 // doc/ppt/xls are extracted to text server-side, and plain-text files are
-// inlined into the message.
+// inlined into the message. Files reach those paths via the "+" picker OR by
+// pasting straight into the textarea (screenshots, copied images, OS-copied
+// files — anything the clipboard exposes as a file).
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ArrowUpToLine, GripVertical, Mic, Pencil, Plug, Puzzle, SquareSlash, Trash2, X } from "lucide-react";
@@ -47,6 +49,11 @@ import {
 const MAX_TEXT_BYTES = 512 * 1024;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 const MAX_DOC_BYTES = 10 * 1024 * 1024;
+// A paste this large stops being a sentence and becomes a document: it turns
+// into a "Pasted text.txt" attachment card (which the sent message renders as
+// a document card with a content preview) instead of a wall of inline text in
+// the draft and the bubble.
+const PASTE_TEXT_DOCUMENT_CHARS = 1200;
 
 // Parse `/create [artifact] [a|an] <type> [instruction]` or
 // `/create-artifact [type] [instruction]`. Returns `{ type, instruction }`
@@ -171,6 +178,26 @@ export interface ChatAttachment {
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "webp"];
 const DOC_EXTS = ["docx", "pptx", "xlsx", "pdf", "doc", "ppt", "xls"];
+
+/** Which attachment bucket a File falls into — shared by the "+" picker and
+ *  the paste path so the two can never drift. Images match by extension OR a
+ *  non-SVG image MIME (a pasted screenshot carries "image/png" but often only
+ *  the generic name "image.png"); docs match by extension; everything else is
+ *  read as text (binary content is rejected later by the NUL sniff). */
+export function classifyAttachment(file: { name: string; type: string }): {
+  kind: ChatAttachment["kind"];
+  ext: string;
+} {
+  const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+  if (
+    IMAGE_EXTS.includes(ext) ||
+    (file.type.startsWith("image/") && file.type !== "image/svg+xml")
+  ) {
+    return { kind: "image", ext };
+  }
+  if (DOC_EXTS.includes(ext)) return { kind: "doc", ext };
+  return { kind: "text", ext };
+}
 
 /** Short type badge shown on the attachment card (e.g. "PDF", "IMAGE"). */
 function attachmentBadge(a: ChatAttachment): string {
@@ -785,6 +812,38 @@ function readAsBase64(file: File): Promise<string> {
   });
 }
 
+/** Turn one picked or pasted File into a ChatAttachment. Throws with a
+ *  user-facing message when the file is over its kind's size cap, decodes as
+ *  binary on the text path, or can't be read at all. */
+export async function fileToAttachment(file: File): Promise<ChatAttachment> {
+  const { kind, ext } = classifyAttachment(file);
+  const limit =
+    kind === "image" ? MAX_IMAGE_BYTES : kind === "doc" ? MAX_DOC_BYTES : MAX_TEXT_BYTES;
+  if (file.size > limit) {
+    throw new Error(`${file.name} is too large (max ${Math.round(limit / 1024 / 1024)} MB)`);
+  }
+  if (kind === "image") {
+    return {
+      name: file.name,
+      size: file.size,
+      kind: "image",
+      data: await readAsBase64(file),
+      mediaType: file.type || `image/${ext === "jpg" ? "jpeg" : ext}`,
+    };
+  }
+  if (kind === "doc") {
+    return { name: file.name, size: file.size, kind: "doc", data: await readAsBase64(file), format: ext };
+  }
+  const text = await file.text();
+  // NUL bytes are the tell for binary content decoded as text — a pasted OS
+  // file with an unregistered extension (an .exe, a font) lands here. Reject
+  // it instead of inlining mojibake into the prompt.
+  if (text.includes("\u0000")) {
+    throw new Error(`${file.name} is not a supported attachment type`);
+  }
+  return { name: file.name, size: file.size, kind: "text", text };
+}
+
 interface Props {
   /** The chat session this composer writes to. Defaults to the global active
    *  session; the split pane passes its pinned session so slash-command
@@ -1269,6 +1328,18 @@ export function ChatComposer({
     setAtIndex(0);
   }, [atQuery]);
 
+  // Keep the keyboard-highlighted row visible: both menus are capped-height
+  // scroll areas, and arrowing past the fold would otherwise move the
+  // selection onto a row the user can't see.
+  const slashActiveRef = useRef<HTMLButtonElement | null>(null);
+  const atActiveRef = useRef<HTMLButtonElement | null>(null);
+  useLayoutEffect(() => {
+    if (slashOpen) slashActiveRef.current?.scrollIntoView({ block: "nearest" });
+  }, [slashIndex, slashOpen]);
+  useLayoutEffect(() => {
+    if (atOpen) atActiveRef.current?.scrollIntoView({ block: "nearest" });
+  }, [atIndex, atOpen]);
+
   /** Splice `replacement` over the popup's token span, keep everything else,
    *  and put the caret right after the inserted text. */
   const replaceTokenSpan = useCallback(
@@ -1714,37 +1785,8 @@ export function ChatComposer({
     if (!files) return;
     setAttachError(null);
     for (const file of Array.from(files)) {
-      const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
-      const isImage =
-        IMAGE_EXTS.includes(ext) ||
-        (file.type.startsWith("image/") && file.type !== "image/svg+xml");
-      const isDoc = DOC_EXTS.includes(ext);
-      const limit = isImage ? MAX_IMAGE_BYTES : isDoc ? MAX_DOC_BYTES : MAX_TEXT_BYTES;
-      if (file.size > limit) {
-        setAttachError(`${file.name} is too large (max ${Math.round(limit / 1024 / 1024)} MB)`);
-        continue;
-      }
       try {
-        let attachment: ChatAttachment;
-        if (isImage) {
-          attachment = {
-            name: file.name,
-            size: file.size,
-            kind: "image",
-            data: await readAsBase64(file),
-            mediaType: file.type || `image/${ext === "jpg" ? "jpeg" : ext}`,
-          };
-        } else if (isDoc) {
-          attachment = {
-            name: file.name,
-            size: file.size,
-            kind: "doc",
-            data: await readAsBase64(file),
-            format: ext,
-          };
-        } else {
-          attachment = { name: file.name, size: file.size, kind: "text", text: await file.text() };
-        }
+        const attachment = await fileToAttachment(file);
         setAttachments((prev) =>
           // Dedupe on name AND size: two different files can share a name
           // (`Screenshot.png` from two folders) — only an exact name+size
@@ -1753,11 +1795,67 @@ export function ChatComposer({
             ? prev
             : [...prev, attachment],
         );
-      } catch {
-        setAttachError(`Could not read ${file.name}`);
+      } catch (e) {
+        setAttachError(e instanceof Error && e.message ? e.message : `Could not read ${file.name}`);
       }
     }
   }, []);
+
+  // Long pasted text arrives as clipboard TEXT (no file), but a wall of
+  // inline text wrecks the draft and the sent bubble. Above the threshold it
+  // becomes a text document card instead — same pipeline as an attached .txt,
+  // so size caps apply and the sent message renders a document card.
+  const attachPastedText = useCallback(async (text: string) => {
+    setAttachError(null);
+    try {
+      const parsed = await fileToAttachment(
+        new File([text], "Pasted text.txt", { type: "text/plain" }),
+      );
+      setAttachments((prev) => {
+        // Same name+size = the same content re-pasted — dedupe. A DIFFERENT
+        // long text while one is already attached gets a numbered name, or
+        // the name+size dedupe would silently swallow it.
+        let attachment = parsed;
+        if (prev.some((a) => a.name === parsed.name && (a.size ?? -1) !== parsed.size)) {
+          let n = 2;
+          while (prev.some((a) => a.name === `Pasted text ${n}.txt`)) n++;
+          attachment = { ...parsed, name: `Pasted text ${n}.txt` };
+        }
+        if (prev.some((a) => a.name === attachment.name && (a.size ?? -1) === attachment.size)) {
+          return prev;
+        }
+        return [...prev, attachment];
+      });
+    } catch (e) {
+      setAttachError(e instanceof Error && e.message ? e.message : "Could not attach pasted text");
+    }
+  }, []);
+
+  // Paste-to-attach: a screenshot (or any copied image) lands on the
+  // clipboard as a file, and so do files copied from the OS file manager.
+  // When a paste carries ANY file, intercept it and run the same handleFiles
+  // path as the "+" picker; text-only pastes keep the default insert unless
+  // they are long enough to become a document card (attachPastedText).
+  // Intercepting on the mere presence of files matters because an image+HTML
+  // clipboard (copying from Word/browsers) would otherwise paste markup into
+  // the draft and drop the image.
+  const handlePaste = useCallback(
+    (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const clipboard = e.clipboardData;
+      const files = clipboard?.files;
+      if (files && files.length > 0) {
+        e.preventDefault();
+        void handleFiles(files);
+        return;
+      }
+      const text = clipboard?.getData("text/plain") ?? "";
+      if (text.length >= PASTE_TEXT_DOCUMENT_CHARS) {
+        e.preventDefault();
+        void attachPastedText(text);
+      }
+    },
+    [handleFiles, attachPastedText],
+  );
 
   // A model must be explicitly chosen before sending (no default model).
   // ACP agents pick their own model — an empty model must not block Send.
@@ -2278,6 +2376,7 @@ export function ChatComposer({
                     type="button"
                     role="option"
                     aria-selected={i === slashIndex}
+                    ref={i === slashIndex ? slashActiveRef : undefined}
                     className={`composer-slash-item${i === slashIndex ? " active" : ""}`}
                     // onMouseDown + preventDefault keeps textarea focus.
                     onMouseDown={(e) => {
@@ -2306,6 +2405,7 @@ export function ChatComposer({
                   type="button"
                   role="option"
                   aria-selected={i === atIndex}
+                  ref={i === atIndex ? atActiveRef : undefined}
                   className={`composer-slash-item${i === atIndex ? " active" : ""}`}
                   onMouseDown={(e) => {
                     e.preventDefault();
@@ -2337,6 +2437,7 @@ export function ChatComposer({
               setCaret(e.target.selectionStart ?? e.target.value.length);
             }}
             onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
+            onPaste={handlePaste}
             onKeyDown={handleKeyDown}
             rows={1}
             disabled={disabled}

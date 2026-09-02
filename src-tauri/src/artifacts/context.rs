@@ -17,6 +17,11 @@ pub struct ArtifactGenerationContext {
     pub workspace: WorkspaceContext,
     pub user_instruction: Option<String>,
     pub artifact_type: ArtifactType,
+    /// How confidently the request was classified as this artifact type
+    /// (0.0-1.0). 1.0 when the type came explicitly from the frontend
+    /// (/create command or deterministic detection); the keyword classifier's
+    /// score otherwise. Feeds the proposal's confidence estimate.
+    pub intent_confidence: f32,
     /// LLM credentials for generation (chat session's provider/model/key).
     pub llm: LlmContext,
 }
@@ -89,6 +94,7 @@ pub async fn build_context(
         workspace,
         user_instruction: intent.instruction.clone(),
         artifact_type,
+        intent_confidence: intent.confidence,
         llm,
     })
 }

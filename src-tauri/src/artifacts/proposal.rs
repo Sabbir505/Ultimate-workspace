@@ -90,7 +90,8 @@ pub struct ArtifactProposal {
     pub artifact_type: ArtifactType,
     /// The artifact configuration (no provenance here).
     pub spec: ArtifactSpec,
-    /// Classifier confidence (0.0-1.0).
+    /// Estimated proposal quality (0.0-1.0): intent-classification confidence
+    /// × generated-spec completeness. Computed by the generator, never static.
     pub confidence: f32,
     /// Fields the generator couldn't determine.
     #[serde(default)]

@@ -22,8 +22,73 @@ pub async fn generate_artifact(
     )
     .await?;
 
-    let proposal = ArtifactProposal::new(context.artifact_type, spec, 0.9);
+    let confidence = compute_confidence(context.intent_confidence, &spec);
+    let proposal = ArtifactProposal::new(context.artifact_type, spec, confidence);
     Ok(proposal)
+}
+
+/// Proposal confidence = how confidently the request was classified as this
+/// artifact type × how completely the LLM filled the spec. Replaces the old
+/// hardcoded 0.9 so the UI chip reflects something measurable. The floor
+/// keeps a degenerate spec from rendering a confusing 0%; the ceiling stops a
+/// perfect checklist from claiming certainty.
+fn compute_confidence(intent_confidence: f32, spec: &ArtifactSpec) -> f32 {
+    (intent_confidence.clamp(0.0, 1.0) * spec_completeness(spec)).clamp(0.05, 0.99)
+}
+
+/// Weighted field checklist per artifact type, normalized by total weight so
+/// scores stay in [0, 1]. Core fields (name, instructions/objective/template,
+/// steps) outweigh enrichment fields (examples, permissions) — a spec that
+/// only carries the skeleton lands mid-range instead of near-perfect.
+fn spec_completeness(spec: &ArtifactSpec) -> f32 {
+    let filled = |s: &str| !s.trim().is_empty();
+    let checks: Vec<(f32, bool)> = match spec {
+        ArtifactSpec::Skill(s) => vec![
+            (3.0, filled(&s.name)),
+            (3.0, filled(&s.description)),
+            (4.0, filled(&s.instructions)),
+            (2.0, !s.inputs.is_empty()),
+            (2.0, !s.outputs.is_empty()),
+            (2.0, s.tools.as_ref().is_some_and(|t| !t.is_empty())),
+            (1.0, s.permissions.is_some()),
+            (1.0, s.examples.as_ref().is_some_and(|e| !e.is_empty())),
+        ],
+        ArtifactSpec::Loop(s) => vec![
+            (3.0, filled(&s.name)),
+            (2.0, filled(&s.description)),
+            (4.0, filled(&s.objective)),
+            (4.0, s.steps.iter().any(|st| filled(&st.action))),
+            (2.0, s.iteration.max > 0),
+            (1.0, s.iteration.condition.as_deref().is_some_and(filled)),
+            (1.0, !s.inputs.is_empty()),
+            (1.0, !s.outputs.is_empty()),
+            (1.0, s.permissions.is_some()),
+        ],
+        ArtifactSpec::PromptTemplate(s) => vec![
+            (3.0, filled(&s.name)),
+            (3.0, filled(&s.description)),
+            (4.0, filled(&s.template)),
+            (3.0, !s.variables.is_empty()),
+            (1.0, s.output_format.as_deref().is_some_and(filled)),
+            (1.0, s.examples.as_ref().is_some_and(|e| !e.is_empty())),
+        ],
+        ArtifactSpec::Automation(s) => vec![
+            (3.0, filled(&s.name)),
+            (3.0, filled(&s.description)),
+            (2.0, filled(&s.trigger.kind)),
+            (2.0, s.trigger.schedule.as_deref().is_some_and(filled)),
+            (4.0, s.steps.iter().any(|st| filled(&st.action))),
+            (1.0, s.harness.as_deref().is_some_and(filled)),
+            (1.0, s.inputs.as_ref().is_some_and(|v| !v.is_empty())),
+            (1.0, s.outputs.as_ref().is_some_and(|v| !v.is_empty())),
+            (1.0, s.permissions.is_some()),
+        ],
+    };
+    let total: f32 = checks.iter().map(|(w, _)| w).sum();
+    if total <= 0.0 {
+        return 0.0;
+    }
+    checks.iter().filter(|(_, met)| *met).map(|(w, _)| w).sum::<f32>() / total
 }
 
 /// Regenerate an artifact with additional instruction.
@@ -450,6 +515,70 @@ async fn call_anthropic_structured(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifacts::schemas::{
+        Example, InputDefinition, OutputDefinition, PermissionPolicy, SkillSpec,
+    };
+
+    fn skill_spec(name: &str, description: &str, instructions: &str) -> SkillSpec {
+        SkillSpec {
+            name: name.to_string(),
+            description: description.to_string(),
+            instructions: instructions.to_string(),
+            inputs: vec![],
+            outputs: vec![],
+            tools: None,
+            model: None,
+            permissions: None,
+            examples: None,
+        }
+    }
+
+    /// A skeleton spec (only the required strings) lands mid-range, not at the
+    /// old hardcoded 0.9: 10 of the 18 skill weights (name 3 + description 3 +
+    /// instructions 4).
+    #[test]
+    fn completeness_scores_skeleton_spec_midrange() {
+        let score = spec_completeness(&ArtifactSpec::Skill(skill_spec("N", "D", "I")));
+        assert!((score - 10.0 / 18.0).abs() < 1e-6, "skeleton score {score}");
+    }
+
+    /// Every field filled → completeness 1.0, and confidence saturates at the
+    /// 0.99 ceiling instead of claiming certainty.
+    #[test]
+    fn confidence_caps_a_complete_spec_at_099() {
+        let mut spec = skill_spec("N", "D", "I");
+        spec.inputs = vec![InputDefinition {
+            name: "x".to_string(),
+            description: None,
+            kind: None,
+        }];
+        spec.outputs = vec![OutputDefinition {
+            name: "y".to_string(),
+            description: None,
+            schema: None,
+        }];
+        spec.tools = Some(vec!["read_file".to_string()]);
+        spec.permissions = Some(PermissionPolicy::WorkspaceWrite);
+        spec.examples = Some(vec![Example {
+            input: "in".to_string(),
+            output: "out".to_string(),
+        }]);
+        let s = ArtifactSpec::Skill(spec);
+        assert!((spec_completeness(&s) - 1.0).abs() < 1e-6);
+        assert!((compute_confidence(1.0, &s) - 0.99).abs() < 1e-6);
+    }
+
+    /// Confidence is the product: a half-confident intent classification
+    /// halves the score, and an empty spec bottoms out at the 0.05 floor.
+    #[test]
+    fn confidence_blends_intent_and_completeness() {
+        let skeleton = ArtifactSpec::Skill(skill_spec("N", "D", "I"));
+        let expected = 0.5 * (10.0 / 18.0);
+        assert!((compute_confidence(0.5, &skeleton) - expected).abs() < 1e-6);
+
+        let empty = ArtifactSpec::Skill(skill_spec("", "", ""));
+        assert!((compute_confidence(1.0, &empty) - 0.05).abs() < 1e-6);
+    }
 
     /// The fence-stripper must recover a spec from both fenced and bare JSON,
     /// and reject garbage with an error that includes the offending content

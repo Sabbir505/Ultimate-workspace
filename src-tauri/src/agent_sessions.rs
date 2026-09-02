@@ -401,7 +401,13 @@ impl AgentSessionManager {
         if !WIRE_MODES.contains(&mode_label) {
             return false;
         }
-        let Ok(sessions) = self.sessions.lock() else {
+        // Best-effort live-apply — NEVER wait on the global `sessions` mutex
+        // here. This runs from sync commands on the MAIN thread; a send
+        // holds `sessions` for its whole (potentially slow) setup, and a
+        // blocking wait froze the entire window (audit B-8 class). Contended
+        // → false: the deterministic mode-mismatch respawn in
+        // `send_claude_turn` applies the change on the next send anyway.
+        let Ok(sessions) = self.sessions.try_lock() else {
             return false;
         };
         let Some(entry) = sessions.get(chat_session_id) else {
@@ -1052,8 +1058,16 @@ fn send_claude_turn(
         }
         // The dead process's stdin is a broken pipe — drop it so a respawn
         // failure can't leave a stale handle behind (B-4/B-5 hygiene).
-        let mut guard = entry.stdin.lock().map_err(|e| e.to_string())?;
-        *guard = None;
+        // MUST be a scoped block: spawn_claude below re-locks this same
+        // stdin cell to install the fresh child's pipe. A std Mutex is not
+        // reentrant — a guard held across that call would deadlock the send
+        // on itself WHILE holding the global `sessions` mutex, freezing
+        // every later send/cancel and the main thread behind them (the
+        // whole window goes "Not Responding").
+        {
+            let mut guard = entry.stdin.lock().map_err(|e| e.to_string())?;
+            *guard = None;
+        }
         // Fresh per-process cancel flag: a respawn after cancel() must not
         // inherit the previous process's `true`.
         let cancelled = Arc::new(AtomicBool::new(false));

@@ -1,8 +1,9 @@
-// Relay app logo — the REAL brand asset (src-tauri/icons/128x128@2x.png,
-// copied to public/logo.png), not a drawn approximation. An earlier inline
-// SVG here tried to recreate the mark and drifted from the shipped icon
-// (wrong chip proportions, missing rail glyphs). Used where the brand stands
-// in for UI chrome (e.g. the collapsed-sidebar restore button).
+// Relay app logo — the REAL brand asset (src-tauri/icons/final.png, made
+// transparent and published as public/logo.png by
+// scripts/make_logo_transparent.py). The PNG carries its own rounded-square
+// silhouette with transparent corners, so no CSS rounding is applied — the
+// artwork's exact shape shows through at every size. Used where the brand
+// stands in for UI chrome (e.g. the collapsed-sidebar restore button).
 //
 // The image lives in public/ so the boot splash (index.html) can reference
 // the same file by URL without bundling it twice. `/logo.png` is safe: the
@@ -18,9 +19,6 @@ export function AppLogo({ size = 20 }: { size?: number }) {
       style={{
         width: size,
         height: size,
-        // The asset is a rounded-square tile; rounding the <img> as well
-        // keeps the silhouette if a future source ships square corners.
-        borderRadius: Math.max(2, size * 0.22),
         display: "block",
       }}
     />

@@ -20,7 +20,7 @@
 // drives the right pane; clicking a model row COMMITS the selection
 // (agent + provider + model together), so a pick can never land the session
 // on an agent with another agent's model attached.
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { listHarnesses, listAcpAgents, listHarnessModels, listChatModels, scanLocalModels, getChatConfig, type ChatConfigPayload, type GgufModel, type HarnessModelConfig, type LlamaOverrides } from "../../lib/ipc";
 import type { HarnessStatus, AcpAgentStatus } from "../../types";
@@ -263,7 +263,7 @@ function railIcon(key: string, label: string): JSX.Element {
 
 // ---- component -------------------------------------------------------------
 
-export function AgentModelPicker({
+export function AgentModelPickerInner({
   agent,
   model,
   provider,
@@ -989,3 +989,10 @@ export function AgentModelPicker({
     </div>
   );
 }
+
+// Memoized (PERF): the picker chip lives inside the composer, which
+// re-renders on every keystroke. All props are primitives or stable
+// references (ChatView memoizes modelLabels and the callbacks), so memo
+// skips the chip subtree on typing re-renders. The open popup re-renders as
+// usual whenever its own state changes.
+export const AgentModelPicker = memo(AgentModelPickerInner);

@@ -10,7 +10,7 @@
 // Switching INTO full_auto does NOT apply here: the store opens a one-time
 // confirmation modal instead; selecting full_auto in this menu calls
 // onModeChange("full_auto") only as a request the store may intercept.
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PermissionMode } from "../../state/chat";
 
 export interface ModeOption {
@@ -74,7 +74,7 @@ interface Props {
   modes?: ModeOption[];
 }
 
-export function PermissionModeMenu({ mode, onModeChange, variant = "pill", planAvailable = false, modes: modesOverride }: Props) {
+export function PermissionModeMenuInner({ mode, onModeChange, variant = "pill", planAvailable = false, modes: modesOverride }: Props) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
@@ -220,3 +220,9 @@ export function PermissionModeMenu({ mode, onModeChange, variant = "pill", planA
     </div>
   );
 }
+
+// Memoized (PERF): the menu lives in the composer's control bar, which
+// re-renders on every keystroke. All props are primitives / stable module
+// constants / a useCallback from ChatView, so memo skips this subtree while
+// the user types.
+export const PermissionModeMenu = memo(PermissionModeMenuInner);

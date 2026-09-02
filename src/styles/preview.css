@@ -281,6 +281,20 @@
 .artifact-preview-md {
   padding: 14px 16px;
 }
+/* Long-document scroll performance: top-level markdown blocks outside the
+   viewport skip layout + paint entirely (Chromium content-visibility). A big
+   .md file used to lay out its WHOLE DOM (katex, highlighted code, tables)
+   on every scroll frame. contain-intrinsic-size keeps the scrollbar
+   approximately stable before a block is first rendered ("auto" remembers
+   the real size after the first paint). */
+.artifact-preview-md > * {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 320px;
+}
+.canvas-plan-body > * {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 320px;
+}
 .artifact-preview-image {
   width: 100%;
   height: 100%;

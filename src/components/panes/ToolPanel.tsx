@@ -12,7 +12,7 @@
 // center, and terminals/browsers live here as tabs. The panel's own
 // left-edge drag handle doubles as the chat|panel splitter (same pattern as
 // DevDiffPanel's resize handle), with the width persisted in the ui store.
-import { lazy, useState, Suspense, useCallback, useEffect, useMemo, useRef } from "react";
+import { lazy, useState, Suspense, useCallback, useEffect, useMemo, useRef, memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Globe, Terminal, FileDiff, GitPullRequest, Bot, FileCode, NotebookText, GitBranch } from "lucide-react";
@@ -24,6 +24,7 @@ import {
   type Pane,
 } from "../../state/panes";
 import { useUiStore, type ToolPanelTab, type ToolPanelTabInstance } from "../../state/ui";
+import type { ChatArtifact } from "../../state/chat";
 import { harnessShortName } from "../../types";
 // ArtifactPreviewPane is the heaviest chat component (syntax highlighting,
 // markdown rendering, JSX live preview). Lazy-load so the right panel tab
@@ -55,6 +56,61 @@ function terminalLabel(t: Pane): string {
     ? `${t.data.label || "Terminal"}${t.data.harness ? ` (${harnessShortName(t.data.harness)})` : ""}`
     : "Terminal";
 }
+
+/** Stable wrapper around ArtifactPreviewPane (PERF): the pane subscribes to
+ *  nothing itself, so its render cost should be paid only when the shown
+ *  artifact actually changes — but ToolPanel re-renders on every store tick
+ *  (chat tokens, panes, tabs) and used to hand the pane a FRESH inline
+ *  `artifact` object + `onClose` closure each time, re-rendering (and for
+ *  markdown documents re-parsing) the whole preview on every chat token
+ *  flush. This wrapper builds the object in a memo keyed on the tab's own
+ *  fields and memoizes the whole subtree. */
+const ToolPanelArtifact = memo(function ToolPanelArtifact({
+  path,
+  filename,
+  inline,
+  instanceId,
+}: {
+  path: string;
+  filename: string;
+  inline: ToolPanelTabInstance["artifactInline"];
+  instanceId: string;
+}) {
+  const closeTab = useUiStore((s) => s.closeTab);
+  const artifact = useMemo<ChatArtifact>(
+    () => ({ path, filename, inline }),
+    [path, filename, inline],
+  );
+  const onClose = useCallback(() => closeTab(instanceId), [closeTab, instanceId]);
+  return <ArtifactPreviewPane artifact={artifact} onClose={onClose} />;
+});
+
+/** Memoized plan-tab canvas (PERF): the markdown parse must run only when
+ *  the plan content changes, not on every store-driven ToolPanel render
+ *  (chat token flushes re-render the panel and used to re-parse the plan). */
+const PlanCanvas = memo(function PlanCanvas({
+  title,
+  content,
+  onClear,
+}: {
+  title: string | null;
+  content: string;
+  onClear: () => void;
+}) {
+  return (
+    <div className="canvas-plan-view">
+      <div className="canvas-plan-header">
+        <span className="canvas-plan-title">{title || "Plan"}</span>
+        <button className="ghost" onClick={onClear} title="Close plan">
+          ✕
+        </button>
+      </div>
+      <div className="canvas-plan-body">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+      </div>
+    </div>
+  );
+});
 
 /** Build a display label for a tab instance. For kinds that may have multiple
  *  instances open (terminal/browser/agents), append the instance's short id so
@@ -104,6 +160,9 @@ export function ToolPanel() {
   const planCanvasContent = useUiStore((s) => s.planCanvasContent);
   const planCanvasTitle = useUiStore((s) => s.planCanvasTitle);
   const setPlanCanvas = useUiStore((s) => s.setPlanCanvas);
+  // Stable close handler so the memoized PlanCanvas subtree only re-renders
+  // when the plan content actually changes.
+  const clearPlanCanvas = useCallback(() => setPlanCanvas(null, null), [setPlanCanvas]);
   // Minimized (collapsed) browsers are excluded here — they live in the
   // DormantBrowsers container below and are restored from the Browser tab.
   const browsers = useMemo(
@@ -434,38 +493,18 @@ export function ToolPanel() {
                       <div>Plans opened from chat or the git sidebar appear here.</div>
                     </div>
                   ) : (
-                    <div className="canvas-plan-view">
-                      <div className="canvas-plan-header">
-                        <span className="canvas-plan-title">
-                          {planCanvasTitle || "Plan"}
-                        </span>
-                        <button
-                          className="ghost"
-                          onClick={() => setPlanCanvas(null, null)}
-                          title="Close plan"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                      <div className="canvas-plan-body">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                          {planCanvasContent}
-                        </ReactMarkdown>
-                      </div>
-                    </div>
+                    <PlanCanvas title={planCanvasTitle} content={planCanvasContent} onClear={clearPlanCanvas} />
                   )}
                 </>
               )}
               {activeInstance.kind === "agents" && <SubagentPanel />}
               {activeInstance.kind === "artifact" && activeInstance.artifactPath && (
                 <Suspense fallback={<div className="artifact-preview-loading">Loading…</div>}>
-                  <ArtifactPreviewPane
-                    artifact={{
-                      path: activeInstance.artifactPath,
-                      filename: activeInstance.artifactFilename ?? "Preview",
-                      inline: activeInstance.artifactInline,
-                    }}
-                    onClose={() => closeTab(activeInstance.instanceId)}
+                  <ToolPanelArtifact
+                    path={activeInstance.artifactPath}
+                    filename={activeInstance.artifactFilename ?? "Preview"}
+                    inline={activeInstance.artifactInline}
+                    instanceId={activeInstance.instanceId}
                   />
                 </Suspense>
               )}

@@ -96,6 +96,11 @@ interface Props {
   /** Live perf snapshot (elapsedMs, etc.) from `chat:perf` for the streaming
    *  bubble — used to show "Working for Xs" while the turn is in flight. */
   livePerf?: ChatPerfPayload | null;
+  /** One-shot entrance animation. The bubble CSS animation must NOT run on
+   *  every mount — virtualized rows remount on every scroll, and an animated
+   *  remount reads as flicker (plus per-row paint work). ChatView sets this
+   *  only for the row that was just appended. */
+  enter?: boolean;
 }
 
 // --- Inline SVG icons (Claude-style, stroke-based, currentColor). ---
@@ -717,7 +722,15 @@ function StepCodeHighlighter({ code, language }: { code: string; language: strin
     );
   }
   const SyntaxHighlighter = comp;
-  return (
+  // Cache the HIGHLIGHTED element tree (keyed by theme+language+code): the
+  // Prism tokenization pass is the single most expensive thing a code block
+  // does, and virtualized remounts used to pay it again on every scroll-back.
+  // The element tree is immutable; reconciliation still diffs it against the
+  // DOM, only the tokenization is skipped. Keyed on the data-theme attribute
+  // (useSyntaxTheme returns a fresh object each recompute — stringifying it
+  // would never invalidate).
+  const themeKey = typeof document !== "undefined" ? document.documentElement.dataset.theme ?? "dark" : "dark";
+  return cachedMarkdown(`hl:${themeKey}:${language}:${code}`, () => (
     <SyntaxHighlighter
       style={theme}
       language={language}
@@ -735,7 +748,7 @@ function StepCodeHighlighter({ code, language }: { code: string; language: strin
     >
       {code}
     </SyntaxHighlighter>
-  );
+  ));
 }
 
 function ActivityStepRow({
@@ -927,6 +940,7 @@ function renderProcessBlock(
   b: Block,
   i: number,
   onPreviewArtifact?: (artifact: ChatArtifact) => void,
+  cache = true,
 ) {
   switch (b.kind) {
     case "activity":
@@ -959,7 +973,7 @@ function renderProcessBlock(
       ) : null;
     case "text":
       return b.text.trim().length > 0 ? (
-        <Markdown key={`text:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
+        <Markdown key={`text:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={cache} />
       ) : null;
   }
 }
@@ -1170,19 +1184,51 @@ function useLiveElapsedSec(
 }
 
 /** Returns a style object for inline code elements using CSS variable lookups
- *  that work in both light and dark themes (the variables resolve at runtime). */
-function useInlineCodeStyle() {
-  return useMemo(
-    () => ({
-      background: "var(--surface-2)",
-      padding: "2px 6px",
-      borderRadius: "var(--radius-xs)",
-      fontFamily: "var(--font-mono)",
-      fontSize: "0.9em",
-      boxShadow: "var(--glass-rim-soft)",
-    }),
-    [],
-  );
+ *  that work in both light and dark themes (the variables resolve at runtime).
+ *  Module-level constant: every Markdown render (cached or fresh) must share
+ *  one identity so cached element trees stay reusable. */
+const inlineCodeStyle = {
+  background: "var(--surface-2)",
+  padding: "2px 6px",
+  borderRadius: "var(--radius-xs)",
+  fontFamily: "var(--font-mono)",
+  fontSize: "0.9em",
+  boxShadow: "var(--glass-rim-soft)",
+} as const;
+
+/**
+ * LRU cache of RENDERED markdown element trees, keyed by content.
+ *
+ * The message list is virtualized: rows unmount when they scroll out of the
+ * window and REMOUNT when the user scrolls back. Without this cache every
+ * remount re-ran the full remark → rehype-katex → syntax-highlight pipeline
+ * (tens of ms per large bubble), which is the dominant scroll cost in long
+ * conversations. React elements are immutable descriptors, so a built tree is
+ * safe to reuse across mounts and parents — reconciliation still diffs it
+ * against the DOM, only the parse is skipped.
+ *
+ * Callers must only cache content whose rendered handlers are call-site
+ * independent (the components config reads no per-message closure except
+ * onPreviewArtifact, which is the stable store action at every call site).
+ */
+const MD_CACHE_MAX = 240;
+const markdownElementCache = new Map<string, ReactNode>();
+
+function cachedMarkdown(key: string, build: () => ReactNode): ReactNode {
+  const hit = markdownElementCache.get(key);
+  if (hit !== undefined) {
+    // Refresh LRU order (Map iterates insertion-first).
+    markdownElementCache.delete(key);
+    markdownElementCache.set(key, hit);
+    return hit;
+  }
+  const el = build();
+  markdownElementCache.set(key, el);
+  if (markdownElementCache.size > MD_CACHE_MAX) {
+    const oldest = markdownElementCache.keys().next().value;
+    if (oldest !== undefined) markdownElementCache.delete(oldest);
+  }
+  return el;
 }
 
 function CopyButton({ code }: { code: string }) {
@@ -1262,6 +1308,13 @@ function ReactIcon() {
   );
 }
 
+/** Module cache of decoded local-image data URIs. Virtualized rows remount on
+ *  every scroll; without this each remount re-fetched the file over IPC and
+ *  repainted "Loading image…" — visible flicker plus IPC churn. Keyed by the
+ *  exact source path; bounded like the markdown cache. */
+const IMAGE_CACHE_MAX = 64;
+const imageDataUriCache = new Map<string, string>();
+
 /** Renders `![alt](src)` inside assistant markdown. Remote/data/blob URLs
  *  render directly. LOCAL file references — what the agent produces when it
  *  saves a screenshot or image to disk (`C:\…`, `file:///…`, `/…`) — can never
@@ -1271,11 +1324,12 @@ function ReactIcon() {
  *  read_artifact_preview the canvas uses) and render as a data URI. */
 function ChatImage({ src, alt }: { src: string; alt?: string }) {
   const isRemote = /^(https?:|data:|blob:)/i.test(src);
-  const [dataUri, setDataUri] = useState<string | null>(null);
+  const cachedUri = isRemote ? null : imageDataUriCache.get(src) ?? null;
+  const [dataUri, setDataUri] = useState<string | null>(cachedUri);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
-    if (isRemote) return;
+    if (isRemote || cachedUri) return;
     let stale = false;
     let path = src.trim();
     const fileMatch = /^file:\/\/\/?(.*)$/i.exec(path);
@@ -1290,8 +1344,16 @@ function ChatImage({ src, alt }: { src: string; alt?: string }) {
     void readArtifactPreview(path)
       .then((preview) => {
         if (stale) return;
-        if (preview?.kind === "image" && preview.dataUri) setDataUri(preview.dataUri);
-        else setFailed(true);
+        if (preview?.kind === "image" && preview.dataUri) {
+          imageDataUriCache.set(src, preview.dataUri);
+          if (imageDataUriCache.size > IMAGE_CACHE_MAX) {
+            const oldest = imageDataUriCache.keys().next().value;
+            if (oldest !== undefined) imageDataUriCache.delete(oldest);
+          }
+          setDataUri(preview.dataUri);
+        } else {
+          setFailed(true);
+        }
       })
       .catch(() => {
         if (!stale) setFailed(true);
@@ -1299,7 +1361,7 @@ function ChatImage({ src, alt }: { src: string; alt?: string }) {
     return () => {
       stale = true;
     };
-  }, [src, isRemote]);
+  }, [src, isRemote, cachedUri]);
 
   if (isRemote || dataUri) {
     return <img src={isRemote ? src : dataUri!} alt={alt ?? ""} />;
@@ -1315,109 +1377,116 @@ function ChatImage({ src, alt }: { src: string; alt?: string }) {
 }
 
 /** Renders a markdown string with syntax-highlighted code fences, mermaid
- *  diagrams and glass-styled links — the assistant's normal answer body. */
+ *  diagrams and glass-styled links — the assistant's normal answer body.
+ *  `cache` (default true) reuses the rendered element tree across mounts via
+ *  the module LRU — pass false for content that changes every flush (the live
+ *  streaming bubble), which would otherwise insert a cache entry per token. */
 function Markdown({
   content,
   onPreviewArtifact,
+  cache = true,
 }: {
   content: string;
   onPreviewArtifact?: (artifact: ChatArtifact) => void;
+  cache?: boolean;
 }) {
-  const inlineCodeStyle = useInlineCodeStyle();
+  const build = () => (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm, remarkMath]}
+      rehypePlugins={[rehypeKatex]}
+      components={{
+        code({ className, children, ...props }) {
+          const match = /language-(\w+)/.exec(className || "");
+          const rawCode = String(children).replace(/\n$/, "");
+          // Cap the code string before handing it to the highlighter so a
+          // misbehaving model can't ship a pathologically large payload
+          // that amplifies any parser cost in the (historically
+          // vulnerable) highlighter dep tree. Truncate cleanly.
+          const codeString =
+            rawCode.length > MAX_CODE_BLOCK_BYTES
+              ? rawCode.slice(0, MAX_CODE_BLOCK_BYTES) + "\n… (truncated)"
+              : rawCode;
+
+          // Inline code: no language class and short.
+          if (!match && !String(children).includes("\n")) {
+            return (
+              <code style={inlineCodeStyle} {...props}>
+                {children}
+              </code>
+            );
+          }
+
+          // Mermaid diagrams render as inline SVG, not as highlighted text.
+          if (match && match[1] === "mermaid") {
+            return (
+              <Suspense fallback={<pre className="chat-markdown-mermaid-fallback">{codeString}</pre>}>
+                <MermaidDiagram code={codeString} />
+              </Suspense>
+            );
+          }
+
+          // React/JSX artifacts open as a live preview in the side pane
+          // (rendered by ArtifactPreviewPane), not inline in the chat.
+          if (match && (match[1] === "jsx" || match[1] === "tsx")) {
+            return (
+              <JsxArtifactChip
+                code={codeString}
+                lang={match[1] as "jsx" | "tsx"}
+                onPreviewArtifact={onPreviewArtifact}
+              />
+            );
+          }
+
+          // Code block with language.
+          return (
+            <div className="chat-code-block">
+              <div className="chat-code-header">
+                <span className="chat-code-lang">{match ? match[1] : "text"}</span>
+                <CopyButton code={codeString} />
+              </div>
+              <StepCodeHighlighter code={codeString} language={match ? match[1] : "text"} />
+            </div>
+          );
+        },
+        // Images: remote URLs render as-is; local file paths (agent-saved
+        // screenshots/images) are loaded over IPC into a data URI — see
+        // ChatImage for why a bare path can never render in this webview.
+        img({ src, alt }) {
+          return <ChatImage src={typeof src === "string" ? src : ""} alt={alt} />;
+        },
+        // Links open in the built-in browser pane, NOT the system browser:
+        // in a Tauri webview a target=_blank navigation falls through to the
+        // OS default handler. Intercept the click and route it to the pane.
+        a({ href, children }) {
+          const isHttp = !!href && /^https?:\/\//i.test(href);
+          return (
+            <a
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: "var(--accent)" }}
+              title={isHttp ? `${href}\n(opens in the built-in browser)` : href}
+              onClick={
+                isHttp
+                  ? (e) => {
+                      e.preventDefault();
+                      openInBrowserPane(href!);
+                    }
+                  : undefined
+              }
+            >
+              {children}
+            </a>
+          );
+        },
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  );
   return (
     <div className="chat-markdown">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeKatex]}
-        components={{
-          code({ className, children, ...props }) {
-            const match = /language-(\w+)/.exec(className || "");
-            const rawCode = String(children).replace(/\n$/, "");
-            // Cap the code string before handing it to the highlighter so a
-            // misbehaving model can't ship a pathologically large payload
-            // that amplifies any parser cost in the (historically
-            // vulnerable) highlighter dep tree. Truncate cleanly.
-            const codeString =
-              rawCode.length > MAX_CODE_BLOCK_BYTES
-                ? rawCode.slice(0, MAX_CODE_BLOCK_BYTES) + "\n… (truncated)"
-                : rawCode;
-
-            // Inline code: no language class and short.
-            if (!match && !String(children).includes("\n")) {
-              return (
-                <code style={inlineCodeStyle} {...props}>
-                  {children}
-                </code>
-              );
-            }
-
-            // Mermaid diagrams render as inline SVG, not as highlighted text.
-            if (match && match[1] === "mermaid") {
-              return (
-                <Suspense fallback={<pre className="chat-markdown-mermaid-fallback">{codeString}</pre>}>
-                  <MermaidDiagram code={codeString} />
-                </Suspense>
-              );
-            }
-
-            // React/JSX artifacts open as a live preview in the side pane
-            // (rendered by ArtifactPreviewPane), not inline in the chat.
-            if (match && (match[1] === "jsx" || match[1] === "tsx")) {
-              return (
-                <JsxArtifactChip
-                  code={codeString}
-                  lang={match[1] as "jsx" | "tsx"}
-                  onPreviewArtifact={onPreviewArtifact}
-                />
-              );
-            }
-
-            // Code block with language.
-            return (
-              <div className="chat-code-block">
-                <div className="chat-code-header">
-                  <span className="chat-code-lang">{match ? match[1] : "text"}</span>
-                  <CopyButton code={codeString} />
-                </div>
-                <StepCodeHighlighter code={codeString} language={match ? match[1] : "text"} />
-              </div>
-            );
-          },
-          // Images: remote URLs render as-is; local file paths (agent-saved
-          // screenshots/images) are loaded over IPC into a data URI — see
-          // ChatImage for why a bare path can never render in this webview.
-          img({ src, alt }) {
-            return <ChatImage src={typeof src === "string" ? src : ""} alt={alt} />;
-          },
-          // Links open in the built-in browser pane, NOT the system browser:
-          // in a Tauri webview a target=_blank navigation falls through to the
-          // OS default handler. Intercept the click and route it to the pane.
-          a({ href, children }) {
-            const isHttp = !!href && /^https?:\/\//i.test(href);
-            return (
-              <a
-                href={href}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ color: "var(--accent)" }}
-                title={isHttp ? `${href}\n(opens in the built-in browser)` : href}
-                onClick={
-                  isHttp
-                    ? (e) => {
-                        e.preventDefault();
-                        openInBrowserPane(href!);
-                      }
-                    : undefined
-                }
-              >
-                {children}
-              </a>
-            );
-          },
-        }}
-      >
-        {content}
-      </ReactMarkdown>
+      {cache ? cachedMarkdown(`md:${content}`, build) : build()}
     </div>
   );
 }
@@ -1616,6 +1685,7 @@ function MessageBubbleInner({
   msgId,
   chatSessionId,
   livePerf,
+  enter,
 }: Props) {
   const isUser = message.role === "user";
   // Inline edit-to-fork state: when the user clicks Edit on a user bubble, we
@@ -1660,9 +1730,11 @@ function MessageBubbleInner({
   // Parse attachment markers (e.g. "[Attached image: x]") out of the content
   // so they render as visual cards above the text instead of inline strings.
   // Live attachments (optimistic message) carry image base64 for thumbnails.
-  const { attachments: msgAttachments, text: cleanContent } = parseAttachments(
-    message.content,
-    message.attachments,
+  // Memoized: the multi-regex pass runs on EVERY render otherwise (each
+  // streaming flush re-renders the parent list).
+  const { attachments: msgAttachments, text: cleanContent } = useMemo(
+    () => parseAttachments(message.content, message.attachments),
+    [message.content, message.attachments],
   );
 
   // PERF (PERFORMANCE_AUDIT.md F8): memoize the parse → group chain by
@@ -1780,14 +1852,17 @@ function MessageBubbleInner({
         ? `Worked for ${formatDuration(message.durationSec)}`
         : "Worked";
 
-  // Detect if this assistant message contains a plan section
-  const planSection = !isUser ? detectPlan(message.content) : null;
+  // Detect if this assistant message contains a plan section. Cached per
+  // content: detectPlan runs seven regexes plus a per-line word count over the
+  // FULL message, and every bubble render used to pay it again (mounts from
+  // scrolling, re-renders from streaming flushes).
+  const planSection = !isUser ? detectPlanCached(message.content) : null;
 
   return (
     <>
       {segmentStart && <div className="superseded-divider">— edited —</div>}
       <div
-        className={`chat-bubble${isUser ? " user" : " assistant"}${superseded ? " superseded" : ""}${editing ? " editing" : ""}`}
+        className={`chat-bubble${isUser ? " user" : " assistant"}${superseded ? " superseded" : ""}${editing ? " editing" : ""}${enter ? " enter" : ""}`}
         data-msg-id={msgId}
       >
         {superseded && (
@@ -1860,9 +1935,13 @@ function MessageBubbleInner({
                   if (b.kind === "text" && i >= firstProc) outside.push(b);
                   else inside.push(b);
                 });
+                // The live bubble's prose grows every token flush — its
+                // markdown must NOT go through the element cache (each
+                // intermediate text would insert a throwaway LRU entry).
+                const mdCache = !live;
                 const textBlock = (b: Block, key: string) =>
                   b.kind === "text" && b.text.trim().length > 0 ? (
-                    <Markdown key={key} content={b.text} onPreviewArtifact={onPreviewArtifact} />
+                    <Markdown key={key} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={mdCache} />
                   ) : null;
                 return (
                   <>
@@ -1871,7 +1950,7 @@ function MessageBubbleInner({
                       label={processLabel}
                       keepExpandedOnEnd={endedByStop}
                     >
-                      {inside.map((b, i) => renderProcessBlock(b, i, onPreviewArtifact))}
+                      {inside.map((b, i) => renderProcessBlock(b, i, onPreviewArtifact, mdCache))}
                     </ProcessSummary>
                     {outside.map((b, i) => textBlock(b, `out:${i}`))}
                   </>
@@ -1880,7 +1959,7 @@ function MessageBubbleInner({
             /* Pure-text turn: flat markdown, nothing to expand. */
             : blocks!.map((b, i) =>
                 b.kind === "text" && b.text.trim().length > 0
-                  ? <Markdown key={`flat:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} />
+                  ? <Markdown key={`flat:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={!live} />
                   : null,
               )}
         {/* Consolidated per-turn changes row: "N files changed +adds −dels"
@@ -1936,6 +2015,28 @@ const PLAN_PATTERNS = [
 ];
 
 interface PlanInfo { title: string; summary: string; full: string; }
+
+/** Cache of detectPlan results keyed by message content — the plan scan runs
+ *  seven regexes plus per-line word counts over the FULL text and used to
+ *  re-run on every bubble render (virtualizer remounts, streaming flushes). */
+const PLAN_CACHE_MAX = 96;
+const planDetectionCache = new Map<string, PlanInfo | null>();
+
+function detectPlanCached(content: string): PlanInfo | null {
+  const hit = planDetectionCache.get(content);
+  if (hit !== undefined) {
+    planDetectionCache.delete(content);
+    planDetectionCache.set(content, hit);
+    return hit;
+  }
+  const info = detectPlan(content);
+  planDetectionCache.set(content, info);
+  if (planDetectionCache.size > PLAN_CACHE_MAX) {
+    const oldest = planDetectionCache.keys().next().value;
+    if (oldest !== undefined) planDetectionCache.delete(oldest);
+  }
+  return info;
+}
 
 function detectPlan(content: string): PlanInfo | null {
   const cleaned = content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
@@ -2008,4 +2109,29 @@ function PlanBanner({ title, summary, full }: PlanInfo) {
 // keystroke made long chats laggy. ChatView keeps the `items` array (and the
 // per-item callbacks) reference-stable via useMemo, so an unchanged bubble
 // now skips re-render entirely.
-export const MessageBubble = memo(MessageBubbleInner);
+//
+// The DEFAULT shallow comparator is not enough: ChatView rebuilds the items
+// array whenever the streaming text flushes (the live bubble's `content`
+// lives in the same memo), which gives EVERY item a fresh object identity —
+// shallow compare then fails for all mounted bubbles and the whole visible
+// list re-rendered per flush. This comparator compares the fields a bubble
+// actually renders (content, attachments, duration, branch flags) so
+// persisted bubbles skip the flush entirely; the callbacks are excluded
+// because each closure captures only the item's own message id plus
+// store-stable actions, so an identity change never changes behavior.
+export const MessageBubble = memo(
+  MessageBubbleInner,
+  (a, b) =>
+    a.message.content === b.message.content &&
+    a.message.role === b.message.role &&
+    a.message.durationSec === b.message.durationSec &&
+    (a.message.attachments ?? null) === (b.message.attachments ?? null) &&
+    a.live === b.live &&
+    a.superseded === b.superseded &&
+    a.segmentStart === b.segmentStart &&
+    (a.artifacts ?? null) === (b.artifacts ?? null) &&
+    a.msgId === b.msgId &&
+    a.chatSessionId === b.chatSessionId &&
+    (a.livePerf ?? null) === (b.livePerf ?? null) &&
+    a.enter === b.enter,
+);

@@ -7,7 +7,7 @@
 // Attachments: images are sent as vision input, docx/pptx/xlsx/pdf and legacy
 // doc/ppt/xls are extracted to text server-side, and plain-text files are
 // inlined into the message.
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ArrowUpToLine, GripVertical, Mic, Pencil, Plug, Puzzle, SquareSlash, Trash2, X } from "lucide-react";
 import { AgentModelPicker, type AgentModelSelection } from "./AgentModelPicker";
@@ -923,8 +923,11 @@ export function ChatComposer({
   // pane's session, not the globally active one. The prop wins — same
   // precedence the send path uses.
   const effectiveSessionId = sessionIdProp ?? activeChatSessionId;
-  // Team broadcast (roadmap #18): the session list + the broadcast action.
-  const broadcastSessions = useChatStore((s) => s.sessions);
+  // Team broadcast (roadmap #18): the broadcast action. The session LIST is
+  // resolved lazily next to broadcastOpen below — PERF: a live subscription
+  // to `s.sessions` re-rendered the whole composer (textarea included) on
+  // every session-list mutation (title autorename, status touch, relist),
+  // while the list is only ever shown inside the transient broadcast modal.
   const broadcastToSessions = useChatStore((s) => s.broadcastToSessions);
   const queuedMessages = useChatStore((s) =>
     effectiveSessionId
@@ -995,6 +998,11 @@ export function ChatComposer({
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   // Team broadcast (roadmap #18): pick N sessions + a prompt, send to all.
   const [broadcastOpen, setBroadcastOpen] = useState(false);
+  // Read at render time (not a store subscription): the list is only ever
+  // rendered inside the open modal, and opening the modal re-renders the
+  // composer anyway. New sessions created while the modal sits open won't
+  // appear until it's reopened — acceptable for a transient picker.
+  const broadcastSessions = broadcastOpen ? useChatStore.getState().sessions : [];
   const [broadcastTargets, setBroadcastTargets] = useState<Record<string, boolean>>({});
   const [broadcastText, setBroadcastText] = useState("");
   // Voice recording (roadmap #16).
@@ -1672,12 +1680,21 @@ export function ChatComposer({
     }
   }, [draft?.nonce]);
 
-  // Auto-grow the textarea as the user types.
+  // Auto-grow the textarea as the user types. The write is skipped when the
+  // computed height is unchanged: the "auto" reset + scrollHeight read force a
+  // synchronous layout, and an unconditional height write per keystroke
+  // invalidates the composer card's layout (its backdrop-filter frost must
+  // recomposite) even when nothing resized.
+  const appliedHeightRef = useRef("");
   useEffect(() => {
     const ta = textareaRef.current;
     if (!ta) return;
     ta.style.height = "auto";
-    ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+    const next = `${Math.min(ta.scrollHeight, 200)}px`;
+    if (appliedHeightRef.current !== next) {
+      appliedHeightRef.current = next;
+      ta.style.height = next;
+    }
   }, [content]);
 
   // Re-focus the composer when the right tool panel's tab/collapse state
@@ -1991,6 +2008,23 @@ export function ChatComposer({
   // The combined agent/model chip shows whenever there's an active session
   // (agent !== undefined), including the no-agent-picked state.
   const showAgentSelector = agent !== undefined && !!onAgentModelPick;
+  // MEMOIZED prop object for ComposerMetrics: a fresh object literal per
+  // render would defeat that component's memo and re-render the whole HUD
+  // (chips + context meter) on every keystroke.
+  const contextMeterProps = useMemo(
+    () => ({
+      usedTokens: usedTokens ?? null,
+      model,
+      provider,
+      isLocal: provider === "local_gguf",
+      localCtx,
+      liveMaxTokens,
+      chatSessionId: activeChatSessionId,
+      contextLimitOverride,
+      pinnedWindow: pinnedWindow > 0 ? pinnedWindow : undefined,
+    }),
+    [usedTokens, model, provider, localCtx, liveMaxTokens, activeChatSessionId, contextLimitOverride, pinnedWindow],
+  );
   // The footer row only exists when something visible lives in it (research
   // chip, attach error, needs-model hint) — otherwise it's an empty strip
   // between the textarea and the control bar.
@@ -2520,17 +2554,7 @@ export function ChatComposer({
           chatSessionId={activeChatSessionId}
           streaming={streaming}
           variant="hud"
-          contextMeter={{
-            usedTokens: usedTokens ?? null,
-            model,
-            provider,
-            isLocal: provider === "local_gguf",
-            localCtx,
-            liveMaxTokens,
-            chatSessionId: activeChatSessionId,
-            contextLimitOverride,
-            pinnedWindow: pinnedWindow > 0 ? pinnedWindow : undefined,
-          }}
+          contextMeter={contextMeterProps}
         />
       </div>
       {createTypeOpen && (

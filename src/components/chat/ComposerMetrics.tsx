@@ -12,6 +12,7 @@
 // Both are stored on `useChatStore`. The HUD always renders the same chip
 // silhouette so the composer's height never jumps when a turn starts: idle
 // metrics show a muted em-dash, active ones switch to a high-contrast tone.
+import { memo } from "react";
 import { useChatStore } from "../../state/chat";
 import { ContextMeter } from "./ContextMeter";
 
@@ -97,7 +98,7 @@ function MetricChip({ label, value, live, tone = "idle", hint }: MetricChipProps
   );
 }
 
-export function ComposerMetrics({ chatSessionId, streaming, variant = "row", contextMeter }: Props) {
+function ComposerMetricsInner({ chatSessionId, streaming, variant = "row", contextMeter }: Props) {
   // Pick the source: live snapshot while streaming, otherwise the LAST
   // completed turn's final numbers (matching the "Worked for Xs" just
   // watched), falling back to the persisted session aggregate. Selecting all
@@ -279,3 +280,9 @@ export function ComposerMetrics({ chatSessionId, streaming, variant = "row", con
     </div>
   );
 }
+
+// Memoized (PERF): the HUD lives inside the composer, which re-renders on
+// every keystroke. With a stable contextMeter object (memoized by
+// ChatComposer) and stable primitives, memo skips the whole chips row +
+// ContextMeter subtree on typing re-renders.
+export const ComposerMetrics = memo(ComposerMetricsInner);

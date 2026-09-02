@@ -219,13 +219,35 @@ function guessTopic(code: string): string | null {
 // render target even when several appear in one message.
 let diagramSeq = 0;
 
+/** Cache of finished (sanitized + normalized) SVG renders, keyed by
+ *  `theme:source`. The message list is virtualized: rows remount on every
+ *  scroll, and without this each remount re-ran mermaid.parse + render for
+ *  the same diagram (hundreds of ms for large graphs — the biggest
+ *  scroll-back stall in diagram-heavy chats). Bounded like the other
+ *  render caches. */
+const MERMAID_CACHE_MAX = 32;
+const mermaidSvgCache = new Map<string, string>();
+
 export function MermaidDiagramInner({ code }: MermaidDiagramProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [svg, setSvg] = useState<string | null>(null);
+  const trimmedCode = code.trim();
+  const currentTheme =
+    typeof document !== "undefined"
+      ? document.documentElement.dataset.theme === "light"
+        ? "light"
+        : "dark"
+      : "dark";
+  const cacheKey = `${currentTheme}:${trimmedCode}`;
+  // Seed synchronously from the cache so a remount paints the diagram
+  // immediately instead of flashing the "Creating the diagram…" hint for the
+  // debounce window.
+  const [svg, setSvg] = useState<string | null>(() => mermaidSvgCache.get(cacheKey) ?? null);
   const [error, setError] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState(false);
   // The raw source as of the last successful render — shown as a fallback.
-  const [renderedFrom, setRenderedFrom] = useState<string>("");
+  const [renderedFrom, setRenderedFrom] = useState<string>(
+    () => (mermaidSvgCache.has(cacheKey) ? trimmedCode : ""),
+  );
   // The topic label captured at the moment we kicked off a render, so the
   // "Creating the diagram of …" hint stays stable while the model keeps
   // streaming more tokens.
@@ -247,6 +269,19 @@ export function MermaidDiagramInner({ code }: MermaidDiagramProps) {
     // Capture the topic up-front so the loading hint is meaningful even
     // before the debounce fires.
     setTopic(guessTopic(trimmed));
+
+    const themeKey =
+      document.documentElement.dataset.theme === "light" ? "light" : "dark";
+    const key = `${themeKey}:${trimmed}`;
+    const cached = mermaidSvgCache.get(key);
+    if (cached !== undefined) {
+      // Already rendered this exact source under this theme — skip the
+      // debounce + parse + render entirely (virtualized remount path).
+      setSvg(cached);
+      setError(null);
+      setRenderedFrom(trimmed);
+      return;
+    }
 
     // Debounce: render only after the source stops changing for 250ms.
     // During streaming this means we render the final diagram once it lands,
@@ -303,7 +338,14 @@ export function MermaidDiagramInner({ code }: MermaidDiagramProps) {
           // SECURITY: the source is untrusted model output and the result is
           // injected via dangerouslySetInnerHTML in the privileged app window.
           // Sanitize BEFORE normalizeSvg so no onerror/script survives.
-          setSvg(normalizeSvg(sanitizeSvg(result.svg)));
+          const out = normalizeSvg(sanitizeSvg(result.svg));
+          mermaidSvgCache.delete(key);
+          mermaidSvgCache.set(key, out);
+          if (mermaidSvgCache.size > MERMAID_CACHE_MAX) {
+            const oldest = mermaidSvgCache.keys().next().value;
+            if (oldest !== undefined) mermaidSvgCache.delete(oldest);
+          }
+          setSvg(out);
           setError(null);
           setRenderedFrom(source);
         } catch (e) {

@@ -252,6 +252,17 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     return [...fromCfg, ...extra];
   }, [harnessAgent, harnessCfg]);
 
+  // id → label map for the composer's agent chip. MEMOIZED: a fresh object
+  // per render would defeat the ChatComposer memo and re-render the whole
+  // composer (and its children) on every streaming flush.
+  const modelLabels = useMemo(
+    () =>
+      harnessAgent
+        ? Object.fromEntries(harnessModels.map((m) => [m.id, m.label]))
+        : undefined,
+    [harnessAgent, harnessModels],
+  );
+
   // A fresh harness chat with no model yet adopts the CLI's configured
   // default (settings.json `model` / config.toml `default_model` / …).
   useEffect(() => {
@@ -1389,11 +1400,45 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
     proposalEntry?: ProposalEntry;
     /** Pre-first-token "assistant is responding" row (TypingIndicator / statusNotice). */
     typing?: boolean;
+    /** One-shot entrance animation flag (see enterKeysRef below). */
+    enter?: boolean;
   };
+  // Entrance-animation bookkeeping (PERF: the bubble CSS animation must not
+  // replay on every virtualizer REMOUNT — rows unmount when scrolled out and
+  // remount when scrolled back, and an animated remount reads as flicker).
+  // `enter` is granted only to keys that appeared AFTER the session's first
+  // build (a message you just sent, this turn's live row), revoked ~350ms
+  // later (after the 0.2s animation finished) so later remounts mount without
+  // the class, and reset wholesale on session switch (existing history never
+  // animates on open).
+  const enterKeysRef = useRef<Set<string>>(new Set());
+  const revokedKeysRef = useRef<Set<string>>(new Set());
+  const prevItemKeysRef = useRef<{ sid: string | null; keys: Set<string> }>({
+    sid: null,
+    keys: new Set(),
+  });
+  const enterTimerRef = useRef<number | null>(null);
+  const [enterEpoch, bumpEnterEpoch] = useState(0);
+  useEffect(() => {
+    return () => {
+      if (enterTimerRef.current != null) window.clearTimeout(enterTimerRef.current);
+    };
+  }, []);
   const items: TimelineItem[] = useMemo(() => {
     const proposals = activeChatSessionId
       ? artifactProposalsBySession[activeChatSessionId] ?? []
       : [];
+    // Group proposal entries by their anchor message ONCE (O(proposals)) —
+    // the per-message filter inside the loop below used to make this O(
+    // messages × proposals) on every streaming flush.
+    const proposalsBySource = new Map<number, ProposalEntry[]>();
+    for (const entry of proposals) {
+      const sid = entry.proposal.sourceMessageId;
+      if (sid == null) continue;
+      const bucket = proposalsBySource.get(sid);
+      if (bucket) bucket.push(entry);
+      else proposalsBySource.set(sid, [entry]);
+    }
     const list: TimelineItem[] = [];
     messages.forEach((m, i) => {
       const messageItem: TimelineItem = {
@@ -1415,7 +1460,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
       // Anchor each artifact proposal directly after the command message that
       // created it. This preserves normal chronological chat order instead of
       // stacking every card in a footer below later messages.
-      for (const entry of proposals.filter((p) => p.proposal.sourceMessageId === m.id)) {
+      for (const entry of proposalsBySource.get(m.id) ?? []) {
         list.push({
           role: "system",
           content: "",
@@ -1463,8 +1508,52 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         typing: true,
       });
     }
+    // Grant/revoke the one-shot entrance flag (comment on the refs above).
+    if (prevItemKeysRef.current.sid !== activeChatSessionId) {
+      prevItemKeysRef.current = {
+        sid: activeChatSessionId,
+        keys: new Set(list.map((it) => it.key)),
+      };
+      enterKeysRef.current = new Set();
+      revokedKeysRef.current = new Set();
+    } else {
+      const prevKeys = prevItemKeysRef.current.keys;
+      let granted = false;
+      for (const it of list) {
+        if (revokedKeysRef.current.has(it.key)) {
+          it.enter = false;
+        } else if (enterKeysRef.current.has(it.key)) {
+          it.enter = true;
+        } else if (prevKeys.has(it.key)) {
+          it.enter = false;
+        } else {
+          enterKeysRef.current.add(it.key);
+          it.enter = true;
+          granted = true;
+        }
+      }
+      prevItemKeysRef.current.keys = new Set(list.map((it) => it.key));
+      if (enterKeysRef.current.size > 2000 || revokedKeysRef.current.size > 2000) {
+        // Bound the key sets; a cleared grant can at worst replay one old
+        // row's pop-in on a much later remount.
+        enterKeysRef.current.clear();
+        revokedKeysRef.current.clear();
+      }
+      if (granted && enterTimerRef.current == null) {
+        enterTimerRef.current = window.setTimeout(() => {
+          enterTimerRef.current = null;
+          for (const k of enterKeysRef.current) revokedKeysRef.current.add(k);
+          enterKeysRef.current.clear();
+          bumpEnterEpoch((n) => n + 1);
+        }, 350);
+      }
+    }
     return list;
-  }, [messages, activeChatSessionId, artifactProposalsBySession, activeIsStreaming, activeStream, waitingForFirstToken, handleDelete, handleSubmitEdit]);
+    // enterEpoch: revoking the entrance flag mutates refs the memo reads, so
+    // the epoch bump must force this recompute (and drop the class post-
+    // animation, so virtualizer remounts don't replay the pop-in).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, activeChatSessionId, artifactProposalsBySession, activeIsStreaming, activeStream, waitingForFirstToken, handleDelete, handleSubmitEdit, enterEpoch]);
   // PERF (PERFORMANCE_AUDIT.md F5): virtualize the message list — long
   // conversations used to mount EVERY MessageBubble (each re-parsing markdown
   // + katex), which made scroll janky and session-switch slow past a few
@@ -1667,6 +1756,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
                       <MessageBubble
                         message={item}
                         live={item.live}
+                        enter={item.enter}
                         msgId={item.id}
                         chatSessionId={activeChatSessionId}
                         onEdit={item.role === "user" ? item.onEdit : undefined}
@@ -1902,11 +1992,7 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         streaming={activeIsStreaming}
         disabled={false}
         model={activeChatSessionId ? (meterModel ?? "") : undefined}
-        modelLabels={
-          harnessAgent
-            ? Object.fromEntries(harnessModels.map((m) => [m.id, m.label]))
-            : undefined
-        }
+        modelLabels={modelLabels}
         agent={activeChatSessionId ? (activeSession?.agent ?? null) : undefined}
         onAgentModelPick={handleAgentModelPick}
         permissionMode={

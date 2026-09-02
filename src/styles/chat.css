@@ -491,12 +491,20 @@ div[data-index]:has(.chat-session-row.menu-open) {
   }
 }
 
-/* Message bubbles â€” Claude style: user gets a compact rounded card on the
+/* Message bubbles — Claude style: user gets a compact rounded card on the
    right; assistant replies render as plain full-width text. */
 .chat-bubble {
   display: flex;
   flex-direction: column;
   max-width: 75%;
+  /* NO unconditional entrance animation here: the message list is
+     virtualized, so rows unmount on scroll-out and REMOUNT on scroll-back —
+     an always-on animation replayed on every remount (visible flicker plus
+     per-row paint work while scrolling). The pop-in runs only on rows
+     explicitly flagged `enter` by ChatView (a message that was just sent,
+     this turn's live bubble) — see .chat-bubble.enter below. */
+}
+.chat-bubble.enter {
   animation: chat-bubble-in 0.2s var(--ease);
 }
 @keyframes chat-bubble-in {

@@ -2,7 +2,13 @@
 // Auto-opened when the model generates a file. Text-like artifacts render
 // inline (markdown/code/csv/json/html); images and PDFs render via a data
 // URI; binary Office formats show a file card with an "Open" button.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+//
+// PERF: the pane is rendered inside ToolPanel, which re-renders on every
+// store tick (chat token flushes, pane updates). It's exported memoized and
+// its callers pass a stable `artifact` object (ToolPanel wraps it in a
+// memoized adapter), so the document — including the markdown parse — only
+// re-renders when the actual file content changes.
+import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -34,6 +40,36 @@ function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Markdown document renderer for file previews (PERF): the parse runs in a
+ *  useMemo keyed on the document text, so a parent re-render (ToolPanel ticks
+ *  on every chat token) can't re-parse a large .md — only an actual file
+ *  change re-runs remark/rehype. Long documents additionally rely on the
+ *  `content-visibility` CSS on .artifact-preview-md to keep scrolling cheap. */
+function MarkdownDocument({ text }: { text: string }) {
+  const rendered = useMemo(
+    () => (
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeKatex]}
+        components={{
+          // ```mermaid fences render as diagrams, not code blocks — the
+          // same pipeline chat messages use (MermaidDiagram).
+          code({ node: _node, className, children, ...props }) {
+            if (/language-mermaid\b/.test(className ?? "")) {
+              return <MermaidDiagram code={String(children).replace(/\n$/, "")} />;
+            }
+            return <code className={className} {...props}>{children}</code>;
+          },
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    ),
+    [text],
+  );
+  return rendered;
 }
 
 function CsvTable({ text }: { text: string }) {
@@ -227,20 +263,7 @@ function PreviewBody({ preview }: { preview: ArtifactPreview }) {
   if (kind === "markdown" && text != null) {
     return (
       <div className="chat-markdown artifact-preview-md">
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm, remarkMath]}
-          rehypePlugins={[rehypeKatex]}
-          components={{
-            // ```mermaid fences render as diagrams, not code blocks — the
-            // same pipeline chat messages use (MermaidDiagram).
-            code({ node: _node, className, children, ...props }) {
-              if (/language-mermaid\b/.test(className ?? "")) {
-                return <MermaidDiagram code={String(children).replace(/\n$/, "")} />;
-              }
-              return <code className={className} {...props}>{children}</code>;
-            },
-          }}
-        >{text}</ReactMarkdown>
+        <MarkdownDocument text={text} />
       </div>
     );
   }
@@ -480,7 +503,7 @@ function ZoomControls({
   );
 }
 
-export function ArtifactPreviewPane({
+export function ArtifactPreviewPaneInner({
   artifact,
   onClose,
 }: {
@@ -816,3 +839,9 @@ export function ArtifactPreviewPane({
     </div>
   );
 }
+
+/** Memoized export: the parent (ToolPanel) re-renders on every store tick;
+ *  with a stable `artifact` prop from the ToolPanelArtifact adapter, the
+ *  preview — including markdown document parses — only re-renders when the
+ *  shown file actually changes. */
+export const ArtifactPreviewPane = memo(ArtifactPreviewPaneInner);

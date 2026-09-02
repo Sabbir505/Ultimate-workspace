@@ -167,6 +167,9 @@ interface PaneData {
   error?: string;
 }
 const paneCache = new Map<string, PaneData>();
+/** Panes with a fetch currently in flight — guards double fetches when the
+ *  open-time warm-up and the pane effect (or a fast rail switch) race. */
+const paneInFlight = new Set<string>();
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -296,6 +299,106 @@ export function AgentModelPickerInner({
 
   const isLocalSession = provider === "local_gguf" && agent === "local";
 
+  // Cached provider panes to revalidate in the background when their pane
+  // next renders (marked on popup open — see the reset effect below). A ref,
+  // not state: marking must not re-render; the pane effect consumes it.
+  const refreshOnOpen = useRef(new Set<string>());
+  // Which rail entry the pane fetches may still write to — completions for a
+  // stale entry update only the cache, never the pane being viewed.
+  const railKeyRef = useRef(railKey);
+
+  // Fetch one rail pane's model list into the cache, updating the live pane
+  // state only when the user is still looking at that entry. Shared by the
+  // pane effect, the open-time refresh, and the warm-up; the module-level
+  // in-flight guard keeps them from double-fetching the same pane.
+  const startPaneFetch = useCallback((key: string) => {
+    if (paneInFlight.has(key)) return;
+    paneInFlight.add(key);
+    const settle = (data: PaneData) => {
+      paneInFlight.delete(key);
+      paneCache.set(key, data);
+      if (railKeyRef.current === key) setPane(data);
+    };
+    if (key.startsWith("harness:")) {
+      const id = key.slice("harness:".length);
+      void listHarnessModels(id)
+        .then((cfg: HarnessModelConfig | null) => {
+          // Config-discovered models first, then static-catalog entries the
+          // config didn't mention (same merge ChatView uses).
+          const fromCfg = cfg?.models ?? [];
+          const cfgIds = new Set(fromCfg.map((m) => m.id));
+          const extra = harnessModelCatalog(id).filter((m) => !cfgIds.has(m.id));
+          settle({
+            status: "ready",
+            rows: [...fromCfg, ...extra].map((m) => ({ id: m.id, label: m.label || m.id })),
+            endpoint: cfg?.endpoint ?? null,
+          });
+        })
+        .catch((err: unknown) =>
+          settle({
+            status: "error",
+            rows: [],
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+    } else if (key.startsWith("provider:")) {
+      const p = key.slice("provider:".length);
+      // Curated Model list (Settings → API provider → Model list): when the
+      // user pinned a set of models for this provider, the picker shows ONLY
+      // those — in curated order, each labeled with its pinned context
+      // window (falling back to the provider-reported one). An empty or
+      // absent list keeps the old behavior: every model the /v1/models
+      // fetch returns.
+      const curated = useSettingsStore.getState().providerModels[p] ?? [];
+      const toRows = (ids: string[]): { id: string; label: string }[] =>
+        ids.map((id) => ({ id, label: id }));
+      void listChatModels(p)
+        .then((list) => {
+          // Curated list wins when present (picker shows ONLY those, in
+          // curated order); otherwise every model the fetch returned. The
+          // per-model context windows ride along invisibly — the meter and
+          // compaction trigger consume them, the labels stay clean.
+          const ids =
+            curated.length > 0
+              ? curated.map((e) => e.id)
+              : dedupeIds((list ?? []).map((m) => m.id));
+          settle({ status: "ready", rows: toRows(ids) });
+        })
+        .catch((err: unknown) => {
+          // Fetch failed (offline / no key yet) — a curated list still gives
+          // the picker content; only without one do we surface the error.
+          if (curated.length > 0) {
+            settle({ status: "ready", rows: toRows(curated.map((e) => e.id)) });
+            return;
+          }
+          settle({
+            status: "error",
+            rows: [],
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+    } else if (key === "local") {
+      void scanLocalModels()
+        .then((list: GgufModel[] | null) => {
+          const rows = dedupeIds((list ?? []).map((m) => m.name || m.filename)).map((id) => ({
+            id,
+            label: shortModelName(id),
+          }));
+          settle({ status: "ready", rows });
+        })
+        .catch((err: unknown) =>
+          settle({
+            status: "error",
+            rows: [],
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+    } else {
+      // ACP panes are static (the agent decides) — nothing to fetch.
+      paneInFlight.delete(key);
+    }
+  }, []);
+
   // Prefetch statuses once per app run (warms the cache before first click).
   useEffect(() => {
     if (agentStatusCache) return;
@@ -321,6 +424,15 @@ export function AgentModelPickerInner({
           if (cfgs[i]) out[id] = cfgs[i]!;
         });
         setProviderCfgs(out);
+        // Warm panes we have no list for yet (first open of the run, or a
+        // provider keyed since the last open) so the first click on their
+        // rail entry renders rows immediately instead of a spinner.
+        for (const id of PROVIDER_IDS) {
+          if (!out[id]?.hasKey) continue;
+          const key = `provider:${id}`;
+          if (paneCache.has(key) || paneInFlight.has(key)) continue;
+          startPaneFetch(key);
+        }
       })
       .catch(() => {
         /* keep whatever configs were already rendered */
@@ -417,13 +529,16 @@ export function AgentModelPickerInner({
     }
     setQuery("");
     setActiveIndex(0);
-    // Provider panes refetch on every open: their content is curated in
+    // Provider panes revalidate on every open: their content is curated in
     // Settings (Model list) and reported live by the provider's models API,
-    // so a cached pane could show a list the user just edited. Local and
-    // harness panes keep their cache (GGUF scans and CLI configs change
-    // far less often).
-    for (const key of Array.from(paneCache.keys())) {
-      if (key.startsWith("provider:")) paneCache.delete(key);
+    // so a cached pane could show a list the user just edited. Mark them for
+    // a background refresh instead of dropping the cache — the pane effect
+    // renders the cached rows instantly and swaps in fresh ones when the
+    // refetch lands, so switching providers never stalls on the network.
+    // Local and harness panes keep their cache outright (GGUF scans and CLI
+    // configs change far less often).
+    for (const key of paneCache.keys()) {
+      if (key.startsWith("provider:")) refreshOnOpen.current.add(key);
     }
     // Default to the session's entry; fall back to the first enabled one so
     // the right pane is never empty on first open.
@@ -435,96 +550,20 @@ export function AgentModelPickerInner({
 
   // ---- right-pane model list per rail selection ----------------------------
 
+  // Render the pane immediately from cache; fetch only when there is nothing
+  // cached, the cache holds an error, or the entry was marked stale on popup
+  // open (stale-while-revalidate — see the reset effect). Switching rail
+  // entries never blanks the pane or waits on the network: cached rows show
+  // at once and the fresh list swaps in when the fetch lands.
   useEffect(() => {
+    railKeyRef.current = railKey;
     if (!open || !railKey) return;
     const cached = paneCache.get(railKey);
     setPane(cached ?? { status: "loading", rows: [] });
-    if (cached && cached.status !== "error") return;
-    let stale = false;
-    const store = (data: PaneData) => {
-      paneCache.set(railKey, data);
-      if (!stale) setPane(data);
-    };
-    if (railKey.startsWith("harness:")) {
-      const id = railKey.slice("harness:".length);
-      void listHarnessModels(id)
-        .then((cfg: HarnessModelConfig | null) => {
-          // Config-discovered models first, then static-catalog entries the
-          // config didn't mention (same merge ChatView uses).
-          const fromCfg = cfg?.models ?? [];
-          const cfgIds = new Set(fromCfg.map((m) => m.id));
-          const extra = harnessModelCatalog(id).filter((m) => !cfgIds.has(m.id));
-          store({
-            status: "ready",
-            rows: [...fromCfg, ...extra].map((m) => ({ id: m.id, label: m.label || m.id })),
-            endpoint: cfg?.endpoint ?? null,
-          });
-        })
-        .catch((err: unknown) =>
-          store({
-            status: "error",
-            rows: [],
-            error: err instanceof Error ? err.message : String(err),
-          }),
-        );
-    } else if (railKey.startsWith("provider:")) {
-      const p = railKey.slice("provider:".length);
-      // Curated Model list (Settings → API provider → Model list): when the
-      // user pinned a set of models for this provider, the picker shows ONLY
-      // those — in curated order, each labeled with its pinned context
-      // window (falling back to the provider-reported one). An empty or
-      // absent list keeps the old behavior: every model the /v1/models
-      // fetch returns.
-      const curated = useSettingsStore.getState().providerModels[p] ?? [];
-      const toRows = (ids: string[]): { id: string; label: string }[] =>
-        ids.map((id) => ({ id, label: id }));
-      void listChatModels(p)
-        .then((list) => {
-          // Curated list wins when present (picker shows ONLY those, in
-          // curated order); otherwise every model the fetch returned. The
-          // per-model context windows ride along invisibly — the meter and
-          // compaction trigger consume them, the labels stay clean.
-          const ids =
-            curated.length > 0
-              ? curated.map((e) => e.id)
-              : dedupeIds((list ?? []).map((m) => m.id));
-          store({ status: "ready", rows: toRows(ids) });
-        })
-        .catch((err: unknown) => {
-          // Fetch failed (offline / no key yet) — a curated list still gives
-          // the picker content; only without one do we surface the error.
-          if (curated.length > 0) {
-            store({ status: "ready", rows: toRows(curated.map((e) => e.id)) });
-            return;
-          }
-          store({
-            status: "error",
-            rows: [],
-            error: err instanceof Error ? err.message : String(err),
-          });
-        });
-    } else if (railKey === "local") {
-      void scanLocalModels()
-        .then((list: GgufModel[] | null) => {
-          const rows = dedupeIds((list ?? []).map((m) => m.name || m.filename)).map((id) => ({
-            id,
-            label: shortModelName(id),
-          }));
-          store({ status: "ready", rows });
-        })
-        .catch((err: unknown) =>
-          store({
-            status: "error",
-            rows: [],
-            error: err instanceof Error ? err.message : String(err),
-          }),
-        );
-    }
-    // ACP panes are static (the agent decides) — nothing to fetch.
-    return () => {
-      stale = true;
-    };
-  }, [open, railKey, fetchNonce]);
+    if (cached && cached.status !== "error" && !refreshOnOpen.current.has(railKey)) return;
+    refreshOnOpen.current.delete(railKey);
+    startPaneFetch(railKey);
+  }, [open, railKey, fetchNonce, startPaneFetch]);
 
   // ---- ranked rows (fuzzy search) -------------------------------------------
 

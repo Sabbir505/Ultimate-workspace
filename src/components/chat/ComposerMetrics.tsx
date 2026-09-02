@@ -4,16 +4,22 @@
 //
 // Source of truth, by state:
 //  • While streaming  → `livePerf[chatSessionId]` (the throttled `chat:perf`
-//    event from the backend). Shows live tok/s + elapsed.
-//  • Idle             → `sessionMetrics[chatSessionId]` (the
-//    `get_chat_session_metrics` aggregate from the DB). Shows turn-count
-//    averages / totals.
+//    event from the backend), carried over from `lastTurnPerf` until each
+//    metric's own measurement lands.
+//  • Idle             → `lastTurnPerf[chatSessionId]` (the final numbers of
+//    the turn just watched), falling back to `sessionMetrics[chatSessionId]`
+//    (the `get_chat_session_metrics` aggregate from the DB).
 //
-// Both are stored on `useChatStore`. The HUD always renders the same chip
-// silhouette so the composer's height never jumps when a turn starts: idle
-// metrics show a muted em-dash, active ones switch to a high-contrast tone.
+// The HUD renders a FIXED chip grid: every state draws the same chips in the
+// same order, so a turn starting or ending never reflows the row. A metric
+// without data shows an em-dash; a real zero shows as zero. When a new turn
+// starts, metrics that the backend hasn't measured yet keep the last turn's
+// value (per-metric carry-over below) instead of collapsing to zero — each
+// chip ticks over to the live number only once the backend reports it.
 import { memo } from "react";
 import { useChatStore } from "../../state/chat";
+import type { LastTurnMetrics } from "../../state/chat";
+import type { ChatPerfPayload, ChatSessionMetricsPayload } from "../../lib/ipc";
 import { ContextMeter } from "./ContextMeter";
 
 interface Props {
@@ -39,7 +45,8 @@ interface Props {
 }
 
 function fmtMs(ms: number | null | undefined): string | null {
-  if (ms == null || !Number.isFinite(ms) || ms <= 0) return null;
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
+  if (ms === 0) return "0 ms";
   if (ms < 1000) return `${Math.round(ms)} ms`;
   const s = ms / 1000;
   if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)}s`;
@@ -70,6 +77,46 @@ function fmtPct(p: number | null | undefined): string | null {
 /** Tone drives the chip's value color: cache→green, speed/tokens→cyan. */
 type Tone = "idle" | "speed" | "cache" | "tokens";
 
+/** The fixed chip slots, in render order. Every state (fresh, aggregate,
+ *  last-turn, live) renders ALL of them, so a chip's position on screen is
+ *  constant across turn boundaries. `turns` is aggregate-only and appended
+ *  after `elapsed`, so its appearance can never shift the slots before it. */
+const CHIP_ORDER = [
+  "in",
+  "out",
+  "llm",
+  "tools",
+  "ttft",
+  "speed",
+  "cache",
+  "elapsed",
+] as const;
+type ChipKey = (typeof CHIP_ORDER)[number];
+
+const CHIP_HINTS: Record<ChipKey | "turns", string> = {
+  in: "Prompt tokens billed — accumulates at each tool round",
+  out: "Output tokens generated",
+  llm: "Model round time (connect + prompt eval + generation)",
+  tools: "Tool execution time, excluding approval waits",
+  ttft: "Time from the model request to the first streamed token",
+  speed: "Decode rate — output tokens divided by generation time (prefill excluded)",
+  cache: "Share of prompt tokens served from the prompt cache",
+  elapsed: "Wall-clock time of the current or last turn",
+  turns: "Completed turns in this session",
+};
+
+const CHIP_TONES: Record<ChipKey | "turns", Tone> = {
+  in: "tokens",
+  out: "tokens",
+  llm: "idle",
+  tools: "idle",
+  ttft: "idle",
+  speed: "speed",
+  cache: "cache",
+  elapsed: "idle",
+  turns: "idle",
+};
+
 interface MetricChipProps {
   label: string;
   value: string;
@@ -98,6 +145,93 @@ function MetricChip({ label, value, live, tone = "idle", hint }: MetricChipProps
   );
 }
 
+/** One chip slot's display state: the raw metric value (null → em-dash) and
+ *  whether the value is fed by the CURRENT turn's live measurement (pulses).
+ *  `liveFed` is false for values carried over from the last completed turn —
+ *  they hold the row steady until this turn's own number replaces them. */
+interface Slot {
+  value: number | null;
+  liveFed: boolean;
+}
+
+/** Per-metric carry-over: while streaming, a metric the backend hasn't
+ *  measured yet this turn (null, or 0 before its first update) falls back to
+ *  the last completed turn's value, so the row never resets to zeros at turn
+ *  start. Each slot flips to live (and starts pulsing) on the backend's first
+ *  report for this turn. */
+function buildSlots(
+  live: ChatPerfPayload | undefined,
+  last: LastTurnMetrics | undefined,
+  agg: ChatSessionMetricsPayload | undefined,
+): Record<ChipKey | "turns", Slot> {
+  const base = last;
+  const dash: Slot = { value: null, liveFed: false };
+  // Idle fallback per slot, resolved once: last-turn first, then aggregate.
+  const idle = (l: number | null | undefined, a: number | null | undefined): Slot => {
+    const n = (last ? l : a) ?? null;
+    return { value: n, liveFed: false };
+  };
+  // Live per-metric: this turn's measurement, else the carried-over value.
+  const liveSlot = (cur: number | null | undefined, prev: number | null | undefined): Slot => {
+    if (cur != null) return { value: cur, liveFed: true };
+    return { value: prev ?? null, liveFed: false };
+  };
+  // Counters that start the turn at a hard 0 (not null) carry the previous
+  // value until their first non-zero update — 0 is "not measured yet", since
+  // the backend writes cumulative numbers from the first event onward.
+  const liveFromZero = (cur: number, prev: number | null | undefined): Slot =>
+    cur > 0 ? { value: cur, liveFed: true } : { value: prev ?? cur, liveFed: false };
+
+  const slots = {
+    in: live
+      ? liveSlot(live.inputTokens, base?.inputTokens)
+      : idle(last?.inputTokens, agg?.inputTokens ?? null),
+    out: live
+      ? liveFromZero(live.outputTokens, base?.outputTokens)
+      : idle(last?.outputTokens, agg?.outputTokens ?? null),
+    llm: live
+      ? liveFromZero(live.llmTimeMs, base?.llmTimeMs)
+      : idle(last?.llmTimeMs, agg?.llmTimeMs ?? null),
+    tools: live
+      ? liveFromZero(live.toolTimeMs, base?.toolTimeMs)
+      : idle(last?.toolTimeMs, agg?.toolTimeMs ?? null),
+    ttft: live
+      ? liveSlot(live.ttftMs, base?.ttftMs)
+      : idle(last?.ttftMs, agg?.ttftAvgMs ?? null),
+    speed: live
+      ? liveSlot(live.tokensPerSecond, base?.tokensPerSecond)
+      : idle(last?.tokensPerSecond, agg?.tokensPerSecond ?? null),
+    cache: live
+      ? liveSlot(live.cacheHitRate, base?.cacheHitRate)
+      : idle(last?.cacheHitRate, agg?.cacheHitRate ?? null),
+    elapsed: live
+      ? { value: live.elapsedMs, liveFed: true }
+      : { value: last?.elapsedMs ?? null, liveFed: false },
+    turns:
+      !live && !last && agg && agg.turnCount > 0
+        ? { value: agg.turnCount, liveFed: false }
+        : dash,
+  };
+  return slots;
+}
+
+function fmtSlotValue(key: ChipKey, n: number | null | undefined): string | null {
+  switch (key) {
+    case "in":
+    case "out":
+      return fmtTokens(n);
+    case "llm":
+    case "tools":
+    case "ttft":
+    case "elapsed":
+      return fmtMs(n);
+    case "speed":
+      return fmtTokPerSecond(n);
+    case "cache":
+      return fmtPct(n);
+  }
+}
+
 function ComposerMetricsInner({ chatSessionId, streaming, variant = "row", contextMeter }: Props) {
   // Pick the source: live snapshot while streaming, otherwise the LAST
   // completed turn's final numbers (matching the "Worked for Xs" just
@@ -117,124 +251,37 @@ function ComposerMetricsInner({ chatSessionId, streaming, variant = "row", conte
   if (!chatSessionId) return null;
 
   const rowClass = variant === "hud" ? "composer-metrics-row is-hud" : "composer-metrics-row";
-  const chips: MetricChipProps[] = [];
+  const slots = buildSlots(live, last, agg);
 
-  if (live) {
-    // While streaming, always surface output tokens + speed even at zero so the
-    // user can see the counter live-tick from the first token. The remaining
-    // chips only render when they have a positive value (e.g. llm/tools/ttft
-    // are null or 0 before the first measurement lands).
+  // FIXED grid: every slot renders in every state — "—" when there is no
+  // data, a real zero as zero — so positions never shift across turns.
+  const chips: MetricChipProps[] = CHIP_ORDER.map((key) => {
+    const slot = slots[key];
+    return {
+      label: key,
+      value: fmtSlotValue(key, slot.value) ?? "—",
+      live: slot.liveFed,
+      tone: CHIP_TONES[key],
+      hint: CHIP_HINTS[key],
+    };
+  });
+  if (slots.turns.value != null) {
     chips.push({
-      label: "out",
-      value: fmtTokens(live.outputTokens) ?? "0 tok",
-      live: true,
-      tone: "tokens",
-      hint: "Output tokens generated so far this turn",
+      label: "turns",
+      value: `${slots.turns.value}`,
+      tone: CHIP_TONES.turns,
+      hint: CHIP_HINTS.turns,
     });
-    chips.push({
-      label: "speed",
-      value: fmtTokPerSecond(live.tokensPerSecond ?? undefined) ?? "0 tok/s",
-      live: true,
-      tone: "speed",
-      hint: "Live decode rate — output tokens divided by generation time (prefill excluded)",
-    });
-    const llm = fmtMs(live.llmTimeMs);
-    if (llm) chips.push({ label: "llm", value: llm, hint: "Model round time this turn (connect + prompt eval + generation)" });
-    if (live.toolTimeMs > 0) {
-      const t = fmtMs(live.toolTimeMs);
-      if (t) chips.push({ label: "tools", value: t, hint: "Tool execution time this turn, excluding approval waits" });
-    }
-    if (live.ttftMs != null) {
-      const ttft = fmtMs(live.ttftMs);
-      if (ttft) chips.push({ label: "ttft", value: ttft, hint: "Time from the model request to the first streamed token" });
-    }
-    // IN/CACHE go live at each tool-loop round boundary, when the provider
-    // reports that round's usage. Round N re-sends the conversation, so IN
-    // accumulates billed prompt tokens across rounds (matching chat:done).
-    const inp = fmtTokens(live.inputTokens ?? undefined);
-    if (inp) chips.push({ label: "in", value: inp, tone: "tokens", hint: "Prompt tokens billed so far — accumulates at each tool round" });
-    const liveCache = fmtPct(live.cacheHitRate ?? undefined);
-    if (liveCache) {
-      chips.push({
-        label: "cache",
-        value: liveCache,
-        tone: "cache",
-        hint: `${liveCache} of the prompt tokens so far were served from the prompt cache`,
-      });
-    }
-    const elapsed = fmtMs(live.elapsedMs);
-    if (elapsed) chips.push({ label: "elapsed", value: elapsed, live: true, hint: "Wall-clock time since this turn started" });
-  } else if (last) {
-    // Idle — the LAST turn's final numbers, so the row agrees with the
-    // "Worked for Xs" label on the bubble above. Falls through to the
-    // session aggregate when no turn has completed in this app run.
-    const inp = fmtTokens(last.inputTokens);
-    if (inp) chips.push({ label: "in", value: inp, tone: "tokens", hint: "Prompt tokens billed across all rounds of the last completed turn" });
-    const out = fmtTokens(last.outputTokens) ?? "0 tok";
-    chips.push({ label: "out", value: out, tone: "tokens", hint: "Output tokens of the last completed turn" });
-    const llm = fmtMs(last.llmTimeMs);
-    if (llm) chips.push({ label: "llm", value: llm, hint: "Model generation time of the last completed turn" });
-    if (last.toolTimeMs > 0) {
-      const t = fmtMs(last.toolTimeMs);
-      if (t) chips.push({ label: "tools", value: t, hint: "Tool execution time of the last completed turn, excluding approval waits" });
-    }
-    const ttft = fmtMs(last.ttftMs ?? undefined);
-    if (ttft) chips.push({ label: "ttft", value: ttft, hint: "Time from the model request to the first streamed token of the last completed turn" });
-    const tokS = fmtTokPerSecond(last.tokensPerSecond ?? undefined);
-    if (tokS) chips.push({ label: "speed", value: tokS, tone: "speed", hint: "Decode rate of the last completed turn (prefill excluded)" });
-    const cache = fmtPct(last.cacheHitRate ?? undefined);
-    if (cache) {
-      chips.push({
-        label: "cache",
-        value: cache,
-        tone: "cache",
-        hint: `${cache} of the last turn's input tokens were served from the prompt cache`,
-      });
-    }
-  } else if (agg) {
-    // Idle — show session totals / averages.
-    const inp = fmtTokens(agg.inputTokens);
-    if (inp) chips.push({ label: "in", value: inp, tone: "tokens", hint: "Total input tokens sent across this session" });
-    const out = fmtTokens(agg.outputTokens);
-    if (out) chips.push({ label: "out", value: out, tone: "tokens", hint: "Total output tokens generated across this session" });
-    const llm = fmtMs(agg.llmTimeMs ?? undefined);
-    if (llm) chips.push({ label: "llm", value: llm, hint: "Total model generation time across this session" });
-    if ((agg.toolTimeMs ?? 0) > 0) {
-      const t = fmtMs(agg.toolTimeMs ?? undefined);
-      if (t) chips.push({ label: "tools", value: t, hint: "Total tool execution time across this session, excluding approval waits" });
-    }
-    if (agg.ttftAvgMs != null) {
-      const ttft = fmtMs(agg.ttftAvgMs ?? undefined);
-      if (ttft) chips.push({ label: "ttft", value: ttft, hint: "Average time from model request to first streamed token across this session" });
-    }
-    const tokS = fmtTokPerSecond(agg.tokensPerSecond ?? undefined);
-    if (tokS) chips.push({ label: "speed", value: tokS, tone: "speed", hint: "Average decode rate (prefill excluded), weighted by output tokens" });
-    const cache = fmtPct(agg.cacheHitRate ?? undefined);
-    if (cache) {
-      chips.push({
-        label: "cache",
-        value: cache,
-        tone: "cache",
-        hint: `${cache} of input tokens were served from the prompt cache`,
-      });
-    }
-    if (agg.turnCount > 0) chips.push({ label: "turns", value: `${agg.turnCount}`, hint: "Completed turns in this session" });
   }
 
-  // Always render the bar — even on a fresh chat or one with no data yet — so
-  // the composer's height doesn't jump when the first turn starts. The
-  // placeholders keep the same chip silhouette, just muted with an em-dash.
-  if (chips.length === 0) {
+  const hasAnyData = chips.some((c) => c.value !== "—");
+  if (!hasAnyData) {
     return (
       <div className={`${rowClass} is-empty`} role="status" aria-live="polite">
         <div className="composer-metrics-chips">
-          <MetricChip label="in" value="—" hint="Input tokens sent — no turns yet" />
-          <MetricChip label="out" value="—" hint="Output tokens generated — no turns yet" />
-          <MetricChip label="llm" value="—" hint="Model generation time — no turns yet" />
-          <MetricChip label="tools" value="—" hint="Tool execution time — no turns yet" />
-          <MetricChip label="ttft" value="—" hint="Time to first token — no turns yet" />
-          <MetricChip label="speed" value="—" hint="Generation rate — no turns yet" />
-          <MetricChip label="cache" value="—" hint="Prompt cache hit rate — no turns yet" />
+          {chips.map((c) => (
+            <MetricChip key={c.label} {...c} />
+          ))}
         </div>
         {contextMeter && (
           <div className="composer-metrics-context-wrap">
@@ -258,8 +305,8 @@ function ComposerMetricsInner({ chatSessionId, streaming, variant = "row", conte
   return (
     <div className={rowClass} role="status" aria-live="polite">
       <div className="composer-metrics-chips">
-        {chips.map((c, i) => (
-          <MetricChip key={`${c.label}-${i}`} {...c} />
+        {chips.map((c) => (
+          <MetricChip key={c.label} {...c} />
         ))}
       </div>
       {contextMeter && (

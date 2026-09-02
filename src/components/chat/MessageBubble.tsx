@@ -858,10 +858,16 @@ function ActivityStepRow({
 function ProcessSummary({
   live,
   label,
+  keepExpandedOnEnd,
   children,
 }: {
   live: boolean;
   label: string;
+  /** True when the turn ended WITHOUT a duration (the user pressed stop).
+   *  Completed turns auto-collapse; a stopped turn keeps whatever expansion
+   *  it had — its process steps are the only content it produced, and
+   *  folding them into an empty-looking "Worked" row erases the turn. */
+  keepExpandedOnEnd?: boolean;
   children: ReactNode;
 }) {
   // The toggle IS the assistant-message-header slot: plain "Working for Xs"
@@ -873,11 +879,16 @@ function ProcessSummary({
   // action line is needed), auto-collapse when it ends. The turn-level live
   // flag doesn't flicker between tool rounds (unlike per-step state), so
   // this doesn't flash. A manual toggle latches for the rest of the turn.
-  const [open, setOpen] = useState(live);
+  const [open, setOpen] = useState(live || !!keepExpandedOnEnd);
   const [userToggled, setUserToggled] = useState(false);
   useEffect(() => {
-    if (!userToggled) setOpen(live);
-  }, [live, userToggled]);
+    if (userToggled) return;
+    if (live) {
+      setOpen(true);
+    } else if (!keepExpandedOnEnd) {
+      setOpen(false);
+    }
+  }, [live, keepExpandedOnEnd, userToggled]);
 
   return (
     <div className={`chat-process${live ? " live" : ""}`}>
@@ -1632,6 +1643,20 @@ function MessageBubbleInner({
     !isUser && msgId != null && msgId > 0 ? s.checkpointsByMessage[msgId] : undefined,
   ) ?? [];
 
+  // Was THIS turn stopped by the user? `stoppedPartial` holds the trimmed
+  // content the turn had produced when Stop was pressed (state/chat.ts
+  // cancelStream); a persisted partial row carries exactly that content and
+  // no duration. Only that bubble keeps its process section expanded after
+  // the stop — completed turns (and every other bubble) collapse normally.
+  const stoppedPartial = useChatStore((s) =>
+    chatSessionId ? s.stoppedPartial[chatSessionId] : undefined,
+  );
+  const endedByStop =
+    !isUser &&
+    message.durationSec == null &&
+    stoppedPartial != null &&
+    stoppedPartial === message.content;
+
   // Parse attachment markers (e.g. "[Attached image: x]") out of the content
   // so they render as visual cards above the text instead of inline strings.
   // Live attachments (optimistic message) carry image base64 for thumbnails.
@@ -1692,8 +1717,9 @@ function MessageBubbleInner({
 
   // Partition the assistant turn into [process blocks] [text]. Process kinds
   // (think / activity / diff) ALL live inside the single collapsible
-  // "Worked for Xs" row at the TOP of the bubble; the model's text (intro +
-  // answer) renders below it in source order. (Thinking used to render as
+  // "Worked for Xs" row at the TOP of the bubble, together with the leading
+  // narration that introduced the work; the model's answer prose renders
+  // below it, outside the collapsible. (Thinking used to render as
   // standalone disclosures interleaved with the text, which read as three
   // separate blocks after the turn ended.)
   let hasProcess = false;
@@ -1739,17 +1765,20 @@ function MessageBubbleInner({
     }
   }
   // The collapsed row's label is ALWAYS the timer: "Working for Xs" while
-  // streaming, "Worked for Xs" once the duration is known. A cancelled stream
-  // has no duration — the label falls back to a plain "Worked", never to the
-  // last running tool's summary (a cut-off turn must not retitle itself
-  // "Running shell command" after the fact).
+  // streaming, "Worked for Xs" once the duration is known. A turn the user
+  // stopped reads "Stopped" (and its process section stays expanded — see
+  // endedByStop); other duration-less turns fall back to a plain "Worked",
+  // never to the last running tool's summary (a cut-off turn must not
+  // retitle itself "Running shell command" after the fact).
   const processLabel = live
     ? (liveElapsedSec != null
         ? `Working for ${formatDuration(liveElapsedSec)}`
         : "Working")
-    : message.durationSec != null
-      ? `Worked for ${formatDuration(message.durationSec)}`
-      : "Worked";
+    : endedByStop
+      ? "Stopped"
+      : message.durationSec != null
+        ? `Worked for ${formatDuration(message.durationSec)}`
+        : "Worked";
 
   // Detect if this assistant message contains a plan section
   const planSection = !isUser ? detectPlan(message.content) : null;
@@ -1808,30 +1837,43 @@ function MessageBubbleInner({
             : hasProcess
             ? (() => {
                 // The "Working for Xs / Worked for Xs" header is ALWAYS the
-                // first line of the assistant turn — narration that arrived
-                // before the first tool call ("Let me read the page…") used
-                // to push the header below itself, so the same turn shape
-                // rendered differently depending on whether the model chose
-                // to speak first. Everything up to the last process block
-                // (intro prose included, in source order) now lives INSIDE
-                // the expansion; only the final answer renders below the row.
+                // first line of the assistant turn. The process region holds
+                // the leading narration plus every tool/think/diff block;
+                // EVERY text block after the first process block is model
+                // prose (mid-run narration + the synthesized answer) and
+                // renders as markdown below the region.
+                //
+                // The old rule — "everything up to the LAST process block
+                // lives inside" — swallowed the answer whenever the model
+                // called a tool (or emitted a think block) after writing it:
+                // all paragraphs but the last collapsed into the region and
+                // the visible answer shrank to the trailing fragment. Text
+                // between process blocks renders below the (live-expanded)
+                // region slightly after its source position, but it is never
+                // hidden.
                 if (!blocks) return null;
-                const lastProc = blocks.reduce(
-                  (acc, b, i) => (b.kind !== "text" ? i : acc),
-                  -1,
-                );
-                const inside = blocks.slice(0, lastProc + 1);
-                const trailing = blocks.slice(lastProc + 1);
+                const firstProc = blocks.findIndex((b) => b.kind !== "text");
+                if (firstProc === -1) return null;
+                const inside: Block[] = [];
+                const outside: Block[] = [];
+                blocks.forEach((b, i) => {
+                  if (b.kind === "text" && i >= firstProc) outside.push(b);
+                  else inside.push(b);
+                });
                 const textBlock = (b: Block, key: string) =>
                   b.kind === "text" && b.text.trim().length > 0 ? (
                     <Markdown key={key} content={b.text} onPreviewArtifact={onPreviewArtifact} />
                   ) : null;
                 return (
                   <>
-                    <ProcessSummary live={live === true} label={processLabel}>
+                    <ProcessSummary
+                      live={live === true}
+                      label={processLabel}
+                      keepExpandedOnEnd={endedByStop}
+                    >
                       {inside.map((b, i) => renderProcessBlock(b, i, onPreviewArtifact))}
                     </ProcessSummary>
-                    {trailing.map((b, i) => textBlock(b, `trail:${i}`))}
+                    {outside.map((b, i) => textBlock(b, `out:${i}`))}
                   </>
                 );
               })()

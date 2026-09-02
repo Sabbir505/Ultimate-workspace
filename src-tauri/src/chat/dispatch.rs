@@ -1432,11 +1432,16 @@ async fn run_gated_automation_tool(
 /// returned instead of executing.
 /// Attach-on-demand meta-tools (`attach_connector` / `attach_mcp_server`).
 /// Validates the id against this turn's attachable catalog, connects the
-/// source, persists the session row (attachments stick for the conversation
-/// per the UX decision), and hands the live tool table to the turn's tool
-/// loop via the manager's late-attach slot — the next round can call the
-/// tools directly. Read-kind by design: the source is one the user already
-/// connected in Settings, so no approval card gates the attach itself.
+/// source, and hands the live tool table to the turn's tool loop via the
+/// manager's late-attach slot — the next round can call the tools directly.
+/// Model-driven attaches are TURN-SCOPED on purpose: they are tool discovery,
+/// not user intent, so no `chat_session_connectors` row is written and the
+/// composer never sprouts chips for sources the model merely probed. The
+/// attachable manifest is rebuilt every turn, so a later turn that needs the
+/// source again just re-attaches. User-pinned attachments (the composer's
+/// @-picker, the send-time keyword fast-path) still persist. Read-kind by
+/// design: the source is one the user already connected in Settings, so no
+/// approval card gates the attach itself.
 async fn run_attach_tool(
     caps: &tools::ToolCaps,
     mgr: &Arc<ChatManager>,
@@ -1511,11 +1516,8 @@ async fn run_attach_tool(
         if let Some(slot) = mgr.late_attach_slot(sid) {
             slot.lock().mcp.extend(entries);
         }
-        {
-            let db_state = app.state::<crate::DbState>();
-            let conn = db_state.0.lock();
-            let _ = crate::db::add_chat_session_connector(&conn, sid, &format!("mcp:{id}"));
-        }
+        // No DB row: the attach lives only in this turn's late-attach slot,
+        // so tool discovery never leaks into the session's pinned set.
         format!("Attached {display} ({n} tools): {listing}")
     } else {
         let attached = crate::connectors::connect_all(app, &[id.clone()]).await;
@@ -1542,11 +1544,8 @@ async fn run_attach_tool(
         if let Some(slot) = mgr.late_attach_slot(sid) {
             slot.lock().connectors.push(att);
         }
-        {
-            let db_state = app.state::<crate::DbState>();
-            let conn = db_state.0.lock();
-            let _ = crate::db::add_chat_session_connector(&conn, sid, &id);
-        }
+        // No DB row — same turn-scoping as the MCP branch above: discovery
+        // attaches must not pin chips into the composer.
         format!("Attached {display} ({n} tools): {listing}")
     }
 }

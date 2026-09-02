@@ -540,8 +540,10 @@ pub fn attach_manifest_segment(
         "## Connected apps & servers (attach on demand)\n\
         These are connected but their tools are NOT loaded yet. When a request \
         needs one, call `attach_connector(\"<id>\")` (or `attach_mcp_server` \
-        for servers) FIRST — its tools join your tool list immediately and stay \
-        for the conversation. The user can also pin one with `@<id>`.\n",
+        for servers) FIRST — its tools join your tool list for this turn \
+        immediately; re-attach in a later turn when needed. Attach only what \
+        the request needs — never attach everything just to check access. The \
+        user can also pin one for the whole conversation with `@<id>`.\n",
     );
     for c in connectors {
         s.push_str(&format!("- {} — {}\n", c.id, c.description));

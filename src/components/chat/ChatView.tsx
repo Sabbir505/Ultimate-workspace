@@ -873,9 +873,21 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   // follow is paused until they return to the bottom. Also: M7 — scrolling to
   // the very top of a paged session prepends the next older page while
   // holding the visual position steady.
+  //
+  // Auto-scroll ownership: `stickToBottomRef` is the single latch. It flips
+  // to "free" ONLY from a scroll event that the user produced — the app's
+  // own pin writes also emit scroll events, so each programmatic write arms
+  // a short suppression window (programmaticPinUntilRef) during which those
+  // self-inflicted events are ignored. Without the window, a mid-stream
+  // measurement cascade (the virtualizer resizing rows around our pin
+  // target) could momentarily read as "user scrolled away", flip the latch
+  // off, and strand the viewport far from the content the turn ended with.
+  const programmaticPinUntilRef = useRef(0);
+  const PROGRAMMATIC_PIN_GUARD_MS = 120;
   const handleScroll = useCallback(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
+    if (performance.now() < programmaticPinUntilRef.current) return;
     const threshold = 80; // px from bottom to still count as "at bottom"
     const distanceFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
@@ -913,11 +925,43 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
         // Restore the visual anchor: prepended rows pushed everything down.
         requestAnimationFrame(() => {
           const el = messagesContainerRef.current;
-          if (el) el.scrollTop = prevTop + (el.scrollHeight - prevHeight);
+          if (el) {
+            el.scrollTop = prevTop + (el.scrollHeight - prevHeight);
+            programmaticPinUntilRef.current = performance.now() + PROGRAMMATIC_PIN_GUARD_MS;
+          }
         });
       });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasMoreHistory, activeChatSessionId, isSplitView, loadOlderMessages, loadOlderSplitMessages]);
+
+  /** The scrollTop that pins the viewport to the live edge, computed from
+   *  MEASURED content — the last mounted virtual row plus the in-flow tail
+   *  that follows the wrapper (task cards, proposal cards, error strip, the
+   *  dock spacer) — clamped to the container's real scroll range. The
+   *  wrapper div's style height can OVER-count (virtualizer 160px estimates,
+   *  or a stale `liveTotal` carried across a session switch): pinning to raw
+   *  scrollHeight then parks the viewport in blank space below the real
+   *  content, which read as "scrolled excessively downward" on first contact
+   *  with a chat. Returns plain max-scroll when the tail row isn't mounted
+   *  (the virtual window hasn't reached the end yet) — converging across the
+   *  settle frames as the tail mounts. */
+  const pinTargetFor = useCallback((el: HTMLDivElement): number => {
+    const maxScroll = el.scrollHeight - el.clientHeight;
+    const rows = el.querySelectorAll<HTMLElement>("[data-index]");
+    const last = rows[rows.length - 1];
+    if (!last || itemsRef.current.length === 0) return maxScroll;
+    if (Number(last.dataset.index) !== itemsRef.current.length - 1) return maxScroll;
+    const elRect = el.getBoundingClientRect();
+    const rowBottom = last.getBoundingClientRect().bottom - elRect.top + el.scrollTop;
+    let tail = 0;
+    const firstTail = last.parentElement?.nextElementSibling ?? null;
+    if (firstTail) tail = 18; // .chat-messages flex gap before the tail stack
+    for (let n: Element | null = firstTail; n; n = n.nextElementSibling) {
+      tail += (n as HTMLElement).offsetHeight;
+    }
+    return Math.max(0, Math.min(maxScroll, rowBottom + tail - el.clientHeight));
+  }, []);
 
   // Follow new messages / streaming tokens only while pinned to the bottom.
   // Writes scrollTop directly instead of scrollIntoView: scrollIntoView also
@@ -993,13 +1037,16 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
           }
         }
       }
-      const target = el.scrollHeight - el.clientHeight;
+      const target = pinTargetFor(el);
       // Skip the write when already at the live edge: redundant scrollTop
       // writes fire scroll events that keep the virtualizer's isScrolling
       // flag hot, which makes its element-measure pass SKIP rows mounting
       // mid-stream (the swapped-in persisted row after a turn ends).
       if (Math.abs(el.scrollTop - target) > 1) {
         el.scrollTop = target;
+        // The scroll event this write produces must not be read as user
+        // intent (see handleScroll).
+        programmaticPinUntilRef.current = performance.now() + PROGRAMMATIC_PIN_GUARD_MS;
       }
     };
     pinToLiveEdgeRef.current = patchTailAndPin;
@@ -1024,7 +1071,7 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
       cancelAnimationFrame(raf);
       pinToLiveEdgeRef.current = null;
     };
-  }, [messages, streaming, composerDockHeight]);
+  }, [messages, streaming, composerDockHeight, pinTargetFor]);
 
   // Heal an already-stranded session on mount / fast-refresh reload: the
   // patch+pin above only fires on message/dock changes, but a chat saved in
@@ -1040,9 +1087,17 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     };
   }, []);
 
-  // Switching sessions resets to the bottom of the new conversation.
+  // Switching sessions resets to the bottom of the new conversation — and
+  // resets the measurement mirrors with it: `liveTotal` is a height from the
+  // PREVIOUS session's virtualizer cache. Math.max(totalSize, liveTotal)
+  // would otherwise inflate the new (possibly empty) chat's wrapper by the
+  // old conversation's height, and the mount pin would slam the viewport
+  // deep into that blank space — the "first message scrolls excessively
+  // downward" report.
   useEffect(() => {
     stickToBottomRef.current = true;
+    liveTotalRef.current = 0;
+    setLiveTotal(0);
   }, [activeChatSessionId]);
 
   // The per-action approval card sits below the message list in the composer
@@ -1068,7 +1123,10 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     if (stickToBottomRef.current) {
       const raf = requestAnimationFrame(() => {
         const el = messagesContainerRef.current;
-        if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
+        if (el && stickToBottomRef.current) {
+          el.scrollTop = pinTargetFor(el);
+          programmaticPinUntilRef.current = performance.now() + PROGRAMMATIC_PIN_GUARD_MS;
+        }
       });
       return () => cancelAnimationFrame(raf);
     }
@@ -1086,7 +1144,7 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
       el.scrollTop = Math.min(max, Math.max(0, el.scrollHeight - el.clientHeight - prevBottom));
     });
     return () => cancelAnimationFrame(raf);
-  }, [approvalKey, questionKey]);
+  }, [approvalKey, questionKey, pinTargetFor]);
 
   // Register a scroll-to-message helper so the TurnNavigator can jump to a
   // specific turn. Sets stickToBottom OFF first so the auto-follow effect

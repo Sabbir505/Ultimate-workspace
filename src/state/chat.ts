@@ -702,6 +702,13 @@ export interface ChatState {
    *  active session's loop is advanced, and only while the session is active
    *  (switching away pauses it). */
   loopState: Record<string, LoopState>;
+  /** Trimmed content of the session's last USER-STOPPED turn (captured in
+   *  `cancelStream`, cleared when the session sends again). The bubble whose
+   *  content matches keeps its process section expanded after the stop — the
+   *  steps are the only content that turn produced, so auto-collapsing them
+   *  into an empty-looking "Worked" row erased it. Completed turns never
+   *  match (their content differs), so they keep collapsing normally. */
+  stoppedPartial: Record<string, string>;
 
   // Actions
   loadSessions: () => Promise<void>;
@@ -1019,6 +1026,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   lastTurnPerf: {},
   sessionMetrics: {},
   loopState: {},
+  stoppedPartial: {},
 
   setCwdOverride: (chatSessionId, path) =>
     set((s) => {
@@ -1846,6 +1854,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sessionIdOverride != null &&
         sessionIdOverride === s.splitChatSessionId &&
         sessionIdOverride !== s.activeChatSessionId;
+      // A fresh turn supersedes any stop-marker for this session.
+      const stoppedPartial = { ...s.stoppedPartial };
+      delete stoppedPartial[activeChatSessionId];
       return {
         messages: forSplit ? s.messages : [...messages, userMsg],
         splitMessages: forSplit ? [...s.splitMessages, userMsg] : s.splitMessages,
@@ -1854,6 +1865,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         chatStatus: { ...get().chatStatus, [activeChatSessionId]: { reason: "thinking", message: "" } },
         // Start a fresh artifact buffer for this turn.
         pendingArtifacts: { ...get().pendingArtifacts, [activeChatSessionId]: [] },
+        stoppedPartial,
         error: null,
         errorCode: null,
       };
@@ -2410,11 +2422,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
         delete nextStatus[streamingChatSessionId];
         const nextLivePerf = { ...s.livePerf };
         delete nextLivePerf[streamingChatSessionId];
+        // Remember WHAT the stopped turn had produced (matches the persisted
+        // partial row's content) so that bubble keeps its process section
+        // expanded instead of collapsing to an empty "Worked" row.
+        const nextStopped = { ...s.stoppedPartial };
+        if (partial.trim().length > 0) {
+          nextStopped[streamingChatSessionId] = partial.trim();
+        } else {
+          delete nextStopped[streamingChatSessionId];
+        }
         return {
           streamingChatSessionId: null,
           streaming: nextStreaming,
           chatStatus: nextStatus,
           livePerf: nextLivePerf,
+          stoppedPartial: nextStopped,
         };
       });
       // A cancelled turn frees the queue too — send the next stacked message.

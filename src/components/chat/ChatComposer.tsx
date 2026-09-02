@@ -69,10 +69,30 @@ export const parseCreateCommand = (text: string): { type: ArtifactType; instruct
 };
 
 /** True when the input is a bare `/create`, `/create artifact`, or the user's
- * typoed `/create artifect` with no recognized subtype. */
+ *  typoed `/create artifect` with no recognized subtype. */
 export const isBareCreateCommand = (text: string): boolean => {
   const t = text.trim().toLowerCase();
   return t === "/create" || t === "/create artifact" || t === "/create artifect" || t === "/create-artifact";
+};
+
+/** The partial `/` or `@` token under the caret, if any. The marker must
+ *  START a word (line start or right after whitespace) and run unbroken to
+ *  the caret — so `/ski` mid-sentence opens the skill menu, while an email
+ *  like `a/b` or a URL path never does. `end` always equals the (clamped)
+ *  caret; `start` points at the marker character itself. */
+export const tokenAtCaret = (
+  text: string,
+  caret: number,
+  marker: "/" | "@",
+): { query: string; start: number; end: number } | null => {
+  const pos = Math.max(0, Math.min(caret, text.length));
+  const m = new RegExp(`(?:^|\\s)\\${marker}(\\S*)$`).exec(text.slice(0, pos));
+  if (!m) return null;
+  return {
+    query: m[1].toLowerCase(),
+    start: m.index + m[0].length - m[1].length - 1,
+    end: pos,
+  };
 };
 
 /**
@@ -1009,10 +1029,20 @@ export function ChatComposer({
   const [createTypeOpen, setCreateTypeOpen] = useState(false);
   const [createInstruction, setCreateInstruction] = useState("");
 
-  // The popup is active while the whole content is a partial first token
-  // starting with "/" (no space typed yet).
-  const slashQuery = /^\/(\S*)$/.exec(content)?.[1]?.toLowerCase() ?? null;
-  const slashOpen = slashQuery !== null;
+  // The caret position inside the textarea — the slash/@ popups key off the
+  // token UNDER THE CURSOR, not off the whole content, so "/" works anywhere
+  // in the sentence (text before and after the command is preserved).
+  const [caret, setCaret] = useState(0);
+  // Escape-dismiss latches: the exact token (position + query) whose popup
+  // was dismissed. Any edit to the token re-opens the menu; the dismissal is
+  // non-destructive (it no longer wipes the draft).
+  const [slashDismissed, setSlashDismissed] = useState("");
+  const [atDismissed, setAtDismissed] = useState("");
+  const dismissKey = (t: { start: number; query: string }) => `${t.start}:${t.query}`;
+
+  const slashToken = tokenAtCaret(content, caret, "/");
+  const slashQuery = slashToken?.query ?? null;
+  const slashOpen = slashToken !== null && slashDismissed !== dismissKey(slashToken);
 
   // (Re)load skills every time the popup opens, so edits made in the Skills
   // Library are picked up immediately (the backend cache is invalidated on
@@ -1154,8 +1184,9 @@ export function ChatComposer({
     setTokenIndent(tokenRowRef.current?.offsetWidth ?? 0);
   }, [commandPill, attachedRows, attachSources]);
 
-  const atQuery = /^@(\S*)$/.exec(content)?.[1]?.toLowerCase() ?? null;
-  const atOpen = atQuery !== null && !!chatSessionId;
+  const atToken = tokenAtCaret(content, caret, "@");
+  const atQuery = atToken?.query ?? null;
+  const atOpen = atToken !== null && atDismissed !== dismissKey(atToken) && !!chatSessionId;
 
   const refreshAttached = useCallback(() => {
     if (!chatSessionId) {
@@ -1230,18 +1261,33 @@ export function ChatComposer({
     setAtIndex(0);
   }, [atQuery]);
 
+  /** Splice `replacement` over the popup's token span, keep everything else,
+   *  and put the caret right after the inserted text. */
+  const replaceTokenSpan = useCallback(
+    (span: { start: number; end: number }, replacement: string) => {
+      setContent((prev) => prev.slice(0, span.start) + replacement + prev.slice(span.end));
+      const nextCaret = span.start + replacement.length;
+      setCaret(nextCaret);
+      const ta = textareaRef.current;
+      if (ta) {
+        ta.focus();
+        requestAnimationFrame(() => ta.setSelectionRange(nextCaret, nextCaret));
+      }
+    },
+    [],
+  );
+
   const applyAttachSource = useCallback(
     (source: AttachSource) => {
       if (!chatSessionId) return;
-      // Drop the partial "@query" token from the input.
-      setContent("");
-      const ta = textareaRef.current;
-      ta?.focus();
+      // Drop the partial "@query" token from the input; text before and
+      // after it stays untouched.
+      if (atToken) replaceTokenSpan(atToken, "");
       void addSessionConnector(chatSessionId, source.rowId)
         .then(() => refreshAttached())
         .catch((e) => toastError(`Could not attach ${source.name}.`, e));
     },
-    [chatSessionId, refreshAttached],
+    [chatSessionId, refreshAttached, atToken, replaceTokenSpan],
   );
 
   const detachSource = useCallback(
@@ -1269,32 +1315,37 @@ export function ChatComposer({
   // Insert a filled prompt template into the composer (roadmap #14).
   const insertTemplateText = useCallback((text: string) => {
     if (!text) return;
-    setContent((prev) => {
-      const sep = prev && !prev.endsWith("\n") ? "\n" : "";
-      return prev ? `${prev}${sep}${text}` : text;
-    });
+    const sep = content && !content.endsWith("\n") ? "\n" : "";
+    const next = content ? `${content}${sep}${text}` : text;
+    setContent(next);
+    // Programmatic setSelectionRange doesn't fire onSelect, so mirror the
+    // caret into state explicitly (the popups read it).
+    setCaret(next.length);
     const ta = textareaRef.current;
     if (ta) {
       ta.focus();
       requestAnimationFrame(() => ta.setSelectionRange(-1, -1));
     }
-  }, []);
+  }, [content]);
 
-  // Handle a selected slash-menu item. Prompt templates insert their body
-  // (or open variable fill); skills and /create commands become an inline
-  // command PILL in the composer (serialized back to the `/slug` token on
-  // send) instead of plain text.
+  // Handle a selected slash-menu item. Prompt templates insert their body;
+  // skills and /create commands render as an inline command PILL when the
+  // token IS the whole draft, and are spliced into the text in place
+  // otherwise — the text before and after the token is always preserved.
   const applySlashItem = useCallback((item: SlashItem) => {
     if (item.kind === "command") {
       if (item.slug === "create") {
-        setContent("");
+        // Drop just the token; any other draft text stays for after the
+        // type selector closes.
+        if (slashToken) replaceTokenSpan(slashToken, "");
         setCreateInstruction("");
         setCreateTypeOpen(true);
       } else {
+        // Commands are message-level directives — they ride the command
+        // pill (serialized back to the leading `/slug` on send) while the
+        // rest of the draft is kept verbatim.
+        if (slashToken) replaceTokenSpan(slashToken, "");
         setCommandPill({ slug: item.slug, label: item.name });
-        setContent("");
-        const ta = textareaRef.current;
-        ta?.focus();
       }
       return;
     }
@@ -1305,18 +1356,36 @@ export function ChatComposer({
       if (!template) return;
       const variables = templateVariables(template.body);
       if (variables.length > 0) {
+        if (slashToken) replaceTokenSpan(slashToken, "");
         setFillingTemplate(template);
         setFillValues({});
+      } else if (slashToken) {
+        replaceTokenSpan(slashToken, template.body);
       } else {
         insertTemplateText(template.body);
       }
       return;
     }
-    setCommandPill({ slug: item.slug, label: item.name });
-    setContent("");
-    const ta = textareaRef.current;
-    ta?.focus();
-  }, [insertTemplateText, promptTemplates]);
+    // Skill: a bare `/query` occupying the whole draft keeps the pill
+    // affordance; anywhere else the `/slug ` token is inserted at the
+    // cursor so surrounding text survives and the backend's token-aware
+    // skill parsing still sees it.
+    if (slashToken && slashToken.start === 0 && slashToken.end === content.length) {
+      setCommandPill({ slug: item.slug, label: item.name });
+      setContent("");
+      setCaret(0);
+      const ta = textareaRef.current;
+      ta?.focus();
+    } else if (slashToken) {
+      replaceTokenSpan(slashToken, `/${item.slug} `);
+    } else {
+      setCommandPill({ slug: item.slug, label: item.name });
+      setContent("");
+      setCaret(0);
+      const ta = textareaRef.current;
+      ta?.focus();
+    }
+  }, [insertTemplateText, promptTemplates, slashToken, content, replaceTokenSpan]);
 
   // Voice recording (roadmap #16): capture raw mic samples on a 16 kHz
   // AudioContext, transcribe a sliding tail every PARTIAL_TICK_MS for live
@@ -1594,6 +1663,7 @@ export function ChatComposer({
   useEffect(() => {
     if (!draft || draft.nonce === 0) return;
     setContent(draft.text);
+    setCaret(draft.text.length);
     const ta = textareaRef.current;
     if (ta) {
       ta.focus();
@@ -1869,7 +1939,10 @@ export function ChatComposer({
         }
         if (e.key === "Escape") {
           e.preventDefault();
-          setContent("");
+          // Dismiss the popup without touching the draft — wiping the whole
+          // content destroyed unrelated text once the menu could open
+          // mid-sentence.
+          if (slashToken) setSlashDismissed(dismissKey(slashToken));
           return;
         }
       }
@@ -1891,7 +1964,7 @@ export function ChatComposer({
         }
         if (e.key === "Escape") {
           e.preventDefault();
-          setContent("");
+          if (atToken) setAtDismissed(dismissKey(atToken));
           return;
         }
       }
@@ -1911,7 +1984,7 @@ export function ChatComposer({
         }
       }
     },
-    [disabled, needsModel, agentLocked, handleSend, slashOpen, slashFiltered, slashIndex, applySlashItem, atOpen, atFiltered, atIndex, applyAttachSource, content, commandPill],
+    [disabled, needsModel, agentLocked, handleSend, slashOpen, slashFiltered, slashIndex, applySlashItem, atOpen, atFiltered, atIndex, applyAttachSource, content, commandPill, slashToken, atToken, dismissKey],
   );
 
   const isEmpty = !content.trim() && attachments.length === 0;
@@ -2225,7 +2298,11 @@ export function ChatComposer({
             }
             style={tokenIndent ? { textIndent: tokenIndent + 8 } : undefined}
             value={content}
-            onChange={(e) => setContent(e.target.value)}
+            onChange={(e) => {
+              setContent(e.target.value);
+              setCaret(e.target.selectionStart ?? e.target.value.length);
+            }}
+            onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
             onKeyDown={handleKeyDown}
             rows={1}
             disabled={disabled}

@@ -393,15 +393,16 @@ const GET_SKILL_DESC: &str = "Load a skill's detailed instructions into your \
 const LIST_SKILLS_DESC: &str = "List every available skill slug.";
 
 const ATTACH_CONNECTOR_DESC: &str = "Load a connected app's tools into this \
-    conversation (Gmail, Notion, Drive, … — see \"Connected apps & servers\" in the \
-    system prompt for ids). The app's tools become callable immediately and stay \
-    attached for the conversation. Call this FIRST when a request needs one of \
-    the listed services; never claim the service is unavailable before attaching.";
+    turn (Gmail, Notion, Drive, … — see \"Connected apps & servers\" in the \
+    system prompt for ids). The app's tools become callable immediately. \
+    Attach only what the current request needs — never attach every service \
+    to check access. Call this FIRST when a request needs one of the listed \
+    services; never claim the service is unavailable before attaching.";
 
 const ATTACH_MCP_SERVER_DESC: &str = "Load an installed MCP server's tools into \
-    this conversation (see \"Connected apps & servers\" in the system prompt for \
-    ids). Same contract as attach_connector: tools become callable immediately \
-    and stay attached for the conversation.";
+    this turn (see \"Connected apps & servers\" in the system prompt for ids). \
+    Same contract as attach_connector: tools become callable immediately; \
+    attach only what the request needs.";
 
 const LIST_DIRECTORY_DESC: &str = "List the immediate children of a directory \
     (files and subdirectories, one per line). Pass an absolute path. Read-only.";

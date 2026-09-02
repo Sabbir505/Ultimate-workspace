@@ -1,6 +1,8 @@
 // Artifact proposal card for conversational artifact creation.
 // Renders a structured preview of the proposed artifact with Regenerate / Edit / Create actions.
-// States: "generating" (spinner) | "ready" (buttons) | "editing" (in editor) | "created" | "rejected"
+// States: "generating" (spinner — "Creating artifact…" on first generation,
+// "Regenerating artifact…" once a spec already exists) | "ready" (buttons) |
+// "editing" (in editor) | "created" | "rejected"
 import { useEffect, useState, useMemo } from "react";
 import type { ArtifactProposal, ArtifactSpec, SkillSpec, LoopSpec, PromptTemplateSpec, AutomationSpec } from "../../lib/ipc";
 import { listHarnessModels, listChatModels } from "../../lib/ipc";
@@ -396,6 +398,16 @@ export function ArtifactProposalCard({
   const isRejected = state === "rejected";
   const isThinking = isGenerating || isEditing;
 
+  // A first-time generation starts from a bare { type } shell (see
+  // ChatComposer.triggerArtifactGeneration); once any real field exists the
+  // proposal has been generated before, so a new "generating" state is an
+  // actual regeneration — the Regenerate button or a missing-fields refill.
+  const hasGeneratedSpec = useMemo(() => {
+    const normalized = normalizeArtifactSpec(proposal.spec);
+    if (!normalized) return false;
+    return Object.keys(normalized).some((key) => key !== "type");
+  }, [proposal.spec]);
+
   // Show thinking animation when generating or editing
   const cardClass = useMemo(() => {
     const classes = ["artifact-proposal-card", `t-${proposal.artifactType}`, state];
@@ -545,7 +557,7 @@ export function ArtifactProposalCard({
         {(isGenerating || regenerating) && (
           <div className="artifact-proposal-generating">
             <span className="artifact-spinner" />
-            <span>Regenerating artifact…</span>
+            <span>{regenerating || hasGeneratedSpec ? "Regenerating artifact…" : "Creating artifact…"}</span>
           </div>
         )}
 

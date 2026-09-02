@@ -154,7 +154,7 @@ describe("ArtifactProposalCard", () => {
     expect(fillBtn).toBeTruthy();
   });
 
-  it("shows the regenerating spinner while generating", () => {
+  it("shows the regenerating spinner while a generated proposal regenerates", () => {
     render(
       <ArtifactProposalCard
         proposalId="wrap-2"
@@ -167,6 +167,24 @@ describe("ArtifactProposalCard", () => {
       />,
     );
     expect(screen.getByText(/Regenerating artifact/i)).toBeTruthy();
+  });
+
+  it("shows Creating (not Regenerating) on first-time generation with a bare spec", () => {
+    // First-time generation starts from a bare { type } shell before the LLM
+    // responds — nothing exists yet, so the label must not say "Regenerating".
+    render(
+      <ArtifactProposalCard
+        proposalId="wrap-4"
+        proposal={{ ...baseProposal, spec: { type: "skill" } as never }}
+        state="generating"
+        onCreate={vi.fn()}
+        onEdit={vi.fn()}
+        onRegenerate={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/Creating artifact/i)).toBeTruthy();
+    expect(screen.queryByText(/Regenerating artifact/i)).toBeNull();
   });
 
   it("renders Edit / Create / Regenerate / Dismiss buttons when ready", () => {

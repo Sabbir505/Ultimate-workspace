@@ -190,14 +190,16 @@ function ArtifactDetails({
           {spec.inputs && spec.inputs.length > 0 && (
             <div className="artifact-field">
               <span className="artifact-field-label">Inputs</span>
-              <ul className="artifact-list">
+              <div className="artifact-tags">
                 {spec.inputs.map((input, i) => (
-                  <li key={i}>
-                    <code>{input.name}</code>: {input.type}{input.required ? " (required)" : ""}
-                    {input.default && ` = ${input.default}`}
-                  </li>
+                  <span key={i} className="artifact-tag">
+                    <code>{input.name}</code>
+                    {input.type && <span className="artifact-tag-meta"> · {input.type}</span>}
+                    {input.required && <span className="artifact-tag-meta"> · required</span>}
+                    {input.default && <span className="artifact-tag-meta"> = {input.default}</span>}
+                  </span>
                 ))}
-              </ul>
+              </div>
             </div>
           )}
           {spec.tools && spec.tools.length > 0 && (
@@ -276,14 +278,16 @@ function ArtifactDetails({
           {spec.variables && spec.variables.length > 0 && (
             <div className="artifact-field">
               <span className="artifact-field-label">Variables</span>
-              <ul className="artifact-list">
+              <div className="artifact-tags">
                 {spec.variables.map((v, i) => (
-                  <li key={i}>
-                    <code>{v.name}</code> ({v.type}){v.required ? " required" : ""}
-                    {v.default && ` = ${v.default}`}
-                  </li>
+                  <span key={i} className="artifact-tag">
+                    <code>{v.name}</code>
+                    {v.type && <span className="artifact-tag-meta"> · {v.type}</span>}
+                    {v.required && <span className="artifact-tag-meta"> · required</span>}
+                    {v.default && <span className="artifact-tag-meta"> = {v.default}</span>}
+                  </span>
                 ))}
-              </ul>
+              </div>
             </div>
           )}
           {spec.outputFormat && (

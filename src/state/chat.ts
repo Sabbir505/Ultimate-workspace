@@ -984,6 +984,8 @@ export interface ChatState {
   onPerf: (payload: ChatPerfPayload) => void;
   /** Record the end-of-turn citation-integrity verdict (research turns). */
   onCitationReport: (payload: ChatCitationReportPayload) => void;
+  /** Dismiss the strip (repair turn dispatched). */
+  clearCitationReport: (chatSessionId: string) => void;
   onError: (chatSessionId: string, message: string, code: string | null) => void;
   onArtifact: (payload: ChatArtifactPayload) => void;
   /** Append a checkpoint from `checkpoint:created` (baseline, post-turn, or
@@ -3044,6 +3046,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({
       citationReports: { ...s.citationReports, [payload.chatSessionId]: payload },
     }));
+  },
+
+  /** Drop the session's citation verdict — the "Fix citations" action calls
+   *  this when it dispatches the repair turn, so the strip disappears while
+   *  the fix runs. If the repaired turn produces a report of its own, the
+   *  fresh verdict replaces this (and the strip re-renders accordingly). */
+  clearCitationReport: (chatSessionId) => {
+    set((s) => {
+      if (!(chatSessionId in s.citationReports)) return {};
+      const next = { ...s.citationReports };
+      delete next[chatSessionId];
+      return { citationReports: next };
+    });
   },
 
   onTaskProgress: ({ chatSessionId, taskId, kind, state, message, downloaded, total, speedBps, destPath }) => {

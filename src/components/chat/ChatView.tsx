@@ -1218,16 +1218,21 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     [sendMessage, startLoop, activeChatSessionId],
   );
 
-  // "Fix citations" on the citation-report strip: pull the stored lint detail
-  // and send a RARR-style repair instruction — the model re-cites or drops
-  // flagged claims from the ledger and regenerates the report artifact.
+  // "Fix citations" on the citation-report strip: dismiss the strip (the
+  // verdict it described is being addressed), then pull the stored lint
+  // detail and send a RARR-style repair instruction — the model re-cites or
+  // drops flagged claims from the ledger and regenerates the report
+  // artifact. The repair turn runs with research scaffolding forced so the
+  // ledger tools are available; if it produces a fresh verdict of its own,
+  // the strip re-renders with the new numbers.
   const handleFixCitations = useCallback(
     async (sid: string) => {
+      useChatStore.getState().clearCitationReport(sid);
       const detail = await getResearchCitationReport(sid).catch(() => null);
       const instruction = detail
         ? `The citation-integrity check on your last research report flagged problems. Lint detail (JSON):\n${detail}\n\nRepair the report working ONLY from the source ledger: for every orphan citation, re-cite the correct ledger entry or delete the claim; for every weak attribution, re-read the flagged source (or a better one), record a supporting excerpt with add_source_note, then re-cite. Drop claims that don't trace to a stored excerpt. Then regenerate the artifact with generate_file (same filename, corrected) and give a one-line summary of the fixes.`
         : "Re-verify every citation in your last research report against get_source_ledger; fix any claim that doesn't trace to a stored excerpt, then regenerate the artifact with generate_file.";
-      handleSend(instruction, []);
+      handleSend(instruction, [], true);
     },
     [handleSend],
   );

@@ -37,6 +37,7 @@ const ArtifactProposalCard = lazy(() => import("./ArtifactProposalCard").then((m
 import { listHarnessModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, deleteEmptyChatSessions, getLocalModelOverrides, setLocalModelOverrides, warmupLocalPrompt, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance, getAgentActualModel } from "../../lib/ipc";
 import { harnessModelCatalog } from "../../lib/harnessModels";
 import { setChatScrollToMessage } from "../../lib/chatScroll";
+import { setChatSelectionPrefill } from "../../lib/chatSelection";
 import type { AgentModelSelection } from "./AgentModelPicker";
 import { TurnNavigator } from "./TurnNavigator";
 import { useContextMeter } from "../../hooks/useContextMeter";
@@ -811,11 +812,16 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   const rowHeightsRef = useRef<Map<string, number>>(new Map());
 
   // Draft handed to the composer: bumping `nonce` re-prefills the textarea
-  // (used by the per-message "Edit" action to load a message for resend).
+  // (used by the per-message "Edit" action to load a message for resend, and
+  // by the selection toolbar's "Ask" — selected text quoted as a follow-up).
   const [draft, setDraft] = useState<{ text: string; nonce: number }>({
     text: "",
     nonce: 0,
   });
+  useEffect(() => {
+    setChatSelectionPrefill((text) => setDraft({ text, nonce: Date.now() }));
+    return () => setChatSelectionPrefill(null);
+  }, []);
 
   // Load sessions on mount if not already loaded.
   useEffect(() => {

@@ -10,7 +10,7 @@
 // StepCodeHighlighter below. That moves it out of the initial bundle.
 import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Pencil } from "lucide-react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -41,6 +41,9 @@ import { useSyntaxTheme } from "../../hooks/useSyntaxTheme";
 import type { SyntaxHighlighterProps, SyntaxStyle } from "../../lib/syntaxHighlighter";
 import { loadSyntaxHighlighter } from "../../lib/syntaxHighlighter";
 import { SmoothReveal } from "../common/SmoothReveal";
+import { linkCitations, parseChatSources, sourcesFingerprint, type ChatSource } from "../../lib/chatCitations";
+import { ChatCitation } from "./ChatCitation";
+import { MarkdownTable } from "./MarkdownTable";
 
 type SyntaxHighlighterComponent = (props: SyntaxHighlighterProps) => React.ReactNode;
 
@@ -711,7 +714,7 @@ function StepCodeHighlighter({ code, language }: { code: string; language: strin
           margin: 0,
           background: "transparent",
           padding: "12px 16px",
-          fontSize: "12px",
+          fontSize: "calc(12px * var(--chat-zoom, 1))",
           fontFamily: "var(--font-mono)",
           lineHeight: 1.5,
           overflowX: "auto",
@@ -739,7 +742,7 @@ function StepCodeHighlighter({ code, language }: { code: string; language: strin
         margin: 0,
         background: "transparent",
         padding: "12px 16px",
-        fontSize: "12px",
+        fontSize: "calc(12px * var(--chat-zoom, 1))",
         fontFamily: "var(--font-mono)",
         lineHeight: 1.5,
         overflowX: "auto",
@@ -941,6 +944,7 @@ function renderProcessBlock(
   i: number,
   onPreviewArtifact?: (artifact: ChatArtifact) => void,
   cache = true,
+  sources?: ChatSource[],
 ) {
   switch (b.kind) {
     case "activity":
@@ -973,7 +977,7 @@ function renderProcessBlock(
       ) : null;
     case "text":
       return b.text.trim().length > 0 ? (
-        <Markdown key={`text:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={cache} />
+        <Markdown key={`text:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={cache} sources={sources} />
       ) : null;
   }
 }
@@ -994,8 +998,16 @@ function FoldedStepGroup({
 }) {
   const [open, setOpen] = useState(false);
   const allDone = steps.every((s) => s.done);
+  // Noun matches what the run actually did — "reading_a_web_page · 3 searches"
+  // read as a bug; web rows are page reads, search rows are searches.
   const noun =
-    icon === "code" ? "commands" : icon === "web" || icon === "search" ? "searches" : "calls";
+    icon === "code"
+      ? "commands"
+      : icon === "search"
+        ? "searches"
+        : icon === "web" || icon === "browser"
+          ? "pages"
+          : "calls";
   return (
     <div className="chat-fold-group">
       <button
@@ -1376,117 +1388,151 @@ function ChatImage({ src, alt }: { src: string; alt?: string }) {
   return <span style={{ color: "var(--muted, #888)", fontSize: "0.85em" }}>Loading image…</span>;
 }
 
+// react-markdown's default URL sanitizer strips unknown schemes — which
+// would blank our internal `cite:` links before the `a` component ever sees
+// them. Pass them through untouched; everything else keeps the default
+// sanitization.
+function citeUrlTransform(url: string): string {
+  return url.startsWith("cite:") ? url : defaultUrlTransform(url);
+}
+
 /** Renders a markdown string with syntax-highlighted code fences, mermaid
  *  diagrams and glass-styled links — the assistant's normal answer body.
  *  `cache` (default true) reuses the rendered element tree across mounts via
  *  the module LRU — pass false for content that changes every flush (the live
- *  streaming bubble), which would otherwise insert a cache entry per token. */
+ *  streaming bubble), which would otherwise insert a cache entry per token.
+ *  `sources` (assistant turns only) enables interactive inline citations:
+ *  `[1]` / `(1,2)` markers whose numbers appear in the turn's Sources section
+ *  render as hover/click chips (see chatCitations.ts). */
 function Markdown({
   content,
   onPreviewArtifact,
   cache = true,
+  sources,
 }: {
   content: string;
   onPreviewArtifact?: (artifact: ChatArtifact) => void;
   cache?: boolean;
+  sources?: ChatSource[];
 }) {
-  const build = () => (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm, remarkMath]}
-      rehypePlugins={[rehypeKatex]}
-      components={{
-        code({ className, children, ...props }) {
-          const match = /language-(\w+)/.exec(className || "");
-          const rawCode = String(children).replace(/\n$/, "");
-          // Cap the code string before handing it to the highlighter so a
-          // misbehaving model can't ship a pathologically large payload
-          // that amplifies any parser cost in the (historically
-          // vulnerable) highlighter dep tree. Truncate cleanly.
-          const codeString =
-            rawCode.length > MAX_CODE_BLOCK_BYTES
-              ? rawCode.slice(0, MAX_CODE_BLOCK_BYTES) + "\n… (truncated)"
-              : rawCode;
+  const hasSources = !!sources && sources.length > 0;
+  const fingerprint = sourcesFingerprint(sources);
+  const build = () => {
+    const body = hasSources ? linkCitations(content, sources!) : content;
+    return (
+      <ReactMarkdown
+        // singleDollarTextMath: false — a lone `$` pair must NOT open math:
+        // "$5 and $10" used to render as KaTeX, which collapses the spaces
+        // ("5and10"). `$$…$$` display math still works.
+        remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
+        rehypePlugins={[rehypeKatex]}
+        urlTransform={citeUrlTransform}
+        components={{
+          table: MarkdownTable,
+          code({ className, children, ...props }) {
+            const match = /language-(\w+)/.exec(className || "");
+            const rawCode = String(children).replace(/\n$/, "");
+            // Cap the code string before handing it to the highlighter so a
+            // misbehaving model can't ship a pathologically large payload
+            // that amplifies any parser cost in the (historically
+            // vulnerable) highlighter dep tree. Truncate cleanly.
+            const codeString =
+              rawCode.length > MAX_CODE_BLOCK_BYTES
+                ? rawCode.slice(0, MAX_CODE_BLOCK_BYTES) + "\n… (truncated)"
+                : rawCode;
 
-          // Inline code: no language class and short.
-          if (!match && !String(children).includes("\n")) {
+            // Inline code: no language class and short.
+            if (!match && !String(children).includes("\n")) {
+              return (
+                <code style={inlineCodeStyle} {...props}>
+                  {children}
+                </code>
+              );
+            }
+
+            // Mermaid diagrams render as inline SVG, not as highlighted text.
+            if (match && match[1] === "mermaid") {
+              return (
+                <Suspense fallback={<pre className="chat-markdown-mermaid-fallback">{codeString}</pre>}>
+                  <MermaidDiagram code={codeString} />
+                </Suspense>
+              );
+            }
+
+            // React/JSX artifacts open as a live preview in the side pane
+            // (rendered by ArtifactPreviewPane), not inline in the chat.
+            if (match && (match[1] === "jsx" || match[1] === "tsx")) {
+              return (
+                <JsxArtifactChip
+                  code={codeString}
+                  lang={match[1] as "jsx" | "tsx"}
+                  onPreviewArtifact={onPreviewArtifact}
+                />
+              );
+            }
+
+            // Code block with language.
             return (
-              <code style={inlineCodeStyle} {...props}>
-                {children}
-              </code>
-            );
-          }
-
-          // Mermaid diagrams render as inline SVG, not as highlighted text.
-          if (match && match[1] === "mermaid") {
-            return (
-              <Suspense fallback={<pre className="chat-markdown-mermaid-fallback">{codeString}</pre>}>
-                <MermaidDiagram code={codeString} />
-              </Suspense>
-            );
-          }
-
-          // React/JSX artifacts open as a live preview in the side pane
-          // (rendered by ArtifactPreviewPane), not inline in the chat.
-          if (match && (match[1] === "jsx" || match[1] === "tsx")) {
-            return (
-              <JsxArtifactChip
-                code={codeString}
-                lang={match[1] as "jsx" | "tsx"}
-                onPreviewArtifact={onPreviewArtifact}
-              />
-            );
-          }
-
-          // Code block with language.
-          return (
-            <div className="chat-code-block">
-              <div className="chat-code-header">
-                <span className="chat-code-lang">{match ? match[1] : "text"}</span>
-                <CopyButton code={codeString} />
+              <div className="chat-code-block">
+                <div className="chat-code-header">
+                  <span className="chat-code-lang">{match ? match[1] : "text"}</span>
+                  <CopyButton code={codeString} />
+                </div>
+                <StepCodeHighlighter code={codeString} language={match ? match[1] : "text"} />
               </div>
-              <StepCodeHighlighter code={codeString} language={match ? match[1] : "text"} />
-            </div>
-          );
-        },
-        // Images: remote URLs render as-is; local file paths (agent-saved
-        // screenshots/images) are loaded over IPC into a data URI — see
-        // ChatImage for why a bare path can never render in this webview.
-        img({ src, alt }) {
-          return <ChatImage src={typeof src === "string" ? src : ""} alt={alt} />;
-        },
-        // Links open in the built-in browser pane, NOT the system browser:
-        // in a Tauri webview a target=_blank navigation falls through to the
-        // OS default handler. Intercept the click and route it to the pane.
-        a({ href, children }) {
-          const isHttp = !!href && /^https?:\/\//i.test(href);
-          return (
-            <a
-              href={href}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{ color: "var(--accent)" }}
-              title={isHttp ? `${href}\n(opens in the built-in browser)` : href}
-              onClick={
-                isHttp
-                  ? (e) => {
-                      e.preventDefault();
-                      openInBrowserPane(href!);
-                    }
-                  : undefined
-              }
-            >
-              {children}
-            </a>
-          );
-        },
-      }}
-    >
-      {content}
-    </ReactMarkdown>
-  );
+            );
+          },
+          // Images: remote URLs render as-is; local file paths (agent-saved
+          // screenshots/images) are loaded over IPC into a data URI — see
+          // ChatImage for why a bare path can never render in this webview.
+          img({ src, alt }) {
+            return <ChatImage src={typeof src === "string" ? src : ""} alt={alt} />;
+          },
+          // Links open in the built-in browser pane, NOT the system browser:
+          // in a Tauri webview a target=_blank navigation falls through to the
+          // OS default handler. Intercept the click and route it to the pane.
+          // `cite:` targets are rewritten citation markers ([1] / (1,2)) and
+          // render as interactive source chips instead of plain links.
+          a({ href, children }) {
+            if (hasSources && href?.startsWith("cite:")) {
+              const nums = href
+                .slice("cite:".length)
+                .split(",")
+                .map((x) => parseInt(x, 10))
+                .filter((n) => Number.isFinite(n));
+              const citation = <ChatCitation nums={nums} sources={sources!} />;
+              if (citation) return citation;
+            }
+            const isHttp = !!href && /^https?:\/\//i.test(href);
+            return (
+              <a
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="chat-md-link"
+                title={isHttp ? `${href}\n(opens in the built-in browser)` : href}
+                onClick={
+                  isHttp
+                    ? (e) => {
+                        e.preventDefault();
+                        openInBrowserPane(href!);
+                      }
+                    : undefined
+                }
+              >
+                {children}
+              </a>
+            );
+          },
+        }}
+      >
+        {body}
+      </ReactMarkdown>
+    );
+  };
   return (
     <div className="chat-markdown">
-      {cache ? cachedMarkdown(`md:${content}`, build) : build()}
+      {cache ? cachedMarkdown(`md:${content}${fingerprint ? `|src:${fingerprint}` : ""}`, build) : build()}
     </div>
   );
 }
@@ -1769,6 +1815,43 @@ function MessageBubbleInner({
   // Group the turn into ordered render blocks (text / think / activity / diff).
   const blocks = useMemo(() => (isUser ? null : groupSegments(segments)), [isUser, segments]);
 
+  // Citation sources for interactive [1] / (1,2) markers: parsed from this
+  // message's own `## Sources` section when present; otherwise, research turns
+  // cite from inside their generated .md artifact, so fall back to reading the
+  // turn's markdown artifacts over IPC (once per artifact path — the result
+  // feeds component state, not the render, so the element cache stays sound).
+  const inlineSources = useMemo(
+    () => (isUser ? [] : parseChatSources(cleanContent)),
+    [isUser, cleanContent],
+  );
+  const [artifactSources, setArtifactSources] = useState<ChatSource[]>([]);
+  useEffect(() => {
+    setArtifactSources([]);
+    if (isUser || inlineSources.length > 0 || !artifacts?.length) return;
+    let stale = false;
+    void (async () => {
+      for (const a of artifacts) {
+        if (!/\.(md|markdown)$/i.test(a.filename)) continue;
+        try {
+          const preview = await readArtifactPreview(a.path);
+          if (stale) return;
+          if (!preview?.text) continue;
+          const parsed = parseChatSources(preview.text);
+          if (parsed.length > 0) {
+            setArtifactSources(parsed);
+            return;
+          }
+        } catch {
+          // Unreadable artifact — citations stay plain text.
+        }
+      }
+    })();
+    return () => {
+      stale = true;
+    };
+  }, [isUser, inlineSources, artifacts]);
+  const sources = inlineSources.length > 0 ? inlineSources : artifactSources;
+
   // Live "Working for Xs" seconds — locally interpolated between chat:perf
   // snapshots so second flips land on wall-clock boundaries; harness turns
   // (no perf events) tick from bubble mount via the fallback. Hook must stay
@@ -1920,35 +2003,35 @@ function MessageBubbleInner({
             ? (() => {
                 // The "Working for Xs / Worked for Xs" header is ALWAYS the
                 // first line of the assistant turn. The process region holds
-                // the leading narration plus every tool/think/diff block;
-                // EVERY text block after the first process block is model
-                // prose (mid-run narration + the synthesized answer) and
-                // renders as markdown below the region.
+                // everything UP TO THE LAST process block IN SOURCE ORDER —
+                // tool rows, thinking, AND the narration the model wrote
+                // between tool runs — so an expanded turn reads as one
+                // chronological transcript instead of "all tools up top, all
+                // prose below". Only the text AFTER the last process block is
+                // the synthesized answer; it renders outside the collapsible
+                // so the turn's answer stays visible when the region is
+                // collapsed.
                 //
-                // The old rule — "everything up to the LAST process block
-                // lives inside" — swallowed the answer whenever the model
-                // called a tool (or emitted a think block) after writing it:
-                // all paragraphs but the last collapsed into the region and
-                // the visible answer shrank to the trailing fragment. Text
-                // between process blocks renders below the (live-expanded)
-                // region slightly after its source position, but it is never
-                // hidden.
+                // (The even older rule — text after the FIRST process block
+                // renders outside — pulled mid-run narration out of sequence:
+                // every paragraph narrated between searches piled up below
+                // all the tool rows. Text blocks render inside via
+                // renderProcessBlock, which already handles kind "text".)
                 if (!blocks) return null;
-                const firstProc = blocks.findIndex((b) => b.kind !== "text");
-                if (firstProc === -1) return null;
-                const inside: Block[] = [];
-                const outside: Block[] = [];
-                blocks.forEach((b, i) => {
-                  if (b.kind === "text" && i >= firstProc) outside.push(b);
-                  else inside.push(b);
-                });
+                const lastProc = blocks.reduce(
+                  (last, b, i) => (b.kind !== "text" ? i : last),
+                  -1,
+                );
+                if (lastProc === -1) return null;
+                const inside = blocks.slice(0, lastProc + 1);
+                const outside = blocks.slice(lastProc + 1);
                 // The live bubble's prose grows every token flush — its
                 // markdown must NOT go through the element cache (each
                 // intermediate text would insert a throwaway LRU entry).
                 const mdCache = !live;
                 const textBlock = (b: Block, key: string) =>
                   b.kind === "text" && b.text.trim().length > 0 ? (
-                    <Markdown key={key} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={mdCache} />
+                    <Markdown key={key} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={mdCache} sources={sources} />
                   ) : null;
                 return (
                   <>
@@ -1957,7 +2040,7 @@ function MessageBubbleInner({
                       label={processLabel}
                       keepExpandedOnEnd={endedByStop}
                     >
-                      {inside.map((b, i) => renderProcessBlock(b, i, onPreviewArtifact, mdCache))}
+                      {inside.map((b, i) => renderProcessBlock(b, i, onPreviewArtifact, mdCache, sources))}
                     </ProcessSummary>
                     {outside.map((b, i) => textBlock(b, `out:${i}`))}
                   </>
@@ -1966,7 +2049,7 @@ function MessageBubbleInner({
             /* Pure-text turn: flat markdown, nothing to expand. */
             : blocks!.map((b, i) =>
                 b.kind === "text" && b.text.trim().length > 0
-                  ? <Markdown key={`flat:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={!live} />
+                  ? <Markdown key={`flat:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={!live} sources={sources} />
                   : null,
               )}
         {/* Consolidated per-turn changes row: "N files changed +adds −dels"

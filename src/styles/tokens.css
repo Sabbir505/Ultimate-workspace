@@ -96,6 +96,9 @@
      replies don't glare on the dark surface. Rest of the app keeps --text. */
   --chat-text: #c9c9c9;
   --text-dim: #a0a0a0;
+  /* Markdown link color — brighter than the gray UI accent so links stay
+     readable on the dark surface (the accent #6e706f nearly disappears). */
+  --link: #88c0d0;
   --accent: #6e706f;
   --accent-soft: rgba(110, 112, 111, 0.16);
   --accent-glow: rgba(110, 112, 111, 0.35);
@@ -220,6 +223,9 @@
   --text: #1a1a1a;
   --chat-text: #1a1a1a;
   --text-dim: #6a6a6a;
+  /* Markdown link color (light theme: deep blue matching the primary button
+     tone — distinct from body text without being garish). */
+  --link: #0b69a3;
   --accent: #6e706f;
   --accent-soft: rgba(110, 112, 111, 0.12);
   --accent-glow: rgba(110, 112, 111, 0.28);

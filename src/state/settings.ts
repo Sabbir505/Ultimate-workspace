@@ -52,6 +52,13 @@ export const DEFAULT_CLOUD_PIN_EXCHANGES = 6;
 // chat/context_windows.rs::load_context_limit_override.
 const K_CLOUD_CONTEXT_LIMIT = "chat.cloud.context_limit";
 
+// Chat text zoom (Ctrl + / Ctrl - to scale, Ctrl + 0 to reset). A multiplier
+// on the chat message/composer/code font sizes via the --chat-zoom CSS var.
+const K_CHAT_ZOOM = "chat.textZoom";
+export const DEFAULT_CHAT_ZOOM = 1;
+export const CHAT_ZOOM_MIN = 0.7;
+export const CHAT_ZOOM_MAX = 1.6;
+
 // Per-provider curated model lists: provider id -> ordered entries with an
 // optional per-model context-window pin (0 = auto). A non-empty list IS the
 // provider's model picker content; absent/empty = show everything the
@@ -136,6 +143,9 @@ interface SettingsState {
   cloudContextLimit: number;
   /** Per-provider curated model lists with per-model window pins. */
   providerModels: Record<string, ProviderModelEntry[]>;
+  /** Chat text zoom multiplier (0.7–1.6). Scales chat message text, the
+   *  composer and code blocks via the --chat-zoom CSS variable. */
+  chatZoom: number;
 
   load: () => Promise<void>;
   setTheme: (theme: ThemeSetting) => void;
@@ -167,6 +177,8 @@ interface SettingsState {
   modelWindowFor: (provider: string, model: string | null | undefined) => number;
   setLocalCompactionSummarizer: (which: "sidecar" | "cloud") => void;
   setLocalCompactionRebuildFromRaw: (on: boolean) => void;
+  /** Set the chat text zoom (clamped to CHAT_ZOOM_MIN–MAX) and persist it. */
+  setChatZoom: (zoom: number) => void;
 }
 
 function persistKeybindings(map: KeybindingMap) {
@@ -200,9 +212,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   providerModels: {},
   localCompactionSummarizer: "sidecar",
   localCompactionRebuildFromRaw: true,
+  chatZoom: DEFAULT_CHAT_ZOOM,
 
   load: async () => {
-    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault, checkpointsEnabled, cloudEnabled, cloudThreshold, cloudPin, summarizer, rebuildRaw, cloudContextLimit] = await Promise.all([
+    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault, checkpointsEnabled, cloudEnabled, cloudThreshold, cloudPin, summarizer, rebuildRaw, cloudContextLimit, chatZoomRaw] = await Promise.all([
       getSetting(K_THEME),
       getSetting(K_DND),
       getSetting(K_NOTIFY_SOUND),
@@ -222,6 +235,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       getSetting(K_LOCAL_COMPACTION_SUMMARIZER),
       getSetting(K_LOCAL_COMPACTION_REBUILD_FROM_RAW),
       getSetting(K_CLOUD_CONTEXT_LIMIT),
+      getSetting(K_CHAT_ZOOM),
     ]);
     // Per-provider curated model lists: the index names the providers that
     // have one; each list is then read from its own key. A missing or
@@ -335,6 +349,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       if (cloudPin) {
         const v = Number(cloudPin);
         if (Number.isInteger(v) && v >= 1 && v <= 50) next.cloudPinExchanges = v;
+      }
+      if (chatZoomRaw) {
+        const v = Number(chatZoomRaw);
+        if (Number.isFinite(v) && v >= CHAT_ZOOM_MIN && v <= CHAT_ZOOM_MAX) next.chatZoom = v;
       }
       return next;
     });
@@ -518,5 +536,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setLocalCompactionRebuildFromRaw: (on) => {
     set({ localCompactionRebuildFromRaw: on });
     void setSetting(K_LOCAL_COMPACTION_REBUILD_FROM_RAW, String(on));
+  },
+
+  setChatZoom: (zoom) => {
+    const clamped = Math.max(CHAT_ZOOM_MIN, Math.min(CHAT_ZOOM_MAX, zoom));
+    set({ chatZoom: clamped });
+    void setSetting(K_CHAT_ZOOM, String(clamped));
   },
 }));

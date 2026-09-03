@@ -28,6 +28,7 @@ import { Sidebar } from "./components/sidebar/Sidebar";
 import { AppLogo } from "./components/common/AppLogo";
 import { ModelDownloadIndicator } from "./components/settings/ModelDownloadIndicator";
 import { ChatView } from "./components/chat/ChatView";
+import { ChatSelectionToolbar } from "./components/chat/ChatSelectionToolbar";
 // In-app JS document engine (generate_document language:"javascript"): must
 // be mounted wherever a chat can run, including the pop-out chat window.
 import { DocCodeRunner } from "./components/chat/DocCodeRunner";
@@ -220,6 +221,14 @@ export default function App() {
   useBrowserMcpEvents();
   useGitStatusPolling();
 
+  // Chat text zoom (Ctrl +/-/0): publish the multiplier as a CSS variable so
+  // every chat surface (bubbles, composer, code blocks, tables) scales at
+  // once. Runs in App so both the main window and pop-out chats get it.
+  const chatZoom = useSettingsStore((s) => s.chatZoom);
+  useEffect(() => {
+    document.documentElement.style.setProperty("--chat-zoom", String(chatZoom));
+  }, [chatZoom]);
+
   // Sync modal states into the UI store so native webviews know to hide.
   // Each modal registers its OWN id (M22) — closing one must not re-expose
   // webviews while another is still open.
@@ -240,6 +249,7 @@ export default function App() {
     return (
       <div className="popout-chat-root">
         <DocCodeRunner />
+        <ChatSelectionToolbar />
         <ChatView popoutSessionId={popout.session ?? undefined} />
       </div>
     );
@@ -248,6 +258,7 @@ export default function App() {
   return (
     <div className="app">
       <DocCodeRunner />
+      <ChatSelectionToolbar />
       <ToastHost />
       {/* Kept mounted so collapse/expand animates as a width slide instead
           of an unmount flash; the collapsed class hides it after the

@@ -6,13 +6,16 @@
 //    empty-looking "Worked" row that hid the only content the turn produced.
 //    Completed turns (no stoppedPartial match) keep collapsing by default.
 //
-// 2. ANSWER PROSE STAYS OUTSIDE the process region: the old partition folded
-//    "everything up to the LAST process block" into the collapsed summary, so
-//    an answer paragraph followed by one more tool/think vanished into it.
-//    Every text block after the FIRST process block must render as visible
-//    markdown below the summary, expanded or not.
+// 2. CHRONOLOGICAL PROCESS TRANSCRIPT: the process region holds every block
+//    up to the LAST process block IN SOURCE ORDER — tool rows, thinking, AND
+//    the narration written between tool runs — so an expanded turn reads in
+//    sequence instead of "all tools up top, all prose below" (the old
+//    "text after the FIRST process block renders outside" rule). Only the
+//    trailing text AFTER the last process block — the synthesized answer —
+//    renders outside the collapsible, so it stays visible when the region is
+//    collapsed.
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, fireEvent, render } from "@testing-library/react";
 import { MessageBubble } from "../components/chat/MessageBubble";
 import { useChatStore } from "../state/chat";
 import type { ChatMessage } from "../lib/ipc";
@@ -67,7 +70,7 @@ describe("MessageBubble stopped turns", () => {
 });
 
 describe("MessageBubble answer visibility", () => {
-  it("keeps answer prose visible when a tool call follows it", () => {
+  it("interleaves narration with tool rows; the trailing answer stays visible collapsed", () => {
     const content = [
       tool("Reading a web page", "rust-lang.org/learn"),
       "\n\n## Analysis\n\nRust is a systems language with strong guarantees.",
@@ -78,26 +81,33 @@ describe("MessageBubble answer visibility", () => {
       <MessageBubble message={assistantMsg(content)} chatSessionId="s1" />,
     );
 
-    // The prose BETWEEN the two tool calls must render outside the collapsed
-    // process region — the old "up to the last process block" rule hid it.
-    expect(queryByText(/strong guarantees/)).not.toBeNull();
+    // Collapsed: the mid-turn narration ("Analysis") hides WITH the process
+    // region it belongs to; the trailing answer stays visible.
+    expect(queryByText(/strong guarantees/)).toBeNull();
     expect(queryByText(/Closing note/)).not.toBeNull();
     // Exactly one process summary still wraps the turn's activity.
     expect(container.querySelectorAll(".chat-process-toggle").length).toBe(1);
+    // Expanded: the narration is part of the region again, in source order.
+    fireEvent.click(container.querySelector(".chat-process-toggle")!);
+    expect(queryByText(/strong guarantees/)).not.toBeNull();
   });
 
-  it("keeps answer prose visible when interleaved thinking follows it", () => {
+  it("keeps the final answer visible when interleaved thinking precedes it", () => {
     const content = [
       "<think>Considering the options.</think>",
       "\n\nFirst conclusion stands on its own.",
       "<think>One more consideration.</think>",
       "\n\nFinal answer.",
     ].join("");
-    const { queryByText } = render(
+    const { queryByText, container } = render(
       <MessageBubble message={assistantMsg(content)} chatSessionId="s1" />,
     );
-    // No tool calls at all — a think/text interleave. Both prose blocks stay
-    // visible; only the reasoning collapses into the process row.
+    // Collapsed: the prose BETWEEN the thinking blocks belongs to the process
+    // transcript; the final answer stays outside and visible.
+    expect(queryByText(/First conclusion stands/)).toBeNull();
+    expect(queryByText(/Final answer/)).not.toBeNull();
+    // Expanded: the interleaved prose renders with the reasoning.
+    fireEvent.click(container.querySelector(".chat-process-toggle")!);
     expect(queryByText(/First conclusion stands/)).not.toBeNull();
     expect(queryByText(/Final answer/)).not.toBeNull();
   });

@@ -11,6 +11,31 @@ import { useUiStore } from "../state/ui";
 export function useKeybindings(): void {
   const keybindings = useSettingsStore((s) => s.keybindings);
 
+  // Chat text zoom (Ctrl/Cmd + or - to scale, Ctrl/Cmd 0 to reset). Runs on
+  // its own listener BEFORE the editable-target gate so the combos also work
+  // while typing in the composer, and preventDefaults so the webview's native
+  // page zoom never double-fires.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      let next: number | null = null;
+      if (e.key === "=" || e.key === "+") {
+        next = useSettingsStore.getState().chatZoom + 0.1;
+      } else if (e.key === "-" || e.key === "_") {
+        next = useSettingsStore.getState().chatZoom - 0.1;
+      } else if (e.key === "0") {
+        next = 1;
+      } else {
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      useSettingsStore.getState().setChatZoom(next);
+    };
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, []);
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       // Don't fire global shortcuts while typing in inputs/textareas, except

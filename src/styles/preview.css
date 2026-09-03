@@ -280,6 +280,29 @@
 }
 .artifact-preview-md {
   padding: 14px 16px;
+  /* Document body text reads at the chat-text level, not the brighter UI
+     --text: long generated markdown glared next to chat replies. */
+  color: var(--chat-text);
+  /* body sets user-select: none for chrome — markdown documents must stay
+     highlight/drag-selectable so users can copy from a generated doc. */
+  user-select: text;
+  -webkit-user-select: text;
+}
+.artifact-preview-md a,
+.canvas-plan-body a {
+  color: var(--link);
+  text-decoration: none;
+  text-underline-offset: 2px;
+}
+.artifact-preview-md a:hover,
+.canvas-plan-body a:hover {
+  text-decoration: underline;
+}
+/* The plan canvas renders the same markdown reader surface. */
+.canvas-plan-body {
+  color: var(--chat-text);
+  user-select: text;
+  -webkit-user-select: text;
 }
 /* Long-document scroll performance: top-level markdown blocks outside the
    viewport skip layout + paint entirely (Chromium content-visibility). A big

@@ -2938,11 +2938,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // double-persist (the backend never persists on error, so there is no
     // other dedupe to race with).
     const partial = get().streaming[chatSessionId] ?? "";
-    if (chatSessionId in get().streaming && partial.trim().length > 0) {
-      void persistPartialChatMessage(chatSessionId, partial).catch(() => {
-        /* best-effort: the error itself is still surfaced below */
-      });
-    }
+    const hadPartial = chatSessionId in get().streaming && partial.trim().length > 0;
     // Clear streaming state and surface the error for the active session.
     // Also drop this session's live-perf chip and pending-artifact buffer —
     // onDone clears both, and an errored turn must not leave them stuck
@@ -2960,12 +2956,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // (the backend already dropped its pending).
       const nextPendingQuestions = { ...s.pendingQuestions };
       delete nextPendingQuestions[chatSessionId];
+      // Remember what the errored turn had produced (matches the persisted
+      // partial row) — same as the cancel path, so the partial bubble keeps
+      // its process section expanded and reads "Stopped" instead of
+      // collapsing to an empty "Worked" row.
+      const nextStopped = { ...s.stoppedPartial };
+      if (hadPartial) {
+        nextStopped[chatSessionId] = partial.trim();
+      } else {
+        delete nextStopped[chatSessionId];
+      }
       return {
         streaming: nextStreaming,
         chatStatus: nextStatus,
         livePerf: nextLivePerf,
         pendingArtifacts: nextPendingArtifacts,
         pendingQuestions: nextPendingQuestions,
+        stoppedPartial: nextStopped,
         streamingChatSessionId:
           s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
         error:
@@ -2974,6 +2981,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
           s.activeChatSessionId === chatSessionId ? (code ?? null) : s.errorCode,
       };
     });
+    // Keep the partial VISIBLE (not just persisted): without a refetch the
+    // live bubble vanishes with the streaming entry and the persisted row
+    // only surfaces on the NEXT turn's history reload — the watched work
+    // "disappears, then reappears later" (60s network-timeout regression).
+    // Same refresh + merge as cancelStream.
+    if (hadPartial) {
+      void (async () => {
+        try {
+          // Persist first, THEN read history — the refetch must land after
+          // the partial row is written or it won't include it.
+          await persistPartialChatMessage(chatSessionId, partial).catch(() => {});
+          const messages = await getChatMessages(chatSessionId, undefined, 200);
+          if (messages && get().activeChatSessionId === chatSessionId) {
+            set((s) => ({
+              messages: mergeOptimistic(s.messages, messages),
+              messagesSessionId: chatSessionId,
+              hasMoreHistory: messages.length >= 200,
+            }));
+          }
+        } catch {
+          /* best-effort: the partial still shows on the next turn */
+        }
+      })();
+    }
     // Turn ended (in error) — keep the queue moving rather than stranding it.
     get().drainQueue(chatSessionId);
     // Disarm any active goal loop on this session so an errored iteration

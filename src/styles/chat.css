@@ -560,7 +560,9 @@ div[data-index]:has(.chat-session-row.menu-open) {
 .chat-bubble-inner {
   padding: 10px 14px;
   border-radius: var(--radius);
-  font-size: 13px;
+  /* Scaled by the Ctrl +/-/0 chat zoom (multiplier published as --chat-zoom
+     on :root by App; headings etc. inherit via em sizing). */
+  font-size: calc(13px * var(--chat-zoom, 1));
   line-height: 1.6;
   color: var(--chat-text);
   overflow-wrap: break-word;
@@ -1375,6 +1377,183 @@ div[data-index]:has(.chat-session-row.menu-open) {
   background: var(--surface-2);
   border-radius: var(--radius-xs);
   color: var(--text-dim);
+}
+
+/* ---------- Markdown UX: selection, links, citations ---------- */
+
+/* Markdown content is always draggable-selectable, regardless of the
+   chrome-level user-select rules around it (body defaults to none). */
+.chat-markdown {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Markdown links: --link is a dedicated high-contrast token (the gray
+   --accent nearly disappears on the dark surface). */
+.chat-md-link {
+  color: var(--link);
+  text-decoration: none;
+  text-underline-offset: 2px;
+}
+.chat-md-link:hover {
+  text-decoration: underline;
+}
+
+/* Inline citation chips — `[1]` / `(1,2)` markers resolved against the turn's
+   Sources section (see lib/chatCitations.ts). Hover/focus shows the linked
+   sources; click opens the first source in the built-in browser pane. */
+.chat-citation {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: 1px;
+  margin: 0 1px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  box-shadow: var(--glass-rim-soft);
+  color: var(--link);
+  font-size: 0.72em;
+  font-weight: 600;
+  line-height: 1.7;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.chat-citation:hover,
+.chat-citation:focus-visible {
+  background: var(--accent-soft);
+  border-color: var(--border-strong);
+  outline: none;
+}
+/* Source preview card — one clickable row per cited number. Clipped only at
+   the messages scroll container's edges, like every CSS popover here. */
+.chat-citation-tip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%) translateY(2px);
+  display: none;
+  flex-direction: column;
+  min-width: 220px;
+  max-width: 340px;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  background: var(--tooltip-bg, var(--surface-glass-2));
+  border: 1px solid var(--tooltip-border, var(--border-strong));
+  box-shadow: var(--glass-shadow);
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 400;
+  line-height: 1.4;
+  text-align: left;
+  z-index: 40;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s var(--ease), transform 0.12s var(--ease);
+}
+.chat-citation:hover .chat-citation-tip,
+.chat-citation:focus-visible .chat-citation-tip {
+  display: flex;
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+  /* Small delay so quick pointer pass-throughs don't flash the card. */
+  transition-delay: 0.08s;
+  pointer-events: auto;
+}
+.chat-citation-tip-head {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+  padding: 0 6px;
+}
+.chat-citation-tip-row {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  width: 100%;
+  padding: 4px 6px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-xs);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  box-shadow: none;
+  font-size: inherit;
+}
+.chat-citation-tip-row:hover {
+  background: var(--glass-hover);
+}
+.chat-citation-tip-num {
+  color: var(--link);
+  font-weight: 700;
+  flex: none;
+}
+.chat-citation-tip-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.chat-citation-tip-title {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.chat-citation-tip-url {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Selection toolbar — floats above a text selection inside a chat message:
+   Copy the raw text, or "Ask" to prefill the composer with the selection
+   quoted as a follow-up. Fixed positioning tracks the selection rect. */
+.chat-selection-toolbar {
+  position: fixed;
+  transform: translate(-50%, calc(-100% - 8px));
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--tooltip-bg, var(--surface-glass-2));
+  border: 1px solid var(--tooltip-border, var(--border-strong));
+  box-shadow: var(--glass-shadow);
+  z-index: 60;
+  animation: chat-bubble-in 0.15s var(--ease);
+}
+.chat-selection-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  padding: 4px 9px;
+  border-radius: var(--radius-xs);
+  font-size: 11.5px;
+  color: var(--text);
+  cursor: pointer;
+}
+.chat-selection-btn:hover {
+  background: var(--glass-hover);
+}
+.chat-selection-ask {
+  color: var(--link);
+}
+.chat-selection-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--border-strong);
 }
 
 /* Code blocks inside messages */

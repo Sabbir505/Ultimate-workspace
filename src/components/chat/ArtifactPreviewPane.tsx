@@ -9,7 +9,7 @@
 // memoized adapter), so the document — including the markdown parse — only
 // re-renders when the actual file content changes.
 import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -29,12 +29,16 @@ import {
 } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { ArtifactExportMenu } from "./ArtifactExportMenu";
+import { ChatCitation } from "./ChatCitation";
 import { DocxViewer } from "./DocxViewer";
 import { JsxPreview } from "./JsxPreview";
+import { MarkdownTable } from "./MarkdownTable";
 import { MermaidDiagram } from "./MermaidDiagram";
 import { PdfViewer } from "./PdfViewer";
 import { sanitizeHtml } from "../../lib/sanitize";
 import { isInteractiveHtml } from "../../lib/interactiveHtml";
+import { linkCitations, parseChatSources } from "../../lib/chatCitations";
+import { openInBrowserPane } from "../../lib/openBrowserPane";
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -42,18 +46,34 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// react-markdown's default URL sanitizer strips unknown schemes — including
+// the internal `cite:` links the citation rewriter emits. Pass those through
+// untouched; everything else keeps the default sanitization.
+function citeUrlTransform(url: string): string {
+  return url.startsWith("cite:") ? url : defaultUrlTransform(url);
+}
+
 /** Markdown document renderer for file previews (PERF): the parse runs in a
  *  useMemo keyed on the document text, so a parent re-render (ToolPanel ticks
  *  on every chat token) can't re-parse a large .md — only an actual file
  *  change re-runs remark/rehype. Long documents additionally rely on the
- *  `content-visibility` CSS on .artifact-preview-md to keep scrolling cheap. */
+ *  `content-visibility` CSS on .artifact-preview-md to keep scrolling cheap.
+ *
+ *  Shares the chat bubble's markdown UX: interactive `[1]` / `(1,2)` citation
+ *  chips (research docs carry their own Sources section), tables with a
+ *  Copy/CSV toolbar, links opening in the built-in browser pane, and single-`$`
+ *  text left as-is so "$5 and $10" doesn't collapse into KaTeX math. */
 function MarkdownDocument({ text }: { text: string }) {
-  const rendered = useMemo(
-    () => (
+  const rendered = useMemo(() => {
+    const sources = parseChatSources(text);
+    const body = sources.length > 0 ? linkCitations(text, sources) : text;
+    return (
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
+        remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
         rehypePlugins={[rehypeKatex]}
+        urlTransform={citeUrlTransform}
         components={{
+          table: MarkdownTable,
           // ```mermaid fences render as diagrams, not code blocks — the
           // same pipeline chat messages use (MermaidDiagram).
           code({ node: _node, className, children, ...props }) {
@@ -62,13 +82,41 @@ function MarkdownDocument({ text }: { text: string }) {
             }
             return <code className={className} {...props}>{children}</code>;
           },
+          a({ href, children }) {
+            if (sources.length > 0 && href?.startsWith("cite:")) {
+              const nums = href
+                .slice("cite:".length)
+                .split(",")
+                .map((x) => parseInt(x, 10))
+                .filter((n) => Number.isFinite(n));
+              return <ChatCitation nums={nums} sources={sources} />;
+            }
+            const isHttp = !!href && /^https?:\/\//i.test(href);
+            return (
+              <a
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="chat-md-link"
+                onClick={
+                  isHttp
+                    ? (e) => {
+                        e.preventDefault();
+                        openInBrowserPane(href!);
+                      }
+                    : undefined
+                }
+              >
+                {children}
+              </a>
+            );
+          },
         }}
       >
-        {text}
+        {body}
       </ReactMarkdown>
-    ),
-    [text],
-  );
+    );
+  }, [text]);
   return rendered;
 }
 

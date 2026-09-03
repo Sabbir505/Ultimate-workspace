@@ -20,9 +20,12 @@ pub async fn browser_create(
     tab_id: String,
     url: String,
     rect: Rect,
+    project_id: Option<String>,
     browser: State<'_, BrowserState>,
 ) -> CmdResult<()> {
-    browser.0.create(&pane_id, &tab_id, &url, rect)
+    browser
+        .0
+        .create(&pane_id, &tab_id, &url, rect, project_id.as_deref())
 }
 
 #[tauri::command]
@@ -33,6 +36,8 @@ pub fn browser_navigate(
     url: String,
     browser: State<BrowserState>,
 ) -> CmdResult<()> {
+    // The user navigating manually re-arms a stopped agent (sticky cancel).
+    browser.0.clear_cancelled(&pane_id);
     browser.0.navigate(&app, &pane_id, &tab_id, &url)
 }
 
@@ -61,16 +66,40 @@ pub fn browser_push_state(
     tab_id: String,
     url: String,
     app: tauri::AppHandle,
+    browser: State<BrowserState>,
 ) -> CmdResult<()> {
     if url.trim().to_lowercase().starts_with("javascript:") {
         return Err("javascript: URLs are not allowed in pushState".to_string());
     }
+    browser.0.remember_tab_url(&crate::browser::browser_label(&pane_id, &tab_id), &url);
     let _ = app.emit(
         "browser:navigated",
         BrowserNavigatedEvent {
             pane_id,
             tab_id,
             url,
+        },
+    );
+    Ok(())
+}
+
+/// Called from the injected bridge when a page's document title settles (on
+/// every post-nav injection pass, plus NavigationCompleted on Windows). Emits
+/// `browser:title` so the frontend can label the tab + derive a favicon.
+/// Purely cosmetic: a page can spoof its own title anyway.
+#[tauri::command]
+pub fn browser_report_title(
+    pane_id: String,
+    tab_id: String,
+    title: String,
+    app: tauri::AppHandle,
+) -> CmdResult<()> {
+    let _ = app.emit(
+        "browser:title",
+        crate::types::BrowserTitleEvent {
+            pane_id,
+            tab_id,
+            title,
         },
     );
     Ok(())
@@ -199,8 +228,83 @@ pub fn browser_resolve_pane_result(
 pub fn browser_open_pane_result(
     req_id: u64,
     pane_id: Option<String>,
+    tab_id: Option<String>,
     browser: State<BrowserState>,
 ) -> CmdResult<()> {
-    browser.0.open_pane_request_resolve(req_id, pane_id);
+    browser.0.open_pane_request_resolve(req_id, pane_id, tab_id);
+    Ok(())
+}
+
+// --- Trust layer (Phase 2): gate confirmations, pause/stop, timeline ------
+
+/// The user's answer to a `browser:confirm-request` gate prompt.
+/// `always_for_site` persists per-origin consent for the same risk class.
+#[tauri::command]
+pub fn browser_confirm_result(
+    req_id: u64,
+    approved: bool,
+    always_for_site: bool,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.gate_request_resolve(
+        req_id,
+        crate::browser::GateAnswer { approved, always_for_site },
+    );
+    Ok(())
+}
+
+/// Pause/resume agent browser actions for a pane (the pane's own user
+/// controls; the page and the user's typing are unaffected).
+#[tauri::command]
+pub fn browser_set_agent_paused(
+    pane_id: String,
+    paused: bool,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.set_paused(&pane_id, paused);
+    Ok(())
+}
+
+/// Stop the agent for a pane: sticky cancel + drain in-flight actions with
+/// `cancelled_by_user`. Cleared by the next manual navigation.
+#[tauri::command]
+pub fn browser_cancel_agent(
+    pane_id: String,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.cancel_agent(&pane_id);
+    Ok(())
+}
+
+/// Clear the current site's session (page-visible cookies + storage) for a
+/// pane and reload — the trust strip's "clear this site" escape hatch.
+#[tauri::command]
+pub fn browser_clear_site_data(
+    pane_id: String,
+    tab_id: String,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.clear_site_session(&pane_id, &tab_id)
+}
+
+/// Snapshot the pane's user-owned action timeline (oldest first).
+#[tauri::command]
+pub fn browser_timeline(
+    pane_id: String,
+    browser: State<BrowserState>,
+) -> CmdResult<Vec<crate::browser::TimelineEntry>> {
+    Ok(browser.0.timeline_for_pane(&pane_id))
+}
+
+/// Answer a tab-management roundtrip (switch/new/close) from the frontend.
+/// `tab_id` echoes the affected tab; None = the operation failed (unknown
+/// pane/tab, or the pane's last tab refused to close).
+#[tauri::command]
+pub fn browser_tab_result(
+    req_id: u64,
+    tab_id: Option<String>,
+    browser: State<BrowserState>,
+) -> CmdResult<()> {
+    browser.0.tab_request_resolve(req_id, tab_id);
     Ok(())
 }

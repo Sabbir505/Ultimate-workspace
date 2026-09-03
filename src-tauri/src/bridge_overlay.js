@@ -159,6 +159,44 @@
         if (caret) caret.classList.remove('__conduit_visible');
     };
 
+    // Public: narration label (Phase 2 trust layer) - a short line of text
+    // pinned just below the cursor ('clicking "Buy now"', 'typing email...')
+    // that fades after ~2s. This is what makes the visible agent READABLE:
+    // users follow WHAT is happening, not just that something moved.
+    var NARRATION_ID = '__conduit_narration';
+    var narrationTimer = null;
+    window.__conduit_narrate = function(text) {
+        if (!text) return;
+        window.__conduit_injectOverlay();
+        var el = document.getElementById(NARRATION_ID);
+        if (!el) {
+            el = document.createElement('div');
+            el.id = NARRATION_ID;
+            el.setAttribute('data-conduit-overlay', '');
+            (document.head || document.documentElement).appendChild(el);
+            var css = document.createElement('style');
+            css.setAttribute('data-conduit-overlay', '');
+            css.textContent = '#' + NARRATION_ID + ' {' +
+                '  position: fixed; pointer-events: none; z-index: 2147483647;' +
+                '  max-width: 280px; padding: 3px 8px;' +
+                '  background: rgba(20, 20, 20, 0.88); color: #fff;' +
+                '  font: 12px/1.4 -apple-system, Segoe UI, sans-serif;' +
+                '  border-radius: 6px; border: 1px solid ' + ACCENT_SOFT + ';' +
+                '  opacity: 0; transition: opacity 0.2s ease-out;' +
+                '}';
+            (document.head || document.documentElement).appendChild(css);
+        }
+        el.textContent = String(text).slice(0, 120);
+        var cursor = document.getElementById(CURSOR_ID);
+        var x = cursor ? (parseFloat(cursor.style.left) || 40) : 40;
+        var y = cursor ? (parseFloat(cursor.style.top) || 40) : 40;
+        el.style.left = Math.min(x + 14, (window.innerWidth || 800) - 200) + 'px';
+        el.style.top = (y + 22) + 'px';
+        el.style.opacity = '1';
+        if (narrationTimer) clearTimeout(narrationTimer);
+        narrationTimer = setTimeout(function() { el.style.opacity = '0'; }, 2000);
+    };
+
     window.__conduit_overlay_installed = false;
     // Install immediately on injection; navigation re-injection re-runs this.
     window.__conduit_injectOverlay();

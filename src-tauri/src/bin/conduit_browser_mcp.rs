@@ -218,7 +218,10 @@ async fn handle_line(
 fn tool_op(tool: &str) -> Result<String, &'static str> {
     match tool {
         "navigate" | "read_page" | "click" | "type_text" | "scroll" | "wait_for"
-        | "history" | "hover" | "evaluate" | "click_and_wait" => Ok(tool.to_string()),
+        | "history" | "hover" | "evaluate" | "click_and_wait" | "screenshot"
+        | "find" | "fill_form" | "select_option" | "press_key" | "batch"
+        | "read_console" | "read_network" | "list_tabs" | "switch_tab"
+        | "new_tab" | "close_tab" | "zoom" | "print_to_pdf" => Ok(tool.to_string()),
         "generate_document" | "generate_diagram" | "generate_file"
         | "get_skill" | "list_skills" | "search_docs" => Ok(format!("conduit_tools:{tool}")),
         _ => Err("unknown tool"),
@@ -272,6 +275,8 @@ async fn handle_tool_call(
             "pane_not_found" => "pane_not_found",
             "invalid_args" => "invalid_args",
             "unknown_op" => "unknown_op",
+            "browser_unavailable" => "browser_unavailable",
+            "cancelled_by_user" => "cancelled_by_user",
             _ => "action_failed",
         };
         return Err((static_code, message.to_string()));
@@ -318,6 +323,7 @@ fn tool_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "read_page",
+            "annotations": { "readOnlyHint": true },
             "description": "Read the current page in the browser pane. ALWAYS call this after navigating, before clicking or typing. Modes: 'interactive' (default — accessibility tree with element roles, labels, form state, and numbered refs you use in click/type_text); 'content' (readability-stripped article text); 'full' (raw page text); 'summary' (~1500 chars + headings for quick triage); 'section' (extract content under a CSS selector or heading). Refs from a read are valid only until the next navigation — re-read after any page change.",
             "inputSchema": {
                 "type": "object",
@@ -335,6 +341,8 @@ fn tool_schemas() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "selector_or_description": { "type": "string", "description": "CSS selector (e.g. '#submit-btn', 'button.login') or a description (e.g. 'the Sign In button', 'search box')." },
+                    "element": { "type": "string", "description": "Optional human-readable description of what you intend to click — recorded in the action timeline shown to the user (e.g. 'the checkout button')." },
+                    "include_snapshot": { "type": "boolean", "description": "Attach a compact post-click element snapshot to the result (same [ref] numbering) so you don't need a separate read_page." },
                     "pane_id": { "type": "string" }
                 },
                 "required": ["selector_or_description"]
@@ -348,6 +356,8 @@ fn tool_schemas() -> Vec<Value> {
                 "properties": {
                     "selector_or_description": { "type": "string", "description": "CSS selector or description of the input field (e.g. '#search', 'the email input')." },
                     "text": { "type": "string", "description": "Text to type into the field." },
+                    "element": { "type": "string", "description": "Optional human-readable description of the field (recorded in the action timeline)." },
+                    "include_snapshot": { "type": "boolean" },
                     "pane_id": { "type": "string" }
                 },
                 "required": ["selector_or_description", "text"]
@@ -360,23 +370,25 @@ fn tool_schemas() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "direction": { "type": "string", "enum": ["up", "down"], "default": "down" },
+                    "include_snapshot": { "type": "boolean", "description": "Attach the compact post-scroll snapshot (newly revealed elements get refs)." },
                     "pane_id": { "type": "string" }
                 }
             }
         }),
         json!({
             "name": "wait_for",
-            "description": "Wait for a condition on the browser page before continuing. 'navigation' — wait for the URL to change (pass the previous URL as target). 'selector' — wait for an element matching the CSS selector to appear. 'network_idle' — wait for the page to settle (readyState complete + network quiet). Essential after clicks that trigger navigation or async content loads.",
+            "description": "Wait for a condition on the browser page before continuing. 'navigation' — wait for the URL to change (pass the previous URL as target). 'selector' — wait for an element matching the CSS selector to appear. 'network_idle' — wait for the page to settle (readyState complete + network quiet). 'stable' — wait until the DOM has stopped mutating for ~600ms (best for streaming SPAs and infinite feeds). Essential after clicks that trigger navigation or async content loads.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "condition": { "type": "string", "enum": ["navigation", "selector", "network_idle"] },
+                    "condition": { "type": "string", "enum": ["navigation", "selector", "network_idle", "stable"] },
                     "target": { "type": "string", "description": "For navigation: the previous URL to compare against; for selector: the CSS selector." },
                     "timeout_ms": { "type": "integer", "default": 10000 },
                     "pane_id": { "type": "string" }
                 },
                 "required": ["condition"]
-            }
+            },
+            "annotations": { "readOnlyHint": true }
         }),
         json!({
             "name": "history",
@@ -396,6 +408,8 @@ fn tool_schemas() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "selector_or_description": { "type": "string", "description": "CSS selector (e.g. '#menu', 'nav li.products') or a natural-language description (e.g. 'the Products menu', 'the user avatar')." },
+                    "element": { "type": "string", "description": "Optional human-readable description (recorded in the action timeline)." },
+                    "include_snapshot": { "type": "boolean" },
                     "pane_id": { "type": "string" }
                 },
                 "required": ["selector_or_description"]
@@ -403,6 +417,7 @@ fn tool_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "evaluate",
+            "annotations": { "destructiveHint": true },
             "description": "Run arbitrary JavaScript in the browser pane (in the page's own origin) and return the result as JSON. The expression is wrapped so a bare expression works directly — e.g. `document.title`, `Array.from(document.querySelectorAll('.row')).length`, `JSON.stringify({url: location.href, ready: document.readyState})`. Use to read form state, page JS variables, or run custom extraction/assertion the read_page/click tools can't reach. Functions/undefined/circular values become markers ([Function], [undefined], [circular]). Avoid side effects — prefer click/type_text for interaction.",
             "inputSchema": {
                 "type": "object",
@@ -423,10 +438,209 @@ fn tool_schemas() -> Vec<Value> {
                     "condition": { "type": "string", "enum": ["navigation", "selector", "network_idle"], "default": "navigation" },
                     "target": { "type": "string", "description": "For navigation: the previous URL to compare against (auto-snapshotted if omitted). For selector: the CSS selector to wait for." },
                     "timeout_ms": { "type": "integer", "default": 10000 },
+                    "element": { "type": "string", "description": "Optional human-readable description (recorded in the action timeline)." },
                     "pane_id": { "type": "string" }
                 },
                 "required": ["selector_or_description"]
             }
+        }),
+        json!({
+            "name": "screenshot",
+            "description": "Capture the browser pane's current page as a PNG screenshot. The image is saved into the artifacts dir (the returned 'path' can be embedded in chat) and returned as base64 so you can visually inspect layout, canvas content, charts, or rendering state that read_page's accessibility tree cannot show. Prefer read_page for text/structure (far cheaper); use screenshot when visual layout matters — checking your own app's rendering, verifying a UI fix, reading canvas/WebGL content. Windows-only today; other platforms return a clear error.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pane_id": { "type": "string" }
+                }
+            },
+            "annotations": { "readOnlyHint": true }
+        }),
+        json!({
+            "name": "find",
+            "description": "Search the page's interactive elements WITHOUT a full read: substring match across labels/aria/placeholder/id/value. Returns the compact element list (same [ref] numbering as click/type_text) for matching elements — far cheaper than read_page when you just need to locate a control. Example: find(query: \"submit\") before clicking. Refs are valid until the page changes materially — re-find after navigations.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Case-insensitive substring to match (e.g. 'sign in', 'search', 'cart')." },
+                    "pane_id": { "type": "string" }
+                },
+                "required": ["query"]
+            },
+            "annotations": { "readOnlyHint": true }
+        }),
+        json!({
+            "name": "fill_form",
+            "description": "Fill MULTIPLE form fields in one call by element ref (from read_page/find). Sets each value directly (React/Vue-safe) — much faster than repeated type_text. Example: fill_form(fields: [{\"ref\": 3, \"text\": \"a@b.c\"}, {\"ref\": 5, \"text\": \"Hunter2\"}]). The result reports per-field success; stale refs (page changed) are flagged for a re-read.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "fields": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "ref": { "type": "integer", "description": "Element ref from read_page/find." },
+                                "text": { "type": "string", "description": "Value to set. Empty string clears the field." }
+                            },
+                            "required": ["ref", "text"]
+                        }
+                    },
+                    "include_snapshot": { "type": "boolean", "description": "Attach the compact post-fill element snapshot to the result." },
+                    "pane_id": { "type": "string" }
+                },
+                "required": ["fields"]
+            }
+        }),
+        json!({
+            "name": "select_option",
+            "description": "Select an option in a <select> dropdown by value OR visible text — the reliable way to operate dropdowns (a11y-tree clicks on dropdowns are a known failure mode). Example: select_option(ref: 7, value: \"Shipping\"). If no exact match, a substring match on option text is tried; the error lists available options.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ref": { "type": "integer", "description": "Element ref of the <select>." },
+                    "value": { "type": "string", "description": "Option value or visible text." },
+                    "include_snapshot": { "type": "boolean" },
+                    "pane_id": { "type": "string" }
+                },
+                "required": ["ref", "value"]
+            }
+        }),
+        json!({
+            "name": "press_key",
+            "description": "Press a key on the currently-focused element: Enter, Escape, Tab, ArrowDown, PageDown, Backspace, etc. Enter on a search input submits its form; Escape blurs/closes lightweight menus. Focus first via type_text (leaves focus in the field) or click.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string", "description": "Key name: 'Enter', 'Escape', 'Tab', 'ArrowUp'|'ArrowDown'|'ArrowLeft'|'ArrowRight', 'Backspace', 'Delete', 'PageUp', 'PageDown', 'Home', 'End'." },
+                    "include_snapshot": { "type": "boolean" },
+                    "pane_id": { "type": "string" }
+                },
+                "required": ["key"]
+            }
+        }),
+        json!({
+            "name": "batch",
+            "description": "Run up to 15 browser actions in ONE round trip, in order. Halts on the first failure and reports the remaining steps as 'Not executed: an earlier action failed' — so multi-step interactions (fill_form -> press_key Enter -> wait_for) cost a single harness call. Each step: {op: 'click'|'type_text'|'fill_form'|'select_option'|'press_key'|'hover'|'scroll'|'wait_for'|'read_page', args: {...}}. batch and navigate are not allowed inside.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "actions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "op": { "type": "string" },
+                                "args": { "type": "object" }
+                            },
+                            "required": ["op"]
+                        }
+                    },
+                    "include_snapshot": { "type": "boolean", "description": "Attach the compact post-batch snapshot." },
+                    "pane_id": { "type": "string" }
+                },
+                "required": ["actions"]
+            }
+        }),
+        json!({
+            "name": "read_console",
+            "description": "Read the page's console output + uncaught errors incrementally (since your last read). Use to diagnose a misbehaving page or your own app after a navigation — far cheaper than screenshots. The response carries 'latest': pass it back as 'since' next time to get only new entries.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "since": { "type": "integer", "description": "Only entries with a higher sequence number (default 0 = all buffered)." },
+                    "level": { "type": "string", "enum": ["all", "error", "warn", "info", "log", "debug"], "default": "all" },
+                    "pane_id": { "type": "string" }
+                }
+            },
+            "annotations": { "readOnlyHint": true }
+        }),
+        json!({
+            "name": "read_network",
+            "description": "Read the page's network activity (fetch/XHR: method, URL, status) incrementally since your last read — diagnose failed API calls, check a request actually fired, or find an endpoint the page hit. Does NOT record request bodies or headers (they can carry credentials). Pass 'latest' back as 'since' for incremental reads.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "since": { "type": "integer" },
+                    "pane_id": { "type": "string" }
+                }
+            },
+            "annotations": { "readOnlyHint": true }
+        }),
+        json!({
+            "name": "list_tabs",
+            "description": "List the browser pane's tabs (tabId, active flag, URL). Use before switch_tab/close_tab. Unactivated tabs report activated:false (their webview is created on first switch).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pane_id": { "type": "string" }
+                }
+            },
+            "annotations": { "readOnlyHint": true }
+        }),
+        json!({
+            "name": "switch_tab",
+            "description": "Make a different tab of the browser pane active (from list_tabs). Subsequent read/click/... ops target the newly-active tab. Auto-waits for the tab's webview to be ready.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string" },
+                    "pane_id": { "type": "string" }
+                },
+                "required": ["tabId"]
+            }
+        }),
+        json!({
+            "name": "new_tab",
+            "description": "Open a NEW tab in the browser pane pointed at a URL and make it active. Use to compare pages side-by-side (e.g. keep docs open while driving your app in another tab) without losing the current page.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string" },
+                    "pane_id": { "type": "string" }
+                },
+                "required": ["url"]
+            }
+        }),
+        json!({
+            "name": "close_tab",
+            "description": "Close a tab of the browser pane (from list_tabs). Closing the last tab closes the whole pane.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string" },
+                    "pane_id": { "type": "string" }
+                },
+                "required": ["tabId"]
+            },
+            "annotations": { "destructiveHint": true }
+        }),
+        json!({
+            "name": "zoom",
+            "description": "Capture a REGION of the page as an upscaled PNG (vision fallback for canvas content, charts, maps, small/dense text that read_page can't represent). Coordinates are viewport CSS pixels from the top-left of the pane; scale defaults to 2 (up to 4). Windows-only today. Saved to the artifacts dir and returned as base64.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "x": { "type": "number" },
+                    "y": { "type": "number" },
+                    "width": { "type": "number" },
+                    "height": { "type": "number" },
+                    "scale": { "type": "number", "default": 2 },
+                    "pane_id": { "type": "string" }
+                },
+                "required": ["x", "y", "width", "height"]
+            }
+        }),
+        json!({
+            "name": "print_to_pdf",
+            "description": "Print the browser pane's CURRENT page to a PDF file in the artifacts dir and return the path — the faithful-document handoff for receipts, order confirmations, tickets, docs, or your own app's print output. Windows-only today. Use screenshot/zoom for visual checks; use this when a durable document matters.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "landscape": { "type": "boolean", "default": false },
+                    "pane_id": { "type": "string" }
+                }
+            },
+            "annotations": { "readOnlyHint": true }
         }),
         json!({
             "name": "generate_document",
@@ -512,9 +726,18 @@ mod tests {
             .collect();
         for tool in ["navigate", "read_page", "generate_document", "generate_diagram",
                      "generate_file", "get_skill", "list_skills", "search_docs",
-                     "history", "hover", "evaluate", "click_and_wait"] {
+                     "history", "hover", "evaluate", "click_and_wait", "screenshot"] {
             assert!(names.contains(&tool), "missing tool schema: {tool}");
         }
+        // Every advertised tool must be routable through tool_op — the
+        // screenshot op existed in the app-side dispatch but was never
+        // mapped/advertised here, making it unreachable from harnesses.
+        for tool in &names {
+            assert!(tool_op(tool).is_ok(), "advertised tool {tool} has no tool_op mapping");
+        }
+        // Read-only tools carry the annotation so MCP clients can auto-approve.
+        let screenshot = schemas.iter().find(|t| t["name"] == "screenshot").unwrap();
+        assert_eq!(screenshot["annotations"]["readOnlyHint"], true);
     }
 
     #[test]

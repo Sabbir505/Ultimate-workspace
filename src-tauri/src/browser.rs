@@ -374,8 +374,46 @@ pub fn platform_supported() -> bool {
     true
 }
 
+/// Scheme allowlist for pane navigation. Pages in the pane are untrusted and
+/// both the MCP `navigate` tool and the chat `open_url` tool forward raw
+/// strings: a `javascript:` URL would execute attacker-chosen script in the
+/// pane's origin (the pushState/WebMessage paths already reject it — this
+/// closes the direct-navigation hole). `file://` stays allowed: the MCP
+/// navigate tool deliberately encourages it for previewing built apps.
+fn validate_nav_url(url: &str) -> Result<tauri::Url, String> {
+    let parsed: tauri::Url = url
+        .parse()
+        .map_err(|e| format!("invalid url `{url}`: {e}"))?;
+    let allowed = matches!(parsed.scheme(), "http" | "https" | "file" | "about");
+    if !allowed {
+        return Err(format!(
+            "blocked url scheme `{}` in browser pane (allowed: http, https, file, about)",
+            parsed.scheme()
+        ));
+    }
+    Ok(parsed)
+}
+
 fn ensure_supported() -> Result<(), String> {
     Ok(())
+}
+
+/// WebView2 profile name for a project (Windows multi-profile isolation —
+/// cookies/storage separated per project so an agent prompt-injected on one
+/// site never holds the user's session for another). Profile names are
+/// restricted to [a-zA-Z0-9_-]; arbitrary project ids are sanitized. `None`
+/// (no project context) keeps the legacy default profile.
+fn browser_profile_for_project(project_id: Option<&str>) -> Option<String> {
+    let pid = project_id?.trim();
+    if pid.is_empty() {
+        return None;
+    }
+    let sanitized: String = pid
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .take(48)
+        .collect();
+    Some(format!("p-{sanitized}"))
 }
 
 // ---- Vendored JS bridge files -----------------------------------------
@@ -402,6 +440,119 @@ const BRIDGE_RESOLVE_JS: &str = include_str!("bridge_resolve.js");
 /// navigation (alongside the pushState monkey-patch) and re-injected lazily by
 /// each action so a fresh page load re-installs it.
 const BRIDGE_OVERLAY_JS: &str = include_str!("bridge_overlay.js");
+/// Compact interactive snapshot + element search (`find`). One line per
+/// interactive element with the same ref numbering as read_page/click —
+/// 200-400 tokens instead of the full JSON tree. QUERY placeholder filters
+/// the listing (find mode) without changing the numbering.
+const BRIDGE_SNAPSHOT_JS: &str = include_str!("bridge_snapshot.js");
+
+/// Diagnostics ring buffer (Phase 1): document-start instrumentation that
+/// records console output, fetch/XHR network activity, and the last DOM
+/// mutation timestamp into `window.__conduitDiag`. Backs the agent-facing
+/// `read_console` / `read_network` ops and the `wait_for: stable` DOM-stability
+/// heuristic — cross-platform (pure JS, no CDP needed on macOS/Linux; on
+/// Windows the same data could later come from CDP event receivers).
+/// Installed via AddScriptToExecuteOnDocumentCreated (Windows) /
+/// initialization_script (macOS) / the escalating post-nav injection (all
+/// platforms — the guard makes re-injection a no-op).
+const DIAG_INIT_JS: &str = r#"(function() {
+    if (window.__conduitDiag) { window.__conduitDiag.installed = true; return; }
+    var diag = {
+        installed: true,
+        seq: 0,
+        lastMutation: 0,
+        console: [],   // {seq, ts, level, text}
+        network: []    // {seq, ts, method, url, status, resourceType}
+    };
+    window.__conduitDiag = diag;
+    var MAX = 100;
+    function push(kind, entry) {
+        entry.seq = ++diag.seq;
+        entry.ts = Date.now();
+        var arr = diag[kind];
+        arr.push(entry);
+        if (arr.length > MAX) arr.splice(0, arr.length - MAX);
+    }
+    // Console: wrap the methods that exist, capture formatted text.
+    var levels = ['log', 'info', 'warn', 'error', 'debug'];
+    for (var li = 0; li < levels.length; li++) {
+        (function(level) {
+            var orig = console[level] ? console[level].bind(console) : function() {};
+            console[level] = function() {
+                try {
+                    var parts = [];
+                    for (var i = 0; i < arguments.length && i < 6; i++) {
+                        var a = arguments[i];
+                        parts.push(typeof a === 'string' ? a : (a instanceof Error ? (a.message || String(a)) : JSON.stringify(a)));
+                    }
+                    push('console', { level: level, text: String(parts.join(' ')).slice(0, 500) });
+                } catch (e) {}
+                orig.apply(null, arguments);
+            };
+        })(levels[li]);
+    }
+    try {
+        window.addEventListener('error', function(ev) {
+            push('console', { level: 'error', text: ('Uncaught: ' + (ev.message || 'unknown error')).slice(0, 500) });
+        });
+    } catch (e) {}
+    // Network: fetch + XHR (response side only — request bodies are never
+    // recorded: they can carry credentials; headers neither).
+    try {
+        var origFetch = window.fetch;
+        if (typeof origFetch === 'function') {
+            window.fetch = function(input, init) {
+                var method = 'GET';
+                var url = '';
+                try {
+                    if (typeof input === 'string') { url = input; }
+                    else if (input && input.url) { url = input.url; method = input.method || 'GET'; }
+                    if (init && init.method) method = init.method;
+                } catch (e) {}
+                var entry = { method: String(method).toUpperCase(), url: String(url).slice(0, 300), status: null };
+                return origFetch.apply(this, arguments).then(function(resp) {
+                    try { entry.status = resp.status; entry.resourceType = 'fetch'; push('network', entry); } catch (e) {}
+                    return resp;
+                }, function(err) {
+                    try { entry.status = 0; entry.resourceType = 'fetch'; push('network', entry); } catch (e) {}
+                    throw err;
+                });
+            };
+        }
+    } catch (e) {}
+    try {
+        var XHR = window.XMLHttpRequest;
+        if (XHR && XHR.prototype) {
+            var origOpen = XHR.prototype.open;
+            var origSend = XHR.prototype.send;
+            XHR.prototype.open = function(method, url) {
+                try { this.__conduitReq = { method: String(method).toUpperCase(), url: String(url).slice(0, 300), status: null }; } catch (e) {}
+                return origOpen.apply(this, arguments);
+            };
+            XHR.prototype.send = function() {
+                var entry = this.__conduitReq;
+                if (entry) {
+                    this.addEventListener('loadend', function() {
+                        try { entry.status = this.status; entry.resourceType = 'xhr'; push('network', entry); } catch (e) {}
+                    });
+                }
+                return origSend.apply(this, arguments);
+            };
+        }
+    } catch (e) {}
+    // DOM mutation timestamp for wait_for: stable.
+    try {
+        var markMutation = function() { diag.lastMutation = Date.now(); };
+        if (document.body) {
+            new MutationObserver(markMutation).observe(document.body, { childList: true, subtree: true, attributes: true });
+        } else {
+            document.addEventListener('DOMContentLoaded', function() {
+                new MutationObserver(markMutation).observe(document.body, { childList: true, subtree: true, attributes: true });
+            });
+        }
+        markMutation();
+    } catch (e) {}
+})();"#;
 
 /// Build the full extraction JS body for a given mode + optional selector.
 /// The mode and selector are JSON-escaped and interpolated into the bridge
@@ -694,6 +845,7 @@ fn create_controller_async(
     env: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment,
     bounds: windows::Win32::Foundation::RECT,
     done: DoneHandle,
+    controller_options: Option<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2ControllerOptions>,
     on_controller: impl FnOnce(
         webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller,
     ) -> Result<(), String>
@@ -731,8 +883,22 @@ fn create_controller_async(
             Ok(())
         },
     ));
-    unsafe { env2.CreateCoreWebView2Controller(hwnd, &handler) }
-        .map_err(|e| format!("CreateController invoke failed: {e}"))?;
+    let created = match controller_options {
+        // Multi-profile path: options live on Environment10 — cast (an old
+        // installed Runtime without it falls back... but we only get here
+        // with options in hand, which already required Environment10, so a
+        // cast failure is a genuine error worth surfacing).
+        Some(options) => {
+            use windows::core::Interface as _;
+            let env10: webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment10 =
+                env2.cast().map_err(|e| format!("Environment10 unavailable: {e}"))?;
+            unsafe { env10.CreateCoreWebView2ControllerWithOptions(hwnd, &options, &handler) }
+                .map_err(|e| format!("CreateControllerWithOptions invoke failed: {e}"))
+        }
+        None => unsafe { env2.CreateCoreWebView2Controller(hwnd, &handler) }
+            .map_err(|e| format!("CreateController invoke failed: {e}")),
+    };
+    created?; // report the async init error through the done channel
     Ok(())
 }
 
@@ -774,6 +940,9 @@ fn attach_core_listeners(
                     use webview2_com::take_pwstr;
                     let uri = take_pwstr(pw);
                     browser_log(&app_start, &format!("nav START label={label_start} uri={uri}"));
+                    if let Some(state) = app_start.try_state::<crate::BrowserState>() {
+                        state.0.remember_tab_url(&label_start, &uri);
+                    }
                     let _ = app_start.emit(
                         "browser:navigated",
                         BrowserNavigatedEvent {
@@ -798,8 +967,12 @@ fn attach_core_listeners(
                                 waited = target;
                             }
                             let lbl = format!("browser-{pid}-tab-{tid}");
-                            let js =
-                                format!("{}{}", pushstate_injection_js(&pid, &tid), BRIDGE_OVERLAY_JS);
+                            let js = format!(
+                                "{}{}{}",
+                                pushstate_injection_js(&pid, &tid),
+                                DIAG_INIT_JS,
+                                BRIDGE_OVERLAY_JS
+                            );
                             let app3 = app2.clone();
                             let map2 = map.clone();
                             let lbl2 = lbl.clone();
@@ -860,8 +1033,10 @@ fn attach_core_listeners(
 
     let app_complete = app.clone();
     let label_complete = label.to_string();
+    let pane_complete = pane_id.clone();
+    let tab_complete = tab_id.clone();
     let complete_handler = NavigationCompletedEventHandler::create(Box::new(
-        move |_sender, args: Option<ICoreWebView2NavigationCompletedEventArgs>| {
+        move |sender, args: Option<ICoreWebView2NavigationCompletedEventArgs>| {
             if let Some(args) = args {
                 let mut success = windows::core::BOOL::default();
                 let _ = unsafe { args.IsSuccess(&mut success) };
@@ -877,6 +1052,16 @@ fn attach_core_listeners(
                 );
                 if success.as_bool() {
                     let _ = app_complete.emit("browser:load-completed", label_complete.clone());
+                    // Report the settled document title so the frontend can
+                    // label the tab (the navigated event fires at nav START,
+                    // before a title exists). Best-effort: the completion
+                    // handler fires on the main-thread pump.
+                    if let Some(core) = sender {
+                        let js = title_report_js(&pane_complete, &tab_complete);
+                        let js_h = windows::core::HSTRING::from(js);
+                        let handler = webview2_com::ExecuteScriptCompletedHandler::create(Box::new(|_, _| Ok(())));
+                        let _ = unsafe { core.ExecuteScript(&js_h, &handler) };
+                    }
                 }
             }
             Ok(())
@@ -884,15 +1069,170 @@ fn attach_core_listeners(
     ));
     let mut complete_token = 0i64;
     let _ = unsafe { core.add_NavigationCompleted(&complete_handler, &mut complete_token) };
+
+    // Permission requests (camera / microphone / geolocation / notifications /
+    // clipboard-read …): auto-DENY. An agent-driven pane must never surface a
+    // consent dialog the user didn't ask for, and granting device access from
+    // an embedded pane is never the right default (Edge's agentic mode also
+    // suspends device permissions while the agent drives).
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2PermissionRequestedEventArgs;
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PERMISSION_STATE_DENY;
+    use webview2_com::PermissionRequestedEventHandler;
+    let app_perm = app.clone();
+    let label_perm = label.to_string();
+    let perm_handler = PermissionRequestedEventHandler::create(Box::new(
+        move |_sender, args: Option<ICoreWebView2PermissionRequestedEventArgs>| {
+            if let Some(args) = args {
+                let mut pw = windows::core::PWSTR::null();
+                let uri = if unsafe { args.Uri(&mut pw) }.is_ok() {
+                    webview2_com::take_pwstr(pw)
+                } else {
+                    String::new()
+                };
+                let mut kind = webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PERMISSION_KIND::default();
+                let _ = unsafe { args.PermissionKind(&mut kind) };
+                browser_log(
+                    &app_perm,
+                    &format!("permission DENIED label={label_perm} uri={uri} kind={}", kind.0),
+                );
+                let _ = unsafe { args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY) };
+            }
+            Ok(())
+        },
+    ));
+    let mut perm_token = 0i64;
+    let _ = unsafe { core.add_PermissionRequested(&perm_handler, &mut perm_token) };
+
+    // Downloads (Phase 3): redirect every download into the artifacts
+    // downloads dir (the agent's file handoff — the timeline + chat can cite
+    // the path) and suppress WebView2's default download UI, which paints
+    // OS chrome over the app. Requires ICoreWebView2_4.
+    use windows::core::Interface as _;
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_4;
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2DownloadStartingEventArgs;
+    use webview2_com::DownloadStartingEventHandler;
+    let app_dl = app.clone();
+    let label_dl = label.to_string();
+    let dl_handler = DownloadStartingEventHandler::create(Box::new(
+        move |_sender, args: Option<ICoreWebView2DownloadStartingEventArgs>| {
+            const MAX_NAME: usize = 160;
+            if let Some(args) = args {
+                use webview2_com::take_pwstr;
+                let _ = unsafe { args.SetHandled(true) };
+                if let Ok(operation) = unsafe { args.DownloadOperation() } {
+                    // Suggested file name from the original target path.
+                    let mut pw = windows::core::PWSTR::null();
+                    let original = if unsafe { args.ResultFilePath(&mut pw) }.is_ok() {
+                        take_pwstr(pw)
+                    } else {
+                        String::new()
+                    };
+                    let file_name = std::path::Path::new(&original)
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "download.bin".to_string());
+                    // Sanitize: no separators, no traversal.
+                    let safe_name: String = file_name
+                        .chars()
+                        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+                        .take(MAX_NAME)
+                        .collect();
+                    let dir = crate::chat::dispatch::artifacts_dir(&app_dl).join("downloads");
+                    let _ = std::fs::create_dir_all(&dir);
+                    let target = dir.join(&safe_name);
+                    // Redirect BEFORE the download body lands: the redirect
+                    // lives on the ARGS (the operation is already running).
+                    let _ = unsafe {
+                        args.SetResultFilePath(&windows::core::HSTRING::from(
+                            target.to_string_lossy().as_ref(),
+                        ))
+                    };
+                    let mut pw2 = windows::core::PWSTR::null();
+                    let uri = if unsafe { operation.Uri(&mut pw2) }.is_ok() {
+                        take_pwstr(pw2)
+                    } else {
+                        String::new()
+                    };
+                    browser_log(
+                        &app_dl,
+                        &format!(
+                            "download label={label_dl} uri={uri} -> {}",
+                            target.to_string_lossy()
+                        ),
+                    );
+                    let (pane_id, _tab_id) = label_dl
+                        .strip_prefix("browser-")
+                        .and_then(|rest| rest.split_once("-tab-"))
+                        .map(|(p, t)| (p.to_string(), t.to_string()))
+                        .unwrap_or_default();
+                    if let Some(state) = app_dl.try_state::<crate::BrowserState>() {
+                        state.0.append_timeline(
+                            &pane_id,
+                            "download",
+                            &format!("{file_name} <- {uri}"),
+                            "ok",
+                            None,
+                            Some(target.to_string_lossy().to_string()),
+                        );
+                    }
+                }
+            }
+            Ok(())
+        },
+    ));
+    match core.cast::<ICoreWebView2_4>() {
+        Ok(core4) => {
+            let mut dl_token = 0i64;
+            let _ = unsafe { core4.add_DownloadStarting(&dl_handler, &mut dl_token) };
+        }
+        Err(e) => browser_log(app, &format!("download redirect unavailable: {e}")),
+    }
+}
+
+/// JS snippet that reports the current document title + URL back to the host
+/// (`browser:title` event) so the frontend can label tabs. Runs on every
+/// injection pass (escalating post-nav schedule — idempotent for the
+/// frontend, which just overwrites the label) and on Windows
+/// NavigationCompleted for a fast, accurate read. Transport mirrors
+/// `pushstate_injection_js`: raw WebView2 panes post a `title_report`
+/// envelope via `chrome.webview.postMessage` (handled by
+/// `attach_web_message_bridge`), tauri-managed panes invoke the
+/// `browser_report_title` command.
+fn title_report_js(pane_id: &str, tab_id: &str) -> String {
+    format!(
+        r#"(function() {{
+    var args = {{ paneId: '{pane}', tabId: '{tab}', title: (document.title || '').slice(0, 300) }};
+    try {{
+        if (window.chrome && window.chrome.webview &&
+            typeof window.chrome.webview.postMessage === 'function') {{
+            args.__conduit = 'title_report';
+            window.chrome.webview.postMessage(JSON.stringify(args));
+            return;
+        }}
+    }} catch(e) {{}}
+    try {{
+        window.__TAURI_INTERNALS__.invoke('browser_report_title', args)
+            .catch(function() {{}});
+    }} catch(e) {{}}
+}})();"#,
+        pane = pane_id,
+        tab = tab_id
+    )
 }
 
 /// JS snippet that monkey-patches history.pushState / replaceState to call
 /// browser_push_state whenever the URL changes via same-document navigation.
 /// This catches Bing's Images/Videos/Maps tab clicks, SPA route changes, etc.
 /// — events WebView2's NavigationStarting does NOT fire for.
+///
+/// Each injection pass ALSO reports the current document title (before the
+/// install guard returns) — the escalating post-nav schedule means a
+/// slow-loading page's title lands within ~5 s even without a
+/// NavigationCompleted hook (the macOS/Linux paths have none).
 fn pushstate_injection_js(pane_id: &str, tab_id: &str) -> String {
     format!(
         r#"(function() {{
+    {title_report}
     if (window.__conduit_pushstate_patched) return;
     window.__conduit_pushstate_patched = true;
     var emit = function() {{
@@ -927,7 +1267,8 @@ fn pushstate_injection_js(pane_id: &str, tab_id: &str) -> String {
     window.addEventListener('hashchange', emit);
 }})();"#,
         pane = pane_id,
-        tab = tab_id
+        tab = tab_id,
+        title_report = title_report_js(pane_id, tab_id)
     )
 }
 
@@ -978,11 +1319,31 @@ fn attach_web_message_bridge(
                     let tab_id = v.get("tabId").and_then(|x| x.as_str()).unwrap_or("").to_string();
                     let url = v.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string();
                     if !url.trim().to_lowercase().starts_with("javascript:") {
+                        if let Some(state) = app.try_state::<crate::BrowserState>() {
+                            state.0.remember_tab_url(
+                                &crate::browser::browser_label(&pane_id, &tab_id),
+                                &url,
+                            );
+                        }
                         let _ = app.emit(
                             "browser:navigated",
                             BrowserNavigatedEvent { pane_id, tab_id, url },
                         );
                     }
+                }
+                Some("title_report") => {
+                    // Mirror `browser_report_title` for raw panes: the page
+                    // reports its document.title so the frontend can label
+                    // the tab. Purely cosmetic — a spoofed title only changes
+                    // the label, never behaviour.
+                    let _ = app.emit(
+                        "browser:title",
+                        crate::types::BrowserTitleEvent {
+                            pane_id: v.get("paneId").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                            tab_id: v.get("tabId").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                            title: v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        },
+                    );
                 }
                 _ => {}
             }
@@ -1014,6 +1375,35 @@ impl Drop for InFlightGuard<'_> {
         self.in_flight.lock().remove(&self.label);
     }
 }
+
+/// The user's answer to a gate confirmation ("Allow once" / "Always on this
+/// site" / Deny), delivered via the `browser_confirm_result` command.
+#[derive(Debug, Clone, Copy)]
+pub struct GateAnswer {
+    pub approved: bool,
+    pub always_for_site: bool,
+}
+
+/// One user-owned timeline record of an agent browser action. The agent
+/// cannot write or delete these — the backend appends on every dispatch.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineEntry {
+    pub ts_ms: u64,
+    pub op: String,
+    /// What the agent said it was targeting (element description, URL, key…)
+    pub target: String,
+    /// "ok" | "error" | "denied" | "cancelled" | "paused"
+    pub outcome: String,
+    /// When gated: the risk class the classifier assigned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_class: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Cap for the per-pane in-memory timeline (oldest entries evicted).
+pub const TIMELINE_CAP: usize = 200;
 
 pub struct BrowserManager {
     app: AppHandle,
@@ -1052,9 +1442,32 @@ pub struct BrowserManager {
     /// Pending resolve-pane roundtrip request id -> sender.
     pane_resolve_pending: Mutex<HashMap<u64, oneshot::Sender<Option<String>>>>,
     next_resolve_req: AtomicU64,
-    /// Pending open-browser roundtrip request id -> sender.
-    pane_open_pending: Mutex<HashMap<u64, oneshot::Sender<Option<String>>>>,
+    /// Pending open-browser roundtrip request id -> sender. The answer is
+    /// (pane_id, Option<tab_id>) — the tab lets open_pane_for_project poll
+    /// for the right webview label instead of a hardcoded "default".
+    pane_open_pending: Mutex<HashMap<u64, oneshot::Sender<Option<(String, Option<String>)>>>>,
     next_open_req: AtomicU64,
+    /// Pending tab-management roundtrips (switch/new/close): request id ->
+    /// sender. The frontend owns the tab list (zustand store), so the MCP tab
+    /// ops resolve through it, then poll for the webview to register.
+    tab_pending: Mutex<HashMap<u64, oneshot::Sender<Option<String>>>>,
+    next_tab_req: AtomicU64,
+    /// Last known URL per webview label — the origin source for the action
+    /// gate's per-site consent ("always allow on this site"). Updated on
+    /// navigate + every browser:navigated source.
+    tab_urls: Mutex<HashMap<String /* label */, String /* url */>>,
+    /// User pause/stop flags per pane (Phase 2 trust layer). `paused` rejects
+    /// agent actions with a resumable "paused_by_user" error; `cancelled` is
+    /// sticky until the user manually navigates (the UI stop button drains
+    /// pending actions with cancelled_by_user).
+    paused: Mutex<HashMap<String /* pane_id */, bool>>,
+    cancelled: Mutex<HashMap<String /* pane_id */, bool>>,
+    /// Pending gate confirmations: request id -> sender (approved?).
+    gate_pending: Mutex<HashMap<u64, oneshot::Sender<GateAnswer>>>,
+    next_gate_req: AtomicU64,
+    /// In-memory action timeline per pane (user-owned audit trail; capped).
+    /// The agent cannot write to or delete it — only the backend records.
+    timeline: Mutex<HashMap<String /* pane_id */, Vec<TimelineEntry>>>,
 }
 
 /// One in-flight agentic action (see `BrowserManager.pending`).
@@ -1062,6 +1475,9 @@ struct PendingAction {
     tx: oneshot::Sender<String>,
     /// Per-action shared secret the page must echo back (anti-spoofing).
     nonce: String,
+    /// Webview label the action was injected into — lets the user's Stop
+    /// button drain only the stopped pane's in-flight actions.
+    label: String,
 }
 
 impl BrowserManager {
@@ -1081,6 +1497,14 @@ impl BrowserManager {
             next_resolve_req: AtomicU64::new(1),
             pane_open_pending: Mutex::new(HashMap::new()),
             next_open_req: AtomicU64::new(1),
+            tab_pending: Mutex::new(HashMap::new()),
+            next_tab_req: AtomicU64::new(1),
+            tab_urls: Mutex::new(HashMap::new()),
+            paused: Mutex::new(HashMap::new()),
+            cancelled: Mutex::new(HashMap::new()),
+            gate_pending: Mutex::new(HashMap::new()),
+            next_gate_req: AtomicU64::new(1),
+            timeline: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1097,7 +1521,14 @@ impl BrowserManager {
     /// on the main thread via `run_on_main_thread` and blocks only its *own*
     /// worker thread on the result — leaving the main thread and other worker
     /// threads free to keep the app responsive.
-    pub fn create(&self, pane_id: &str, tab_id: &str, url: &str, rect: Rect) -> Result<(), String> {
+    pub fn create(
+        &self,
+        pane_id: &str,
+        tab_id: &str,
+        url: &str,
+        rect: Rect,
+        project_id: Option<&str>,
+    ) -> Result<(), String> {
         let label = browser_label(pane_id, tab_id);
         eprintln!("[conduit:browser] create pane={pane_id} tab={tab_id} label={label} url={url} rect={rect:?}");
         browser_log(&self.app, &format!("create pane={pane_id} tab={tab_id} label={label} url={url} rect={rect:?}"));
@@ -1144,14 +1575,12 @@ impl BrowserManager {
             }
         }
 
-        // Validate the target URL up front.
-        let _parsed: tauri::Url = url
-            .parse()
-            .map_err(|e| {
-                let msg = format!("invalid url `{url}`: {e}");
-                eprintln!("[conduit:browser] url parse FAILED: {msg}");
-                msg
-            })?;
+        // Validate the target URL up front (scheme allowlist — see
+        // validate_nav_url).
+        let _parsed = validate_nav_url(url).map_err(|e| {
+            eprintln!("[conduit:browser] url validation FAILED: {e}");
+            e
+        })?;
         let rect = sanitize(rect);
 
         // Build the webview (or webview window on Linux) on the main thread
@@ -1159,7 +1588,7 @@ impl BrowserManager {
         // produce a `BrowserPane` whose API is uniform for the rest of
         // this module. See `build_pane_on_main_thread` for the platform
         // split.
-        let pane = match self.build_pane_on_main_thread(pane_id, tab_id, url, rect) {
+        let pane = match self.build_pane_on_main_thread(pane_id, tab_id, url, rect, project_id) {
             Ok(p) => p,
             Err(e) => {
                 browser_log(&self.app, &format!("create FAILED label={label}: {e}"));
@@ -1301,6 +1730,7 @@ impl BrowserManager {
         tab_id: &str,
         url: &str,
         rect: Rect,
+        project_id: Option<&str>,
     ) -> Result<BrowserPane, String> {
         let label = browser_label(pane_id, tab_id);
         let event_pane_id = pane_id.to_string();
@@ -1348,6 +1778,11 @@ impl BrowserManager {
             let app2 = self.app.clone();
             let url2 = url.to_string();
             let self_webviews = self.webviews.clone();
+            // Per-project profile (Phase 2): cookies/storage separated per
+            // project via WebView2 multi-profile. Falls back to the default
+            // profile when there's no project context or the options API is
+            // unavailable in the installed WebView2 Runtime.
+            let profile_name = browser_profile_for_project(project_id);
             // NOTE: called ON the main thread via run_main_thread_call — the
             // COM completions fire on the main thread's normal pump while the
             // WORKER waits on done_rx. The main thread never blocks.
@@ -1366,16 +1801,35 @@ impl BrowserManager {
                     // field again and break the controller closure's Send.
                     let h = hwnd_wrap;
                     let app_log = app2.clone();
-                    create_controller_async(app_log, h.0, &env, bounds, done_ctrl.clone(), move |controller| {
+                    // Per-project controller options (profile name). Requires
+                    // Environment10 (WebView2 Runtime >= 1.0.1108); when the
+                    // runtime is older, None keeps the default-profile path.
+                    let controller_options = (|| {
+                        use windows::core::Interface as _;
+                        let profile = profile_name.as_ref()?;
+                        let env10: webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment10 =
+                            env.cast().ok()?;
+                        let options = unsafe { env10.CreateCoreWebView2ControllerOptions() }.ok()?;
+                        unsafe {
+                            options.SetProfileName(&windows::core::HSTRING::from(profile.as_str()))
+                        }
+                        .ok()?;
+                        Some(options)
+                    })();
+                    create_controller_async(app_log, h.0, &env, bounds, done_ctrl.clone(), controller_options, move |controller| {
                         let core = unsafe { controller.CoreWebView2() }
                             .map_err(|e| format!("CoreWebView2 unavailable: {e}"))?;
-                        // Document-start bridge (visual overlay primitives) —
-                        // installed once per webview; every later document
-                        // re-runs it automatically.
+                        // Document-start bridge (visual overlay primitives +
+                        // diagnostics ring buffer) — installed once per
+                        // webview; every later document re-runs both
+                        // automatically.
                         let overlay_h = HSTRING::from(BRIDGE_OVERLAY_JS);
                         let script_handler = webview2_com::AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(|_, _| Ok(())));
                         unsafe { core.AddScriptToExecuteOnDocumentCreated(&overlay_h, &script_handler) }
                             .map_err(|e| format!("AddScriptToExecuteOnDocumentCreated failed: {e}"))?;
+                        let diag_h = HSTRING::from(DIAG_INIT_JS);
+                        let diag_handler = webview2_com::AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(|_, _| Ok(())));
+                        let _ = unsafe { core.AddScriptToExecuteOnDocumentCreated(&diag_h, &diag_handler) };
                         attach_core_listeners(&app2, self_webviews.clone(), &label2, &core);
                         // B-3: page→host bridge for the raw pane (no Tauri IPC
                         // here) — action results + pushState reports.
@@ -1437,10 +1891,14 @@ impl BrowserManager {
                 // an explicit navigate() call: the FIRST click into a new page
                 // cleared it, and every agent action after that degraded
                 // silently to no-visual clicks (no cursor, no typing effect).
+                .initialization_script(DIAG_INIT_JS)
                 .initialization_script(BRIDGE_OVERLAY_JS)
                 .on_navigation(move |nav_url| {
                     eprintln!("[conduit:browser] navigation: {nav_url}");
                     browser_log(&app, &format!("wry on_navigation (nav START allowed) url={nav_url} label={label_for_nav}"));
+                    if let Some(state) = app.try_state::<crate::BrowserState>() {
+                        state.0.remember_tab_url(&label_for_nav, nav_url.as_str());
+                    }
                     let _ = app.emit(
                         "browser:navigated",
                         BrowserNavigatedEvent {
@@ -1469,12 +1927,13 @@ impl BrowserManager {
                             match app_ref.get_webview(&lbl) {
                                 Some(w) => {
                                     let _ = w.eval(&pushstate_injection_js(&pid, &tid));
-                                    // Belt-and-braces: the overlay is ALSO an
-                                    // initialization script (installs at
-                                    // document-start in every page), but keep
-                                    // the eval here so panes created before a
+                                    // Belt-and-braces: the overlay + diag layer
+                                    // are ALSO initialization scripts (install
+                                    // at document-start in every page), but keep
+                                    // the evals here so panes created before a
                                     // bridge update and any document-start
-                                    // race still get visuals. Idempotent.
+                                    // race still get them. Idempotent.
+                                    let _ = w.eval(DIAG_INIT_JS);
                                     let _ = w.eval(BRIDGE_OVERLAY_JS);
                                 }
                                 // Webview gone (tab closed mid-load) — stop.
@@ -1670,6 +2129,10 @@ impl BrowserManager {
         };
         drop(pane);
         browser_log(app, &format!("navigate pane={pane_id} tab={tab_id} url={parsed}"));
+        // A manual (or any) navigation re-arms the agent: the sticky cancel
+        // flag exists to halt an out-of-control agent until a human acts.
+        self.clear_cancelled(pane_id);
+        self.remember_tab_url(&browser_label(pane_id, tab_id), &parsed.to_string());
         // Route through CoreWebView2.Navigate ON THE MAIN THREAD, against our
         // own controller (the tauri dispatcher's Webview messages are
         // silently dropped for these panes).
@@ -1737,9 +2200,7 @@ impl BrowserManager {
         url: &str,
     ) -> Result<(BrowserPane, tauri::Url), String> {
         ensure_supported()?;
-        let parsed: tauri::Url = url
-            .parse()
-            .map_err(|e| format!("invalid url `{url}`: {e}"))?;
+        let parsed = validate_nav_url(url)?;
         *self.active.lock() = Some((pane_id.to_string(), tab_id.to_string()));
         self.pane_active_tab.lock().insert(pane_id.to_string(), tab_id.to_string());
         let label = browser_label(pane_id, tab_id);
@@ -1759,10 +2220,12 @@ impl BrowserManager {
             std::thread::sleep(std::time::Duration::from_secs(1));
             if let Some(w) = app.get_webview(&label) {
                 let _ = w.eval(&pushstate_injection_js(&pid, &tid));
-                // Re-inject the visual-feedback overlay after navigation — a
-                // fresh page load clears injected DOM, so the cursor/highlight
+                // Re-inject the diagnostics layer + visual-feedback overlay
+                // after navigation — a fresh page load clears injected DOM, so
+                // the console/network ring buffer and the cursor/highlight
                 // primitives must be re-installed (Task #7). Idempotent on the
                 // JS side: a no-op if already present.
+                let _ = w.eval(DIAG_INIT_JS);
                 let _ = w.eval(BRIDGE_OVERLAY_JS);
             }
         });
@@ -1778,6 +2241,43 @@ impl BrowserManager {
     pub fn go_forward(&self, pane_id: &str, tab_id: &str) -> Result<(), String> {
         let label = browser_label(pane_id, tab_id);
         self.eval(&label, "history.forward()")
+    }
+
+    /// Clear the current site's session for a pane: cookies visible to the
+    /// page (document.cookie expiry), localStorage and sessionStorage, then
+    /// reload. Scoped to the CURRENT origin — that's what "clear this site"
+    /// means and it's the origin the user can see. HttpOnly cookies are NOT
+    /// touchable from JS (by design); with per-project profiles (Windows) the
+    /// project profile itself already scopes those. Cross-platform, best-
+    /// effort: any failure leaves the page intact.
+    pub fn clear_site_session(&self, pane_id: &str, tab_id: &str) -> Result<(), String> {
+        let label = browser_label(pane_id, tab_id);
+        // NB: self.eval runs the body as a SCRIPT (ExecuteScript) — a
+        // top-level `return` is a SyntaxError and would silently no-op the
+        // whole clear. Statements only; the reload makes the outcome visible.
+        self.eval(
+            &label,
+            r#"
+try { localStorage.clear(); } catch (e) {}
+try { sessionStorage.clear(); } catch (e) {}
+try {
+  var expired = 'Thu, 01 Jan 1970 00:00:00 GMT';
+  var parts = document.cookie.split(';');
+  for (var i = 0; i < parts.length; i++) {
+    var name = parts[i].split('=')[0].trim();
+    if (!name) continue;
+    var base = name + '=; expires=' + expired + ' path=/';
+    document.cookie = base;
+    document.cookie = base + '; domain=' + location.hostname;
+    if (location.hostname.indexOf('.') !== -1) {
+      document.cookie = base + '; domain=.' + location.hostname.split('.').slice(-2).join('.');
+    }
+  }
+} catch (e) {}
+window.__conduitSiteCleared = location.origin;
+location.reload();
+"#,
+        )
     }
 
     pub fn reload(&self, pane_id: &str, tab_id: &str) -> Result<(), String> {
@@ -2032,13 +2532,28 @@ impl BrowserManager {
         opts: ActionOpts,
     ) -> Result<String, String> {
         ensure_supported()?;
+        // Trust layer (manager level — covers the chat tools too, which don't
+        // pass the MCP gate layer): the user's pause/stop always wins.
+        let pane_id = label
+            .strip_prefix("browser-")
+            .and_then(|rest| rest.split_once("-tab-"))
+            .map(|(p, _)| p.to_string());
+        if let Some(pid) = pane_id.as_deref() {
+            if self.is_cancelled(pid) {
+                return Err("ERROR: cancelled_by_user — the user stopped the agent".to_string());
+            }
+            if self.is_paused(pid) {
+                return Err("ERROR: paused_by_user — the user paused the agent".to_string());
+            }
+        }
         let pane = self.get(label)?;
         let req_id = self.next_req.fetch_add(1, Ordering::SeqCst);
         let nonce = format!("{:016x}", rand::random::<u64>());
         let (tx, rx) = oneshot::channel::<String>();
-        self.pending
-            .lock()
-            .insert(req_id, PendingAction { tx, nonce: nonce.clone() });
+        self.pending.lock().insert(
+            req_id,
+            PendingAction { tx, nonce: nonce.clone(), label: label.to_string() },
+        );
         let js = action_wrapper_js(req_id, &nonce, body, &opts);
         let eval_res = {
             #[cfg(windows)]
@@ -2085,20 +2600,30 @@ impl BrowserManager {
 
     /// Capture the page currently shown in a pane's webview as PNG bytes.
     /// Backs the `browser_screenshot` tool so the agent can show the user
-    /// exactly what the page looks like. Blocking (up to a 15 s roundtrip) —
+    /// exactly what the page looks like. Blocking (up to a ~20 s roundtrip) —
     /// call inside `tokio::task::spawn_blocking` from async contexts.
     ///
-    /// Windows: WebView2 `CapturePreview` on the pane's child webview. The
-    /// WebView2 API is UI-thread-affine, so the call is marshalled onto the
-    /// main thread; `wait_for_async_operation` pumps the message loop while
-    /// it waits, so the UI stays alive during the capture. Returns `None` on
-    /// failure and on platforms without a capture path (Linux/macOS today).
+    /// Renders through the CDP compositor (`Page.captureScreenshot`), which
+    /// works from any thread and doesn't depend on the OS painting the child
+    /// HWND (the old COM `CapturePreview` roundtrip intermittently returned
+    /// empty frames and needed UI-thread marshaling). Windows-only today;
+    /// other platforms return `None` and callers surface a clear error.
     pub fn capture_pane_png(&self, label: &str) -> Option<Vec<u8>> {
-        // The COM CapturePreview path captured from the calling thread via a
-        // with_webview that was silently dropped for freshly-created panes.
-        // The CDP screenshot path now routes through with_core_on_main
-        // (run_on_main_thread marshaling) and works from any thread.
-        self.capture_pane_png_via_cdp(label)
+        #[cfg(windows)]
+        {
+            let json = self
+                .call_devtools_protocol(label, "Page.captureScreenshot", r#"{"format":"png"}"#)
+                .ok()?;
+            let v: serde_json::Value = serde_json::from_str(&json).ok()?;
+            let b64 = v.get("data")?.as_str()?;
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.decode(b64).ok()
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = label;
+            None
+        }
     }
 
     /// Capture the active chat-mode page (same as `capture_pane_png` but
@@ -2162,40 +2687,88 @@ impl BrowserManager {
         Err("CDP execution layer requires the Windows WebView2 backend".to_string())
     }
 
-    /// Capture the pane as PNG via CDP `Page.captureScreenshot` — the CDP
-    /// path renders through the compositor (works where the COM
-    /// `CapturePreview` stream roundtrip intermittently returns an empty
-    /// frame) and decodes the base64 payload straight out of the JSON.
-    pub fn capture_pane_png_via_cdp(&self, label: &str) -> Option<Vec<u8>> {
-        #[cfg(windows)]
-        {
-            let json = self
-                .call_devtools_protocol(label, "Page.captureScreenshot", r#"{"format":"png"}"#)
-                .ok()?;
-            let v: serde_json::Value = serde_json::from_str(&json).ok()?;
-            let b64 = v.get("data")?.as_str()?;
-            use base64::Engine;
-            base64::engine::general_purpose::STANDARD.decode(b64).ok()
+    /// Print the pane's CURRENT page to PDF (ICoreWebView2_7::PrintToPdf) —
+    /// the `print_to_pdf` agent tool: hand a faithful document version of a
+    /// page to the workspace (receipts, confirmations, docs, your own app's
+    /// print preview). Blocking (main-thread COM roundtrip, up to ~30 s);
+    /// call inside `spawn_blocking` from async contexts.
+    #[cfg(windows)]
+    pub fn print_to_pdf_for_pane(
+        &self,
+        label: &str,
+        output_path: &std::path::Path,
+        landscape: bool,
+    ) -> Result<(), String> {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_7;
+        use webview2_com::PrintToPdfCompletedHandler;
+        use windows::core::Interface as _;
+
+        let out = output_path.to_path_buf();
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
         }
-        #[cfg(not(windows))]
-        {
-            let _ = label;
-            None
-        }
+        with_core_on_main(&self.app, self.webviews.clone(), label, "print to pdf", move |core| {
+            use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_2;
+            use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment6;
+            // Print settings come from the environment (via ICoreWebView2_2's
+            // Environment getter — the same chain chat/pdfprint.rs uses).
+            let core2 = core.cast::<ICoreWebView2_2>().map_err(|e| e.to_string())?;
+            let env = unsafe { core2.Environment() }.map_err(|e| e.to_string())?;
+            let env6 = env
+                .cast::<ICoreWebView2Environment6>()
+                .map_err(|e| format!("print settings unavailable (old runtime?): {e}"))?;
+            let settings = unsafe { env6.CreatePrintSettings() }.map_err(|e| e.to_string())?;
+            let orientation = if landscape {
+                webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PRINT_ORIENTATION_LANDSCAPE
+            } else {
+                webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT
+            };
+            let _ = unsafe { settings.SetOrientation(orientation) };
+            let _ = unsafe { settings.SetShouldPrintBackgrounds(true) };
+            let _ = unsafe { settings.SetShouldPrintHeaderAndFooter(false) };
+
+            let core7: ICoreWebView2_7 = core
+                .cast()
+                .map_err(|e| format!("PrintToPdf unavailable (old runtime?): {e}"))?;
+            let out_target = windows::core::HSTRING::from(out.to_string_lossy().as_ref());
+            // Runs ON the main thread: wait_for_async_operation pumps the
+            // message loop so the COM completion can fire (pdfprint pattern).
+            PrintToPdfCompletedHandler::wait_for_async_operation(
+                {
+                    let core7 = core7.clone();
+                    let settings = settings.clone();
+                    Box::new(move |handler| unsafe {
+                        core7.PrintToPdf(&out_target, &settings, &handler)
+                            .map_err(webview2_com::Error::WindowsError)
+                    })
+                },
+                Box::new(|error_code, succeeded| {
+                    error_code?;
+                    if succeeded {
+                        Ok(())
+                    } else {
+                        // PrintToPdf reported success=false without an error
+                        // code — surface generic E_FAIL (pdfprint pattern).
+                        Err(windows::core::Error::from(windows::core::HRESULT(-2147467259)))
+                    }
+                }),
+            )
+            .map_err(|e| format!("PrintToPdf failed: {e}"))?;
+            if !out.is_file() {
+                return Err("print completed but produced no file".to_string());
+            }
+            Ok(())
+        })
     }
 
-    /// CDP-first capture with the COM CapturePreview path as fallback — the
-    /// screenshot callers use this so a CDP failure degrades instead of
-    /// breaking the tool.
-    pub fn capture_active_png_via_cdp(&self) -> Option<Vec<u8>> {
-        let label = self.active_label().ok()?;
-        match self.capture_pane_png_via_cdp(&label) {
-            Some(png) if !png.is_empty() => Some(png),
-            _ => {
-                eprintln!("[conduit:browser] CDP screenshot empty — falling back to CapturePreview");
-                self.capture_pane_png(&label)
-            }
-        }
+    #[cfg(not(windows))]
+    pub fn print_to_pdf_for_pane(
+        &self,
+        _label: &str,
+        _output_path: &std::path::Path,
+        _landscape: bool,
+    ) -> Result<(), String> {
+        Err("print_to_pdf requires the Windows WebView2 backend".to_string())
     }
 
     /// Read the active page with structured readability-style extraction.
@@ -2387,7 +2960,7 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
     /// Returns a req_id the caller awaits via `open_pane_request_resolve`.
     pub fn open_pane_request_emit(&self, project_id: &str, url: &str) -> u64 {
         let req_id = self.next_open_req.fetch_add(1, Ordering::SeqCst);
-        let (tx, _rx) = oneshot::channel::<Option<String>>();
+        let (tx, _rx) = oneshot::channel::<Option<(String, Option<String>)>>();
         self.pane_open_pending.lock().insert(req_id, tx);
         let payload = serde_json::json!({ "reqId": req_id, "projectId": project_id, "url": url });
         let _ = self.app.emit("browser:open-browser-request", payload);
@@ -2395,10 +2968,251 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
     }
 
     /// Receive the frontend's answer for an open-browser request.
-    pub fn open_pane_request_resolve(&self, req_id: u64, pane_id: Option<String>) {
+    pub fn open_pane_request_resolve(
+        &self,
+        req_id: u64,
+        pane_id: Option<String>,
+        tab_id: Option<String>,
+    ) {
         if let Some(tx) = self.pane_open_pending.lock().remove(&req_id) {
-            let _ = tx.send(pane_id);
+            let _ = tx.send(pane_id.map(|p| (p, tab_id)));
         }
+    }
+
+    /// Receive the frontend's answer for a tab roundtrip (switch/new/close).
+    /// `tab_id` is the affected tab (echoed for switch/new; None = failure).
+    pub fn tab_request_resolve(&self, req_id: u64, tab_id: Option<String>) {
+        if let Some(tx) = self.tab_pending.lock().remove(&req_id) {
+            let _ = tx.send(tab_id);
+        }
+    }
+
+    // ---- Phase 2 trust layer ---------------------------------------------
+
+    /// Remember a tab's current URL (origin source for per-site consent).
+    pub fn remember_tab_url(&self, label: &str, url: &str) {
+        self.tab_urls.lock().insert(label.to_string(), url.to_string());
+    }
+
+    pub fn tab_url(&self, label: &str) -> Option<String> {
+        self.tab_urls.lock().get(label).cloned()
+    }
+
+    /// Pause/unpause agent actions for a pane. Paused actions fail with a
+    /// resumable error; the page and the user's own browsing are unaffected.
+    pub fn set_paused(&self, pane_id: &str, paused: bool) {
+        self.paused.lock().insert(pane_id.to_string(), paused);
+        if paused {
+            self.append_timeline(
+                pane_id,
+                "control",
+                "pause",
+                "ok",
+                None,
+                Some("agent paused by user".into()),
+            );
+        }
+    }
+
+    pub fn is_paused(&self, pane_id: &str) -> bool {
+        self.paused.lock().get(pane_id).copied().unwrap_or(false)
+    }
+
+    /// Stop the agent for a pane: sticky cancel flag + drain every pending
+    /// action with `cancelled_by_user` so in-flight tool calls return
+    /// immediately instead of hanging out their 45 s timeout.
+    pub fn cancel_agent(&self, pane_id: &str) {
+        self.cancelled.lock().insert(pane_id.to_string(), true);
+        // Drain ONLY this pane's in-flight actions (oneshot senders are not
+        // cloneable — collect the ids first, then remove+resolve each).
+        let prefix = format!("browser-{pane_id}-tab-");
+        let ids: Vec<u64> = {
+            self.pending
+                .lock()
+                .iter()
+                .filter(|(_, p)| p.label.starts_with(&prefix))
+                .map(|(k, _)| *k)
+                .collect()
+        };
+        for id in ids {
+            if let Some(p) = self.pending.lock().remove(&id) {
+                let _ = p
+                    .tx
+                    .send("ERROR: cancelled_by_user — the user stopped the agent".to_string());
+            }
+        }
+        self.append_timeline(pane_id, "control", "stop", "ok", None, Some("agent stopped by user".into()));
+    }
+
+    pub fn is_cancelled(&self, pane_id: &str) -> bool {
+        self.cancelled.lock().get(pane_id).copied().unwrap_or(false)
+    }
+
+    /// Clear the sticky cancel flag — the user manually navigating the pane
+    /// signals "I'm driving now; the agent may act again".
+    pub fn clear_cancelled(&self, pane_id: &str) {
+        self.cancelled.lock().remove(pane_id);
+    }
+
+    /// Emit a gate confirmation request to the frontend and await the answer.
+    /// 120 s timeout: a human must respond; silence denies.
+    pub async fn request_gate_approval(
+        &self,
+        pane_id: &str,
+        op: &str,
+        target: &str,
+        url: &str,
+        risk_class: &str,
+        reason: &str,
+    ) -> Option<GateAnswer> {
+        let req_id = self.next_gate_req.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel::<GateAnswer>();
+        self.gate_pending.lock().insert(req_id, tx);
+        let payload = serde_json::json!({
+            "reqId": req_id,
+            "paneId": pane_id,
+            "op": op,
+            "target": target,
+            "url": url,
+            "riskClass": risk_class,
+            "reason": reason,
+        });
+        let _ = self.app.emit("browser:confirm-request", payload);
+        match tokio::time::timeout(Duration::from_secs(120), rx).await {
+            Ok(Ok(answer)) => Some(answer),
+            _ => None,
+        }
+    }
+
+    /// Receive the frontend's answer for a gate confirmation.
+    pub fn gate_request_resolve(&self, req_id: u64, answer: GateAnswer) {
+        if let Some(tx) = self.gate_pending.lock().remove(&req_id) {
+            let _ = tx.send(answer);
+        }
+    }
+
+    /// Append one user-owned timeline record and push it to the UI live.
+    pub fn append_timeline(
+        &self,
+        pane_id: &str,
+        op: &str,
+        target: &str,
+        outcome: &str,
+        risk_class: Option<&str>,
+        detail: Option<String>,
+    ) {
+        let entry = TimelineEntry {
+            ts_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            op: op.to_string(),
+            target: target.chars().take(160).collect(),
+            outcome: outcome.to_string(),
+            risk_class: risk_class.map(|s| s.to_string()),
+            detail,
+        };
+        {
+            let mut map = self.timeline.lock();
+            let list = map.entry(pane_id.to_string()).or_default();
+            list.push(entry.clone());
+            let len = list.len();
+            if len > TIMELINE_CAP {
+                list.drain(..len - TIMELINE_CAP);
+            }
+        }
+        let _ = self.app.emit(
+            "browser:timeline-entry",
+            serde_json::json!({ "paneId": pane_id, "entry": entry }),
+        );
+    }
+
+    /// Snapshot a pane's timeline (oldest first).
+    pub fn timeline_for_pane(&self, pane_id: &str) -> Vec<TimelineEntry> {
+        self.timeline
+            .lock()
+            .get(pane_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Ask the frontend to perform a tab operation in a pane and await the
+    /// outcome. `kind` is "switch" | "new" | "close"; `arg` is the tabId
+    /// (switch/close) or the URL (new). Emits `browser:{kind}-tab-request`
+    /// and awaits `tab_request_resolve` (5 s timeout).
+    async fn tab_request(&self, kind: &str, pane_id: &str, arg: &str) -> Result<String, String> {
+        let req_id = self.next_tab_req.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel::<Option<String>>();
+        self.tab_pending.lock().insert(req_id, tx);
+        let payload = if kind == "new" {
+            serde_json::json!({ "reqId": req_id, "paneId": pane_id, "url": arg })
+        } else {
+            serde_json::json!({ "reqId": req_id, "paneId": pane_id, "tabId": arg })
+        };
+        let event = format!("browser:{kind}-tab-request");
+        let _ = self.app.emit(&event, payload);
+
+        match tokio::time::timeout(Duration::from_secs(5), rx).await {
+            Ok(Ok(Some(tab_id))) => Ok(tab_id),
+            Ok(Ok(None)) => Err(format!(
+                "frontend could not {kind} tab (may be the last tab, an unknown tab, or the pane is gone)"
+            )),
+            Ok(Err(_)) => Err("tab request channel closed".to_string()),
+            Err(_) => Err("tab request timed out waiting for the frontend".to_string()),
+        }
+    }
+
+    /// Public awaited tab ops used by the MCP dispatch. `switch`/`new` poll
+    /// for the tab's webview to register (lazy creation runs async on the
+    /// frontend) so the agent can act on the tab immediately after.
+    pub async fn switch_tab_for_pane(&self, pane_id: &str, tab_id: &str) -> Result<String, String> {
+        let _ = self.tab_request("switch", pane_id, tab_id).await?;
+        let label = browser_label(pane_id, tab_id);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if self.webviews.lock().contains_key(&label) {
+                self.pane_active_tab.lock().insert(pane_id.to_string(), tab_id.to_string());
+                *self.active.lock() = Some((pane_id.to_string(), tab_id.to_string()));
+                return Ok(label);
+            }
+            if std::time::Instant::now() >= deadline {
+                // The store switched even if the webview hasn't registered —
+                // good enough for list/read flows that lazily create later.
+                self.pane_active_tab.lock().insert(pane_id.to_string(), tab_id.to_string());
+                return Ok(label);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    pub async fn new_tab_for_pane(&self, pane_id: &str, url: &str) -> Result<String, String> {
+        let tab_id = self.tab_request("new", pane_id, url).await?;
+        let label = browser_label(pane_id, &tab_id);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if self.webviews.lock().contains_key(&label) {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "tab {tab_id} created but its webview did not register within 3s"
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        self.pane_active_tab.lock().insert(pane_id.to_string(), tab_id.clone());
+        *self.active.lock() = Some((pane_id.to_string(), tab_id.clone()));
+        Ok(label)
+    }
+
+    pub async fn close_tab_for_pane(&self, pane_id: &str, tab_id: &str) -> Result<String, String> {
+        self.tab_request("close", pane_id, tab_id).await?;
+        // Defensive: drop our own map entry + visibility state in case the
+        // frontend's browser_close raced or was skipped.
+        let label = browser_label(pane_id, tab_id);
+        self.tab_visible.lock().remove(&label);
+        self.webviews.lock().remove(&label);
+        Ok(tab_id.to_string())
     }
 
     /// High-level helper used by the MCP WS dispatch (Task #4) to resolve a
@@ -2476,21 +3290,24 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
         url: &str,
     ) -> Result<String, String> {
         let req_id = self.next_open_req.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = oneshot::channel::<Option<String>>();
+        let (tx, rx) = oneshot::channel::<Option<(String, Option<String>)>>();
         self.pane_open_pending.lock().insert(req_id, tx);
         let payload = serde_json::json!({ "reqId": req_id, "projectId": project_id, "url": url });
         let _ = self.app.emit("browser:open-browser-request", payload);
 
         match tokio::time::timeout(Duration::from_secs(5), rx).await {
-            Ok(Ok(Some(new_pane_id))) => {
-                // The frontend created the pane and returned its id, but the
-                // native webview (`browser_create` → `create()`) may still be
-                // initializing async on the main thread — `pane_active_tab` /
-                // `webviews` aren't populated until `create()` finishes. Poll
-                // for the predictable default-tab label to appear in the
+            Ok(Ok(Some((new_pane_id, answered_tab)))) => {
+                // The frontend created the pane and returned its id + active
+                // tab id, but the native webview (`browser_create` →
+                // `create()`) may still be initializing async on the main
+                // thread — `pane_active_tab` / `webviews` aren't populated
+                // until `create()` finishes. Poll for THAT tab's label in the
                 // webviews map (create() inserts it last), up to ~3s, rather
                 // than relying on a fixed sleep that races the webview init.
-                let label = browser_label(&new_pane_id, "default");
+                // (The tab id used to be hardcoded "default", which broke
+                // whenever the frontend's first tab id differed.)
+                let tab = answered_tab.unwrap_or_else(|| "default".to_string());
+                let label = browser_label(&new_pane_id, &tab);
                 let deadline = std::time::Instant::now() + Duration::from_secs(3);
                 loop {
                     if self.webviews.lock().contains_key(&label) {
@@ -2511,11 +3328,11 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
     }
 
     pub async fn click_ref(&self, r: i64) -> Result<String, String> {
-        self.run_action(&click_js(r)).await
+        self.run_action(&click_js(r, None)).await
     }
 
     pub async fn type_into(&self, r: i64, text: &str) -> Result<String, String> {
-        self.run_action(&type_js(r, text)).await
+        self.run_action(&type_js(r, text, None)).await
     }
 
     pub async fn scroll_by(&self, dy: i64) -> Result<String, String> {
@@ -2558,6 +3375,108 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
         self.run_action_for_pane(label, &evaluate_js(expression)).await
     }
 
+    /// Compact interactive snapshot (same ref numbering as click/type) — backs
+    /// the `include_snapshot` action flag and the `find` tool (a query filters
+    /// the listing without changing the numbering).
+    pub async fn snapshot_for_pane(&self, label: &str, query: Option<&str>) -> Result<String, String> {
+        self.run_action_for_pane(label, &snapshot_js(query)).await
+    }
+
+    /// Set multiple form fields directly by ref (fast path, no per-keystroke
+    /// typing). `fields_json` is a validated `[{"ref":N,"text":"..."}]` array.
+    pub async fn fill_form_for_pane(&self, label: &str, fields_json: &str) -> Result<String, String> {
+        self.run_action_for_pane(label, &fill_form_js(fields_json)).await
+    }
+
+    /// Select an `<option>` by value or visible text — the direct semantic
+    /// action that fixes the classic a11y-click-on-dropdown failure.
+    pub async fn select_option_for_pane(&self, label: &str, r: i64, value: &str) -> Result<String, String> {
+        self.run_action_for_pane(label, &select_option_js(r, value)).await
+    }
+
+    /// Press a key (Enter/Escape/arrows/…) on the focused element.
+    pub async fn press_key_for_pane(&self, label: &str, key: &str) -> Result<String, String> {
+        self.run_action_for_pane(label, &press_key_js(key)).await
+    }
+
+    /// Read the diagnostics ring buffer ("console" | "network") incrementally.
+    pub async fn read_diag_for_pane(&self, label: &str, kind: &str, since: u64) -> Result<String, String> {
+        self.run_action_for_pane(label, &diag_read_js(kind, since)).await
+    }
+
+    /// List a pane's tabs from the webviews map (tabs whose webview was
+    /// activated at least once) with the active flag. Returns
+    /// `Vec<(tab_id, is_active, has_webview)>` — URLs are read by the caller
+    /// per tab via `evaluate_for_pane("location.href")` only when needed.
+    pub fn list_tabs_for_pane(&self, pane_id: &str) -> Vec<(String, bool, bool)> {
+        let prefix = format!("browser-{pane_id}-tab-");
+        let active_tab = self.pane_active_tab.lock().get(pane_id).cloned();
+        let mut out: Vec<(String, bool, bool)> = Vec::new();
+        {
+            let webviews = self.webviews.lock();
+            for key in webviews.keys() {
+                if let Some(tab) = key.strip_prefix(&prefix) {
+                    let is_active = active_tab.as_deref() == Some(tab);
+                    out.push((tab.to_string(), is_active, true));
+                }
+            }
+        }
+        // The active tab from the frontend's perspective may not have a
+        // webview yet (lazy creation on first activation) — still report it.
+        if let Some(active) = active_tab {
+            if !out.iter().any(|(t, _, _)| *t == active) {
+                out.push((active, true, false));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Capture a REGION of the pane as PNG via CDP `Page.captureScreenshot`
+    /// with a clip rect (the `zoom` tool: small text, dense UI). Coordinates
+    /// are viewport CSS pixels; `scale` upsamples the crop (default 2).
+    #[cfg(windows)]
+    pub fn capture_pane_png_clipped(
+        &self,
+        label: &str,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        scale: f64,
+    ) -> Option<Vec<u8>> {
+        let params = serde_json::json!({
+            "format": "png",
+            "clip": {
+                "x": x.max(0.0),
+                "y": y.max(0.0),
+                "width": width.max(1.0),
+                "height": height.max(1.0),
+                "scale": scale.clamp(0.5, 4.0),
+            }
+        });
+        let json = self
+            .call_devtools_protocol(label, "Page.captureScreenshot", &params.to_string())
+            .ok()?;
+        let v: serde_json::Value = serde_json::from_str(&json).ok()?;
+        let b64 = v.get("data")?.as_str()?;
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.decode(b64).ok()
+    }
+
+    #[cfg(not(windows))]
+    pub fn capture_pane_png_clipped(
+        &self,
+        _label: &str,
+        _x: f64,
+        _y: f64,
+        _width: f64,
+        _height: f64,
+        _scale: f64,
+    ) -> Option<Vec<u8>> {
+        None
+    }
+
     fn get(&self, label: &str) -> Result<BrowserPane, String> {
         self.webviews
             .lock()
@@ -2581,6 +3500,69 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
         self.run_action_for_pane(label, &body).await
     }
 
+    /// Narrated resolve + click: `narration` (the agent's element description)
+    /// shows as a label pinned to the synthetic cursor — the readable-agent
+    /// trust primitive. Used by the MCP dispatch.
+    pub async fn resolve_and_click_narrated(
+        &self,
+        label: &str,
+        desc: &str,
+        narration: Option<&str>,
+        opts: &ActionOpts,
+    ) -> Result<String, String> {
+        let resolved = self.resolve_element(label, desc, "click").await?;
+        let v: serde_json::Value = serde_json::from_str(&resolved)
+            .map_err(|e| format!("resolve_and_click: bad resolution json: {e}"))?;
+        if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
+            let r = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(-1);
+            let click_result = self
+                .run_action_for_pane_opts(label, &click_js(r, narration), opts.clone())
+                .await?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "clicked": {
+                    "ref": r,
+                    "tag": v.get("tag").and_then(|x| x.as_str()).unwrap_or(""),
+                    "label": v.get("label").and_then(|x| x.as_str()).unwrap_or(""),
+                },
+                "result": click_result,
+            }).to_string())
+        } else {
+            Ok(resolved)
+        }
+    }
+
+    /// Narrated resolve + type. Same shape as resolve_and_click_narrated.
+    pub async fn resolve_and_type_narrated(
+        &self,
+        label: &str,
+        desc: &str,
+        text: &str,
+        narration: Option<&str>,
+        opts: &ActionOpts,
+    ) -> Result<String, String> {
+        let resolved = self.resolve_element(label, desc, "type").await?;
+        let v: serde_json::Value = serde_json::from_str(&resolved)
+            .map_err(|e| format!("resolve_and_type: bad resolution json: {e}"))?;
+        if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
+            let r = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(-1);
+            let type_result = self
+                .run_action_for_pane_opts(label, &type_js(r, text, narration), opts.clone())
+                .await?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "typed": {
+                    "ref": r,
+                    "tag": v.get("tag").and_then(|x| x.as_str()).unwrap_or(""),
+                    "label": v.get("label").and_then(|x| x.as_str()).unwrap_or(""),
+                },
+                "result": type_result,
+            }).to_string())
+        } else {
+            Ok(resolved)
+        }
+    }
+
     /// Resolve + click. Returns the bridge JSON (ok or not_found with
     /// suggestions) when resolution succeeds/fails; the click result string is
     /// folded into the ok payload's `result` field so the caller can surface
@@ -2596,7 +3578,9 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
             .map_err(|e| format!("resolve_and_click: bad resolution json: {e}"))?;
         if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
             let r = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(-1);
-            let click_result = self.run_action_for_pane_opts(label, &click_js(r), opts.clone()).await?;
+            let click_result = self
+                .run_action_for_pane_opts(label, &click_js(r, None), opts.clone())
+                .await?;
             // mi13: build with json! — one serializer pass instead of three
             // format!-embedded to_string calls.
             Ok(serde_json::json!({
@@ -2625,7 +3609,9 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
             .map_err(|e| format!("resolve_and_type: bad resolution json: {e}"))?;
         if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
             let r = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(-1);
-            let type_result = self.run_action_for_pane_opts(label, &type_js(r, text), opts.clone()).await?;
+            let type_result = self
+                .run_action_for_pane_opts(label, &type_js(r, text, None), opts.clone())
+                .await?;
             Ok(serde_json::json!({
                 "ok": true,
                 "typed": {
@@ -2805,11 +3791,19 @@ return 'URL: ' + location.href + '\nTITLE: ' + document.title +
 /// once the whole sequence (and the real DOM click) completes (Task #7 race
 /// guard). The overlay primitives come from bridge_overlay.js (injected after
 /// navigation + lazily by __conduit_injectOverlay).
-fn click_js(r: i64) -> String {
+fn click_js(r: i64, narrate: Option<&str>) -> String {
+    let narrate_js = match narrate {
+        Some(t) => {
+            let esc = serde_json::to_string(t).unwrap_or_else(|_| "null".to_string());
+            format!("if (typeof __conduit_narrate === 'function') __conduit_narrate({esc});")
+        }
+        None => String::new(),
+    };
     format!(
         r#"
+{narrate_js}
 var el = document.querySelector('[data-conduit-ref="{r}"]');
-if (!el) return 'ERROR: no element with ref {r}. Call browser_read first to refresh the element map.';
+if (!el) return 'ERROR: ref {r} is stale — no element with this ref on the current page. The page changed since the ref was assigned; re-read the page (read_page or find) to get fresh refs.';
 function doClick() {{
     el.scrollIntoView({{block: 'center'}});
     el.click();
@@ -2841,12 +3835,20 @@ return __conduit_tweenCursor(cx, cy, 150).then(function() {{
 /// this is functionally required (not just visual) so React/Vue controlled
 /// inputs register the change the same way a real user typing does. The tool
 /// result reports only after the last keystroke (Task #7 race guard).
-fn type_js(r: i64, text: &str) -> String {
+fn type_js(r: i64, text: &str, narrate: Option<&str>) -> String {
     let js_text = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
+    let narrate_js = match narrate {
+        Some(t) => {
+            let esc = serde_json::to_string(t).unwrap_or_else(|_| "null".to_string());
+            format!("if (typeof __conduit_narrate === 'function') __conduit_narrate({esc});")
+        }
+        None => String::new(),
+    };
     format!(
         r#"
+{narrate_js}
 var el = document.querySelector('[data-conduit-ref="{r}"]');
-if (!el) return 'ERROR: no element with ref {r}. Call browser_read first to refresh the element map.';
+if (!el) return 'ERROR: ref {r} is stale — no element with this ref on the current page. The page changed since the ref was assigned; re-read the page (read_page or find) to get fresh refs.';
 var text = {js_text};
 function doTypePlain() {{
     el.focus();
@@ -2915,7 +3917,7 @@ fn hover_js(r: i64) -> String {
     format!(
         r#"
 var el = document.querySelector('[data-conduit-ref="{r}"]');
-if (!el) return 'ERROR: no element with ref {r}. Call browser_read first to refresh the element map.';
+if (!el) return 'ERROR: ref {r} is stale — no element with this ref on the current page. The page changed since the ref was assigned; re-read the page (read_page or find) to get fresh refs.';
 var rect = el.getBoundingClientRect();
 var cx = Math.max(rect.left + Math.max(rect.width / 2, 1), 1);
 var cy = Math.max(rect.top + Math.max(rect.height / 2, 1), 1);
@@ -2989,6 +3991,155 @@ try {{
     )
 }
 
+/// Compact interactive snapshot (`include_snapshot` on action results, and the
+/// `find` tool when a query is given). The QUERY placeholder is the
+/// JSON-escaped filter string ("" lists everything).
+fn snapshot_js(query: Option<&str>) -> String {
+    let q = serde_json::to_string(query.unwrap_or("")).unwrap_or_else(|_| "\"\"".to_string());
+    BRIDGE_SNAPSHOT_JS.replace("QUERY_PLACEHOLDER", &q)
+}
+
+/// Set form-field values DIRECTLY by ref (no per-keystroke typing) — the fast
+/// path for forms. `fields` is a JSON array `[{"ref": 2, "text": "a@b.c"}, …]`
+/// (already validated/clamped by the MCP layer). Uses the native value setter
+/// so React/Vue controlled inputs register the change, then fires
+/// input+change. Returns per-field results so a partial failure is visible.
+fn fill_form_js(fields: &str) -> String {
+    format!(
+        r#"
+var fields = {fields};
+var results = [];
+function setDirect(el, text) {{
+    var isValue = ('value' in el && typeof el.value === 'string');
+    el.focus();
+    if (isValue) {{
+        // React-controlled inputs ignore direct .value writes unless the
+        // NATIVE setter is used — this is the standard workaround.
+        var proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (desc && desc.set) {{ desc.set.call(el, text); }} else {{ el.value = text; }}
+    }} else {{
+        el.textContent = text;
+    }}
+    el.dispatchEvent(new Event('input', {{bubbles: true}}));
+    el.dispatchEvent(new Event('change', {{bubbles: true}}));
+    el.blur();
+}}
+for (var i = 0; i < fields.length; i++) {{
+    var f = fields[i];
+    var el = document.querySelector('[data-conduit-ref="' + f.ref + '"]');
+    if (!el) {{ results.push({{ ref: f.ref, ok: false, error: 'stale — no element with this ref on the current page; re-read to get fresh refs' }}); continue; }}
+    try {{
+        setDirect(el, String(f.text == null ? '' : f.text));
+        results.push({{ ref: f.ref, ok: true }});
+    }} catch (e) {{
+        results.push({{ ref: f.ref, ok: false, error: String(e && e.message ? e.message : e) }});
+    }}
+}}
+var failed = results.filter(function(r) {{ return !r.ok; }}).length;
+return 'fill_form: ' + (results.length - failed) + '/' + results.length + ' fields set' + (failed ? ' — ' + failed + ' failed (stale refs re-read needed)' : '') + '. ' + JSON.stringify(results);
+"#
+    )
+}
+
+/// Select an `<option>` in a `<select>` by value OR visible text, using the
+/// native setter + input/change events so React/Vue wrappers fire. Dropdowns
+/// are the classic a11y-click failure mode (Invariant Labs) — this is the
+/// direct semantic action.
+fn select_option_js(r: i64, value: &str) -> String {
+    let val = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        r#"
+var el = document.querySelector('[data-conduit-ref="{r}"]');
+if (!el) return 'ERROR: ref {r} is stale — no element with this ref on the current page. Re-read the page (read_page or find) to get fresh refs.';
+if (el.tagName !== 'SELECT') return 'ERROR: ref {r} is a ' + el.tagName.toLowerCase() + ', not a <select>.';
+var want = {val};
+var match = null;
+for (var i = 0; i < el.options.length; i++) {{
+    var opt = el.options[i];
+    if (opt.value === want || (opt.text || '').trim() === want) {{ match = opt; break; }}
+}}
+if (!match) {{
+    for (var j = 0; j < el.options.length; j++) {{
+        var opt2 = el.options[j];
+        if ((opt2.text || '').toLowerCase().indexOf(want.toLowerCase()) !== -1) {{ match = opt2; break; }}
+    }}
+}}
+if (!match) {{
+    var avail = [];
+    for (var k = 0; k < el.options.length && k < 12; k++) avail.push(el.options[k].text);
+    return 'ERROR: no option matching ' + JSON.stringify(want) + '. Available: ' + JSON.stringify(avail);
+}}
+var proto = HTMLSelectElement.prototype;
+var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+if (desc && desc.set) {{ desc.set.call(el, match.value); }} else {{ el.value = match.value; }}
+el.dispatchEvent(new Event('input', {{bubbles: true}}));
+el.dispatchEvent(new Event('change', {{bubbles: true}}));
+return 'Selected ' + JSON.stringify(match.text || match.value) + ' in ref {r}.';
+"#
+    )
+}
+
+/// Press a key on the currently-focused element (or body). Synthetic
+/// keydown/keypress/keyup don't trigger browser DEFAULT actions (Enter won't
+/// submit a form by itself), so an Enter on a form control explicitly calls
+/// form.requestSubmit() — guarded, and only when the form has no submit-on
+/// Enter conflict. Escape blurs (closes lightweight menus).
+fn press_key_js(key: &str) -> String {
+    let k = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        r#"
+var key = {k};
+var target = document.activeElement || document.body;
+var o = {{ key: key, code: key, bubbles: true, cancelable: true }};
+// Common aliases → KeyboardEvent.code values (code matters to some apps).
+var codes = {{ Enter: 'Enter', Escape: 'Escape', Tab: 'Tab', ArrowUp: 'ArrowUp', ArrowDown: 'ArrowDown', ArrowLeft: 'ArrowLeft', ArrowRight: 'ArrowRight', Backspace: 'Backspace', Delete: 'Delete', PageUp: 'PageUp', PageDown: 'PageDown', Home: 'Home', End: 'End' }};
+if (codes[key]) o.code = codes[key];
+target.dispatchEvent(new KeyboardEvent('keydown', o));
+try {{ target.dispatchEvent(new KeyboardEvent('keypress', o)); }} catch (e) {{}}
+target.dispatchEvent(new KeyboardEvent('keyup', o));
+var extra = '';
+if (key === 'Enter' && target.tagName === 'INPUT') {{
+    var form = target.form;
+    if (form) {{
+        try {{ if (typeof form.requestSubmit === 'function') {{ form.requestSubmit(); extra = ' (form submitted)'; }} }} catch (e) {{}}
+    }}
+}}
+if (key === 'Escape' && typeof target.blur === 'function') {{ try {{ target.blur(); }} catch (e) {{}} }}
+return 'Pressed ' + JSON.stringify(key) + ' on ' + target.tagName.toLowerCase() + (target.id ? '#' + target.id : '') + extra + '.';
+"#
+    )
+}
+
+/// Read the diagnostics ring buffer (`console` | `network`) incrementally:
+/// entries with seq > `since`, plus the latest seq so the agent can resume.
+fn diag_read_js(kind: &str, since: u64) -> String {
+    format!(
+        r#"
+var diag = window.__conduitDiag;
+if (!diag) return JSON.stringify({{ entries: [], latest: 0, installed: false }});
+var since = {since};
+var arr = diag.{kind} || [];
+var out = [];
+for (var i = 0; i < arr.length; i++) {{ if (arr[i].seq > since) out.push(arr[i]); }}
+return JSON.stringify({{ entries: out, latest: diag.seq, installed: true }});
+"#
+    )
+}
+
+/// DOM-stability probe for `wait_for: stable` — readyState complete AND no DOM
+/// mutation in the last ~600ms (via the diagnostics MutationObserver). When
+/// the diag layer isn't installed (pre-injection page), lastMutation stays 0
+/// and the probe degrades to the readyState check.
+pub fn stable_check_js() -> String {
+    r#"
+var diag = window.__conduitDiag;
+var quiet = !diag || (Date.now() - diag.lastMutation) > 600;
+return JSON.stringify({ stable: document.readyState === 'complete' && quiet });
+"#
+    .to_string()
+}
+
 // ---- Page capture (browser_screenshot) ------------------------------------
 
 
@@ -3055,15 +4206,15 @@ mod tests {
 
     #[test]
     fn click_js_targets_ref_and_guards_missing() {
-        let js = click_js(3);
+        let js = click_js(3, None);
         assert!(js.contains(r#"data-conduit-ref="3""#));
         assert!(js.contains(".click()"));
-        assert!(js.contains("ERROR: no element with ref 3"));
+        assert!(js.contains("ERROR: ref 3 is stale"));
     }
 
     #[test]
     fn type_js_json_escapes_text() {
-        let js = type_js(1, "he said \"hi\"\nbye");
+        let js = type_js(1, "he said \"hi\"\nbye", None);
         // The typed text must be a valid JS string literal (quotes/newlines escaped).
         assert!(js.contains(r#"he said \"hi\"\nbye"#));
         assert!(js.contains(r#"data-conduit-ref="1""#));
@@ -3082,7 +4233,7 @@ mod tests {
         assert!(js.contains("MouseEvent"));
         assert!(js.contains("mouseover"));
         assert!(js.contains("mouseenter"));
-        assert!(js.contains("ERROR: no element with ref 4"));
+        assert!(js.contains("ERROR: ref 4 is stale"));
     }
 
     #[test]
@@ -3353,6 +4504,161 @@ mod tests {
             trimmed.starts_with("var SELECTOR = \"") && trimmed.trim_end().ends_with("\";"),
             "SELECTOR line is not a valid JS string-literal assignment: {line}"
         );
+    }
+
+    // ---- Phase 1 agent core ----
+
+    #[test]
+    fn validate_nav_url_allows_browseable_schemes_and_blocks_script() {
+        // The pane forwards raw strings from agents and chat tools; the
+        // scheme allowlist must reject script-bearing URLs while keeping
+        // http/https/file/about (file is deliberately allowed for app
+        // previews; about:blank is the pane's blank state).
+        assert!(validate_nav_url("https://example.com/").is_ok());
+        assert!(validate_nav_url("http://localhost:5173/").is_ok());
+        assert!(validate_nav_url("file:///C:/proj/index.html").is_ok());
+        assert!(validate_nav_url("about:blank").is_ok());
+        assert!(validate_nav_url("javascript:alert(1)").is_err());
+        assert!(validate_nav_url("JAVASCRIPT:alert(1)").is_err());
+        assert!(validate_nav_url("data:text/html,<script>alert(1)</script>").is_err());
+        assert!(validate_nav_url("vbscript:msgbox(1)").is_err());
+        assert!(validate_nav_url("blob:https://example.com/abc").is_err());
+        assert!(validate_nav_url("not a url at all ://").is_err());
+    }
+
+    #[test]
+    fn snapshot_js_injects_query_and_keeps_placeholder_free() {
+        let js = snapshot_js(Some("Sign In"));
+        assert!(js.contains("var QUERY = \"Sign In\";"));
+        assert!(!js.contains("QUERY_PLACEHOLDER"));
+        let js_empty = snapshot_js(None);
+        assert!(js_empty.contains("var QUERY = \"\";"));
+        // The bridge must tag refs (same contract as click/type) and emit
+        // the compact one-line-per-element format.
+        assert!(js.contains("data-conduit-ref"));
+        assert!(js.contains("var MAX_LIST = 250;"));
+    }
+
+    #[test]
+    fn fill_form_js_embeds_fields_json_and_uses_native_setter() {
+        let fields = serde_json::json!([
+            { "ref": 2, "text": "a\"b" },
+            { "ref": 5, "text": "" }
+        ]).to_string();
+        let js = fill_form_js(&fields);
+        // Fields ride as a JSON literal (escaped quotes preserved).
+        assert!(js.contains("a\\\"b"));
+        assert!(js.contains("var fields ="));
+        // React-controlled inputs need the native value setter.
+        assert!(js.contains("getOwnPropertyDescriptor"));
+        assert!(js.contains("dispatchEvent"));
+        // Stale refs are reported per-field, not fatal.
+        assert!(js.contains("stale"));
+    }
+
+    #[test]
+    fn select_option_js_targets_ref_and_matches_value_or_text() {
+        let js = select_option_js(7, "Shipping");
+        assert!(js.contains(r#"data-conduit-ref="7""#));
+        assert!(js.contains("var want = \"Shipping\";"));
+        assert!(js.contains("HTMLSelectElement"));
+        assert!(js.contains("Available:")); // error path lists options
+    }
+
+    #[test]
+    fn press_key_js_dispatches_key_events_and_submits_form_on_enter() {
+        let js = press_key_js("Enter");
+        assert!(js.contains("var key = \"Enter\";"));
+        assert!(js.contains("KeyboardEvent('keydown'"));
+        assert!(js.contains("KeyboardEvent('keyup'"));
+        assert!(js.contains("requestSubmit"));
+        let js_esc = press_key_js("Escape");
+        assert!(js_esc.contains("blur"));
+    }
+
+    #[test]
+    fn diag_read_js_returns_incremental_entries() {
+        let js = diag_read_js("console", 42);
+        assert!(js.contains("var since = 42;"));
+        assert!(js.contains("diag.console"));
+        assert!(js.contains("__conduitDiag"));
+        // Uninstalled pages degrade to an explicit marker.
+        assert!(js.contains("installed: false"));
+    }
+
+    #[test]
+    fn diag_init_js_patches_console_fetch_xhr_and_mutations_once() {
+        // Guard: re-injection must be a no-op (escalating schedule + post-nav).
+        assert!(DIAG_INIT_JS.contains("if (window.__conduitDiag)"));
+        assert!(DIAG_INIT_JS.contains("console[level]"));
+        assert!(DIAG_INIT_JS.contains("window.fetch"));
+        assert!(DIAG_INIT_JS.contains("XMLHttpRequest"));
+        assert!(DIAG_INIT_JS.contains("MutationObserver"));
+        assert!(DIAG_INIT_JS.contains("lastMutation"));
+        // Never record request bodies (credentials) — URLs/status only.
+        assert!(!DIAG_INIT_JS.contains("request body"));
+    }
+
+    #[test]
+    fn stable_check_js_requires_quiescence_and_ready_state() {
+        let js = stable_check_js();
+        assert!(js.contains("readyState === 'complete'"));
+        assert!(js.contains("lastMutation"));
+        assert!(js.contains("600"));
+    }
+
+    #[test]
+    fn browser_profile_names_are_sanitized_and_scoped() {
+        // Webview2 profile names must stay within [a-zA-Z0-9_-]; arbitrary
+        // project ids are sanitized, not rejected, so every project gets a
+        // stable isolated profile.
+        assert_eq!(
+            browser_profile_for_project(Some("proj-123")).as_deref(),
+            Some("p-proj-123")
+        );
+        let weird = browser_profile_for_project(Some(r"C:\Users\odd id.uuid")).unwrap();
+        assert!(weird.starts_with("p-"));
+        assert!(weird.chars().skip(2).all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        // No project context -> default profile (legacy behavior).
+        assert!(browser_profile_for_project(None).is_none());
+        assert!(browser_profile_for_project(Some("   ")).is_none());
+        // Deterministic: same id -> same profile (cookies persist per project).
+        assert_eq!(
+            browser_profile_for_project(Some("acme")),
+            browser_profile_for_project(Some("acme"))
+        );
+    }
+
+    #[test]
+    fn click_and_type_js_narrate_when_given() {
+        // Narration labels (trust layer) ride into the action body, guarded on
+        // the overlay primitive existing (graceful degradation).
+        let js = click_js(3, Some("clicking the checkout button"));
+        assert!(js.contains("__conduit_narrate"));
+        assert!(js.contains("clicking the checkout button"));
+        let plain = click_js(3, None);
+        assert!(!plain.contains("__conduit_narrate"));
+        let type_n = type_js(4, "x", Some("typing email"));
+        assert!(type_n.contains("__conduit_narrate"));
+        assert!(type_n.contains("typing email"));
+    }
+
+    #[test]
+    fn stale_ref_messages_follow_the_re_read_protocol() {
+        // click/type/hover JS must return the canonical stale-ref error —
+        // the agent-facing instruction to re-read (Anthropic stale-ref
+        // protocol), not the old vague "call browser_read" wording.
+        for (js, r) in [
+            (click_js(3, None), "3"),
+            (type_js(4, "x", None), "4"),
+            (hover_js(5), "5"),
+        ] {
+            assert!(js.contains("is stale"), "missing stale wording");
+            assert!(js.contains(&format!("ref {r}")));
+            assert!(js.contains("re-read the page"));
+        }
+        // select_option carries the same protocol.
+        assert!(select_option_js(9, "x").contains("is stale"));
     }
 
     #[test]

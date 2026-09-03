@@ -58,7 +58,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::browser::BROWSER_MCP_PORT;
+use crate::browser_mcp::bound_port;
 use crate::browser_mcp_register;
 use crate::harness_adapters::{resolve_for_spawn, CommandSpec};
 use crate::DbState;
@@ -1945,7 +1945,7 @@ fn previewable_ext(path: &str) -> bool {
 /// Legacy fallback for per-turn spawns when the full bundle failed to write.
 fn resolve_opencode_config(app: &AppHandle, project_id: Option<&str>) -> Option<std::path::PathBuf> {
     let data_dir = app.path().app_data_dir().ok()?;
-    browser_mcp_register::write_opencode_config(&data_dir, project_id?, BROWSER_MCP_PORT)
+    browser_mcp_register::write_opencode_config(&data_dir, project_id?, bound_port())
 }
 
 /// The artifacts dir the bundle should advertise: the spawn dir when set
@@ -1981,7 +1981,7 @@ pub(crate) fn resolve_harness_bundle(
 ) -> Option<crate::harness_bundle::HarnessBundlePaths> {
     let data_dir = app.path().app_data_dir().ok()?;
     crate::harness_bundle::write_bundle(
-        &data_dir, project_id.unwrap_or(NO_PROJECT_BUNDLE_SLUG), cwd, Some(artifacts_dir.as_str()), sandbox, approval, crate::browser::BROWSER_MCP_PORT, connectors)
+        &data_dir, project_id.unwrap_or(NO_PROJECT_BUNDLE_SLUG), cwd, Some(artifacts_dir.as_str()), sandbox, approval, crate::browser_mcp::bound_port(), connectors)
 }
 
 fn spawn_claude(

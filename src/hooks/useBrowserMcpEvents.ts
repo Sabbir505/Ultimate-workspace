@@ -7,12 +7,22 @@
 import { useEffect } from "react";
 import {
   browserNavigateTab,
+  browserNewTabResult,
   browserOpenPaneResult,
   browserResolvePaneResult,
+  browserSwitchTabResult,
+  browserCloseTabResult,
   listenBrowserActivity,
+  listenBrowserCloseTabRequest,
+  listenBrowserConfirmRequest,
+  listenBrowserNewTabRequest,
   listenBrowserOpenBrowserRequest,
   listenBrowserResolvePaneRequest,
+  listenBrowserSwitchTabRequest,
+  listenBrowserTakeoverRequest,
+  listenBrowserTimelineEntry,
 } from "../lib/ipc";
+import { useBrowserTrustStore } from "../state/browserTrust";
 import { surfaceBrowserTab } from "../lib/sessionLauncher";
 import { usePanesStore } from "../state/panes";
 import { useProjectsStore } from "../state/projects";
@@ -35,10 +45,14 @@ function surfaceBrowserPanel(paneId?: string | null): void {
 
 /**
  * Open (or reuse) a built-in browser pane for a specific project pointed at
- * `url`. Returns the new or existing paneId. Mirrors `openInBrowserPane` from
- * useChatEvents but scoped to an explicit projectId.
+ * `url`. Returns the paneId + active tabId (the backend polls for that tab's
+ * webview). Mirrors `openInBrowserPane` from useChatEvents but scoped to an
+ * explicit projectId.
  */
-export function openBrowserPaneForProject(url: string, projectId: string | null): string {
+export function openBrowserPaneForProject(
+  url: string,
+  projectId: string | null,
+): { paneId: string; tabId: string } {
   const panes = usePanesStore.getState();
   const existing = panes.panes.find(
     (p) => p.data.kind === "browser" && !p.data.collapsed,
@@ -50,7 +64,10 @@ export function openBrowserPaneForProject(url: string, projectId: string | null)
       void browserNavigateTab(existing.paneId, tab.tabId, url).catch(() => {});
     }
     surfaceBrowserPanel(existing.paneId);
-    return existing.paneId;
+    return {
+      paneId: existing.paneId,
+      tabId: tab?.tabId ?? existing.data.tabs[0]?.tabId ?? "default",
+    };
   }
   const paneId = panes.addPane({
     kind: "browser",
@@ -58,7 +75,14 @@ export function openBrowserPaneForProject(url: string, projectId: string | null)
     projectId,
   });
   surfaceBrowserPanel(paneId);
-  return paneId;
+  const pane = usePanesStore
+    .getState()
+    .panes.find((p) => p.paneId === paneId);
+  const tabId =
+    pane && pane.data.kind === "browser"
+      ? pane.data.tabs[pane.data.activeTabIndex]?.tabId ?? "default"
+      : "default";
+  return { paneId, tabId };
 }
 
 export function useBrowserMcpEvents(): void {
@@ -82,15 +106,75 @@ export function useBrowserMcpEvents(): void {
 
     // Open-browser-request: the backend wants us to create (or reveal) a
     // browser pane for a given project pointed at a URL, then answer back
-    // with the new paneId.
+    // with the new paneId + the active tabId (the backend polls for THAT
+    // tab's webview label — the old hardcoded "default" poll broke whenever
+    // the frontend's first tab id differed).
     unlistens.push(
       listenBrowserOpenBrowserRequest(({ reqId, projectId, url }) => {
         try {
-          const newPaneId = openBrowserPaneForProject(url, projectId);
-          void browserOpenPaneResult(reqId, newPaneId).catch(() => {});
+          const { paneId, tabId } = openBrowserPaneForProject(url, projectId);
+          void browserOpenPaneResult(reqId, paneId, tabId).catch(() => {});
         } catch {
           void browserOpenPaneResult(reqId, null).catch(() => {});
         }
+      }),
+    );
+
+    // Switch-tab-request: the agent wants a different tab of a pane active.
+    unlistens.push(
+      listenBrowserSwitchTabRequest(({ reqId, paneId, tabId }) => {
+        const panes = usePanesStore.getState();
+        const pane = panes.panes.find(
+          (p) => p.paneId === paneId && p.data.kind === "browser",
+        );
+        if (!pane || pane.data.kind !== "browser") {
+          void browserSwitchTabResult(reqId, null).catch(() => {});
+          return;
+        }
+        const index = pane.data.tabs.findIndex((t) => t.tabId === tabId);
+        if (index < 0) {
+          void browserSwitchTabResult(reqId, null).catch(() => {});
+          return;
+        }
+        panes.switchBrowserTab(paneId, index);
+        surfaceBrowserPanel(paneId);
+        void browserSwitchTabResult(reqId, tabId).catch(() => {});
+      }),
+    );
+
+    // New-tab-request: the agent wants a new tab pointed at a URL. The pane's
+    // BrowserPane component lazily creates the webview once the tab activates.
+    unlistens.push(
+      listenBrowserNewTabRequest(({ reqId, paneId, url }) => {
+        const panes = usePanesStore.getState();
+        const pane = panes.panes.find(
+          (p) => p.paneId === paneId && p.data.kind === "browser",
+        );
+        if (!pane || pane.data.kind !== "browser") {
+          void browserNewTabResult(reqId, null).catch(() => {});
+          return;
+        }
+        const tabId = panes.addBrowserTab(paneId, url);
+        surfaceBrowserPanel(paneId);
+        void browserNewTabResult(reqId, tabId).catch(() => {});
+      }),
+    );
+
+    // Close-tab-request: the agent closes a tab. If it was the pane's last
+    // tab the store closes the whole pane — the answer still echoes the tab.
+    unlistens.push(
+      listenBrowserCloseTabRequest(({ reqId, paneId, tabId }) => {
+        const panes = usePanesStore.getState();
+        const pane = panes.panes.find(
+          (p) => p.paneId === paneId && p.data.kind === "browser",
+        );
+        if (!pane || pane.data.kind !== "browser" ||
+            !pane.data.tabs.some((t) => t.tabId === tabId)) {
+          void browserCloseTabResult(reqId, null).catch(() => {});
+          return;
+        }
+        panes.closeBrowserTab(paneId, tabId);
+        void browserCloseTabResult(reqId, tabId).catch(() => {});
       }),
     );
 
@@ -99,6 +183,34 @@ export function useBrowserMcpEvents(): void {
     unlistens.push(
       listenBrowserActivity(({ paneId }) => {
         surfaceBrowserPanel(paneId);
+        useBrowserTrustStore.getState().markAgentActivity(paneId);
+      }),
+    );
+
+    // Gate confirmation (trust layer): the backend paused a risky agent
+    // action until the user approves. Route to the pane-scoped UI via the
+    // store; timeout/answers go back through browserConfirmResult.
+    unlistens.push(
+      listenBrowserConfirmRequest((payload) => {
+        useBrowserTrustStore.getState().setConfirm(payload);
+        surfaceBrowserPanel(payload.paneId);
+      }),
+    );
+
+    // Credential takeover: the agent tried to type into a credential field —
+    // it is denied and blinded; the user enters credentials themselves.
+    unlistens.push(
+      listenBrowserTakeoverRequest((payload) => {
+        useBrowserTrustStore.getState().setTakeover(payload);
+        surfaceBrowserPanel(payload.paneId);
+      }),
+    );
+
+    // Timeline: user-owned record of every agent browser action, streamed
+    // live for the pane's audit panel.
+    unlistens.push(
+      listenBrowserTimelineEntry(({ paneId, entry }) => {
+        useBrowserTrustStore.getState().appendTimeline(paneId, entry);
       }),
     );
 

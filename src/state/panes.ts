@@ -136,6 +136,9 @@ interface PanesState {
   switchBrowserTab: (paneId: string, tabIndex: number) => void;
   /** Set the title of a specific tab. */
   setBrowserTabTitle: (paneId: string, tabId: string, title: string) => void;
+  /** Set a tab's favicon URL (derived from the page URL by the pane when a
+   *  title report arrives). */
+  setBrowserTabFavicon: (paneId: string, tabId: string, faviconUrl: string) => void;
   /** Update a specific tab's url (used by navigated events targeting a tab). */
   setBrowserTabUrl: (paneId: string, tabId: string, url: string) => void;
 
@@ -578,11 +581,33 @@ export const usePanesStore = create<PanesState>((set, get) => ({
       }),
     })),
 
+  setBrowserTabFavicon: (paneId, tabId, faviconUrl) =>
+    set((s) => ({
+      panes: s.panes.map((p) => {
+        if (p.paneId !== paneId || p.data.kind !== "browser") return p;
+        return {
+          ...p,
+          data: {
+            ...p.data,
+            tabs: p.data.tabs.map((t) => (t.tabId === tabId ? { ...t, faviconUrl } : t)),
+          },
+        };
+      }),
+    })),
+
   setBrowserTabUrl: (paneId, tabId, url) =>
     set((s) => ({
       panes: s.panes.map((p) => {
         if (p.paneId !== paneId || p.data.kind !== "browser") return p;
-        const newTabs = p.data.tabs.map((t) => (t.tabId === tabId ? { ...t, url } : t));
+        const newTabs = p.data.tabs.map((t) => {
+          if (t.tabId !== tabId) return t;
+          // A real navigation invalidates the previous page's title/favicon —
+          // clear them so the tab never shows the old page's label while the
+          // new page loads (the injected bridge reports the new title within
+          // moments).
+          if (t.url === url) return t;
+          return { ...t, url, title: "", faviconUrl: undefined };
+        });
         const activeTab = newTabs[p.data.activeTabIndex];
         return {
           ...p,

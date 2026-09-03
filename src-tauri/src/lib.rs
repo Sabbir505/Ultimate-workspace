@@ -6,7 +6,6 @@
 //! agent processes after the app closes).
 
 mod browser;
-mod browser_capture;
 mod browser_mcp;
 mod browser_mcp_register;
 mod checkpoints;
@@ -200,7 +199,9 @@ pub fn run() {
 
             // Spawn the loopback WebSocket server that the standalone
             // conduit-browser-mcp binary connects to (agent-driven browser
-            // control). Bind is non-fatal: if port BROWSER_MCP_PORT is taken
+            // control). Binds an OS-assigned ephemeral port (published via
+            // browser_mcp::bound_port + a handshake file, so registration and
+            // third-party clients always find it). Bind failure is non-fatal:
             // the MCP binary just gets connection-refused and reports
             // `browser_unavailable` — the rest of the app is unaffected.
             {
@@ -273,6 +274,7 @@ pub fn run() {
             commands::browser_cmds::browser_navigate,
             commands::browser_cmds::browser_open_devtools,
             commands::browser_cmds::browser_push_state,
+            commands::browser_cmds::browser_report_title,
             commands::browser_cmds::browser_action_result,
             commands::browser_cmds::browser_go_back,
             commands::browser_cmds::browser_go_forward,
@@ -286,6 +288,12 @@ pub fn run() {
             commands::browser_cmds::unregister_browser_pane_project,
             commands::browser_cmds::browser_resolve_pane_result,
             commands::browser_cmds::browser_open_pane_result,
+            commands::browser_cmds::browser_tab_result,
+            commands::browser_cmds::browser_confirm_result,
+            commands::browser_cmds::browser_set_agent_paused,
+            commands::browser_cmds::browser_cancel_agent,
+            commands::browser_cmds::browser_timeline,
+            commands::browser_cmds::browser_clear_site_data,
             // git
             github::github_list_prs,
             github::github_create_pr,

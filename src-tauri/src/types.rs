@@ -212,6 +212,17 @@ pub struct BrowserNavigatedEvent {
     pub url: String,
 }
 
+/// Document title reported by the injected bridge after a page settles (and
+/// on every post-nav injection pass). Purely cosmetic — drives the tab label
+/// + favicon in the browser pane's tab bar.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserTitleEvent {
+    pub pane_id: String,
+    pub tab_id: String,
+    pub title: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserUrlDetectedEvent {

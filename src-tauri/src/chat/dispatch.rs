@@ -1894,11 +1894,10 @@ async fn run_browser_tool(
     let mgr = browser.0.clone();
 
     // Screenshot goes through the CDP execution layer (compositor-rendered,
-    // no COM IStream roundtrip) with the legacy CapturePreview path as
-    // fallback — both are blocking main-thread roundtrips, so
+    // no COM IStream roundtrip) — a blocking main-thread roundtrip, so
     // spawn_blocking as before.
     if name == BROWSER_SCREENSHOT {
-        let png = match tokio::task::spawn_blocking(move || mgr.capture_active_png_via_cdp()).await
+        let png = match tokio::task::spawn_blocking(move || mgr.capture_active_png()).await
         {
             Ok(Some(png)) => png,
             Ok(None) => {

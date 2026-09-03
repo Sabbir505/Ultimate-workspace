@@ -21,6 +21,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   createHistory,
   currentUrl,
+  canGoBack as historyCanGoBack,
+  canGoForward as historyCanGoForward,
   DEFAULT_BROWSER_URL,
   normalizeUrl,
   pushUrl,
@@ -38,6 +40,7 @@ import {
   browserSetVisibleTab,
   browserClosePane,
   listenBrowserNavigatedTab,
+  listenBrowserTitle,
   listenBrowserLoadCompleted,
   tauriRuntimeAvailable,
   type BrowserRect,
@@ -52,6 +55,16 @@ import {
 } from "../../state/panes";
 import { useSettingsStore } from "../../state/settings";
 import { useUiStore } from "../../state/ui";
+import { useBrowserTrustStore } from "../../state/browserTrust";
+import {
+  browserCancelAgent,
+  browserClearSiteData,
+  browserConfirmResult,
+  browserSetAgentPaused,
+  browserTimeline,
+  getSetting,
+  setSetting,
+} from "../../lib/ipc";
 
 const LOAD_TIMEOUT_MS = 8000;
 const BOUNDS_DEBOUNCE_MS = 50;
@@ -79,6 +92,23 @@ function rectOf(el: HTMLElement): BrowserRect {
   return { x: r.x, y: r.y, width: r.width, height: r.height };
 }
 
+const AGENT_ACTIVE_TTL_MS = 4000;
+
+/** Time-decaying "agent working" flag. zustand selectors only recompute when
+ *  the store changes, so a raw Date.now() comparison would freeze on its first
+ *  value — a 1s interval re-renders while the flag is live (and stops when
+ *  idle, so an inactive pane costs nothing). */
+function useAgentActiveTick(lastActivity: number | undefined): boolean {
+  const [, setTick] = useState(0);
+  const active = !!lastActivity && Date.now() - lastActivity < AGENT_ACTIVE_TTL_MS;
+  useEffect(() => {
+    if (!active) return;
+    const id = window.setInterval(() => setTick((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [active, lastActivity]);
+  return active;
+}
+
 function makeTabState(url: string): TabState {
   return {
     history: createHistory(url),
@@ -104,6 +134,7 @@ export function BrowserPane({ pane, visible = true }: Props) {
   const addBrowserTab = usePanesStore((s) => s.addBrowserTab);
   const closeBrowserTab = usePanesStore((s) => s.closeBrowserTab);
   const setBrowserTabTitle = usePanesStore((s) => s.setBrowserTabTitle);
+  const setBrowserTabFavicon = usePanesStore((s) => s.setBrowserTabFavicon);
   const setBrowserTabUrl = usePanesStore((s) => s.setBrowserTabUrl);
 
   // Occlusion inputs (native path only; see lib/browserOcclusion.ts).
@@ -113,6 +144,39 @@ export function BrowserPane({ pane, visible = true }: Props) {
   const modalOpen = useUiStore((s) => s.modalOpen);
   // HTML popups that must paint over the webview (context meter hover panel).
   const contextTipOpen = useUiStore((s) => s.contextTipOpen);
+
+  // Trust layer (Phase 2): gate confirmations, takeover, pause/stop, timeline.
+  const confirm = useBrowserTrustStore((s) =>
+    s.confirm && s.confirm.paneId === paneId ? s.confirm : null,
+  );
+  const takeover = useBrowserTrustStore((s) =>
+    s.takeover && s.takeover.paneId === paneId ? s.takeover : null,
+  );
+  const paused = useBrowserTrustStore((s) => !!s.paused[paneId]);
+  const timelineOpen = useBrowserTrustStore((s) => !!s.timelineOpen[paneId]);
+  const timelineEntries = useBrowserTrustStore((s) => s.timeline[paneId]);
+  const lastActivity = useBrowserTrustStore((s) => s.lastAgentActivity[paneId]);
+  const agentWorking = useAgentActiveTick(lastActivity);
+  const trustToggleTimeline = useBrowserTrustStore((s) => s.toggleTimeline);
+  const trustSetTakeover = useBrowserTrustStore((s) => s.setTakeover);
+  const trustSetPaused = useBrowserTrustStore((s) => s.setPaused);
+  const trustSetConfirm = useBrowserTrustStore((s) => s.setConfirm);
+  const trustSetTimeline = useBrowserTrustStore((s) => s.setTimeline);
+
+  // Autonomy dial: "auto" (default — only hard-gate risk classes confirm) vs
+  // "manual" (every agent action confirms). Persisted via the DB settings.
+  const [autonomy, setAutonomy] = useState<"auto" | "manual">("auto");
+  useEffect(() => {
+    void getSetting("browserAutonomy")
+      .then((v) => {
+        if (v === "manual" || v === "auto") setAutonomy(v);
+      })
+      .catch(() => {});
+  }, []);
+  const changeAutonomy = (next: "auto" | "manual") => {
+    setAutonomy(next);
+    void setSetting("browserAutonomy", next).catch(() => {});
+  };
   // The Browser tab's content only renders when this tool-panel tab is the
   // active one AND the panel is not collapsed. PaneFrame's `visible` prop only
   // reflects the active-browser-vs-hidden-browser decision inside the slot —
@@ -152,6 +216,12 @@ export function BrowserPane({ pane, visible = true }: Props) {
   const activeTab = tabs[activeTabIndex];
   const activeTabState = tabStates.get(activeTabId);
   const frameSrc = activeTabState ? currentUrl(activeTabState.history) : (activeTab?.url ?? DEFAULT_BROWSER_URL);
+  // Back/forward button enablement from the LOCAL history stack (the same
+  // stack the iframe fallback navigates). The native path's real history can
+  // be richer (e.g. restored after re-mount), but this matches the stack we
+  // control and removes the always-enabled buttons.
+  const canGoBack = activeTabState ? historyCanGoBack(activeTabState.history) : false;
+  const canGoForward = activeTabState ? historyCanGoForward(activeTabState.history) : false;
   const occluded = browserOccluded({
     activeView,
     paletteOpen,
@@ -225,7 +295,7 @@ export function BrowserPane({ pane, visible = true }: Props) {
     const body = bodyRef.current;
     const rect: BrowserRect = body ? rectOf(body) : { x: 0, y: 0, width: 1, height: 1 };
 
-    browserCreateTab(paneId, tabId, tabUrl, rect)
+    browserCreateTab(paneId, tabId, tabUrl, rect, projectId)
       .then(() => {
         // setState after unmount is a React 18 no-op; the unmount cleanup
         // closes the pane's webviews, so a late resolve can't leak one.
@@ -373,6 +443,13 @@ export function BrowserPane({ pane, visible = true }: Props) {
   // (native webviews are OS-level child windows that float above the DOM —
   // CSS z-index has no effect on them).
   // When not occluded: hide all tabs except the active one; show the active one.
+  // Trust layer: while the credential-takeover overlay or the timeline panel
+  // is open the native webview MUST hide — the DOM overlay cannot paint above
+  // an OS child window (same constraint as browserOcclusion). This flag is
+  // folded into the occlusion effect below (single writer: a second
+  // setVisible writer raced it and the webview could repaint OVER the
+  // takeover/timeline overlay on any tabState change).
+  const trustOverlayOpen = !!takeover || timelineOpen;
   useLayoutEffect(() => {
     const offScreen: BrowserRect = { x: -9999, y: -9999, width: 1, height: 1 };
     // Collect every tab ID that has a native webview — both from the current
@@ -387,7 +464,9 @@ export function BrowserPane({ pane, visible = true }: Props) {
       allNativeTabIds.add(tid);
     }
     for (const tabId of allNativeTabIds) {
-      const shouldShow = !occluded && tabId === activeTabId;
+      // trustOverlayOpen (takeover / timeline panel) hides the webview too —
+      // the DOM overlays cannot paint above an OS child window.
+      const shouldShow = !occluded && !trustOverlayOpen && tabId === activeTabId;
       void browserSetVisibleTab(paneId, tabId, shouldShow).catch(() => {});
       // Move off-screen when hidden as a safety net — native webviews don't
       // respect CSS z-index and the visibility call may not take effect
@@ -396,7 +475,7 @@ export function BrowserPane({ pane, visible = true }: Props) {
         void browserSetBoundsTab(paneId, tabId, offScreen).catch(() => {});
       }
     }
-  }, [paneId, tabs, tabStates, occluded, activeTabId]);
+  }, [paneId, tabs, tabStates, occluded, activeTabId, trustOverlayOpen]);
 
   // --- Native navigation events: keep the address bar + history truthful
   // for in-page navigations (link clicks, redirects). ---
@@ -440,6 +519,46 @@ export function BrowserPane({ pane, visible = true }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paneId, projectId]);
 
+  // --- Injected-bridge title reports: label the tab + derive a favicon. ---
+  // The backend emits `browser:title` on every post-nav injection pass and on
+  // WebView2 NavigationCompleted, so a slow page's title lands within ~5 s.
+  useEffect(() => {
+    const listenReady = listenBrowserTitle((payload) => {
+      if (payload.paneId !== paneId) return;
+      const title = payload.title.trim();
+      if (title) setBrowserTabTitle(paneId, payload.tabId, title);
+      // Favicon from the tab's current URL: same-origin /favicon.ico. Cheap,
+      // offline-safe, and correct for the sites users + agents actually open
+      // (local dev servers included). If a site has none, the browser just
+      // renders a broken-image we hide via onError.
+      // Read from the STORE, not this closure: the effect intentionally does
+      // not depend on the tabs array (listener stability), so a closure copy
+      // would be stale for tabs created after mount.
+      const pane = usePanesStore
+        .getState()
+        .panes.find((p) => p.paneId === paneId);
+      const tab =
+        pane && pane.data.kind === "browser"
+          ? pane.data.tabs.find((t) => t.tabId === payload.tabId)
+          : undefined;
+      const url = tab?.url;
+      if (url) {
+        try {
+          const u = new URL(url);
+          if (u.protocol === "http:" || u.protocol === "https:") {
+            setBrowserTabFavicon(paneId, payload.tabId, u.origin + "/favicon.ico");
+          }
+        } catch {
+          /* non-parseable URL — skip favicon */
+        }
+      }
+    });
+    return () => {
+      void listenReady.then((u) => u());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paneId, setBrowserTabTitle, setBrowserTabFavicon]);
+
   // --- WebView2 NavigationCompleted (ground truth) — clear the loading flag
   // when a load REALLY finished, even if the navigation-start event never
   // surfaced (the stuck-loading bug: spinner forever, black pane). ---
@@ -461,6 +580,35 @@ export function BrowserPane({ pane, visible = true }: Props) {
       void listenReady.then((u) => u());
     };
   }, [paneId]);
+
+  // Trust layer: hydrate the timeline snapshot once per pane (live entries
+  // stream in via browser:timeline-entry -> store).
+  useEffect(() => {
+    void browserTimeline(paneId)
+      .then((entries) => trustSetTimeline(paneId, entries))
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paneId]);
+
+  const answerConfirm = (approved: boolean, alwaysForSite: boolean) => {
+    if (!confirm) return;
+    void browserConfirmResult(confirm.reqId, approved, alwaysForSite).catch(() => {});
+    trustSetConfirm(null);
+  };
+
+  const dismissTakeover = () => {
+    trustSetTakeover(null);
+  };
+
+  const togglePause = () => {
+    const next = !paused;
+    trustSetPaused(paneId, next);
+    void browserSetAgentPaused(paneId, next).catch(() => {});
+  };
+
+  const stopAgent = () => {
+    void browserCancelAgent(paneId).catch(() => {});
+  };
 
   // Iframe fallback only: arm the "didn't respond" heuristic whenever the
   // frame navigates. The native path has no XFO problem, so no timeout there.
@@ -691,6 +839,18 @@ export function BrowserPane({ pane, visible = true }: Props) {
             onClick={() => onSwitchTab(i)}
             title={tab.title || tab.url}
           >
+            {tab.faviconUrl && (
+              <img
+                className="tab-favicon"
+                src={tab.faviconUrl}
+                alt=""
+                onError={(e) => {
+                  // Site has no /favicon.ico — drop the img instead of
+                  // showing a broken-image glyph forever.
+                  e.currentTarget.style.display = "none";
+                }}
+              />
+            )}
             <span className="tab-title">{tab.title || "New Tab"}</span>
             <button
               className="ghost tab-close"
@@ -715,6 +875,7 @@ export function BrowserPane({ pane, visible = true }: Props) {
           className="ghost"
           title="Back (uses the page's real history)"
           onClick={back}
+          disabled={!canGoBack}
         >
           ←
         </button>
@@ -722,6 +883,7 @@ export function BrowserPane({ pane, visible = true }: Props) {
           className="ghost"
           title="Forward (uses the page's real history)"
           onClick={forward}
+          disabled={!canGoForward}
         >
           →
         </button>
@@ -771,6 +933,74 @@ export function BrowserPane({ pane, visible = true }: Props) {
         <button className="ghost" title="Open in external browser" onClick={openExternal}>
           ↗
         </button>
+      </div>
+
+      {/* Trust layer: gate confirmation bar. Lives in the DOM chrome ABOVE
+          the webview anchor, so the OS child webview can't cover it. */}
+      {confirm && (
+        <div className="browser-confirm" data-risk={confirm.riskClass}>
+          <div className="browser-confirm-text">
+            <span className="browser-confirm-title">
+              Agent wants to {confirm.op} {confirm.target ? `“${confirm.target}”` : ""}
+            </span>
+            <span className="browser-confirm-reason">
+              {confirm.reason}
+              {confirm.url ? ` — ${confirm.url}` : ""}
+            </span>
+          </div>
+          <div className="browser-confirm-actions">
+            <button className="primary" onClick={() => answerConfirm(true, false)}>
+              Allow once
+            </button>
+            <button onClick={() => answerConfirm(true, true)}>Always on this site</button>
+            <button className="danger" onClick={() => answerConfirm(false, false)}>
+              Deny
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Trust layer: agent status strip (activity tint + pause/stop). */}
+      <div className={`browser-trust-strip${agentWorking ? " active" : ""}${paused ? " paused" : ""}`}>
+        <span className="browser-trust-status">
+          {paused ? "⏸ Agent paused" : agentWorking ? "⏺ Agent working…" : "Idle"}
+        </span>
+        <div className="browser-trust-controls">
+          <div className="browser-autonomy" title="Auto: confirm only risky actions (payments, destructive, credentials). Manual: confirm every agent action.">
+            <button
+              className={autonomy === "auto" ? "seg active" : "seg"}
+              onClick={() => changeAutonomy("auto")}
+            >
+              Auto
+            </button>
+            <button
+              className={autonomy === "manual" ? "seg active" : "seg"}
+              onClick={() => changeAutonomy("manual")}
+            >
+              Manual
+            </button>
+          </div>
+          <button
+            className="ghost"
+            title="Clear this site's session (cookies + storage) and reload"
+            onClick={() => void browserClearSiteData(paneId, activeTabId).catch(() => {})}
+          >
+            🧹
+          </button>
+          <button className="ghost" title={paused ? "Resume agent" : "Pause agent"} onClick={togglePause}>
+            {paused ? "▶" : "⏸"}
+          </button>
+          <button className="ghost" title="Stop the agent (cancels its current action)" onClick={stopAgent}>
+            ⏹
+          </button>
+          <button
+            className="ghost"
+            title="Agent action timeline (what the agent did — user-owned log)"
+            onClick={() => trustToggleTimeline(paneId)}
+          >
+            {timelineOpen ? "✕" : "☰"}
+          </button>
+        </div>
       </div>
 
       {/* The body div is the native webview's anchor: its rect drives the
@@ -833,6 +1063,59 @@ export function BrowserPane({ pane, visible = true }: Props) {
             </div>
           );
         })}
+
+        {/* Trust layer: user-owned action timeline (hides the webview while
+            open — trustOverlayOpen feeds the main occlusion effect). */}
+        {timelineOpen && (
+          <div className="browser-timeline">
+            <div className="browser-timeline-head">
+              <span>Agent actions — this session</span>
+              <button className="ghost" onClick={() => trustToggleTimeline(paneId)}>
+                ✕
+              </button>
+            </div>
+            <div className="browser-timeline-list">
+              {(timelineEntries ?? []).length === 0 && (
+                <div className="hint">No agent actions recorded yet.</div>
+              )}
+              {(timelineEntries ?? [])
+                .slice()
+                .reverse()
+                .map((e, i) => (
+                  <div key={i} className={`browser-timeline-row outcome-${e.outcome}`}>
+                    <span className="tl-time">
+                      {new Date(e.tsMs).toLocaleTimeString([], { hour12: false })}
+                    </span>
+                    <span className="tl-op">{e.op}</span>
+                    <span className="tl-target" title={e.detail ?? e.target}>
+                      {e.target || "—"}
+                      {e.riskClass ? ` [${e.riskClass}]` : ""}
+                    </span>
+                    <span className="tl-outcome">{e.outcome}</span>
+                  </div>
+                ))}
+            </div>
+          </div>
+        )}
+
+        {/* Trust layer: credential takeover — the agent is denied and blinded;
+            the user types credentials themselves (Operator's privacy-shielded
+            takeover, as a deny-and-hand-off). */}
+        {takeover && (
+          <div className="browser-takeover">
+            <div className="browser-takeover-card">
+              <div style={{ fontWeight: 700 }}>You're in control</div>
+              <div className="hint">
+                The agent tried to enter credentials ({takeover.reason}). Relay
+                never lets an agent type passwords or card details. Enter them
+                yourself now — the page is live below — then hand control back.
+              </div>
+              <button className="primary" onClick={dismissTakeover}>
+                Done — hand back to the agent
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </>
   );

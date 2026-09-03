@@ -146,8 +146,18 @@ export interface BrowserNavigatedPayload {
   tabId: string;
   url: string;
 }
-export const browserCreateTab = (paneId: string, tabId: string, url: string, rect: BrowserRect) =>
-  safeInvoke<void>("browser_create", { paneId, tabId, url, rect });
+export const browserCreateTab = (
+  paneId: string,
+  tabId: string,
+  url: string,
+  rect: BrowserRect,
+  projectId?: string | null,
+) =>
+  safeInvoke<void>("browser_create", { paneId, tabId, url, rect, projectId: projectId ?? null });
+/** Clear the current site's session (page-visible cookies + storage) and
+ *  reload — the trust strip's "clear this site" escape hatch. */
+export const browserClearSiteData = (paneId: string, tabId: string) =>
+  safeInvoke<void>("browser_clear_site_data", { paneId, tabId });
 export const browserNavigateTab = (paneId: string, tabId: string, url: string) =>
   safeInvoke<void>("browser_navigate", { paneId, tabId, url });
 /** Open the WebView2 DevTools window for a browser pane (console + network). */
@@ -170,6 +180,15 @@ export const browserClosePane = (paneId: string) =>
   safeInvoke<void>("browser_close_pane", { paneId });
 export const listenBrowserNavigatedTab = (handler: (payload: BrowserNavigatedPayload) => void) =>
   safeListen<BrowserNavigatedPayload>("browser:navigated", handler);
+/** Document title reported by the injected bridge once a page settles —
+ *  drives the tab bar label + derived favicon. */
+export interface BrowserTitlePayload {
+  paneId: string;
+  tabId: string;
+  title: string;
+}
+export const listenBrowserTitle = (handler: (payload: BrowserTitlePayload) => void) =>
+  safeListen<BrowserTitlePayload>("browser:title", handler);
 /** WebView2 NavigationCompleted (success only) — the label of the webview
  *  ("browser-{pane}-tab-{tab}"). The ground-truth "this page really finished
  *  loading" signal, used to clear the pane's loading flag even when the
@@ -184,8 +203,16 @@ export const unregisterBrowserPaneProject = (paneId: string) =>
   safeInvoke<void>("unregister_browser_pane_project", { paneId });
 export const browserResolvePaneResult = (reqId: number, paneId: string | null) =>
   safeInvoke<void>("browser_resolve_pane_result", { reqId, paneId: paneId ?? null });
-export const browserOpenPaneResult = (reqId: number, paneId: string | null) =>
-  safeInvoke<void>("browser_open_pane_result", { reqId, paneId: paneId ?? null });
+export const browserOpenPaneResult = (reqId: number, paneId: string | null, tabId?: string | null) =>
+  safeInvoke<void>("browser_open_pane_result", { reqId, paneId: paneId ?? null, tabId: tabId ?? null });
+/** Answers for the tab-management roundtrips (switch/new/close): tabId echoes
+ *  the affected tab, null = the operation could not be performed. */
+export const browserSwitchTabResult = (reqId: number, tabId: string | null) =>
+  safeInvoke<void>("browser_tab_result", { reqId, tabId });
+export const browserNewTabResult = (reqId: number, tabId: string | null) =>
+  safeInvoke<void>("browser_tab_result", { reqId, tabId });
+export const browserCloseTabResult = (reqId: number, tabId: string | null) =>
+  safeInvoke<void>("browser_tab_result", { reqId, tabId });
 
 export interface BrowserResolvePaneRequestPayload {
   reqId: number;
@@ -203,6 +230,32 @@ export const listenBrowserOpenBrowserRequest = (
   handler: (payload: BrowserOpenBrowserRequestPayload) => void,
 ) => safeListen<BrowserOpenBrowserRequestPayload>("browser:open-browser-request", handler);
 
+// --- Tab-management roundtrips (MCP list/switch/new/close_tab tools) ---
+export interface BrowserSwitchTabRequestPayload {
+  reqId: number;
+  paneId: string;
+  tabId: string;
+}
+export interface BrowserNewTabRequestPayload {
+  reqId: number;
+  paneId: string;
+  url: string;
+}
+export interface BrowserCloseTabRequestPayload {
+  reqId: number;
+  paneId: string;
+  tabId: string;
+}
+export const listenBrowserSwitchTabRequest = (
+  handler: (payload: BrowserSwitchTabRequestPayload) => void,
+) => safeListen<BrowserSwitchTabRequestPayload>("browser:switch-tab-request", handler);
+export const listenBrowserNewTabRequest = (
+  handler: (payload: BrowserNewTabRequestPayload) => void,
+) => safeListen<BrowserNewTabRequestPayload>("browser:new-tab-request", handler);
+export const listenBrowserCloseTabRequest = (
+  handler: (payload: BrowserCloseTabRequestPayload) => void,
+) => safeListen<BrowserCloseTabRequestPayload>("browser:close-tab-request", handler);
+
 /** Emitted by the backend whenever the agent performs any browser action
  *  (harness MCP ops via resolve_or_open; chat-mode browser_* tools). The
  *  frontend surfaces the Browser tab so the work is visible as it happens. */
@@ -212,6 +265,71 @@ export interface BrowserActivityPayload {
 export const listenBrowserActivity = (
   handler: (payload: BrowserActivityPayload) => void,
 ) => safeListen<BrowserActivityPayload>("browser:activity", handler);
+
+// --- Trust layer (Phase 2): gates, takeover, pause/stop, timeline ----------
+export interface BrowserConfirmRequestPayload {
+  reqId: number;
+  paneId: string;
+  op: string;
+  target: string;
+  url: string;
+  riskClass: string;
+  reason: string;
+}
+export const listenBrowserConfirmRequest = (
+  handler: (payload: BrowserConfirmRequestPayload) => void,
+) => safeListen<BrowserConfirmRequestPayload>("browser:confirm-request", handler);
+export const browserConfirmResult = (
+  reqId: number,
+  approved: boolean,
+  alwaysForSite: boolean,
+) =>
+  safeInvoke<void>("browser_confirm_result", {
+    reqId,
+    approved,
+    alwaysForSite,
+  });
+
+export interface BrowserTakeoverRequestPayload {
+  paneId: string;
+  reason: string;
+  url: string;
+  target: string;
+}
+export const listenBrowserTakeoverRequest = (
+  handler: (payload: BrowserTakeoverRequestPayload) => void,
+) => safeListen<BrowserTakeoverRequestPayload>("browser:takeover-request", handler);
+
+export const browserSetAgentPaused = (paneId: string, paused: boolean) =>
+  safeInvoke<void>("browser_set_agent_paused", { paneId, paused });
+export const browserCancelAgent = (paneId: string) =>
+  safeInvoke<void>("browser_cancel_agent", { paneId });
+export const browserTimeline = (paneId: string) =>
+  safeInvoke<
+    Array<{
+      tsMs: number;
+      op: string;
+      target: string;
+      outcome: string;
+      riskClass?: string;
+      detail?: string;
+    }>
+  >("browser_timeline", { paneId });
+
+export interface BrowserTimelineEntryPayload {
+  paneId: string;
+  entry: {
+    tsMs: number;
+    op: string;
+    target: string;
+    outcome: string;
+    riskClass?: string;
+    detail?: string;
+  };
+}
+export const listenBrowserTimelineEntry = (
+  handler: (payload: BrowserTimelineEntryPayload) => void,
+) => safeListen<BrowserTimelineEntryPayload>("browser:timeline-entry", handler);
 
 // --- Harnesses ---
 export const listHarnesses = () => safeInvoke<HarnessStatus[] | null>("list_harnesses");

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use once_cell::sync::Lazy;
 use tauri::{AppHandle, Manager, State};
 
-use crate::browser::BROWSER_MCP_PORT;
+use crate::browser_mcp::bound_port;
 use crate::browser_mcp_register;
 use crate::db;
 use crate::harness_adapters::{all_adapters, get_adapter, resolve_for_spawn, CommandSpec};
@@ -144,7 +144,7 @@ pub fn spawn_agent_session(
 /// degrade silently to "no browser tools this session" rather than blocking.
 fn resolve_mcp_config(app: &AppHandle, project_id: &str) -> Option<PathBuf> {
     let data_dir = app.path().app_data_dir().ok()?;
-    browser_mcp_register::write_mcp_config(&data_dir, project_id, BROWSER_MCP_PORT)
+    browser_mcp_register::write_mcp_config(&data_dir, project_id, bound_port())
 }
 
 /// Same as resolve_mcp_config, but OpenCode-format: opencode reads MCP servers
@@ -152,7 +152,7 @@ fn resolve_mcp_config(app: &AppHandle, project_id: &str) -> Option<PathBuf> {
 /// var on the spawn (it has no --mcp-config CLI flag).
 fn resolve_opencode_config(app: &AppHandle, project_id: &str) -> Option<PathBuf> {
     let data_dir = app.path().app_data_dir().ok()?;
-    browser_mcp_register::write_opencode_config(&data_dir, project_id, BROWSER_MCP_PORT)
+    browser_mcp_register::write_opencode_config(&data_dir, project_id, bound_port())
 }
 
 /// Append `<flag> <path>` to a CommandSpec (e.g. `--mcp-config` for claude,

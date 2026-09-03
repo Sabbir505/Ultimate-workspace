@@ -9,7 +9,7 @@ IDs are UUID strings. Timestamps are Unix epoch **seconds** (i64).
 ## Types
 
 ```ts
-type HarnessId = 'claude_code' | 'kimi_code' | 'opencode';
+type HarnessId = 'claude_code' | 'kimi_code' | 'opencode' | 'pi' | 'omp' | 'commandcode';
 type ChatProviderId = 'anthropic' | 'openai' | 'openrouter' | 'anthropic_compatible' | 'openai_compatible' | 'local_gguf';
 type PaneState = 'idle' | 'working' | 'waiting' | 'diff_ready';
 type ChatAgent = 'builtin' | 'local' | `harness:${HarnessId}`;
@@ -67,7 +67,7 @@ Harnesses:
 - `list_harness_models(harnessId: HarnessId) -> HarnessModelConfig` — models/endpoint discovered in the CLI's own config files (`~/.claude/settings.json`, `~/.kimi-code/config.toml`, `~/.config/opencode/opencode.json`); per-model `source` = `"config"` | `"cli"` | `"builtin"`. Best-effort — empty/failed reads yield an empty list and the frontend falls back to the static catalog (`src/lib/harnessModels.ts`).
 
 Headless CLI chat (chat sessions whose `agent` is `"harness:<id>"`; same `chat:token`/`chat:done`/`chat:error`/`chat:artifact` events as the built-in chat):
-- `send_agent_chat_message(chatSessionId, content, harnessId, model?, cwd?, projectId?) -> ()` — spawns (or writes to) the headless CLI; claude uses a persistent process, kimi/opencode spawn per turn. The harness always runs at full-auto permission (`--dangerously-skip-permissions` for claude, `--auto` for opencode, kimi prompt mode auto-approves). The capture-and-resume CLI session id persists under `agent.cli_session_id.<harness>.<sid>` in `app_settings`.
+- `send_agent_chat_message(chatSessionId, content, harnessId, model?, cwd?, projectId?) -> ()` — spawns (or writes to) the headless CLI; claude uses a persistent process, kimi/opencode/pi/omp/commandcode spawn per turn (pi-lineage CLIs stream `-p --mode json` / `--output-format json` NDJSON and take the turn prompt on stdin). The harness always runs at full-auto permission (`--dangerously-skip-permissions` for claude, `--auto` for opencode, kimi prompt mode auto-approves). The capture-and-resume CLI session id persists under `agent.cli_session_id.<harness>.<sid>` in `app_settings`.
 - `cancel_agent_chat_message(chatSessionId) -> ()` — kills the in-flight CLI process; the next send respawns. Captured CLI session id is kept so context survives the cancel.
 
 Git:

@@ -12,8 +12,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod claude_code;
+pub mod commandcode;
 pub mod kimi_code;
+pub mod omp;
 pub mod opencode;
+pub mod pi;
 pub mod pricing;
 
 /// A command ready to be turned into a `portable_pty::CommandBuilder`.
@@ -184,17 +187,29 @@ pub fn adapters() -> &'static HashMap<&'static str, Arc<dyn HarnessAdapter>> {
         m.insert("claude_code", Arc::new(claude_code::ClaudeCodeAdapter));
         m.insert("kimi_code", Arc::new(kimi_code::KimiCodeAdapter));
         m.insert("opencode", Arc::new(opencode::OpenCodeAdapter));
+        m.insert("pi", Arc::new(pi::PiAdapter));
+        m.insert("omp", Arc::new(omp::OmpAdapter));
+        m.insert("commandcode", Arc::new(commandcode::CommandCodeAdapter));
         m
     });
     &ADAPTERS
 }
+
+/// Stable presentation order for the harness list (Settings table, agent
+/// picker, sidebar select). A HashMap iterates in random order, and with six
+/// adapters the rows would reshuffle on every cache expiry — so everything
+/// that enumerates goes through this order.
+const ADAPTER_ORDER: [&str; 6] = ["claude_code", "kimi_code", "opencode", "pi", "omp", "commandcode"];
 
 pub fn get_adapter(id: &str) -> Option<Arc<dyn HarnessAdapter>> {
     adapters().get(id).cloned()
 }
 
 pub fn all_adapters() -> Vec<Arc<dyn HarnessAdapter>> {
-    adapters().values().cloned().collect()
+    ADAPTER_ORDER
+        .iter()
+        .filter_map(|id| adapters().get(id).cloned())
+        .collect()
 }
 
 /// On Windows, agent CLIs installed via npm are `.cmd`/`.bat` shims
@@ -260,6 +275,9 @@ pub const TURN_PROMPT_ENV: &str = "CONDUIT_TURN_PROMPT";
 pub enum TurnHarness {
     Kimi,
     OpenCode,
+    Pi,
+    Omp,
+    CommandCode,
 }
 
 impl TurnHarness {
@@ -267,6 +285,9 @@ impl TurnHarness {
         match self {
             TurnHarness::Kimi => "kimi",
             TurnHarness::OpenCode => "opencode",
+            TurnHarness::Pi => "pi",
+            TurnHarness::Omp => "omp",
+            TurnHarness::CommandCode => "commandcode",
         }
     }
 
@@ -275,12 +296,22 @@ impl TurnHarness {
         match self {
             TurnHarness::Kimi => "kimi-turn.cmd",
             TurnHarness::OpenCode => "opencode-turn.cmd",
+            TurnHarness::Pi => "pi-turn.cmd",
+            TurnHarness::Omp => "omp-turn.cmd",
+            TurnHarness::CommandCode => "commandcode-turn.cmd",
         }
     }
 
-    /// The constant body of the delayed-expansion wrapper batch. The prompt
-    /// placeholder is `!CONDUIT_TURN_PROMPT!`; `%*` forwards our trusted
-    /// flags (Rust-quoted, so quoting survives the parse chain).
+    /// The constant body of the turn wrapper batch. Only kimi/opencode still
+    /// use the `!CONDUIT_TURN_PROMPT!` delayed-expansion transport — both are
+    /// native .exe binaries, and cmd.exe fully expands `!VAR!` on lines whose
+    /// command is an exe. Pi/omp/commandcode install as npm .cmd SHIMS: a
+    /// batch-to-batch hand-off passes the RAW argument text to the shim,
+    /// whose `endLocal … %*` tail re-expands it with delayed expansion OFF,
+    /// so the placeholder reached the CLI as a literal string (reproduced
+    /// with an argv-dump shim). Those three take the prompt on STDIN instead
+    /// (see TurnPromptTransport), so their wrappers only forward our trusted
+    /// flags via `%*`.
     #[cfg(windows)]
     fn wrapper_body(&self) -> &'static str {
         match self {
@@ -290,12 +321,17 @@ impl TurnHarness {
             TurnHarness::OpenCode => {
                 "@echo off\r\nsetlocal EnableDelayedExpansion\r\nopencode run --format json --auto %* -- \"!CONDUIT_TURN_PROMPT!\"\r\n"
             }
+            TurnHarness::Pi => "@echo off\r\npi -p --mode json %*\r\n",
+            TurnHarness::Omp => "@echo off\r\nomp -p --mode=json %*\r\n",
+            TurnHarness::CommandCode => {
+                "@echo off\r\ncommandcode -p --output-format json --yolo --skip-onboarding --no-auto-update %*\r\n"
+            }
         }
     }
 
-    /// Full argv with the prompt inline — used on POSIX (exec carries argv
-    /// verbatim, no shell re-parse) and as the Windows fallback when the
-    /// wrapper can't be written.
+    /// Flags-only argv for the stdin-prompt CLIs (the prompt NEVER touches a
+    /// command line), or prompt-inline argv for kimi/opencode on POSIX (exec
+    /// carries argv verbatim, no shell re-parse).
     fn argv_args(&self, prompt: &str, flags: Vec<String>) -> Vec<String> {
         match self {
             TurnHarness::Kimi => {
@@ -315,8 +351,50 @@ impl TurnHarness {
                 a.push(prompt.to_string());
                 a
             }
+            TurnHarness::Pi | TurnHarness::Omp | TurnHarness::CommandCode => {
+                // pi-lineage print mode reads the prompt from stdin when no
+                // positional message is given (verified live for all three).
+                // omp takes sade-style `--mode=json`; pi space-separated.
+                let mut a: Vec<String> = match self {
+                    TurnHarness::Pi => vec!["-p".into(), "--mode".into(), "json".into()],
+                    TurnHarness::Omp => vec!["-p".into(), "--mode=json".into()],
+                    // `--yolo` pre-approves tools (headless has no permission
+                    // channel — same role as claude's
+                    // --dangerously-skip-permissions), `--skip-onboarding`
+                    // keeps an un-onboarded account from blocking on the
+                    // taste wizard, and `--no-auto-update` stops the CLI from
+                    // self-updating MID-TURN and printing a non-JSON banner
+                    // into the stream (observed live: "Updated 1.44.0 →
+                    // 1.45.0" as line 1 of the NDJSON).
+                    _ => vec![
+                        "-p".into(),
+                        "--output-format".into(),
+                        "json".into(),
+                        "--yolo".into(),
+                        "--skip-onboarding".into(),
+                        "--no-auto-update".into(),
+                    ],
+                };
+                a.extend(flags);
+                a
+            }
         }
     }
+}
+
+/// How the untrusted turn prompt reaches the CLI — `turn_spec` returns this
+/// and the caller MUST honor it (piping stdin when told) or the prompt never
+/// lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnPromptTransport {
+    /// Windows: prompt travels in `CONDUIT_TURN_PROMPT` + the delayed-
+    /// expansion wrapper batch (M12). POSIX: prompt inline in argv. Only
+    /// valid for native .exe binaries (kimi/opencode) — see wrapper_body.
+    EnvOrArgv,
+    /// The parent pipes the prompt to the child's stdin after spawn and
+    /// closes the pipe (pi/omp/commandcode print mode). Immune to every
+    /// cmd.exe re-parse layer, including npm .cmd shims' `endLocal … %*`.
+    Stdin,
 }
 
 /// Write the two turn-wrapper batches to a temp dir (idempotent — rewrites
@@ -326,7 +404,7 @@ impl TurnHarness {
 fn ensure_turn_wrappers() -> Option<std::path::PathBuf> {
     let dir = std::env::temp_dir().join("conduit-turn-wrappers");
     std::fs::create_dir_all(&dir).ok()?;
-    for kind in [TurnHarness::Kimi, TurnHarness::OpenCode] {
+    for kind in [TurnHarness::Kimi, TurnHarness::OpenCode, TurnHarness::Pi, TurnHarness::Omp, TurnHarness::CommandCode] {
         let path = dir.join(kind.wrapper_name());
         let body = kind.wrapper_body();
         let current = std::fs::read_to_string(&path).unwrap_or_default();
@@ -338,15 +416,34 @@ fn ensure_turn_wrappers() -> Option<std::path::PathBuf> {
 }
 
 /// Build the spawn spec for a one-shot turn carrying an untrusted prompt.
-/// Returns the spec plus, on Windows, the `(TURN_PROMPT_ENV, prompt)` pair
-/// the caller MUST set on the `Command` — the prompt never appears in
-/// `spec.args` in that case (see the M12 note above). Off-Windows the prompt
-/// is inline in argv and the pair is None.
+/// Returns the spec, the prompt transport the caller MUST honor, and — for
+/// [`TurnPromptTransport::EnvOrArgv`] on Windows — the
+/// `(TURN_PROMPT_ENV, prompt)` pair to set on the `Command`. The prompt never
+/// appears in `spec.args` for any Windows path.
 pub fn turn_spec(
     kind: TurnHarness,
     prompt: &str,
     flags: Vec<String>,
-) -> (CommandSpec, Option<(String, String)>) {
+) -> (
+    CommandSpec,
+    Option<(String, String)>,
+    TurnPromptTransport,
+) {
+    // The stdin-prompt CLIs never need a wrapper or an env pair — their argv
+    // is flags-only on every platform and the prompt is piped post-spawn.
+    if matches!(
+        kind,
+        TurnHarness::Pi | TurnHarness::Omp | TurnHarness::CommandCode
+    ) {
+        return (
+            resolve_for_spawn(&CommandSpec {
+                program: kind.program().to_string(),
+                args: kind.argv_args(prompt, flags),
+            }),
+            None,
+            TurnPromptTransport::Stdin,
+        );
+    }
     #[cfg(windows)]
     {
         if let Some(wrapper) = ensure_turn_wrappers().map(|d| d.join(kind.wrapper_name())) {
@@ -358,6 +455,7 @@ pub fn turn_spec(
                     args,
                 },
                 Some((TURN_PROMPT_ENV.to_string(), prompt.to_string())),
+                TurnPromptTransport::EnvOrArgv,
             );
         }
         // Wrapper write failed — fall through to the legacy argv spec so the
@@ -369,6 +467,7 @@ pub fn turn_spec(
             args: kind.argv_args(prompt, flags),
         }),
         None,
+        TurnPromptTransport::EnvOrArgv,
     )
 }
 
@@ -566,10 +665,12 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn turn_spec_keeps_prompt_off_the_command_line() {
-        // M12: the untrusted prompt must travel via env, never argv.
+        // M12: the untrusted prompt must travel via env for the exe-binary
+        // harnesses, and via stdin for the npm-shim harnesses — never argv.
         let hostile = "a&b %PATH% say \"hi\" <tag> | pipe ^caret 100% & calc";
         for kind in [TurnHarness::Kimi, TurnHarness::OpenCode] {
-            let (spec, env) = turn_spec(kind, hostile, vec!["-m".into(), "some-model".into()]);
+            let (spec, env, transport) = turn_spec(kind, hostile, vec!["-m".into(), "some-model".into()]);
+            assert_eq!(transport, TurnPromptTransport::EnvOrArgv);
             assert_eq!(spec.program, "cmd.exe");
             // No command-line token may contain the prompt text.
             assert!(
@@ -590,6 +691,56 @@ mod tests {
             assert!(body.contains("!CONDUIT_TURN_PROMPT!"), "{body}");
             assert!(!body.contains("%CONDUIT_TURN_PROMPT%"), "{body}");
         }
+        // The npm-shim harnesses must NOT use the env transport: a batch→
+        // batch hand-off re-expands %* with delayed expansion off (npm shims'
+        // `endLocal … %*` tail), which delivered the placeholder literally.
+        // Their prompt is piped on stdin; argv is flags-only.
+        for kind in [TurnHarness::Pi, TurnHarness::Omp, TurnHarness::CommandCode] {
+            let (spec, env, transport) = turn_spec(kind, hostile, vec!["-m".into(), "some-model".into()]);
+            assert_eq!(transport, TurnPromptTransport::Stdin, "{kind:?}");
+            assert!(env.is_none(), "{kind:?}");
+            assert!(
+                spec.args.iter().all(|a| !a.contains(hostile) && !a.contains("CONDUIT_TURN_PROMPT")),
+                "prompt/placeholder leaked into argv: {:?}",
+                spec.args
+            );
+            assert!(spec.args.iter().any(|a| a == "some-model"), "{kind:?}");
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn pi_turn_wrapper_is_flags_only() {
+        // pi/omp/commandcode wrappers forward only our trusted flags — the
+        // prompt arrives on stdin, so no placeholder may appear.
+        for kind in [TurnHarness::Pi, TurnHarness::Omp, TurnHarness::CommandCode] {
+            let (spec, _, transport) = turn_spec(kind, "prompt text", vec!["-m".into(), "some-model".into()]);
+            assert_eq!(transport, TurnPromptTransport::Stdin);
+            assert!(
+                spec.args.iter().all(|a| !a.contains("CONDUIT_TURN_PROMPT") && !a.contains("prompt text")),
+                "prompt leaked into argv: {:?}",
+                spec.args
+            );
+            let body = kind.wrapper_body();
+            assert!(body.contains("%*"), "{body}");
+            assert!(!body.contains("CONDUIT_TURN_PROMPT"), "{body}");
+        }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn pi_omp_posix_argv_shapes() {
+        // POSIX: the stdin-prompt CLIs still get flags-only argv.
+        let (spec, env, transport) = turn_spec(TurnHarness::Pi, "hello", vec!["-m".into(), "some-model".into()]);
+        assert_eq!(transport, TurnPromptTransport::Stdin);
+        assert!(env.is_none());
+        assert_eq!(spec.program, "pi");
+        assert_eq!(spec.args, vec!["-p", "--mode", "json", "-m", "some-model"]);
+        let (omp, omp_env, omp_transport) = turn_spec(TurnHarness::Omp, "hello", vec!["-m".into(), "some-model".into()]);
+        assert_eq!(omp_transport, TurnPromptTransport::Stdin);
+        assert!(omp_env.is_none());
+        assert_eq!(omp.program, "omp");
+        assert_eq!(omp.args, vec!["-p", "--mode=json", "-m", "some-model"]);
     }
 
     #[test]
@@ -664,10 +815,21 @@ mod tests {
 
     #[test]
     fn registry_has_all_adapters() {
-        assert!(get_adapter("claude_code").is_some());
-        assert!(get_adapter("kimi_code").is_some());
-        assert!(get_adapter("opencode").is_some());
+        for id in [
+            "claude_code",
+            "kimi_code",
+            "opencode",
+            "pi",
+            "omp",
+            "commandcode",
+        ] {
+            assert!(get_adapter(id).is_some(), "{id} missing from registry");
+        }
         assert!(get_adapter("nope").is_none());
+        // The presentation order covers every registered adapter — a new
+        // adapter added without an ADAPTER_ORDER entry would vanish from
+        // list_harnesses.
+        assert_eq!(all_adapters().len(), adapters().len());
     }
 
     #[test]

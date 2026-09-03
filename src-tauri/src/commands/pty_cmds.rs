@@ -279,15 +279,22 @@ pub fn pane_memory(pane_id: String, pty: State<PtyState>) -> CmdResult<u64> {
 }
 
 #[tauri::command]
-pub async fn list_harnesses() -> CmdResult<Vec<HarnessStatus>> {
+pub async fn list_harnesses(force: Option<bool>) -> CmdResult<Vec<HarnessStatus>> {
     // Each install probe spawns the CLI with `--version` and polls for up to
     // 5s per binary. This command used to be sync, so every agent-menu open
-    // froze the whole window while ~5 node CLIs cold-started. Two fixes:
+    // froze the whole window while ~6 node CLIs cold-started. Two fixes:
     //   1. async command → probes run off the main thread,
     //   2. 30s TTL cache → repeated opens cost nothing (install status only
     //      changes via install_harness / manual npm, well over TTL apart).
-    if let Some(list) = harness_status_cache_get() {
-        return Ok(list);
+    // `force` bypasses the cache for the Settings "Re-check" button: its whole
+    // purpose is picking up OUT-OF-BAND installs/uninstalls, which the 30s
+    // window would otherwise hide. A forced probe still refreshes the cache,
+    // so background callers (boot, agent picker) keep their cheap path.
+    let force = force.unwrap_or(false);
+    if !force {
+        if let Some(list) = harness_status_cache_get() {
+            return Ok(list);
+        }
     }
     let probed = tauri::async_runtime::spawn_blocking(|| {
         all_adapters()
@@ -325,12 +332,31 @@ pub fn run_harness_login(
 /// The npm package that installs each harness CLI (one-click Install in the
 /// Harnesses settings panel). Verified upstream names:
 /// claude → @anthropic-ai/claude-code, kimi → @moonshot-ai/kimi-code,
-/// opencode → opencode-ai.
+/// opencode → opencode-ai, pi → @earendil-works/pi-coding-agent,
+/// omp → @oh-my-pi/pi-coding-agent, commandcode → command-code.
 fn harness_npm_package(harness_id: &str) -> Option<&'static str> {
     match harness_id {
         "claude_code" => Some("@anthropic-ai/claude-code"),
         "kimi_code" => Some("@moonshot-ai/kimi-code"),
         "opencode" => Some("opencode-ai"),
+        "pi" => Some("@earendil-works/pi-coding-agent"),
+        "omp" => Some("@oh-my-pi/pi-coding-agent"),
+        "commandcode" => Some("command-code"),
+        _ => None,
+    }
+}
+
+/// Runtime prerequisites a harness's npm distribution needs beyond Node/npm.
+/// omp's npm package is a Bun program — its bin shim `exec`s `bun`, so on a
+/// Bun-less device the install "succeeds" while every probe (and every launch)
+/// fails. Surfacing that up front beats a mystery "not installed" row.
+fn harness_runtime_prerequisite(harness_id: &str) -> Option<(&'static str, &'static str)> {
+    match harness_id {
+        "omp" => Some((
+            "bun",
+            "omp's npm distribution requires the Bun runtime — install Bun first \
+             (npm install -g bun, or https://bun.sh), then install omp",
+        )),
         _ => None,
     }
 }
@@ -340,6 +366,14 @@ fn harness_npm_package(harness_id: &str) -> Option<&'static str> {
 /// 5-minute ceiling; the frontend re-probes install status afterwards.
 #[tauri::command]
 pub async fn install_harness(harness_id: String) -> CmdResult<String> {
+    if let Some((binary, hint)) = harness_runtime_prerequisite(&harness_id) {
+        let present = tauri::async_runtime::spawn_blocking(move || crate::harness_adapters::binary_on_path(binary))
+            .await
+            .unwrap_or(false);
+        if !present {
+            return Err(hint.to_string());
+        }
+    }
     let package = harness_npm_package(&harness_id)
         .ok_or_else(|| format!("unknown harness: {harness_id}"))?;
     let spec = resolve_for_spawn(&CommandSpec::new("npm", &["install", "-g", package]));
@@ -370,7 +404,38 @@ pub async fn install_harness(harness_id: String) -> CmdResult<String> {
         if let Ok(mut guard) = HARNESS_STATUS_CACHE.lock() {
             *guard = None;
         }
-        Ok(format!("Installed {package}"))
+        // Verify the CLI actually RUNS now before reporting success. A freshly
+        // written npm shim can fail its first `--version` (Defender scanning
+        // the new node_modules, cold node start > the probe's 5s cap) — the
+        // row then stayed on "Install" until a manual Re-check. Poll briefly;
+        // missing binaries fail spawn instantly so this loop is fast when the
+        // install genuinely didn't produce a runnable CLI.
+        let verify_id = harness_id.clone();
+        let verified = tauri::async_runtime::spawn_blocking(move || {
+            let Some(adapter) = get_adapter(&verify_id) else { return false };
+            for attempt in 0..6 {
+                if adapter.is_installed() {
+                    return true;
+                }
+                if attempt < 5 {
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+        if verified {
+            Ok(format!("Installed {package} — {} is ready to use", harness_id))
+        } else {
+            let binary = get_adapter(&harness_id)
+                .map(|a| a.binary().to_string())
+                .unwrap_or_else(|| harness_id.clone());
+            Ok(format!(
+                "Installed {package}, but `{binary} --version` still fails — it may need a PATH \
+                 refresh (restart Relay) or a runtime this device is missing",
+            ))
+        }
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let tail: String = stderr

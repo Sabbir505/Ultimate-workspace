@@ -9,6 +9,9 @@ const SERIES_ORDER = [
   "claude_code",
   "kimi_code",
   "opencode",
+  "pi",
+  "omp",
+  "commandcode",
   "chat:anthropic",
   "chat:openai",
   "chat:openrouter",
@@ -21,6 +24,9 @@ function seriesLabel(p: string): string {
     case "claude_code": return "Claude Code";
     case "kimi_code": return "Kimi";
     case "opencode": return "OpenCode";
+    case "pi": return "Pi";
+    case "omp": return "Omp";
+    case "commandcode": return "CommandCode";
     // "chat:anthropic" → "Anthropic" etc. — the prefix is a grouping artifact.
     case "chat:anthropic": return "Anthropic";
     case "chat:openai": return "OpenAI";

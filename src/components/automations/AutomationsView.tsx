@@ -8,6 +8,7 @@ import {
   CalendarClock,
   Bell,
   CheckCircle2,
+  Download,
   Edit3,
   ExternalLink,
   Hourglass,
@@ -27,6 +28,7 @@ import {
   automationNextFire,
   getRunWhileClosed,
   getSetting,
+  installHarness,
   listAutomationRuns,
   listChatModels,
   scanLocalModels,
@@ -47,10 +49,12 @@ import { useProjectsStore } from "../../state/projects";
 import { useSettingsStore } from "../../state/settings";
 import { useUiStore } from "../../state/ui";
 import { useChatStore } from "../../state/chat";
+import type { HarnessId } from "../../types";
 import {
   AUTOMATION_STATE_META,
   automationState,
   friendlyRunError,
+  harnessNeedsInstall,
   isFailureStatus,
   type AutomationStateKey,
 } from "./shared";
@@ -73,6 +77,9 @@ const AGENT_OPTIONS: { id: string; label: string; group: "harness" | "api" | "lo
   // Harnesses
   { id: "claude_code", label: "Claude Code (harness)", group: "harness" },
   { id: "opencode", label: "OpenCode (harness)", group: "harness" },
+  { id: "pi", label: "Pi (harness)", group: "harness" },
+  { id: "omp", label: "Omp (harness)", group: "harness" },
+  { id: "commandcode", label: "CommandCode (harness)", group: "harness" },
   // API providers
   { id: "anthropic", label: "Anthropic API", group: "api" },
   { id: "openai", label: "OpenAI API", group: "api" },
@@ -568,12 +575,22 @@ function AutomationDetail({
   const setActiveView = useUiStore((s) => s.setActiveView);
   const selectSession = useChatStore((s) => s.selectSession);
   const loadSessions = useChatStore((s) => s.loadSessions);
+  const harnesses = useProjectsStore((s) => s.harnesses);
+  const refreshHarnesses = useProjectsStore((s) => s.refreshHarnesses);
 
   const [runs, setRuns] = useState<AutomationRun[]>([]);
   const [runsLoading, setRunsLoading] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [promptExpanded, setPromptExpanded] = useState(false);
   const [nextRunAt, setNextRunAt] = useState<number | null | undefined>(undefined);
+  // One-time harness install (failure banner): the automation's harness CLI
+  // isn't on this device, so "Run again" becomes "Install" until it lands.
+  const [installing, setInstalling] = useState(false);
+
+  // True only when the automation runs a CLI harness that exists in the
+  // registry but isn't installed — provider/local agents never match.
+  const harnessMissing = harnessNeedsInstall(automation.harness, harnesses);
+  const missingHarnessName = harnesses.find((h) => h.id === automation.harness)?.displayName;
 
   const refreshRuns = useCallback(async () => {
     setRunsLoading(true);
@@ -637,6 +654,22 @@ function AutomationDetail({
       setRunError(String(e));
     }
   }, [automation.id, runNow, refreshRuns]);
+
+  const handleInstallHarness = useCallback(async () => {
+    setRunError(null);
+    setInstalling(true);
+    try {
+      const msg = await installHarness(automation.harness as HarnessId);
+      toastSuccess(msg || `${missingHarnessName ?? automation.harness} installed`);
+    } catch (e) {
+      toastError(`Couldn't install ${missingHarnessName ?? automation.harness}`, String(e));
+    } finally {
+      setInstalling(false);
+      // Forced re-probe: the banner must flip back to "Run again" the moment
+      // the CLI lands, regardless of the backend's 30s probe cache.
+      void refreshHarnesses(true);
+    }
+  }, [automation.harness, missingHarnessName, refreshHarnesses]);
 
   const handleToggleEnabled = useCallback(async () => {
     setRunError(null);
@@ -762,9 +795,14 @@ function AutomationDetail({
 
       {/* Failure banner — surfaces the last run's outcome without making the
           user scan the runs table; raw errors are translated to plain
-          language with a suggested next step. */}
+          language with a suggested next step. When the automation's harness
+          CLI isn't installed, "Run again" becomes a one-time "Install"
+          (npm -g) that flips back once the re-probe sees the binary. */}
       {isFailureStatus(automation.lastStatus) && !runError && (() => {
         const friendly = friendlyRunError(automation.lastStatus!);
+        const hint = harnessMissing
+          ? `${missingHarnessName ?? automation.harness} isn't installed on this device — one-time install below, then Run again.`
+          : friendly.hint;
         return (
           <div className="automation-detail-banner">
             <AlertTriangle size={15} strokeWidth={2} className="automation-detail-banner-icon" />
@@ -775,21 +813,36 @@ function AutomationDetail({
               </strong>
               <span>
                 {friendly.text}
-                {friendly.hint ? ` ${friendly.hint}` : ""}
+                {hint ? ` ${hint}` : ""}
               </span>
             </div>
             {automation.enabled && (
-              <button
-                onClick={() => void handleRunNow()}
-                disabled={!!runningNow[automation.id]}
-                className="automations-btn automation-detail-banner-action"
-              >
-                {runningNow[automation.id] ? (
-                  <><Loader2 size={13} strokeWidth={2} className="animate-spin" /> Running…</>
-                ) : (
-                  <><Play size={13} strokeWidth={2} /> Run again</>
-                )}
-              </button>
+              harnessMissing && !runningNow[automation.id] ? (
+                <button
+                  onClick={() => void handleInstallHarness()}
+                  disabled={installing}
+                  title={`Runs npm install -g to install ${missingHarnessName ?? automation.harness}`}
+                  className="automations-btn automation-detail-banner-action"
+                >
+                  {installing ? (
+                    <><Loader2 size={13} strokeWidth={2} className="animate-spin" /> Installing…</>
+                  ) : (
+                    <><Download size={13} strokeWidth={2} /> Install</>
+                  )}
+                </button>
+              ) : (
+                <button
+                  onClick={() => void handleRunNow()}
+                  disabled={!!runningNow[automation.id]}
+                  className="automations-btn automation-detail-banner-action"
+                >
+                  {runningNow[automation.id] ? (
+                    <><Loader2 size={13} strokeWidth={2} className="animate-spin" /> Running…</>
+                  ) : (
+                    <><Play size={13} strokeWidth={2} /> Run again</>
+                  )}
+                </button>
+              )
             )}
           </div>
         );

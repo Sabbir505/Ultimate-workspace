@@ -26,16 +26,18 @@ export function OnboardingBanner() {
       </button>
       <strong>No agent harness detected</strong>
       <div className="hint">
-        Relay orchestrates existing CLI agents. Neither <code>claude</code> (Claude Code) nor{" "}
-        <code>kimi</code> (Kimi Code CLI) was found on your PATH. Install one of them to start agent
-        sessions — project management, the browser pane, and everything else works regardless.
+        Relay orchestrates existing CLI agents. None of {harnesses.map((h) => h.displayName).join(", ")} was
+        found on your PATH. Install one from Settings → Harnesses to start agent sessions — project
+        management, the browser pane, and everything else works regardless.
       </div>
       <div className="hint">
-        Claude Code: <code>npm install -g @anthropic-ai/claude-code</code> · Kimi Code CLI: see{" "}
-        <code>https://www.kimi.com/code</code>
+        Claude Code: <code>npm install -g @anthropic-ai/claude-code</code> · OpenCode:{" "}
+        <code>npm install -g opencode-ai</code> · Pi: <code>npm install -g @earendil-works/pi-coding-agent</code>{" "}
+        · Omp: <code>npm install -g @oh-my-pi/pi-coding-agent</code> · CommandCode:{" "}
+        <code>npm install -g command-code</code>
       </div>
       <div>
-        <button onClick={() => setActiveView("settings")}>Open Settings to re-check</button>
+        <button onClick={() => setActiveView("settings")}>Open Settings to install</button>
       </div>
     </div>
   );

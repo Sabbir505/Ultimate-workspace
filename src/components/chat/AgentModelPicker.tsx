@@ -35,6 +35,10 @@ import {
   OpenAiIcon,
   OpenRouterIcon,
   OpenCodeIcon,
+  KimiIcon,
+  PiIcon,
+  OmpIcon,
+  CommandCodeIcon,
   ZedIcon,
   LocalModelIcon,
   MonogramIcon,
@@ -247,6 +251,10 @@ function railIcon(key: string, label: string): JSX.Element {
     );
   }
   if (key === "harness:opencode") return <OpenCodeIcon />;
+  if (key === "harness:kimi_code") return <KimiIcon />;
+  if (key === "harness:pi") return <PiIcon />;
+  if (key === "harness:omp") return <OmpIcon />;
+  if (key === "harness:commandcode") return <CommandCodeIcon />;
   if (key === "acp:zed") return <ZedIcon />;
   if (key === "local") return <LocalModelIcon />;
   if (key === "provider:anthropic" || key === "provider:anthropic_compatible") {
@@ -260,7 +268,7 @@ function railIcon(key: string, label: string): JSX.Element {
     return <OpenAiIcon />;
   }
   if (key === "provider:openrouter") return <OpenRouterIcon />;
-  // kimi_code, Devin, and user-defined ACP agents — monogram fallback.
+  // Devin and user-defined ACP agents — monogram fallback.
   return <MonogramIcon letter={label} />;
 }
 

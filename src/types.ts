@@ -1,5 +1,5 @@
 // IPC contract types — mirrors CONTRACT.md exactly (camelCase fields).
-export type HarnessId = "claude_code" | "kimi_code" | "opencode";
+export type HarnessId = "claude_code" | "kimi_code" | "opencode" | "pi" | "omp" | "commandcode";
 export type PaneState = "idle" | "working" | "waiting" | "diff_ready";
 
 export interface Project {
@@ -48,6 +48,12 @@ export function harnessShortName(id: HarnessId): string {
       return "kimi";
     case "opencode":
       return "opencode";
+    case "pi":
+      return "pi";
+    case "omp":
+      return "omp";
+    case "commandcode":
+      return "cmdcode";
   }
 }
 

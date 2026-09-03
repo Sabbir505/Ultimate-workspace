@@ -102,9 +102,42 @@ pub async fn cancel_agent_chat_message(
 
 /// The models/endpoint discovered in the CLI harness's own config files
 /// (settings.json / config.toml / opencode.json) — see harness_config.rs.
+///
+/// Discovery may LIVE-PROBE the CLI (`pi --list-models`, `omp models --json`,
+/// `commandcode --list-models` — each a 1–3s node/bun cold start). This used
+/// to be a sync command, which Tauri runs on the MAIN thread: opening the
+/// agent picker froze the whole window for the length of every probe. It must
+/// stay off the main thread (spawn_blocking), and a short TTL cache keeps
+/// repeat picker opens free.
 #[tauri::command]
-pub fn list_harness_models(harness_id: String) -> crate::harness_config::HarnessModelConfig {
-    crate::harness_config::harness_model_config(&harness_id)
+pub async fn list_harness_models(
+    harness_id: String,
+) -> Result<crate::harness_config::HarnessModelConfig, String> {
+    use once_cell::sync::Lazy;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    const TTL: Duration = Duration::from_secs(30);
+    static CACHE: Lazy<std::sync::Mutex<HashMap<String, (Instant, crate::harness_config::HarnessModelConfig)>>> =
+        Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+
+    if let Ok(guard) = CACHE.lock() {
+        if let Some((at, cfg)) = guard.get(&harness_id) {
+            if at.elapsed() < TTL {
+                return Ok(cfg.clone());
+            }
+        }
+    }
+    let id = harness_id.clone();
+    let cfg = tauri::async_runtime::spawn_blocking(move || {
+        crate::harness_config::harness_model_config(&id)
+    })
+    .await
+    .map_err(|e| format!("harness model probe join failed: {e}"))?;
+    if let Ok(mut guard) = CACHE.lock() {
+        guard.insert(harness_id, (Instant::now(), cfg.clone()));
+    }
+    Ok(cfg)
 }
 
 /// ACP agents (roadmap #20) for the composer's agent menu: the static

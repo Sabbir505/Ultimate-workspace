@@ -38,9 +38,10 @@ const OPENCODE_EXTRA_MODELS: HarnessModel[] = [
   { id: "qwen3.7-plus", label: "Qwen3.7 Plus" },
 ];
 
-/** Models offered for a CLI agent, keyed by harness id. OpenCode is
- *  provider-agnostic (it routes to whatever the user configured), so it gets
- *  the union of every known model. Unknown ids fall back to an empty list. */
+/** Models offered for a CLI agent, keyed by harness id. OpenCode, Pi, Omp,
+ *  and CommandCode are provider-agnostic (they route to whatever the user
+ *  configured), so they get the union of every known model. Unknown ids fall
+ *  back to an empty list. */
 export function harnessModelCatalog(harnessId: string): HarnessModel[] {
   switch (harnessId) {
     case "claude_code":
@@ -48,6 +49,9 @@ export function harnessModelCatalog(harnessId: string): HarnessModel[] {
     case "kimi_code":
       return KIMI_MODELS;
     case "opencode":
+    case "pi":
+    case "omp":
+    case "commandcode":
       return [...CLAUDE_MODELS, ...KIMI_MODELS, ...OPENCODE_EXTRA_MODELS];
     default:
       return [];

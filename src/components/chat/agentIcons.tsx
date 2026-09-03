@@ -1,6 +1,6 @@
 // Brand marks for the agent/model picker's icon rail. Paths are the official
 // simple-icons glyphs (CC0) rendered with fill="currentColor" so CSS tints
-// them per state (dim → default → selected). Kimi/Devin/user-defined ACP
+// them per state (dim → default → selected). Devin and user-defined ACP
 // agents have no freely-licensed glyph — they fall back to a monogram of
 // the agent's initial, same shape the Settings API rail uses.
 import type { ReactElement } from "react";
@@ -54,6 +54,78 @@ export const OpenRouterIcon = brand(
 /** OpenCode — the frame mark (opencode CLI). */
 export const OpenCodeIcon = brand("OpenCode", "M22 24H2V0h20zM17 4.8H7v14.4h10z", 16);
 
+/** Kimi — the official mark (Kimi Code CLI, Moonshot AI; simple-icons "kimi",
+ *  CC0 — replaces the old monogram fallback). */
+export const KimiIcon = brand(
+  "Kimi",
+  "M21.765.351C22.998.351 24 1.353 24 2.586S22.998 4.82 21.765 4.82h-1.974c-.15 0-.26-.12-.26-.26V2.586A2.237 2.237 0 0 1 21.765.35M9.41 13.388l8.447-8.377c.16-.16.07-.471-.14-.471h-4.55s-.1.02-.14.06l-9.099 9.029c-.14.14-.35.02-.35-.21V4.81c0-.15-.1-.27-.221-.27H.22c-.12 0-.22.12-.22.27v18.57c0 .15.1.27.22.27h3.137c.12 0 .22-.12.22-.27v-3.79c0-.08.03-.16.08-.21l2.826-2.796c.07-.07.16-.08.241-.03l7.546 5.551a8.9 8.9 0 0 0 4.018 1.493c.12.01.23-.11.23-.27V19.76c0-.14-.08-.25-.19-.26a5.8 5.8 0 0 1-2.355-.942l-6.533-4.73c-.14-.09-.15-.32-.03-.441", 16,
+);
+
+/** Pi — the official pixel-π mark from pi.dev (glyph only, currentColor so
+ *  the rail's dim→active tinting applies; the site's tile crops to
+ *  165.29–634.72 within its 800 box, so the viewBox is cropped to match). */
+export function PiIcon(): ReactElement {
+  return (
+    <svg
+      className="agent-rail-svg"
+      style={{ width: 16, height: 16 }}
+      viewBox="165.29 165.29 469.43 469.43"
+      role="img"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <title>Pi</title>
+      <path
+        fillRule="evenodd"
+        fill="currentColor"
+        d="M165.29 165.29 H517.36 V400 H400 V517.36 H282.65 V634.72 H165.29 Z M282.65 282.65 V400 H400 V282.65 Z"
+      />
+      <path fill="currentColor" d="M517.36 400 H634.72 V634.72 H517.36 Z" />
+    </svg>
+  );
+}
+
+/** Omp — the official glyph from omp.sh's favicon (the T-block mark; the
+ *  site renders it in a pink→violet→cyan gradient on a dark tile, flattened
+ *  to currentColor here for the same tinting consistency). */
+export function OmpIcon(): ReactElement {
+  return (
+    <svg
+      className="agent-rail-svg"
+      style={{ width: 16, height: 16 }}
+      viewBox="12 14 40 40"
+      role="img"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <title>Omp</title>
+      <path fill="currentColor" d="M14 16h36v8H40v32h-8V24h-6v22h-8V24h-4z" />
+    </svg>
+  );
+}
+
+/** CommandCode — the official cmd symbol from commandcode.ai
+ *  (/logos/cmdsymbol-*.svg; the site draws it in a squircle ring, cropped to
+ *  the inner glyph here so it stays legible at 16px). */
+export function CommandCodeIcon(): ReactElement {
+  return (
+    <svg
+      className="agent-rail-svg"
+      style={{ width: 16, height: 16 }}
+      viewBox="85.58 85.58 273.87 273.87"
+      role="img"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <title>CommandCode</title>
+      <path
+        fill="currentColor"
+        d="M306.202 85.5845C276.837 85.5845 252.95 109.472 252.95 138.837V161.66H192.09V138.837C192.09 109.472 168.202 85.5845 138.837 85.5845C109.472 85.5845 85.5845 109.472 85.5845 138.837C85.5845 168.202 109.472 192.09 138.837 192.09H161.66V252.95H138.837C109.472 252.95 85.5845 276.837 85.5845 306.202C85.5845 335.568 109.472 359.455 138.837 359.455C168.202 359.455 192.09 335.568 192.09 306.202V283.38H252.95V306.202C252.95 335.568 276.837 359.455 306.202 359.455C335.567 359.455 359.455 335.568 359.455 306.202C359.455 276.837 335.567 252.95 306.202 252.95H283.38V192.09H306.202C335.567 192.09 359.455 168.202 359.455 138.837C359.455 109.472 335.567 85.5845 306.202 85.5845ZM283.38 161.66V138.837C283.38 126.209 293.574 116.015 306.202 116.015C318.831 116.015 329.025 126.209 329.025 138.837C329.025 151.466 318.831 161.66 306.202 161.66H283.38ZM138.837 161.66C126.209 161.66 116.015 151.466 116.015 138.837C116.015 126.209 126.209 116.015 138.837 116.015C151.466 116.015 161.66 126.209 161.66 138.837V161.66H138.837ZM192.09 252.95V192.09H252.95V252.95H192.09ZM306.202 329.025C293.574 329.025 283.38 318.831 283.38 306.202V283.38H306.202C318.831 283.38 329.025 293.574 329.025 306.202C329.025 318.831 318.831 329.025 306.202 329.025ZM138.837 329.025C126.209 329.025 116.015 318.831 116.015 306.202C116.015 293.574 126.209 283.38 138.837 283.38H161.66V306.202C161.66 318.831 151.466 329.025 138.837 329.025Z"
+      />
+    </svg>
+  );
+}
+
 /** Zed — the Zed Industries mark (ACP agent "zed"). */
 export const ZedIcon = brand(
   "Zed",
@@ -98,8 +170,8 @@ export function LocalModelIcon(): ReactElement {
   );
 }
 
-/** Monogram fallback — Kimi, Devin, and user-defined ACP agents have no
- *  freely redistributable mark; use the agent's initial in a small tile. */
+/** Monogram fallback — Devin and user-defined ACP agents have no freely
+ *  redistributable mark; use the agent's initial in a small tile. */
 export function MonogramIcon({ letter }: { letter: string }): ReactElement {
   return (
     <span className="agent-rail-monogram" aria-hidden="true">

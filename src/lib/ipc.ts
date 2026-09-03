@@ -332,7 +332,11 @@ export const listenBrowserTimelineEntry = (
 ) => safeListen<BrowserTimelineEntryPayload>("browser:timeline-entry", handler);
 
 // --- Harnesses ---
-export const listHarnesses = () => safeInvoke<HarnessStatus[] | null>("list_harnesses");
+/** Probe harness install status. Cached server-side for 30s unless `force` —
+ *  the Settings "Re-check" button passes true so an out-of-band install or
+ *  uninstall is picked up immediately. */
+export const listHarnesses = (force = false) =>
+safeInvoke<HarnessStatus[] | null>("list_harnesses", { force });
 export const runHarnessLogin = (paneId: string, harnessId: HarnessId, cwd: string) =>
 safeInvoke<void>("run_harness_login", { paneId, harnessId, cwd });
 /** One-click global npm install of a harness CLI (Harnesses settings panel).

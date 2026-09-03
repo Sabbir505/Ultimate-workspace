@@ -17,6 +17,9 @@ type ProposalState = "generating" | "ready" | "editing" | "created" | "rejected"
 const AGENT_OPTIONS: { id: string; label: string; group: "harness" | "api" | "local" }[] = [
   { id: "claude_code", label: "Claude Code (harness)", group: "harness" },
   { id: "opencode", label: "OpenCode (harness)", group: "harness" },
+  { id: "pi", label: "Pi (harness)", group: "harness" },
+  { id: "omp", label: "Omp (harness)", group: "harness" },
+  { id: "commandcode", label: "CommandCode (harness)", group: "harness" },
   { id: "anthropic", label: "Anthropic API", group: "api" },
   { id: "openai", label: "OpenAI API", group: "api" },
   { id: "openrouter", label: "OpenRouter", group: "api" },

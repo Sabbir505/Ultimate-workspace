@@ -31,7 +31,7 @@ pub struct HarnessModelInfo {
     pub source: &'static str,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessModelConfig {
     /// The CLI's configured default model id, when the config names one.
@@ -47,6 +47,9 @@ pub fn harness_model_config(harness_id: &str) -> HarnessModelConfig {
         "claude_code" => claude_config(),
         "kimi_code" => kimi_config(),
         "opencode" => opencode_config(),
+        "pi" => pi_config(),
+        "omp" => omp_config(),
+        "commandcode" => commandcode_config(),
         _ => HarnessModelConfig::default(),
     };
     // The default model always appears in the list, even if the config names
@@ -250,12 +253,223 @@ fn opencode_config() -> HarnessModelConfig {
 /// line). Best-effort with a short timeout — an uninstalled/hung CLI just
 /// yields nothing and the config-derived list stands.
 fn opencode_live_models() -> Vec<String> {
+    capture_cli_stdout("opencode", &["models"], 80)
+        .map(|out| {
+            out.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| l.contains('/') && !l.contains(' '))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------- Pi / Omp
+//
+// Both are pi-lineage CLIs (omp is a pi fork). pi keeps user config as JSON
+// under `~/.pi/agent/` (settings.json for the default model, models.json for
+// custom providers); omp uses `~/.omp/agent/*.yml`, which we deliberately do
+// NOT parse (no YAML dependency for one file) — its models come from the
+// live `omp models --json` dump instead.
+
+fn pi_config() -> HarnessModelConfig {
+    let mut cfg = HarnessModelConfig::default();
+    let Some(home) = crate::util::home_dir() else { return cfg };
+    let dir = home.join(".pi").join("agent");
+
+    // settings.json: `defaultProvider` + `defaultModel` (verified against the
+    // CLI's docs/settings.md). Prefix the provider when the model id is bare
+    // so the stored id is the unambiguous "provider/model" selector.
+    if let Some(j) = read_json(dir.join("settings.json")) {
+        cfg.default_model = j.get("defaultModel").and_then(|m| m.as_str()).map(String::from);
+        if let (Some(dm), Some(dp)) = (
+            cfg.default_model.clone(),
+            j.get("defaultProvider").and_then(|p| p.as_str()),
+        ) {
+            if !dm.contains('/') && !dp.is_empty() {
+                cfg.default_model = Some(format!("{dp}/{dm}"));
+            }
+        }
+    }
+
+    // models.json: custom providers (relays, Ollama, …) — `baseUrl` feeds the
+    // endpoint display, `models[].id` the list (ids stored as "provider/id",
+    // the selector `--model` accepts).
+    if let Some(j) = read_json(dir.join("models.json")) {
+        if let Some(providers) = j.get("providers").and_then(|p| p.as_object()) {
+            for (pid, p) in providers {
+                if cfg.endpoint.is_none() {
+                    cfg.endpoint = p.get("baseUrl").and_then(|u| u.as_str()).map(String::from);
+                }
+                if let Some(models) = p.get("models").and_then(|m| m.as_array()) {
+                    for m in models {
+                        let Some(mid) = m.get("id").and_then(|i| i.as_str()) else { continue };
+                        let label = m
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or(mid)
+                            .to_string();
+                        cfg.models.push(HarnessModelInfo {
+                            id: format!("{pid}/{mid}"),
+                            label,
+                            source: "config",
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Live `pi --list-models` covers the authenticated built-in catalog the
+    // config files don't name.
+    let known: std::collections::HashSet<String> =
+        cfg.models.iter().map(|m| m.id.clone()).collect();
+    if let Some(out) = capture_cli_stdout("pi", &["--list-models"], 100) {
+        for (id, label) in parse_pi_models_table(&out) {
+            if !known.contains(&id) {
+                cfg.models.push(HarnessModelInfo {
+                    id,
+                    label,
+                    source: "cli",
+                });
+            }
+        }
+    }
+    cfg
+}
+
+/// Parse `pi --list-models` output into ("provider/model", label) pairs.
+/// Table rows are whitespace-padded columns:
+/// `provider model context max-out thinking images` — requiring a
+/// context-size token in the third column keeps prose lines ("No models
+/// available. Use /login to log into a provider via OAuth or API key. See:")
+/// and file paths out of the result. (Verified against a real authenticated
+/// listing; chalk disables ANSI when piped.)
+fn parse_pi_models_table(out: &str) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+    for line in out.lines() {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.len() != 6 || tokens[0] == "provider" {
+            continue;
+        }
+        let is_context = tokens[2]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit());
+        if !is_context {
+            continue;
+        }
+        rows.push((format!("{}/{}", tokens[0], tokens[1]), tokens[1].to_string()));
+    }
+    rows
+}
+
+/// Live `omp models --json` — `{"models":[{provider,id,selector,name,…}]}`.
+/// The `selector` ("provider/id") is exactly what `--model` accepts.
+fn omp_config() -> HarnessModelConfig {
+    let mut cfg = HarnessModelConfig::default();
+    let Some(out) = capture_cli_stdout("omp", &["models", "--json"], 100) else {
+        return cfg;
+    };
+    cfg.models = parse_omp_models_json(&out);
+    cfg
+}
+
+/// Live `commandcode --list-models` — a padded two-column table
+/// (`<provider/id><pad><description>`) with section headers and a trailing
+/// ` (default)` marker on the account's default model. (Verified against a
+/// real authenticated listing; the CLI offers no --json form.) Rows require a
+/// `/` in the id so headers ("Open Source", "Available models · 67 models")
+/// never parse as models.
+fn commandcode_config() -> HarnessModelConfig {
+    match capture_cli_stdout("commandcode", &["--list-models"], 150) {
+        Some(out) => commandcode_config_from(&out),
+        None => HarnessModelConfig::default(),
+    }
+}
+
+fn commandcode_config_from(out: &str) -> HarnessModelConfig {
+    let mut cfg = HarnessModelConfig::default();
+    for line in out.lines() {
+        let Some((id, label)) = line.split_once("  ") else { continue };
+        let id = id.trim();
+        if !id.contains('/') || id.contains(' ') {
+            continue;
+        }
+        let label = label.trim();
+        if label == "(default)" {
+            // Empty description, only the marker — still list the model.
+            cfg.default_model = Some(id.to_string());
+            cfg.models.push(HarnessModelInfo {
+                id: id.to_string(),
+                label: id.rsplit('/').next().unwrap_or(id).to_string(),
+                source: "cli",
+            });
+            continue;
+        }
+        if let Some(base) = label.strip_suffix(" (default)") {
+            cfg.default_model = Some(id.to_string());
+            cfg.models.push(HarnessModelInfo {
+                id: id.to_string(),
+                label: base.trim().to_string(),
+                source: "cli",
+            });
+            continue;
+        }
+        cfg.models.push(HarnessModelInfo {
+            id: id.to_string(),
+            label: label.to_string(),
+            source: "cli",
+        });
+    }
+    cfg
+}
+
+/// Parse `omp models --json` into model rows. omp's own provider config is
+/// YAML (`~/.omp/agent/models.yml`), which we deliberately don't parse — the
+/// live dump already reflects it. Unparseable output yields an empty list
+/// rather than garbage rows.
+fn parse_omp_models_json(out: &str) -> Vec<HarnessModelInfo> {
+    let Ok(j) = serde_json::from_str::<serde_json::Value>(out) else {
+        return Vec::new();
+    };
+    let Some(list) = j.get("models").and_then(|m| m.as_array()) else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|m| {
+            let id = m
+                .get("selector")
+                .and_then(|s| s.as_str())
+                .map(String::from)
+                .or_else(|| {
+                    let provider = m.get("provider").and_then(|p| p.as_str())?;
+                    let id = m.get("id").and_then(|i| i.as_str())?;
+                    Some(format!("{provider}/{id}"))
+                })?;
+            let label = m
+                .get("name")
+                .and_then(|n| n.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| id.rsplit('/').next().unwrap_or(&id).to_string());
+            Some(HarnessModelInfo {
+                id,
+                label,
+                source: "cli",
+            })
+        })
+        .collect()
+}
+
+/// Spawn a harness CLI, drain stdout on a background thread (a full OS pipe
+/// buffer would otherwise deadlock the child — same pattern as git.rs's run_git
+/// drain threads), and return its output once it exits within `ticks` × 100ms.
+/// A missing/hung CLI yields None; callers must treat that as "no models".
+fn capture_cli_stdout(program: &str, args: &[&str], ticks: u32) -> Option<String> {
+    use std::io::Read;
     use std::process::{Command, Stdio};
     use std::time::Duration;
 
-    let spec = crate::harness_adapters::resolve_for_spawn(
-        &crate::harness_adapters::CommandSpec::new("opencode", &["models"]),
-    );
+    let spec = crate::harness_adapters::resolve_for_spawn(&crate::harness_adapters::CommandSpec::new(program, args));
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args)
         .stdin(Stdio::null())
@@ -269,16 +483,7 @@ fn opencode_live_models() -> Vec<String> {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(_) => return vec![],
-    };
-    // Drain stdout on a background thread BEFORE waiting. Reading only after
-    // exit deadlocks once the model registry exceeds the OS pipe buffer
-    // (~64KB): the child blocks on a full pipe and never exits, so the wait
-    // loop times out and the whole list is dropped. Same pattern as git.rs's
-    // run_git drain threads.
-    use std::io::Read;
+    let mut child = cmd.spawn().ok()?;
     let mut stdout_pipe = child
         .stdout
         .take()
@@ -288,30 +493,22 @@ fn opencode_live_models() -> Vec<String> {
         let _ = stdout_pipe.read_to_string(&mut out);
         out
     });
-    // 8s is generous for a local registry dump; a hung shim must not wedge
-    // the model dropdown.
-    for _ in 0..80 {
+    for _ in 0..ticks {
         match child.try_wait() {
-            Ok(Some(_)) => {
-                let out = drain.join().unwrap_or_default();
-                return out
-                    .lines()
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| l.contains('/') && !l.contains(' '))
-                    .collect();
-            }
+            Ok(Some(_)) => return Some(drain.join().unwrap_or_default()),
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return vec![];
+                let _ = drain.join();
+                return None;
             }
         }
     }
     let _ = child.kill();
     let _ = child.wait();
     let _ = drain.join();
-    vec![]
+    None
 }
 
 fn capitalize(s: &str) -> String {
@@ -340,5 +537,78 @@ mod tests {
         // Different name + id keeps the disambiguating parenthetical.
         assert_eq!(remap_label("Sonnet", "kimi-k2.6"), "Sonnet (kimi-k2.6)");
         assert_eq!(remap_label("Opus", "glm-5.2"), "Opus (glm-5.2)");
+    }
+
+    #[test]
+    fn parse_pi_models_table_real_listing() {
+        // Captured verbatim from `pi --list-models` on a configured machine
+        // (relay provider + three models).
+        let out = "provider  model              context  max-out  thinking  images\n\
+                   sharkai   deepseek-v4-flash  128K     16.4K    no        no    \n\
+                   sharkai   glm-5.2            128K     16.4K    no        no    \n\
+                   sharkai   mimo-v2.5          128K     16.4K    no        no    \n";
+        let rows = parse_pi_models_table(out);
+        assert_eq!(
+            rows,
+            vec![
+                ("sharkai/deepseek-v4-flash".to_string(), "deepseek-v4-flash".to_string()),
+                ("sharkai/glm-5.2".to_string(), "glm-5.2".to_string()),
+                ("sharkai/mimo-v2.5".to_string(), "mimo-v2.5".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_pi_models_table_ignores_prose_and_header() {
+        // The unauthenticated listing is prose, not a table — must parse to
+        // nothing rather than inventing rows out of the sentence.
+        let out = "No models available. Use /login to log into a provider via OAuth or API key. See:\n\
+                   C:\\Users\\x\\AppData\\Roaming\\npm\\node_modules\\@earendil-works\\pi-coding-agent\\docs\\providers.md\n\
+                   provider  model  context  max-out  thinking  images\n";
+        assert!(parse_pi_models_table(out).is_empty());
+    }
+
+    #[test]
+    fn parse_omp_models_json_real_dump() {
+        // Shape captured verbatim from `omp models --json` ( Bun 1.4 / omp 18).
+        let out = r#"{"models":[{"provider":"sharkai","id":"glm-5.2","selector":"sharkai/glm-5.2","name":"GLM 5.2","contextWindow":1048576,"maxTokens":131072,"reasoning":true,"thinking":["minimal","low"],"input":["text"],"cost":{"input":0.14,"output":0.28}}"#;
+        let out = format!("{out}]}}");
+        let rows = parse_omp_models_json(&out);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "sharkai/glm-5.2");
+        assert_eq!(rows[0].label, "GLM 5.2");
+        assert_eq!(rows[0].source, "cli");
+    }
+
+    #[test]
+    fn parse_omp_models_json_tolerates_garbage() {
+        assert!(parse_omp_models_json("not json at all").is_empty());
+        assert!(parse_omp_models_json("{}").is_empty());
+    }
+
+    #[test]
+    fn parse_commandcode_models_table_real_listing() {
+        // Captured verbatim from `commandcode --list-models` (authenticated).
+        let out = "Available models  ·  67 models\n\
+                   \n\
+                   Open Source\n\
+                   \n\
+                   deepseek/deepseek-v4-pro               hybrid-attention long-context reasoning\n\
+                   deepseek/deepseek-v4-flash             fast hybrid-attention reasoning (default)\n\
+                   moonshotai/kimi-k3                     long-horizon coding & knowledge work with 1M context\n";
+        let cfg = commandcode_config_from(out);
+        assert_eq!(cfg.models.len(), 3);
+        assert_eq!(cfg.models[0].id, "deepseek/deepseek-v4-pro");
+        assert_eq!(cfg.models[0].label, "hybrid-attention long-context reasoning");
+        assert_eq!(cfg.default_model.as_deref(), Some("deepseek/deepseek-v4-flash"));
+        assert_eq!(cfg.models[1].label, "fast hybrid-attention reasoning");
+    }
+
+    #[test]
+    fn parse_commandcode_models_table_headers_never_parse() {
+        let out = "Available models  ·  67 models\nOpen Source\nFlagship\n";
+        let cfg = commandcode_config_from(out);
+        assert!(cfg.models.is_empty());
+        assert!(cfg.default_model.is_none());
     }
 }

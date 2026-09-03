@@ -301,13 +301,32 @@ export function SettingsView() {
   const handleInstallHarness = async (id: HarnessId, displayName: string) => {
     setInstallingHarness(id);
     try {
-      await installHarness(id);
-      toastSuccess(`${displayName} installed`);
+      // The backend verifies the CLI actually runs post-install and may add
+      // a PATH-refresh/runtime warning to the confirmation line.
+      const msg = await installHarness(id);
+      toastSuccess(msg || `${displayName} installed`);
     } catch (e) {
       toastError(`Couldn't install ${displayName}`, String(e));
     } finally {
       setInstallingHarness(null);
-      void refreshHarnesses();
+      // Forced probe: the row must reflect reality the moment the install
+      // lands, regardless of the backend's 30s probe cache.
+      void refreshHarnesses(true);
+    }
+  };
+
+  // "Re-check" must catch an out-of-band install/uninstall (done in a
+  // terminal), so it force-bypasses the backend's 30s probe cache — and gives
+  // feedback while the multi-second probe runs or when the backend errors.
+  const [rechecking, setRechecking] = useState(false);
+  const handleRecheckHarnesses = async () => {
+    setRechecking(true);
+    try {
+      await refreshHarnesses(true);
+    } catch (e) {
+      toastError("Couldn't re-check harnesses", String(e));
+    } finally {
+      setRechecking(false);
     }
   };
 
@@ -438,8 +457,14 @@ export function SettingsView() {
                 <>
                   <div className="panel-head">
                     <h3>Agent harnesses</h3>
-                    <button className="ghost" onClick={() => void refreshHarnesses()} style={{ padding: "2px 8px" }}>
-                      Re-check
+                    <button
+                      className="ghost"
+                      onClick={() => void handleRecheckHarnesses()}
+                      disabled={rechecking}
+                      title="Re-probe every harness binary on PATH (bypasses the 30s cache)"
+                      style={{ padding: "2px 8px" }}
+                    >
+                      {rechecking ? "Checking…" : "Re-check"}
                     </button>
                   </div>
                   {harnesses.length === 0 ? (

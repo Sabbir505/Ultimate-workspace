@@ -41,7 +41,7 @@ const FRIENDLY_ERROR_MATCHERS: { test: RegExp; friendly: FriendlyError }[] = [
     test: /failed to spawn|enoent|program not found|is not recognized/i,
     friendly: {
       text: "The agent CLI couldn't be started.",
-      hint: "Check the harness is installed and on PATH, then Run again.",
+      hint: "If the harness isn't installed, use the one-time Install button, then Run again.",
     },
   },
   {
@@ -62,6 +62,18 @@ export function friendlyRunError(statusOrSummary: string): FriendlyError {
     if (m.test.test(s)) return m.friendly;
   }
   return { text: s };
+}
+
+/** True when an automation's `harness` names a CLI harness that is registered
+ *  but NOT installed on this device — the case where the failure banner's
+ *  "Run again" becomes a one-time "Install". Provider/local agent ids
+ *  ("anthropic", "local_gguf", …) are absent from the harness registry and
+ *  never match. */
+export function harnessNeedsInstall(
+  harness: string,
+  harnesses: { id: string; installed: boolean }[],
+): boolean {
+  return harnesses.some((h) => h.id === harness && !h.installed);
 }
 
 /** Unified per-automation state — one concept instead of separate

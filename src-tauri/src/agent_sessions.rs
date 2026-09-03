@@ -319,6 +319,9 @@ impl AgentSessionManager {
             "claude_code" => send_claude_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, connectors),
             "kimi_code" => spawn_per_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, PerTurn::Kimi, connectors),
             "opencode" => send_opencode_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, connectors),
+            "pi" => spawn_per_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, PerTurn::Pi, connectors),
+            "omp" => spawn_per_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, PerTurn::Omp, connectors),
+            "commandcode" => spawn_per_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, PerTurn::CommandCode, connectors),
             s if s.starts_with("acp:") => {
                 send_acp_turn(app, db, chat_session_id, &effective, entry, cwd, project_id, &s[4..])
             }
@@ -2786,14 +2789,45 @@ fn read_claude_stream(
     }
 }
 
-// ------------------------------------------------------ per-turn CLIs (kimi/opencode)
+// ------------------------------------------------------ per-turn CLIs (kimi/opencode/pi/omp)
 
 /// Which per-turn CLI a spawn targets. OpenCode normally runs as the
 /// persistent server (see send_opencode_turn); `PerTurn::OpenCode` survives
 /// only as the degraded fallback when `opencode serve` cannot be started.
+/// Pi and Omp share one event protocol (Omp is a pi fork): `CLI -p --mode
+/// json` streams a session-header line followed by JSONL deltas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PerTurn {
     Kimi,
     OpenCode,
+    Pi,
+    Omp,
+    CommandCode,
+}
+
+impl PerTurn {
+    /// The harness id stored on the chat session / used for CLI session-id
+    /// persistence (`agent.cli_session_id.<harness>.<sid>`).
+    fn harness_id(self) -> &'static str {
+        match self {
+            PerTurn::Kimi => "kimi_code",
+            PerTurn::OpenCode => "opencode",
+            PerTurn::Pi => "pi",
+            PerTurn::Omp => "omp",
+            PerTurn::CommandCode => "commandcode",
+        }
+    }
+
+    /// Friendly name for the "starting up" status notice.
+    fn display(self) -> &'static str {
+        match self {
+            PerTurn::Kimi => "Kimi",
+            PerTurn::OpenCode => "OpenCode",
+            PerTurn::Pi => "Pi",
+            PerTurn::Omp => "Omp",
+            PerTurn::CommandCode => "CommandCode",
+        }
+    }
 }
 
 /// Spawn a fresh one-shot process for a single turn, resuming the CLI's own
@@ -2825,6 +2859,9 @@ fn spawn_per_turn(
         None
     };
     let mut prompt_env: Option<(String, String)> = None;
+    // Set when turn_spec chose the stdin transport: the prompt is piped to
+    // the child after spawn (pi-lineage print mode reads stdin).
+    let mut stdin_payload: Option<String> = None;
     let spec = match kind {
         PerTurn::Kimi => {
             // The untrusted prompt never rides the command line — it goes via
@@ -2874,7 +2911,7 @@ End your reply with the plan and wait for the user's approval.]"
             } else {
                 content.to_string()
             };
-            let (spec, env) =
+            let (spec, env, _) =
                 crate::harness_adapters::turn_spec(crate::harness_adapters::TurnHarness::Kimi, &turn_content, flags);
             prompt_env = env;
             spec
@@ -2915,16 +2952,98 @@ End your reply with the plan and wait for the user's approval.]"
                 flags.push("-s".into());
                 flags.push(id.clone());
             }
-            let (spec, env) =
+            let (spec, env, _) =
                 crate::harness_adapters::turn_spec(crate::harness_adapters::TurnHarness::OpenCode, content, flags);
             prompt_env = env;
+            spec
+        }
+        PerTurn::Pi | PerTurn::Omp => {
+            // pi-lineage JSON protocol: `-p --mode json` (space-separated flag
+            // for pi, sade `--mode=json` for omp — turn_spec owns the exact
+            // spelling). Prompt rides stdin (never a cmd.exe line).
+            //
+            // Permission model (verified live): both CLIs' print modes
+            // AUTO-APPROVE tool calls — a file-creating turn executed
+            // end-to-end with no approval flag. pi's `--approve` governs
+            // project-trust (loading project-local extensions/settings —
+            // arbitrary code), which we deliberately leave at the safe
+            // non-interactive default of "ignore"; omp's `--auto-approve`
+            // would be redundant. So: full-auto tools, no extra flags.
+            let mut flags: Vec<String> = vec![];
+            if !entry.model.is_empty() {
+                // E-9c: the model id rides the cmd.exe wrapper line via an
+                // unquoted `%*` — reject cmd metacharacters up front.
+                crate::harness_adapters::ensure_cmd_safe_model(&entry.model)?;
+                flags.push("--model".into());
+                flags.push(entry.model.clone());
+            }
+            if let Some(id) = &resume {
+                // pi: `--session <path|id>`; omp: `--resume <id>` (both accept
+                // the captured session id — verified against upstream docs).
+                match kind {
+                    PerTurn::Omp => {
+                        flags.push("--resume".into());
+                    }
+                    _ => {
+                        flags.push("--session".into());
+                    }
+                }
+                flags.push(id.clone());
+            }
+            // Like Kimi, the pi-lineage CLIs reject a dedicated plan flag in
+            // prompt mode — the read-only posture rides as a prompt directive.
+            let turn_content = if chat_permission_mode_label(db, sid) == "plan" {
+                format!(
+                    "{content}\n\n[PLAN MODE ACTIVE — read-only. The user enabled plan mode: \
+research and analyze, then reply with a detailed implementation plan as markdown. \
+Do NOT modify, create, or delete any files and do NOT run mutating commands. \
+End your reply with the plan and wait for the user's approval.]"
+                )
+            } else {
+                content.to_string()
+            };
+            let harness = match kind {
+                PerTurn::Omp => crate::harness_adapters::TurnHarness::Omp,
+                _ => crate::harness_adapters::TurnHarness::Pi,
+            };
+            let (spec, env, transport) = crate::harness_adapters::turn_spec(harness, &turn_content, flags);
+            prompt_env = env;
+            if transport == crate::harness_adapters::TurnPromptTransport::Stdin {
+                stdin_payload = Some(turn_content);
+            }
+            spec
+        }
+        PerTurn::CommandCode => {
+            // The fixed headless flags (-p --output-format json --yolo
+            // --skip-onboarding --no-auto-update) live in turn_spec's argv —
+            // here only the per-session bits ride along. Resume uses
+            // `--resume <id>` ("by id or name", CLI reference); `-m` selects
+            // the model for this session.
+            let mut flags: Vec<String> = vec![];
+            if !entry.model.is_empty() {
+                // E-9c: the model id rides the cmd.exe wrapper line via an
+                // unquoted `%*` — reject cmd metacharacters up front.
+                crate::harness_adapters::ensure_cmd_safe_model(&entry.model)?;
+                flags.push("-m".into());
+                flags.push(entry.model.clone());
+            }
+            if let Some(id) = &resume {
+                flags.push("--resume".into());
+                flags.push(id.clone());
+            }
+            let (spec, env, transport) =
+                crate::harness_adapters::turn_spec(crate::harness_adapters::TurnHarness::CommandCode, content, flags);
+            prompt_env = env;
+            if transport == crate::harness_adapters::TurnPromptTransport::Stdin {
+                stdin_payload = Some(content.to_string());
+            }
             spec
         }
     };
 
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args)
-        .stdin(Stdio::null())
+        .stdin(if stdin_payload.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     // The prompt travels in the process env block (never cmd-parsed) when the
@@ -2956,6 +3075,29 @@ End your reply with the plan and wait for the user's approval.]"
         .spawn()
         .map_err(|e| format!("failed to spawn {} CLI: {e}", spec.program))?;
 
+    // Stdin transport (pi/omp/commandcode): write the prompt and close the
+    // pipe — EOF tells the CLI the prompt is complete. Same failure contract
+    // as claude's one-shot stdin: a failed write kills the WHOLE tree (E-7 —
+    // `child.kill()` would only terminate the cmd.exe wrapper and the CLI
+    // grandchild would wait on stdin forever).
+    if let Some(prompt) = stdin_payload {
+        let write_result = match child.stdin.take() {
+            Some(mut stdin) => {
+                use std::io::Write as _;
+                stdin
+                    .write_all(prompt.as_bytes())
+                    .and_then(|_| stdin.flush())
+                    .map_err(|e| format!("failed to write prompt to CLI stdin: {e}"))
+                // stdin drops here, closing the pipe.
+            }
+            None => Err("failed to open CLI stdin".to_string()),
+        };
+        if let Err(e) = write_result {
+            kill_child_tree(&mut child);
+            return Err(e);
+        }
+    }
+
     let stdout = child
         .stdout
         .take()
@@ -2963,15 +3105,18 @@ End your reply with the plan and wait for the user's approval.]"
     entry.turn_in_flight.store(true, Ordering::SeqCst);
     entry.child = Some(child);
 
-    // Emit a "starting" status so the UI shows immediate activity. Kimi only:
-    // OpenCode runs as the persistent server (no per-turn notice), and its
-    // degraded fallback shares this spawn path — a flash there read as noise.
-    // Cleared by the first real `chat:token` event (frontend onToken clears
-    // chatStatus for the session) or by `chat:done`/`chat:error`.
+    // Emit a "starting" status so the UI shows immediate activity. Kimi-only:
+    // its cold start is slow enough to read as a hang. Pi/omp/commandcode are
+    // NOT announced — the CLI effectively spins up while the user is still
+    // composing (agent/model selection already exercised it), and a per-send
+    // "starting up…" flash on the first message read as noise. OpenCode runs
+    // as the persistent server (no per-turn notice), and its degraded
+    // fallback shares this spawn path — a flash there would be noise too.
+    // Cleared by the first real `chat:token` event or `chat:done`/`chat:error`.
     if matches!(kind, PerTurn::Kimi) {
         let _ = app.emit(
             "chat:status",
-            json!({ "chatSessionId": sid, "reason": "harness_starting", "message": "Kimi is starting up…" }),
+            json!({ "chatSessionId": sid, "reason": "harness_starting", "message": format!("{} is starting up…", kind.display()) }),
         );
     }
 
@@ -2985,7 +3130,6 @@ End your reply with the plan and wait for the user's approval.]"
     let sid2 = sid.to_string();
     let in_flight2 = Arc::clone(&entry.turn_in_flight);
     let session_cell = Arc::clone(&entry.cli_session_id);
-    let is_kimi = matches!(kind, PerTurn::Kimi);
     std::thread::spawn(move || {
         read_per_turn_stream(
             Some(&app2),
@@ -2994,7 +3138,7 @@ End your reply with the plan and wait for the user's approval.]"
             stdout,
             &in_flight2,
             &session_cell,
-            is_kimi,
+            kind,
             &cancelled,
             watches,
         );
@@ -3012,7 +3156,7 @@ fn read_per_turn_stream(
     stdout: impl std::io::Read,
     in_flight: &AtomicBool,
     session_cell: &Arc<Mutex<Option<String>>>,
-    is_kimi: bool,
+    kind: PerTurn,
     cancelled: &AtomicBool,
     mut watches: Vec<DirWatch>,
 ) {
@@ -3029,6 +3173,9 @@ fn read_per_turn_stream(
     let mut output: Option<i64> = None;
     let mut cost: Option<f64> = None;
     let mut tools = ToolTracker::new();
+    // CommandCode emits several frames per running tool (`tool_running` and
+    // friends all carry the same toolCallId) — dedupe markers per call id.
+    let mut seen_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
     // mi18: read_line into ONE reused String — BufReader::lines() allocated a
     // fresh String per line on streams that run thousands of lines per turn.
     let mut reader = BufReader::new(stdout);
@@ -3048,22 +3195,28 @@ fn read_per_turn_stream(
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if is_kimi {
-            handle_kimi_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut tools);
-        } else {
-            handle_opencode_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut cost, &mut last_text, &mut last_reasoning, &mut in_think, &mut tools);
+        match kind {
+            PerTurn::Kimi => handle_kimi_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut tools),
+            PerTurn::OpenCode => handle_opencode_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut cost, &mut last_text, &mut last_reasoning, &mut in_think, &mut tools),
+            // Pi and Omp share the pi-lineage JSON event protocol.
+            PerTurn::Pi | PerTurn::Omp => {
+                handle_pi_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut cost, &mut in_think, &mut tools)
+            }
+            PerTurn::CommandCode => {
+                handle_commandcode_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut in_think, &mut tools, &mut seen_tools)
+            }
         }
     }
     // Process exit closes the turn. Persist any captured CLI session id so
     // the next turn (even after cancel or an app restart) resumes the same
     // conversation. If the turn was cancelled, discard the partial reply —
     // cancel() already emitted `chat:done`.
-    persist_cli_session_id(db, if is_kimi { "kimi_code" } else { "opencode" }, sid, session_cell);
+    persist_cli_session_id(db, kind.harness_id(), sid, session_cell);
     in_flight.store(false, Ordering::SeqCst);
     if cancelled.load(Ordering::SeqCst) {
         full.clear();
     } else {
-        // kimi/opencode fallback streams don't expose a model id on their
+        // per-turn CLI streams don't reliably expose a model id on their
         // events — the cost rollup falls back to the session's model.
         finish_turn(app, db, sid, &mut full, input, output, cost, &mut watches, started_at, None);
     }
@@ -4138,6 +4291,255 @@ fn handle_opencode_event(
     }
 }
 
+/// pi-lineage `--mode json` events (pi and omp — omp is a pi fork with the
+/// same wire protocol; shapes verified against `pi -p --mode json` and the
+/// upstream `docs/json.md`). Line 1 is the session header
+/// (`{"type":"session","id":…}`); then JSONL deltas: `message_update` carries
+/// cumulative `usage` plus an `assistantMessageEvent` (`text_delta`,
+/// `thinking_delta`, `done`, `error`); tool runs surface as
+/// `tool_execution_start/end`. Any other event type (omp's
+/// `advisor_cost_changed`, compaction notices, …) is ignored.
+fn handle_pi_event(
+    app: Option<&AppHandle>,
+    sid: &str,
+    v: &Value,
+    full: &mut String,
+    session_cell: &Arc<Mutex<Option<String>>>,
+    input: &mut Option<i64>,
+    output: &mut Option<i64>,
+    cost: &mut Option<f64>,
+    in_think: &mut bool,
+    tools: &mut ToolTracker,
+) {
+    match v.get("type").and_then(|t| t.as_str()) {
+        // Session header line: our chance to bind the CLI's own session id
+        // for resume (also accepted from any later event carrying `id`).
+        Some("session") => {
+            if let Some(id) = v.get("id").and_then(|s| s.as_str()) {
+                if let Ok(mut g) = session_cell.lock() {
+                    *g = Some(id.to_string());
+                }
+            }
+        }
+        Some("message_update") => {
+            // Cumulative provider-reported usage; cost.total is relay-reported
+            // and may stay 0 — finish_turn falls back to the session's model.
+            if let Some(u) = v.get("usage") {
+                *input = u.get("input").and_then(|t| t.as_i64()).or(*input);
+                *output = u.get("output").and_then(|t| t.as_i64()).or(*output);
+                *cost = u.pointer("/cost/total").and_then(|c| c.as_f64()).filter(|c| *c > 0.0).or(*cost);
+            }
+            let Some(ev) = v.get("assistantMessageEvent") else { return };
+            match ev.get("type").and_then(|t| t.as_str()) {
+                Some("text_delta") => {
+                    // Text closes an open thinking block — same contract as
+                    // claude's stream reader (an unclosed <think> would
+                    // swallow the answer into the collapsible block).
+                    if *in_think {
+                        full.push_str("</think>");
+                        emit_token(app, sid, "</think>");
+                        *in_think = false;
+                    }
+                    if let Some(delta) = ev.get("delta").and_then(|d| d.as_str()) {
+                        full.push_str(delta);
+                        emit_token(app, sid, delta);
+                    }
+                }
+                Some("thinking_delta") => {
+                    if !*in_think {
+                        full.push_str("<think>");
+                        emit_token(app, sid, "<think>");
+                        *in_think = true;
+                    }
+                    if let Some(delta) = ev.get("delta").and_then(|d| d.as_str()) {
+                        full.push_str(delta);
+                        emit_token(app, sid, delta);
+                    }
+                }
+                // Stream-level failure: surface the provider's message inline
+                // so the turn doesn't close with an empty reply.
+                Some("error") => {
+                    let msg = pi_message_text(ev.get("error"))
+                        .unwrap_or_else(|| "the CLI reported an error".to_string());
+                    full.push_str(&msg);
+                    emit_token(app, sid, &msg);
+                }
+                _ => {}
+            }
+        }
+        // A tool starts executing with its complete parsed arguments.
+        Some("tool_execution_start") => {
+            let name = v.get("toolName").and_then(|t| t.as_str()).unwrap_or("tool");
+            let inp = v.get("args").cloned().unwrap_or(json!({}));
+            emit_todowrite_steps(app, sid, name, &inp);
+            let value = tool_meta_generic(name, &inp);
+            if is_subagent_tool_name(name) {
+                let role = inp.get("subagent_type").and_then(|x| x.as_str()).unwrap_or("agent").to_string();
+                let task = inp.get("description").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let prompt = inp.get("prompt").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let marker = tools.subagent_use(name, value, app, sid, &role, &task, &prompt);
+                full.push_str(&marker);
+                emit_token(app, sid, &marker);
+            } else {
+                // pi reports the tool's output separately (tool_execution_end),
+                // so the start marker queues a pending slot for tool_result to
+                // match — the plain tool_use, NOT the self-contained variant.
+                let marker = tools.tool_use(name, vec![value]);
+                full.push_str(&marker);
+                emit_token(app, sid, &marker);
+            }
+        }
+        // The tool finished: attach its output to the step for shell tools.
+        Some("tool_execution_end") => {
+            let text = extract_result_text(v.get("result"));
+            let is_error = v.get("isError").and_then(|e| e.as_bool()).unwrap_or(false);
+            if let Some(marker) = tools.tool_result(&text, is_error, app, sid) {
+                full.push_str(&marker);
+                emit_token(app, sid, &marker);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Flatten an assistant message value (`{content:[{type:"text",text},…]}`) to
+/// its text blocks — used for pi error events, which carry a full
+/// AssistantMessage rather than a plain string.
+fn pi_message_text(msg: Option<&Value>) -> Option<String> {
+    let msg = msg?;
+    let content = msg.get("content")?;
+    if let Some(text) = content.as_str() {
+        return (!text.trim().is_empty()).then(|| text.to_string());
+    }
+    let parts = content.as_array()?;
+    let text = parts
+        .iter()
+        .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.trim().is_empty()).then(|| text)
+}
+
+/// CommandCode `-p --output-format json` NDJSON events. Verified live
+/// (v1.44): frames are `{"type":"event","event":{…}}` wrapping inner
+/// AgentEvents (`run_start` with `sessionId`, `turn_start`, `message_start`,
+/// `model_request_start`, `tool_running` with `toolCallId`/`toolName`,
+/// `run_error` with `error.message`, `run_end` with
+/// `result.{finalText,usage}`), then one final
+/// `{"type":"result","subtype":"success|error|max_turns",…}` line carrying
+/// `sessionId`, `usage.{inputTokens,outputTokens,…}` and `finalText`. The
+/// docs don't enumerate the streaming delta type names, so text/thinking
+/// deltas are matched liberally (any inner event with a `delta` string whose
+/// type mentions text/reasoning) and the `result.finalText` line is used as a
+/// catch-up — any suffix the delta events never delivered still lands, so the
+/// reply can't be lost to a renamed event type.
+fn handle_commandcode_event(
+    app: Option<&AppHandle>,
+    sid: &str,
+    v: &Value,
+    full: &mut String,
+    session_cell: &Arc<Mutex<Option<String>>>,
+    input: &mut Option<i64>,
+    output: &mut Option<i64>,
+    in_think: &mut bool,
+    tools: &mut ToolTracker,
+    seen_tools: &mut std::collections::HashSet<String>,
+) {
+    // Capture the CLI session id from any frame that carries one.
+    if let Some(id) = v.get("sessionId").and_then(|s| s.as_str()) {
+        if let Ok(mut g) = session_cell.lock() {
+            if g.is_none() || v.get("type").and_then(|t| t.as_str()) == Some("result") {
+                *g = Some(id.to_string());
+            }
+        }
+    }
+    match v.get("type").and_then(|t| t.as_str()) {
+        Some("event") => {
+            let Some(inner) = v.get("event") else { return };
+            let ty = inner.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            match ty {
+                "run_error" => {
+                    let msg = inner
+                        .pointer("/error/message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("the CLI reported an error");
+                    full.push_str(msg);
+                    emit_token(app, sid, msg);
+                }
+                "run_end" => {
+                    if let Some(u) = inner.pointer("/result/usage") {
+                        *input = u.get("inputTokens").and_then(|t| t.as_i64()).or(*input);
+                        *output = u.get("outputTokens").and_then(|t| t.as_i64()).or(*output);
+                    }
+                }
+                _ => {
+                    // Tool frames: every variant carries toolCallId+toolName;
+                    // mark once per call (the start marker), results attach via
+                    // the pi-style completion frames when present.
+                    if let (Some(call_id), Some(name)) = (
+                        inner.get("toolCallId").and_then(|t| t.as_str()),
+                        inner.get("toolName").and_then(|t| t.as_str()),
+                    ) {
+                        if seen_tools.insert(call_id.to_string()) {
+                            let inp = inner.get("args").cloned().unwrap_or(inner.get("input").cloned().unwrap_or(json!({})));
+                            emit_todowrite_steps(app, sid, name, &inp);
+                            let value = tool_meta_generic(name, &inp);
+                            let marker = tools.tool_use(name, vec![value]);
+                            full.push_str(&marker);
+                            emit_token(app, sid, &marker);
+                        }
+                        return;
+                    }
+                    // Streaming deltas (liberal match — see doc comment).
+                    if let Some(delta) = inner.get("delta").and_then(|d| d.as_str()) {
+                        let thinking = ty.contains("think") || ty.contains("reason");
+                        if thinking && !*in_think {
+                            full.push_str("<think>");
+                            emit_token(app, sid, "<think>");
+                            *in_think = true;
+                        } else if !thinking && *in_think {
+                            full.push_str("</think>");
+                            emit_token(app, sid, "</think>");
+                            *in_think = false;
+                        }
+                        full.push_str(delta);
+                        emit_token(app, sid, delta);
+                    }
+                }
+            }
+        }
+        Some("result") => {
+            // Usage is authoritative here (the docs: totals on the result
+            // line). camelCase — commandcode, unlike claude, doesn't use
+            // snake_case usage fields.
+            if let Some(u) = v.get("usage") {
+                *input = u.get("inputTokens").and_then(|t| t.as_i64()).or(*input);
+                *output = u.get("outputTokens").and_then(|t| t.as_i64()).or(*output);
+            }
+            if v.get("subtype").and_then(|s| s.as_str()) == Some("error") {
+                if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+                    if !err.trim().is_empty() && !full.contains(err) {
+                        full.push_str(err);
+                        emit_token(app, sid, err);
+                    }
+                }
+            }
+            // finalText catch-up: append whatever the delta events never
+            // delivered (nothing when streaming worked end-to-end).
+            if let Some(text) = v.get("finalText").and_then(|t| t.as_str()) {
+                if !text.is_empty() {
+                    let suffix = text.strip_prefix(full.as_str()).unwrap_or(text);
+                    if !suffix.is_empty() {
+                        full.push_str(suffix);
+                        emit_token(app, sid, suffix);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 // ---------------------------------------------------------------- one-shot turns
 
 /// Run a single self-contained turn and BLOCK until it finishes. This is the
@@ -4179,11 +4581,10 @@ pub fn run_one_shot(
         }
     };
 
-    let (spec, prompt_env) = one_shot_spec(harness, &effective, model)?;
-    // claude one-shot takes the prompt via stdin (see one_shot_spec — M12);
-    // the other harnesses either carry it in the env pair (Windows wrapper)
-    // or inline in argv (POSIX).
-    let prompt_via_stdin = harness == "claude_code";
+    let (spec, prompt_env, prompt_via_stdin) = one_shot_spec(harness, &effective, model)?;
+    // claude and the pi-lineage CLIs take the prompt via stdin (M12); the
+    // other harnesses either carry it in the env pair (Windows wrapper) or
+    // inline in argv (POSIX).
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args)
         .stdin(if prompt_via_stdin { Stdio::piped() } else { Stdio::null() })
@@ -4246,7 +4647,15 @@ pub fn run_one_shot(
     let in_flight2 = Arc::clone(&in_flight);
     let app2 = app.cloned();
     let is_claude = harness == "claude_code";
-    let is_kimi = harness == "kimi_code";
+    // one_shot_spec already rejected unknown harnesses, so this is total over
+    // the harnesses that can reach here.
+    let per_turn_kind = match harness {
+        "opencode" => PerTurn::OpenCode,
+        "pi" => PerTurn::Pi,
+        "omp" => PerTurn::Omp,
+        "commandcode" => PerTurn::CommandCode,
+        _ => PerTurn::Kimi,
+    };
     let reader = std::thread::spawn(move || {
         // One-shot turns are never cancelled (they block the caller) and never
         // resumed, so both cells are throwaway; the readers still persist any
@@ -4261,7 +4670,7 @@ pub fn run_one_shot(
             read_claude_stream(app2.as_ref(), &db2, &sid2, stdout, &in_flight2, &cell, &never_cancelled, dummy_stdin, watches, &generation, 1);
         } else {
             let cell = Arc::new(Mutex::new(None));
-            read_per_turn_stream(app2.as_ref(), &db2, &sid2, stdout, &in_flight2, &cell, is_kimi, &never_cancelled, watches);
+            read_per_turn_stream(app2.as_ref(), &db2, &sid2, stdout, &in_flight2, &cell, per_turn_kind, &never_cancelled, watches);
         }
     });
 
@@ -4380,7 +4789,7 @@ fn harness_oneshot_blocking(
                 flags.push("-m".into());
                 flags.push(model.into());
             }
-            let (spec, env) = crate::harness_adapters::turn_spec(
+            let (spec, env, _) = crate::harness_adapters::turn_spec(
                 crate::harness_adapters::TurnHarness::Kimi,
                 prompt,
                 flags,
@@ -4396,12 +4805,31 @@ fn harness_oneshot_blocking(
                 flags.push("-m".into());
                 flags.push(model.into());
             }
-            let (spec, env) = crate::harness_adapters::turn_spec(
+            let (spec, env, _) = crate::harness_adapters::turn_spec(
                 crate::harness_adapters::TurnHarness::OpenCode,
                 prompt,
                 flags,
             );
             (spec, env, false)
+        }
+        "pi" | "omp" | "commandcode" => {
+            let mut flags: Vec<String> = Vec::new();
+            if !model.is_empty() {
+                crate::harness_adapters::ensure_cmd_safe_model(model)?;
+                flags.push(if harness_id == "commandcode" { "-m".into() } else { "--model".into() });
+                flags.push(model.into());
+            }
+            let harness = match harness_id {
+                "omp" => crate::harness_adapters::TurnHarness::Omp,
+                "commandcode" => crate::harness_adapters::TurnHarness::CommandCode,
+                _ => crate::harness_adapters::TurnHarness::Pi,
+            };
+            let (spec, env, transport) = crate::harness_adapters::turn_spec(harness, prompt, flags);
+            (
+                spec,
+                env,
+                transport == crate::harness_adapters::TurnPromptTransport::Stdin,
+            )
         }
         other => return Err(format!("unsupported harness for generation: {other}")),
     };
@@ -4515,6 +4943,41 @@ fn parse_oneshot_text(harness_id: &str, raw: &str) -> Result<String, String> {
             }
             Ok(full)
         }
+        "pi" | "omp" => {
+            // pi-lineage JSON events: text_delta deltas concatenate (mirrors
+            // handle_pi_event's text path, minus tool markers).
+            let mut full = String::new();
+            for line in raw.lines() {
+                let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+                if v.get("type").and_then(|t| t.as_str()) == Some("message_update") {
+                    if let Some(delta) = v
+                        .pointer("/assistantMessageEvent/type")
+                        .and_then(|t| t.as_str())
+                        .filter(|t| *t == "text_delta")
+                        .map(|_| ())
+                        .and_then(|_| v.pointer("/assistantMessageEvent/delta"))
+                        .and_then(|d| d.as_str())
+                    {
+                        full.push_str(delta);
+                    }
+                }
+            }
+            Ok(full)
+        }
+        "commandcode" => {
+            // finalText on the result line IS the reply; deltas are ignored
+            // (mirrors handle_commandcode_event's catch-up semantics).
+            let mut full = String::new();
+            for line in raw.lines() {
+                let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+                if v.get("type").and_then(|t| t.as_str()) == Some("result") {
+                    if let Some(text) = v.get("finalText").and_then(|t| t.as_str()) {
+                        full.push_str(text);
+                    }
+                }
+            }
+            Ok(full)
+        }
         _ => {
             let mut full = String::new();
             let mut last_text = String::new();
@@ -4547,7 +5010,14 @@ fn parse_oneshot_text(harness_id: &str, raw: &str) -> Result<String, String> {
 /// get it via CONDUIT_TURN_PROMPT + delayed-expansion wrapper (the returned
 /// env pair, Windows only — POSIX keeps the prompt in argv, which exec
 /// carries verbatim).
-fn one_shot_spec(harness: &str, prompt: &str, model: &str) -> Result<(CommandSpec, Option<(String, String)>), String> {
+fn one_shot_spec(
+    harness: &str,
+    prompt: &str,
+    model: &str,
+) -> Result<(CommandSpec, Option<(String, String)>, bool), String> {
+    // The bool is `stdin_prompt`: when true the caller pipes `prompt` to the
+    // child's stdin after spawn (claude and the pi-lineage CLIs).
+    let _ = prompt; // prompt text only rides argv for kimi/opencode POSIX
     match harness {
         "claude_code" => {
             let mut args: Vec<String> = vec![
@@ -4568,6 +5038,7 @@ fn one_shot_spec(harness: &str, prompt: &str, model: &str) -> Result<(CommandSpe
                     args,
                 }),
                 None,
+                true,
             ))
         }
         "kimi_code" => {
@@ -4582,11 +5053,12 @@ fn one_shot_spec(harness: &str, prompt: &str, model: &str) -> Result<(CommandSpe
                 flags.push("-m".into());
                 flags.push(model.into());
             }
-            Ok(crate::harness_adapters::turn_spec(
+            let (spec, env, _) = crate::harness_adapters::turn_spec(
                 crate::harness_adapters::TurnHarness::Kimi,
                 prompt,
                 flags,
-            ))
+            );
+            Ok((spec, env, false))
         }
         "opencode" => {
             // Flags BEFORE `--` (yargs swallows post-terminator tokens into
@@ -4600,11 +5072,50 @@ fn one_shot_spec(harness: &str, prompt: &str, model: &str) -> Result<(CommandSpe
                 flags.push("-m".into());
                 flags.push(model.into());
             }
-            Ok(crate::harness_adapters::turn_spec(
+            let (spec, env, _) = crate::harness_adapters::turn_spec(
                 crate::harness_adapters::TurnHarness::OpenCode,
                 prompt,
                 flags,
-            ))
+            );
+            Ok((spec, env, false))
+        }
+        "pi" | "omp" => {
+            // pi-lineage one-shot turns: `-p --mode json` streams the shared
+            // JSONL event protocol (handled by handle_pi_event). No resume —
+            // automation runs are self-contained.
+            let mut flags: Vec<String> = vec![];
+            if !model.is_empty() {
+                crate::harness_adapters::ensure_cmd_safe_model(model)?;
+                flags.push("--model".into());
+                flags.push(model.into());
+            }
+            let (spec, env, transport) = crate::harness_adapters::turn_spec(
+                if harness == "omp" {
+                    crate::harness_adapters::TurnHarness::Omp
+                } else {
+                    crate::harness_adapters::TurnHarness::Pi
+                },
+                prompt,
+                flags,
+            );
+            Ok((spec, env, transport == crate::harness_adapters::TurnPromptTransport::Stdin))
+        }
+        "commandcode" => {
+            // Fixed headless flags ride in turn_spec's argv (yolo/onboarding/
+            // auto-update); only the model selection is per-run. No resume —
+            // automation runs are self-contained.
+            let mut flags: Vec<String> = vec![];
+            if !model.is_empty() {
+                crate::harness_adapters::ensure_cmd_safe_model(model)?;
+                flags.push("-m".into());
+                flags.push(model.into());
+            }
+            let (spec, env, transport) = crate::harness_adapters::turn_spec(
+                crate::harness_adapters::TurnHarness::CommandCode,
+                prompt,
+                flags,
+            );
+            Ok((spec, env, transport == crate::harness_adapters::TurnPromptTransport::Stdin))
         }
         other => Err(format!("harness '{other}' has no headless chat backend yet")),
     }
@@ -5200,6 +5711,168 @@ fn no_console_window(cmd: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Feed pi-lineage JSONL lines through handle_pi_event with app=None
+    /// (events no-op), sharing reader state across lines exactly like
+    /// read_per_turn_stream does. Returns (transcript, cli-session-id cell).
+    fn feed_pi(lines: &[&str]) -> (String, Arc<Mutex<Option<String>>>) {
+        let cell = Arc::new(Mutex::new(None));
+        let mut full = String::new();
+        let mut input = None;
+        let mut output = None;
+        let mut cost = None;
+        let mut in_think = false;
+        let mut tools = ToolTracker::new();
+        for line in lines {
+            let v = serde_json::from_str(line).expect("test line must be valid JSON");
+            handle_pi_event(
+                None, "s", &v, &mut full, &cell, &mut input, &mut output, &mut cost, &mut in_think, &mut tools,
+            );
+        }
+        (full, cell)
+    }
+
+    #[test]
+    fn pi_session_header_binds_cli_session_id() {
+        // First line of a real `pi -p --mode json` run.
+        let (full, cell) = feed_pi(&[
+            r#"{"type":"session","version":3,"id":"01a067a9-7c1d-7332-9b4e-1d3f5a7b9c1e","timestamp":"2026-09-03","cwd":"D:/x"}"#,
+        ]);
+        assert!(full.is_empty()); // header is metadata, not transcript
+        assert_eq!(
+            cell.lock().unwrap().clone(),
+            Some("01a067a9-7c1d-7332-9b4e-1d3f5a7b9c1e".to_string())
+        );
+    }
+
+    #[test]
+    fn pi_text_deltas_stream_into_transcript() {
+        let (full, _) = feed_pi(&[
+            r#"{"type":"message_update","usage":{"input":10,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":11,"cost":{"total":0.0}},"assistantMessageEvent":{"type":"text_start","contentIndex":0}}"#,
+            r#"{"type":"message_update","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":12,"cost":{"total":0.0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hel"}}"#,
+            r#"{"type":"message_update","usage":{"input":10,"output":3,"cacheRead":0,"cacheWrite":0,"totalTokens":13,"cost":{"total":0.0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"lo"}}"#,
+        ]);
+        assert_eq!(full, "Hello");
+    }
+
+    #[test]
+    fn pi_thinking_deltas_wrap_in_think_block() {
+        let (full, _) = feed_pi(&[
+            r#"{"type":"message_update","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"total":0}},"assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"hmm "}}"#,
+            r#"{"type":"message_update","usage":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"answer"}}"#,
+        ]);
+        assert_eq!(full, "<think>hmm </think>answer");
+    }
+
+    #[test]
+    fn pi_error_event_surfaces_message() {
+        let (full, _) = feed_pi(&[
+            r#"{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"total":0}},"assistantMessageEvent":{"type":"error","reason":"error","error":{"role":"assistant","content":[{"type":"text","text":"401: bad key"}],"stopReason":"error"}}}"#,
+        ]);
+        assert!(full.contains("401: bad key"), "{full}");
+    }
+
+    #[test]
+    fn pi_tool_execution_renders_markers() {
+        let (full, _) = feed_pi(&[
+            r#"{"type":"tool_execution_start","toolCallId":"t1","toolName":"bash","args":{"command":"ls"}}"#,
+            r#"{"type":"tool_execution_end","toolCallId":"t1","result":{"content":"a.txt"},"isError":false}"#,
+        ]);
+        assert!(full.contains("bash"), "start marker missing: {full}");
+        assert!(full.contains("a.txt"), "result missing: {full}");
+    }
+
+    #[test]
+    fn pi_unknown_event_types_are_ignored() {
+        // omp emits advisor events pi doesn't have; neither may corrupt the
+        // transcript or panic.
+        let (full, _) = feed_pi(&[
+            r#"{"type":"advisor_cost_changed","total":0.5}"#,
+            r#"{"type":"agent_start"}"#,
+        ]);
+        assert!(full.is_empty());
+    }
+
+    /// Feed CommandCode NDJSON frames through handle_commandcode_event with
+    /// app=None, sharing reader state like read_per_turn_stream does.
+    fn feed_cc(lines: &[&str]) -> (String, Arc<Mutex<Option<String>>>, Option<i64>, Option<i64>) {
+        let cell = Arc::new(Mutex::new(None));
+        let mut full = String::new();
+        let mut input = None;
+        let mut output = None;
+        let mut in_think = false;
+        let mut tools = ToolTracker::new();
+        let mut seen = std::collections::HashSet::new();
+        for line in lines {
+            let v = serde_json::from_str(line).expect("test line must be valid JSON");
+            handle_commandcode_event(
+                None, "s", &v, &mut full, &cell, &mut input, &mut output, &mut in_think, &mut tools, &mut seen,
+            );
+        }
+        (full, cell, input, output)
+    }
+
+    #[test]
+    fn commandcode_result_line_binds_session_and_usage() {
+        // Envelope shapes captured verbatim from a live `commandcode -p
+        // --output-format json` run (the account was out of credits, so the
+        // error path is the recorded one).
+        let (full, cell, input, output) = feed_cc(&[
+            r#"{"type":"event","event":{"type":"run_start","sessionId":"88a3940f-2032-4a7a-b362-4fca46c4ea9b"}}"#,
+            r#"{"type":"result","subtype":"error","sessionId":"88a3940f-2032-4a7a-b362-4fca46c4ea9b","usage":{"inputTokens":12,"outputTokens":5,"cacheReadTokens":0,"cacheWriteTokens":0},"durationMs":3970,"finalText":"","error":"Error: insufficient credits"}"#,
+        ]);
+        assert_eq!(
+            cell.lock().unwrap().clone(),
+            Some("88a3940f-2032-4a7a-b362-4fca46c4ea9b".to_string())
+        );
+        assert_eq!(input, Some(12));
+        assert_eq!(output, Some(5));
+        assert!(full.contains("insufficient credits"), "{full}");
+    }
+
+    #[test]
+    fn commandcode_delta_frames_stream_and_result_catches_up() {
+        let (full, _, _, _) = feed_cc(&[
+            r#"{"type":"event","event":{"type":"text_delta","delta":"Hel"}}"#,
+            r#"{"type":"event","event":{"type":"text_delta","delta":"lo"}}"#,
+            // finalText carries the full reply — only the unstreamed suffix lands.
+            r#"{"type":"result","subtype":"success","sessionId":"sid-1","usage":{"inputTokens":1,"outputTokens":2},"finalText":"Hello world"}"#,
+        ]);
+        assert_eq!(full, "Hello world");
+    }
+
+    #[test]
+    fn commandcode_final_text_recovers_when_no_deltas_arrived() {
+        // If the delta event type ever renames, the result line still
+        // delivers the reply (forward-compat contract).
+        let (full, _, _, _) = feed_cc(&[
+            r#"{"type":"event","event":{"type":"message_start"}}"#,
+            r#"{"type":"result","subtype":"success","finalText":"the whole answer"}"#,
+        ]);
+        assert_eq!(full, "the whole answer");
+    }
+
+    #[test]
+    fn commandcode_tool_frames_mark_once() {
+        let (full, _, _, _) = feed_cc(&[
+            r#"{"type":"event","event":{"type":"tool_running","toolCallId":"t1","toolName":"bash","description":"ls"}}"#,
+            r#"{"type":"event","event":{"type":"tool_running","toolCallId":"t1","toolName":"bash","description":"ls"}}"#,
+            r#"{"type":"event","event":{"type":"tool_finished","toolCallId":"t1","toolName":"bash"}}"#,
+        ]);
+        assert_eq!(full.matches("bash").count(), 1, "tool marked once: {full}");
+    }
+
+    #[test]
+    fn commandcode_non_json_update_banner_is_harmless() {
+        // The reader skips unparseable lines; the handler sees only JSON. The
+        // mid-stream self-update banner ("Updated 1.44.0 → 1.45.0") observed
+        // live must never corrupt the transcript — covered by the reader's
+        // from_str guard, asserted here at the handler boundary.
+        let (full, _, _, _) = feed_cc(&[
+            r#"{"type":"event","event":{"type":"turn_start","turnNumber":1}}"#,
+        ]);
+        assert!(full.is_empty());
+    }
 
     fn record(id: i64, role: &str, content: &str) -> crate::types::ChatMessageRecord {
         crate::types::ChatMessageRecord {

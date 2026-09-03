@@ -26,7 +26,10 @@ interface ProjectsState {
   selectedProjectId: string | null;
 
   loadAll: () => Promise<void>;
-  refreshHarnesses: () => Promise<void>;
+  /** Re-probe harness install status. `force` bypasses the backend's 30s
+   *  cache — used by the Settings "Re-check" button so an out-of-band
+   *  install/uninstall shows up immediately. */
+  refreshHarnesses: (force?: boolean) => Promise<void>;
   refreshSessions: () => Promise<void>;
   addProjectAtPath: (path: string) => Promise<Project | null>;
   removeProjectById: (projectId: string) => Promise<void>;
@@ -71,8 +74,8 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     void get().refreshGitStatus();
   },
 
-  refreshHarnesses: async () => {
-    const harnesses = await listHarnesses();
+  refreshHarnesses: async (force = false) => {
+    const harnesses = await listHarnesses(force);
     if (harnesses) set({ harnesses });
   },
 

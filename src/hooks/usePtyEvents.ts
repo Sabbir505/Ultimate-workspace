@@ -3,10 +3,10 @@
 // inside a React effect — never at module import time — so jsdom tests that
 // import stores don't touch the Tauri event bridge.
 import { useEffect } from "react";
-import { osNotify } from "../lib/notify";
 import { safeListen, browserNavigateTab } from "../lib/ipc";
 import { openSession } from "../lib/sessionLauncher";
-import { playNotifyChime } from "../lib/sound";
+import { isAppFocused } from "../lib/appFocus";
+import { relayNotify } from "../lib/notifyCenter";
 import { sessionDisplayTitle } from "../lib/sessionTitle";
 import { usePanesStore } from "../state/panes";
 import { useProjectsStore } from "../state/projects";
@@ -29,10 +29,6 @@ const lastNotifiedAt = new Map<string, number>();
 
 function clearNotifyCooldown(paneId: string): void {
   lastNotifiedAt.delete(paneId);
-}
-
-async function notify(title: string, body: string): Promise<void> {
-  await osNotify(title, body);
 }
 
 /** Sessions currently being opened on behalf of the phone app. The relay emits
@@ -84,7 +80,7 @@ export function usePtyEvents(): void {
         // (working→waiting→working→waiting) doesn't spam toasts + chimes.
         if (prev === "working" && (state === "waiting" || state === "diff_ready")) {
           const paneIsFocused =
-            panesStore.focusedPaneId === paneId && typeof document !== "undefined" && document.hasFocus();
+            panesStore.focusedPaneId === paneId && isAppFocused();
           const settings = useSettingsStore.getState();
           if (!paneIsFocused && !settings.dnd && pane && pane.data.kind === "terminal") {
             const now = Date.now();
@@ -97,8 +93,18 @@ export function usePtyEvents(): void {
                 : null;
               const name = session ? sessionDisplayTitle(session.title) : pane.data.label;
               const verb = state === "diff_ready" ? "has a diff ready for review" : "is waiting for input";
-              void notify("Relay", `${name} ${verb}`);
-              if (settings.notifySound) playNotifyChime();
+              relayNotify({
+                kind: "completed",
+                title: "Relay",
+                body: `${name} ${verb}`,
+                paneId,
+                chatSessionId: sessionId ?? undefined,
+                // Relay may be focused (pane in the background) — an OS toast
+                // would be intrusive; the calm chime is focus-gated anyway.
+                osToast: !isAppFocused(),
+                inAppToast: true,
+                sound: "completion",
+              });
             }
           }
         }
@@ -108,6 +114,25 @@ export function usePtyEvents(): void {
     unlistens.push(
       safeListen<PtyExitPayload>("pty:exit", ({ paneId, code }) => {
         usePanesStore.getState().markPaneExited(paneId, code);
+        // A nonzero exit while the user wasn't interacting with the pane is a
+        // crash, not a completion — surface it in the bell + toast stack. The
+        // user closing a pane kills its process (also a nonzero/None code), so
+        // only notify when the pane still exists and wasn't intentionally
+        // closed (markPaneExited runs before removal on user close; here the
+        // pane remains mounted with exited:true).
+        const pane = usePanesStore.getState().panes.find((p) => p.paneId === paneId);
+        if (pane && pane.data.kind === "terminal" && code != null && code !== 0) {
+          relayNotify({
+            kind: "crash",
+            title: "Agent process exited",
+            body: `${pane.data.label} exited with code ${code}.`,
+            paneId,
+            chatSessionId: pane.data.sessionId ?? undefined,
+            osToast: !isAppFocused(),
+            inAppToast: true,
+            sound: "alert",
+          });
+        }
       }),
     );
 

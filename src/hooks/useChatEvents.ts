@@ -34,8 +34,28 @@ import {
 } from "../lib/ipc";
 import { matchPlanStep } from "../lib/planMatcher";
 import { openInBrowserPane } from "../lib/openBrowserPane";
+import { isAppFocused } from "../lib/appFocus";
+import { relayNotify } from "../lib/notifyCenter";
+import { sessionDisplayTitle } from "../lib/sessionTitle";
 import { useChatStore } from "../state/chat";
 import { useUiStore } from "../state/ui";
+
+/** Is the user LOOKING at this session right now — Relay focused AND the
+ *  session is the visible (focused/active) chat? Completion toasts + chimes
+ *  are suppressed for the session the user is watching; background chats and
+ *  unfocused-app completions still notify. */
+function isViewingSession(chatSessionId: string): boolean {
+  const chat = useChatStore.getState();
+  const focusedId = chat.focusedChatSessionId ?? chat.activeChatSessionId;
+  return isAppFocused() && chatSessionId === focusedId;
+}
+
+function sessionName(chatSessionId: string): string {
+  const title = useChatStore
+    .getState()
+    .sessions.find((s) => s.id === chatSessionId)?.title;
+  return sessionDisplayTitle(title ?? undefined);
+}
 
 export function useChatEvents(): void {
   useEffect(() => {
@@ -81,6 +101,27 @@ export function useChatEvents(): void {
         if (ownerSessionId) {
           void emitMobileSessionChatEvent(ownerSessionId, "done", payload);
         }
+        // Completion notification — works for BOTH the active chat and
+        // background chats (streams are session-keyed, so a background turn
+        // completing is indistinguishable from an active one). Nothing fires
+        // when the user is watching that session finish; the calm chime only
+        // sounds when Relay itself is unfocused.
+        if (!isViewingSession(chatSessionId)) {
+          const appFocused = isAppFocused();
+          relayNotify({
+            kind: "completed",
+            title: `${sessionName(chatSessionId)} finished`,
+            body: "Agent turn complete — response ready.",
+            chatSessionId,
+            // OS toast only steals attention across apps when Relay isn't
+            // the focused app; background-chat completions surface as an
+            // in-app toast instead.
+            osToast: !appFocused,
+            inAppToast: appFocused,
+            sound: "completion",
+            soundOnlyUnfocused: true,
+          });
+        }
       }),
     );
 
@@ -99,6 +140,22 @@ export function useChatEvents(): void {
         const ownerSessionId = useChatStore.getState().getOwnerSessionId(chatSessionId);
         if (ownerSessionId) {
           void emitMobileSessionChatEvent(ownerSessionId, "error", { chatSessionId, message, code });
+        }
+        // Errors are always worth a record; the interrupting surfaces (OS
+        // toast + alert chime) only fire when the user isn't looking at the
+        // failing session.
+        if (!isViewingSession(chatSessionId)) {
+          const appFocused = isAppFocused();
+          relayNotify({
+            kind: "error",
+            title: `${sessionName(chatSessionId)} hit an error`,
+            body: message || "The agent turn failed.",
+            chatSessionId,
+            osToast: !appFocused,
+            inAppToast: appFocused,
+            sound: "alert",
+            soundOnlyUnfocused: true,
+          });
         }
       }),
     );
@@ -149,6 +206,22 @@ export function useChatEvents(): void {
         if (ownerSessionId) {
           void emitMobileSessionChatEvent(ownerSessionId, "approval", payload);
         }
+        // The agent is BLOCKED until the user approves — worth interrupting
+        // for. Same visibility policy as completions: quiet when the user is
+        // watching that session (the approval card is right there).
+        if (!isViewingSession(payload.chatSessionId)) {
+          const appFocused = isAppFocused();
+          relayNotify({
+            kind: "approval",
+            title: `${sessionName(payload.chatSessionId)} needs approval`,
+            body: payload.summary || payload.tool || "A tool action is waiting for you.",
+            chatSessionId: payload.chatSessionId,
+            osToast: !appFocused,
+            inAppToast: appFocused,
+            sound: "alert",
+            soundOnlyUnfocused: true,
+          });
+        }
       }),
     );
 
@@ -164,6 +237,20 @@ export function useChatEvents(): void {
     unlistens.push(
       listenChatQuestionRequest((payload) => {
         useChatStore.getState().onQuestionRequest(payload);
+        // Same as approvals: the turn is paused until the user answers.
+        if (!isViewingSession(payload.chatSessionId)) {
+          const appFocused = isAppFocused();
+          relayNotify({
+            kind: "approval",
+            title: `${sessionName(payload.chatSessionId)} has a question`,
+            body: payload.questions?.[0]?.question || "The agent needs your input to continue.",
+            chatSessionId: payload.chatSessionId,
+            osToast: !appFocused,
+            inAppToast: appFocused,
+            sound: "alert",
+            soundOnlyUnfocused: true,
+          });
+        }
       }),
     );
 

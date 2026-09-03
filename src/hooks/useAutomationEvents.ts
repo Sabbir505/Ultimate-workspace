@@ -1,14 +1,13 @@
 // Automation run-finished wiring: the backend emits `automation:run-finished`
 // from the scheduler's finalize path (app-open runs only — headless runs go
-// to the webhook/email channels). Failures become OS toasts (DND-aware, with
-// the optional chime); every event refreshes the automations store so the
-// view's status column and Past Runs list stay live.
+// to the webhook/email channels). Every event lands in the notification
+// center (bell) so runs are auditable later; failures additionally become OS
+// toasts with the optional chime, DND-aware. Every event also refreshes the
+// automations store so the view's status column and Past Runs list stay live.
 import { useEffect } from "react";
 import { listenAutomationRunFinished } from "../lib/ipc";
-import { osNotify } from "../lib/notify";
-import { playNotifyChime } from "../lib/sound";
+import { relayNotify } from "../lib/notifyCenter";
 import { useAutomationsStore } from "../state/automations";
-import { useSettingsStore } from "../state/settings";
 
 export function useAutomationEvents(): void {
   useEffect(() => {
@@ -23,11 +22,30 @@ export function useAutomationEvents(): void {
 
       // Toast policy: failures only — a healthy */15 cron toasting every
       // success would be noise. "skipped" is informational, not a failure.
-      if (p.status === "ok" || p.status === "skipped") return;
-      const settings = useSettingsStore.getState();
-      if (settings.dnd) return;
-      void osNotify("Relay automation failed", `${p.name}: ${p.summary}`);
-      if (settings.notifySound) playNotifyChime();
+      // Successes/skips still land in the bell panel (no toast, no chime).
+      if (p.status === "ok" || p.status === "skipped") {
+        relayNotify({
+          kind: "automation",
+          title: `Automation ${p.name} ${p.status === "skipped" ? "skipped" : "finished"}`,
+          body: p.summary,
+          view: "automations",
+          chatSessionId: p.chatSessionId || undefined,
+        });
+        return;
+      }
+      relayNotify({
+        kind: "automation",
+        title: "Relay automation failed",
+        body: `${p.name}: ${p.summary}`,
+        view: "automations",
+        chatSessionId: p.chatSessionId || undefined,
+        osToast: true,
+        sound: "alert",
+        // Failure chime is an alert, not a completion cue — it fires even
+        // when Relay is focused (a cron failing in the background is exactly
+        // what the user needs to hear about).
+        soundOnlyUnfocused: false,
+      });
     }).then((u) => {
       if (disposed) u();
       else unlisten = u;

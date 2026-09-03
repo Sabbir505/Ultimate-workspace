@@ -62,3 +62,36 @@ export function playNotifyChime(): void {
     /* synth failure — no-op */
   }
 }
+
+/** Calm "an agent finished" chime for when Relay is NOT the focused app —
+ *  quieter and slower than the notify chime so it reads as a gentle
+ *  background cue rather than an alert. Two triangle tones (C6 → G5, a
+ *  falling fourth) with a slow attack and long decay: a resolved, relaxed
+ *  gesture that won't startle someone working in another window. */
+export function playCompletionChime(): void {
+  const ac = ensureCtx();
+  if (!ac) return;
+  try {
+    const now = ac.currentTime;
+    const notes = [
+      { freq: 1046.5, start: 0, gain: 0.09 }, // C6
+      { freq: 783.99, start: 0.22, gain: 0.07 }, // G5
+    ];
+    for (const n of notes) {
+      const osc = ac.createOscillator();
+      const gain = ac.createGain();
+      osc.type = "triangle";
+      osc.frequency.value = n.freq;
+      const t = now + n.start;
+      const dur = 0.6;
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(n.gain, t + 0.04);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      osc.connect(gain).connect(ac.destination);
+      osc.start(t);
+      osc.stop(t + dur + 0.05);
+    }
+  } catch {
+    /* synth failure — no-op */
+  }
+}

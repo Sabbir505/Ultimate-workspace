@@ -26,6 +26,7 @@ import { PeekPanel } from "./components/peek/PeekPanel";
 import { ProjectSettingsPanel } from "./components/sidebar/ProjectSettingsPanel";
 import { Sidebar } from "./components/sidebar/Sidebar";
 import { AppLogo } from "./components/common/AppLogo";
+import { NotificationBell } from "./components/common/NotificationBell";
 import { ModelDownloadIndicator } from "./components/settings/ModelDownloadIndicator";
 import { ChatView } from "./components/chat/ChatView";
 import { ChatSelectionToolbar } from "./components/chat/ChatSelectionToolbar";
@@ -50,6 +51,7 @@ import { useViewNav } from "./hooks/useViewNav";
 import { useTheme } from "./hooks/useTheme";
 import { confirmReplaceLru } from "./lib/sessionLauncher";
 import { initWorkspacePersistence } from "./lib/workspaceRestore";
+import { initAppFocusTracking } from "./lib/appFocus";
 import { useProjectsStore } from "./state/projects";
 import { useSettingsStore } from "./state/settings";
 import { useSkillsStore } from "./state/skills";
@@ -221,6 +223,12 @@ export default function App() {
   useBrowserMcpEvents();
   useGitStatusPolling();
 
+  // Focus tracking (module singleton) — drives the "notify only when Relay
+  // is in the background" rules for completion sounds + OS toasts.
+  useEffect(() => {
+    initAppFocusTracking();
+  }, []);
+
   // Chat text zoom (Ctrl +/-/0): publish the multiplier as a CSS variable so
   // every chat surface (bubbles, composer, code blocks, tables) scales at
   // once. Runs in App so both the main window and pop-out chats get it.
@@ -352,6 +360,9 @@ export default function App() {
           )}
           <ModelDownloadIndicator />
           <span className="spacer" data-tauri-drag-region="" />
+          {/* Notification bell — the durable record behind the title bar.
+              Sits just before the side-panel toggle (the rightmost icon). */}
+          <NotificationBell />
           <button
             className={`ghost toolbar-icon-btn${toolPanelCollapsed ? "" : " active"}`}
             onClick={toggleToolPanel}

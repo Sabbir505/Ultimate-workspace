@@ -63,6 +63,20 @@ pub fn list_artifacts_for_chat(
     rows.collect()
 }
 
+/// Artifacts attributed to one assistant message (timeline order).
+pub fn list_artifacts_for_message(
+    conn: &Connection,
+    chat_session_id: &str,
+    chat_message_id: i64,
+) -> DbResult<Vec<ArtifactRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM artifacts \
+          WHERE chat_session_id = ?1 AND chat_message_id = ?2 ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![chat_session_id, chat_message_id], map_artifact)?;
+    rows.collect()
+}
+
 /// Attribute a session's not-yet-attributed artifacts to the assistant message
 /// that just completed, so reopening the chat can render them on that bubble.
 pub fn attach_artifacts_to_message(

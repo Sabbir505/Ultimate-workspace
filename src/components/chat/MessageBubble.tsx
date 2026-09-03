@@ -42,7 +42,7 @@ import type { SyntaxHighlighterProps, SyntaxStyle } from "../../lib/syntaxHighli
 import { loadSyntaxHighlighter } from "../../lib/syntaxHighlighter";
 import { SmoothReveal } from "../common/SmoothReveal";
 import { linkCitations, parseChatSources, sourcesFingerprint, type ChatSource } from "../../lib/chatCitations";
-import { ChatCitation } from "./ChatCitation";
+import { ChatCitation, CitationFlagContext, type CitationFlag } from "./ChatCitation";
 import { MarkdownTable } from "./MarkdownTable";
 
 type SyntaxHighlighterComponent = (props: SyntaxHighlighterProps) => React.ReactNode;
@@ -1510,7 +1510,11 @@ function Markdown({
                 target="_blank"
                 rel="noopener noreferrer"
                 className="chat-md-link"
-                title={isHttp ? `${href}\n(opens in the built-in browser)` : href}
+                // No `title` attribute: the native tooltip is OS-positioned
+                // and paints over the surrounding text with no way to place
+                // or style it (user-reported overlap). Links open in the
+                // browser pane on click; citation chips carry their own
+                // rendered preview cards instead.
                 onClick={
                   isHttp
                     ? (e) => {
@@ -1759,6 +1763,22 @@ function MessageBubbleInner({
     !isUser && msgId != null && msgId > 0 ? s.checkpointsByMessage[msgId] : undefined,
   ) ?? [];
 
+  // Citation-lint verdicts for this session's most recent research turn.
+  // Numbered chips inside THIS turn's markdown render amber (weak) / red
+  // (orphan) accordingly — provided through context so the memoized markdown
+  // element cache doesn't need re-keying when the verdict arrives after the
+  // bubble is already on screen.
+  const citationReport = useChatStore((s) =>
+    !isUser && chatSessionId ? s.citationReports[chatSessionId] : undefined,
+  );
+  const citationFlags = useMemo(() => {
+    if (!citationReport) return {};
+    const map: Record<number, CitationFlag> = {};
+    for (const n of citationReport.orphanNumbers ?? []) map[n] = "orphan";
+    for (const n of citationReport.weakNumbers ?? []) if (!(n in map)) map[n] = "weak";
+    return map;
+  }, [citationReport]);
+
   // Was THIS turn stopped by the user? `stoppedPartial` holds the trimmed
   // content the turn had produced when Stop was pressed (state/chat.ts
   // cancelStream); a persisted partial row carries exactly that content and
@@ -1995,12 +2015,14 @@ function MessageBubbleInner({
                 </button>
               </div>
             </div>
-          ) : isUser
-            ? cleanContent.trim().length > 0 && (
+          ) : (
+            <CitationFlagContext.Provider value={citationFlags}>
+            {isUser ? (
+              cleanContent.trim().length > 0 && (
                 <Markdown content={cleanContent} onPreviewArtifact={onPreviewArtifact} />
               )
-            : hasProcess
-            ? (() => {
+            ) : hasProcess ? (
+              (() => {
                 // The "Working for Xs / Worked for Xs" header is ALWAYS the
                 // first line of the assistant turn. The process region holds
                 // everything UP TO THE LAST process block IN SOURCE ORDER —
@@ -2046,12 +2068,16 @@ function MessageBubbleInner({
                   </>
                 );
               })()
-            /* Pure-text turn: flat markdown, nothing to expand. */
-            : blocks!.map((b, i) =>
+            ) : (
+              /* Pure-text turn: flat markdown, nothing to expand. */
+              blocks!.map((b, i) =>
                 b.kind === "text" && b.text.trim().length > 0
                   ? <Markdown key={`flat:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={!live} sources={sources} />
                   : null,
-              )}
+              )
+            )}
+            </CitationFlagContext.Provider>
+          )}
         {/* Consolidated per-turn changes row: "N files changed +adds −dels"
             with an Undo (checkpoint restore) button; expanding lists the
             files with Review / Open. Replaces the old stacked

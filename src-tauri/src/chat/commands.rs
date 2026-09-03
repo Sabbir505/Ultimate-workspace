@@ -5078,6 +5078,18 @@ pub fn list_compacted_messages(
     Ok(owned)
 }
 
+/// Most recent citation-integrity verdict (full JSON detail) for a chat
+/// session — the "Fix citations" repair action reads it to tell the model
+/// exactly which claims to re-cite, source properly, or drop.
+#[tauri::command]
+pub fn research_citation_report(
+    chat_session_id: String,
+    db: State<'_, DbState>,
+) -> CmdResult<Option<String>> {
+    let conn = db.0.lock();
+    db::latest_citation_detail(&conn, &chat_session_id).map_err(|e| e.to_string())
+}
+
 /// Manual compaction ("Compact now" in the context-meter panel). Forces a
 /// compaction pass for the session regardless of the configured threshold —
 /// cloud sessions summarize via their own provider, local sessions via the

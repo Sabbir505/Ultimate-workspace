@@ -903,6 +903,11 @@ Use one of the listed read-only tools instead."
     if let Some(result) = run_ledger_tool(app, sid, name, args).await {
         return ToolOutcome::text(result);
     }
+    if name == tools::WEB_SEARCH || name == tools::FETCH_URL {
+        return ToolOutcome::text(
+            run_cached_web_tool(client, artifacts_dir, caps, app, sid, name, args).await,
+        );
+    }
     tools::execute_tool(client, artifacts_dir, caps, name, args, Some(app)).await
 }
 
@@ -1637,6 +1642,13 @@ pub(crate) async fn run_tool(
         return text;
     }
 
+    // Cached web tools: `web_search` / `fetch_url` hit the SQLite research
+    // caches before touching the network, and every search is recorded in the
+    // session's query history (repeat-query nudge + audit trail).
+    if name == tools::WEB_SEARCH || name == tools::FETCH_URL {
+        return run_cached_web_tool(client, artifacts_dir, caps, app, sid, name, args).await;
+    }
+
     // Automation tools (list/create/update/delete/run-now) — DB + scheduler
     // via the AppHandle, like the ledger tools above. The list is read-only
     // and auto-runs; the rest mutate persisted state / spawn unattended runs,
@@ -1974,6 +1986,110 @@ async fn run_browser_tool(
     })
 }
 
+/// Cached dispatch for the two network research tools.
+///
+/// `web_search`: results are served from the SQLite search cache (12 h TTL)
+/// when fresh, and every executed search is recorded in the session's query
+/// history — a repeat query gets an explicit nudge (research quality rule:
+/// each query must explore new ground) and leaves an audit trail either way.
+///
+/// `fetch_url`: extracted page content is cached per canonical URL (7 day
+/// TTL) so re-reading the same source never re-hits the wire. Errors are
+/// never cached.
+async fn run_cached_web_tool(
+    client: &reqwest::Client,
+    artifacts_dir: &std::path::Path,
+    caps: &tools::ToolCaps,
+    app: &AppHandle,
+    sid: &str,
+    name: &str,
+    args: &Value,
+) -> String {
+    let db = app.state::<crate::DbState>();
+    match name {
+        tools::WEB_SEARCH => {
+            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            if query.trim().is_empty() {
+                return "Error: web_search requires a non-empty \"query\".".to_string();
+            }
+            let cache_key = format!(
+                "q:{}",
+                db::content_hash(&format!("v1:{}", query.trim().to_ascii_lowercase()))
+            );
+            let mut repeat = false;
+            {
+                let conn = db.0.lock();
+                if let Ok(Some(cached)) =
+                    db::search_cache_get(&conn, &cache_key, db::SEARCH_CACHE_TTL_SECS)
+                {
+                    return format!("(cached from earlier this session)\n\n{cached}");
+                }
+            }
+            // BYO-key provider (Settings → search.provider / search.<p>_key)
+            // replaces the keyless SERP engines when configured.
+            let provider = {
+                let conn = db.0.lock();
+                tools::configured_provider(&conn)
+            };
+            let (text, engines_tag) =
+                match tools::web_search_with_status(client, query, provider.as_ref()).await {
+                    Ok(pair) => pair,
+                    Err(e) => return format!("web_search failed: {e}"),
+                };
+            {
+                let conn = db.0.lock();
+                // Count result lines ("N. title — url") for the audit row.
+                let result_count = text
+                    .lines()
+                    .filter(|l| {
+                        l.starts_with(|c: char| c.is_ascii_digit())
+                            && l.contains(" — ")
+                    })
+                    .count() as i64;
+                if let Ok(already) =
+                    db::record_search(&conn, sid, query, &engines_tag, result_count)
+                {
+                    repeat = already;
+                }
+                let _ = db::search_cache_put(&conn, &cache_key, &engines_tag, &text);
+            }
+            if repeat {
+                format!(
+                    "NOTE: you already ran this exact query earlier in this session. \
+                     Each research query should explore NEW ground — rephrase with \
+                     different terms unless you are deliberately re-checking.\n\n{text}"
+                )
+            } else {
+                text
+            }
+        }
+        tools::FETCH_URL => {
+            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let canonical = db::canonical_url_key(url);
+            {
+                let conn = db.0.lock();
+                if let Ok(Some(cached)) =
+                    db::page_cache_get(&conn, &canonical, db::PAGE_CACHE_TTL_SECS)
+                {
+                    return format!("(cached from earlier this session)\n\n{cached}");
+                }
+            }
+            match tools::fetch_url(client, url).await {
+                Ok(text) => {
+                    let conn = db.0.lock();
+                    let _ = db::page_cache_put(&conn, &canonical, &text);
+                    text
+                }
+                Err(e) => format!("fetch_url failed: {e}"),
+            }
+        }
+        _ => {
+            // Guarded by the matches! at the call site; delegate as a fallback.
+            tools::execute_tool(client, artifacts_dir, caps, name, args, Some(app)).await.text
+        }
+    }
+}
+
 /// Dispatch the source-ledger tools (`add_source_note` / `get_source_ledger` /
 /// `reset_source_ledger`) against the per-session DB ledger. These need DB
 /// access (which the provider-agnostic `execute_tool` does not receive), so
@@ -1981,8 +2097,11 @@ async fn run_browser_tool(
 /// Returns `None` for any other tool name so the caller falls through to the
 /// normal tool dispatcher.
 async fn run_ledger_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -> Option<String> {
-    use tools::{ADD_SOURCE_NOTE, GET_SOURCE_LEDGER, RESET_SOURCE_LEDGER};
-    if !matches!(name, ADD_SOURCE_NOTE | GET_SOURCE_LEDGER | RESET_SOURCE_LEDGER) {
+    use tools::{ADD_SOURCE_NOTE, CHECK_SUFFICIENCY, GET_SOURCE_LEDGER, RESET_SOURCE_LEDGER};
+    if !matches!(
+        name,
+        ADD_SOURCE_NOTE | GET_SOURCE_LEDGER | RESET_SOURCE_LEDGER | CHECK_SUFFICIENCY
+    ) {
         return None;
     }
     let db = app.state::<crate::DbState>();
@@ -1999,6 +2118,16 @@ async fn run_ledger_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -
                     .unwrap_or("")
                     .trim();
                 let unavailable = args.get("unavailable").and_then(|v| v.as_str());
+                let publisher = args
+                    .get("publisher")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                let published_at = args
+                    .get("publishedAt")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
                 if url.is_empty() || fact.is_empty() {
                     return Some(
                         "Error: add_source_note requires a non-empty \"url\" and \"fact\".".to_string(),
@@ -2012,6 +2141,8 @@ async fn run_ledger_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -
                     fact,
                     excerpt,
                     unavailable,
+                    publisher,
+                    published_at,
                 ) {
                     Ok(_) => Ok(format!("Recorded source note for {url}.")),
                     Err(e) => Err(format!("add_source_note failed: {e}")),
@@ -2021,17 +2152,122 @@ async fn run_ledger_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -
             // serde of the full notes vector under the DB mutex stalled every
             // other DB reader for the duration.
             GET_SOURCE_LEDGER => {
+                // mode="compact" returns the claim INDEX without verbatim
+                // excerpts (id, url, title, fact, publisher, publishedAt,
+                // unavailable) — the local-model context-pressure valve: when
+                // the ledger grew past what a small window can hold, synthesis
+                // re-reads the index and pulls only the notes it needs.
+                let compact = args
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|m| m == "compact");
                 let notes = match db::list_source_notes(&conn, sid) {
                     Ok(n) => n,
                     Err(e) => return Some(format!("get_source_ledger failed: {e}")),
                 };
                 drop(conn);
+                if compact {
+                    let index: Vec<serde_json::Value> = notes
+                        .iter()
+                        .map(|n| {
+                            serde_json::json!({
+                                "id": n.id,
+                                "url": n.url,
+                                "title": n.title,
+                                "fact": n.fact,
+                                "publisher": n.publisher,
+                                "publishedAt": n.published_at,
+                                "unavailable": n.unavailable,
+                            })
+                        })
+                        .collect();
+                    return Some(serde_json::to_string(&index).unwrap_or_else(|_| "[]".to_string()));
+                }
                 return Some(serde_json::to_string(&notes).unwrap_or_else(|_| "[]".to_string()));
             }
-            RESET_SOURCE_LEDGER => match db::clear_source_notes(&conn, sid) {
-                Ok(_) => Ok("Source ledger cleared.".to_string()),
-                Err(e) => Err(format!("reset_source_ledger failed: {e}")),
-            },
+            RESET_SOURCE_LEDGER => {
+                // A fresh research task starts from a clean ledger AND a clean
+                // query history — the repeat-query nudge must not fire on
+                // queries from the previous task.
+                let clear_q = db::clear_searches(&conn, sid).map_err(|e| e.to_string());
+                match clear_q.and_then(|_| db::clear_source_notes(&conn, sid).map_err(|e| e.to_string())) {
+                    Ok(_) => Ok("Source ledger and query history cleared.".to_string()),
+                    Err(e) => Err(format!("reset_source_ledger failed: {e}")),
+                }
+            }
+            CHECK_SUFFICIENCY => {
+                // Stateless evidence-sufficiency gate: evaluate the model's
+                // own declared per-sub-question status against the research
+                // quality bars (independent corroboration, opposing views,
+                // no unexplained gaps) and tell it exactly what's missing.
+                let Some(items) = args.get("subquestions").and_then(|v| v.as_array()) else {
+                    return Some(
+                        "Error: check_sufficiency requires a \"subquestions\" array."
+                            .to_string(),
+                    );
+                };
+                if items.is_empty() {
+                    return Some(
+                        "Error: check_sufficiency got an empty \"subquestions\" array."
+                            .to_string(),
+                    );
+                }
+                let mut insufficient: Vec<String> = Vec::new();
+                let mut checked = 0usize;
+                for item in items {
+                    checked += 1;
+                    let question = item
+                        .get("question")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("(unlabeled sub-question)")
+                        .trim();
+                    let status = item
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("insufficient")
+                        .trim()
+                        .to_ascii_lowercase();
+                    let independent = item
+                        .get("independent_sources")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let opposing = item
+                        .get("opposing_view_found")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let gap = item
+                        .get("gaps")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty());
+                    let weak = status != "sufficient"
+                        || independent < 2
+                        || (!opposing && gap.is_none());
+                    if weak {
+                        let detail = gap.unwrap_or("no opposing/stale view was looked for");
+                        insufficient.push(format!(
+                            "“{question}”: {independent} independent source(s), \
+                             opposing view {}. Fix before synthesis: {detail}.",
+                            if opposing { "found" } else { "missing" }
+                        ));
+                    }
+                }
+                if insufficient.is_empty() {
+                    Ok(format!(
+                        "SUFFICIENT — all {checked} sub-question(s) meet the evidence \
+                         bars (≥2 independent sources each, opposing views looked for). \
+                         Proceed to synthesis: get_source_ledger → write report → Sources."
+                    ))
+                } else if items.len() == 1 {
+                    Ok(format!("NOT SUFFICIENT — {}", insufficient.join(" ")))
+                } else {
+                    Ok(format!(
+                        "NOT SUFFICIENT — {} of {checked} sub-question(s) fall short:\n- {}",
+                        insufficient.len(),
+                        insufficient.join("\n- ")
+                    ))
+                }
+            }
             _ => unreachable!("guarded by matches! above"),
         }
     };

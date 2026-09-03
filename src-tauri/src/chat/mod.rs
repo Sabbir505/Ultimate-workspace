@@ -4,6 +4,8 @@
 //! All SSE streaming, API keys stored in the OS keychain, HTTP in Rust backend.
 
 pub mod artifacts;
+pub mod citation_lint;
+pub mod citation_verify;
 pub mod jsdocgen;
 pub mod pdfprint;
 pub mod codeexec;
@@ -690,6 +692,135 @@ impl ChatManager {
                             turn_message_id = Some(msg.id);
                         }
                         let _ = db::touch_chat_session(&conn, &sid);
+                    }
+                    // Citation-integrity lint (research turns only): the
+                    // model's report is checked mechanically against the
+                    // source ledger — orphan citations, unused sources, weak
+                    // attribution. Zero model calls; the verdict rides to the
+                    // frontend as `chat:citation-report` and persists in
+                    // `citation_reports` for trend tracking.
+                    if research_mode && tools_enabled {
+                        let artifact_paths: Vec<String> = turn_message_id
+                            .and_then(|mid| {
+                                let conn = db.lock();
+                                db::list_artifacts_for_message(&conn, &sid, mid)
+                                    .ok()
+                                    .map(|arts| {
+                                        arts.into_iter()
+                                            .filter(|a| a.kind == "md")
+                                            .map(|a| a.path)
+                                            .collect::<Vec<_>>()
+                                    })
+                            })
+                            .unwrap_or_default();
+                        let report = {
+                            let conn = db.lock();
+                            citation_lint::lint_and_store(
+                                &conn,
+                                &sid,
+                                turn_message_id,
+                                &full_response,
+                                &artifact_paths,
+                            )
+                        };
+                        if let Some(report) = report {
+                            let weak_numbers: Vec<u32> =
+                                report.weak.iter().map(|w| w.number).collect();
+                            let orphan_numbers: Vec<u32> =
+                                report.orphans.iter().map(|o| o.number).collect();
+                            // R10 — async precision sampler: re-judge the
+                            // heuristic's weak flags with one background
+                            // model call against the session's own provider.
+                            // The strip already rendered; when verdicts land,
+                            // a refined `chat:citation-report` updates it and
+                            // a refined row is persisted for the Fix action.
+                            if !report.weak.is_empty() && !matches!(provider_id, ChatProviderId::LocalGguf) {
+                                let verify_claims: Vec<citation_verify::VerifyClaim> = report
+                                    .weak
+                                    .iter()
+                                    .take(12)
+                                    .map(|w| citation_verify::VerifyClaim {
+                                        number: w.number,
+                                        sentence: w.sentence.clone(),
+                                        excerpt: w.excerpt.clone(),
+                                    })
+                                    .collect();
+                                let client2 = client.clone();
+                                let base2 = tool_base.clone();
+                                let key2 = api_key.clone();
+                                let model2 = chat_req.model.clone();
+                                let sid2 = sid.clone();
+                                let mid2 = turn_message_id;
+                                let app2 = app.clone();
+                                let db2 = std::sync::Arc::clone(&db);
+                                let report2 = report.clone();
+                                let orphan_numbers2 = orphan_numbers.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let verdicts = citation_verify::verify_via_provider(
+                                        &client2,
+                                        provider_id,
+                                        &base2,
+                                        &key2,
+                                        &model2,
+                                        &verify_claims,
+                                    )
+                                    .await;
+                                    let Ok(verdicts) = verdicts else {
+                                        return; // silent: verification is best-effort
+                                    };
+                                    let supported: Vec<u32> = verdicts
+                                        .iter()
+                                        .filter(|v| v.verdict == "supported")
+                                        .map(|v| v.number)
+                                        .collect();
+                                    if supported.is_empty() {
+                                        return; // nothing cleared — no update needed
+                                    }
+                                    let refined = {
+                                        let conn = db2.lock();
+                                        citation_lint::refine_with_verdicts(
+                                            &conn,
+                                            &sid2,
+                                            mid2,
+                                            &report2,
+                                            &verdicts,
+                                        )
+                                    };
+                                    if let Some(refined) = refined {
+                                        let weak_numbers: Vec<u32> =
+                                            refined.weak.iter().map(|w| w.number).collect();
+                                        let _ = app2.emit(
+                                            "chat:citation-report",
+                                            CitationReportPayload {
+                                                chat_session_id: sid2,
+                                                message_id: mid2,
+                                                total_citations: refined.total_citations,
+                                                orphan_count: refined.orphan_count,
+                                                unused_count: refined.unused_ledger_count,
+                                                uncited_sentences: refined.uncited_sentences,
+                                                weak_count: refined.weak_count,
+                                                weak_numbers,
+                                                orphan_numbers: orphan_numbers2,
+                                            },
+                                        );
+                                    }
+                                });
+                            }
+                            let _ = app.emit(
+                                "chat:citation-report",
+                                CitationReportPayload {
+                                    chat_session_id: sid.clone(),
+                                    message_id: turn_message_id,
+                                    total_citations: report.total_citations,
+                                    orphan_count: report.orphan_count,
+                                    unused_count: report.unused_ledger_count,
+                                    uncited_sentences: report.uncited_sentences,
+                                    weak_count: report.weak_count,
+                                    weak_numbers,
+                                    orphan_numbers,
+                                },
+                            );
+                        }
                     }
                     let _ = app.emit(
                         "chat:done",

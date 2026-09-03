@@ -2,7 +2,8 @@
 // wrapper + Copy/CSV toolbar + full-width fill), interactive citations
 // resolved from a numbered "6. Source References" heading, and the
 // single-$ math fix ("$5 and $10" must stay plain text with its spaces).
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act } from "react";
 import { cleanup, render } from "@testing-library/react";
 import { MessageBubble } from "../components/chat/MessageBubble";
 import type { ChatMessage } from "../lib/ipc";
@@ -55,10 +56,24 @@ describe("MessageBubble markdown UX", () => {
     // parenthesized prose marker ("step (1)") deliberately stays plain text.
     const chips = container.querySelectorAll(".chat-citation");
     expect(chips.length).toBe(1);
-    // Hover source preview exists and carries the linked source title.
-    const tip = container.querySelector(".chat-citation-tip");
-    expect(tip).not.toBeNull();
-    expect(tip!.textContent).toContain("Zhipu AI");
+    // Hover opens the source preview — rendered through a PORTAL at
+    // document.body (fixed positioning escapes the transcript's stacking
+    // contexts; see ChatCitation.tsx), so assert against document.body after
+    // firing mouseenter. The 70ms open delay is bypassed by timers.
+    vi.useFakeTimers();
+    try {
+      chips[0].dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      act(() => {
+        vi.advanceTimersByTime(120);
+      });
+      const tip = document.body.querySelector(".chat-citation-tip");
+      expect(tip).not.toBeNull();
+      expect(tip!.textContent).toContain("Zhipu AI");
+      // Fixed layer, never absolutely-positioned inside the markdown flow.
+      expect(tip!.classList.contains("chat-citation-tip")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps dollar amounts as plain text (no KaTeX space collapse)", () => {

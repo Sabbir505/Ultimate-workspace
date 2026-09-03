@@ -13,6 +13,7 @@ import {
   listenChatApprovalResolved,
   listenChatQuestionRequest,
   listenChatArtifact,
+  listenChatCitationReport,
   listenChatDone,
   listenChatError,
   listenChatOpenBrowser,
@@ -167,6 +168,16 @@ export function useChatEvents(): void {
         if (ownerSessionId) {
           void emitMobileSessionChatEvent(ownerSessionId, "artifact", payload);
         }
+      }),
+    );
+
+    // End-of-turn citation-integrity verdict (research turns only): the
+    // backend lints the generated report against the session's source ledger
+    // and reports what was mechanically verified. Rendered as the trust strip
+    // above the composer. No mobile relay (desktop-only UI).
+    unlistens.push(
+      listenChatCitationReport((payload) => {
+        useChatStore.getState().onCitationReport(payload);
       }),
     );
 

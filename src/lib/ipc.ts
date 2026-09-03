@@ -848,6 +848,32 @@ export interface ChatDonePayload {
   cacheHitRate: number | null;
 }
 
+/** End-of-turn citation-integrity verdict for a research report, emitted as
+ *  `chat:citation-report`. The backend lints the generated report against the
+ *  session's source ledger — zero model calls, purely mechanical — so the
+ *  numbers describe what was actually verified, not what the model claims. */
+export interface ChatCitationReportPayload {
+  chatSessionId: string;
+  /** Backend message row the report is attached to (null when unknown). */
+  messageId: number | null;
+  /** `[n]`-style markers found in the report. */
+  totalCitations: number;
+  /** Markers that don't resolve to a ledger-backed source (fabricated or
+   *  never-read). */
+  orphanCount: number;
+  /** Readable ledger sources that never made it into the report. */
+  unusedCount: number;
+  /** Substantive sentences carrying no citation marker at all. */
+  uncitedSentences: number;
+  /** Cited sentences whose overlap with the cited excerpt is suspiciously
+   *  low (weak attribution). */
+  weakCount: number;
+  /** Which citation numbers were flagged weak (amber chips). */
+  weakNumbers: number[];
+  /** Which citation numbers are orphans (red chips). */
+  orphanNumbers: number[];
+}
+
 /** Live per-session perf snapshot, emitted (throttled) while a turn is streaming
  *  as `chat:perf`. The frontend uses this to update the composer metrics row
  *  without waiting for `chat:done`. */
@@ -1921,6 +1947,12 @@ export const listenChatStatus = (handler: (payload: ChatStatusPayload) => void) 
   safeListen<ChatStatusPayload>("chat:status", handler);
 export const listenChatDone = (handler: (payload: ChatDonePayload) => void) =>
   safeListen<ChatDonePayload>("chat:done", handler);
+export const listenChatCitationReport = (handler: (payload: ChatCitationReportPayload) => void) =>
+  safeListen<ChatCitationReportPayload>("chat:citation-report", handler);
+/** Full JSON detail of a session's most recent citation-integrity verdict —
+ *  the "Fix citations" repair action feeds it back to the model. */
+export const getResearchCitationReport = (chatSessionId: string) =>
+  safeInvoke<string | null>("research_citation_report", { chatSessionId });
 /** Throttled (~1 Hz) live perf snapshot while a turn is streaming. The
  *  composer metrics row subscribes here so it can update without waiting
  *  for the next chat:done event. */

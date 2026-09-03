@@ -52,6 +52,7 @@ import {
   type ChatApprovalResolvedPayload,
   type ChatAttachmentInput,
   type ChatArtifactPayload,
+  type ChatCitationReportPayload,
   type ChatCheckpoint,
   type ChatConfigPayload,
   type ChatMessageRecord,
@@ -773,6 +774,12 @@ export interface ChatState {
    *  into an empty-looking "Worked" row erased it. Completed turns never
    *  match (their content differs), so they keep collapsing normally. */
   stoppedPartial: Record<string, string>;
+  /** Latest end-of-turn citation-integrity verdict per chat session
+   *  (`chat:citation-report` — research turns only). Rendered as the trust
+   *  strip above the composer: what the mechanical ledger lint verified about
+   *  the report the user just received. In-memory, event-driven; a session
+   *  reopened later doesn't re-show an old verdict. */
+  citationReports: Record<string, ChatCitationReportPayload>;
 
   // Actions
   loadSessions: () => Promise<void>;
@@ -975,6 +982,8 @@ export interface ChatState {
   ) => void;
   /** Update the live per-turn perf snapshot for a session (from `chat:perf`). */
   onPerf: (payload: ChatPerfPayload) => void;
+  /** Record the end-of-turn citation-integrity verdict (research turns). */
+  onCitationReport: (payload: ChatCitationReportPayload) => void;
   onError: (chatSessionId: string, message: string, code: string | null) => void;
   onArtifact: (payload: ChatArtifactPayload) => void;
   /** Append a checkpoint from `checkpoint:created` (baseline, post-turn, or
@@ -1096,6 +1105,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessionMetrics: {},
   loopState: {},
   stoppedPartial: {},
+  citationReports: {},
 
   setCwdOverride: (chatSessionId, path) =>
     set((s) => {
@@ -3027,6 +3037,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!(payload.chatSessionId in get().streaming)) return;
     set((s) => ({
       livePerf: { ...s.livePerf, [payload.chatSessionId]: payload },
+    }));
+  },
+
+  onCitationReport: (payload) => {
+    set((s) => ({
+      citationReports: { ...s.citationReports, [payload.chatSessionId]: payload },
     }));
   },
 

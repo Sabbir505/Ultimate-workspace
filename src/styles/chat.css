@@ -1426,40 +1426,40 @@ div[data-index]:has(.chat-session-row.menu-open) {
   border-color: var(--border-strong);
   outline: none;
 }
-/* Source preview card — one clickable row per cited number. Clipped only at
-   the messages scroll container's edges, like every CSS popover here. */
+/* Source preview card — one clickable row per cited number. Rendered through
+   a React portal at document.body with position:fixed (coords computed in
+   ChatCitation.tsx): an absolutely-positioned tip inside the markdown flow
+   was painted over by neighboring text — virtualizer rows and markdown
+   blocks create their own stacking contexts the tip's z-index could not
+   escape — and clipped at scroll-container edges. The background is OPAQUE
+   (--tooltip-bg): translucent glass read as "text overlapping the card". */
 .chat-citation-tip {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%) translateY(2px);
-  display: none;
+  position: fixed;
+  display: flex;
   flex-direction: column;
   min-width: 220px;
   max-width: 340px;
   padding: 8px;
   border-radius: var(--radius-sm);
-  background: var(--tooltip-bg, var(--surface-glass-2));
+  background: var(--tooltip-bg, var(--surface-2));
   border: 1px solid var(--tooltip-border, var(--border-strong));
   box-shadow: var(--glass-shadow);
-  color: var(--text);
+  color: var(--tooltip-fg, var(--text));
   font-size: 11.5px;
   font-weight: 400;
   line-height: 1.4;
   text-align: left;
-  z-index: 40;
+  /* Above the app's overlays (command palettes, toasts) — this is a
+     pointer-targeted popover that must never lose a z-order fight. */
+  z-index: 1000;
   opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.12s var(--ease), transform 0.12s var(--ease);
-}
-.chat-citation:hover .chat-citation-tip,
-.chat-citation:focus-visible .chat-citation-tip {
-  display: flex;
-  opacity: 1;
-  transform: translateX(-50%) translateY(0);
-  /* Small delay so quick pointer pass-throughs don't flash the card. */
-  transition-delay: 0.08s;
+  animation: chat-citation-tip-in 0.12s var(--ease) 0.02s forwards;
   pointer-events: auto;
+}
+@keyframes chat-citation-tip-in {
+  to {
+    opacity: 1;
+  }
 }
 .chat-citation-tip-head {
   font-size: 9.5px;
@@ -3779,3 +3779,101 @@ button.chat-mermaid-open {
 .chat-grid-wrap.split-active > .chat-split-resizer { order: 1; }
 .chat-grid-wrap.split-active > .chat-split-side { order: 1; }
 .chat-grid-wrap.split-active > .tool-panel { order: 2; }
+
+/* ---------- Citation-integrity strip (research turns) ---------- */
+
+/* Rendered above the composer after a research turn completes: what the
+   mechanical ledger lint verified about the delivered report. One compact
+   row — health dot · label · counts — with the hint as a truncating tail
+   (full text on hover via title). Inherits glass surface tokens so it reads
+   as part of the composer cluster, not a floating alert. */
+.citation-report-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  margin: 0 16px 8px;
+  padding: 7px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  box-shadow: var(--glass-rim-soft);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text);
+  min-width: 0;
+}
+.citation-report-strip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--ok, #3fb950);
+}
+.citation-report-strip.is-warn .citation-report-strip-dot {
+  background: var(--warn, #d29922);
+}
+.citation-report-strip.is-bad .citation-report-strip-dot {
+  background: var(--danger, #f87171);
+}
+.citation-report-strip-label {
+  font-weight: 600;
+  flex: none;
+}
+.citation-report-strip-counts {
+  white-space: nowrap;
+  flex: none;
+  color: var(--text);
+}
+.citation-report-strip-sep {
+  color: var(--text-dim);
+  margin: 0 5px;
+}
+.citation-report-strip-hint {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+/* Narrow windows: the hint is the expendable part — hide it before letting
+   the counts wrap. */
+@media (max-width: 640px) {
+  .citation-report-strip-hint {
+    display: none;
+  }
+}
+
+/* Citation chips flagged by the end-of-turn integrity lint: amber = weak
+   attribution (the claim shares little of its excerpt's anchor vocabulary),
+   red = orphan (the cited source was never read / isn't in the ledger). The
+   default chip keeps the link-blue look — flags must draw the eye, not
+   decorate. */
+.chat-citation.is-weak {
+  color: var(--warn, #d29922);
+  border-color: color-mix(in srgb, var(--warn, #d29922) 45%, transparent);
+  background: color-mix(in srgb, var(--warn, #d29922) 10%, transparent);
+}
+.chat-citation.is-orphan {
+  color: var(--danger, #f87171);
+  border-color: color-mix(in srgb, var(--danger, #f87171) 50%, transparent);
+  background: color-mix(in srgb, var(--danger, #f87171) 10%, transparent);
+}
+.citation-report-strip-fix {
+  flex: none;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: transparent;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.citation-report-strip-fix:hover {
+  background: var(--accent-soft);
+  border-color: var(--border-strong);
+}

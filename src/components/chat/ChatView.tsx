@@ -24,6 +24,7 @@ import type { ChatPerfPayload } from "../../lib/ipc";
 // TypingIndicator is tiny and eager — imported from its own module so the
 // entry chunk doesn't statically pull in MessageBubble (react-markdown).
 import { TypingIndicator } from "./TypingIndicator";
+import { CitationReportStrip } from "./CitationReportStrip";
 const MessageBubble = lazy(() => import("./MessageBubble").then((m) => ({ default: m.MessageBubble })));
 // Heavy chat features (artifact previews with syntax-highlighting + markdown,
 // inline mermaid diagrams, file diff cards) are split into separate chunks so
@@ -34,7 +35,7 @@ const MessageBubble = lazy(() => import("./MessageBubble").then((m) => ({ defaul
 // edit-tool call. None of these appear on the empty welcome screen.
 const TaskProgressCard = lazy(() => import("./TaskProgressCard").then((m) => ({ default: m.TaskProgressCard })));
 const ArtifactProposalCard = lazy(() => import("./ArtifactProposalCard").then((m) => ({ default: m.ArtifactProposalCard })));
-import { listHarnessModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, deleteEmptyChatSessions, getLocalModelOverrides, setLocalModelOverrides, warmupLocalPrompt, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance, getAgentActualModel } from "../../lib/ipc";
+import { listHarnessModels, scanLocalModels, startLocalModel, stopLocalModel, localModelStatus, deleteEmptyChatSessions, getLocalModelOverrides, setLocalModelOverrides, warmupLocalPrompt, type ChatMessage, type GgufModel, type HarnessModelConfig, type LlamaOverrides, regenerateArtifact, createArtifact, type ArtifactProposal, type ArtifactSpec, type ArtifactProvenance, getAgentActualModel, getResearchCitationReport } from "../../lib/ipc";
 import { harnessModelCatalog } from "../../lib/harnessModels";
 import { setChatScrollToMessage } from "../../lib/chatScroll";
 import { setChatSelectionPrefill } from "../../lib/chatSelection";
@@ -1217,6 +1218,20 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     [sendMessage, startLoop, activeChatSessionId],
   );
 
+  // "Fix citations" on the citation-report strip: pull the stored lint detail
+  // and send a RARR-style repair instruction — the model re-cites or drops
+  // flagged claims from the ledger and regenerates the report artifact.
+  const handleFixCitations = useCallback(
+    async (sid: string) => {
+      const detail = await getResearchCitationReport(sid).catch(() => null);
+      const instruction = detail
+        ? `The citation-integrity check on your last research report flagged problems. Lint detail (JSON):\n${detail}\n\nRepair the report working ONLY from the source ledger: for every orphan citation, re-cite the correct ledger entry or delete the claim; for every weak attribution, re-read the flagged source (or a better one), record a supporting excerpt with add_source_note, then re-cite. Drop claims that don't trace to a stored excerpt. Then regenerate the artifact with generate_file (same filename, corrected) and give a one-line summary of the fixes.`
+        : "Re-verify every citation in your last research report against get_source_ledger; fix any claim that doesn't trace to a stored excerpt, then regenerate the artifact with generate_file.";
+      handleSend(instruction, []);
+    },
+    [handleSend],
+  );
+
   // Edit-to-fork submit (roadmap #9): retire this message's tail, then re-send
   // the edited text as a new turn. Wired per item so the bubble's Save handler
   // carries the message id.
@@ -1976,6 +1991,11 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
           />
         </div>
       )}
+
+      {/* End-of-turn citation-integrity verdict (research turns only): what
+          the mechanical ledger lint verified about the report just delivered.
+          Renders above the composer so it survives transcript scrolling. */}
+      <CitationReportStrip chatSessionId={activeChatSessionId} onFix={(sid) => void handleFixCitations(sid)} />
 
       {/* present_plan proposal — the model is PAUSED until this is resolved.
           Approving unlocks mutations; rejecting sends the feedback text back. */}

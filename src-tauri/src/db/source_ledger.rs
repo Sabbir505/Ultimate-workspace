@@ -18,14 +18,19 @@ fn map_source_note(row: &rusqlite::Row) -> rusqlite::Result<SourceNote> {
         fact: row.get("fact")?,
         excerpt: row.get("excerpt")?,
         unavailable: row.get("unavailable")?,
+        publisher: row.get("publisher").unwrap_or(None),
+        published_at: row.get("published_at").unwrap_or(None),
         created_at: row.get("created_at")?,
     })
 }
 
 /// Record one source note for a chat session. `unavailable` carries the
 /// `browser_read` failure reason when the source could not be read; pass `None`
-/// for a usable source. Returns the inserted note (its assigned row id).
-/// Uses INSERT OR IGNORE to skip duplicates (same session + url + fact).
+/// for a usable source. `publisher` / `published_at` are optional page
+/// metadata (site name, publish date) that synthesis uses to weight
+/// conflicting claims. Uses INSERT OR IGNORE to skip duplicates
+/// (same session + url + fact).
+#[allow(clippy::too_many_arguments)]
 pub fn add_source_note(
     conn: &Connection,
     chat_session_id: &str,
@@ -34,14 +39,26 @@ pub fn add_source_note(
     fact: &str,
     excerpt: &str,
     unavailable: Option<&str>,
+    publisher: Option<&str>,
+    published_at: Option<&str>,
 ) -> DbResult<SourceNote> {
     let now = now_ts();
     let changes_before = conn.changes();
     conn.execute(
         "INSERT OR IGNORE INTO chat_source_notes
-           (chat_session_id, url, title, fact, excerpt, unavailable, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![chat_session_id, url, title, fact, excerpt, unavailable, now],
+           (chat_session_id, url, title, fact, excerpt, unavailable, publisher, published_at, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            chat_session_id,
+            url,
+            title,
+            fact,
+            excerpt,
+            unavailable,
+            publisher,
+            published_at,
+            now
+        ],
     )?;
     let was_inserted = conn.changes() > 0 && conn.changes() > changes_before;
     if was_inserted {
@@ -54,6 +71,8 @@ pub fn add_source_note(
             fact: fact.to_string(),
             excerpt: excerpt.to_string(),
             unavailable: unavailable.map(str::to_string),
+            publisher: publisher.map(str::to_string),
+            published_at: published_at.map(str::to_string),
             created_at: now,
         })
     } else {
@@ -109,6 +128,8 @@ mod tests {
             "A is the first fact.",
             "\"A is the first fact.\"",
             None,
+            Some("Example Org"),
+            Some("2026-08-30"),
         )
         .unwrap();
         add_source_note(
@@ -119,6 +140,8 @@ mod tests {
             "B is the second fact.",
             "\"B is the second fact.\"",
             Some("paywalled"),
+            None,
+            None,
         )
         .unwrap();
 
@@ -127,6 +150,8 @@ mod tests {
         assert_eq!(notes[0].id, n1.id);
         assert_eq!(notes[0].url, "https://example.com/a");
         assert!(notes[0].unavailable.is_none());
+        assert_eq!(notes[0].publisher.as_deref(), Some("Example Org"));
+        assert_eq!(notes[0].published_at.as_deref(), Some("2026-08-30"));
         assert_eq!(notes[1].unavailable.as_deref(), Some("paywalled"));
         // Insertion order preserved (id ASC).
         assert!(notes[0].id < notes[1].id);
@@ -141,8 +166,28 @@ mod tests {
         let conn = mem();
         let a = create_chat_session(&conn, "openai", "gpt-4o", None).unwrap();
         let b = create_chat_session(&conn, "openai", "gpt-4o", None).unwrap();
-        add_source_note(&conn, &a.id, "https://a", "A", "a", "a", None).unwrap();
-        add_source_note(&conn, &b.id, "https://b", "B", "b", "b", None).unwrap();
+        add_source_note(
+            &conn,
+            &a.id,
+            "https://a",
+            "A",
+            "a",
+            "a",
+            None,
+            None,
+            None,
+        ).unwrap();
+        add_source_note(
+            &conn,
+            &b.id,
+            "https://b",
+            "B",
+            "b",
+            "b",
+            None,
+            None,
+            None,
+        ).unwrap();
         assert_eq!(list_source_notes(&conn, &a.id).unwrap().len(), 1);
         assert_eq!(list_source_notes(&conn, &b.id).unwrap().len(), 1);
         // Clearing one session leaves the other intact.
@@ -157,7 +202,7 @@ mod tests {
         let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-5", None).unwrap();
         for i in 0..55 {
             let url = format!("https://example.com/{i}");
-            add_source_note(&conn, &cs.id, &url, "T", "f", "e", None).unwrap();
+            add_source_note(&conn, &cs.id, &url, "T", "f", "e", None, None, None).unwrap();
         }
         let notes = list_source_notes(&conn, &cs.id).unwrap();
         assert_eq!(notes.len(), 50);
@@ -173,7 +218,17 @@ mod tests {
         // Requires foreign_keys = ON (the `mem()` helper sets it).
         let conn = mem();
         let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-5", None).unwrap();
-        add_source_note(&conn, &cs.id, "https://x", "X", "x", "x", None).unwrap();
+        add_source_note(
+            &conn,
+            &cs.id,
+            "https://x",
+            "X",
+            "x",
+            "x",
+            None,
+            None,
+            None,
+        ).unwrap();
         assert_eq!(list_source_notes(&conn, &cs.id).unwrap().len(), 1);
 
         delete_chat_session(&conn, &cs.id).unwrap();

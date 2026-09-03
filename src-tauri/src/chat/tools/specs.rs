@@ -36,8 +36,9 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         openai_fn(BROWSER_SCROLL, BROWSER_SCROLL_DESC, browser_scroll_parameters()),
         // Research source ledger — always on (state tools, not gated by permission mode).
         openai_fn(ADD_SOURCE_NOTE, ADD_SOURCE_NOTE_DESC, add_source_note_parameters()),
-        openai_fn(GET_SOURCE_LEDGER, GET_SOURCE_LEDGER_DESC, no_parameters()),
+        openai_fn(GET_SOURCE_LEDGER, GET_SOURCE_LEDGER_DESC, get_source_ledger_parameters()),
         openai_fn(RESET_SOURCE_LEDGER, RESET_SOURCE_LEDGER_DESC, no_parameters()),
+        openai_fn(CHECK_SUFFICIENCY, CHECK_SUFFICIENCY_DESC, check_sufficiency_parameters()),
         // Plan tracking — always on (session-state tools, not gated by permission
         // mode; the plan gate, not the schema, decides what's blocked per mode).
         openai_fn(TODO_WRITE, TODO_WRITE_DESC, todo_items_parameters(true)),
@@ -193,8 +194,9 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
         anthropic_fn(BROWSER_SCROLL, BROWSER_SCROLL_DESC, browser_scroll_parameters()),
         // Research source ledger — always on (state tools, not gated by permission mode).
         anthropic_fn(ADD_SOURCE_NOTE, ADD_SOURCE_NOTE_DESC, add_source_note_parameters()),
-        anthropic_fn(GET_SOURCE_LEDGER, GET_SOURCE_LEDGER_DESC, no_parameters()),
+        anthropic_fn(GET_SOURCE_LEDGER, GET_SOURCE_LEDGER_DESC, get_source_ledger_parameters()),
         anthropic_fn(RESET_SOURCE_LEDGER, RESET_SOURCE_LEDGER_DESC, no_parameters()),
+        anthropic_fn(CHECK_SUFFICIENCY, CHECK_SUFFICIENCY_DESC, check_sufficiency_parameters()),
         // Plan tracking — mirror of the OpenAI builder's block above.
         anthropic_fn(TODO_WRITE, TODO_WRITE_DESC, todo_items_parameters(true)),
         anthropic_fn(ENTER_PLAN_MODE, ENTER_PLAN_MODE_DESC, enter_plan_mode_parameters()),
@@ -353,6 +355,23 @@ fn no_parameters() -> Value {
     json!({ "type": "object", "properties": {} })
 }
 
+/// `get_source_ledger` takes an optional read mode: default returns full
+/// notes (fact + verbatim excerpt); `"compact"` returns the claim index
+/// without excerpts for small-context models / huge ledgers.
+fn get_source_ledger_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "mode": {
+                "type": "string",
+                "enum": ["full", "compact"],
+                "description": "'full' (default) = every note with its verbatim excerpt; 'compact' = claim index only (id, url, title, fact, publisher, publishedAt, unavailable — NO excerpts) when the ledger is too large for the context window."
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
 /// Parameter schema for the local-docs `search_docs` tool. `query` is the
 /// natural-language question; `top_k` (optional, capped server-side at 20)
 /// controls how many hits to return.
@@ -468,9 +487,57 @@ fn add_source_note_parameters() -> Value {
                 "type": "string",
                 "enum": ["paywalled", "login_required", "extraction_failed", "blocked"],
                 "description": "Set this to the browser_read failureReason when the source could not be read; omit when usable."
+            },
+            "publisher": {
+                "type": "string",
+                "description": "The source's publisher/site name when the page metadata shows one (e.g. 'Nature', 'Rust Blog'). Used to weight conflicting claims."
+            },
+            "publishedAt": {
+                "type": "string",
+                "description": "The page's publish date when shown (e.g. '2026-05-14'). Used to prefer fresher sources when they conflict."
             }
         },
         "required": ["url", "title", "fact", "excerpt"]
+    })
+}
+
+fn check_sufficiency_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "subquestions": {
+                "type": "array",
+                "description": "One entry per planned sub-question.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "The sub-question."
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["sufficient", "insufficient"],
+                            "description": "'sufficient' only when the ledger holds ≥2 notes from independent domains that answer it."
+                        },
+                        "independent_sources": {
+                            "type": "integer",
+                            "description": "How many distinct domains corroborate the answer in the ledger."
+                        },
+                        "opposing_view_found": {
+                            "type": "boolean",
+                            "description": "Whether you looked for and found dissenting/outdated views worth reporting."
+                        },
+                        "gaps": {
+                            "type": "string",
+                            "description": "When insufficient: exactly what is missing (e.g. 'no primary source for the pricing claim')."
+                        }
+                    },
+                    "required": ["question", "status"]
+                }
+            }
+        },
+        "required": ["subquestions"]
     })
 }
 

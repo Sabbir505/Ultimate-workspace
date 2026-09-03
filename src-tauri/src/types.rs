@@ -520,6 +520,16 @@ pub struct SourceNote {
     pub excerpt: String,
     /// `None` when the source was usable; otherwise the failure reason string.
     pub unavailable: Option<String>,
+    /// Publisher/site name when known (page metadata or the model's input) —
+    /// feeds trust-forwarding chips and lets synthesis weight conflicts by
+    /// source authority.
+    #[serde(default)]
+    pub publisher: Option<String>,
+    /// Publish date when known (page metadata / model input). Temporal
+    /// conflicts (stale-vs-fresh) are a first-class research error class;
+    /// without a date the synthesis can only guess which claim is newer.
+    #[serde(default)]
+    pub published_at: Option<String>,
     pub created_at: i64,
 }
 
@@ -569,6 +579,36 @@ pub struct ChatDonePayload {
     /// Prompt/KV-cache hit rate (0.0–1.0), computed from usage cache fields.
     #[serde(default)]
     pub cache_hit_rate: Option<f64>,
+}
+
+/// End-of-turn citation-integrity verdict for a research report (`chat:citation-report`
+/// event). Summary counts only — the per-citation detail is persisted in the
+/// `citation_reports` table and reachable via the `research_citation_report`
+/// IPC command if a surface needs it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CitationReportPayload {
+    pub chat_session_id: String,
+    pub message_id: Option<i64>,
+    /// `[n]`-style markers found in the report.
+    pub total_citations: usize,
+    /// Markers that don't resolve to a ledger-backed source (fabricated or
+    /// never-read source).
+    pub orphan_count: usize,
+    /// Readable ledger sources that never made it into the report.
+    pub unused_count: usize,
+    /// Substantive sentences with no citation marker at all.
+    pub uncited_sentences: usize,
+    /// Cited sentences whose lexical overlap with the cited excerpt is
+    /// suspiciously low (weak attribution).
+    pub weak_count: usize,
+    /// Which citation numbers were flagged weak — the frontend colors those
+    /// chips amber.
+    #[serde(default)]
+    pub weak_numbers: Vec<u32>,
+    /// Which citation numbers are orphans — those chips render red.
+    #[serde(default)]
+    pub orphan_numbers: Vec<u32>,
 }
 
 /// Per-session cumulative perf snapshot, emitted (throttled) while a turn is

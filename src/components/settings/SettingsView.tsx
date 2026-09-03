@@ -37,6 +37,7 @@ import {
   Blocks,
   Cpu,
   Coins,
+  Globe,
   TerminalSquare,
   GitBranch,
   Pencil,
@@ -60,6 +61,7 @@ type Category =
   | "harnesses"
   | "localmodels"
   | "apikeys"
+  | "websearch"
   | "connectors"
   | "knowledge"
   | "mcpgallery"
@@ -75,6 +77,7 @@ const CATEGORY_KEYS: Category[] = [
   "harnesses",
   "localmodels",
   "apikeys",
+  "websearch",
   "connectors",
   "knowledge",
   "mcpgallery",
@@ -97,6 +100,7 @@ function SettingsNavIcon({ category }: { category: Category }) {
     case "notifications": return <Bell {...props} />;
     case "assistant": return <Bot {...props} />;
     case "apikeys": return <KeyRound {...props} />;
+    case "websearch": return <Globe {...props} />;
     case "localmodels": return <Cpu {...props} />;
     case "harnesses": return <TerminalSquare {...props} />;
     case "connectors": return <Plug {...props} />;
@@ -133,6 +137,7 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
     title: "Models & Providers",
     items: [
       { key: "apikeys", label: "API Keys", sub: "Chat provider keys" },
+      { key: "websearch", label: "Web Search", sub: "Keyless or BYO-key engine" },
       { key: "localmodels", label: "Local Models", sub: "GGUF via llama-server" },
     ],
   },
@@ -426,6 +431,7 @@ export function SettingsView() {
               {category === "notifications" && <NotificationsPanel />}
 
               {category === "assistant" && <AssistantPanel />}
+              {category === "websearch" && <WebSearchPanel />}
               {category === "git" && <GitPanel />}
 
               {category === "harnesses" && (
@@ -1564,6 +1570,109 @@ function AssistantPanel() {
           </span>
         </div>
       </div>
+    </>
+  );
+}
+
+/** Web Search panel: which engine powers `web_search` in chat/research mode.
+ *  Keyless multi-engine (DuckDuckGo + Mojeek + Wikipedia) is the default and
+ *  needs nothing; BYO-key options swap in a paid index. Keys persist via the
+ *  generic settings store (the backend reads `search.provider` /
+ *  `search.<provider>_key` at call time). */
+const SEARCH_PROVIDERS = [
+  { value: "", label: "Keyless (default)" },
+  { value: "serper", label: "Serper (Google)" },
+  { value: "tavily", label: "Tavily" },
+  { value: "brave", label: "Brave" },
+] as const;
+
+const SEARCH_PROVIDER_HELP: Record<string, string> = {
+  serper:
+    "Google-quality SERP. 2,500 free queries, then ~$1 per 1,000 — get a key at serper.dev.",
+  tavily:
+    "Agent-native search with news/recency filters. 1,000 free credits monthly — get a key at tavily.com.",
+  brave:
+    "Independent web index. Metered (~$5/mo at hobby scale) — get a key at brave.com/search/api. Note: Brave's terms restrict caching, so Brave-only results are never stored locally.",
+};
+
+function WebSearchPanel() {
+  const [provider, setProvider] = useState("");
+  const [keys, setKeys] = useState<Record<string, string>>({});
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let stale = false;
+    void Promise.all([
+      getSetting("search.provider"),
+      getSetting("search.serper_key"),
+      getSetting("search.tavily_key"),
+      getSetting("search.brave_key"),
+    ]).then(([p, serper, tavily, brave]) => {
+      if (stale) return;
+      setProvider(p ?? "");
+      setKeys({ serper: serper ?? "", tavily: tavily ?? "", brave: brave ?? "" });
+      setLoaded(true);
+    });
+    return () => {
+      stale = true;
+    };
+  }, []);
+
+  const pickProvider = (v: string) => {
+    setProvider(v);
+    void setSetting("search.provider", v);
+  };
+
+  const setKey = (id: string, value: string) => {
+    setKeys((k) => ({ ...k, [id]: value }));
+    void setSetting(`search.${id}_key`, value);
+  };
+
+  return (
+    <>
+      <div className="panel-head">
+        <h3>Web Search</h3>
+        <span className="panel-count">Chat & research mode</span>
+      </div>
+      <div className="settings-form-row settings-form-row-pair">
+        <div className="settings-form-field">
+          <label className="settings-form-label">Search engine</label>
+          <div className="settings-form-control">
+            <GlassSelect<string>
+              value={provider}
+              options={[...SEARCH_PROVIDERS]}
+              onChange={pickProvider}
+            />
+          </div>
+        </div>
+      </div>
+      <p className="settings-section-hint">
+        Keyless search merges DuckDuckGo, Mojeek and Wikipedia — free, no setup,
+        works offline of any account. A paid engine below upgrades the index
+        quality for research mode; Wikipedia stays as a supplement either way.
+      </p>
+      {provider !== "" && (
+        <div className="settings-form-row settings-form-row-pair">
+          <div className="settings-form-field">
+            <label className="settings-form-label">
+              {provider === "serper" ? "Serper API key" : provider === "tavily" ? "Tavily API key" : "Brave API key"}
+            </label>
+            <div className="settings-form-control">
+              <input
+                type="password"
+                value={keys[provider] ?? ""}
+                placeholder={loaded ? "Paste your API key…" : ""}
+                onChange={(e) => setKey(provider, e.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+      {provider !== "" && SEARCH_PROVIDER_HELP[provider] && (
+        <p className="settings-section-hint">{SEARCH_PROVIDER_HELP[provider]}</p>
+      )}
     </>
   );
 }

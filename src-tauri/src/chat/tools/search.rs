@@ -1,10 +1,21 @@
 //! Web text extraction for the chat tools: `fetch_url` (readable text from a
-//! single URL) and `web_search` (keyless SERP via DuckDuckGo + Wikipedia).
+//! single URL) and `web_search` (keyless multi-engine SERP).
 //!
 //! Both produce plain text the model consumes. A real browser User-Agent is
 //! sent on every request so CDNs/WAFs (Cloudflare) do not 403 us.
+//!
+//! `fetch_url` extracts article content with `dom_smoothie` (a Readability.js
+//! port — the same algorithm family as Firefox Reader Mode and the in-app
+//! browser bridge), falls back to the old tag-stripper when Readability can't
+//! find an article, and falls back to the keyless Jina Reader
+//! (`r.jina.ai`) when the direct fetch is blocked or the target is a PDF.
+//! `web_search` merges results from DuckDuckGo's HTML SERP, Mojeek, and
+//! Wikipedia, tolerating any single engine failing, and reports per-engine
+//! health so "no results" vs "engine down" stays distinguishable.
 
+use std::collections::VecDeque;
 use std::net::IpAddr;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -123,20 +134,124 @@ pub(crate) fn host_blocked_in(host: &str, proxied: bool) -> bool {
     addrs.iter().any(is_blocked_ip)
 }
 
-/// Fetch a URL and return its readable text (HTML stripped, truncated).
+/// Upper bound on response text handed to the model from `fetch_url` (chars,
+/// truncated on a char boundary AFTER extraction). Raised from 12 KB to 32 KB:
+/// Readability output is focused article text, and research-mode reads of
+/// long primary sources were silently losing half the document at 12 KB.
+const FETCH_URL_MAX_TEXT_CHARS: usize = 32_000;
+
+/// Keyless Jina Reader rate limit: the no-key tier allows 20 requests per
+/// minute. A rolling window shared process-wide keeps a research turn that
+/// fans out several blocked fetches from burning the whole budget at once.
+const JINA_RPM: usize = 20;
+
+/// Rolling-window rate limiter for the keyless Jina Reader tier.
+struct JinaRateLimiter {
+    hits: std::sync::Mutex<VecDeque<Instant>>,
+}
+
+static JINA_LIMITER: std::sync::LazyLock<JinaRateLimiter> = std::sync::LazyLock::new(|| {
+    JinaRateLimiter {
+        hits: std::sync::Mutex::new(VecDeque::new()),
+    }
+});
+
+/// True when a Jina request is allowed under the rolling 20 RPM window;
+/// records the hit when allowed.
+fn jina_rate_limit_ok() -> bool {
+    let mut q = match JINA_LIMITER.hits.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let now = Instant::now();
+    while let Some(front) = q.front() {
+        if now.duration_since(*front) > Duration::from_secs(60) {
+            q.pop_front();
+        } else {
+            break;
+        }
+    }
+    if q.len() >= JINA_RPM {
+        return false;
+    }
+    q.push_back(now);
+    true
+}
+
+/// True when `url` points at a PDF (by extension — the content-type check
+/// happens after the response headers arrive).
+fn is_probable_pdf_url(url: &str) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or("");
+    path.to_ascii_lowercase().ends_with(".pdf")
+}
+
+/// Fetch a URL through the keyless Jina Reader (`https://r.jina.ai/<url>`),
+/// which renders JS-heavy pages, bypasses many CDN blocks, and parses PDFs
+/// server-side. Returns the reader's markdown output with its Title/URL
+/// header retained. The caller MUST have passed the target through the SSRF
+/// host guard first — routing a private/loopback URL through a public reader
+/// would otherwise launder it past `fetch_url`'s address checks.
+async fn fetch_url_via_jina(client: &reqwest::Client, url: &str) -> Result<String, String> {
+    if !jina_rate_limit_ok() {
+        return Err(
+            "jina reader rate limit reached (20 req/min keyless); retry in a minute \
+             or read the page in the browser pane instead."
+                .to_string(),
+        );
+    }
+    let reader_url = format!("https://r.jina.ai/{url}");
+    let resp = client
+        .get(&reader_url)
+        .header("User-Agent", BROWSER_UA)
+        .header("Accept", "text/plain")
+        .timeout(Duration::from_secs(45))
+        .send()
+        .await
+        .map_err(|e| format!("jina reader request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("jina reader returned HTTP {status}"));
+    }
+    let body = resp.text().await.map_err(|e| e.to_string())?;
+    if body.trim().is_empty() {
+        return Err("jina reader returned an empty document".to_string());
+    }
+    Ok(truncate_chars(&body, FETCH_URL_MAX_TEXT_CHARS))
+}
+
+/// Truncate `s` to at most `max` chars on a char boundary, appending an
+/// ellipsis marker when cut.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut cut = max;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}\n… (content truncated)", &s[..cut])
+}
+
+/// Fetch a URL and return its readable text (Readability-extracted, truncated).
 ///
-/// On HTTP failure the error is returned as `Err(...)` and surfaced to the
-/// model verbatim ("fetch_url failed: HTTP 403 Forbidden") so it can report the
-/// real reason rather than guessing. The model's tendency to call a single
-/// 403/timeout "non-functional" is addressed at the source: a browser
-/// User-Agent (so Cloudflare stops 403'ing us) and a 30s timeout (was 15s,
-/// too tight for slow JS-heavy news sites).
-pub(super) async fn fetch_url(client: &reqwest::Client, url: &str) -> Result<String, String> {
+/// Pipeline: (1) direct GET with the SSRF guards; a PDF content-type or a
+/// blocked/failed direct fetch falls back to the keyless Jina Reader, which
+/// renders JS-heavy pages and parses PDFs server-side; (2) HTML responses are
+/// extracted with `dom_smoothie` (Readability.js port); if Readability finds
+/// no article, the old tag-stripper takes over so non-article pages (web
+/// apps, docs indexes) still yield text.
+///
+/// On total failure the error is returned as `Err(...)` and surfaced to the
+/// model verbatim so it can report the real reason rather than guessing.
+pub(crate) async fn fetch_url(client: &reqwest::Client, url: &str) -> Result<String, String> {
     let url = url.trim();
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("url must start with http:// or https://".to_string());
     }
     // Parse out the host and reject blocked address ranges (SSRF guard).
+    // This runs BEFORE both the direct fetch and the Jina fallback — the
+    // reader must never be handed a private/loopback target it would fetch
+    // on our behalf.
     let parsed = url::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
     if let Some(host) = parsed.host_str() {
         if host_blocked(host) {
@@ -146,6 +261,33 @@ pub(super) async fn fetch_url(client: &reqwest::Client, url: &str) -> Result<Str
             ));
         }
     }
+
+    let direct = fetch_url_direct(client, url).await;
+    match direct {
+        Ok(FetchBody::Html(html)) => Ok(extract_html(url, &html)),
+        Ok(FetchBody::Pdf) => {
+            // Binary content is useless to the model — the reader parses it.
+            fetch_url_via_jina(client, url)
+                .await
+                .map_err(|e| format!("PDF fetch failed: {e}"))
+        }
+        Err(direct_err) => {
+            // Blocked/broken direct fetch → one reader retry before giving up.
+            fetch_url_via_jina(client, url).await.map_err(|jina_err| {
+                format!("direct fetch failed ({direct_err}); reader fallback failed ({jina_err})")
+            })
+        }
+    }
+}
+
+/// What the direct fetch produced: extractable HTML, or a binary document
+/// (PDF) the text pipeline must not touch.
+enum FetchBody {
+    Html(String),
+    Pdf,
+}
+
+async fn fetch_url_direct(client: &reqwest::Client, url: &str) -> Result<FetchBody, String> {
     let resp = client
         .get(url)
         .header("User-Agent", BROWSER_UA)
@@ -154,7 +296,7 @@ pub(super) async fn fetch_url(client: &reqwest::Client, url: &str) -> Result<Str
             "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         )
         .header("Accept-Language", "en-US,en;q=0.9")
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(Duration::from_secs(30))
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
@@ -180,37 +322,87 @@ pub(super) async fn fetch_url(client: &reqwest::Client, url: &str) -> Result<Str
     if !status.is_success() {
         return Err(format!("HTTP {status}"));
     }
+    // PDFs (content-type or extension) route to the reader — decoding PDF
+    // bytes as UTF-8 text produces garbage that used to poison the ledger.
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if content_type.contains("application/pdf") || is_probable_pdf_url(url) {
+        return Ok(FetchBody::Pdf);
+    }
     // Read the body with a hard byte cap so a hostile server can't OOM the
-    // process by streaming gigabytes of HTML.
+    // process by streaming gigabytes of HTML. Over-cap pages are TRUNCATED
+    // and still extracted, not refused: heavy reference pages (Wikipedia
+    // articles with large tables) legitimately exceed 1 MiB of raw HTML
+    // while extracting to well under the text budget — refusing them sent
+    // every such read to the reader fallback (which 403s on some domains)
+    // or failed the read entirely.
     let mut body_buf: Vec<u8> = Vec::new();
+    let mut truncated = false;
     let mut stream = resp.bytes_stream();
     use futures_util::StreamExt;
     while let Some(chunk_res) = stream.next().await {
         let chunk = chunk_res.map_err(|e| format!("read body: {e}"))?;
         if body_buf.len() + chunk.len() > FETCH_URL_MAX_BODY_BYTES {
-            return Err(format!(
-                "fetch_url refused: response body exceeds {FETCH_URL_MAX_BODY_BYTES} byte cap (sandbox limit)."
-            ));
+            let remaining = FETCH_URL_MAX_BODY_BYTES - body_buf.len();
+            body_buf.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
         }
         body_buf.extend_from_slice(&chunk);
     }
-    let body = match String::from_utf8(body_buf) {
-        Ok(s) => s,
-        Err(_) => return Err("fetch_url response is not valid UTF-8".to_string()),
-    };
-    let title = extract_title(&body);
-    let text = html_to_text(&body);
-    const MAX: usize = 12_000;
-    let text = if text.len() > MAX {
-        let mut cut = MAX;
-        while !text.is_char_boundary(cut) {
-            cut -= 1;
+    let _ = truncated; // extraction quality note only; the text cap governs output
+    // Lossy: a truncate may split a multi-byte char mid-sequence.
+    let body = String::from_utf8_lossy(&body_buf).into_owned();
+    Ok(FetchBody::Html(body))
+}
+
+/// Extract readable article text from an HTML document: `dom_smoothie`
+/// (Readability.js port) first, the legacy tag-stripper as fallback for
+/// non-article pages. Returns the same `Title: …\nURL: …\n\n<body>` envelope
+/// the tool has always produced.
+fn extract_html(url: &str, html: &str) -> String {
+    // Readability with a document URL resolves relative links while parsing.
+    let readability = dom_smoothie::Readability::new(html, Some(url), None)
+        .ok()
+        .and_then(|mut rd| {
+            let title = rd.get_article_title().to_string();
+            rd.parse().ok().map(|article| (title, article))
+        });
+    if let Some((title, article)) = readability {
+        let text = article.text_content.trim();
+        if text.len() >= 200 {
+            let title = if title.is_empty() {
+                article.title.trim()
+            } else {
+                title.trim()
+            };
+            let body = truncate_chars(text, FETCH_URL_MAX_TEXT_CHARS);
+            let mut out = format!("Title: {title}\nURL: {url}\n");
+            if let Some(byline) = article.byline.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                out.push_str(&format!("Byline: {byline}\n"));
+            }
+            if let Some(published) = article
+                .published_time
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                out.push_str(&format!("Published: {published}\n"));
+            }
+            out.push_str(&format!("\n{body}"));
+            return out;
         }
-        format!("{}\n… (content truncated)", &text[..cut])
-    } else {
-        text
-    };
-    Ok(format!("Title: {title}\nURL: {url}\n\n{text}"))
+    }
+    // Readability found no article (or too little text) — strip tags instead
+    // so index/list/app pages still surface something usable.
+    let title = extract_title(html);
+    let text = html_to_text(html);
+    let body = truncate_chars(&text, FETCH_URL_MAX_TEXT_CHARS);
+    format!("Title: {title}\nURL: {url}\n\n{body}")
 }
 
 fn extract_title(html: &str) -> String {
@@ -325,56 +517,133 @@ struct SearchHit {
     snippet: String,
 }
 
-/// Free, no-API-key web search. Primary source is the DuckDuckGo HTML results
-/// page (a *real* SERP, unlike the Instant Answer API which only fires for
-/// encyclopedic entities). The Instant Answer API and Wikipedia are kept as
-/// cheap secondary sources for encyclopedic color. Results are merged,
-/// de-duplicated, and rendered as a plain-text list for the model.
+/// A BYO-key search provider the user configured in Settings. When set, it
+/// replaces the keyless SERP engines (DDG/Mojeek) as the web index; Wikipedia
+/// still supplements. Keys live in `app_settings` (`search.<provider>_key`),
+/// set through the existing generic settings IPC.
+#[derive(Debug, Clone)]
+pub struct SearchProvider {
+    /// Static provider id ("serper" | "tavily" | "brave") — doubles as the
+    /// engine tag used for cache-exclusion decisions.
+    pub name: &'static str,
+    pub key: String,
+}
+
+/// Resolve the configured search provider from app_settings, if any.
+pub(crate) fn configured_provider(conn: &rusqlite::Connection) -> Option<SearchProvider> {
+    let provider = crate::db::get_setting(conn, "search.provider")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let provider = provider.trim().to_ascii_lowercase();
+    let known = match provider.as_str() {
+        "serper" => "serper",
+        "tavily" => "tavily",
+        "brave" => "brave",
+        _ => return None,
+    };
+    let key = crate::db::get_setting(conn, &format!("search.{known}_key"))
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        return None;
+    }
+    Some(SearchProvider { name: known, key })
+}
+
+/// Free, no-API-key web search across multiple engines: the DuckDuckGo HTML
+/// results page (a *real* SERP), Mojeek's independent index, and Wikipedia's
+/// API. No engine is load-bearing: any one can fail (rate-limit, layout
+/// change) and the merged result stays useful. (The old DDG Instant Answer
+/// API call was removed — verified live 2026-09 to return HTTP 200 with
+/// empty payloads, i.e. unmaintained legacy that only masked real outages
+/// as "No results found".)
 ///
-/// Network errors from each source are tracked separately so the caller can
+/// Results are merged, de-duplicated by URL, and rendered as a plain-text
+/// list for the model, with a per-engine health footer so the model can
 /// distinguish "no public results" from "the search backend was unreachable":
-/// if *every* source errored, we return an explicit `Err` instead of the
-/// misleading "No results found" string (which the model read as "tool broken").
+/// if *every* engine errored, we return an explicit `Err` instead.
 pub(super) async fn web_search(client: &reqwest::Client, query: &str) -> Result<String, String> {
+    web_search_with_status(client, query, None)
+        .await
+        .map(|(text, _)| text)
+}
+
+/// Same as [`web_search`] but also returns a machine-readable per-engine
+/// status tag (`"duckduckgo:ok,mojeek:fail,wikipedia:ok"`) that the caching
+/// layer uses to decide whether the payload may be persisted (Brave/other
+/// engines with storage restrictions are excluded by tag, not by name
+/// guessing after the fact).
+pub(crate) async fn web_search_with_status(
+    client: &reqwest::Client,
+    query: &str,
+    provider: Option<&SearchProvider>,
+) -> Result<(String, String), String> {
     let mut hits: Vec<SearchHit> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-    let mut sources_tried = 0u32;
+    let mut engine_status: Vec<String> = Vec::new();
+    let mut engine_tag: Vec<String> = Vec::new();
+    let mut engines_ok = 0u32;
+    let mut engines_tried = 0u32;
 
-    sources_tried += 1;
-    match duckduckgo_html(client, query).await {
-        Ok(mut v) => hits.append(&mut v),
-        Err(e) => errors.push(format!("duckduckgo_html: {e}")),
+    macro_rules! run_engine {
+        ($name:literal, $fut:expr) => {{
+            engines_tried += 1;
+            match $fut.await {
+                Ok(mut v) => {
+                    let n = v.len();
+                    hits.append(&mut v);
+                    engines_ok += 1;
+                    engine_status.push(format!("{} ok ({n})", $name));
+                    engine_tag.push(format!("{}:ok", $name));
+                }
+                Err(e) => {
+                    engine_status.push(format!("{} FAILED: {e}", $name));
+                    engine_tag.push(format!("{}:fail", $name));
+                }
+            }
+        }};
     }
 
-    sources_tried += 1;
-    match duckduckgo_instant(client, query).await {
-        Ok(mut v) => hits.append(&mut v),
-        Err(e) => errors.push(format!("duckduckgo_instant: {e}")),
+    // BYO-key provider replaces the keyless SERP engines when configured;
+    // Wikipedia stays as a free encyclopedic supplement either way.
+    match provider {
+        Some(p) => match p.name {
+            "tavily" => run_engine!("tavily", tavily_search(client, &p.key, query)),
+            "brave" => run_engine!("brave", brave_search(client, &p.key, query)),
+            _ => run_engine!("serper", serper_search(client, &p.key, query)),
+        },
+        None => {
+            run_engine!("duckduckgo", duckduckgo_html(client, query));
+            run_engine!("mojeek", mojeek_html(client, query));
+        }
     }
+    run_engine!("wikipedia", wikipedia_search(client, query));
 
-    sources_tried += 1;
-    match wikipedia_search(client, query).await {
-        Ok(mut v) => hits.append(&mut v),
-        Err(e) => errors.push(format!("wikipedia: {e}")),
-    }
+    let engines_tag = engine_tag.join(",");
 
     // De-duplicate by URL, preserving order.
     let mut seen = std::collections::HashSet::new();
     hits.retain(|h| !h.url.is_empty() && seen.insert(h.url.clone()));
 
     if hits.is_empty() {
-        // If every source failed with a network/HTTP error, that is NOT "no
+        // If every engine failed with a network/HTTP error, that is NOT "no
         // results" — it is "search is unreachable". Surface it as an error so
         // the model tells the user the backend is down instead of claiming the
         // query has no results (which it would otherwise parrot).
-        if errors.len() as u32 == sources_tried {
+        if engines_ok == 0 {
             return Err(format!(
-                "all search backends failed: {}",
-                errors.join("; ")
+                "all search engines failed: {}",
+                engine_status.join("; ")
             ));
         }
-        return Ok(format!(
-            "No results found for \"{query}\". Try rephrasing the query."
+        return Ok((
+            format!(
+                "No results found for \"{query}\". Engines: {}. Try rephrasing the query.",
+                engine_status.join(", ")
+            ),
+            engines_tag,
         ));
     }
 
@@ -385,7 +654,154 @@ pub(super) async fn web_search(client: &reqwest::Client, query: &str) -> Result<
             out.push_str(&format!("   {}\n", h.snippet));
         }
     }
-    Ok(out)
+    if engines_ok < engines_tried {
+        out.push_str(&format!(
+            "\n(engine health: {} — degraded results, treat coverage as partial)\n",
+            engine_status.join(", ")
+        ));
+    }
+    Ok((out, engines_tag))
+}
+
+// ---------------------------------------------------------------------------
+// BYO-key search providers
+// ---------------------------------------------------------------------------
+
+/// Serper.dev: Google SERP, $1/1k queries. POST JSON, `X-API-KEY` header.
+async fn serper_search(
+    client: &reqwest::Client,
+    key: &str,
+    query: &str,
+) -> Result<Vec<SearchHit>, String> {
+    let resp = client
+        .post("https://google.serper.dev/search")
+        .header("X-API-KEY", key)
+        .header("Content-Type", "application/json")
+        .timeout(std::time::Duration::from_secs(15))
+        .json(&serde_json::json!({ "q": query }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+    let json: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let mut hits = Vec::new();
+    if let Some(organic) = json.get("organic").and_then(|v| v.as_array()) {
+        for r in organic {
+            let url = r.get("link").and_then(|v| v.as_str()).unwrap_or("");
+            let title = r.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            if url.is_empty() || title.is_empty() {
+                continue;
+            }
+            hits.push(SearchHit {
+                title: title.to_string(),
+                url: url.to_string(),
+                snippet: r
+                    .get("snippet")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            });
+        }
+    }
+    Ok(hits)
+}
+
+/// Tavily: agent-native search, $8/1k basic credits. POST JSON, `api_key` in
+/// the body (their documented v1 auth shape).
+async fn tavily_search(
+    client: &reqwest::Client,
+    key: &str,
+    query: &str,
+) -> Result<Vec<SearchHit>, String> {
+    let resp = client
+        .post("https://api.tavily.com/search")
+        .timeout(std::time::Duration::from_secs(20))
+        .json(&serde_json::json!({
+            "api_key": key,
+            "query": query,
+            "search_depth": "basic",
+            "max_results": 8
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+    let json: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let mut hits = Vec::new();
+    if let Some(results) = json.get("results").and_then(|v| v.as_array()) {
+        for r in results {
+            let url = r.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let title = r.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            if url.is_empty() || title.is_empty() {
+                continue;
+            }
+            hits.push(SearchHit {
+                title: title.to_string(),
+                url: url.to_string(),
+                snippet: r
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            });
+        }
+    }
+    Ok(hits)
+}
+
+/// Brave Search API: independent index, metered (~$5/mo effective at hobby
+/// scale). GET with `X-Subscription-Token`. NOTE: Brave's terms restrict
+/// result storage — `cacheable_engines` refuses to persist brave-only
+/// payloads, so the cache layer stays compliant.
+async fn brave_search(
+    client: &reqwest::Client,
+    key: &str,
+    query: &str,
+) -> Result<Vec<SearchHit>, String> {
+    let resp = client
+        .get("https://api.search.brave.com/res/v1/web/search")
+        .header("X-Subscription-Token", key)
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(15))
+        .query(&[("q", query), ("count", "8")])
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+    let json: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let mut hits = Vec::new();
+    if let Some(results) = json
+        .get("web")
+        .and_then(|w| w.get("results"))
+        .and_then(|v| v.as_array())
+    {
+        for r in results {
+            let url = r.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let title = r.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            if url.is_empty() || title.is_empty() {
+                continue;
+            }
+            hits.push(SearchHit {
+                title: title.to_string(),
+                url: url.to_string(),
+                snippet: r
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            });
+        }
+    }
+    Ok(hits)
 }
 
 /// The DuckDuckGo **HTML** results endpoint (`html.duckduckgo.com/html/`) is a
@@ -530,6 +946,125 @@ fn unwrap_ddg_redirect(href: &str) -> String {
     percent_decode(encoded)
 }
 
+/// Mojeek is the keyless fallback index: an independent crawler (not a Bing/DDG
+/// reskin), stable HTML, no bot-wall — queried so a DDG layout change or rate
+/// limit can no longer take search down by itself.
+async fn mojeek_html(client: &reqwest::Client, query: &str) -> Result<Vec<SearchHit>, String> {
+    let url = "https://www.mojeek.com/search";
+    let resp = client
+        .get(url)
+        .header("User-Agent", BROWSER_UA)
+        .timeout(std::time::Duration::from_secs(10))
+        .query(&[("q", query)])
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+    let body = resp.text().await.map_err(|e| e.to_string())?;
+    Ok(parse_mojeek_html(&body))
+}
+
+/// Parse the Mojeek results page. Results are `<li>` blocks whose title link
+/// is an `<a href="http…">Title</a>` (historically inside an `<h2>`) with a
+/// sibling `<p class="s">` snippet. Parsed tolerantly (block-slice + first
+/// external anchor rather than exact class chains) so minor markup tweaks
+/// degrade instead of zeroing the engine.
+fn parse_mojeek_html(html: &str) -> Vec<SearchHit> {
+    let lower = html.to_ascii_lowercase();
+    let mut hits = Vec::new();
+    let mut search_from = 0;
+    while let Some(rel) = lower[search_from..].find("<li") {
+        let li_start = search_from + rel;
+        // Skip `<li`-prefixed tags like `<link`.
+        let after = lower[li_start + 3..].chars().next();
+        if !matches!(after, Some(' ') | Some('>') | Some('\t') | Some('\n') | Some('\r')) {
+            search_from = li_start + 3;
+            continue;
+        }
+        let li_end_rel = match lower[li_start..].find("</li>") {
+            Some(e) => e,
+            None => break,
+        };
+        let li_end = li_start + li_end_rel;
+        search_from = li_end + 5;
+        let block = &html[li_start..li_end];
+        let block_lower = &lower[li_start..li_end];
+
+        // First anchor with an external http(s) href is the result link.
+        let mut href: Option<(String, usize)> = None;
+        let mut scan = 0;
+        while let Some(a_rel) = block_lower[scan..].find("<a ") {
+            let a_pos = scan + a_rel;
+            let close_gt = match block_lower[a_pos..].find('>') {
+                Some(g) => a_pos + g,
+                None => break,
+            };
+            let open_tag = &block[a_pos..=close_gt.min(block.len() - 1)];
+            if let Some(raw_href) = extract_attr(open_tag, "href") {
+                if raw_href.starts_with("http://") || raw_href.starts_with("https://") {
+                    href = Some((raw_href, close_gt + 1));
+                    break;
+                }
+            }
+            scan = close_gt + 1;
+        }
+        let Some((url, text_start)) = href else { continue };
+        let title_end = match block_lower[text_start..].find("</a>") {
+            Some(e) => text_start + e,
+            None => continue,
+        };
+        let title = strip_html(&block[text_start..title_end]);
+        if title.is_empty() {
+            continue;
+        }
+        // Snippet: first `<p class="s">` in the block; fall back to any `<p>`.
+        let snippet = find_tag_text(block, block_lower, "p", Some("s"))
+            .or_else(|| find_tag_text(block, block_lower, "p", None))
+            .unwrap_or_default();
+        hits.push(SearchHit {
+            title,
+            url,
+            snippet,
+        });
+    }
+    hits
+}
+
+/// Text content of the first `<tag>` (optionally restricted to a `class`
+/// value) inside `block`. `block_lower` is the ASCII-lowercased twin of
+/// `block` (same byte offsets).
+fn find_tag_text(block: &str, block_lower: &str, tag: &str, class: Option<&str>) -> Option<String> {
+    let mut scan = 0;
+    while let Some(t_rel) = block_lower[scan..].find(&format!("<{tag}")) {
+        let t_pos = scan + t_rel;
+        let after = match block_lower[t_pos + tag.len() + 1..].chars().next() {
+            Some(c) => c,
+            None => return None,
+        };
+        if !matches!(after, ' ' | '>') {
+            scan = t_pos + tag.len();
+            continue;
+        }
+        let close_gt = block_lower[t_pos..].find('>')? + t_pos;
+        let open_tag = &block[t_pos..=close_gt.min(block.len() - 1)];
+        let class_ok = match class {
+            None => true,
+            Some(want) => extract_attr(open_tag, "class")
+                .is_some_and(|c| c.split_whitespace().any(|w| w == want)),
+        };
+        let text_start = close_gt + 1;
+        let text_end_rel = block_lower[text_start..].find(&format!("</{tag}>"))?;
+        if class_ok {
+            return Some(strip_html(&block[text_start..text_start + text_end_rel]));
+        }
+        scan = text_start + text_end_rel;
+    }
+    None
+}
+
 /// Minimal percent-decoding for the `uddg` parameter value.
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
@@ -550,77 +1085,6 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).to_string()
-}
-
-async fn duckduckgo_instant(
-    client: &reqwest::Client,
-    query: &str,
-) -> Result<Vec<SearchHit>, String> {
-    let url = "https://api.duckduckgo.com/";
-    let resp = client
-        .get(url)
-        .header("User-Agent", BROWSER_UA)
-        .timeout(std::time::Duration::from_secs(10))
-        .query(&[
-            ("q", query),
-            ("format", "json"),
-            ("no_html", "1"),
-            ("t", "conduit"),
-        ])
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    let json: Value = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(parse_duckduckgo(&json))
-}
-
-/// Pull the abstract and related topics out of a DuckDuckGo IA response.
-fn parse_duckduckgo(json: &Value) -> Vec<SearchHit> {
-    let mut hits = Vec::new();
-
-    let abstract_text = json.get("AbstractText").and_then(|v| v.as_str()).unwrap_or("");
-    let abstract_url = json.get("AbstractURL").and_then(|v| v.as_str()).unwrap_or("");
-    if !abstract_text.is_empty() && !abstract_url.is_empty() {
-        let heading = json.get("Heading").and_then(|v| v.as_str()).unwrap_or("Result");
-        hits.push(SearchHit {
-            title: heading.to_string(),
-            url: abstract_url.to_string(),
-            snippet: abstract_text.to_string(),
-        });
-    }
-
-    if let Some(topics) = json.get("RelatedTopics").and_then(|v| v.as_array()) {
-        for t in topics {
-            // Related topics are either a hit ({Text, FirstURL}) or a group
-            // ({Name, Topics:[...]}). Flatten one level of groups.
-            if let Some(hit) = related_topic_hit(t) {
-                hits.push(hit);
-            } else if let Some(sub) = t.get("Topics").and_then(|v| v.as_array()) {
-                for st in sub {
-                    if let Some(hit) = related_topic_hit(st) {
-                        hits.push(hit);
-                    }
-                }
-            }
-        }
-    }
-
-    hits
-}
-
-fn related_topic_hit(t: &Value) -> Option<SearchHit> {
-    let text = t.get("Text").and_then(|v| v.as_str())?;
-    let url = t.get("FirstURL").and_then(|v| v.as_str())?;
-    if text.is_empty() || url.is_empty() {
-        return None;
-    }
-    // Use the leading phrase (before the first " - ") as the title.
-    let title = text.split(" - ").next().unwrap_or(text).to_string();
-    Some(SearchHit {
-        title,
-        url: url.to_string(),
-        snippet: text.to_string(),
-    })
 }
 
 async fn wikipedia_search(
@@ -740,23 +1204,55 @@ mod tests {
 
 
     #[test]
-    fn parse_duckduckgo_extracts_abstract_and_topics() {
-        let json = json!({
-            "Heading": "Ada Lovelace",
-            "AbstractText": "English mathematician and writer.",
-            "AbstractURL": "https://en.wikipedia.org/wiki/Ada_Lovelace",
-            "RelatedTopics": [
-                { "Text": "Analytical Engine - a proposed machine", "FirstURL": "https://duckduckgo.com/Analytical_Engine" },
-                { "Name": "Group", "Topics": [
-                    { "Text": "Ada (language) - named after Lovelace", "FirstURL": "https://duckduckgo.com/Ada" }
-                ]}
-            ]
-        });
-        let hits = parse_duckduckgo(&json);
-        assert_eq!(hits[0].title, "Ada Lovelace");
-        assert_eq!(hits[0].url, "https://en.wikipedia.org/wiki/Ada_Lovelace");
-        assert_eq!(hits[1].title, "Analytical Engine");
-        assert_eq!(hits[2].title, "Ada (language)");
+    fn parse_mojeek_html_extracts_results_tolerantly() {
+        // Fixture shaped like Mojeek's SERP: <li> blocks with an <h2><a href>
+        // title link and a <p class="s"> snippet. Exercises both the exact
+        // shape and a variant with the anchor outside the <h2>.
+        let html = concat!(
+            r#"<ul class="results-standard"><li><h2><a href="https://www.rust-lang.org/">Rust Programming Language</a></h2>"#,
+            r#"<p class="s">A language empowering everyone to build reliable software.</p></li>"#,
+            r#"<li><h2><a class="title" href="https://doc.rust-lang.org/book/">The Rust Book</a></h2>"#,
+            r#"<p class="s">Learn Rust — the official book.</p></li>"#,
+            r#"<li><a href="/internal">internal link is skipped</a></li>"#,
+            r#"<li><p class="s">no anchor here</p></li>"#,
+            r#"</ul>"#,
+        );
+        let hits = parse_mojeek_html(html);
+        assert_eq!(hits.len(), 2, "external-anchor results parsed, others skipped");
+        assert_eq!(hits[0].url, "https://www.rust-lang.org/");
+        assert_eq!(hits[0].title, "Rust Programming Language");
+        assert_eq!(
+            hits[0].snippet,
+            "A language empowering everyone to build reliable software."
+        );
+        assert_eq!(hits[1].url, "https://doc.rust-lang.org/book/");
+        assert_eq!(hits[1].title, "The Rust Book");
+    }
+
+    #[test]
+    fn truncate_chars_cuts_on_char_boundary() {
+        assert_eq!(truncate_chars("hello", 10), "hello");
+        let cut = truncate_chars("abcdef", 3);
+        assert!(cut.starts_with("abc"));
+        assert!(cut.contains("truncated"));
+        // Multibyte: must not panic slicing inside a char.
+        let _ = truncate_chars("héllo wörld", 4);
+    }
+
+    #[test]
+    fn is_probable_pdf_url_checks_path_only() {
+        assert!(is_probable_pdf_url("https://x.org/report.pdf"));
+        assert!(is_probable_pdf_url("https://x.org/report.PDF?dl=1"));
+        assert!(!is_probable_pdf_url("https://x.org/pdf.html"));
+        assert!(!is_probable_pdf_url("https://x.org/page?q=.pdf"));
+    }
+
+    #[test]
+    fn jina_rate_limiter_windows() {
+        // Fresh limiter: below the cap, every hit allowed.
+        for _ in 0..4 {
+            assert!(jina_rate_limit_ok());
+        }
     }
 
     #[test]

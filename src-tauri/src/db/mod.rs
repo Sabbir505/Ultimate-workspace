@@ -16,6 +16,7 @@ mod cost;
 mod cost_v2;
 pub mod docs;
 mod projects;
+mod research_cache;
 mod secrets;
 mod settings;
 mod skills;
@@ -140,6 +141,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_artifacts_message_id(conn)?;
     migrate_chat_messages_superseded(conn)?;
     migrate_cost_v2(conn)?;
+    migrate_source_notes_metadata(conn)?;
     migrate_chat_messages_v2(conn)?;
     migrate_chat_messages_started_completed(conn)?;
     migrate_chat_messages_perf(conn)?;
@@ -336,6 +338,23 @@ fn migrate_chat_messages_superseded(conn: &Connection) -> DbResult<()> {
     if let Err(e) = conn.execute(sql, []) {
         if !e.to_string().contains("duplicate column name") {
             return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Source-note metadata columns: publisher name and publish date. Temporal
+/// conflicts (stale-vs-fresh sources) are a first-class research error class;
+/// without a capture date in the ledger the synthesis prompt can only guess
+/// which source is newer. Same duplicate-column-tolerant pattern as
+/// `migrate_cost_v2`.
+fn migrate_source_notes_metadata(conn: &Connection) -> DbResult<()> {
+    for col in ["publisher TEXT", "published_at TEXT"] {
+        let sql = format!("ALTER TABLE chat_source_notes ADD COLUMN {col}");
+        if let Err(e) = conn.execute(&sql, []) {
+            if !e.to_string().contains("duplicate column name") {
+                return Err(e);
+            }
         }
     }
     Ok(())
@@ -711,6 +730,8 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           fact TEXT NOT NULL,
           excerpt TEXT NOT NULL,
           unavailable TEXT,
+          publisher TEXT,
+          published_at TEXT,
           created_at INTEGER NOT NULL
         );
 
@@ -718,6 +739,60 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
 
         -- Prevent exact-duplicate source notes (same session + url + fact).
         CREATE UNIQUE INDEX IF NOT EXISTS uq_source_notes_dedup ON chat_source_notes(chat_session_id, url, fact);
+
+        -- Cached web-search result payloads, keyed on the normalized query
+        -- (see research_cache::search_cache_put). Brave-sourced payloads are
+        -- never stored (API terms prohibit result storage without a
+        -- storage-rights plan).
+        CREATE TABLE IF NOT EXISTS search_cache (
+          key TEXT PRIMARY KEY,
+          payload TEXT NOT NULL,
+          engines TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+
+        -- Cached extracted page content keyed on the canonical URL, so
+        -- re-reads of the same source within the TTL never re-hit the wire.
+        CREATE TABLE IF NOT EXISTS page_cache (
+          url_key TEXT PRIMARY KEY,
+          content TEXT NOT NULL,
+          content_hash TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+
+        -- Per-session log of executed web searches. Powers the each-query-unique
+        -- rule (the dispatcher nudges on exact repeats) and leaves an audit
+        -- trail of what a research task actually searched.
+        CREATE TABLE IF NOT EXISTS research_queries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          chat_session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+          query TEXT NOT NULL,
+          normalized_query TEXT NOT NULL,
+          engines TEXT NOT NULL,
+          result_count INTEGER NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_research_queries_session
+          ON research_queries(chat_session_id, normalized_query);
+
+        -- Output of the citation-integrity lint run over each research
+        -- report (orphan citations, unused sources, weak attribution).
+        CREATE TABLE IF NOT EXISTS citation_reports (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          chat_session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+          message_id INTEGER,
+          total_citations INTEGER NOT NULL,
+          orphan_count INTEGER NOT NULL,
+          unused_count INTEGER NOT NULL,
+          uncited_sentences INTEGER NOT NULL,
+          weak_count INTEGER NOT NULL,
+          detail TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_citation_reports_session
+          ON citation_reports(chat_session_id, created_at DESC);
 
         -- App-scoped connector OAuth credentials. Secret token values live in
         -- the OS keychain (secrets.rs); this row only holds non-sensitive
@@ -858,11 +933,19 @@ pub use chat::{
 // artifacts
 pub use artifacts::{
     attach_artifacts_to_message, delete_artifact, delete_expired_artifacts, insert_artifact,
-    list_artifacts, list_artifacts_for_chat,
+    list_artifacts, list_artifacts_for_chat, list_artifacts_for_message,
 };
 
 // source ledger (research mode)
 pub use source_ledger::{add_source_note, clear_source_notes, list_source_notes};
+
+// research caches + query history (research mode)
+pub use research_cache::{
+    cacheable_engines, canonical_url_key, citation_quality_trend, clear_searches, content_hash,
+    latest_citation_detail, page_cache_get, page_cache_put, record_search, save_citation_report,
+    search_cache_get, search_cache_put, CitationQualityPoint, PAGE_CACHE_TTL_SECS,
+    SEARCH_CACHE_TTL_SECS,
+};
 
 pub use docs::{
     add_corpus, any_searchable_corpus, attach_corpus_to_chat, attached_corpus_ids,
@@ -924,6 +1007,7 @@ pub(crate) fn mem() -> Connection {
     migrate_artifacts_message_id(&conn).unwrap();
     migrate_chat_messages_superseded(&conn).unwrap();
     migrate_cost_v2(&conn).unwrap();
+    migrate_source_notes_metadata(&conn).unwrap();
     migrate_chat_messages_v2(&conn).unwrap();
     migrate_chat_messages_started_completed(&conn).unwrap();
     migrate_chat_messages_perf(&conn).unwrap();

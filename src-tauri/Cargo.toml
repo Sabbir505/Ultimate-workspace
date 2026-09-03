@@ -141,6 +141,7 @@ hkdf = "0.12"
 # HMAC-SHA256 for the E2E pairing proof (relay_crypto::compute_pair_proof).
 # Same RustCrypto family as hkdf/chacha20poly1305.
 hmac = "0.12"
+dom_smoothie = "0.18"
 
 [dev-dependencies]
 tempfile = "3"

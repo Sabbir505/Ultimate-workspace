@@ -411,48 +411,78 @@ pub fn is_research_request(content: &str) -> bool {
 
 /// Plan/Execute/Synthesize scaffolding, appended after the CORE prompt only on
 /// turns classified as research requests (and only when tools are enabled).
-/// Keeps the model from improvising a search-click-read loop: it states a
-/// plan, records real excerpts per source into the ledger, and synthesizes
-/// from the ledger rather than conversation memory.
+/// Keeps the model from improvising a search-click-read loop: it scopes the
+/// task, states a plan, records real excerpts per source into the ledger,
+/// checks evidence sufficiency, and synthesizes from the ledger rather than
+/// conversation memory.
 const RESEARCH_SEGMENT: &str = "\n\n## Research mode (this turn)\n\
 Multi-source research — do NOT answer from memory or improvise a search loop. Follow:\n\n\
-### 1. Plan\n\
-Call `reset_source_ledger` first. Internally identify 3-5 distinct sub-questions \
-covering the user's question with genuinely diverse sources (not all tracing to one \
-original). State the plan in one line to the user (stating it measurably improves follow-through).\n\n\
+### 1. Scope\n\
+Call `reset_source_ledger` first. If the question is genuinely ambiguous (wrong \
+scope could waste the whole run), ask the user AT MOST two short clarifying \
+questions and END THE TURN — their reply re-enters research mode with answers. \
+Otherwise: internally identify 3-5 distinct sub-questions covering the question \
+with genuinely diverse sources (not all tracing to one original), state the \
+research brief in 1-2 sentences to the user (what you'll establish and from \
+where — stating it measurably improves follow-through).\n\n\
 ### 2. Execute (per sub-question: search → triage → read → record)\n\
-- Search broad first: 2-3 `web_search` calls to map the landscape before deep-reading any source.\n\
+- Search broad first: 2-3 `web_search` calls to map the landscape before deep-reading any source. \
+Each query must explore NEW ground — repeated queries are nudged by the tool and waste the budget.\n\
 - For promising URLs, `browser_read(mode: \"summary_only\")` first; escalate to `full` \
 only if the summary shows it's central. Prefer `browser_read` over `fetch_url` for \
 structured output.\n\
 - IMMEDIATELY after each read, call `add_source_note` with: `url` (or canonicalUrl), \
 `title`, `fact` (one concrete sentence), `excerpt` (SHORT VERBATIM quote — don't \
-paraphrase at extraction; paraphrase at synthesis), and `unavailable` = \
-`failureReason` if the source couldn't be read. A source not in the ledger does \
-not exist for this turn.\n\
+paraphrase at extraction; paraphrase at synthesis), `unavailable` = \
+`failureReason` if the source couldn't be read, and — when the page metadata \
+shows them — `publisher` and `publishedAt` (used later to weight conflicts). A \
+source not in the ledger does not exist for this turn.\n\
 - If paywalled/login_required/extraction_failed, record with `unavailable` set and \
 move on — surface in final Sources as \"consulted, unavailable\" so gaps are visible.\n\
-- Stop a sub-question once you have 2-3 corroborating notes.\n\n\
-### 3. Synthesize (read ledger → write artifact → verify)\n\
-- Call `get_source_ledger` to retrieve all notes. Write the answer FROM THE LEDGER, \
-not conversation memory.\n\
-- **Flag contradictions** explicitly rather than silently picking one or averaging.\n\
+- Stop a sub-question once you have 2-3 corroborating notes from INDEPENDENT \
+domains (three articles citing the same press release = one source).\n\n\
+### 3. Verify sufficiency (before writing anything)\n\
+Call `get_source_ledger`, then `check_sufficiency` with one entry per \
+sub-question: status sufficient only when ≥2 independent sources answer it and \
+you looked for opposing/outdated views. On NOT SUFFICIENT, do the targeted \
+follow-up it lists (a search or two, not a restart) and re-check ONCE. After a \
+second NOT SUFFICIENT, proceed anyway and say plainly what stayed unverified.\n\n\
+### 4. Synthesize (read ledger → write artifact → verify)\n\
+- Write the answer FROM THE LEDGER, not conversation memory.\n\
+- **Conflicts**: sources may disagree because one is outdated, one is wrong, or \
+the question is genuinely ambiguous. Before writing, identify conflicting pairs; \
+prefer the fresher (use publishedAt) / more authoritative (publisher, primary \
+over aggregator) source; where genuinely ambiguous, state BOTH positions with \
+their dates and citations — never silently average them into a false consensus.\n\
 - **Verify**: every non-obvious factual claim must trace to a ledger entry. Cut or \
-hedge anything that doesn't.\n\
+hedge anything that doesn't (weakly supported claims get \"reportedly\"/\"one source \
+says\", not confident assertion).\n\
 - Call `generate_file` with `format: \"md\"` and a descriptive `filename`. Content: \
 (1) title + short executive summary; (2) findings by sub-question with inline [1], \
 [2] citations; (3) `## Sources` built from the ledger — one numbered entry per note \
-(url + title + one-line fact; unavailable sources marked).\n\
+(publisher + title + url + one-line fact; publish date when known; unavailable \
+sources marked).\n\
 - After `generate_file`, write a 2-3 sentence plain-text summary and mention the filename.\n\n\
 ### Context budget\n\
 Target 8-15 notes total, not 40. Re-reading the same URL is forbidden. Read in full \
-≤5-8 sources — if you need more, the sub-questions are too broad; split them, don't read 20 pages.";
+≤5-8 sources — if you need more, the sub-questions are too broad; split them, don't read 20 pages.\n\n\
+### Depth (broad questions)\n\
+When the question genuinely spans independent areas (state of X across N vendors, \
+a survey with distinct sub-fields), you MAY fan out: spawn 2-4 `task` subagents, \
+one per sub-question cluster, each prompted to run its own search→read→record \
+cycle against the SHARED ledger (they have the ledger tools) and return a \
+COMPRESSED findings summary (claims + source list, never raw pages). You keep \
+orchestrating: dedupe their sources, resolve conflicts yourself, and run the same \
+sufficiency check before synthesis. Skip the fan-out for focused questions — \
+a single loop is faster and equally good.";
 
 /// Stricter budget addendum appended to the research segment only when
 /// `ModelClass == Local`, mirroring how `core_prompt_strict` follows the base.
 const RESEARCH_LOCAL_ADDENDUM: &str = "\n\n\
 Local model: cap at 8 reads total, prefer `browser_read` `section` over `full`, \
-never exceed 12 source notes, and if a fact isn't supported by the ledger, OMIT it.";
+never exceed 12 source notes, and if a fact isn't supported by the ledger, OMIT it. \
+When the ledger no longer fits comfortably, call `get_source_ledger` with \
+mode:'compact' (claim index, no excerpts) instead of scrolling back.";
 
 /// Build the research-mode prompt segment for a given model class. Frontier
 /// models get the segment as-is; local/smaller models get the stricter-budget
@@ -766,6 +796,7 @@ mod tests {
                 "add_source_note",
                 "get_source_ledger",
                 "reset_source_ledger",
+                "check_sufficiency",
             ];
             let mut backtick_split = prompt.split('`');
             // Skip the text before the first backtick.

@@ -14,7 +14,10 @@ use serde_json::{json, Value};
 use super::codeexec;
 
 mod search;
-use search::{fetch_url, web_search};
+pub(crate) use search::{
+    configured_provider, fetch_url, web_search_with_status,
+};
+use search::web_search;
 /// Re-exported so `download_task` (chat/tasks.rs) can reuse the SSRF guard
 /// (host_blocked / is_blocked_ip) instead of duplicating it.
 pub(crate) use search::{host_blocked, is_blocked_ip};
@@ -137,6 +140,11 @@ pub const GET_SOURCE_LEDGER: &str = "get_source_ledger";
 /// Clear the source ledger for this chat session — call at the start of every
 /// new research task so a fresh question begins from a clean ledger.
 pub const RESET_SOURCE_LEDGER: &str = "reset_source_ledger";
+/// Evidence-sufficiency checklist the research loop MUST pass before
+/// synthesizing the final report. Stateless: validates the model's declared
+/// per-sub-question status and returns SUFFICIENT / NOT SUFFICIENT with the
+/// gaps spelled out. Dispatched with the ledger tools (same registry).
+pub const CHECK_SUFFICIENCY: &str = "check_sufficiency";
 
 // ---- Automations (scheduled headless agent runs) ----
 //
@@ -617,13 +625,25 @@ const ADD_SOURCE_NOTE_DESC: &str = "Record ONE concrete fact from a research \
 
 const GET_SOURCE_LEDGER_DESC: &str = "Re-read every source note you have recorded \
     for this chat session, returned as a JSON array (each entry: url, title, fact, \
-    excerpt, unavailable, createdAt). Call this during synthesis to write the final \
-    answer and its Sources section FROM THE LEDGER, not from conversation memory.";
+    excerpt, publisher, publishedAt, unavailable, createdAt). Call this during synthesis \
+    to write the final answer and its Sources section FROM THE LEDGER, not from \
+    conversation memory. mode:'compact' drops the excerpts and returns just the claim \
+    index — use it when the ledger is too large for the context window, then cite \
+    specific entries from memory of what you recorded.";
 
 const RESET_SOURCE_LEDGER_DESC: &str = "Clear every source note recorded for this \
     chat session. Call this at the START of each new research task so a fresh \
     question begins from a clean ledger (notes from a previous, unrelated question \
     are discarded).";
+
+const CHECK_SUFFICIENCY_DESC: &str = "Evidence-sufficiency gate before writing a \
+    research report: declare each sub-question's status and the tool tells you \
+    whether the evidence is strong enough to synthesize. Call this right after \
+    get_source_ledger and BEFORE generate_file. When the verdict is NOT \
+    SUFFICIENT, do the targeted follow-up work it lists (one or two more \
+    searches/reads), then call it again. Do not call it more than twice — \
+    after the second NOT SUFFICIENT, write the report and say what stayed \
+    unverified.";
 
 const TODO_WRITE_DESC: &str = "Create or update your task list for the current \
     task. Use it for any multi-step work (2+ distinct steps or files); skip it \

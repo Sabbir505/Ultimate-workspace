@@ -54,10 +54,23 @@ fn verify_project_path(path: &Path, db: &DbState) -> CmdResult<()> {
     Err("path is outside allowed project roots".to_string())
 }
 
+// Every git command below that spawns subprocesses is `async` +
+// `spawn_blocking`. Tauri 2 runs SYNCHRONOUS commands on the main thread, so a
+// sync `git status` here blocked the Windows message pump whenever the repo
+// was slow (big tree, Defender scan, cold cache). The OS then flags the window
+// as unresponsive and the taskbar icon swaps to the ghost/"not responding"
+// (crashed-app-looking) icon. This is the hot path while agents work: every
+// fs-change burst triggers refreshGitStatus → get_git_status. Offloading keeps
+// the event loop pumping so the taskbar icon never ghosts.
+
 #[tauri::command]
-pub fn get_git_status(path: String, db: State<DbState>) -> CmdResult<GitStatusInfo> {
+pub async fn get_git_status(path: String, db: State<'_, DbState>) -> CmdResult<GitStatusInfo> {
     verify_project_path(Path::new(&path), &db)?;
-    Ok(git::get_git_status(Path::new(&path)))
+    let path = PathBuf::from(path);
+    let info = tokio::task::spawn_blocking(move || git::get_git_status(&path))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(info)
 }
 
 /// Returns the per-file change list for `path` (project root OR a worktree
@@ -65,9 +78,13 @@ pub fn get_git_status(path: String, db: State<DbState>) -> CmdResult<GitStatusIn
 /// without re-running the full `get_git_diff` (which can be 200KB+ and is
 /// overkill when the panel only needs file names + status).
 #[tauri::command]
-pub fn get_changed_files(path: String, db: State<DbState>) -> CmdResult<Vec<git::ChangedFile>> {
+pub async fn get_changed_files(path: String, db: State<'_, DbState>) -> CmdResult<Vec<git::ChangedFile>> {
     verify_project_path(Path::new(&path), &db)?;
-    Ok(git::get_changed_files(Path::new(&path)))
+    let path = PathBuf::from(path);
+    let files = tokio::task::spawn_blocking(move || git::get_changed_files(&path))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(files)
 }
 
 /// Creates `git worktree add <path> -b <branch>` at
@@ -76,10 +93,10 @@ pub fn get_changed_files(path: String, db: State<DbState>) -> CmdResult<Vec<git:
 /// SECURITY: `branch_name` starting with `-` is rejected to prevent git
 /// flag injection (e.g. `-D` being interpreted as a delete flag).
 #[tauri::command]
-pub fn create_worktree(
+pub async fn create_worktree(
     project_id: String,
     branch_name: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<String> {
     // Reject branch names that git would interpret as flags.
     if branch_name.starts_with('-') {
@@ -96,13 +113,18 @@ pub fn create_worktree(
             .ok_or_else(|| "project not found".to_string())?
             .path
     };
-    git::create_worktree(Path::new(&project_path), &branch_name)
+    tokio::task::spawn_blocking(move || git::create_worktree(Path::new(&project_path), &branch_name))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn get_git_diff(path: String, db: State<DbState>) -> CmdResult<String> {
+pub async fn get_git_diff(path: String, db: State<'_, DbState>) -> CmdResult<String> {
     verify_project_path(Path::new(&path), &db)?;
-    git::get_git_diff(Path::new(&path))
+    let path = PathBuf::from(path);
+    tokio::task::spawn_blocking(move || git::get_git_diff(&path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Per-file diff for a single path in `path`'s working tree. Used by the
@@ -112,70 +134,105 @@ pub fn get_git_diff(path: String, db: State<DbState>) -> CmdResult<String> {
 /// file they highlighted. Handles untracked files (synthesizes an
 /// "all-added" diff via `git diff --no-index`).
 #[tauri::command]
-pub fn get_git_file_diff(path: String, file_path: String, db: State<DbState>) -> CmdResult<String> {
+pub async fn get_git_file_diff(
+    path: String,
+    file_path: String,
+    db: State<'_, DbState>,
+) -> CmdResult<String> {
     verify_project_path(Path::new(&path), &db)?;
-    git::get_git_file_diff(Path::new(&path), &file_path)
+    let path = PathBuf::from(path);
+    tokio::task::spawn_blocking(move || git::get_git_file_diff(&path, &file_path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Per-file diff against a chosen base — backs the Changes panel's filters:
 /// "worktree" (default per-file diff), "staged" (HEAD vs index), and
 /// "base:<tree-sha>" (<sha> vs worktree; "base:empty" = the empty tree).
 #[tauri::command]
-pub fn get_git_file_diff_scoped(
+pub async fn get_git_file_diff_scoped(
     path: String,
     file_path: String,
     scope: String,
-    db: State<DbState>,
+    db: State<'_, DbState>,
 ) -> CmdResult<String> {
     verify_project_path(Path::new(&path), &db)?;
-    git::get_git_file_diff_scoped(Path::new(&path), &file_path, &scope)
+    let path = PathBuf::from(path);
+    tokio::task::spawn_blocking(move || git::get_git_file_diff_scoped(&path, &file_path, &scope))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Every change on the current branch vs its base (merge-base vs working
 /// tree + untracked), with line counts and the merge-base sha the UI can
 /// expand individual files against.
 #[tauri::command]
-pub fn get_branch_changed_files(path: String, db: State<DbState>) -> CmdResult<git::BranchChanges> {
+pub async fn get_branch_changed_files(
+    path: String,
+    db: State<'_, DbState>,
+) -> CmdResult<git::BranchChanges> {
     verify_project_path(Path::new(&path), &db)?;
-    git::get_branch_changed_files(Path::new(&path))
+    let path = PathBuf::from(path);
+    tokio::task::spawn_blocking(move || git::get_branch_changed_files(&path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 // ---- Branch management ----
 
 #[tauri::command]
-pub fn list_git_branches(path: String, db: State<DbState>) -> CmdResult<Vec<git::BranchInfo>> {
+pub async fn list_git_branches(path: String, db: State<'_, DbState>) -> CmdResult<Vec<git::BranchInfo>> {
     verify_project_path(Path::new(&path), &db)?;
-    git::list_branches(Path::new(&path))
+    let path = PathBuf::from(path);
+    tokio::task::spawn_blocking(move || git::list_branches(&path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn create_git_branch(path: String, name: String, db: State<DbState>) -> CmdResult<()> {
+pub async fn create_git_branch(path: String, name: String, db: State<'_, DbState>) -> CmdResult<()> {
     verify_project_path(Path::new(&path), &db)?;
-    git::create_branch(Path::new(&path), &name)
+    let path = PathBuf::from(path);
+    tokio::task::spawn_blocking(move || git::create_branch(&path, &name))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn checkout_git_branch(path: String, name: String, db: State<DbState>) -> CmdResult<()> {
+pub async fn checkout_git_branch(path: String, name: String, db: State<'_, DbState>) -> CmdResult<()> {
     verify_project_path(Path::new(&path), &db)?;
-    git::checkout_branch(Path::new(&path), &name)
+    let path = PathBuf::from(path);
+    tokio::task::spawn_blocking(move || git::checkout_branch(&path, &name))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn delete_git_branch(path: String, name: String, db: State<DbState>) -> CmdResult<()> {
+pub async fn delete_git_branch(path: String, name: String, db: State<'_, DbState>) -> CmdResult<()> {
     verify_project_path(Path::new(&path), &db)?;
-    git::delete_branch(Path::new(&path), &name)
+    let path = PathBuf::from(path);
+    tokio::task::spawn_blocking(move || git::delete_branch(&path, &name))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn get_git_log(path: String, db: State<DbState>) -> CmdResult<Vec<git::GitLogEntry>> {
+pub async fn get_git_log(path: String, db: State<'_, DbState>) -> CmdResult<Vec<git::GitLogEntry>> {
     verify_project_path(Path::new(&path), &db)?;
-    git::get_git_log(Path::new(&path))
+    let path = PathBuf::from(path);
+    tokio::task::spawn_blocking(move || git::get_git_log(&path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn get_remote_url(path: String, db: State<DbState>) -> CmdResult<Option<String>> {
+pub async fn get_remote_url(path: String, db: State<'_, DbState>) -> CmdResult<Option<String>> {
     verify_project_path(Path::new(&path), &db)?;
-    Ok(git::get_remote_url(Path::new(&path)))
+    let path = PathBuf::from(path);
+    let url = tokio::task::spawn_blocking(move || git::get_remote_url(&path))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(url)
 }
 
 /// Stage all changes and commit with the given message. Returns the short SHA.

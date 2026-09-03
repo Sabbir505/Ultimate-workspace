@@ -75,7 +75,11 @@ pub fn build_instructions_md(project_path: &str, artifacts_dir: &str) -> String 
          `conduit-tools` MCP tools (`generate_document`, `generate_diagram`, \
          `generate_file`) — do not hand-build docx/pptx/pdf yourself. Use \
          `get_skill` to load the detailed guidance for a skill before \
-         producing it."
+         producing it. To check which connectors / MCP servers / skills are \
+         available, call `get_capabilities` on `conduit-tools` — never run \
+         `claude mcp list` (or similar probes) in your terminal: that spawns \
+         processes to re-derive what the app already knows and reads your \
+         config file instead of the live session."
     ));
     if let Some(catalog) = crate::chat::prompts::available_skills_segment() {
         parts.push(catalog);

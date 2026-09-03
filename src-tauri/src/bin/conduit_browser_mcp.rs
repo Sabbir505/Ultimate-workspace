@@ -223,7 +223,7 @@ fn tool_op(tool: &str) -> Result<String, &'static str> {
         | "read_console" | "read_network" | "list_tabs" | "switch_tab"
         | "new_tab" | "close_tab" | "zoom" | "print_to_pdf" => Ok(tool.to_string()),
         "generate_document" | "generate_diagram" | "generate_file"
-        | "get_skill" | "list_skills" | "search_docs" => Ok(format!("conduit_tools:{tool}")),
+        | "get_skill" | "list_skills" | "search_docs" | "get_capabilities" => Ok(format!("conduit_tools:{tool}")),
         _ => Err("unknown tool"),
     }
 }
@@ -710,6 +710,11 @@ fn tool_schemas() -> Vec<Value> {
                 "required": ["query"]
             }
         }),
+        json!({
+            "name": "get_capabilities",
+            "description": "Report which connectors, MCP servers, and skills are available in this Relay session, as JSON. THE authority on availability — call this instead of running `claude mcp list` or similar shell probes; it is instant, in-process, and reflects the app's real connections rather than a config file.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
     ]
 }
 
@@ -726,6 +731,7 @@ mod tests {
             .collect();
         for tool in ["navigate", "read_page", "generate_document", "generate_diagram",
                      "generate_file", "get_skill", "list_skills", "search_docs",
+                     "get_capabilities",
                      "history", "hover", "evaluate", "click_and_wait", "screenshot"] {
             assert!(names.contains(&tool), "missing tool schema: {tool}");
         }

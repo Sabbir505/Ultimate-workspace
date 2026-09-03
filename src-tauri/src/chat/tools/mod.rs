@@ -51,6 +51,13 @@ pub(crate) use automations::{
     execute_automation_tool, is_automation_tool, is_mutating_automation_tool,
 };
 
+/// `get_capabilities` — in-process connector/MCP availability report so the
+/// model NEVER spawns a shell just to introspect what's connected. Two
+/// variants: the per-turn report (this module's dispatch) and the app-level
+/// report for harness CLIs (mcp_tools_bridge intercepts before execute_tool).
+mod capabilities;
+pub use capabilities::{app_capabilities_report, capabilities_report};
+
 /// Names of every tool the model may call. Kept in one place so the specs and
 /// the dispatcher can't drift apart.
 pub const WEB_SEARCH: &str = "web_search";
@@ -70,6 +77,11 @@ pub const LIST_SKILLS: &str = "list_skills";
 /// of attachable ids; a fresh turn ships no connector schemas at all.
 pub const ATTACH_CONNECTOR: &str = "attach_connector";
 pub const ATTACH_MCP_SERVER: &str = "attach_mcp_server";
+/// In-process availability/introspection report: attached vs attachable
+/// connectors and MCP servers, enabled built-ins, and the terminal process
+/// lifecycle contract. THE authority on "is X available" — the shell
+/// dispatch refuses `claude mcp list`-style probes and points here.
+pub const GET_CAPABILITIES: &str = "get_capabilities";
 pub const BROWSER_READ: &str = "browser_read";
 
 pub const BROWSER_CLICK: &str = "browser_click";
@@ -412,6 +424,17 @@ const ATTACH_MCP_SERVER_DESC: &str = "Load an installed MCP server's tools into 
     Same contract as attach_connector: tools become callable immediately; \
     attach only what the request needs.";
 
+const GET_CAPABILITIES_DESC: &str = "Report your live capabilities as JSON: \
+    which connectors and MCP servers are ATTACHED to this turn (with their \
+    tool lists), which are attachable right now, and which built-in tools are \
+    enabled — plus the terminal process lifecycle rules. This is THE authority \
+    on availability. When you (or the user) ask what is connected / available \
+    / which MCP servers exist, call this — NEVER answer by spawning a shell \
+    (`claude mcp list`, curl probes, version checks): those commands are \
+    refused, and this report is instant, approval-free, and reflects the \
+    actual session toolset rather than a config file. Read-only, no \
+    approval needed.";
+
 const LIST_DIRECTORY_DESC: &str = "List the immediate children of a directory \
     (files and subdirectories, one per line). Pass an absolute path. Read-only.";
 
@@ -585,14 +608,21 @@ const DOWNLOAD_PROGRESS_DESC: &str = "Report a `download_file` task's live \
     and report to the user until it completes.";
 
 const RUN_SHELL_DESC: &str = "Run a native shell command (cmd.exe / sh) with \
-    the user's privileges and return combined stdout/stderr — CLI tools like \
-    git, pip, ffmpeg work as in a terminal. One-shot commands only (nothing \
-    long-running like a dev server). ALWAYS approval-gated. Prefer \
-    `download_file` for plain URL downloads and `run_code` for short \
-    snippets. NEVER use this to open/launch a file for the user (no `start`, \
-    `open`, `xdg-open`) — that is exactly what the `open_file` tool does, \
-    and shell quoting around `start` only produces Windows 'cannot find' \
-    errors.";
+    the user's privileges — CLI tools like git, pip, ffmpeg work as in a \
+    terminal. Lifecycle classes: FOREGROUND (default) runs to completion and \
+    returns combined stdout/stderr, killed at 120s (timeout_secs may shorten, \
+    never extend) — use for probes, builds, git, anything whose output you \
+    need next. LONG-RUNNING work (dev servers, watchers, long installs) MUST \
+    use background=true: you get a task id immediately, poll get_task_status \
+    for streamed output, and MUST cancel_task when done — never a foreground \
+    call for these. TEMPORARY work that must self-terminate passes \
+    timeout_secs (5–3600; background) — the process is killed exactly at the \
+    deadline. NEVER use this to inspect connector/MCP availability (`claude \
+    mcp list`, curl probes, version checks) — call `get_capabilities`; those \
+    commands are refused. NEVER use this to open/launch a file for the user \
+    (no `start`, `open`, `xdg-open`) — that is exactly what the `open_file` \
+    tool does. ALWAYS approval-gated. Prefer `download_file` for plain URL \
+    downloads and `run_code` for short snippets.";
 
 const TASK_DESC: &str = "Spawn a focused subagent that runs ONE task with its \
     own model turn and reports back. Use this to delegate a self-contained \
@@ -608,9 +638,10 @@ const TASK_DESC: &str = "Spawn a focused subagent that runs ONE task with its \
     result.";
 
 const GET_TASK_STATUS_DESC: &str = "Report the status of any background task \
-    (`download_file` or `run_shell`) by its task id: state (running/completed/\
-    failed/cancelled), progress numbers, and the output or error message. \
-    Read-only. Poll this while a task is running to track it.";
+    (`download_file`, or a background `run_shell`) by its task id: state \
+    (running/completed/failed/cancelled), progress numbers, and the output or \
+    error message. Read-only. Poll this while a background or long-running \
+    task streams — never wait synchronously on it.";
 
 const CANCEL_TASK_DESC: &str = "Cancel a background task started in this \
     conversation by its task id. For downloads this keeps the .part file so a \
@@ -915,6 +946,13 @@ pub async fn execute_tool(
                         .join("\n"),
                 )
             }
+        }
+        GET_CAPABILITIES => {
+            // The in-process availability report — reads this turn's ToolCaps
+            // (the same struct that built the tool schema), so what it claims
+            // can never disagree with what the model can call. No process, no
+            // approval; this is what replaces `claude mcp list`-style probes.
+            ToolOutcome::text(capabilities_report(caps))
         }
         RUN_CODE => {
             if !caps.code_exec {

@@ -25,6 +25,38 @@
 //! auto-runs or surfaces an approval card before the task is even created.
 //! `run_shell` is native code execution, so it is ALWAYS gated on an
 //! approval card, in every permission mode.
+//!
+//! # Terminal process lifecycle (authoritative rules)
+//!
+//! Every process the model starts through the shell tool belongs to exactly
+//! one of four lifecycle classes. The limits below are the single source of
+//! truth — the tool description, the `get_capabilities` report
+//! ([`terminal_lifecycle_json`]) and the enforcement code all read from
+//! these constants, so they cannot drift.
+//!
+//! | Class | How to start | Lifetime | Cleanup |
+//! |---|---|---|---|
+//! | **Foreground** (default) | `run_shell` | ≤ [`SHELL_FOREGROUND_TIMEOUT_SECS`] (120s); `timeout_secs` may shorten, never extend | None — process exits, output returns inline |
+//! | **Temporary** | any mode + explicit `timeout_secs` (5–3600) | auto-killed exactly at the deadline, state → Failed with a timeout notice | Automatic — the engine kills it |
+//! | **Background** | `run_shell` + `background: true` | returns a task id immediately; output streams via `get_task_status` | `cancel_task`, or app exit (`kill_on_drop`) |
+//! | **Long-running** | background + NO `timeout_secs` | unbounded while the app runs (dev servers, watchers, long installs) | the model MUST `cancel_task` when done; app exit is the backstop |
+//!
+//! Hard rules the enforcement encodes:
+//! 1. A foreground command can NEVER outlive [`SHELL_FOREGROUND_TIMEOUT_SECS`]
+//!    — the ceiling protects the conversation turn, so an explicit
+//!    `timeout_secs` is clamped to `[SHELL_TEMPORARY_MIN_SECS,
+//!    SHELL_FOREGROUND_TIMEOUT_SECS]` in the foreground.
+//! 2. Anything expected to run longer than the foreground ceiling MUST be
+//!    started with `background: true`. Work that must self-terminate sets
+//!    `timeout_secs` (clamped to `[SHELL_TEMPORARY_MIN_SECS,
+//!    SHELL_TEMPORARY_MAX_SECS]` in the background) — that is the Temporary
+//!    class.
+//! 3. Background shells without a timeout are the Long-running class: no
+//!    engine-side deadline, but the model owns the cleanup (`cancel_task`).
+//! 4. Availability questions (connectors / MCP servers) never start a
+//!    process at all — `get_capabilities` answers them in-process, and the
+//!    shell dispatch refuses `mcp list`-style probes (see
+//!    `dispatch::capability_probe_refusal`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -58,6 +90,71 @@ const DOWNLOAD_RETRIES: u32 = 2;
 /// (resumed via Range). This replaces the old blanket request timeout, which
 /// capped TOTAL transfer time and made every large model download fail.
 const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+// ---- Terminal lifecycle limits (see the module doc) ----
+
+/// Foreground ceiling in seconds: a synchronous `run_shell` is killed at this
+/// deadline so a never-exiting command can't wedge the turn (and a blocking
+/// pool thread). An explicit foreground `timeout_secs` may shorten the run,
+/// never extend it.
+pub const SHELL_FOREGROUND_TIMEOUT_SECS: u64 = 120;
+/// Minimum honorable `timeout_secs` — below this the command had no chance,
+/// and a mistyped `0`/`1` would read as an engine bug instead of a limit.
+pub const SHELL_TEMPORARY_MIN_SECS: u64 = 5;
+/// Maximum background `timeout_secs` (1 hour). Beyond this a "temporary"
+/// process is really a long-running one and must be `background: true`
+/// without a timeout (Long-running class, cleaned up via `cancel_task`).
+pub const SHELL_TEMPORARY_MAX_SECS: u64 = 3600;
+
+/// Foreground timeout for a `run_shell` call: explicit `timeout_secs` may
+/// only SHORTEN the ceiling (clamped to `[MIN, FOREGROUND]`); `None` → the
+/// default ceiling.
+pub fn foreground_shell_timeout(timeout_secs: Option<u64>) -> Duration {
+    let secs = timeout_secs
+        .unwrap_or(SHELL_FOREGROUND_TIMEOUT_SECS)
+        .clamp(SHELL_TEMPORARY_MIN_SECS, SHELL_FOREGROUND_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+/// Background timeout: `None` → Long-running class (no engine deadline);
+/// `Some(secs)` → Temporary class, clamped to `[MIN, MAX]`.
+pub fn background_shell_timeout(timeout_secs: Option<u64>) -> Option<Duration> {
+    timeout_secs
+        .map(|s| Duration::from_secs(s.clamp(SHELL_TEMPORARY_MIN_SECS, SHELL_TEMPORARY_MAX_SECS)))
+}
+
+/// The terminal lifecycle contract as JSON for the `get_capabilities`
+/// report — generated from the same constants the enforcement uses, so the
+/// model always reads the live limits rather than prompt text that may lag.
+pub fn terminal_lifecycle_json() -> serde_json::Value {
+    serde_json::json!({
+        "foreground": {
+            "how": "run_shell (default)",
+            "ceiling_seconds": SHELL_FOREGROUND_TIMEOUT_SECS,
+            "output": "combined stdout/stderr returned in the tool result",
+            "timeout_secs": "optional; may only shorten the run",
+        },
+        "temporary": {
+            "how": "any mode + timeout_secs (5-3600)",
+            "behavior": "process is killed exactly at the deadline; state becomes failed with a timeout notice",
+            "cleanup": "automatic",
+        },
+        "background": {
+            "how": "run_shell with background=true",
+            "behavior": "returns a task id immediately; output streams via get_task_status",
+            "cleanup": "cancel_task kills it; also killed when the app exits",
+        },
+        "long_running": {
+            "how": "background=true without timeout_secs (dev servers, watchers, long installs)",
+            "lifetime": "unbounded while the app runs",
+            "cleanup": "YOU MUST cancel_task when done — app exit is only the backstop",
+        },
+        "availability_probes": {
+            "rule": "NEVER start a process to check connector/MCP availability",
+            "instead": "call get_capabilities (in-process, no approval, instant)",
+        },
+    })
+}
 
 /// Machine-readable task state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,13 +379,17 @@ impl TaskManager {
     }
 
     /// Start a native shell command in the background. Returns the task id.
-    /// `app` may be `None` in tests/headless runs (progress events skipped).
+    /// `timeout_secs` = `Some` marks it Temporary (auto-killed at the clamped
+    /// deadline); `None` is the Long-running class — no engine deadline,
+    /// cleaned up via `cancel_task`/app exit. `app` may be `None` in
+    /// tests/headless runs (progress events skipped).
     pub fn start_shell<R: tauri::Runtime>(
         &self,
         app: Option<&AppHandle<R>>,
         sid: &str,
         command: &str,
         workdir: Option<&str>,
+        timeout_secs: Option<u64>,
     ) -> String {
         let (id, entry) = self.register("shell");
         let (tx, rx) = oneshot::channel();
@@ -297,9 +398,10 @@ impl TaskManager {
         let sid = sid.to_string();
         let command = command.to_string();
         let workdir = workdir.map(|s| s.to_string());
+        let timeout = background_shell_timeout(timeout_secs);
         let entry_for_task = Arc::clone(&entry);
         tauri::async_runtime::spawn(async move {
-            shell_task(app.as_ref(), &sid, &entry_for_task, rx, &command, workdir).await;
+            shell_task(app.as_ref(), &sid, &entry_for_task, rx, &command, workdir, timeout).await;
         });
         id
     }
@@ -308,16 +410,16 @@ impl TaskManager {
 /// Synchronous shell execution: runs the command to completion and returns
 /// its combined stdout+stderr as a string. Used by the built-in provider path
 /// so the tool result (and therefore the captured output) flows into the turn
-/// buffer and persists in the stored message. Bounded by `SHELL_TIMEOUT`
-/// (a command that never exits is killed — the model is told to use
-/// start_shell for persistent background work).
-pub fn run_shell_to_completion(command: &str, workdir: Option<&str>) -> String {
-    /// Ceiling on a synchronous run_shell. `ping -t` / `npm run dev` style
-    /// commands would otherwise wedge the turn (and a blocking-pool thread)
-    /// forever; on expiry the child tree is killed and the partial output
-    /// is returned with a timeout notice.
-    const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-
+/// buffer and persists in the stored message. Bounded by `timeout` (see the
+/// foreground lifecycle rules — a command that never exits is killed and the
+/// partial output is returned with a timeout notice pointing at the
+/// background class). Use [`TaskManager::start_shell`] for work that may
+/// outlive the ceiling.
+pub fn run_shell_to_completion(
+    command: &str,
+    workdir: Option<&str>,
+    timeout: std::time::Duration,
+) -> String {
     let mut cmd = if cfg!(windows) {
         let mut c = std::process::Command::new("cmd.exe");
         c.arg("/C").arg(command);
@@ -366,7 +468,7 @@ pub fn run_shell_to_completion(command: &str, workdir: Option<&str>) -> String {
         buf
     });
     // Bounded wait: poll try_wait until the child exits or the ceiling hits.
-    let deadline = std::time::Instant::now() + SHELL_TIMEOUT;
+    let deadline = std::time::Instant::now() + timeout;
     let mut timed_out = false;
     loop {
         match child.try_wait() {
@@ -390,11 +492,16 @@ pub fn run_shell_to_completion(command: &str, workdir: Option<&str>) -> String {
         out.push_str(&err);
     }
     if timed_out {
-        // Say WHY the output ends here so the model doesn't treat a killed
-        // command's partial output as success.
+        // Say WHY the output ends here and HOW to do it right next time, so
+        // the model doesn't treat a killed command's partial output as
+        // success and doesn't retry the same blocking form.
         out.push_str(&format!(
-            "\n[run_shell timed out after {}s and was killed — use start_shell for long-running commands]",
-            SHELL_TIMEOUT.as_secs()
+            "\n[run_shell timed out after {}s and was killed — the foreground \
+             ceiling is {}s. For work that runs longer, re-run with \
+             background=true and poll get_task_status; for work that must \
+             self-terminate, pass timeout_secs.]",
+            timeout.as_secs(),
+            SHELL_FOREGROUND_TIMEOUT_SECS
         ));
     }
     // Tail-cap: keep last 60 lines / 8 KB.
@@ -722,8 +829,10 @@ async fn download_task<R: tauri::Runtime>(
 }
 
 /// Run a native shell command, streaming output lines as progress events.
-/// No sandbox, no wall-clock timeout (long CLI runs like
-/// `huggingface-cli download` are the point) — cancel_task kills it.
+/// No sandbox. `timeout` = `Some` marks the task Temporary — the child is
+/// killed at the deadline and the task finishes Failed with a timeout notice;
+/// `None` is the Long-running class (no wall-clock limit — cancel_task or app
+/// exit ends it).
 async fn shell_task<R: tauri::Runtime>(
     app: Option<&AppHandle<R>>,
     sid: &str,
@@ -731,6 +840,7 @@ async fn shell_task<R: tauri::Runtime>(
     mut cancel_rx: oneshot::Receiver<()>,
     command: &str,
     workdir: Option<String>,
+    timeout: Option<Duration>,
 ) {
     // Strip any NUL bytes — they terminate C strings early and could otherwise
     // smuggle extra bytes past the shell interface (defense-in-depth; the model
@@ -805,6 +915,15 @@ async fn shell_task<R: tauri::Runtime>(
 
     let mut stdout_open = true;
     let mut stderr_open = true;
+    // Temporary-class deadline: resolves once at expiry, or never for the
+    // Long-running class (`None` → pending forever).
+    let deadline_fut = async {
+        match timeout {
+            Some(t) => sleep(t).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(deadline_fut);
     loop {
         tokio::select! {
             biased;
@@ -817,6 +936,28 @@ async fn shell_task<R: tauri::Runtime>(
                     snap.message = "Cancelled — process killed.".to_string();
                 }
                 TaskManager::emit(app, sid, entry);
+                return;
+            }
+            _ = &mut deadline_fut => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                let secs = timeout.map(|t| t.as_secs()).unwrap_or(0);
+                let tail = {
+                    let snap = entry.snapshot.lock();
+                    snap.message.clone()
+                };
+                TaskManager::finish(
+                    app,
+                    sid,
+                    entry,
+                    TaskState::Failed,
+                    format!(
+                        "Timed out after {secs}s and was killed (temporary process: \
+                         timeout_secs elapsed). Re-run with a longer timeout_secs, \
+                         or with background=true (no timeout) if it is meant to be \
+                         long-running.\n\n{tail}"
+                    ),
+                );
                 return;
             }
             next = stdout_lines.next_line(), if stdout_open => {
@@ -1071,10 +1212,10 @@ mod tests {
 
     #[test]
     fn shell_captures_output_and_exit_code() {
-        
+
         let tm = TaskManager::new();
         let cmd = if cfg!(windows) { "echo conduit-shell-test" } else { "echo conduit-shell-test" };
-        let id = tm.start_shell(None::<&tauri::AppHandle>, "sid1", cmd, None);
+        let id = tm.start_shell(None::<&tauri::AppHandle>, "sid1", cmd, None, None);
         let mut final_state = String::new();
         for _ in 0..200 {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1087,6 +1228,72 @@ mod tests {
         assert!(final_state.contains("completed"), "got: {final_state}");
         assert!(final_state.contains("conduit-shell-test"), "output must be captured: {final_state}");
         assert!(final_state.contains("exit 0"), "exit code must be reported: {final_state}");
+    }
+
+    #[test]
+    fn foreground_timeout_clamps_only_downward() {
+        // Default → the ceiling; explicit values shorten; anything above the
+        // ceiling or below the floor is clamped (the foreground may never run
+        // longer than SHELL_FOREGROUND_TIMEOUT_SECS, even on request).
+        assert_eq!(
+            foreground_shell_timeout(None),
+            Duration::from_secs(SHELL_FOREGROUND_TIMEOUT_SECS)
+        );
+        assert_eq!(foreground_shell_timeout(Some(10)), Duration::from_secs(10));
+        assert_eq!(
+            foreground_shell_timeout(Some(5_000)),
+            Duration::from_secs(SHELL_FOREGROUND_TIMEOUT_SECS)
+        );
+        assert_eq!(foreground_shell_timeout(Some(0)), Duration::from_secs(SHELL_TEMPORARY_MIN_SECS));
+    }
+
+    #[test]
+    fn background_timeout_maps_none_to_long_running() {
+        // None = Long-running class (no engine deadline).
+        assert_eq!(background_shell_timeout(None), None);
+        assert_eq!(
+            background_shell_timeout(Some(30)),
+            Some(Duration::from_secs(30))
+        );
+        // Clamped into the Temporary window (5s..1h).
+        assert_eq!(
+            background_shell_timeout(Some(86_400)),
+            Some(Duration::from_secs(SHELL_TEMPORARY_MAX_SECS))
+        );
+        assert_eq!(
+            background_shell_timeout(Some(0)),
+            Some(Duration::from_secs(SHELL_TEMPORARY_MIN_SECS))
+        );
+    }
+
+    #[test]
+    fn background_shell_times_out_and_reports_temporary_class() {
+        // A `sleep 30` / `ping -n 30` under a 1s Temporary deadline must be
+        // killed by the engine (not left running) and finish Failed with the
+        // timeout notice.
+        let tm = TaskManager::new();
+        let cmd = if cfg!(windows) { "ping -n 30 127.0.0.1" } else { "sleep 30" };
+        let id = tm.start_shell(None::<&tauri::AppHandle>, "sid1", cmd, None, Some(1));
+        let mut final_state = String::new();
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let snap = tm.status_json(&id);
+            if snap.contains("completed") || snap.contains("failed") || snap.contains("cancelled") {
+                final_state = snap;
+                break;
+            }
+        }
+        assert!(final_state.contains("failed"), "expected timeout failure, got: {final_state}");
+        assert!(final_state.contains("Timed out"), "must say WHY it died: {final_state}");
+    }
+
+    #[test]
+    fn foreground_run_times_out_within_ceiling() {
+        // Direct runner: a never-ending command under a 1s timeout returns
+        // (with the timeout notice) instead of blocking for 30s.
+        let cmd = if cfg!(windows) { "ping -n 30 127.0.0.1" } else { "sleep 30" };
+        let out = run_shell_to_completion(cmd, None, Duration::from_secs(1));
+        assert!(out.contains("timed out"), "must carry the timeout notice: {out}");
     }
 }
 

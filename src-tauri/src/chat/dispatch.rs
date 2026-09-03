@@ -542,6 +542,36 @@ fn system_tool_summary(name: &str, args: &Value) -> String {
     }
 }
 
+/// Detect a shell command that only inspects connector / MCP-server
+/// availability, returning the refusal text that redirects the model to
+/// `get_capabilities` (`None` = not a probe, run it). High-precision by
+/// design — the matcher requires BOTH an MCP mention and a probe verb, so
+/// config mutations (`claude mcp add x`) and code search (`grep mcp src/`)
+/// pass untouched while `claude mcp list`-style probes are stopped before a
+/// process spawns.
+pub fn capability_probe_refusal(command: &str) -> Option<String> {
+    let lower = command.to_ascii_lowercase();
+    if !lower.contains("mcp") {
+        return None;
+    }
+    let probe_verb = ["list", "ls ", "status", "which ", "where ", "--version"]
+        .iter()
+        .any(|k| lower.contains(k));
+    if !probe_verb {
+        return None;
+    }
+    Some(
+        "Refused: that command inspects connector / MCP-server availability, and \
+         availability questions never need a shell process in Relay. Call \
+         `get_capabilities` instead — it reports attached and attachable \
+         connectors, attached and attachable MCP servers, and enabled built-in \
+         tools in one in-process call (read-only, no approval). Re-issue the \
+         command only if you need it for a different purpose (e.g. editing MCP \
+         config files)."
+            .to_string(),
+    )
+}
+
 /// Execute a system tool (`download_file` / `run_shell` / status / cancel)
 /// against the background TaskManager. The permission gate has already
 /// decided (or the user approved); these calls either start a task, or read/
@@ -587,17 +617,48 @@ async fn execute_system_tool(app: &AppHandle, sid: &str, name: &str, args: &Valu
             if command.is_empty() {
                 return "Error: run_shell requires a non-empty \"command\".".to_string();
             }
+            // Availability introspection never gets a process: refuse the
+            // probe and hand the model to the report that answers it.
+            if let Some(refusal) = capability_probe_refusal(command) {
+                return refusal;
+            }
             let workdir = args.get("workdir").and_then(|v| v.as_str());
-            // Run to completion so the output flows into the turn buffer and
-            // persists in the stored message (the async start_shell path sends
-            // output to a separate chat:task-progress channel that doesn't
-            // persist). The sync runner parks on the child, so it must run on
-            // the blocking pool — inline it would pin a tokio worker for the
-            // whole command (up to the runner's 120 s ceiling).
+            let background = args
+                .get("background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64());
+
+            // Background / long-running class: task id now, streaming output
+            // via get_task_status, killed by cancel_task (or app exit).
+            if background {
+                let id = tasks
+                    .0
+                    .start_shell(Some(app), sid, command, workdir, timeout_secs);
+                let class = if timeout_secs.is_some() {
+                    "temporary (auto-killed at timeout_secs)"
+                } else {
+                    "long-running (no timeout — cancel_task when done)"
+                };
+                return format!(
+                    "Background shell started (task {id}, {class}) — poll \
+                     get_task_status with task_id=\"{id}\" for streamed output, \
+                     and cancel_task with that id to kill it. Do not wait \
+                     synchronously; report progress to the user as it streams."
+                );
+            }
+
+            // Foreground: run to completion so the output flows into the turn
+            // buffer and persists in the stored message. The sync runner
+            // parks on the child, so it must run on the blocking pool —
+            // inlining would pin a tokio worker for the whole command (up to
+            // the lifecycle ceiling; an explicit timeout_secs may only
+            // shorten the run, never extend it).
+            let timeout = crate::chat::tasks::foreground_shell_timeout(timeout_secs);
             let cmd_owned = command.to_string();
             let wd_owned = workdir.map(str::to_string);
             tokio::task::spawn_blocking(move || {
-                crate::chat::tasks::run_shell_to_completion(&cmd_owned, wd_owned.as_deref())
+                crate::chat::tasks::run_shell_to_completion(&cmd_owned, wd_owned.as_deref(), timeout)
             })
             .await
             .unwrap_or_else(|e| format!("shell task failed: {e}"))
@@ -848,6 +909,9 @@ const SUBAGENT_TOOL_ALLOW: &[&str] = &[
     tools::WEB_SEARCH,
     tools::ADD_SOURCE_NOTE,
     tools::GET_SOURCE_LEDGER,
+    // Read-only introspection: a subagent asked "is X connected?" must
+    // answer from this report, not by shelling out (it has no shell anyway).
+    tools::GET_CAPABILITIES,
 ];
 /// Max model rounds (tool rounds + final answer) per subagent. Deliberately
 /// generous (100): research subagents that read many files per round need
@@ -2390,8 +2454,7 @@ mod tests {
     /// tool. The subagent loop bypasses the main loop's permission layer (no
     /// approval cards by design), so the allowlist IS the permission boundary.
     #[test]
-    fn subagent_allowlist_is_read_only() {
-        const MUTATING: &[&str] = &[
+    fn subagent_allowlist_is_read_only() {        const MUTATING: &[&str] = &[
             tools::WRITE_FILE,
             tools::EDIT_FILE,
             tools::DELETE_FILE,
@@ -2410,5 +2473,46 @@ mod tests {
         // And the grounding basics must remain available.
         assert!(SUBAGENT_TOOL_ALLOW.contains(&tools::READ_FILE));
         assert!(SUBAGENT_TOOL_ALLOW.contains(&tools::FETCH_URL));
+    }
+
+    // ---- run_shell availability-probe guard ----
+
+    #[test]
+    fn probe_guard_refuses_mcp_listing_probes() {
+        for cmd in [
+            "claude mcp list",
+            "claude mcp list --json",
+            "kimi mcp list",
+            "opencode mcp status",
+            "which mcp",
+            "where mcp",
+            "claude --version mcp",
+            "ls mcp.json",
+            "npm ls mcp-server-memory",
+        ] {
+            let refusal = capability_probe_refusal(cmd);
+            assert!(refusal.is_some(), "must refuse: {cmd}");
+            assert!(
+                refusal.unwrap().contains("get_capabilities"),
+                "refusal must redirect to the report: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn probe_guard_passes_real_work() {
+        for cmd in [
+            "claude mcp add my-server -- npx -y @acme/server",
+            "grep -rn mcp src/",
+            "npm run dev",
+            "git status",
+            "git stash list",
+            "python gen_mcp_docs.py",
+            "echo mcp > out.txt",
+            "claude --version",
+            "node server.js",
+        ] {
+            assert!(capability_probe_refusal(cmd).is_none(), "must pass: {cmd}");
+        }
     }
 }

@@ -573,7 +573,11 @@ pub fn attach_manifest_segment(
         for servers) FIRST — its tools join your tool list for this turn \
         immediately; re-attach in a later turn when needed. Attach only what \
         the request needs — never attach everything just to check access. The \
-        user can also pin one for the whole conversation with `@<id>`.\n",
+        user can also pin one for the whole conversation with `@<id>`.\n\
+        To check what is attached or available RIGHT NOW, call \
+        `get_capabilities` — it is the instant, in-process authority on \
+        connector/MCP availability. NEVER spawn a shell to check (`claude mcp \
+        list`, curl probes); the shell dispatch refuses those.\n",
     );
     for c in connectors {
         s.push_str(&format!("- {} — {}\n", c.id, c.description));

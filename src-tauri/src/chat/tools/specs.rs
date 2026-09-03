@@ -30,6 +30,9 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         openai_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
         openai_fn(GET_SKILL, GET_SKILL_DESC, get_skill_parameters()),
         openai_fn(LIST_SKILLS, LIST_SKILLS_DESC, no_parameters()),
+        // In-process availability introspection — always on (read-only, no
+        // gating). Replaces shell probes for connector/MCP availability.
+        openai_fn(GET_CAPABILITIES, GET_CAPABILITIES_DESC, no_parameters()),
         openai_fn(BROWSER_READ, BROWSER_READ_DESC, browser_read_parameters()),
         openai_fn(BROWSER_CLICK, BROWSER_CLICK_DESC, browser_ref_parameters()),
         openai_fn(BROWSER_TYPE, BROWSER_TYPE_DESC, browser_type_parameters()),
@@ -188,6 +191,8 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
         anthropic_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
         anthropic_fn(GET_SKILL, GET_SKILL_DESC, get_skill_parameters()),
         anthropic_fn(LIST_SKILLS, LIST_SKILLS_DESC, no_parameters()),
+        // In-process availability introspection (mirror of the OpenAI block).
+        anthropic_fn(GET_CAPABILITIES, GET_CAPABILITIES_DESC, no_parameters()),
         anthropic_fn(BROWSER_READ, BROWSER_READ_DESC, browser_read_parameters()),
         anthropic_fn(BROWSER_CLICK, BROWSER_CLICK_DESC, browser_ref_parameters()),
         anthropic_fn(BROWSER_TYPE, BROWSER_TYPE_DESC, browser_type_parameters()),
@@ -620,6 +625,21 @@ fn run_shell_parameters() -> Value {
                 "type": "string",
                 "description": "Optional working directory for the command. Defaults \
                     to the user's home directory when omitted or invalid.",
+            },
+            "background": {
+                "type": "boolean",
+                "description": "Run as a BACKGROUND task (long-running work: dev \
+                    servers, watchers, long installs). Returns a task id \
+                    immediately; poll get_task_status for streamed output and \
+                    cancel_task to kill it. Required for anything longer than the \
+                    120s foreground ceiling.",
+            },
+            "timeout_secs": {
+                "type": "integer",
+                "description": "TEMPORARY processes only: auto-kill at this \
+                    deadline (5–3600; foreground calls are capped at the 120s \
+                    ceiling). The task is marked failed with a timeout notice \
+                    when it fires.",
             }
         },
         "required": ["command"],

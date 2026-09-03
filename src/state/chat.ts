@@ -1810,6 +1810,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // first catalog entry. Switch OUT of harness to builtin: leave the
     // built-in posture alone (the toggle stays on the same dual policies).
     let nextPermissionMode: string | null | undefined = undefined;
+    let ejectToFullAuto: string | null = null;
     if (agent && agent.startsWith("harness:") && agent !== prev?.agent) {
       const harnessId = agent.slice("harness:".length);
       const catalog = HARNESS_PERMISSION_MODES[harnessId];
@@ -1817,9 +1818,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } else if (agent === null && prev?.agent && prev.agent.startsWith("harness:")) {
       // Built-in sessions don't track a mode in permission_mode; the store
       // treats the built-in posture as derived from the dual policies.
-      nextPermissionMode = "manual";
+      // Return to the built-in DEFAULT (full-auto), not manual — ejection
+      // must not silently downgrade the session to per-action approvals.
+      // Goes through setSessionPolicies (not the label-only mode setter) so
+      // older sessions created before the full-auto default actually get
+      // the matching policies instead of a lying label.
+      ejectToFullAuto = chatSessionId;
     }
     await updateChatSessionAgent(chatSessionId, agent);
+    if (ejectToFullAuto) {
+      try {
+        // confirmFullAccess (not setSessionPolicies): full-auto is the app
+        // default, so ejecting must not pop the one-time confirmation modal.
+        await get().confirmFullAccess(ejectToFullAuto);
+      } catch {
+        // Best-effort — agent swap still applied.
+      }
+    }
     if (nextPermissionMode !== undefined) {
       try {
         await setChatSessionPermissionMode(chatSessionId, nextPermissionMode);

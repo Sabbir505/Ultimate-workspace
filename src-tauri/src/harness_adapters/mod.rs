@@ -321,10 +321,10 @@ impl TurnHarness {
             TurnHarness::OpenCode => {
                 "@echo off\r\nsetlocal EnableDelayedExpansion\r\nopencode run --format json --auto %* -- \"!CONDUIT_TURN_PROMPT!\"\r\n"
             }
-            TurnHarness::Pi => "@echo off\r\npi -p --mode json %*\r\n",
-            TurnHarness::Omp => "@echo off\r\nomp -p --mode=json %*\r\n",
+            TurnHarness::Pi => "@echo off\r\npi -p --approve --mode json %*\r\n",
+            TurnHarness::Omp => "@echo off\r\nomp -p --auto-approve --mode=json %*\r\n",
             TurnHarness::CommandCode => {
-                "@echo off\r\ncommandcode -p --output-format json --yolo --skip-onboarding --no-auto-update %*\r\n"
+                "@echo off\r\ncommandcode -p --output-format json --yolo --tools-all --skip-onboarding --no-auto-update %*\r\n"
             }
         }
     }
@@ -355,22 +355,30 @@ impl TurnHarness {
                 // pi-lineage print mode reads the prompt from stdin when no
                 // positional message is given (verified live for all three).
                 // omp takes sade-style `--mode=json`; pi space-separated.
+                // Full-auto posture by default: pi trusts project-local
+                // files for the run (`--approve`) and its print mode already
+                // auto-approves tool calls; omp says so explicitly
+                // (`--auto-approve`); commandcode gets `--yolo` (bypass
+                // permission prompts) plus `--tools-all` (un-withhold every
+                // tool in -p mode). `--skip-onboarding` keeps an
+                // un-onboarded commandcode account from blocking on the
+                // taste wizard, and `--no-auto-update` stops it from
+                // self-updating MID-TURN and printing a non-JSON banner into
+                // the stream (observed live: "Updated 1.44.0 → 1.45.0" as
+                // line 1 of the NDJSON).
                 let mut a: Vec<String> = match self {
-                    TurnHarness::Pi => vec!["-p".into(), "--mode".into(), "json".into()],
-                    TurnHarness::Omp => vec!["-p".into(), "--mode=json".into()],
-                    // `--yolo` pre-approves tools (headless has no permission
-                    // channel — same role as claude's
-                    // --dangerously-skip-permissions), `--skip-onboarding`
-                    // keeps an un-onboarded account from blocking on the
-                    // taste wizard, and `--no-auto-update` stops the CLI from
-                    // self-updating MID-TURN and printing a non-JSON banner
-                    // into the stream (observed live: "Updated 1.44.0 →
-                    // 1.45.0" as line 1 of the NDJSON).
+                    TurnHarness::Pi => {
+                        vec!["-p".into(), "--approve".into(), "--mode".into(), "json".into()]
+                    }
+                    TurnHarness::Omp => {
+                        vec!["-p".into(), "--auto-approve".into(), "--mode=json".into()]
+                    }
                     _ => vec![
                         "-p".into(),
                         "--output-format".into(),
                         "json".into(),
                         "--yolo".into(),
+                        "--tools-all".into(),
                         "--skip-onboarding".into(),
                         "--no-auto-update".into(),
                     ],
@@ -730,17 +738,18 @@ mod tests {
     #[test]
     #[cfg(not(windows))]
     fn pi_omp_posix_argv_shapes() {
-        // POSIX: the stdin-prompt CLIs still get flags-only argv.
+        // POSIX: the stdin-prompt CLIs still get flags-only argv, with the
+        // full-auto posture baked in (--approve / --auto-approve).
         let (spec, env, transport) = turn_spec(TurnHarness::Pi, "hello", vec!["-m".into(), "some-model".into()]);
         assert_eq!(transport, TurnPromptTransport::Stdin);
         assert!(env.is_none());
         assert_eq!(spec.program, "pi");
-        assert_eq!(spec.args, vec!["-p", "--mode", "json", "-m", "some-model"]);
+        assert_eq!(spec.args, vec!["-p", "--approve", "--mode", "json", "-m", "some-model"]);
         let (omp, omp_env, omp_transport) = turn_spec(TurnHarness::Omp, "hello", vec!["-m".into(), "some-model".into()]);
         assert_eq!(omp_transport, TurnPromptTransport::Stdin);
         assert!(omp_env.is_none());
         assert_eq!(omp.program, "omp");
-        assert_eq!(omp.args, vec!["-p", "--mode=json", "-m", "some-model"]);
+        assert_eq!(omp.args, vec!["-p", "--auto-approve", "--mode=json", "-m", "some-model"]);
     }
 
     #[test]

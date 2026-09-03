@@ -90,11 +90,17 @@ pub fn create_chat_session(
     model: &str,
     project_id: Option<&str>,
 ) -> DbResult<ChatSession> {
+    // Default posture is FULL-AUTO (workspace_write + full_access): the
+    // built-in/local agent runs tools without per-action approval cards,
+    // matching the harness CLIs, which all run headless turns unrestricted
+    // (--dangerously-skip-permissions / prompt auto-approve / --auto /
+    // --yolo). read_only / plan / auto_edit remain one switch away in the
+    // mode menu.
     let now = now_ts();
     let id = new_id();
     conn.execute(
         "INSERT INTO chat_sessions (id, title, provider, model, created_at, last_active_at, watch_mode, project_id, permission_mode, sandbox_policy, approval_policy)
-         VALUES (?1, NULL, ?2, ?3, ?4, ?4, NULL, ?5, 'manual', 'workspace_write', 'on_request')",
+         VALUES (?1, NULL, ?2, ?3, ?4, ?4, NULL, ?5, 'full_auto', 'workspace_write', 'full_access')",
         params![id, provider, model, now, project_id],
     )?;
     conn.query_row(
@@ -902,9 +908,9 @@ mod tests {
     #[test]
     fn plan_mode_label_round_trips_and_restores_posture() {
         let conn = super::super::mem();
-        // Fresh sessions start as manual (workspace_write + on_request).
+        // Fresh sessions start full-auto (workspace_write + full_access).
         let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
-        assert_eq!(cs.permission_mode, "manual");
+        assert_eq!(cs.permission_mode, "full_auto");
 
         // Entering plan flips the label to "plan"; the dual-policy columns
         // are untouched (that's the whole point — approval resumes them).
@@ -913,13 +919,13 @@ mod tests {
         let read = get_chat_session(&conn, &cs.id).unwrap().unwrap();
         assert_eq!(read.permission_mode, "plan");
         assert_eq!(read.sandbox_policy, "workspace_write");
-        assert_eq!(read.approval_policy, "on_request");
+        assert_eq!(read.approval_policy, "full_access");
 
         // Exiting restores the label derived from the preserved policies.
         let label = set_chat_session_plan(&conn, &cs.id, false).unwrap();
-        assert_eq!(label, "manual");
+        assert_eq!(label, "full_auto");
         let read = get_chat_session(&conn, &cs.id).unwrap().unwrap();
-        assert_eq!(read.permission_mode, "manual");
+        assert_eq!(read.permission_mode, "full_auto");
 
         // A session whose real posture is auto_edit restores to auto_edit,
         // not manual.
@@ -954,11 +960,13 @@ mod tests {
     }
 
     #[test]
-    fn permission_mode_defaults_manual_and_updates() {
+    fn permission_mode_defaults_full_auto_and_updates() {
         let conn = super::super::mem();
-        // New sessions start at manual.
+        // New sessions start full-auto.
         let cs = create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
-        assert_eq!(cs.permission_mode, "manual");
+        assert_eq!(cs.permission_mode, "full_auto");
+        assert_eq!(cs.sandbox_policy, "workspace_write");
+        assert_eq!(cs.approval_policy, "full_access");
 
         // Update persists and reads back through the mapper.
         update_chat_session_permission_mode(&conn, &cs.id, "full_auto").unwrap();

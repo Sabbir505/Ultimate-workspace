@@ -36,29 +36,15 @@ const POLL_INTERVAL: Duration = Duration::from_millis(150);
 /// fully self-contained and offline.
 const PAGED_JS: &str = include_str!("paged.polyfill.min.js");
 
-/// Base print CSS. Defaults only — the model's own <style> blocks are
-/// injected AFTER this sheet and win the cascade. Paged.js consumes the
-/// `@page` rule to build its page boxes with margin boxes.
-const BASE_CSS: &str = r#"
-@page { size: A4; margin: 20mm 17mm; }
-html, body { margin: 0; padding: 0; }
-body {
-  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
-  color: #1a1a1a; line-height: 1.55; font-size: 11pt;
+/// Base print CSS, generated from the shared docdesign tokens (default
+/// theme) — fonts, sizes, margins and colors all come from
+/// `src/lib/docdesign/tokens.json`, not from hand-written constants here.
+/// Defaults only — the model's own <style> blocks are injected AFTER this
+/// sheet and win the cascade. Paged.js consumes the `@page` rule to build its
+/// page boxes with margin boxes.
+fn base_css() -> String {
+    crate::chat::docdesign::base_css()
 }
-h1, h2, h3, h4 { line-height: 1.2; margin: 1.4em 0 0.5em; }
-h1 { font-size: 24pt; } h2 { font-size: 17pt; } h3 { font-size: 13.5pt; }
-p { margin: 0.55em 0; }
-table { border-collapse: collapse; width: 100%; margin: 1em 0; }
-th, td { border: 1px solid #ccc; padding: 6px 9px; text-align: left; }
-th { background: #f3f4f6; }
-blockquote { margin: 1em 0; padding: 0.4em 1em; border-left: 3px solid #bbb; color: #444; }
-code, pre { font-family: Consolas, monospace; font-size: 9.5pt; }
-pre { background: #f6f6f6; padding: 10px 12px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; }
-img { max-width: 100%; }
-a { color: #1156d6; text-decoration: none; }
-@media print { * { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
-"#;
 
 /// Bootstrap script injected before Paged.js: a completion flag the host
 /// polls via `ExecuteScript`, wired into PagedConfig.after, plus safety
@@ -93,8 +79,9 @@ window.addEventListener('load', function () {
 /// because each render uses a fresh temp file.
 pub(crate) fn compose_print_document(model_html: &str, title: &str) -> String {
     let head_inject = format!(
-        "<title>{}</title>\n<style>{BASE_CSS}</style>\n<script>{BOOTSTRAP_JS}</script>\n<script>{PAGED_JS}</script>\n<script>{FALLBACK_JS}</script>\n",
+        "<title>{}</title>\n<style>{}</style>\n<script>{BOOTSTRAP_JS}</script>\n<script>{PAGED_JS}</script>\n<script>{FALLBACK_JS}</script>\n",
         html_escape(title),
+        base_css(),
     );
     let lower = model_html.to_ascii_lowercase();
     let trimmed = model_html.trim_start();

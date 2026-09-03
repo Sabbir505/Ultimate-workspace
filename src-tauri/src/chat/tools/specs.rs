@@ -25,6 +25,8 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
             GENERATE_DOCUMENT_DESC,
             generate_document_parameters(),
         ),
+        openai_fn(PLAN_DOCUMENT, PLAN_DOCUMENT_DESC, plan_document_parameters()),
+        openai_fn(REVISE_DOCUMENT, REVISE_DOCUMENT_DESC, revise_document_parameters()),
         openai_fn(GENERATE_DIAGRAM, GENERATE_DIAGRAM_DESC, generate_diagram_parameters()),
         openai_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
         openai_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
@@ -186,6 +188,8 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
             GENERATE_DOCUMENT_DESC,
             generate_document_parameters(),
         ),
+        anthropic_fn(PLAN_DOCUMENT, PLAN_DOCUMENT_DESC, plan_document_parameters()),
+        anthropic_fn(REVISE_DOCUMENT, REVISE_DOCUMENT_DESC, revise_document_parameters()),
         anthropic_fn(GENERATE_DIAGRAM, GENERATE_DIAGRAM_DESC, generate_diagram_parameters()),
         anthropic_fn(FETCH_URL, FETCH_URL_DESC, fetch_url_parameters()),
         anthropic_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
@@ -328,6 +332,56 @@ fn generate_document_parameters() -> Value {
             }
         },
         "required": ["format", "filename", "code"],
+    })
+}
+
+fn plan_document_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "format": {
+                "type": "string",
+                "enum": ["pptx", "docx", "pdf"],
+                "description": "pptx: deck plan (slides/layouts). docx|pdf: document plan (sections/blocks).",
+            },
+            "filename": {
+                "type": "string",
+                "description": "Base file name (extension optional; .pptx is used).",
+            },
+            "theme": {
+                "type": "string",
+                "enum": ["ink", "midnight", "emerald", "plum", "amber", "crimson", "teal"],
+                "description": "Design-system theme. Optional; defaults to ink, or the plan's own theme field.",
+            },
+            "system": {
+                "type": "string",
+                "enum": ["editorial", "consulting", "product", "minimal"],
+                "description": "Named design system: defaults the theme and nudges layout selection (editorial=reports/prose, consulting=analysis decks, product=launch decks, minimal=memos). Optional.",
+            },
+            "plan": {
+                "type": "object",
+                "description": "The deck plan: { v: 1, kind: \"deck\", title, theme?, slides: [{ id, layout, slots, notes? }] }.                     Layouts: cover, section, agenda, bullets, two-col, chart-text, chart-full, kpi, quote, timeline, table, statement, closing.                     The full planner guide (slot budgets, chart schema, rules) is returned with any validation error.",
+            }
+        },
+        "required": ["format", "filename", "plan"],
+    })
+}
+
+fn revise_document_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Artifact path from the original plan_document result.",
+            },
+            "patches": {
+                "type": "array",
+                "description": "Targeted edits. Deck: {\"slide\": id, \"slot\": id, \"value\": any} or {\"slide\": id, \"notes\": str}. Document: {\"section\": id, \"heading\": str}, {\"section\": id, \"block\": index, \"value\": str|object}, or {\"section\": id, \"block\": index, \"remove\": true}.",
+                "items": { "type": "object" },
+            }
+        },
+        "required": ["path", "patches"],
     })
 }
 

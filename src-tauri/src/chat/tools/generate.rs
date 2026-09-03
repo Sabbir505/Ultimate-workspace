@@ -280,7 +280,8 @@ pub(super) async fn generate_document(
     match result {
         Ok(file) => {
             let mut text = format!(
-                "{engine_guide}\n\nCreated document \"{}\" ({}). It has been saved and is available to the user.",
+                "{engine_guide}\n\n{}\n\nCreated document \"{}\" ({}). It has been saved and is available to the user.",
+                crate::chat::docdesign::style_digest(),
                 file.filename,
                 file.path.display()
             );

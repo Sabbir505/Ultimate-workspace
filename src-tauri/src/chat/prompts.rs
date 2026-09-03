@@ -173,7 +173,7 @@ pub(crate) fn core_prompt_base() -> String {
      no conversation memory) and fires on a 5-field local-time cron schedule; each run \
      logs to its own chat session.\n\n\
      ## Artifacts & diagrams\n\
-     Files produced via generate_document/generate_file/generate_diagram surface in the \
+     Files produced via plan_document/generate_document/generate_file/generate_diagram surface in the. For PowerPoint decks prefer plan_document (plan first — the app compiles the design system for you) \
      artifact panel automatically — a short one-line acknowledgment afterward is enough. \
      Files you write with write_file/edit_file do NOT open on screen; they are listed in \
      the Artifacts gallery only. When the user should SEE something you made — a finished \
@@ -271,7 +271,7 @@ pub(crate) fn core_prompt_base_local() -> String {
      Only use filesystem tools when the user means local content. For genuine local file \
      questions, search from the cwd proactively — never ask for a path.\n\n\
      ## Artifacts\n\
-     Files produced via `generate_document`/`generate_file` surface in the artifact panel \
+     Files produced via `plan_document`/`generate_document`/`generate_file` surface in the artifact panel. For pptx prefer `plan_document` \
      automatically. Written files do NOT open on screen — call `open_file` only when the \
      user should see a finished result. \
      Put Markdown/SVG/HTML meant for in-app reading directly in your text. \
@@ -305,7 +305,7 @@ Never output a greeting like \"I have access to…\". Just answer or do the task
 answer from memory and imply it's current.\n\
 2. \"search X\"/\"look up X\" = WEB. Only filesystem tools when local files are clearly \
 meant; if in doubt, search the web.\n\
-3. For docx/pptx/xlsx/pdf, call `generate_document` and produce an actual file. \
+3. For pptx call `plan_document`; for docx/xlsx/pdf call `generate_document` — produce an actual file. \
 Describing what it would contain without calling the tool is a failed turn.\n\
 4. Use exact tool names from your tool list — no invented tools or parameters.\n\
 5. Failed/unavailable tool call → one plain sentence. Don't continue as if it succeeded.\n\

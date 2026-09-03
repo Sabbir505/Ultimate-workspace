@@ -13,6 +13,7 @@ import {
   listenChatApprovalResolved,
   listenChatQuestionRequest,
   listenChatArtifact,
+  listenDocQa,
   listenChatCitationReport,
   listenChatDone,
   listenChatError,
@@ -39,6 +40,7 @@ import { isAppFocused } from "../lib/appFocus";
 import { relayNotify } from "../lib/notifyCenter";
 import { sessionDisplayTitle } from "../lib/sessionTitle";
 import { useChatStore } from "../state/chat";
+import { useDocQaStore } from "../state/docQa";
 import { useUiStore } from "../state/ui";
 
 /** Is the user LOOKING at this session right now — Relay focused AND the
@@ -168,6 +170,14 @@ export function useChatEvents(): void {
         if (ownerSessionId) {
           void emitMobileSessionChatEvent(ownerSessionId, "artifact", payload);
         }
+      }),
+    );
+
+    // Design-QA verdict for plan-compiled documents (keyed by artifact path,
+    // rendered in the artifact preview pane). Desktop-only UI.
+    unlistens.push(
+      listenDocQa((payload) => {
+        useDocQaStore.getState().put(payload);
       }),
     );
 

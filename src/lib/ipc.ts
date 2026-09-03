@@ -2144,6 +2144,39 @@ export const docgenComplete = (args: {
   error?: string;
 }) => safeInvoke<null>("docgen_complete", args);
 
+/** Resolve one plan-compiled document run (see DocDesignRunner): the produced
+ *  file as base64, or an error, plus the JSON-encoded QA issue list from plan
+ *  validation and compile-time invariants. */
+export const docdesignComplete = (args: {
+  requestId: string;
+  base64?: string;
+  error?: string;
+  issuesJson?: string;
+  payloadKind?: string;
+}) => safeInvoke<null>("docdesign_complete", args);
+
+/** Resolve one docdesign render-probe round (`docdesign://qa`): the QA issue
+ *  list measured on the rendered PDF, plus its page count. */
+export const docdesignQaComplete = (args: {
+  requestId: string;
+  issuesJson?: string;
+  pageCount?: number;
+}) => safeInvoke<null>("docdesign_qa_complete", args);
+
+/** Design-QA verdict for a generated document (keyed by artifact path). */
+export interface DocQaReportPayload {
+  path: string;
+  filename: string;
+  passed: string[];
+  warnings: string[];
+  probes: string[];
+  pageCount: number;
+  critic: string;
+  clean: boolean;
+}
+export const listenDocQa = (handler: (payload: DocQaReportPayload) => void) =>
+  safeListen<DocQaReportPayload>("chat:doc-qa", handler);
+
 /** Last-modified time of a file (seconds since epoch), or null when the file
  *  doesn't exist. Artifact preview panes poll this to hot-reload when the
  *  model edits an open artifact file. */

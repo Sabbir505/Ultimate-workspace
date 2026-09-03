@@ -28,6 +28,7 @@ import {
   type ArtifactPreview,
 } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
+import { useDocQaStore } from "../../state/docQa";
 import { ArtifactExportMenu } from "./ArtifactExportMenu";
 import { ChatCitation } from "./ChatCitation";
 import { DocxViewer } from "./DocxViewer";
@@ -880,6 +881,7 @@ export function ArtifactPreviewPaneInner({
           </div>
         ) : (
           <div className="artifact-preview-zoom" style={zoomStyle}>
+            <DocQaStrip artifactPath={artifact.path} />
             <PreviewBody preview={preview} />
           </div>
         )}
@@ -893,3 +895,35 @@ export function ArtifactPreviewPaneInner({
  *  preview — including markdown document parses — only re-renders when the
  *  shown file actually changes. */
 export const ArtifactPreviewPane = memo(ArtifactPreviewPaneInner);
+
+/** Design-QA strip for plan-compiled documents (docdesign): a compact
+ *  pass/warn row above the preview, mirroring the citation-report strip.
+ *  Rendered only when a QA verdict exists for this artifact path. */
+export function DocQaStrip({ artifactPath }: { artifactPath: string }) {
+  const qa = useDocQaStore((s) => s.byPath[artifactPath]);
+  if (!qa) return null;
+  const warnCount = qa.warnings.length + qa.probes.length;
+  const level = qa.clean ? "ok" : warnCount > 0 ? "warn" : "warn";
+  const summary = qa.clean
+    ? `Design QA passed · ${qa.passed.length} check${qa.passed.length === 1 ? "" : "s"} · ${qa.pageCount} page${qa.pageCount === 1 ? "" : "s"} probed`
+    : `Design QA · ${warnCount} warning${warnCount === 1 ? "" : "s"} · ${qa.passed.length} check${qa.passed.length === 1 ? "" : "s"} passed`;
+  return (
+    <div
+      className={`doc-qa-strip is-${level}`}
+      title={[...qa.warnings, ...qa.probes].join("\n")}
+    >
+      <span className="doc-qa-strip-dot" aria-hidden />
+      <span className="doc-qa-strip-text">
+        {summary}
+        {!qa.clean && (
+          <ul className="doc-qa-strip-issues">
+            {[...qa.warnings, ...qa.probes].slice(0, 4).map((w, i) => (
+              <li key={i}>{w}</li>
+            ))}
+            {warnCount > 4 && <li>… and {warnCount - 4} more</li>}
+          </ul>
+        )}
+      </span>
+    </div>
+  );
+}

@@ -46,17 +46,22 @@ not covered.
 """
 
 import datetime
+import json
 import os
 
 # ---------------------------------------------------------------------------
-# Design tokens. Hex strings (no leading '#').
+# Design tokens — loaded from the SHARED token file (docdesign_tokens.json,
+# staged next to this module by the host) so the Python engine styles from the
+# same source of truth as the JS engines and the HTML print CSS. The literals
+# below are only a fallback for standalone imports without the staged file.
+# Hex strings (no leading '#').
 #   ink     – body text            muted   – secondary text
 #   accent  – the one accent hue    tint    – faint accent wash for fills
 #   hair    – hairline rules
 #   cbg/cfg – cover background / foreground
 #   cmut    – cover secondary text  cacc    – cover accent (title-slide eyebrow)
 # ---------------------------------------------------------------------------
-THEMES = {
+_FALLBACK_THEMES = {
     "ink":      {"ink": "14161C", "muted": "6B7280", "accent": "2F55E0", "tint": "EEF2FE",
                  "hair": "E5E7EB", "cbg": "0E1116", "cfg": "FFFFFF", "cmut": "9AA4B2", "cacc": "9DB6FF"},
     "midnight": {"ink": "14161C", "muted": "6B7280", "accent": "6D4AE0", "tint": "F1EEFE",
@@ -73,13 +78,52 @@ THEMES = {
                  "hair": "D9E7E7", "cbg": "062226", "cfg": "FFFFFF", "cmut": "92AEAF", "cacc": "6FD8E0"},
 }
 
-# Aliases keep older theme names working.
+
+def _load_tokens():
+    """Read the shared docdesign token file; fall back to embedded copies."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docdesign_tokens.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+_TOKENS = _load_tokens()
+
+
+def _themes_from_tokens(tokens):
+    themes = {}
+    for tid, theme in (tokens.get("themes") or {}).items():
+        c = theme.get("color") or {}
+        themes[tid] = {
+            "ink": c.get("ink", "14161C"),
+            "muted": c.get("muted", "6B7280"),
+            "accent": c.get("accent", "2F55E0"),
+            "tint": c.get("tint", "EEF2FE"),
+            "hair": c.get("hair", "E5E7EB"),
+            "cbg": c.get("coverBg", "0E1116"),
+            "cfg": c.get("coverFg", "FFFFFF"),
+            "cmut": c.get("coverMuted", "9AA4B2"),
+            "cacc": c.get("coverAccent", "9DB6FF"),
+        }
+    return themes
+
+
+THEMES = _themes_from_tokens(_TOKENS) if _TOKENS else dict(_FALLBACK_THEMES)
+if not THEMES:
+    THEMES = dict(_FALLBACK_THEMES)
+
+# Aliases keep older theme names working (shared file first, then legacy).
 _ALIASES = {"blue": "ink", "slate": "ink", "default": "ink", "purple": "plum",
             "green": "emerald", "red": "crimson", "orange": "amber"}
+if _TOKENS:
+    _ALIASES.update(_TOKENS.get("aliases") or {})
 
-# Widely-available editorial pairing: serif display + sans body.
-DISPLAY = "Georgia"
-BODY = "Calibri"
+# Widely-available editorial pairing: serif display + sans body. Faces also
+# come from the shared tokens when they are staged.
+DISPLAY = (_TOKENS or {}).get("faces", {}).get("display", {}).get("primary", "Georgia")
+BODY = (_TOKENS or {}).get("faces", {}).get("body", {}).get("primary", "Calibri")
 WHITE = "FFFFFF"
 
 

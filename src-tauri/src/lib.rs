@@ -431,6 +431,8 @@ pub fn run() {
             commands::chat_cmds::is_libreoffice_available,
             commands::chat_cmds::office_accurate_pdf,
             commands::chat_cmds::docgen_complete,
+            commands::chat_cmds::docdesign_complete,
+            commands::chat_cmds::docdesign_qa_complete,
             commands::chat_cmds::get_file_mtime,
             commands::chat_cmds::find_file_by_basename,
             commands::chat_cmds::download_artifact,

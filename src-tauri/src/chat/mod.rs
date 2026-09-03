@@ -6,6 +6,7 @@
 pub mod artifacts;
 pub mod citation_lint;
 pub mod citation_verify;
+pub mod docdesign;
 pub mod jsdocgen;
 pub mod pdfprint;
 pub mod codeexec;

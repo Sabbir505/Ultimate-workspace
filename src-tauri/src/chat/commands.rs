@@ -3347,6 +3347,45 @@ pub fn docgen_complete(request_id: String, data_b64: Option<String>, error: Opti
     Ok(())
 }
 
+/// Completion callback for the plan-compiled document engine (`docdesign`).
+/// The frontend `DocDesignRunner` validates the plan (L1), compiles it against
+/// the design system (L2 invariants), runs the generated program in a
+/// sandboxed frame, and posts the produced file back as base64 (or an error)
+/// plus the JSON-encoded QA issue list. Resolves the waiter parked in
+/// `chat::docdesign::plan`.
+#[tauri::command]
+pub fn docdesign_complete(
+    request_id: String,
+    data_b64: Option<String>,
+    error: Option<String>,
+    issues_json: Option<String>,
+    payload_kind: Option<String>,
+) -> CmdResult<()> {
+    let result = match (data_b64, error) {
+        (Some(b64), _) => crate::chat::jsdocgen::decode_base64(&b64),
+        (None, Some(e)) => Err(e),
+        (None, None) => Err(
+            "the document compiler returned neither file data nor an error".to_string(),
+        ),
+    };
+    crate::chat::docdesign::plan::complete(&request_id, result, issues_json, payload_kind);
+    Ok(())
+}
+
+/// Completion callback for the docdesign render probes (`docdesign://qa`).
+/// The frontend converts the artifact to PDF (LibreOffice bridge for office
+/// files) and inspects it with pdf.js; this resolves the waiter parked in
+/// `chat::docdesign::qa::run_render_probes`.
+#[tauri::command]
+pub fn docdesign_qa_complete(
+    request_id: String,
+    issues_json: Option<String>,
+    page_count: Option<u32>,
+) -> CmdResult<()> {
+    crate::chat::docdesign::qa::complete(&request_id, issues_json, page_count.unwrap_or(0));
+    Ok(())
+}
+
 /// Last-modified time of a file, in seconds since the Unix epoch. The
 /// artifact preview panes poll this (cheap stat) to hot-reload when the model
 /// edits an open artifact file. `None` when the file is gone (deleted while

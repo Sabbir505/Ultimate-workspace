@@ -33,6 +33,7 @@ import { ChatSelectionToolbar } from "./components/chat/ChatSelectionToolbar";
 // In-app JS document engine (generate_document language:"javascript"): must
 // be mounted wherever a chat can run, including the pop-out chat window.
 import { DocCodeRunner } from "./components/chat/DocCodeRunner";
+import { DocDesignRunner } from "./components/chat/DocDesignRunner";
 import { FolderNotch, GitHubNotch } from "./components/chat/ChatComposer";
 import { useChatStore } from "./state/chat";
 import { GitToolsSidebar } from "./components/chat/GitToolsSidebar";
@@ -257,6 +258,7 @@ export default function App() {
     return (
       <div className="popout-chat-root">
         <DocCodeRunner />
+        <DocDesignRunner />
         <ChatSelectionToolbar />
         <ChatView popoutSessionId={popout.session ?? undefined} />
       </div>
@@ -266,6 +268,7 @@ export default function App() {
   return (
     <div className="app">
       <DocCodeRunner />
+      <DocDesignRunner />
       <ChatSelectionToolbar />
       <ToastHost />
       {/* Kept mounted so collapse/expand animates as a width slide instead

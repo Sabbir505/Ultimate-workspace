@@ -31,6 +31,10 @@ const GEN_TIMEOUT: Duration = Duration::from_secs(90);
 /// Styling toolkit made importable (as `conduit_docgen`) for every run so the
 /// model can emit themed docx/pptx with a few high-level calls.
 const DOCGEN_HELPER: &str = include_str!("docgen_helper.py");
+/// Shared design tokens (the same file the JS engines and the HTML print CSS
+/// build from), staged next to the helper so every engine styles from one
+/// source of truth.
+const DOCDESIGN_TOKENS: &str = include_str!("../../../src/lib/docdesign/tokens.json");
 /// Max bytes of the program's own stdout/stderr fed back to the model.
 const MAX_OUTPUT: usize = 8_000;
 
@@ -95,8 +99,10 @@ pub async fn generate(
         return Err(format!("could not write generator script: {e}"));
     }
     // Drop the styling toolkit next to the script so `import conduit_docgen`
-    // resolves (the script's dir is on sys.path automatically).
+    // resolves (the script's dir is on sys.path automatically), plus the
+    // shared design tokens it reads its themes from.
     let _ = std::fs::write(tmp.join("conduit_docgen.py"), DOCGEN_HELPER);
+    let _ = std::fs::write(tmp.join("docdesign_tokens.json"), DOCDESIGN_TOKENS);
 
     // Also expose the helper via PYTHONPATH so it imports even though cwd is
     // the artifacts dir, preserving any pre-existing PYTHONPATH.

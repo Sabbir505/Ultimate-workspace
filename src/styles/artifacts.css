@@ -549,3 +549,48 @@
   font-size: 11px;
   color: var(--text-dim);
 }
+
+/* docdesign QA strip — verdict row above a plan-compiled document preview
+   (mirrors the citation-report strip's visual language). */
+.doc-qa-strip {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex: none;
+  margin: 0 0 8px;
+  padding: 7px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.doc-qa-strip-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--success, #3fb970);
+}
+
+.doc-qa-strip.is-warn .doc-qa-strip-dot {
+  background: var(--warning, #d29922);
+}
+
+.doc-qa-strip-text {
+  min-width: 0;
+}
+
+.doc-qa-strip-issues {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  list-style: disc;
+}
+
+.doc-qa-strip-issues li {
+  margin: 2px 0;
+  overflow-wrap: anywhere;
+}

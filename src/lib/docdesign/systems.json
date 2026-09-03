@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "systems": {
+    "editorial": {
+      "name": "Editorial",
+      "defaultTheme": "ink",
+      "kinds": ["doc", "pdf"],
+      "layouts": ["cover", "section", "agenda", "bullets", "quote", "statement", "closing"],
+      "voice": "Long-form prose, generous whitespace, serif display headings; reports, briefs and documentation."
+    },
+    "consulting": {
+      "name": "Consulting",
+      "defaultTheme": "midnight",
+      "kinds": ["deck"],
+      "layouts": ["cover", "section", "agenda", "bullets", "two-col", "chart-text", "chart-full", "kpi", "timeline", "table", "closing"],
+      "voice": "Dense, action-titled slides — every slide states its takeaway; analysis decks and reviews."
+    },
+    "product": {
+      "name": "Product",
+      "defaultTheme": "emerald",
+      "kinds": ["deck"],
+      "layouts": ["cover", "section", "bullets", "two-col", "chart-full", "kpi", "quote", "statement", "timeline", "closing"],
+      "voice": "Punchy headlines, big numbers, one message per slide; launches and status updates."
+    },
+    "minimal": {
+      "name": "Minimal",
+      "defaultTheme": "teal",
+      "kinds": ["deck", "doc", "pdf"],
+      "layouts": ["cover", "section", "bullets", "quote", "statement", "closing"],
+      "voice": "Maximal whitespace, hairline rules, two type weights; memos and one-pagers."
+    }
+  }
+}

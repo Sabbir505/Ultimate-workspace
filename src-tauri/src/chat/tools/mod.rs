@@ -63,6 +63,8 @@ pub use capabilities::{app_capabilities_report, capabilities_report};
 pub const WEB_SEARCH: &str = "web_search";
 pub const GENERATE_FILE: &str = "generate_file";
 pub const GENERATE_DOCUMENT: &str = "generate_document";
+pub const PLAN_DOCUMENT: &str = "plan_document";
+pub const REVISE_DOCUMENT: &str = "revise_document";
 pub const GENERATE_DIAGRAM: &str = "generate_diagram";
 pub const FETCH_URL: &str = "fetch_url";
 pub const RUN_CODE: &str = "run_code";
@@ -370,15 +372,37 @@ const GENERATE_FILE_DESC: &str = "Generate a simple downloadable text-based \
     the first line of each slide is its title and remaining lines are bullets. \
     For xlsx/csv, provide comma-separated rows (one row per line).";
 
-const GENERATE_DOCUMENT_DESC: &str = "Create a professionally designed \
-    docx/pptx/xlsx/pdf by writing a complete Python program in `code` that \
-    builds it and saves it to os.environ[\"CONDUIT_OUTPUT\"] (the requested \
-    filename). STRONGLY PREFER the pre-installed `conduit_docgen` helper \
-    (themes: ink, midnight, emerald, plum, amber, crimson, teal). The output \
-    must look polished — never a plain text dump. The full editorial style \
-    guide + conduit_docgen cheatsheet is returned with the tool result; read \
-    it and regenerate if the first attempt falls short. Imports allowed: \
-    stdlib, conduit_docgen, python-docx, python-pptx, openpyxl, reportlab.";
+const GENERATE_DOCUMENT_DESC: &str = "Create a professionally designed docx/pptx/xlsx/pdf. \
+    The engine is chosen by `language` (default per format): \"javascript\" (docx/pptx) — a \
+    JS program against the preloaded `docx` / `PptxGenJS` globals delivering via \
+    `await conduit.save(...)`; \"html\" (pdf) — a complete styled HTML document rendered by a \
+    real browser engine; \"python\" (fallback for any format) — a Python program saving to \
+    os.environ[\"CONDUIT_OUTPUT\"] (imports: stdlib, conduit_docgen, python-docx, python-pptx, \
+    openpyxl, reportlab). For PowerPoint decks prefer plan_document instead — it plans the \
+    deck first and compiles it against the shared design system. The full editorial style \
+    guide + engine cheatsheet is returned with the tool result; regenerate if the first \
+    attempt falls short.";
+
+const PLAN_DOCUMENT_DESC: &str = "Create a professionally designed PowerPoint deck, Word \
+    document, or PDF by authoring a structured PLAN (not code): call with \
+    { format: \"pptx\"|\"docx\"|\"pdf\", filename, theme?, plan }. Deck plans (pptx) are a \
+    slide outline — per-slide layout from a fixed catalog (cover, section, bullets, two-col, \
+    chart-text, chart-full, kpi, quote, timeline, table, statement, closing), slot content \
+    and speaker notes. Document plans (docx/pdf) are sections of typed blocks (paragraph, \
+    bullets/numbered, callout, quote, table, kpi-strip). The app validates the plan (layout \
+    budgets, chart shapes, coherence), compiles it against the shared design system \
+    (typography, spacing, colors handled for you), and runs design QA before saving. QA \
+    issues come back with the result; fix them by re-calling with a REVISED plan (same \
+    filename overwrites). Prefer this over generate_document for pptx/docx/pdf. The full \
+    planner guide is returned with any error.";
+
+const REVISE_DOCUMENT_DESC: &str = "Make targeted edits to a document you created with \
+    plan_document: { path, patches }. Each patch addresses one slide slot or one document \
+    block — e.g. { \"slide\": \"s3\", \"slot\": \"title\", \"value\": \"New title\" } or \
+    { \"section\": \"sec2\", \"block\": 1, \"value\": \"replacement text\" }. The plan is \
+    patched, RECOMPILED against the design system, and re-validated — revisions stay \
+    on-brand and within budgets. Much better than regenerating the whole document for \
+    copy tweaks. The patch guide is returned with any error.";
 
 const GENERATE_DIAGRAM_DESC: &str = "Create a freeform STATIC vector illustration \
     (concept sketch, annotated architecture art) as a self-contained .html file. \
@@ -812,6 +836,8 @@ pub async fn execute_tool(
         }
         GENERATE_FILE => generate_file(artifacts_dir, args),
         GENERATE_DOCUMENT => generate_document(app, artifacts_dir, args).await,
+        PLAN_DOCUMENT => crate::chat::docdesign::plan::plan_document(app, artifacts_dir, args).await,
+        REVISE_DOCUMENT => crate::chat::docdesign::plan::revise_document(app, artifacts_dir, args).await,
         GENERATE_DIAGRAM => generate_diagram(artifacts_dir, args),
         FETCH_URL => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");

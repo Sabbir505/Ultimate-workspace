@@ -72,10 +72,16 @@ pub fn build_instructions_md(project_path: &str, artifacts_dir: &str) -> String 
     parts.push(format!(
         "You are running inside Relay. {location} \
          Generated documents and diagrams must go to `{artifacts_dir}` via the \
-         `conduit-tools` MCP tools (`generate_document`, `generate_diagram`, \
-         `generate_file`) — do not hand-build docx/pptx/pdf yourself. Use \
-         `get_skill` to load the detailed guidance for a skill before \
-         producing it. To check which connectors / MCP servers / skills are \
+         `conduit-tools` MCP tools — do not hand-build docx/pptx/pdf yourself. \
+         For a polished docx/pptx/pdf, PREFER `plan_document`: you author a \
+         structured plan (outline, layouts, slot text, chart data); Relay \
+         validates it, compiles it against the design system, and runs design \
+         QA. Fix any QA warnings by re-calling with a revised plan, or make \
+         copy tweaks with `revise_document` (targeted patches, no full \
+         regeneration). Fall back to `generate_document` for xlsx or when the \
+         planner is unavailable. Use `get_skill` to load the detailed guidance \
+         for a skill before producing it. To check which connectors / MCP \
+         servers / skills are \
          available, call `get_capabilities` on `conduit-tools` — never run \
          `claude mcp list` (or similar probes) in your terminal: that spawns \
          processes to re-derive what the app already knows and reads your \
@@ -435,6 +441,10 @@ mod tests {
         assert!(md.contains("C:/work/out"));
         // Skill catalog from available_skills_segment (docx is a built-in).
         assert!(md.contains("docx"));
+        // The plan-compiled design path must be advertised to harness agents
+        // (and preferred over the legacy generate_document).
+        assert!(md.contains("plan_document"), "instructions must mention plan_document");
+        assert!(md.contains("revise_document"), "instructions must mention revise_document");
     }
 
     #[test]

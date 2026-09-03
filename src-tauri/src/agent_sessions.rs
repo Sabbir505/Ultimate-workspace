@@ -625,7 +625,8 @@ const CONTEXT_PRIMER_SUMMARY_TRIGGER_CHARS: usize = 8_000;
 /// (see the send path's comment for ordering). Extracted from the send path
 /// so a test can pin its tool references: the persona must only name tools
 /// that actually exist in harness sessions — the conduit-tools MCP whitelist
-/// (generate_document/diagram/file, get_skill, list_skills, search_docs) and
+/// (generate_document/plan_document/revise_document/diagram/file, get_skill,
+/// list_skills, search_docs) and
 /// the conduit-browser MCP family. It must NOT reference built-in-chat-only
 /// tools like `open_file`, which the CLI cannot call (that phantom reference
 /// used to make harness models promise to "open" files and then fail or

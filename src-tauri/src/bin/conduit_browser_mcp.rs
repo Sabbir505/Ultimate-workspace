@@ -223,6 +223,7 @@ fn tool_op(tool: &str) -> Result<String, &'static str> {
         | "read_console" | "read_network" | "list_tabs" | "switch_tab"
         | "new_tab" | "close_tab" | "zoom" | "print_to_pdf" => Ok(tool.to_string()),
         "generate_document" | "generate_diagram" | "generate_file"
+        | "plan_document" | "revise_document"
         | "get_skill" | "list_skills" | "search_docs" | "get_capabilities" => Ok(format!("conduit_tools:{tool}")),
         _ => Err("unknown tool"),
     }
@@ -657,6 +658,40 @@ fn tool_schemas() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "plan_document",
+            "description": "Create a REAL, professionally designed docx/pptx/pdf from a structured PLAN — no code. You author content (title, per-slide layouts or document sections, slot text, chart data, tables, KPIs, speaker notes); Relay validates the plan (layout budgets, chart shapes, deck coherence), compiles it against the built-in design system (typography, spacing, colors handled for you), renders it, and runs design QA before saving. QA warnings come back in the result — fix them by re-calling with a revised plan (same filename overwrites). Prefer this over generate_document for polished pptx/docx/pdf. The full planner guide is returned with any error.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "format": { "type": "string", "enum": ["pptx", "docx", "pdf"] },
+                    "filename": { "type": "string" },
+                    "theme": { "type": "string", "enum": ["ink", "midnight", "emerald", "plum", "amber", "crimson", "teal"] },
+                    "system": { "type": "string", "enum": ["editorial", "consulting", "product", "minimal"], "description": "Named design system: defaults the theme and nudges layout selection." },
+                    "plan": {
+                        "type": "object",
+                        "description": "Deck plan: { v: 1, kind: 'deck', title, theme?, slides: [{ id, layout, slots, notes? }] } with layouts cover|section|agenda|bullets|two-col|chart-text|chart-full|kpi|quote|timeline|table|statement|closing. Document plan: { v: 1, kind: 'doc', title, subtitle?, sections: [{ id, heading, blocks: [...] }] } with block types paragraph|bullets|numbered|callout|quote|table|kpi-strip. Full schema arrives with any validation error."
+                    }
+                },
+                "required": ["format", "filename", "plan"]
+            }
+        }),
+        json!({
+            "name": "revise_document",
+            "description": "Make targeted edits to a document previously created with plan_document: patch individual slide slots or document blocks in the PLAN, and Relay recompiles and re-validates — revisions stay on-brand and within budgets. Far better than regenerating the whole document for copy tweaks.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Artifact path from the original plan_document result." },
+                    "patches": {
+                        "type": "array",
+                        "items": { "type": "object" },
+                        "description": "Deck: { slide: id, slot: id, value: any } or { slide: id, notes: str }. Document: { section: id, heading: str } | { section: id, block: index, value: str|object } | { section: id, block: index, remove: true }."
+                    }
+                },
+                "required": ["path", "patches"]
+            }
+        }),
+        json!({
             "name": "generate_diagram",
             "description": "Create a hand-styled HTML/CSS diagram file in the artifacts dir from a full HTML document. Use get_skill('diagram') for guidance.",
             "inputSchema": {
@@ -730,7 +765,8 @@ mod tests {
             .filter_map(|t| t["name"].as_str())
             .collect();
         for tool in ["navigate", "read_page", "generate_document", "generate_diagram",
-                     "generate_file", "get_skill", "list_skills", "search_docs",
+                     "generate_file", "plan_document", "revise_document",
+                     "get_skill", "list_skills", "search_docs",
                      "get_capabilities",
                      "history", "hover", "evaluate", "click_and_wait", "screenshot"] {
             assert!(names.contains(&tool), "missing tool schema: {tool}");
@@ -749,6 +785,9 @@ mod tests {
     #[test]
     fn conduit_tool_routing_uses_tools_namespace() {
         assert_eq!(tool_op("generate_document").unwrap(), "conduit_tools:generate_document");
+        // The plan-compiled design path is reachable from harnesses too.
+        assert_eq!(tool_op("plan_document").unwrap(), "conduit_tools:plan_document");
+        assert_eq!(tool_op("revise_document").unwrap(), "conduit_tools:revise_document");
         assert_eq!(tool_op("search_docs").unwrap(), "conduit_tools:search_docs");
         assert_eq!(tool_op("navigate").unwrap(), "navigate"); // browser tools unchanged
         // New browser tools keep their bare op names (dispatched in

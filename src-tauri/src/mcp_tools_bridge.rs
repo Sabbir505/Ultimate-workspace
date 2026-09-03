@@ -1,6 +1,7 @@
 //! App-side half of the `conduit-tools` MCP server. The relay binary forwards
-//! `tools/call` for generate_document / generate_diagram / generate_file /
-//! get_skill / list_skills / search_docs over the loopback WebSocket; this
+//! `tools/call` for generate_document / plan_document / revise_document /
+//! generate_diagram / generate_file / get_skill / list_skills / search_docs
+//! over the loopback WebSocket; this
 //! module runs them through the SAME `chat::tools::execute_tool` dispatcher
 //! the built-in chat uses, so the harness gets the identical output pipeline
 //! and artifact classification. Generated files land in the shared artifacts
@@ -23,8 +24,10 @@ use crate::chat::tools::{self, ToolCaps};
 /// `execute_conduit_tool` for the app-level report (ToolCaps::default() here
 /// has no per-turn attachment state, so routing it through execute_tool would
 /// report a falsely empty connector list).
-const ALLOWED_RELAY_TOOLS: [&str; 7] = [
+const ALLOWED_RELAY_TOOLS: [&str; 9] = [
     tools::GENERATE_DOCUMENT,
+    tools::PLAN_DOCUMENT,
+    tools::REVISE_DOCUMENT,
     tools::GENERATE_DIAGRAM,
     tools::GENERATE_FILE,
     tools::GET_SKILL,
@@ -86,6 +89,10 @@ mod tests {
         assert_eq!(tool_from_op("conduit_tools:search_docs"), Some("search_docs".to_string()));
         // Read-only introspection is allowed through the relay.
         assert_eq!(tool_from_op("conduit_tools:get_capabilities"), Some("get_capabilities".to_string()));
+        // The plan-compiled design path is reachable from harnesses (same
+        // artifacts-dir-only risk class as generate_document).
+        assert_eq!(tool_from_op("conduit_tools:plan_document"), Some("plan_document".to_string()));
+        assert_eq!(tool_from_op("conduit_tools:revise_document"), Some("revise_document".to_string()));
         assert_eq!(tool_from_op("navigate"), None);
         assert_eq!(tool_from_op("conduit_tools:"), None);
         // Mutating/dangerous chat tools must be rejected server-side even

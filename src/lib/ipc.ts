@@ -573,6 +573,16 @@ export const removeBudget = (projectId: string) =>
 export const checkBudgets = () =>
   safeInvoke<BudgetAlertPayload[] | null>("check_budgets");
 
+// Projects show up on the Cost page automatically once they accrue spend;
+// these hide/unhide them from that page's per-project list (display-only —
+// usage data and configured budgets are untouched).
+export const listHiddenCostProjects = () =>
+  safeInvoke<string[] | null>("list_hidden_cost_projects");
+export const hideCostProject = (projectId: string) =>
+  safeInvoke<void>("hide_cost_project", { projectId });
+export const unhideCostProject = (projectId: string) =>
+  safeInvoke<void>("unhide_cost_project", { projectId });
+
 /** Stream `budget:alert` events (threshold crossed) — drives the in-app toast. */
 export const onBudgetAlert = (handler: (p: BudgetAlertPayload) => void) =>
   safeListen<BudgetAlertPayload>("budget:alert", handler);

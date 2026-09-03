@@ -1,12 +1,20 @@
 // Budget/spend alerts panel (roadmap #10): shows per-project monthly spend
 // against configured budgets, with an inline editor to set/remove budgets.
 // Mounted inside the CostDashboard below the stats row.
+//
+// Projects land on the Cost page automatically once they accrue spend in the
+// range. Rows without a configured budget can be removed ("hidden") from the
+// page; hidden projects stay removable via the restore footer and their
+// usage data / configured budgets are untouched.
 import { useCallback, useEffect, useState } from "react";
 import {
   listBudgets,
   setBudget,
   removeBudget,
   listProjects,
+  listHiddenCostProjects,
+  hideCostProject,
+  unhideCostProject,
   toastError,
   type BudgetConfig,
 } from "../../lib/ipc";
@@ -24,6 +32,9 @@ export function BudgetPanel({ perProject }: Props) {
   // Project id → name. `perProject` only carries the UUID; without this
   // lookup the panel renders raw UUIDs where a name is expected.
   const [projectNames, setProjectNames] = useState<Map<string, string>>(new Map());
+  // Project ids hidden from the Cost page (persisted via app_settings).
+  const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set());
+  const [showHidden, setShowHidden] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -40,8 +51,10 @@ export function BudgetPanel({ perProject }: Props) {
     let cancelled = false;
     void (async () => {
       try {
-        const ps = await listProjects();
-        if (!cancelled && ps) setProjectNames(new Map(ps.map((p) => [p.id, p.name])));
+        const [ps, hidden] = await Promise.all([listProjects(), listHiddenCostProjects()]);
+        if (cancelled) return;
+        if (ps) setProjectNames(new Map(ps.map((p) => [p.id, p.name])));
+        if (hidden) setHiddenIds(new Set(hidden));
       } catch {
         if (!cancelled) toastError("Could not load project names");
       }
@@ -72,13 +85,40 @@ export function BudgetPanel({ perProject }: Props) {
     } finally { setBusy(null); }
   };
 
-  if (perProject.length === 0) return null;
+  const handleHide = async (projectId: string) => {
+    setBusy(projectId);
+    try {
+      await hideCostProject(projectId);
+      setHiddenIds((prev) => new Set(prev).add(projectId));
+    } catch (err) {
+      toastError("Failed to remove project", err);
+    } finally { setBusy(null); }
+  };
+
+  const handleUnhide = async (projectId: string) => {
+    setBusy(projectId);
+    try {
+      await unhideCostProject(projectId);
+      setHiddenIds((prev) => {
+        const next = new Set(prev);
+        next.delete(projectId);
+        return next;
+      });
+    } catch (err) {
+      toastError("Failed to restore project", err);
+    } finally { setBusy(null); }
+  };
+
+  const visible = perProject.filter((p) => !hiddenIds.has(p.projectId));
+  const hiddenList = [...hiddenIds];
+
+  if (perProject.length === 0 && hiddenList.length === 0) return null;
 
   return (
     <div className="budget-panel">
       <h4 className="budget-panel-title">Project budgets</h4>
       <div className="budget-rows">
-        {perProject.map((p) => {
+        {visible.map((p) => {
           const cfg = budgets.find((b) => b.projectId === p.projectId);
           const pct = cfg && cfg.monthlyUsd > 0
             ? (p.totalCostUsd / cfg.monthlyUsd * 100).toFixed(1)
@@ -115,14 +155,44 @@ export function BudgetPanel({ perProject }: Props) {
                   </button>
                 </>
               ) : (
-                <button className="ghost" onClick={() => { setEditing(p.projectId); setDraftUsd(""); }}>
-                  Set budget
-                </button>
+                <>
+                  <button className="ghost" onClick={() => { setEditing(p.projectId); setDraftUsd(""); }}>
+                    Set budget
+                  </button>
+                  <button
+                    className="ghost"
+                    title="Remove from Cost page"
+                    aria-label={`Remove ${displayName(p.projectId)} from Cost page`}
+                    onClick={() => void handleHide(p.projectId)}
+                    disabled={busy === p.projectId}
+                  >
+                    Remove
+                  </button>
+                </>
               )}
             </div>
           );
         })}
       </div>
+      {hiddenList.length > 0 && (
+        <div className="budget-hidden">
+          <button className="ghost" onClick={() => setShowHidden((v) => !v)}>
+            {showHidden ? `Hide removed (${hiddenList.length})` : `Show removed (${hiddenList.length})`}
+          </button>
+          {showHidden && hiddenList.map((id) => (
+            <div key={id} className="budget-row">
+              <span className="budget-row-name">{displayName(id)}</span>
+              <button
+                className="ghost"
+                onClick={() => void handleUnhide(id)}
+                disabled={busy === id}
+              >
+                Restore
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

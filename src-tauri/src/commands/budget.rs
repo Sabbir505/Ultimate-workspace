@@ -104,6 +104,50 @@ pub fn remove_budget(db: State<'_, DbState>, project_id: String) -> CmdResult<()
     Ok(())
 }
 
+/// App-settings key holding the JSON `Vec<String>` of project ids hidden
+/// from the Cost page's per-project list. Projects land there automatically
+/// once they accrue spend; hiding is display-only — no usage rows are
+/// deleted and any configured budget keeps alerting.
+const HIDDEN_COST_PROJECTS_KEY: &str = "cost.hidden_project_ids";
+
+fn load_hidden_projects(conn: &rusqlite::Connection) -> Vec<String> {
+    match db::get_setting(conn, HIDDEN_COST_PROJECTS_KEY) {
+        Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn save_hidden_projects(conn: &rusqlite::Connection, ids: &[String]) -> Result<(), String> {
+    let json = serde_json::to_string(ids).map_err(|e| e.to_string())?;
+    db::set_setting(conn, HIDDEN_COST_PROJECTS_KEY, &json).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_hidden_cost_projects(db: State<'_, DbState>) -> CmdResult<Vec<String>> {
+    let conn = db.0.lock();
+    Ok(load_hidden_projects(&conn))
+}
+
+/// Hide a project from the Cost page's per-project list. Idempotent.
+#[tauri::command]
+pub fn hide_cost_project(db: State<'_, DbState>, project_id: String) -> CmdResult<()> {
+    let conn = db.0.lock();
+    let mut ids = load_hidden_projects(&conn);
+    if ids.iter().any(|id| id == &project_id) {
+        return Ok(());
+    }
+    ids.push(project_id);
+    save_hidden_projects(&conn, &ids)
+}
+
+#[tauri::command]
+pub fn unhide_cost_project(db: State<'_, DbState>, project_id: String) -> CmdResult<()> {
+    let conn = db.0.lock();
+    let mut ids = load_hidden_projects(&conn);
+    ids.retain(|id| id != &project_id);
+    save_hidden_projects(&conn, &ids)
+}
+
 /// Compute the current calendar month's spend per project and, for each
 /// configured budget that has crossed its threshold, emit `budget:alert` and
 /// push a mobile notice. Called after cost events / on a timer. Returns the
@@ -229,5 +273,24 @@ mod tests {
         let (yy, mm) = civil_from_days(days);
         assert_eq!(yy, 2026);
         assert_eq!(mm, 1);
+    }
+
+    #[test]
+    fn hidden_projects_round_trip_and_dedupe() {
+        let conn = crate::db::mem();
+        assert!(load_hidden_projects(&conn).is_empty());
+        save_hidden_projects(&conn, &["p1".into(), "p2".into()]).unwrap();
+        assert_eq!(load_hidden_projects(&conn), vec!["p1".to_string(), "p2".to_string()]);
+        // A stale hide (e.g. double-click) must not duplicate the id.
+        let mut ids = load_hidden_projects(&conn);
+        if !ids.iter().any(|id| id == "p1") {
+            ids.push("p1".into());
+            save_hidden_projects(&conn, &ids).unwrap();
+        }
+        assert_eq!(load_hidden_projects(&conn).len(), 2);
+        let mut ids = load_hidden_projects(&conn);
+        ids.retain(|id| id != "p1");
+        save_hidden_projects(&conn, &ids).unwrap();
+        assert_eq!(load_hidden_projects(&conn), vec!["p2".to_string()]);
     }
 }

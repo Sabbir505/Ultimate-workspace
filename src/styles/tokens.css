@@ -439,7 +439,10 @@ button:disabled {
 button.primary {
   background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 92%, #fff 8%), var(--accent));
   border-color: color-mix(in srgb, var(--accent) 70%, transparent);
-  color: #fff;
+  /* NOT #fff: theme presets rotate --accent to light fills (amber, lavender,
+     cyan) where white text drops below 2:1. --accent-contrast is each
+     palette's readable counterpart. */
+  color: var(--accent-contrast);
   box-shadow: var(--glass-rim), 0 4px 14px -6px var(--accent-glow);
 }
 button.ghost {

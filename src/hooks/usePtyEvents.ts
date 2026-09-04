@@ -27,8 +27,18 @@ import type {
 const notifyCooldownMs = 30_000;
 const lastNotifiedAt = new Map<string, number>();
 
+/** When each pane's current "working" stretch began (epoch ms). A freshly
+ *  spawned pane prints its banner (any output → working) and flips to
+ *  waiting after the first 1.5s of silence — notifying on that is what made
+ *  "open a new chat, switch to another app" produce a stray waiting toast
+ *  before the user sent anything. A pane must actually WORK for a while
+ *  before its going-quiet is worth interrupting anyone. */
+const workingSince = new Map<string, number>();
+const minWorkingMs = 5_000;
+
 function clearNotifyCooldown(paneId: string): void {
   lastNotifiedAt.delete(paneId);
+  workingSince.delete(paneId);
 }
 
 /** Sessions currently being opened on behalf of the phone app. The relay emits
@@ -63,6 +73,15 @@ export function usePtyEvents(): void {
         const prev = pane?.state;
         panesStore.setPaneState(paneId, state);
 
+        // Track the current working stretch (see workingSince). Cleared on
+        // any non-working state so the next stretch starts fresh.
+        const workingStart = workingSince.get(paneId);
+        if (state === "working") {
+          if (workingStart == null) workingSince.set(paneId, Date.now());
+        } else {
+          workingSince.delete(paneId);
+        }
+
         // Focusing a pane clears its notify cooldown (the documented §7.13
         // behavior — the user has seen it, so the next completion should
         // notify again). Previously this was promised in the comment but
@@ -78,11 +97,23 @@ export function usePtyEvents(): void {
         // §7.13: notify on working -> waiting/diff_ready for unfocused panes,
         // unless Do Not Disturb is on. Throttled per-pane so a flapping pane
         // (working→waiting→working→waiting) doesn't spam toasts + chimes.
+        // The pane must also have genuinely worked for a while: a just-
+        // spawned pane goes working→waiting on its first banner + silence
+        // (nothing to notify about), while a real turn or command runs long
+        // enough to clear minWorkingMs.
         if (prev === "working" && (state === "waiting" || state === "diff_ready")) {
           const paneIsFocused =
             panesStore.focusedPaneId === paneId && isAppFocused();
           const settings = useSettingsStore.getState();
-          if (!paneIsFocused && !settings.dnd && pane && pane.data.kind === "terminal") {
+          const workedLongEnough =
+            workingStart != null && Date.now() - workingStart >= minWorkingMs;
+          if (
+            !paneIsFocused &&
+            !settings.dnd &&
+            pane &&
+            pane.data.kind === "terminal" &&
+            workedLongEnough
+          ) {
             const now = Date.now();
             const last = lastNotifiedAt.get(paneId) ?? 0;
             if (now - last >= notifyCooldownMs) {
@@ -92,7 +123,12 @@ export function usePtyEvents(): void {
                 ? useProjectsStore.getState().sessions.find((s) => s.id === sessionId)
                 : null;
               const name = session ? sessionDisplayTitle(session.title) : pane.data.label;
-              const verb = state === "diff_ready" ? "has a diff ready for review" : "is waiting for input";
+              const verb =
+                state === "diff_ready"
+                  ? "has changes ready for your review"
+                  : session
+                    ? "is waiting for you"
+                    : "is ready for your next command";
               relayNotify({
                 kind: "completed",
                 title: "Relay",
@@ -114,6 +150,7 @@ export function usePtyEvents(): void {
     unlistens.push(
       safeListen<PtyExitPayload>("pty:exit", ({ paneId, code }) => {
         usePanesStore.getState().markPaneExited(paneId, code);
+        workingSince.delete(paneId); // dead panes can't resume a working stretch
         // A nonzero exit while the user wasn't interacting with the pane is a
         // crash, not a completion — surface it in the bell + toast stack. The
         // user closing a pane kills its process (also a nonzero/None code), so

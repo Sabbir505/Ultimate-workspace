@@ -15,6 +15,7 @@ mod connector_credentials;
 mod cost;
 mod cost_v2;
 pub mod docs;
+mod memory;
 mod projects;
 mod research_cache;
 mod secrets;
@@ -101,6 +102,19 @@ fn migrate_unc_paths(conn: &Connection) -> DbResult<()> {
 /// table and can't reveal whether the index is populated — compare row counts
 /// against the `docsize` shadow table (one row per indexed document) instead.
 /// On mismatch, `rebuild` re-reads chat_messages; when in sync this is a no-op.
+/// Memory reflection flag (MEMORY_DESIGN_ARCHITECTURE.md §8.4): databases
+/// created in the first memory iteration predate the `reflected` column.
+fn migrate_memory_reflected(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE memories ADD COLUMN reflected INTEGER NOT NULL DEFAULT 0";
+    if let Err(e) = conn.execute(sql, []) {
+        let msg = e.to_string();
+        if !msg.contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
 fn migrate_chat_fts(conn: &Connection) -> DbResult<()> {
     let in_sync = conn
         .query_row(
@@ -146,6 +160,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_messages_started_completed(conn)?;
     migrate_chat_messages_perf(conn)?;
     migrate_chat_fts(conn)?;
+    migrate_memory_reflected(conn)?;
     migrate_unc_paths(conn)
 }
 
@@ -658,6 +673,100 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           INSERT INTO chat_messages_fts(rowid, content) VALUES (new.id, new.content);
         END;
 
+        -- ── Persistent user memory (MEMORY_DESIGN_ARCHITECTURE.md §9) ──────
+        -- Flat scored fact store (no graph): one row per durable fact about
+        -- the user / a project. Bi-temporal columns (valid_from/valid_until =
+        -- world time; created_at/superseded_at = store time) so a
+        -- contradiction SUPERSEDES a memory instead of overwriting it — the
+        -- old row survives for audit (superseded_by chain), matching
+        -- db/chat_messages supersession precedent.
+        CREATE TABLE IF NOT EXISTS memories (
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          profile TEXT NOT NULL DEFAULT 'default',
+          project_id TEXT,
+          subject TEXT NOT NULL DEFAULT 'user',
+          content TEXT NOT NULL,
+          keywords TEXT NOT NULL DEFAULT '[]',
+          importance INTEGER NOT NULL DEFAULT 5,
+          confidence REAL NOT NULL DEFAULT 0.8,
+          status TEXT NOT NULL DEFAULT 'active',
+          superseded_by TEXT,
+          valid_from INTEGER NOT NULL,
+          valid_until INTEGER,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          superseded_at INTEGER,
+          last_accessed_at INTEGER,
+          access_count INTEGER NOT NULL DEFAULT 0,
+          origin TEXT NOT NULL DEFAULT 'extracted',
+          reflected INTEGER NOT NULL DEFAULT 0,
+          embedding BLOB
+        );
+        CREATE INDEX IF NOT EXISTS idx_memories_active
+          ON memories(profile, status, importance);
+        CREATE INDEX IF NOT EXISTS idx_memories_project
+          ON memories(project_id, status);
+
+        -- Full-text index over memory content/keywords (hybrid retrieval's
+        -- keyword leg). External-content, trigger-synced, same pattern as
+        -- chat_messages_fts above.
+        CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+          content, keywords,
+          content='memories',
+          content_rowid='rowid',
+          tokenize='unicode61'
+        );
+        CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
+          INSERT INTO memories_fts(rowid, content, keywords)
+            VALUES (new.rowid, new.content, new.keywords);
+        END;
+        CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories BEGIN
+          INSERT INTO memories_fts(memories_fts, rowid, content, keywords)
+            VALUES('delete', old.rowid, old.content, old.keywords);
+        END;
+        CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE OF content, keywords ON memories BEGIN
+          INSERT INTO memories_fts(memories_fts, rowid, content, keywords)
+            VALUES('delete', old.rowid, old.content, old.keywords);
+          INSERT INTO memories_fts(rowid, content, keywords)
+            VALUES (new.rowid, new.content, new.keywords);
+        END;
+
+        -- Provenance: ≥1 evidence row per memory (P4 — a memory without a
+        -- source message cannot exist). Rows point into chat_messages so the
+        -- UI can jump to the exact quote that produced the fact.
+        CREATE TABLE IF NOT EXISTS memory_evidence (
+          memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+          chat_session_id TEXT NOT NULL,
+          chat_message_id INTEGER NOT NULL,
+          quote TEXT NOT NULL,
+          PRIMARY KEY (memory_id, chat_message_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_evidence_msg
+          ON memory_evidence(chat_message_id);
+
+        -- Append-only audit of every write decision (judge output included,
+        -- NOOPs logged too). The undo/inspection log behind the memory UI —
+        -- nothing about the store's evolution is hidden from the user.
+        CREATE TABLE IF NOT EXISTS memory_ops (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts INTEGER NOT NULL,
+          actor TEXT NOT NULL,
+          session_id TEXT,
+          candidate TEXT NOT NULL,
+          operation TEXT NOT NULL,
+          target_ids TEXT NOT NULL DEFAULT '[]',
+          rationale TEXT NOT NULL DEFAULT ''
+        );
+
+        -- Idempotency cursor: highest chat_messages.id already fed through
+        -- extraction for a session (re-running never re-extracts a turn).
+        CREATE TABLE IF NOT EXISTS memory_cursor (
+          chat_session_id TEXT PRIMARY KEY,
+          last_message_id INTEGER NOT NULL DEFAULT 0,
+          last_run_at INTEGER NOT NULL DEFAULT 0
+        );
+
         -- Per-turn git working-tree snapshots (refs/conduit/checkpoints/…).
         -- message_id is the assistant message the checkpoint follows; NULL =
         -- turn-start baseline / pre-restore safety snapshot. `files` is a
@@ -979,6 +1088,16 @@ pub use automations::{
     list_automations, list_runs_for, record_run, record_status, set_automation_chat_session,
     set_automation_enabled, start_run, update_automation, Automation, AutomationInput,
     AutomationRun,
+};
+
+// persistent user memory (MEMORY_DESIGN_ARCHITECTURE.md §9)
+pub use memory::{
+    active_memories_for_scope, add_memory_evidence, bump_memory_access, count_active_memories,
+    delete_memory, evidence_count_for_memory, evidence_for_memory, flag_unbacked_memories,
+    get_cursor, get_memory, insert_memory, list_memories, list_memory_ops, log_memory_op,
+    mark_reflected, purge_memories_for_profile, similar_active_memories, supersede_memory,
+    unreflected_sample, unreflected_stats, update_memory_content, upsert_cursor,
+    search_memories_fts, set_memory_status, MemoryOpRow,
 };
 
 // ---- test helpers ----

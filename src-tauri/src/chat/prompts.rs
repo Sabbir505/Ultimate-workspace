@@ -646,9 +646,12 @@ const PLAN_MODE_SEGMENT: &str = "## Plan mode (active)\n\
 /// tools are on), the attach-on-demand manifest for connectors / MCP servers
 /// (only when tools are on), the research-mode scaffolding (only on
 /// research-shaped turns with tools on), the plan-mode scaffolding (only while
-/// plan mode is active), the user's custom system prompt, and any invoked
-/// skills (the caller pre-filters to skills whose `/command` appears in the
-/// message). Returns `None` when nothing applies.
+/// plan mode is active), the Tier-1 persistent-memory profile block (only when
+/// the memory store has profile-eligible facts — MEMORY_DESIGN_ARCHITECTURE.md
+/// §11.2, pre-rendered by the caller since it needs the DB), the user's custom
+/// system prompt, and any invoked skills (the caller pre-filters to skills
+/// whose `/command` appears in the message). Returns `None` when nothing
+/// applies.
 pub fn build_system_prompt(
     provider: ChatProviderId,
     model: &str,
@@ -658,6 +661,7 @@ pub fn build_system_prompt(
     research_mode: bool,
     plan_mode: bool,
     manifest: Option<&str>,
+    memory_profile: Option<&str>,
 ) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     parts.push(core_prompt_for(provider, model));
@@ -665,6 +669,9 @@ pub fn build_system_prompt(
     // current_datetime_segment's doc for why this can't live inside the
     // static CORE text.
     parts.push(current_datetime_segment());
+    if let Some(profile) = memory_profile.filter(|p| !p.trim().is_empty()) {
+        parts.push(profile.to_string());
+    }
     if tools_enabled {
         // One-line catalog of every available skill so the model can decide
         // whether to call `get_skill(slug)` for a given request. Distinct from
@@ -849,7 +856,7 @@ mod tests {
     #[test]
     fn system_prompt_embeds_current_date() {
         for provider in [ChatProviderId::LocalGguf, ChatProviderId::OpenAI] {
-            let p = build_system_prompt(provider, "test-model", None, &[], false, false, false, None)
+            let p = build_system_prompt(provider, "test-model", None, &[], false, false, false, None, None)
                 .expect("core + date segment always present");
             assert!(p.contains("## Current date & time"), "missing date anchor");
             let today = chrono::Local::now().format("%a %Y-%m-%d").to_string();

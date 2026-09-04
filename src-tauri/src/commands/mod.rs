@@ -16,6 +16,7 @@ pub mod pty_cmds;
 pub mod skills_cmds;
 pub mod stt;
 pub mod budget;
+pub mod memory_cmds;
 pub mod speech;
 pub mod updater_cmds;
 pub mod worktree_cmds;

@@ -103,6 +103,13 @@ pub struct ChatRequest {
     /// empty when the embedding sidecar isn't running or nothing matched.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub local_docs_retrieval: Vec<String>,
+    /// Tier-2 memory injection (MEMORY_DESIGN_ARCHITECTURE.md §11.3): the
+    /// pre-computed `<remembered_context>` block for this turn, rendered as a
+    /// synthetic user message AHEAD of the docs-retrieval message so durable
+    /// user facts sit closest to the system prompt. `None` when memory is
+    /// disabled or nothing scored above the injection floor.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub memory_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -258,6 +265,12 @@ fn anthropic_request(
         budget_tokens: (max_tokens - 1024).clamp(1024, max_tokens - 1),
     });
     let mut messages: Vec<serde_json::Value> = Vec::new();
+    if let Some(mem) = &req.memory_context {
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": mem,
+        }));
+    }
     if !req.local_docs_retrieval.is_empty() {
         messages.push(serde_json::json!({
             "role": "user",
@@ -299,6 +312,14 @@ fn openai_request(
         if !sys.is_empty() {
             messages.push(serde_json::json!({ "role": "system", "content": sys }));
         }
+    }
+    // Per-turn memory injection (§11.3) precedes docs retrieval: durable user
+    // facts first, then the turn's retrieved documents, then the conversation.
+    if let Some(mem) = &req.memory_context {
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": mem,
+        }));
     }
     // Per-turn local-docs auto-retrieval (§3.1.7): first user message carries
     // the retrieved context so the model answers from the user's own docs

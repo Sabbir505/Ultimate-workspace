@@ -58,6 +58,12 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         // below follow the mutating-tool gating (see tools/mod.rs family
         // block). Without them the model denies an app capability it has.
         openai_fn(LIST_AUTOMATIONS, LIST_AUTOMATIONS_DESC, no_parameters()),
+        // Persistent memory (MEMORY_DESIGN_ARCHITECTURE.md §12.1) — always
+        // registered; dispatch returns a clear error when the feature is
+        // toggled off (same posture as list_automations).
+        openai_fn(MEMORY_SAVE, MEMORY_SAVE_DESC, memory_save_parameters()),
+        openai_fn(MEMORY_RECALL, MEMORY_RECALL_DESC, memory_recall_parameters()),
+        openai_fn(MEMORY_FORGET, MEMORY_FORGET_DESC, memory_forget_parameters()),
     ]);
     // Local-docs search — only exposed when the embedding sidecar is up and at
     // least one corpus is indexed (computed per turn into ToolCaps.local_docs).
@@ -216,6 +222,12 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
         anthropic_fn(SEARCH_CONTENT, SEARCH_CONTENT_DESC, search_content_parameters()),
         // Automations — read-only list always on (mirror of the OpenAI block).
         anthropic_fn(LIST_AUTOMATIONS, LIST_AUTOMATIONS_DESC, no_parameters()),
+        // Persistent memory (MEMORY_DESIGN_ARCHITECTURE.md §12.1) — always
+        // registered; dispatch returns a clear error when the feature is
+        // toggled off (same posture as list_automations).
+        anthropic_fn(MEMORY_SAVE, MEMORY_SAVE_DESC, memory_save_parameters()),
+        anthropic_fn(MEMORY_RECALL, MEMORY_RECALL_DESC, memory_recall_parameters()),
+        anthropic_fn(MEMORY_FORGET, MEMORY_FORGET_DESC, memory_forget_parameters()),
     ]);
     if caps.local_docs {
         specs.push(anthropic_fn(SEARCH_DOCS, SEARCH_DOCS_DESC, search_docs_parameters()));
@@ -453,6 +465,78 @@ fn search_docs_parameters() -> Value {
                 "minimum": 1,
                 "maximum": 20,
                 "default": 5,
+            },
+        },
+    })
+}
+
+fn memory_save_parameters() -> Value {
+    json!({
+        "type": "object",
+        "required": ["content"],
+        "properties": {
+            "content": {
+                "type": "string",
+                "description": "The fact to remember, as ONE self-contained \
+                    sentence in third person, timeless tense (e.g. 'User \
+                    prefers pnpm over npm'). Never include secrets or code."
+            },
+            "kind": {
+                "type": "string",
+                "enum": ["identity", "preference", "fact", "project", "feedback", "episode"],
+                "description": "The memory category. Defaults to 'fact'.",
+            },
+            "subject": {
+                "type": "string",
+                "description": "What the fact is about: 'user' (default), \
+                    'project', or a short topic slug.",
+            },
+            "importance": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9,
+                "description": "How much this should shape future behavior: \
+                    1-2 mundane, 5-6 shapes how you help, 7-8 high-impact \
+                    (workflow corrections, core constraints), 9 identity/safety. \
+                    Defaults to 6.",
+            },
+        },
+    })
+}
+
+fn memory_recall_parameters() -> Value {
+    json!({
+        "type": "object",
+        "required": ["query"],
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Keywords or a natural-language question to \
+                    search remembered facts for (e.g. 'pdf pipeline decision')."
+            },
+            "kind": {
+                "type": "string",
+                "description": "Optional filter: identity | preference | fact | \
+                    project | feedback | episode.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20,
+                "description": "Max records to return. Defaults to 8.",
+            },
+        },
+    })
+}
+
+fn memory_forget_parameters() -> Value {
+    json!({
+        "type": "object",
+        "required": ["memory_id"],
+        "properties": {
+            "memory_id": {
+                "type": "string",
+                "description": "The memory id (from memory_recall) to retire."
             },
         },
     })

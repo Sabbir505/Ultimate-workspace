@@ -2828,3 +2828,56 @@ export const mcpGalleryConnect = (id: string) =>
 export const mcpGalleryDisconnect = (id: string) =>
   safeInvoke<null>("mcp_gallery_disconnect", { id });
 
+
+// ── Persistent user memory (MEMORY_DESIGN_ARCHITECTURE.md §12) ─────────────
+
+export interface MemoryRecordView {
+  id: string;
+  kind: string;
+  profile: string;
+  projectId: string | null;
+  subject: string;
+  content: string;
+  keywords: string[];
+  importance: number;
+  confidence: number;
+  status: string;
+  supersededBy: string | null;
+  validFrom: number;
+  validUntil: number | null;
+  createdAt: number;
+  updatedAt: number;
+  origin: string;
+  /** True once the memory has been folded into (or considered by) a
+   * reflection pass (MEMORY_DESIGN_ARCHITECTURE.md §8.4). */
+  reflected: boolean;
+}
+
+export interface MemoryStatusView {
+  enabled: boolean;
+  activeCount: number;
+}
+
+export const memoryList = (includeInactive = true) =>
+  safeInvoke<MemoryRecordView[] | null>("memory_list", { includeInactive });
+
+export const memoryStatus = () =>
+  safeInvoke<MemoryStatusView | null>("memory_status");
+
+export const memorySetEnabled = (enabled: boolean) =>
+  safeInvoke<null>("memory_set_enabled", { enabled });
+
+export const memoryUpdate = (memoryId: string, content: string, importance?: number) =>
+  safeInvoke<null>("memory_update", { memoryId, content, importance });
+
+export const memoryDelete = (memoryId: string) =>
+  safeInvoke<null>("memory_delete", { memoryId });
+
+export const memoryPurge = (profile = "default") =>
+  safeInvoke<number | null>("memory_purge", { profile });
+
+export const memoryCreate = (content: string, kind?: string, importance?: number) =>
+  safeInvoke<MemoryRecordView | null>("memory_create", { content, kind, importance });
+
+export const memoryExport = () =>
+  safeInvoke<string | null>("memory_export");

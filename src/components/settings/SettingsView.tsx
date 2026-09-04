@@ -20,6 +20,7 @@ import { useArtifactsStore } from "../../state/artifacts";
 import { ModelMarket, FitBadge } from "./ModelMarket";
 import { LlamaAdvancedFields } from "../chat/LlamaAdvancedFields";
 import { KnowledgePanel } from "./KnowledgePanel";
+import { MemoryPanel } from "./MemoryPanel";
 import { SttPanel } from "./SttPanel";
 import { PermissionRulesPanel } from "./PermissionRulesPanel";
 import { ThemeGalleryPanel } from "./ThemeGalleryPanel";
@@ -46,6 +47,7 @@ import {
   EyeOff,
   Plus,
   Library,
+  Brain,
   Shield,
   ShieldOff,
   Smartphone,
@@ -64,6 +66,7 @@ type Category =
   | "websearch"
   | "connectors"
   | "knowledge"
+  | "memory"
   | "mcpgallery"
   | "permissions"
   | "data"
@@ -80,6 +83,7 @@ const CATEGORY_KEYS: Category[] = [
   "websearch",
   "connectors",
   "knowledge",
+  "memory",
   "mcpgallery",
   "permissions",
   "data",
@@ -106,6 +110,7 @@ function SettingsNavIcon({ category }: { category: Category }) {
     case "connectors": return <Plug {...props} />;
     case "mcpgallery": return <Blocks {...props} />;
     case "knowledge": return <Library {...props} />;
+    case "memory": return <Brain {...props} />;
     case "permissions": return <Shield {...props} />;
     case "data": return <Database {...props} />;
     case "git": return <GitBranch {...props} />;
@@ -160,6 +165,7 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
       { key: "connectors", label: "Connectors", sub: "Notion & more (OAuth)" },
       { key: "mcpgallery", label: "MCP Servers", sub: "Gallery + custom MCP" },
       { key: "knowledge", label: "Knowledge", sub: "Local folders (RAG)" },
+      { key: "memory", label: "Memory", sub: "What the assistant remembers" },
       { key: "remote", label: "Remote", sub: "Mobile pairing + Tailscale" },
     ],
   },
@@ -529,6 +535,7 @@ export function SettingsView() {
               {category === "connectors" && <ConnectorsPanel />}
 
               {category === "knowledge" && <KnowledgePanel />}
+              {category === "memory" && <MemoryPanel />}
 
               {category === "mcpgallery" && <McpGalleryPanel />}
 

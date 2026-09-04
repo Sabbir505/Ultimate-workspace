@@ -2254,3 +2254,104 @@
 }
 
 .settings-note { margin-top: 6px; font-size: 11.5px; }
+
+/* ── Memory panel (Settings → Memory) — MEMORY_DESIGN_ARCHITECTURE.md §12.2 ── */
+.memory-panel .panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.memory-panel .toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  font-size: 13px;
+  cursor: pointer;
+}
+.memory-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+.memory-search {
+  flex: 1 1 200px;
+  min-width: 160px;
+}
+.memory-filters,
+.memory-actions {
+  display: flex;
+  gap: 6px;
+}
+.memory-actions .danger {
+  color: var(--danger, #d33);
+}
+.memory-add {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.memory-add input {
+  flex: 1;
+}
+.memory-count {
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+.memory-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.memory-item {
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--bg-elev, rgba(128, 128, 128, 0.06));
+}
+.memory-item.status-superseded,
+.memory-item.status-retired {
+  opacity: 0.55;
+}
+.memory-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+.memory-content {
+  font-size: 13px;
+  line-height: 1.45;
+}
+.memory-item-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.memory-item-actions button,
+.memory-add button,
+.memory-actions button {
+  font-size: 12px;
+  padding: 3px 10px;
+}
+.memory-edit {
+  display: flex;
+  gap: 6px;
+}
+.memory-edit input {
+  flex: 1;
+}
+.memory-empty {
+  padding: 16px 4px;
+  font-size: 13px;
+}

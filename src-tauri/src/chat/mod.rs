@@ -336,6 +336,7 @@ impl ChatManager {
             effort,
             thinking,
             local_docs_retrieval: Vec::new(),
+            memory_context: None,
         };
 
         // OpenRouter and LocalGguf speak the OpenAI wire format, so they ride
@@ -562,6 +563,65 @@ impl ChatManager {
                 }
             }
 
+            // ── Tier-2 memory injection (MEMORY_DESIGN_ARCHITECTURE.md §11.3) ─
+            // Budgeted, hybrid-scored recall of relevant memories for THIS
+            // turn's query, rendered as a fenced data block. Disabled store →
+            // nothing happens (the block is omitted entirely).
+            if crate::memory::memory_enabled_conn(&db) {
+                let query = chat_req
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "user")
+                    .map(|m| m.content.trim())
+                    .filter(|c| !c.is_empty())
+                    .map(|c| c.to_string());
+                if let Some(q) = query {
+                    let project_id = {
+                        let conn = db.lock();
+                        db::get_chat_session(&conn, &sid).ok().flatten().and_then(|s| s.project_id)
+                    };
+                    // Vector leg when the sidecar is up; keyword+recency always.
+                    let q_emb: Option<Vec<f32>> = match &embedding_base {
+                        Some(base) => {
+                            match local_models::embed_texts(base, &[q.clone()]).await {
+                                Ok(mut v) => v.pop(),
+                                Err(_) => None,
+                            }
+                        }
+                        None => None,
+                    };
+                    let hits = {
+                        let conn = db.lock();
+                        crate::memory::retrieve::search_memories(
+                            &conn, "default", project_id.as_deref(), &q, q_emb.as_deref(), 8,
+                        )
+                    };
+                    if let Ok(scored) = hits {
+                        if !scored.is_empty() {
+                            let recs: Vec<crate::memory::model::MemoryRecord> =
+                                scored.iter().map(|s| s.record.clone()).collect();
+                            if let Some(section) = crate::memory::render::render_context_section(
+                                &recs,
+                                crate::db::now_ts(),
+                            ) {
+                                let injected_chars = section.len();
+                                let injected_n = recs.len();
+                                eprintln!(
+                                    "[memory-audit] tier2_inject_chars={injected_chars} items={injected_n}"
+                                );
+                                chat_req.memory_context = Some(section);
+                                // Access bump drives recency decay (§11.1).
+                                let ids: Vec<String> =
+                                    scored.iter().map(|s| s.record.id.clone()).collect();
+                                let conn = db.lock();
+                                let _ = db::bump_memory_access(&conn, &ids);
+                            }
+                        }
+                    }
+                }
+            }
+
             // ── Turn execution, with ONE compact-and-retry on context
             // overflow. A provider rejecting the request for exceeding its
             // window is recoverable: force a cloud compaction pass over the
@@ -694,6 +754,11 @@ impl ChatManager {
                         }
                         let _ = db::touch_chat_session(&conn, &sid);
                     }
+                    // Memory extraction (MEMORY_DESIGN_ARCHITECTURE.md §7.1):
+                    // background, fire-and-forget — the assistant row is
+                    // persisted, so the cursor-based extractor sees the full
+                    // turn. Never blocks or fails the reply path.
+                    crate::memory::worker::spawn_turn_extraction(&app, &sid);
                     // Citation-integrity lint (research turns only): the
                     // model's report is checked mechanically against the
                     // source ledger — orphan citations, unused sources, weak
@@ -1548,6 +1613,7 @@ mod tests {
             false,
             false,
             manifest.as_deref(),
+            None,
         )
         .unwrap();
         let total = system.len() + specs.len();
@@ -1601,6 +1667,7 @@ mod tests {
             true,
             false,
             None,
+            None,
         )
         .unwrap();
         assert!(p.contains("Research mode (this turn)"));
@@ -1615,6 +1682,7 @@ mod tests {
             false,
             false,
             None,
+            None,
         )
         .unwrap();
         assert!(!p.contains("Research mode (this turn)"));
@@ -1627,6 +1695,7 @@ mod tests {
             false,
             true,
             false,
+            None,
             None,
         )
         .unwrap();
@@ -1644,6 +1713,7 @@ mod tests {
             true,
             false,
             None,
+            None,
         )
         .unwrap();
         assert!(p.contains("cap at 8 reads"));
@@ -1656,6 +1726,7 @@ mod tests {
             true,
             true,
             false,
+            None,
             None,
         )
         .unwrap();

@@ -27,6 +27,7 @@ mod harness_adapters;
 mod harness_bundle;
 mod harness_config;
 mod installed_skills;
+pub mod memory;
 mod mcp_gallery;
 mod mcp_tools_bridge;
 mod mobile;
@@ -527,6 +528,16 @@ pub fn run() {
             mcp_gallery::mcp_gallery_set_enabled,
             mcp_gallery::mcp_gallery_connect,
             mcp_gallery::mcp_gallery_disconnect,
+            // persistent user memory (MEMORY_DESIGN_ARCHITECTURE.md §12)
+            commands::memory_cmds::memory_list,
+            commands::memory_cmds::memory_update,
+            commands::memory_cmds::memory_delete,
+            commands::memory_cmds::memory_purge,
+            commands::memory_cmds::memory_evidence,
+            commands::memory_cmds::memory_export,
+            commands::memory_cmds::memory_status,
+            commands::memory_cmds::memory_set_enabled,
+            commands::memory_cmds::memory_create,
         ]);
 
     let app = builder

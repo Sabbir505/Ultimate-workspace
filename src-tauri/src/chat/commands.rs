@@ -1683,6 +1683,21 @@ pub async fn send_chat_message(
         let custom = db::get_setting(&conn, "assistant.systemPrompt")
             .map_err(|e| e.to_string())?;
         let skills = parse_invoked_skills(&content);
+        // Tier-1 memory profile (MEMORY_DESIGN_ARCHITECTURE.md §11.2):
+        // pre-rendered here because the block needs the DB. Empty store or
+        // feature-off → None → the prompt part is omitted byte-neutral.
+        let project_id = db::get_chat_session(&conn, &chat_session_id)
+            .ok()
+            .flatten()
+            .and_then(|s| s.project_id);
+        let memory_profile = if crate::memory::memory_enabled(&conn) {
+            match db::active_memories_for_scope(&conn, "default", project_id.as_deref()) {
+                Ok(mems) => crate::memory::render::render_profile_block(&mems, crate::db::now_ts()),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
         let built = crate::chat::build_system_prompt(
             provider_id.clone(),
             &model,
@@ -1692,6 +1707,7 @@ pub async fn send_chat_message(
             research_mode,
             session_plan_mode,
             manifest.as_deref(),
+            memory_profile.as_deref(),
         );
         // [prompt-audit] inputs captured before `custom`/`skills` are consumed.
         let audit = (
@@ -1700,6 +1716,15 @@ pub async fn send_chat_message(
         );
         (built, audit)
     };
+    // [memory-audit]: Tier-1 profile size, alongside the prompt-audit line
+    // below (design §11.5 budgets are enforced in render::fit_budget).
+    {
+        let profile_chars = system
+            .as_ref()
+            .and_then(|s| s.find("## About this user").map(|i| s.len() - i))
+            .unwrap_or(0);
+        eprintln!("[memory-audit] tier1_profile_chars={profile_chars}");
+    }
     // [prompt-audit]: attribute the system prompt's size on every send. The
     // catalog is re-derived (cheap dir scan) because build_system_prompt fuses
     // the parts; core + research segment is the unattributed remainder.
@@ -2466,6 +2491,7 @@ pub(crate) async fn run_prompt_warmup(
         false,
         false,
         manifest.as_deref(),
+            None,
     )
     .unwrap_or_default();
     // Replicate the send path's `## Working directory` tail — the section
@@ -4640,6 +4666,7 @@ pub async fn count_context_tokens(
                     false,
                     false,
                     manifest.as_deref(),
+            None,
                 )
                 .unwrap_or_default()
             };
@@ -4762,6 +4789,7 @@ pub async fn count_context_tokens(
             false,
             false,
             manifest.as_deref(),
+            None,
         )
         .unwrap_or_default()
     };
@@ -4915,6 +4943,7 @@ pub async fn count_context_breakdown(
                     false,
                     false,
                     manifest.as_deref(),
+            None,
                 )
                 .unwrap_or_default()
             };
@@ -5000,6 +5029,7 @@ pub async fn count_context_breakdown(
             false,
             false,
             manifest.as_deref(),
+            None,
         )
         .unwrap_or_default()
     };
@@ -5211,6 +5241,7 @@ pub async fn chat_compact_now(
                 false,
                 false,
                 manifest.as_deref(),
+            None,
             )
             .unwrap_or_default()
         };
@@ -5302,6 +5333,7 @@ pub async fn chat_compact_now(
                 false,
                 false,
                 manifest.as_deref(),
+            None,
             )
             .unwrap_or_default()
         };

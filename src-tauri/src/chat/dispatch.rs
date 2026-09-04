@@ -1754,6 +1754,14 @@ pub(crate) async fn run_tool(
         return run_search_docs_tool(app, name, args).await;
     }
 
+    // Persistent-memory tools (MEMORY_DESIGN_ARCHITECTURE.md §12.1): DB +
+    // session state via the AppHandle, like search_docs above. `memory_save`
+    // is async (judge LLM call); recall/forget are sync. Always registered in
+    // the schema; a disabled feature returns a clear error to the model.
+    if tools::is_memory_tool(name) {
+        return run_memory_tool(app, sid, name, args).await;
+    }
+
     // Connector-originated tools (OAuth-backed remote MCP tools, e.g. Notion).
     // A matched tool name routes to the vendor's MCP server. Writes are gated
     // per the session's permission mode (approval under read_only/manual,
@@ -2514,5 +2522,27 @@ mod tests {
         ] {
             assert!(capability_probe_refusal(cmd).is_none(), "must pass: {cmd}");
         }
+    }
+}
+
+/// Dispatch the persistent-memory tools (MEMORY_DESIGN_ARCHITECTURE.md §12.1).
+/// `memory_save` runs the judge LLM call (async); `memory_recall` runs an
+/// FTS/recency search synchronously; `memory_forget` retires by id. All three
+/// degrade to explanatory errors when the feature is toggled off.
+async fn run_memory_tool(app: &AppHandle, sid: &str, name: &str, args: &Value) -> String {
+    {
+        let db = app.state::<crate::DbState>();
+        let conn = db.0.lock();
+        if !crate::memory::memory_enabled(&conn) {
+            return "Memory is disabled — the user turned it off in Settings → \
+                    Memory. Do not retry; answer without remembered context."
+                .to_string();
+        }
+    }
+    match name {
+        tools::MEMORY_SAVE => crate::memory::tools_impl::memory_save(app, sid, args).await,
+        tools::MEMORY_RECALL => crate::memory::tools_impl::memory_recall(app, args),
+        tools::MEMORY_FORGET => crate::memory::tools_impl::memory_forget(app, args),
+        _ => format!("Error: unknown memory tool {name}"),
     }
 }

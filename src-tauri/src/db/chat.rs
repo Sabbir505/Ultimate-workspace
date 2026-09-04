@@ -187,6 +187,12 @@ pub fn delete_chat_session(conn: &Connection, chat_session_id: &str) -> DbResult
         "UPDATE automations SET chat_session_id = NULL WHERE chat_session_id = ?1",
         params![chat_session_id],
     )?;
+    // Memory evidence for this session (§13.5) — gone with the transcript.
+    let _ = conn.execute(
+        "DELETE FROM memory_evidence WHERE chat_session_id = ?1",
+        params![chat_session_id],
+    );
+    let _ = crate::db::memory::flag_unbacked_memories(conn);
     // FK cascade handles chat_messages.
     conn.execute(
         "DELETE FROM chat_sessions WHERE id = ?1",
@@ -664,6 +670,15 @@ pub fn delete_chat_message(conn: &Connection, message_id: i64) -> DbResult<bool>
         params![message_id],
     )?;
     if changed > 0 {
+        // Memory evidence (MEMORY_DESIGN_ARCHITECTURE.md §13.5): the deleted
+        // message can no longer back a memory — drop its evidence rows and
+        // flag memories left with none (excluded from injection until the
+        // user reviews them in Settings → Memory).
+        tx.execute(
+            "DELETE FROM memory_evidence WHERE chat_message_id = ?1",
+            params![message_id],
+        )?;
+        crate::db::memory::flag_unbacked_memories(&tx)?;
         // Drop any FK-style link to this message; the artifact row/file
         // itself stays (see doc comment above).
         let _ = tx.execute(
@@ -701,6 +716,16 @@ pub fn delete_chat_messages_after(
          )",
         params![chat_session_id, after_id],
     );
+    // Memory evidence for the doomed messages (§13.5) — same subquery.
+    let _ = conn.execute(
+        "DELETE FROM memory_evidence
+         WHERE chat_session_id = ?1 AND chat_message_id IN (
+             SELECT id FROM chat_messages
+             WHERE chat_session_id = ?1 AND (?2 IS NULL OR id > ?2)
+         )",
+        params![chat_session_id, after_id],
+    );
+    let _ = crate::db::memory::flag_unbacked_memories(conn);
     let changed = match after_id {
         Some(after) => conn.execute(
             "DELETE FROM chat_messages WHERE chat_session_id = ?1 AND id > ?2",

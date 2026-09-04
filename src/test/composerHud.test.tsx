@@ -6,10 +6,10 @@
 // yet in a new turn CARRIES OVER the last turn's value instead of resetting
 // to zero. Chips fed by the current turn's live snapshot pulse (is-live).
 //
-// Also checks that each chip carries a hover tooltip (role=tooltip) explaining
-// the metric, so the HUD is self-documenting.
+// Also checks that hovering a chip reveals its hover tooltip (role=tooltip)
+// explaining the metric, so the HUD is self-documenting.
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { ComposerMetrics } from "../components/chat/ComposerMetrics";
 import { useChatStore } from "../state/chat";
 
@@ -276,15 +276,21 @@ describe("ComposerMetrics HUD", () => {
     expect(cacheChip?.className).toContain("tone-cache");
   });
 
-  it("renders a hover tooltip on every chip", () => {
+  it("shows a hover tooltip for a chip (portaled, only while hovered)", () => {
     useChatStore.setState({ livePerf: {}, lastTurnPerf: {}, sessionMetrics: {} });
     render(<ComposerMetrics chatSessionId="s1" streaming={false} variant="hud" />);
+    // Tooltips mount only while a chip is hovered — none before.
+    expect(screen.queryAllByRole("tooltip")).toHaveLength(0);
+    const row = screen.getByRole("status");
+    const cacheChip = within(row).getByText("cache").closest(".composer-metrics-chip")!;
+    fireEvent.mouseEnter(cacheChip);
+    // The tooltip is portaled to document.body (fixed positioning), so
+    // screen-level queries find it — exactly one, with the metric's hint.
     const tooltips = screen.getAllByRole("tooltip");
-    expect(tooltips.length).toBeGreaterThanOrEqual(7);
-    // Each tooltip has non-empty text.
-    for (const t of tooltips) {
-      expect(t.textContent?.trim().length).toBeGreaterThan(0);
-    }
+    expect(tooltips).toHaveLength(1);
+    expect(tooltips[0].textContent).toContain("prompt cache");
+    fireEvent.mouseLeave(cacheChip);
+    expect(screen.queryAllByRole("tooltip")).toHaveLength(0);
   });
 
   it("renders nothing when there is no active chat session", () => {

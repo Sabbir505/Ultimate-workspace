@@ -817,7 +817,9 @@
 :root[data-theme="light"] .composer-metrics-row.is-hud {
   border-top-color: rgba(0, 0, 0, 0.08);
 }
-/* Chips group — left side, wraps when too many. */
+/* Chips group — left side, wraps when too many. overflow stays visible so
+   the per-chip hover tooltips (absolute, above the chip) are never clipped
+   by this box. */
 .composer-metrics-chips {
   display: flex;
   align-items: center;
@@ -825,7 +827,7 @@
   gap: 6px 14px;
   flex: 1;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 /* Context meter — right-aligned at the end of the HUD row. */
 .composer-metrics-context-wrap {
@@ -892,15 +894,20 @@
 .composer-metrics-row.is-empty .composer-metrics-chip-label {
   opacity: 0.7;
 }
-/* Hover tooltip — a small floating panel below the chip. Hidden by default,
-   revealed on hover. Consistent with the .context-meter-tooltip pattern. */
+/* Hover tooltip — a small floating panel that opens ABOVE the chip (the HUD
+   is docked to the composer card's bottom edge, so downward would leave the
+   card and get clipped by the chat pane). Portaled to document.body with
+   fixed positioning by ComposerMetrics (same pattern as .context-meter-panel)
+   so no overflow:hidden ancestor — the chips box wraps and the card clips —
+   can cut it off, and so it can never spill past the viewport edges. The
+   element only exists while a chip is hovered; left/bottom are inline styles
+   from the chip's rect. */
 .composer-metrics-tooltip {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 50%;
-  transform: translateX(-50%) scale(0.96);
-  z-index: 30;
+  position: fixed;
+  transform: translateX(-50%);
+  width: max-content;
   max-width: 240px;
+  z-index: 2100;
   padding: 6px 10px;
   font-family: var(--font-ui, sans-serif);
   font-size: 11px;
@@ -914,23 +921,7 @@
   border: 1px solid var(--border, #2a2a2a);
   border-radius: var(--radius-xs, 6px);
   box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.5);
-  opacity: 0;
-  visibility: hidden;
   pointer-events: none;
-  transition: opacity 0.15s var(--ease), transform 0.15s var(--ease);
-}
-.composer-metrics-chip:hover .composer-metrics-tooltip {
-  opacity: 1;
-  visibility: visible;
-  transform: translateX(-50%) scale(1);
-}
-@media (prefers-reduced-motion: reduce) {
-  .composer-metrics-tooltip {
-    transition: none;
-  }
-  .composer-metrics-chip:hover .composer-metrics-tooltip {
-    transform: translateX(-50%);
-  }
 }
 
 /* Base notch chip layout — positioning/sizing for the inner content of agent

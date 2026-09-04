@@ -16,10 +16,12 @@
 // starts, metrics that the backend hasn't measured yet keep the last turn's
 // value (per-metric carry-over below) instead of collapsing to zero — each
 // chip ticks over to the live number only once the backend reports it.
-import { memo } from "react";
+import { memo, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useChatStore } from "../../state/chat";
 import type { LastTurnMetrics } from "../../state/chat";
 import type { ChatPerfPayload, ChatSessionMetricsPayload } from "../../lib/ipc";
+import { useUiStore } from "../../state/ui";
 import { ContextMeter } from "./ContextMeter";
 
 interface Props {
@@ -127,7 +129,40 @@ interface MetricChipProps {
   hint?: string;
 }
 
+/** Half the tooltip's max-width (+margin), used to clamp its fixed position
+ *  so the panel can never leave the viewport, whichever chip is hovered. */
+const TIP_HALF = 124;
+
 function MetricChip({ label, value, live, tone = "idle", hint }: MetricChipProps) {
+  const chipRef = useRef<HTMLSpanElement>(null);
+  // Fixed-viewport position for the portaled tooltip, computed from the
+  // chip's rect at hover time (same approach as .context-meter-panel).
+  const [tipPos, setTipPos] = useState<{ left: number; bottom: number } | null>(null);
+  const setContextTipOpen = useUiStore((s) => s.setContextTipOpen);
+
+  // While the portaled tooltip shows, tell native browser webviews to hide:
+  // they float above ALL DOM, so no z-index could lift the tooltip over them
+  // (same contract as the context-meter panel). Unmount-clears so a mid-hover
+  // unmount can't strand the flag true.
+  useEffect(() => {
+    if (!tipPos) return;
+    setContextTipOpen(true);
+    return () => setContextTipOpen(false);
+  }, [tipPos, setContextTipOpen]);
+
+  const onHover = () => {
+    const el = chipRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    // Center above the chip, clamped to the viewport; the HUD sits at the
+    // composer card's bottom edge, so the tooltip opens upward.
+    const left = Math.min(
+      Math.max(r.left + r.width / 2, TIP_HALF),
+      window.innerWidth - TIP_HALF,
+    );
+    setTipPos({ left, bottom: window.innerHeight - r.top + 6 });
+  };
+
   const cls = [
     "composer-metrics-chip",
     live ? "is-live" : "",
@@ -136,11 +171,26 @@ function MetricChip({ label, value, live, tone = "idle", hint }: MetricChipProps
     .filter(Boolean)
     .join(" ");
   return (
-    <span className={cls} title={hint}>
+    <span
+      ref={chipRef}
+      className={cls}
+      onMouseEnter={onHover}
+      onMouseLeave={() => setTipPos(null)}
+    >
       <span className="composer-metrics-chip-dot" />
       <span className="composer-metrics-chip-label">{label}</span>
       <span className="composer-metrics-chip-value">{value}</span>
-      {hint && <span className="composer-metrics-tooltip" role="tooltip">{hint}</span>}
+      {hint && tipPos &&
+        createPortal(
+          <span
+            className="composer-metrics-tooltip"
+            role="tooltip"
+            style={{ left: tipPos.left, bottom: tipPos.bottom }}
+          >
+            {hint}
+          </span>,
+          document.body,
+        )}
     </span>
   );
 }

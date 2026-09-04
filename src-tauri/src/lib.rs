@@ -32,6 +32,8 @@ pub mod memory;
 mod mcp_gallery;
 mod mcp_tools_bridge;
 mod mobile;
+// OS toasts under the app's own identity (Windows) — see the module doc.
+mod os_toast;
 mod pty;
 mod secrets;
 mod types;
@@ -249,6 +251,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // OS toast under the app identity (Windows; dev runs only —
+            // installed builds get this from the plugin's own AUMID path).
+            os_toast::os_toast,
             // projects / sessions
             commands::projects::list_projects,
             commands::projects::add_project,

@@ -671,6 +671,7 @@ dependencies = [
  "open",
  "parking_lot",
  "pdf-extract",
+ "png 0.17.16",
  "portable-pty",
  "rand 0.8.7",
  "regex",
@@ -690,6 +691,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "tauri-plugin-updater",
+ "tauri-winrt-notification",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
@@ -703,6 +705,7 @@ dependencies = [
  "window-vibrancy 0.5.3",
  "windows 0.61.3",
  "windows-sys 0.61.2",
+ "winreg 0.55.0",
  "zip 2.4.2",
 ]
 

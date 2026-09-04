@@ -60,7 +60,11 @@ fn connector_opencode_entry(s: &HarnessMcpServer) -> Value {
 /// provider personality and behavioral guidance; only the Conduit-specific
 /// environment (project path, artifacts dir, conduit-tools, browser pane)
 /// is additive information the CLI can't know on its own.
-pub fn build_instructions_md(project_path: &str, artifacts_dir: &str) -> String {
+pub fn build_instructions_md(
+    project_path: &str,
+    artifacts_dir: &str,
+    artifacts_section: &str,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
     // Project-less sessions get a bundle too (connectors + conduit-tools) —
     // the preamble just has no project path to point at.
@@ -87,6 +91,11 @@ pub fn build_instructions_md(project_path: &str, artifacts_dir: &str) -> String 
          processes to re-derive what the app already knows and reads your \
          config file instead of the live session."
     ));
+    // Artifact awareness, right after the preamble: "where do artifacts live"
+    // / "open the report we made" must resolve to real files, not a shrug.
+    if !artifacts_section.trim().is_empty() {
+        parts.push(artifacts_section.to_string());
+    }
     if let Some(catalog) = crate::chat::prompts::available_skills_segment() {
         parts.push(catalog);
     }
@@ -115,6 +124,40 @@ pub fn build_instructions_md(project_path: &str, artifacts_dir: &str) -> String 
          serve command blocking in the foreground."
     ));
     parts.join("\n\n")
+}
+
+/// "## Artifacts" awareness block for the harness instructions. The CLI has no
+/// other way to learn where Relay keeps generated artifacts, so questions like
+/// "open the report we made" otherwise resolve to a shrug. `recent` lines are
+/// pre-rendered by the caller ("- path (kind, date)") since they need the DB;
+/// empty inputs (no dir, no artifacts) produce no section.
+pub fn build_artifacts_section(default_export_dir: &str, recent: &[String]) -> String {
+    if default_export_dir.trim().is_empty() && recent.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "## Artifacts\n\n\
+         Everything Relay generates for you (documents, charts, exports, \
+         reports) is saved on disk and stays readable. Relay's default export \
+         folder",
+    );
+    if !default_export_dir.trim().is_empty() {
+        s.push_str(&format!(" is `{default_export_dir}`"));
+    }
+    s.push_str(
+        ". When the user asks about an artifact — a report, a document, a chart, \
+         an export, even by an approximate name — list and read files from that \
+         folder and the project folder with your file tools instead of saying \
+         you don't have it.\n",
+    );
+    if !recent.is_empty() {
+        s.push_str("\nMost recent artifacts:\n");
+        for line in recent {
+            s.push_str(line);
+            s.push('\n');
+        }
+    }
+    s
 }
 
 /// Claude Code `--settings` content. `sandbox` + `approval` are the chat
@@ -161,10 +204,14 @@ pub fn build_claude_settings_json(
 
 /// Kimi `--agent-file` content: Markdown agent definition whose body is the
 /// harness instructions. Frontmatter per kimi-code's agent file format.
-pub fn build_kimi_agent_md(project_path: &str, artifacts_dir: &str) -> String {
+pub fn build_kimi_agent_md(
+    project_path: &str,
+    artifacts_dir: &str,
+    artifacts_section: &str,
+) -> String {
     format!(
         "---\nname: conduit\ndescription: Relay-assisted agent with document generation skills\n---\n\n{}",
-        build_instructions_md(project_path, artifacts_dir)
+        build_instructions_md(project_path, artifacts_dir, artifacts_section)
     )
 }
 
@@ -299,6 +346,7 @@ pub fn write_bundle(
     approval: Option<&str>,
     ws_port: u16,
     connectors: &[HarnessMcpServer],
+    artifacts_section: &str,
 ) -> Option<HarnessBundlePaths> {
     let base = data_dir.join("harness").join(safe_id(project_id));
     if std::fs::create_dir_all(&base).is_err() {
@@ -334,13 +382,13 @@ pub fn write_bundle(
     };
 
     let ok_instructions =
-        write_or_none(&claude_instructions, build_instructions_md(pp, ad));
+        write_or_none(&claude_instructions, build_instructions_md(pp, ad, artifacts_section));
     let ok_settings = write_or_none(
         &claude_settings,
         serde_json::to_string_pretty(&build_claude_settings_json(pp, ad, sandbox, approval))
             .unwrap_or_default(),
     );
-    let ok_agent = write_or_none(&kimi_agent, build_kimi_agent_md(pp, ad));
+    let ok_agent = write_or_none(&kimi_agent, build_kimi_agent_md(pp, ad, artifacts_section));
     if !ok_instructions || !ok_settings || !ok_agent {
         return None;
     }
@@ -435,7 +483,7 @@ mod tests {
 
     #[test]
     fn instructions_contain_preamble_and_skill_catalog() {
-        let md = build_instructions_md("C:/work/proj", "C:/work/out");
+        let md = build_instructions_md("C:/work/proj", "C:/work/out", "");
         assert!(md.contains("You are running inside Relay"));
         assert!(md.contains("C:/work/proj"));
         assert!(md.contains("C:/work/out"));
@@ -445,6 +493,31 @@ mod tests {
         // (and preferred over the legacy generate_document).
         assert!(md.contains("plan_document"), "instructions must mention plan_document");
         assert!(md.contains("revise_document"), "instructions must mention revise_document");
+    }
+
+    #[test]
+    fn artifacts_section_lists_dir_and_recent_files() {
+        let section = build_artifacts_section(
+            "C:/Users/x/Documents/Conduit",
+            &["- report.docx (docx, 2026-09-01)".into()],
+        );
+        assert!(section.contains("## Artifacts"));
+        assert!(section.contains("C:/Users/x/Documents/Conduit"));
+        assert!(section.contains("report.docx"));
+
+        // Nothing known → no section at all (the instructions skip it).
+        assert!(build_artifacts_section("", &[]).is_empty());
+
+        // The section is only appended when non-empty.
+        let md = build_instructions_md("C:/work/proj", "C:/work/out", "");
+        assert!(!md.contains("## Artifacts"));
+        let md = build_instructions_md(
+            "C:/work/proj",
+            "C:/work/out",
+            &build_artifacts_section("C:/export", &["- a.csv (csv, 2026-09-04)".into()]),
+        );
+        assert!(md.contains("## Artifacts"));
+        assert!(md.contains("a.csv"));
     }
 
     #[test]
@@ -480,7 +553,7 @@ mod tests {
 
     #[test]
     fn kimi_agent_md_has_frontmatter_and_prompt() {
-        let md = build_kimi_agent_md("C:/work/proj", "C:/work/out");
+        let md = build_kimi_agent_md("C:/work/proj", "C:/work/out", "");
         assert!(md.starts_with("---\n"));
         assert!(md.contains("name: conduit"));
         assert!(md.contains("You are running inside Relay"));
@@ -490,7 +563,7 @@ mod tests {
     fn project_less_bundle_tolerates_empty_project_path() {
         // Sessions with no selected project still get a bundle (connectors +
         // conduit-tools); instructions and settings must not emit empty paths.
-        let md = build_instructions_md("", "C:/work/out");
+        let md = build_instructions_md("", "C:/work/out", "");
         assert!(md.contains("No project folder is selected"));
         assert!(!md.contains("The project is at ``"));
         let v = build_claude_settings_json("", "C:/work/out", None, None);
@@ -630,7 +703,7 @@ mod tests {
         // instructions/settings/agent write unconditionally (independent of the
         // sidecar binary); the mcp.json / opencode.json parts need
         // mcp_binary_path() and are skipped in CI. Assert the unconditional ones.
-        let b = write_bundle(&dir, "p1", Some("C:/work/proj"), Some("C:/work/out"), None, None, 7681, &[]);
+        let b = write_bundle(&dir, "p1", Some("C:/work/proj"), Some("C:/work/out"), None, None, 7681, &[], "");
         let b = b.expect("base dir should create");
         assert!(b.claude_instructions.exists(), "claude instructions written");
         assert!(b.claude_settings.exists(), "claude settings written");

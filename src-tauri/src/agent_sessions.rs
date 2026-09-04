@@ -1984,8 +1984,33 @@ pub(crate) fn resolve_harness_bundle(
     approval: Option<&str>,
 ) -> Option<crate::harness_bundle::HarnessBundlePaths> {
     let data_dir = app.path().app_data_dir().ok()?;
+    // Artifact awareness for the harness instructions: the CLI has no other
+    // way to learn where Relay's artifacts live, so "open the report we made"
+    // used to resolve to a shrug. Default export folder + the 10 most recent
+    // artifacts (newest first, from the DB).
+    let default_export_dir =
+        crate::chat::dispatch::artifacts_dir(app).to_string_lossy().into_owned();
+    let recent: Vec<String> = app
+        .try_state::<DbState>()
+        .map(|db| {
+            let conn = db.0.lock();
+            crate::db::list_artifacts(&conn)
+                .unwrap_or_default()
+                .iter()
+                .take(10)
+                .filter_map(|a| {
+                    let date = chrono::DateTime::from_timestamp(a.created_at, 0)
+                        .map(|d| d.format("%Y-%m-%d").to_string())
+                        .unwrap_or_default();
+                    Some(format!("- {} ({}, {})", a.filename, a.kind, date))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let artifacts_section =
+        crate::harness_bundle::build_artifacts_section(&default_export_dir, &recent);
     crate::harness_bundle::write_bundle(
-        &data_dir, project_id.unwrap_or(NO_PROJECT_BUNDLE_SLUG), cwd, Some(artifacts_dir.as_str()), sandbox, approval, crate::browser_mcp::bound_port(), connectors)
+        &data_dir, project_id.unwrap_or(NO_PROJECT_BUNDLE_SLUG), cwd, Some(artifacts_dir.as_str()), sandbox, approval, crate::browser_mcp::bound_port(), connectors, &artifacts_section)
 }
 
 fn spawn_claude(

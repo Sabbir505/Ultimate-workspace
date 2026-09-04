@@ -6,13 +6,16 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   applyImprovementProposal,
+  checkImprovementCanaries,
   evaluateImprovementProposal,
+  getImproveAutonomy,
   getSetting,
   listImproveArtifacts,
   listImprovementProposals,
   listImproveVersions,
   rejectImprovementProposal,
   runImprovementSweep,
+  setImproveAutonomy,
   setImproveChannel,
   setSetting,
   toastError,
@@ -38,6 +41,7 @@ export function ImprovementsPanel() {
   const [enabled, setEnabled] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [tiers, setTiers] = useState<Record<string, "manual" | "auto" | "canary">>({});
 
   const refresh = useCallback(async () => {
     try {
@@ -54,7 +58,11 @@ export function ImprovementsPanel() {
     }
   }, []);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    void refresh();
+    // Resolve any matured canary windows (promote / auto-rollback) on open.
+    void checkImprovementCanaries().then(() => refresh()).catch(() => {});
+  }, [refresh]);
 
   const nameOf = (artifactId: string) =>
     artifacts.find((a) => a.id === artifactId)?.name ?? artifactId.slice(0, 8);
@@ -120,6 +128,23 @@ export function ImprovementsPanel() {
       } catch (err) {
         toastError("Could not load version history", err);
       }
+    }
+    if (!(artifactId in tiers)) {
+      try {
+        const t = await getImproveAutonomy(artifactId);
+        if (t) setTiers((prev) => ({ ...prev, [artifactId]: t as "manual" | "auto" | "canary" }));
+      } catch {
+        /* default tier applies */
+      }
+    }
+  };
+
+  const changeTier = async (artifactId: string, tier: "manual" | "auto" | "canary") => {
+    setTiers((prev) => ({ ...prev, [artifactId]: tier }));
+    try {
+      await setImproveAutonomy(artifactId, tier);
+    } catch (err) {
+      toastError("Could not save the autonomy tier", err);
     }
   };
 
@@ -227,6 +252,18 @@ export function ImprovementsPanel() {
           </button>
           {expanded === a.id && (
             <div className="improve-versions-list">
+              <div className="improve-version-row">
+                <span className="improve-meta">Autonomy</span>
+                <select
+                  data-testid={`tier-${a.id}`}
+                  value={tiers[a.id] ?? "manual"}
+                  onChange={(e) => void changeTier(a.id, e.target.value as "manual" | "auto" | "canary")}
+                >
+                  <option value="manual">Manual — I apply proposals</option>
+                  <option value="auto">Auto — promote after passing eval (1/24h)</option>
+                  <option value="canary">Canary — shadow window, auto-rollback</option>
+                </select>
+              </div>
               {(versions[a.id] ?? []).map((v) => (
                 <div key={v.id} className="improve-version-row">
                   <span>v{v.version}</span>

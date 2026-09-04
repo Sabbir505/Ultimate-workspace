@@ -180,12 +180,17 @@ pub fn list_improvement_proposals(
 
 /// Sweep for improvements across eligible artifacts. Long-running (one
 /// proposer LLM turn per eligible artifact) — runs on the blocking pool.
+/// Any matured canary windows are resolved first (promote/rollback) so the
+/// sweep sees fresh state.
 #[tauri::command]
 pub async fn run_improvement_sweep(db: State<'_, DbState>) -> CmdResult<Vec<db::improve::ImproveProposal>> {
     let db = std::sync::Arc::clone(&db.0);
-    tauri::async_runtime::spawn_blocking(move || crate::improve_engine::sweep(&db))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = crate::improve_engine::check_canaries(&db);
+        crate::improve_engine::sweep(&db)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Run the regression gate for one proposal (champion vs candidate over the
@@ -221,4 +226,30 @@ pub fn list_improve_eval_cases(
 ) -> CmdResult<Vec<db::improve::EvalCase>> {
     let conn = db.0.lock();
     db::improve::list_eval_cases(&conn, &artifact_id, false).map_err(|e| e.to_string())
+}
+
+/// Set the per-artifact autonomy tier (§9.2): manual | auto | canary.
+#[tauri::command]
+pub fn set_improve_autonomy(db: State<'_, DbState>, artifact_id: String, tier: String) -> CmdResult<()> {
+    if !matches!(tier.as_str(), "manual" | "auto" | "canary") {
+        return Err(format!("unknown autonomy tier: {tier}"));
+    }
+    let conn = db.0.lock();
+    db::improve::set_autonomy(&conn, &artifact_id, &tier).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_improve_autonomy(db: State<'_, DbState>, artifact_id: String) -> CmdResult<String> {
+    let conn = db.0.lock();
+    db::improve::autonomy(&conn, &artifact_id).map_err(|e| e.to_string())
+}
+
+/// Resolve any matured canary windows (promote or auto-rollback). Cheap DB
+/// work — the frontend can call it on open and after each turn.
+#[tauri::command]
+pub async fn check_improvement_canaries(db: State<'_, DbState>) -> CmdResult<Vec<String>> {
+    let db = std::sync::Arc::clone(&db.0);
+    tauri::async_runtime::spawn_blocking(move || crate::improve_engine::check_canaries(&db))
+        .await
+        .map_err(|e| e.to_string())?
 }

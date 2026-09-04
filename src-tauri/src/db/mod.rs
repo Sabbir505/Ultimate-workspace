@@ -116,6 +116,19 @@ fn migrate_memory_reflected(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Databases created during the self-improving-artifacts P0/P1 iterations
+/// predate the per-artifact autonomy tier (P2 — §9.2).
+fn migrate_improve_autonomy(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE improve_artifacts ADD COLUMN autonomy TEXT NOT NULL DEFAULT 'manual'";
+    if let Err(e) = conn.execute(sql, []) {
+        let msg = e.to_string();
+        if !msg.contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
 fn migrate_chat_fts(conn: &Connection) -> DbResult<()> {
     let in_sync = conn
         .query_row(
@@ -160,6 +173,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_messages_v2(conn)?;
     migrate_chat_messages_started_completed(conn)?;
     migrate_chat_messages_perf(conn)?;
+    migrate_improve_autonomy(conn)?;
     migrate_chat_fts(conn)?;
     migrate_memory_reflected(conn)?;
     migrate_unc_paths(conn)
@@ -658,6 +672,7 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           kind TEXT NOT NULL,                 -- 'skill'|'loop'|'prompt_template'|'automation'
           ref_key TEXT NOT NULL,              -- skill slug / template id / automation id
           name TEXT NOT NULL,
+          autonomy TEXT NOT NULL DEFAULT 'manual', -- §9.2: 'manual'|'auto'|'canary'
           created_at INTEGER NOT NULL,
           UNIQUE(kind, ref_key)
         );

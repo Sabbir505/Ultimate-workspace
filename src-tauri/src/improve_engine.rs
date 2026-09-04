@@ -431,7 +431,128 @@ pub fn evaluate_proposal(db: &Arc<parking_lot::Mutex<Connection>>, proposal_id: 
     }
     improve::set_proposal_status(&db.lock(), proposal_id, &verdict, Some(&eval_run_id))
         .map_err(|e| e.to_string())?;
+    if verdict == "passed" {
+        route_passed_proposal(db, &proposal)?;
+    }
     Ok(verdict)
+}
+
+/// §9.2 autonomy tiers, applied when an eval passes:
+/// manual → wait for the user; auto → promote (capped 1/24h);
+/// canary → open a shadow watch window instead of promoting.
+fn route_passed_proposal(db: &Arc<parking_lot::Mutex<Connection>>, proposal: &ImproveProposal) -> EngResult<()> {
+    let tier = improve::autonomy(&db.lock(), &proposal.artifact_id).map_err(|e| e.to_string())?;
+    match tier.as_str() {
+        "auto" => {
+            {
+                let conn = db.lock();
+                if improve::promoted_recently(&conn, &proposal.artifact_id, 86_400)
+                    .map_err(|e| e.to_string())?
+                {
+                    // Cap hit: stay 'passed' for manual apply (§9.3).
+                    return Ok(());
+                }
+            }
+            apply_proposal(db, &proposal.id)?;
+            let conn = db.lock();
+            improve::record_event(&conn, Some(&proposal.artifact_id), Some(&proposal.id), "promoted", Some(r#"{"how":"auto"}"#))
+                .map_err(|e| e.to_string())
+        }
+        "canary" => {
+            {
+                let conn = db.lock();
+                improve::set_channel(&conn, &proposal.artifact_id, "shadow", proposal.candidate_version)
+                    .map_err(|e| e.to_string())?;
+                improve::open_canary(&conn, &proposal.artifact_id, &proposal.id, proposal.base_version, proposal.candidate_version)
+                    .map_err(|e| e.to_string())?;
+                improve::record_event(&conn, Some(&proposal.artifact_id), Some(&proposal.id), "canary_started", None)
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }
+        _ => Ok(()), // manual (default): the user decides from the panel
+    }
+}
+
+/// Resolve every open canary window (§9.2): enough clean shadow runs →
+/// promote; dirty window or expiry without evidence → auto-rollback. Two
+/// rollbacks permanently demote the artifact to Manual (§9.3).
+pub fn check_canaries(db: &Arc<parking_lot::Mutex<Connection>>) -> EngResult<Vec<String>> {
+    let canaries = improve::open_canaries(&db.lock()).map_err(|e| e.to_string())?;
+    let mut resolved = Vec::new();
+    for c in canaries {
+        let (total, bad, base_total, base_bad) = {
+            let conn = db.lock();
+            let (total, bad) = improve::version_run_health(&conn, &c.artifact_id, c.shadow_version, c.started_at)
+                .map_err(|e| e.to_string())?;
+            let (base_total, base_bad) = improve::version_run_health(&conn, &c.artifact_id, c.base_version, c.started_at)
+                .map_err(|e| e.to_string())?;
+            (total, bad, base_total, base_bad)
+        };
+        let age = db::now_ts() - c.started_at;
+        if total < c.min_runs && age < c.max_age_secs {
+            continue; // window still open, not enough evidence yet
+        }
+        let bad_rate = bad as f64 / total.max(1) as f64;
+        let base_rate = base_bad as f64 / base_total.max(1) as f64;
+        // Promote only when the window produced the minimum evidence AND the
+        // shadow bad-rate stays within the champion's rate (+ slack).
+        let clean = total >= c.min_runs && bad_rate <= (base_rate + 0.1).min(0.3);
+        let kind: String = {
+            let conn = db.lock();
+            conn.query_row(
+                "SELECT kind FROM improve_artifacts WHERE id = ?1",
+                rusqlite::params![c.artifact_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?
+        };
+        if clean {
+            let body = {
+                let conn = db.lock();
+                improve::version_body(&conn, &c.artifact_id, c.shadow_version)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("shadow body missing")?
+            };
+            {
+                let conn = db.lock();
+                improve::set_channel(&conn, &c.artifact_id, "active", c.shadow_version).map_err(|e| e.to_string())?;
+            }
+            materialize(db, &c.artifact_id, &kind, &body)?;
+            improve::resolve_canary(&db.lock(), &c.id, "promoted").map_err(|e| e.to_string())?;
+            improve::set_proposal_status(&db.lock(), &c.proposal_id, "applied", None).map_err(|e| e.to_string())?;
+            let conn = db.lock();
+            improve::record_event(&conn, Some(&c.artifact_id), Some(&c.proposal_id), "promoted", Some(r#"{"how":"canary"}"#))
+                .map_err(|e| e.to_string())?;
+        } else {
+            let base_body = {
+                let conn = db.lock();
+                improve::version_body(&conn, &c.artifact_id, c.base_version)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("base body missing")?
+            };
+            {
+                let conn = db.lock();
+                improve::set_channel(&conn, &c.artifact_id, "active", c.base_version).map_err(|e| e.to_string())?;
+            }
+            materialize(db, &c.artifact_id, &kind, &base_body)?;
+            improve::resolve_canary(&db.lock(), &c.id, "rolled_back").map_err(|e| e.to_string())?;
+            improve::set_proposal_status(&db.lock(), &c.proposal_id, "stale", None).map_err(|e| e.to_string())?;
+            let conn = db.lock();
+            improve::record_event(&conn, Some(&c.artifact_id), Some(&c.proposal_id), "rolled_back", None)
+                .map_err(|e| e.to_string())?;
+            // Blast-radius rule: two rollbacks lose promotion privileges.
+            let rollbacks = improve::rolled_back_count(&conn, &c.artifact_id).map_err(|e| e.to_string())?;
+            if rollbacks >= 2 {
+                let tier = improve::autonomy(&conn, &c.artifact_id).map_err(|e| e.to_string())?;
+                if tier == "canary" || tier == "auto" {
+                    improve::set_autonomy(&conn, &c.artifact_id, "manual").map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        resolved.push(c.id);
+    }
+    Ok(resolved)
 }
 
 /// §8 gate: zero regressions on cases the champion passed, ≥95% candidate
@@ -686,6 +807,76 @@ mod tests {
         assert_eq!(apply_regression_gate(&worse), "failed_eval");
         // Everything errored → no evidence → fail.
         assert_eq!(apply_regression_gate(&[]), "failed_eval");
+    }
+
+    /// Canary fixture: prompt_template artifact (materialization touches only
+    /// the in-memory settings) with a v2 candidate and an open canary.
+    fn canary_fixture(db: &Arc<parking_lot::Mutex<Connection>>) -> (ImproveArtifact, i64, String) {
+        let conn = db.lock();
+        let a = improve::ensure_artifact(&conn, "prompt_template", "t1", "T", "body v1").unwrap();
+        crate::db::set_setting(&conn, "prompts.templates", r#"[{"id":"t1","name":"T","body":"body v1"}]"#).unwrap();
+        let v2 = improve::record_version(&conn, &a.id, 1, "body v2", None, "auto_proposal").unwrap().unwrap();
+        let p = improve::create_proposal(&conn, &a.id, 1, v2, "fix", None, None, None).unwrap();
+        improve::set_proposal_status(&conn, &p.id, "passed", None).unwrap();
+        improve::open_canary(&conn, &a.id, &p.id, 1, v2).unwrap();
+        (a, v2, p.id)
+    }
+
+    #[test]
+    fn canary_clean_window_promotes() {
+        let db = Arc::new(parking_lot::Mutex::new(crate::db::mem()));
+        let (a, v2, pid) = canary_fixture(&db);
+        // Window still open (not enough evidence) → unresolved.
+        check_canaries(&db).unwrap();
+        assert!(improve::get_canary(&db.lock(), "x").is_ok()); // query sanity
+        // 10 clean shadow runs meet min_runs.
+        for i in 0..10 {
+            let (run, body) = improve::start_run_shadow(&db.lock(), &a.id, Some(&format!("w{i}"))).unwrap();
+            assert_eq!(body.as_deref(), Some("body v2"));
+            improve::finish_session_runs(&db.lock(), &format!("w{i}"), "applied", None).unwrap();
+        }
+        let resolved = check_canaries(&db).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(improve::channel_version(&db.lock(), &a.id, "active").unwrap(), Some(v2));
+        assert_eq!(improve::get_proposal(&db.lock(), &pid).unwrap().unwrap().status, "applied");
+        // The live template copy was materialized to the promoted body.
+        let raw = crate::db::get_setting(&db.lock(), "prompts.templates").unwrap().unwrap();
+        assert!(raw.contains("body v2"), "template not materialized: {raw}");
+    }
+
+    #[test]
+    fn canary_dirty_window_rolls_back_and_demotes_after_two() {
+        let db = Arc::new(parking_lot::Mutex::new(crate::db::mem()));
+        let (a, _v2, pid) = canary_fixture(&db);
+        improve::set_autonomy(&db.lock(), &a.id, "canary").unwrap();
+        // Dirty window: every shadow run corrected.
+        for i in 0..10 {
+            let (run, _body) = improve::start_run_shadow(&db.lock(), &a.id, Some(&format!("w{i}"))).unwrap();
+            improve::finish_session_runs(&db.lock(), &format!("w{i}"), "corrected", None).unwrap();
+        }
+        check_canaries(&db).unwrap();
+        // Rolled back to the base version, live copy restored, proposal stale.
+        assert_eq!(improve::channel_version(&db.lock(), &a.id, "active").unwrap(), Some(1));
+        assert_eq!(improve::get_proposal(&db.lock(), &pid).unwrap().unwrap().status, "stale");
+        let raw = crate::db::get_setting(&db.lock(), "prompts.templates").unwrap().unwrap();
+        assert!(raw.contains("body v1") && !raw.contains("body v2"));
+        // One rollback is survivable; the second demotes to manual (§9.3).
+        assert_eq!(improve::autonomy(&db.lock(), &a.id).unwrap(), "canary");
+        // Compute the next candidate version BEFORE locking again — these
+        // guards are not reentrant.
+        let v3 = {
+            let conn = db.lock();
+            improve::record_version(&conn, &a.id, 1, "body v3", None, "auto_proposal").unwrap().unwrap()
+        };
+        let p2 = improve::create_proposal(&db.lock(), &a.id, 1, v3, "try again", None, None, None).unwrap();
+        improve::set_proposal_status(&db.lock(), &p2.id, "passed", None).unwrap();
+        improve::open_canary(&db.lock(), &a.id, &p2.id, 1, v3).unwrap();
+        for i in 10..20 {
+            let (run, _) = improve::start_run_shadow(&db.lock(), &a.id, Some(&format!("w{i}"))).unwrap();
+            improve::finish_session_runs(&db.lock(), &format!("w{i}"), "failed", None).unwrap();
+        }
+        check_canaries(&db).unwrap();
+        assert_eq!(improve::autonomy(&db.lock(), &a.id).unwrap(), "manual", "blast-radius rule");
     }
 
     #[test]

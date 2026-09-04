@@ -1682,13 +1682,17 @@ pub async fn send_chat_message(
         let conn = db.0.lock();
         let custom = db::get_setting(&conn, "assistant.systemPrompt")
             .map_err(|e| e.to_string())?;
-        let skills = parse_invoked_skills(&content);
-        // Self-improving artifacts (P0 telemetry): one open run per invoked
-        // skill; the turn lifecycle closes it (applied/failed/corrected).
-        // Best-effort — telemetry must never block a send.
-        for (skill_name, skill_body) in &skills {
+        let mut skills = parse_invoked_skills(&content);
+        // Self-improving artifacts telemetry: one open run per invoked skill;
+        // the turn lifecycle closes it (applied/failed/corrected). When a
+        // canary window is open, the run serves the SHADOW version's body so
+        // live traffic exercises the candidate (§9.2). Best-effort — telemetry
+        // must never block a send.
+        for (skill_name, skill_body) in skills.iter_mut() {
             if let Ok(artifact) = db::improve::ensure_artifact(&conn, "skill", skill_name, skill_name, skill_body) {
-                let _ = db::improve::start_run(&conn, &artifact.id, Some(&chat_session_id));
+                if let Ok((_, Some(shadow_body))) = db::improve::start_run_shadow(&conn, &artifact.id, Some(&chat_session_id)) {
+                    *skill_body = shadow_body;
+                }
             }
         }
         // Tier-1 memory profile (MEMORY_DESIGN_ARCHITECTURE.md §11.2):

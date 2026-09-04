@@ -711,6 +711,13 @@ export interface ImproveEvalCase {
 export const listImproveEvalCases = (artifactId: string) =>
   safeInvoke<ImproveEvalCase[] | null>("list_improve_eval_cases", { artifactId });
 
+export const setImproveAutonomy = (artifactId: string, tier: "manual" | "auto" | "canary") =>
+  safeInvoke<void>("set_improve_autonomy", { artifactId, tier });
+export const getImproveAutonomy = (artifactId: string) =>
+  safeInvoke<string | null>("get_improve_autonomy", { artifactId });
+export const checkImprovementCanaries = () =>
+  safeInvoke<string[] | null>("check_improvement_canaries");
+
 /** Stream `budget:alert` events (threshold crossed) — drives the in-app toast. */
 export const onBudgetAlert = (handler: (p: BudgetAlertPayload) => void) =>
   safeListen<BudgetAlertPayload>("budget:alert", handler);

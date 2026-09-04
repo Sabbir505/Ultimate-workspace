@@ -609,6 +609,202 @@ pub fn harvest_eval_cases(conn: &Connection, artifact_id: &str, since: i64, max:
     Ok(added)
 }
 
+// ---- P2: autonomy tiers, canaries, audit ----
+
+/// Autonomy tier for one artifact (§9.2). `manual` (default) waits for the
+/// user; `auto` promotes immediately after a passing eval; `canary` promotes
+/// through a shadow watch window.
+pub fn autonomy(conn: &Connection, artifact_id: &str) -> DbResult<String> {
+    let tier: Option<String> = conn
+        .query_row(
+            "SELECT autonomy FROM improve_artifacts WHERE id = ?1",
+            params![artifact_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(tier.unwrap_or_else(|| "manual".into()))
+}
+
+pub fn set_autonomy(conn: &Connection, artifact_id: &str, tier: &str) -> DbResult<()> {
+    conn.execute(
+        "UPDATE improve_artifacts SET autonomy = ?2 WHERE id = ?1",
+        params![artifact_id, tier],
+    )?;
+    record_event(conn, Some(artifact_id), None, "tier_changed", Some(&format!("{{\"tier\":\"{tier}\"}}")))
+}
+
+pub fn record_event(
+    conn: &Connection,
+    artifact_id: Option<&str>,
+    proposal_id: Option<&str>,
+    event: &str,
+    detail_json: Option<&str>,
+) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO improve_events (id, artifact_id, proposal_id, event, detail_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![new_id(), artifact_id, proposal_id, event, detail_json, now_ts()],
+    )?;
+    Ok(())
+}
+
+pub fn list_events(conn: &Connection, artifact_id: &str, limit: i64) -> DbResult<Vec<(String, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT event, detail_json, created_at FROM improve_events
+          WHERE artifact_id = ?1 ORDER BY created_at DESC, id DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![artifact_id, limit], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default(), r.get::<_, i64>(2)?.to_string()))
+    })?;
+    rows.collect()
+}
+
+/// Open a run pinned to `version` (used to serve shadow/canary bodies while
+/// attributing the telemetry to the right version).
+pub fn start_run_versioned(conn: &Connection, artifact_id: &str, version: i64, chat_session_id: Option<&str>) -> DbResult<String> {
+    let id = new_id();
+    conn.execute(
+        "INSERT INTO improve_runs (id, artifact_id, version, chat_session_id, started_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, artifact_id, version, chat_session_id, now_ts()],
+    )?;
+    Ok(id)
+}
+
+/// If an open canary exists for the artifact, serve its shadow version:
+/// returns (run_id, Some(shadow_body)). Otherwise an ordinary active run.
+pub fn start_run_shadow(conn: &Connection, artifact_id: &str, chat_session_id: Option<&str>) -> DbResult<(String, Option<String>)> {
+    let canary: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT c.id, c.shadow_version FROM improve_canaries c
+              WHERE c.artifact_id = ?1 AND c.resolved_at IS NULL
+              ORDER BY c.started_at DESC LIMIT 1",
+            params![artifact_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((_, shadow_version)) = canary {
+        let body = version_body(conn, artifact_id, shadow_version)?.unwrap_or_default();
+        if !body.is_empty() {
+            let run = start_run_versioned(conn, artifact_id, shadow_version, chat_session_id)?;
+            return Ok((run, Some(body)));
+        }
+    }
+    Ok((start_run(conn, artifact_id, chat_session_id)?, None))
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Canary {
+    pub id: String,
+    pub artifact_id: String,
+    pub proposal_id: String,
+    pub base_version: i64,
+    pub shadow_version: i64,
+    pub min_runs: i64,
+    pub max_age_secs: i64,
+    pub started_at: i64,
+    pub resolved_at: Option<i64>,
+    pub verdict: Option<String>,
+}
+
+fn map_canary(row: &rusqlite::Row) -> rusqlite::Result<Canary> {
+    Ok(Canary {
+        id: row.get("id")?,
+        artifact_id: row.get("artifact_id")?,
+        proposal_id: row.get("proposal_id")?,
+        base_version: row.get("base_version")?,
+        shadow_version: row.get("shadow_version")?,
+        min_runs: row.get("min_runs")?,
+        max_age_secs: row.get("max_age_secs")?,
+        started_at: row.get("started_at")?,
+        resolved_at: row.get("resolved_at")?,
+        verdict: row.get("verdict")?,
+    })
+}
+
+pub fn open_canary(
+    conn: &Connection,
+    artifact_id: &str,
+    proposal_id: &str,
+    base_version: i64,
+    shadow_version: i64,
+) -> DbResult<Canary> {
+    // One open canary per artifact — a newer candidate supersedes by closing
+    // the old window (caller decides) or by replacing it here.
+    conn.execute(
+        "UPDATE improve_canaries SET resolved_at = ?2, verdict = 'stale'
+          WHERE artifact_id = ?1 AND resolved_at IS NULL",
+        params![artifact_id, now_ts()],
+    )?;
+    let id = new_id();
+    conn.execute(
+        "INSERT INTO improve_canaries (id, artifact_id, proposal_id, base_version, shadow_version, min_runs, max_age_secs, started_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 10, 172800, ?6)",
+        params![id, artifact_id, proposal_id, base_version, shadow_version, now_ts()],
+    )?;
+    get_canary(conn, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+}
+
+pub fn get_canary(conn: &Connection, id: &str) -> DbResult<Option<Canary>> {
+    conn.query_row(
+        "SELECT id, artifact_id, proposal_id, base_version, shadow_version, min_runs, max_age_secs, started_at, resolved_at, verdict
+           FROM improve_canaries WHERE id = ?1",
+        params![id],
+        map_canary,
+    )
+    .optional()
+}
+
+pub fn open_canaries(conn: &Connection) -> DbResult<Vec<Canary>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, artifact_id, proposal_id, base_version, shadow_version, min_runs, max_age_secs, started_at, resolved_at, verdict
+           FROM improve_canaries WHERE resolved_at IS NULL ORDER BY started_at ASC",
+    )?;
+    let rows = stmt.query_map([], map_canary)?;
+    rows.collect()
+}
+
+/// Finished-run health for one version since a timestamp: (total, bad).
+pub fn version_run_health(conn: &Connection, artifact_id: &str, version: i64, since: i64) -> DbResult<(i64, i64)> {
+    conn.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN outcome IN ('failed', 'corrected') THEN 1 ELSE 0 END), 0)
+           FROM improve_runs
+          WHERE artifact_id = ?1 AND version = ?2 AND finished_at IS NOT NULL AND started_at >= ?3",
+        params![artifact_id, version, since],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+}
+
+pub fn resolve_canary(conn: &Connection, id: &str, verdict: &str) -> DbResult<()> {
+    conn.execute(
+        "UPDATE improve_canaries SET resolved_at = ?2, verdict = ?3 WHERE id = ?1 AND resolved_at IS NULL",
+        params![id, now_ts(), verdict],
+    )?;
+    Ok(())
+}
+
+/// Rollback credit (§9.3 blast-radius rule): rolled_back events per artifact.
+pub fn rolled_back_count(conn: &Connection, artifact_id: &str) -> DbResult<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM improve_events WHERE artifact_id = ?1 AND event = 'rolled_back'",
+        params![artifact_id],
+        |r| r.get(0),
+    )
+}
+
+/// 24h auto-promotion cap (§9.3): a promoted event within the window?
+pub fn promoted_recently(conn: &Connection, artifact_id: &str, within_secs: i64) -> DbResult<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM improve_events
+          WHERE artifact_id = ?1 AND event = 'promoted' AND created_at >= ?2",
+        params![artifact_id, now_ts() - within_secs],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -788,6 +984,61 @@ mod tests {
         let v2 = record_version(&conn, &a.id, 1, "v2", None, "auto_proposal").unwrap().unwrap();
         create_proposal(&conn, &a.id, 1, v2, "fix", None, None, None).unwrap();
         assert!(sweep_candidates(&conn, since, 3).unwrap().is_empty());
+    }
+
+    #[test]
+    fn autonomy_tiers_and_events() {
+        let conn = super::super::mem();
+        let a = ensure_artifact(&conn, "skill", "docx", "Docx", "v1").unwrap();
+        assert_eq!(autonomy(&conn, &a.id).unwrap(), "manual", "default tier");
+        set_autonomy(&conn, &a.id, "canary").unwrap();
+        assert_eq!(autonomy(&conn, &a.id).unwrap(), "canary");
+        let events = list_events(&conn, &a.id, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "tier_changed");
+    }
+
+    #[test]
+    fn canary_window_and_shadow_serving() {
+        let conn = super::super::mem();
+        let a = ensure_artifact(&conn, "skill", "docx", "Docx", "v1").unwrap();
+        let v2 = record_version(&conn, &a.id, 1, "v2", None, "auto_proposal").unwrap().unwrap();
+        let p = create_proposal(&conn, &a.id, 1, v2, "fix", None, None, None).unwrap();
+        // No canary → ordinary active run, no override body.
+        let (run, body) = start_run_shadow(&conn, &a.id, Some("s0")).unwrap();
+        assert!(body.is_none());
+        assert_eq!(
+            conn.query_row("SELECT version FROM improve_runs WHERE id = ?1", params![run], |r| r.get::<_, i64>(0)).unwrap(),
+            1
+        );
+        let c = open_canary(&conn, &a.id, &p.id, 1, v2).unwrap();
+        assert!(c.resolved_at.is_none());
+        // Canary open → runs serve the shadow version and carry its body.
+        let (run2, body2) = start_run_shadow(&conn, &a.id, Some("s1")).unwrap();
+        assert_eq!(body2.as_deref(), Some("v2"));
+        assert_eq!(
+            conn.query_row("SELECT version FROM improve_runs WHERE id = ?1", params![run2], |r| r.get::<_, i64>(0)).unwrap(),
+            2
+        );
+        finish_session_runs(&conn, "s1", "applied", None).unwrap();
+        // Window statistics read back per version.
+        assert_eq!(version_run_health(&conn, &a.id, 2, 0).unwrap(), (1, 0));
+        // Opening a second canary supersedes (stale) the first.
+        let c2 = open_canary(&conn, &a.id, &p.id, 1, v2).unwrap();
+        assert_eq!(get_canary(&conn, &c.id).unwrap().unwrap().verdict.as_deref(), Some("stale"));
+        assert!(open_canaries(&conn).unwrap().len() == 1 && open_canaries(&conn).unwrap()[0].id == c2.id);
+    }
+
+    #[test]
+    fn promotion_cap_and_rollback_credit() {
+        let conn = super::super::mem();
+        let a = ensure_artifact(&conn, "skill", "docx", "Docx", "v1").unwrap();
+        assert!(!promoted_recently(&conn, &a.id, 86_400).unwrap());
+        record_event(&conn, Some(&a.id), None, "promoted", None).unwrap();
+        assert!(promoted_recently(&conn, &a.id, 86_400).unwrap());
+        record_event(&conn, Some(&a.id), None, "rolled_back", None).unwrap();
+        record_event(&conn, Some(&a.id), None, "rolled_back", None).unwrap();
+        assert_eq!(rolled_back_count(&conn, &a.id).unwrap(), 2, "blast-radius rule trips at 2");
     }
 
     #[test]

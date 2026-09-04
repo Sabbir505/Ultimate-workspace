@@ -777,6 +777,12 @@ pub fn mark_branch_superseded(
           WHERE chat_session_id = ?1 AND id >= ?2 AND superseded_by IS NULL",
         params![chat_session_id, from_message_id, from_message_id],
     )?;
+    // Edit-to-fork is a user correction: close the session's open artifact
+    // runs as 'corrected' (SELF_IMPROVING_ARTIFACTS.md §5.3). Best-effort —
+    // telemetry must never fail the branch operation.
+    if n > 0 {
+        let _ = super::improve::finish_session_runs(conn, chat_session_id, "corrected", None);
+    }
     Ok(n)
 }
 

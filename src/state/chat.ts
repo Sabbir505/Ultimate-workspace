@@ -70,6 +70,10 @@ import {
   type SubagentSpawnPayload,
   type SubagentTokenPayload,
   type SubagentDonePayload,
+  finishArtifactRuns,
+  loopSessionAdvance,
+  loopSessionFinish,
+  loopSessionStart,
 } from "../lib/ipc";
 export type { ArtifactProposal, PlanTodo } from "../lib/ipc";
 import type { ArtifactProposal } from "../lib/ipc";
@@ -513,6 +517,10 @@ export interface LoopState {
   /** Whether the loop is still live. Set false when it completes, blocks,
    *  errors, is stopped by the user, or the cap is reached. */
   active: boolean;
+  /** Backend loop-session id (SELF_IMPROVING_ARTIFACTS.md P0) — set once the
+   *  fire-and-forget `loop_session_start` resolves. Telemetry only; the
+   *  frontend state machine stays authoritative for loop control. */
+  backendId?: string;
 }
 
 /** What `advanceLoop` decided after one reply. */
@@ -1231,6 +1239,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
         [id]: { goal, iteration: 0, max: GOAL_LOOP_MAX, active: true },
       },
     }));
+    // Persist the loop session (run telemetry + survival across restarts).
+    // Fire-and-forget: telemetry must never block arming the loop.
+    void loopSessionStart(id, goal, GOAL_LOOP_MAX)
+      .then((ls) => {
+        if (!ls) return;
+        set((s) => {
+          const cur = s.loopState[id];
+          if (!cur) return {};
+          return { loopState: { ...s.loopState, [id]: { ...cur, backendId: ls.id } } };
+        });
+      })
+      .catch(() => {});
   },
 
   stopLoop: (sessionIdOverride?) => {
@@ -1239,6 +1259,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => {
       const cur = s.loopState[id];
       if (!cur) return {};
+      if (cur.active && cur.backendId) {
+        void loopSessionFinish(cur.backendId, "stopped").catch(() => {});
+      }
       return { loopState: { ...s.loopState, [id]: { ...cur, active: false } } };
     });
   },
@@ -1256,18 +1279,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set((s) => ({
         loopState: { ...s.loopState, [chatSessionId]: { ...cur, iteration: nextIter, active: false } },
       }));
+      if (cur.backendId) void loopSessionFinish(cur.backendId, "maxed").catch(() => {});
       return "stop";
     }
     if (status === "continue") {
       set((s) => ({
         loopState: { ...s.loopState, [chatSessionId]: { ...cur, iteration: nextIter } },
       }));
+      if (cur.backendId) void loopSessionAdvance(cur.backendId, nextIter).catch(() => {});
       return "continue";
     }
     // complete | blocked | stop: end the loop.
     set((s) => ({
       loopState: { ...s.loopState, [chatSessionId]: { ...cur, iteration: nextIter, active: false } },
     }));
+    if (cur.backendId) {
+      const terminal = status === "complete" ? "complete" : status === "blocked" ? "blocked" : "stopped";
+      void loopSessionFinish(cur.backendId, terminal).catch(() => {});
+    }
     return status === "complete" ? "complete" : status === "blocked" ? "blocked" : "stop";
   },
 
@@ -2572,6 +2601,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // next turn.
       const loop = get().loopState[streamingChatSessionId];
       if (loop && loop.active) {
+        if (loop.backendId) void loopSessionFinish(loop.backendId, "stopped").catch(() => {});
         set((s) => ({
           loopState: {
             ...s.loopState,
@@ -2579,6 +2609,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           },
         }));
       }
+      // The cancel path never emits a terminal event, so the session's open
+      // artifact runs would stay open forever — close them as abandoned.
+      void finishArtifactRuns(streamingChatSessionId, "abandoned").catch(() => {});
       // Refresh the message list so the persisted partial shows up inline.
       // mergeOptimistic keeps the just-drained queued message's bubble: the
       // refetch snapshot can predate that send's DB persist.
@@ -2822,6 +2855,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
     // Turn finished — send the next queued message, if any (FIFO).
     get().drainQueue(chatSessionId);
+    // Artifact telemetry (SELF_IMPROVING_ARTIFACTS.md §5): the turn ended
+    // cleanly, so any skill/template runs opened for this session count as
+    // applied. No-op when the turn used no tracked artifact.
+    void finishArtifactRuns(chatSessionId, "applied").catch(() => {});
     // Goal-loop (/goal / /loop): if the loop is armed for this session and
     // drainQueue didn't already start a new turn (no queued user messages),
     // inspect the just-finished assistant reply and, on `continue`, auto-issue
@@ -3008,6 +3045,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           s.activeChatSessionId === chatSessionId ? (code ?? null) : s.errorCode,
       };
     });
+    // Artifact telemetry (SELF_IMPROVING_ARTIFACTS.md §5.2): the turn errored,
+    // so open runs count as failed with the classified error code.
+    void finishArtifactRuns(chatSessionId, "failed", code ?? undefined).catch(() => {});
     // Keep the partial VISIBLE (not just persisted): without a refetch the
     // live bubble vanishes with the streaming entry and the persisted row
     // only surfaces on the NEXT turn's history reload — the watched work

@@ -1683,6 +1683,14 @@ pub async fn send_chat_message(
         let custom = db::get_setting(&conn, "assistant.systemPrompt")
             .map_err(|e| e.to_string())?;
         let skills = parse_invoked_skills(&content);
+        // Self-improving artifacts (P0 telemetry): one open run per invoked
+        // skill; the turn lifecycle closes it (applied/failed/corrected).
+        // Best-effort — telemetry must never block a send.
+        for (skill_name, skill_body) in &skills {
+            if let Ok(artifact) = db::improve::ensure_artifact(&conn, "skill", skill_name, skill_name, skill_body) {
+                let _ = db::improve::start_run(&conn, &artifact.id, Some(&chat_session_id));
+            }
+        }
         // Tier-1 memory profile (MEMORY_DESIGN_ARCHITECTURE.md §11.2):
         // pre-rendered here because the block needs the DB. Empty store or
         // feature-off → None → the prompt part is omitted byte-neutral.

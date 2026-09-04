@@ -7,6 +7,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/ipc", () => ({
+  // Self-improving artifacts telemetry (P0) — loop persistence + turn runs.
+  loopSessionStart: vi.fn().mockResolvedValue(null),
+  loopSessionAdvance: vi.fn().mockResolvedValue(undefined),
+  loopSessionFinish: vi.fn().mockResolvedValue(undefined),
+  finishArtifactRuns: vi.fn().mockResolvedValue(0),
   sendChatMessage: vi.fn(),
   sendAgentChatMessage: vi.fn(),
   cancelChatMessage: vi.fn().mockResolvedValue(undefined),

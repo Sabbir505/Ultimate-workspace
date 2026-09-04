@@ -1,0 +1,496 @@
+//! Self-improving artifacts: versioning + execution telemetry
+//! (SELF_IMPROVING_ARTIFACTS.md §4 versioning, §5 observation).
+//!
+//! Registry tables live under the `improve_*` prefix — `artifacts` is already
+//! taken by the chat-attachment table. All functions take `&Connection` for
+//! in-memory testability, mirroring the other db modules.
+//!
+//! Design invariants:
+//! - versions are append-only and immutable; the live copy is whatever the
+//!   `active` channel points at;
+//! - runs stay open (outcome NULL) until a terminal event classifies them —
+//!   turn success/error, edit-to-fork (`corrected`), or loop finish.
+
+use rusqlite::{params, Connection, OptionalExtension};
+
+use super::{new_id, now_ts, DbResult};
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImproveArtifact {
+    pub id: String,
+    pub kind: String,
+    pub ref_key: String,
+    pub name: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImproveVersion {
+    pub id: String,
+    pub artifact_id: String,
+    pub version: i64,
+    pub body: String,
+    pub meta_json: Option<String>,
+    pub origin: String,
+    pub parent_version: Option<i64>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopSession {
+    pub id: String,
+    pub chat_session_id: String,
+    pub goal: String,
+    pub iteration: i64,
+    pub max_iterations: i64,
+    pub status: String,
+    pub run_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+// ---- artifact registry + versioning ----
+
+fn map_artifact(row: &rusqlite::Row) -> rusqlite::Result<ImproveArtifact> {
+    Ok(ImproveArtifact {
+        id: row.get("id")?,
+        kind: row.get("kind")?,
+        ref_key: row.get("ref_key")?,
+        name: row.get("name")?,
+        created_at: row.get("created_at")?,
+    })
+}
+
+/// Insert-or-get the registry row and guarantee it has a v1 + active channel.
+/// `body` seeds v1 on first sight; existing artifacts are returned untouched
+/// (lazy backfill — no migration needed).
+pub fn ensure_artifact(
+    conn: &Connection,
+    kind: &str,
+    ref_key: &str,
+    name: &str,
+    body: &str,
+) -> DbResult<ImproveArtifact> {
+    let existing = conn
+        .query_row(
+            "SELECT * FROM improve_artifacts WHERE kind = ?1 AND ref_key = ?2",
+            params![kind, ref_key],
+            map_artifact,
+        )
+        .optional()?;
+    if let Some(a) = existing {
+        return Ok(a);
+    }
+    let id = new_id();
+    let now = now_ts();
+    conn.execute(
+        "INSERT INTO improve_artifacts (id, kind, ref_key, name, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, kind, ref_key, name, now],
+    )?;
+    conn.execute(
+        "INSERT INTO improve_versions (id, artifact_id, version, body, origin, created_at)
+         VALUES (?1, ?2, 1, ?3, 'import', ?4)",
+        params![new_id(), id, body, now],
+    )?;
+    conn.execute(
+        "INSERT INTO improve_channels (artifact_id, channel, version, updated_at)
+         VALUES (?1, 'active', 1, ?2)",
+        params![id, now],
+    )?;
+    Ok(ImproveArtifact {
+        id,
+        kind: kind.to_string(),
+        ref_key: ref_key.to_string(),
+        name: name.to_string(),
+        created_at: now,
+    })
+}
+
+/// Append a new version derived from `parent_version` when the body actually
+/// changed. Returns the new version number, or None when body is unchanged
+/// (idempotent re-runs must not spam the history).
+pub fn record_version(
+    conn: &Connection,
+    artifact_id: &str,
+    parent_version: i64,
+    body: &str,
+    meta_json: Option<&str>,
+    origin: &str,
+) -> DbResult<Option<i64>> {
+    let parent_body: Option<String> = conn
+        .query_row(
+            "SELECT body FROM improve_versions WHERE artifact_id = ?1 AND version = ?2",
+            params![artifact_id, parent_version],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if parent_body.as_deref() == Some(body) {
+        return Ok(None);
+    }
+    let next: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) + 1 FROM improve_versions WHERE artifact_id = ?1",
+        params![artifact_id],
+        |r| r.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO improve_versions (id, artifact_id, version, body, meta_json, origin, parent_version, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![new_id(), artifact_id, next, body, meta_json, origin, parent_version, now_ts()],
+    )?;
+    Ok(Some(next))
+}
+
+pub fn list_versions(conn: &Connection, artifact_id: &str) -> DbResult<Vec<ImproveVersion>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, artifact_id, version, body, meta_json, origin, parent_version, created_at
+           FROM improve_versions WHERE artifact_id = ?1 ORDER BY version ASC",
+    )?;
+    let rows = stmt.query_map(params![artifact_id], |r| {
+        Ok(ImproveVersion {
+            id: r.get(0)?,
+            artifact_id: r.get(1)?,
+            version: r.get(2)?,
+            body: r.get(3)?,
+            meta_json: r.get(4)?,
+            origin: r.get(5)?,
+            parent_version: r.get(6)?,
+            created_at: r.get(7)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Point a channel at a version (promote/rollback are the same operation).
+pub fn set_channel(conn: &Connection, artifact_id: &str, channel: &str, version: i64) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO improve_channels (artifact_id, channel, version, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(artifact_id, channel) DO UPDATE SET version = ?3, updated_at = ?4",
+        params![artifact_id, channel, version, now_ts()],
+    )?;
+    Ok(())
+}
+
+pub fn channel_version(conn: &Connection, artifact_id: &str, channel: &str) -> DbResult<Option<i64>> {
+    conn.query_row(
+        "SELECT version FROM improve_channels WHERE artifact_id = ?1 AND channel = ?2",
+        params![artifact_id, channel],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+// ---- run telemetry ----
+
+/// Open a run row for one execution of the artifact's active version.
+pub fn start_run(
+    conn: &Connection,
+    artifact_id: &str,
+    chat_session_id: Option<&str>,
+) -> DbResult<String> {
+    let version = channel_version(conn, artifact_id, "active")?.unwrap_or(1);
+    let id = new_id();
+    conn.execute(
+        "INSERT INTO improve_runs (id, artifact_id, version, chat_session_id, started_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, artifact_id, version, chat_session_id, now_ts()],
+    )?;
+    Ok(id)
+}
+
+/// Close every open run in a chat session with one outcome. Returns the
+/// number of rows closed. Used by turn success ('applied'), turn error
+/// ('failed'), and edit-to-fork ('corrected').
+pub fn finish_session_runs(
+    conn: &Connection,
+    chat_session_id: &str,
+    outcome: &str,
+    error_code: Option<&str>,
+) -> DbResult<usize> {
+    let n = conn.execute(
+        "UPDATE improve_runs
+            SET finished_at = ?2, outcome = ?3, error_code = COALESCE(?4, error_code)
+          WHERE chat_session_id = ?1 AND finished_at IS NULL",
+        params![chat_session_id, now_ts(), outcome, error_code],
+    )?;
+    Ok(n)
+}
+
+pub fn record_feedback(
+    conn: &Connection,
+    artifact_id: &str,
+    run_id: Option<&str>,
+    chat_session_id: Option<&str>,
+    verdict: &str,
+    reason: Option<&str>,
+) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO improve_feedback (id, artifact_id, run_id, chat_session_id, verdict, reason, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![new_id(), artifact_id, run_id, chat_session_id, verdict, reason, now_ts()],
+    )?;
+    Ok(())
+}
+
+/// Aggregate per-version health used by the P1 improvement sweep: open runs
+/// are ignored, `corrected|failed` count as bad.
+pub fn run_health(conn: &Connection, artifact_id: &str) -> DbResult<(i64, i64)> {
+    let (total, bad) = conn.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN outcome IN ('failed', 'corrected') THEN 1 ELSE 0 END), 0)
+           FROM improve_runs
+          WHERE artifact_id = ?1 AND finished_at IS NOT NULL",
+        params![artifact_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok((total, bad))
+}
+
+// ---- goal-loop runtime persistence ----
+
+fn map_loop(row: &rusqlite::Row) -> rusqlite::Result<LoopSession> {
+    Ok(LoopSession {
+        id: row.get("id")?,
+        chat_session_id: row.get("chat_session_id")?,
+        goal: row.get("goal")?,
+        iteration: row.get("iteration")?,
+        max_iterations: row.get("max_iterations")?,
+        status: row.get("status")?,
+        run_id: row.get("run_id")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+/// Create a loop session and its telemetry run. The loop artifact is the
+/// goal-loop skill itself (`kind='loop'`, `ref_key='goal'`) — one shared
+/// registry entry whose version tracks the skill body.
+pub fn start_loop_session(
+    conn: &Connection,
+    chat_session_id: &str,
+    goal: &str,
+    max_iterations: i64,
+    loop_skill_body: &str,
+) -> DbResult<LoopSession> {
+    let artifact = ensure_artifact(conn, "loop", "goal", "Goal loop", loop_skill_body)?;
+    let run_id = start_run(conn, &artifact.id, Some(chat_session_id))?;
+    let id = new_id();
+    let now = now_ts();
+    conn.execute(
+        "INSERT INTO loop_sessions (id, chat_session_id, goal, iteration, max_iterations, status, run_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 0, ?4, 'running', ?5, ?6, ?6)",
+        params![id, chat_session_id, goal, max_iterations, run_id, now],
+    )?;
+    Ok(LoopSession {
+        id,
+        chat_session_id: chat_session_id.to_string(),
+        goal: goal.to_string(),
+        iteration: 0,
+        max_iterations,
+        status: "running".to_string(),
+        run_id: Some(run_id),
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+pub fn advance_loop_session(conn: &Connection, loop_id: &str, iteration: i64) -> DbResult<()> {
+    conn.execute(
+        "UPDATE loop_sessions SET iteration = ?2, updated_at = ?3 WHERE id = ?1",
+        params![loop_id, iteration, now_ts()],
+    )?;
+    Ok(())
+}
+
+/// Terminal transition. Maps the loop status to the run outcome:
+/// complete→applied, blocked→failed, stopped/maxed→abandoned.
+pub fn finish_loop_session(conn: &Connection, loop_id: &str, status: &str) -> DbResult<()> {
+    let now = now_ts();
+    conn.execute(
+        "UPDATE loop_sessions SET status = ?2, updated_at = ?3 WHERE id = ?1",
+        params![loop_id, status, now],
+    )?;
+    let run_id: Option<String> = conn
+        .query_row(
+            "SELECT run_id FROM loop_sessions WHERE id = ?1",
+            params![loop_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    if let Some(run_id) = run_id {
+        let outcome = match status {
+            "complete" => "applied",
+            "blocked" => "failed",
+            _ => "abandoned",
+        };
+        conn.execute(
+            "UPDATE improve_runs SET finished_at = ?2, outcome = ?3 WHERE id = ?1 AND finished_at IS NULL",
+            params![run_id, now, outcome],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn get_loop_session(conn: &Connection, loop_id: &str) -> DbResult<Option<LoopSession>> {
+    conn.query_row(
+        "SELECT id, chat_session_id, goal, iteration, max_iterations, status, run_id, created_at, updated_at
+           FROM loop_sessions WHERE id = ?1",
+        params![loop_id],
+        map_loop,
+    )
+    .optional()
+}
+
+/// Most recent loop session for a chat session (used to resume state after
+/// restart and to finish dangling sessions).
+pub fn latest_loop_session(conn: &Connection, chat_session_id: &str) -> DbResult<Option<LoopSession>> {
+    conn.query_row(
+        "SELECT id, chat_session_id, goal, iteration, max_iterations, status, run_id, created_at, updated_at
+           FROM loop_sessions WHERE chat_session_id = ?1 ORDER BY created_at DESC LIMIT 1",
+        params![chat_session_id],
+        map_loop,
+    )
+    .optional()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_artifact_is_idempotent_and_seeds_v1() {
+        let conn = super::super::mem();
+        let a = ensure_artifact(&conn, "skill", "docx", "Docx", "body v1").unwrap();
+        // Same (kind, ref_key) → same row, no duplicate version.
+        let a2 = ensure_artifact(&conn, "skill", "docx", "Docx renamed", "body v1").unwrap();
+        assert_eq!(a.id, a2.id);
+        assert_eq!(list_versions(&conn, &a.id).unwrap().len(), 1);
+        assert_eq!(channel_version(&conn, &a.id, "active").unwrap(), Some(1));
+    }
+
+    #[test]
+    fn record_version_appends_and_skips_unchanged_body() {
+        let conn = super::super::mem();
+        let a = ensure_artifact(&conn, "skill", "docx", "Docx", "v1").unwrap();
+        // Unchanged body → no new version.
+        assert_eq!(record_version(&conn, &a.id, 1, "v1", None, "auto_proposal").unwrap(), None);
+        // Changed body → v2.
+        assert_eq!(record_version(&conn, &a.id, 1, "v2 improved", None, "auto_proposal").unwrap(), Some(2));
+        let versions = list_versions(&conn, &a.id).unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[1].parent_version, Some(1));
+        assert_eq!(versions[1].origin, "auto_proposal");
+    }
+
+    #[test]
+    fn channel_repoint_is_rollback() {
+        let conn = super::super::mem();
+        let a = ensure_artifact(&conn, "loop", "goal", "Goal loop", "v1").unwrap();
+        let v2 = record_version(&conn, &a.id, 1, "v2", None, "auto_proposal").unwrap().unwrap();
+        set_channel(&conn, &a.id, "active", v2).unwrap();
+        assert_eq!(channel_version(&conn, &a.id, "active").unwrap(), Some(2));
+        // Rollback = move the pointer back.
+        set_channel(&conn, &a.id, "active", 1).unwrap();
+        assert_eq!(channel_version(&conn, &a.id, "active").unwrap(), Some(1));
+    }
+
+    #[test]
+    fn run_lifecycle_open_to_terminal_outcomes() {
+        let conn = super::super::mem();
+        let a = ensure_artifact(&conn, "skill", "docx", "Docx", "v1").unwrap();
+        let r1 = start_run(&conn, &a.id, Some("sess1")).unwrap();
+        let r2 = start_run(&conn, &a.id, Some("sess1")).unwrap();
+        // Run rows start open (outcome NULL).
+        let (total, bad) = run_health(&conn, &a.id).unwrap();
+        assert_eq!((total, bad), (0, 0), "open runs are not counted");
+        // Turn error closes both.
+        assert_eq!(finish_session_runs(&conn, "sess1", "failed", Some("context_overflow")).unwrap(), 2);
+        let (total, bad) = run_health(&conn, &a.id).unwrap();
+        assert_eq!((total, bad), (2, 2));
+        // Idempotent: nothing left open for that session.
+        assert_eq!(finish_session_runs(&conn, "sess1", "corrected", None).unwrap(), 0);
+        let _ = r1;
+        let _ = r2;
+    }
+
+    #[test]
+    fn corrected_and_failed_both_count_as_bad_but_applied_not() {
+        let conn = super::super::mem();
+        let a = ensure_artifact(&conn, "template", "t1", "T", "v1").unwrap();
+        start_run(&conn, &a.id, Some("s1")).unwrap();
+        start_run(&conn, &a.id, Some("s2")).unwrap();
+        start_run(&conn, &a.id, Some("s3")).unwrap();
+        finish_session_runs(&conn, "s1", "applied", None).unwrap();
+        finish_session_runs(&conn, "s2", "corrected", None).unwrap();
+        finish_session_runs(&conn, "s3", "failed", None).unwrap();
+        assert_eq!(run_health(&conn, &a.id).unwrap(), (3, 2));
+    }
+
+    #[test]
+    fn feedback_round_trip() {
+        let conn = super::super::mem();
+        let a = ensure_artifact(&conn, "skill", "pdf", "Pdf", "v1").unwrap();
+        let run = start_run(&conn, &a.id, Some("s1")).unwrap();
+        record_feedback(&conn, &a.id, Some(&run), Some("s1"), "down", Some("wrong format")).unwrap();
+        record_feedback(&conn, &a.id, None, None, "up", None).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM improve_feedback WHERE artifact_id = ?1", params![a.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn loop_session_lifecycle_maps_status_to_outcome() {
+        let conn = super::super::mem();
+        let ls = start_loop_session(&conn, "chat1", "fix the tests", 10, "loop skill body").unwrap();
+        assert_eq!(ls.iteration, 0);
+        assert_eq!(ls.status, "running");
+        assert!(ls.run_id.is_some());
+        // The loop artifact is created lazily and shared across sessions.
+        let a = conn
+            .query_row("SELECT id FROM improve_artifacts WHERE kind = 'loop' AND ref_key = 'goal'", [], |r| r.get::<_, String>(0))
+            .unwrap();
+
+        advance_loop_session(&conn, &ls.id, 3).unwrap();
+        let got = get_loop_session(&conn, &ls.id).unwrap().unwrap();
+        assert_eq!(got.iteration, 3);
+
+        finish_loop_session(&conn, &ls.id, "complete").unwrap();
+        let got = get_loop_session(&conn, &ls.id).unwrap().unwrap();
+        assert_eq!(got.status, "complete");
+        // complete → run applied.
+        let outcome: String = conn
+            .query_row("SELECT outcome FROM improve_runs WHERE id = ?1", params![got.run_id.unwrap()], |r| r.get(0))
+            .unwrap();
+        assert_eq!(outcome, "applied");
+
+        // blocked → failed; stopped/maxed → abandoned.
+        let ls2 = start_loop_session(&conn, "chat2", "g", 5, "loop skill body").unwrap();
+        finish_loop_session(&conn, &ls2.id, "blocked").unwrap();
+        let ls3 = start_loop_session(&conn, "chat3", "g", 5, "loop skill body").unwrap();
+        finish_loop_session(&conn, &ls3.id, "maxed").unwrap();
+        let (total, bad) = run_health(&conn, &a).unwrap();
+        assert_eq!((total, bad), (3, 1));
+
+        // Latest-session lookup (resume after restart).
+        assert_eq!(latest_loop_session(&conn, "chat2").unwrap().unwrap().id, ls2.id);
+        assert!(latest_loop_session(&conn, "chatX").unwrap().is_none());
+    }
+
+    #[test]
+    fn artifact_cascade_deletes_history_and_runs() {
+        let conn = super::super::mem();
+        let a = ensure_artifact(&conn, "skill", "tmp", "T", "v1").unwrap();
+        start_run(&conn, &a.id, Some("s")).unwrap();
+        record_version(&conn, &a.id, 1, "v2", None, "user").unwrap();
+        conn.execute("DELETE FROM improve_artifacts WHERE id = ?1", params![a.id]).unwrap();
+        let versions: i64 = conn.query_row("SELECT COUNT(*) FROM improve_versions", [], |r| r.get(0)).unwrap();
+        let runs: i64 = conn.query_row("SELECT COUNT(*) FROM improve_runs", [], |r| r.get(0)).unwrap();
+        assert_eq!((versions, runs), (0, 0));
+    }
+}

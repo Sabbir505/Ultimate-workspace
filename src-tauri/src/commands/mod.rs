@@ -10,6 +10,7 @@ pub mod chat_cmds;
 pub mod connectors_cmds;
 pub mod data;
 pub mod git_cmds;
+pub mod improve_cmds;
 pub mod local_model_market;
 pub mod projects;
 pub mod pty_cmds;

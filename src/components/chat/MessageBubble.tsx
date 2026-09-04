@@ -18,7 +18,7 @@ import rehypeKatex from "rehype-katex";
 // does NOT re-import it — see PERFORMANCE_AUDIT.md C8. Doing it twice would
 // ship two copies in the lazy MessageBubble chunk.
 import type { ChatMessage, ChatMessageRecord, ChatPerfPayload } from "../../lib/ipc";
-import { listCompactedMessages, readArtifactPreview } from "../../lib/ipc";
+import { listCompactedMessages, readArtifactPreview, recordArtifactFeedback } from "../../lib/ipc";
 import type { ChatArtifact } from "../../state/chat";
 import { liveAttachmentsForMessage, useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
@@ -263,11 +263,15 @@ function MessageActions({
   onEdit,
   onRepeat,
   onDelete,
+  onFeedback,
 }: {
   content: string;
   onEdit?: (content: string) => void;
   onRepeat?: () => void;
   onDelete?: () => void;
+  /** Assistant-only 👍/👎 — explicit artifact-improvement feedback
+   *  (SELF_IMPROVING_ARTIFACTS.md §5.3). Absent for user bubbles. */
+  onFeedback?: (verdict: "up" | "down") => void;
 }) {
   const [copied, setCopied] = useState(false);
   const copy = useCallback(
@@ -296,6 +300,32 @@ function MessageActions({
       >
         {copied ? <CheckIcon /> : <CopyIcon />}
       </button>
+      {onFeedback && (
+        <>
+          <button
+            className="chat-msg-action"
+            onClick={(e) => {
+              e.currentTarget.blur();
+              onFeedback("up");
+            }}
+            title="Good response"
+            aria-label="Good response"
+          >
+            👍
+          </button>
+          <button
+            className="chat-msg-action"
+            onClick={(e) => {
+              e.currentTarget.blur();
+              onFeedback("down");
+            }}
+            title="Bad response"
+            aria-label="Bad response"
+          >
+            👎
+          </button>
+        </>
+      )}
       {onRepeat && (
         <button
           className="chat-msg-action"
@@ -2112,6 +2142,11 @@ function MessageBubbleInner({
           onEdit={isUser ? openEditor : undefined}
           onRepeat={onRepeat}
           onDelete={onDelete}
+          onFeedback={
+            !isUser && chatSessionId
+              ? (verdict) => void recordArtifactFeedback(chatSessionId, verdict).catch(() => {})
+              : undefined
+          }
         />
       )}
     </div>

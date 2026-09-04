@@ -18,6 +18,11 @@ const sendAgentChatMessageMock = vi.fn().mockResolvedValue(undefined);
 const cancelAgentChatMessageMock = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("../lib/ipc", () => ({
+  // Self-improving artifacts telemetry (P0) — loop persistence + turn runs.
+  loopSessionStart: vi.fn().mockResolvedValue(null),
+  loopSessionAdvance: vi.fn().mockResolvedValue(undefined),
+  loopSessionFinish: vi.fn().mockResolvedValue(undefined),
+  finishArtifactRuns: vi.fn().mockResolvedValue(0),
   listAcpAgentDefs: (...a: unknown[]) => listAcpAgentDefsMock(...a),
   saveAcpAgentDefs: (...a: unknown[]) => saveAcpAgentDefsMock(...a),
   listHarnesses: (...a: unknown[]) => listHarnessesMock(...a),

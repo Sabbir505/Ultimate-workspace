@@ -15,6 +15,7 @@ mod connector_credentials;
 mod cost;
 mod cost_v2;
 pub mod docs;
+pub mod improve;
 mod memory;
 mod projects;
 mod research_cache;
@@ -647,6 +648,86 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         -- every poll — previously a full-table scan + join per rollup call.
         CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at);
         CREATE INDEX IF NOT EXISTS idx_chat_sessions_active ON chat_sessions(last_active_at DESC);
+
+        -- ── Self-improving artifacts (SELF_IMPROVING_ARTIFACTS.md §4/§5) ──
+        -- `improve_artifacts` (not `artifacts` — that name is taken by the
+        -- chat-attachment table) is the versioning + telemetry registry for
+        -- behavioral artifacts: skills, loops, prompt templates, automations.
+        CREATE TABLE IF NOT EXISTS improve_artifacts (
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,                 -- 'skill'|'loop'|'prompt_template'|'automation'
+          ref_key TEXT NOT NULL,              -- skill slug / template id / automation id
+          name TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          UNIQUE(kind, ref_key)
+        );
+
+        -- Append-only version history. Full resolved body per version so
+        -- history survives edits/deletes of the live copy.
+        CREATE TABLE IF NOT EXISTS improve_versions (
+          id TEXT PRIMARY KEY,
+          artifact_id TEXT NOT NULL REFERENCES improve_artifacts(id) ON DELETE CASCADE,
+          version INTEGER NOT NULL,
+          body TEXT NOT NULL,
+          meta_json TEXT,
+          origin TEXT NOT NULL DEFAULT 'user', -- 'user'|'auto_proposal'|'import'
+          parent_version INTEGER,
+          created_at INTEGER NOT NULL,
+          UNIQUE(artifact_id, version)
+        );
+
+        -- Movable pointers: rollback = re-point 'active'.
+        CREATE TABLE IF NOT EXISTS improve_channels (
+          artifact_id TEXT NOT NULL REFERENCES improve_artifacts(id) ON DELETE CASCADE,
+          channel TEXT NOT NULL,              -- 'active'|'candidate'|'shadow'
+          version INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (artifact_id, channel)
+        );
+
+        -- Execution telemetry per artifact version (mirror of automation_runs;
+        -- P0: skill invocations, goal-loop sessions, prompt-template fills).
+        CREATE TABLE IF NOT EXISTS improve_runs (
+          id TEXT PRIMARY KEY,
+          artifact_id TEXT NOT NULL REFERENCES improve_artifacts(id) ON DELETE CASCADE,
+          version INTEGER NOT NULL,
+          chat_session_id TEXT,
+          started_at INTEGER NOT NULL,
+          finished_at INTEGER,
+          outcome TEXT,                       -- 'applied'|'failed'|'abandoned'|'corrected'; NULL while open
+          error_code TEXT,
+          metrics_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_improve_runs_artifact
+          ON improve_runs(artifact_id, started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_improve_runs_session
+          ON improve_runs(chat_session_id, finished_at);
+
+        -- Explicit 👍/👎 feedback attributed to an artifact run when known.
+        CREATE TABLE IF NOT EXISTS improve_feedback (
+          id TEXT PRIMARY KEY,
+          artifact_id TEXT NOT NULL REFERENCES improve_artifacts(id) ON DELETE CASCADE,
+          run_id TEXT REFERENCES improve_runs(id) ON DELETE SET NULL,
+          chat_session_id TEXT,
+          verdict TEXT NOT NULL,              -- 'up'|'down'
+          reason TEXT,
+          created_at INTEGER NOT NULL
+        );
+
+        -- Goal-loop runtime persistence (frontend state machine calls in on
+        -- every transition so loop outcomes survive the session).
+        CREATE TABLE IF NOT EXISTS loop_sessions (
+          id TEXT PRIMARY KEY,
+          chat_session_id TEXT NOT NULL,
+          goal TEXT NOT NULL,
+          iteration INTEGER NOT NULL DEFAULT 0,
+          max_iterations INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'running', -- 'running'|'complete'|'blocked'|'stopped'|'maxed'
+          run_id TEXT REFERENCES improve_runs(id) ON DELETE SET NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_loop_sessions_chat ON loop_sessions(chat_session_id, created_at DESC);
 
         -- Full-text search over chat messages (command palette Chats
         -- section). External-content table: chat_messages stays the source of

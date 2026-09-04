@@ -583,6 +583,97 @@ export const hideCostProject = (projectId: string) =>
 export const unhideCostProject = (projectId: string) =>
   safeInvoke<void>("unhide_cost_project", { projectId });
 
+// ── Self-improving artifacts (SELF_IMPROVING_ARTIFACTS.md P0) ────────────
+
+export interface ImproveArtifact {
+  id: string;
+  kind: "skill" | "loop" | "prompt_template" | "automation";
+  refKey: string;
+  name: string;
+  createdAt: number;
+}
+
+export interface ImproveVersion {
+  id: string;
+  artifactId: string;
+  version: number;
+  body: string;
+  metaJson: string | null;
+  origin: string;
+  parentVersion: number | null;
+  createdAt: number;
+}
+
+export interface LoopSessionRecord {
+  id: string;
+  chatSessionId: string;
+  goal: string;
+  iteration: number;
+  maxIterations: number;
+  status: string;
+  runId: string | null;
+}
+
+export const listImproveArtifacts = () =>
+  safeInvoke<ImproveArtifact[] | null>("list_improve_artifacts");
+export const listImproveVersions = (artifactId: string) =>
+  safeInvoke<ImproveVersion[] | null>("list_improve_versions", { artifactId });
+export const setImproveChannel = (artifactId: string, channel: string, version: number) =>
+  safeInvoke<void>("set_improve_channel", { artifactId, channel, version });
+/** Record one execution of a frontend-known artifact (e.g. template fill). */
+export const recordArtifactRun = (
+  chatSessionId: string,
+  kind: string,
+  refKey: string,
+  name: string,
+  body: string,
+) =>
+  safeInvoke<string | null>("record_artifact_run", {
+    chatSessionId,
+    kind,
+    refKey,
+    name,
+    body,
+  });
+/** Close the session's open runs: `applied` on turn success, `failed`+code on error. */
+export const finishArtifactRuns = (
+  chatSessionId: string,
+  outcome: string,
+  errorCode?: string,
+) =>
+  safeInvoke<number | null>("finish_artifact_runs", {
+    chatSessionId,
+    outcome,
+    errorCode: errorCode ?? null,
+  });
+export const recordArtifactFeedback = (
+  chatSessionId: string | null,
+  verdict: "up" | "down",
+  reason?: string,
+  artifactId?: string,
+) =>
+  safeInvoke<void>("record_artifact_feedback", {
+    chatSessionId,
+    artifactId: artifactId ?? null,
+    verdict,
+    reason: reason ?? null,
+  });
+
+export const loopSessionStart = (chatSessionId: string, goal: string, maxIterations: number) =>
+  safeInvoke<LoopSessionRecord | null>("loop_session_start", {
+    chatSessionId,
+    goal,
+    maxIterations,
+  });
+export const loopSessionAdvance = (loopId: string, iteration: number) =>
+  safeInvoke<void>("loop_session_advance", { loopId, iteration });
+export const loopSessionFinish = (loopId: string, status: string) =>
+  safeInvoke<void>("loop_session_finish", { loopId, status });
+export const getLoopSession = (loopId: string) =>
+  safeInvoke<LoopSessionRecord | null>("get_loop_session", { loopId });
+export const latestLoopSession = (chatSessionId: string) =>
+  safeInvoke<LoopSessionRecord | null>("latest_loop_session", { chatSessionId });
+
 /** Stream `budget:alert` events (threshold crossed) — drives the in-app toast. */
 export const onBudgetAlert = (handler: (p: BudgetAlertPayload) => void) =>
   safeListen<BudgetAlertPayload>("budget:alert", handler);

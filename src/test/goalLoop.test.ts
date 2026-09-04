@@ -40,6 +40,11 @@ vi.mock("../lib/ipc", () => ({
   deleteChatApiKey: vi.fn(),
   readArtifactPreview: vi.fn(),
   emitMobileSessionChatEvent: vi.fn(),
+  // Self-improving artifacts telemetry (P0) — loop persistence + turn runs.
+  loopSessionStart: vi.fn().mockResolvedValue(null),
+  loopSessionAdvance: vi.fn().mockResolvedValue(undefined),
+  loopSessionFinish: vi.fn().mockResolvedValue(undefined),
+  finishArtifactRuns: vi.fn().mockResolvedValue(0),
 }));
 
 import {

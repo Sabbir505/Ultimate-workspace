@@ -148,6 +148,12 @@ describe("ThemeGalleryPanel", () => {
 
     expect(await screen.findByText(/Nord/)).toBeTruthy();
     // importCustomTheme adds the theme but doesn't select it — need to set active.
+    // A built-in preset is also named "Nord", so the text query above can
+    // resolve before the async import lands in the store — wait on the
+    // store itself before reading the theme back.
+    await waitFor(() => {
+      expect(useSettingsStore.getState().customThemes.some((t) => t.name === "Nord")).toBe(true);
+    });
     useSettingsStore.getState().setCustomTheme(
       useSettingsStore.getState().customThemes.find((t) => t.name === "Nord")!.id,
     );

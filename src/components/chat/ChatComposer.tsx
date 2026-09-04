@@ -308,10 +308,14 @@ async function blobToBase64(blob: Blob): Promise<string> {
   return btoa(binary);
 }
 
-/** Live-partial cadence and window. 3s keeps CPU flat while feeling live;
- *  the 10s tail bounds each request's cost regardless of session length. */
-const PARTIAL_TICK_MS = 3000;
-const PARTIAL_TAIL_SECONDS = 10;
+/** Live-partial cadence and segment limits. While the mic is open the
+ *  un-committed segment is re-transcribed every 1.5s so dictated text lands
+ *  in the textarea as you speak; a ~0.77s pause (3 audio chunks) commits the
+ *  segment, and a segment with no pause at all is force-committed at 20s to
+ *  bound each request's cost. */
+const PARTIAL_TICK_MS = 1500;
+const VOICE_SILENCE_CHUNKS = 3;
+const SEGMENT_MAX_SECONDS = 20;
 
 /** Whisper was trained on subtitle-style transcripts and sprinkles newline
  *  tokens at segment boundaries — mid-flow, semi-random. Flatten them into
@@ -1067,14 +1071,34 @@ export function ChatComposer({
   // Voice recording (roadmap #16).
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
-  // Live partial transcription (updated every PARTIAL_TICK_MS while the mic
-  // is open) shown as ghost text under the composer, plus the raw capture
-  // plumbing: Float32 sample chunks from a ScriptProcessor on a 16 kHz
-  // AudioContext (no MediaRecorder — partials then never re-decode audio).
-  const [partialText, setPartialText] = useState<string | null>(null);
+  // Live dictation lands directly in the textarea: while the mic is open,
+  // Float32 sample chunks from a ScriptProcessor on a 16 kHz AudioContext
+  // (no MediaRecorder) fill two buffers — the full clip for the final pass
+  // and the current SEGMENT (audio since the last pause) for the live
+  // partial. A short silence commits the segment's text into the draft, so
+  // it can never vanish when speech continues; the partial after it is
+  // re-rendered in place every PARTIAL_TICK_MS.
   const samplesRef = useRef<Float32Array[]>([]);
-  const tailRef = useRef<Float32Array[]>([]);
-  const tailLenRef = useRef(0);
+  const segmentRef = useRef<Float32Array[]>([]);
+  const segmentLenRef = useRef(0);
+  const silenceRunRef = useRef(0);
+  const segmentHadSoundRef = useRef(false);
+  /** Bumped whenever a segment is handed to the commit chain; live-partial
+   *  results tagged with an older gen are dropped so a transcription that
+   *  overlaps a flush can't duplicate committed words. */
+  const segmentGenRef = useRef(0);
+  /** Serializes segment-commit transcriptions so their text appends in
+   *  audio order even when two flushes overlap. */
+  const commitChainRef = useRef<Promise<void>>(Promise.resolve());
+  // Where the live dictation text sits in the draft: [start, end) span in
+  // `content`, plus the exact text last rendered there (the splice
+  // validates against it — if the user edited that region by hand, the next
+  // update appends at the end instead of clobbering their edit).
+  const voiceSpanRef = useRef<{ start: number; end: number } | null>(null);
+  const voiceRenderedRef = useRef("");
+  const voiceCommittedRef = useRef("");
+  const voicePartialRef = useRef("");
+  const voiceFocusAppliedRef = useRef(false);
   const rateRef = useRef(16000);
   const levelRef = useRef(0);
   const generationRef = useRef(0);
@@ -1458,9 +1482,10 @@ export function ChatComposer({
   }, [insertTemplateText, promptTemplates, slashToken, content, replaceTokenSpan]);
 
   // Voice recording (roadmap #16): capture raw mic samples on a 16 kHz
-  // AudioContext, transcribe a sliding tail every PARTIAL_TICK_MS for live
-  // ghost text, and run one full-buffer pass on stop for the final insert.
-  // Same STT server either way — the sidecar lazy-starts itself.
+  // AudioContext, commit each silence-bounded segment straight into the
+  // textarea while the partial after it re-renders in place every tick, and
+  // run one full-buffer pass on stop that replaces it all with the polished
+  // text. Same STT server either way — the sidecar lazy-starts itself.
   const stopCapture = useCallback(() => {
     recordingRef.current = false;
     pendingStopRef.current = false;
@@ -1511,17 +1536,104 @@ export function ChatComposer({
     return () => cancelAnimationFrame(raf);
   }, [recording]);
 
+  // Splice the current dictation text (committed segments + live partial)
+  // into the draft at the tracked span. Validation runs inside the updater
+  // against the freshest `content`; if the user hand-edited the region, the
+  // update appends at the end rather than clobbering their edit. The ref
+  // writes are idempotent (same inputs on a StrictMode double-invoke).
+  const renderVoiceText = useCallback(() => {
+    const committed = voiceCommittedRef.current;
+    const partial = voicePartialRef.current;
+    const text = partial ? (committed ? `${committed} ` : "") + partial : committed;
+    if (!text) return;
+    const span = voiceSpanRef.current;
+    const rendered = voiceRenderedRef.current;
+    voiceRenderedRef.current = text;
+    setContent((prev) => {
+      const ok = !!span && prev.slice(span.start, span.end) === rendered;
+      const start = ok ? span.start : prev.length;
+      const end = ok ? span.end : prev.length;
+      voiceSpanRef.current = { start, end: start + text.length };
+      return prev.slice(0, start) + text + prev.slice(end);
+    });
+    // Caret follows the dictated text once the updater has run; the real
+    // selection is only moved when the textarea already has focus.
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      const s = voiceSpanRef.current;
+      if (!ta || !s) return;
+      setCaret(s.end);
+      ta.scrollTop = ta.scrollHeight;
+      if (document.activeElement !== ta && !voiceFocusAppliedRef.current) {
+        voiceFocusAppliedRef.current = true; // focus once per recording, at the first words
+        ta.focus();
+      }
+      if (document.activeElement === ta) ta.setSelectionRange(s.end, s.end);
+    });
+  }, []);
+
+  // Undo everything dictation put in the box (push-to-talk aborted).
+  const removeVoiceSpan = useCallback(() => {
+    const span = voiceSpanRef.current;
+    const rendered = voiceRenderedRef.current;
+    voiceSpanRef.current = null;
+    voiceRenderedRef.current = "";
+    voiceCommittedRef.current = "";
+    voicePartialRef.current = "";
+    voiceFocusAppliedRef.current = false;
+    if (!span || !rendered) return;
+    setContent((prev) =>
+      prev.slice(span.start, span.end) === rendered
+        ? prev.slice(0, span.start) + prev.slice(span.end)
+        : prev,
+    );
+  }, []);
+
+  // Hand the current segment to the commit chain: swap it out, transcribe,
+  // and append its text to the draft as stable committed words. Jobs check
+  // the recording generation after their await, so a stop/cancel mid-flight
+  // drops the result (the final pass or the abort covers it).
+  const flushVoiceSegment = useCallback(() => {
+    const chunks = segmentRef.current;
+    if (chunks.length === 0) return;
+    segmentRef.current = [];
+    segmentLenRef.current = 0;
+    segmentHadSoundRef.current = false;
+    silenceRunRef.current = 0;
+    segmentGenRef.current += 1;
+    const segGen = segmentGenRef.current;
+    const recGen = generationRef.current;
+    commitChainRef.current = commitChainRef.current.then(async () => {
+      try {
+        const wav = encodeWav16k(joinSamples(chunks, rateRef.current));
+        const res = await transcribeAudio(await blobToBase64(wav), "audio/wav");
+        if (generationRef.current !== recGen || segGen !== segmentGenRef.current) return;
+        const text = res?.text ? flattenVoiceText(res.text) : "";
+        if (text) {
+          voiceCommittedRef.current = voiceCommittedRef.current
+            ? `${voiceCommittedRef.current} ${text}`
+            : text;
+          voicePartialRef.current = "";
+          renderVoiceText();
+        }
+      } catch {
+        // Segment commits are best-effort — the final pass retries everything.
+      }
+    });
+  }, [renderVoiceText]);
+
   const finishVoiceRecording = useCallback(async () => {
     if (!recordingRef.current) return;
-    generationRef.current += 1; // invalidate in-flight partials
+    generationRef.current += 1; // disarm in-flight segment commits and partials
     stopCapture();
     setRecording(false);
-    // Keep the last partial on screen while the full clip transcribes —
-    // clearing here made the text visibly vanish and pop back later.
     const chunks = samplesRef.current;
     samplesRef.current = [];
-    tailRef.current = [];
-    tailLenRef.current = 0;
+    segmentRef.current = [];
+    segmentLenRef.current = 0;
+    // Segment text already sits in the box and stays visible through the
+    // final pass — and survives it if the full pass fails or comes back
+    // empty (the chunks only ever get wiped once a result is in hand).
     if (chunks.length === 0) return;
     setTranscribing(true);
     try {
@@ -1529,8 +1641,11 @@ export function ChatComposer({
       const res = await transcribeAudio(await blobToBase64(wav), "audio/wav");
       const text = res?.text ? flattenVoiceText(res.text) : "";
       if (text) {
-        insertTemplateText(text);
-      } else {
+        // One polished full-clip pass replaces the pause-by-pause segments.
+        voiceCommittedRef.current = text;
+        voicePartialRef.current = "";
+        renderVoiceText();
+      } else if (!voiceCommittedRef.current && !voicePartialRef.current) {
         toastError("Transcription returned no text. Is a Whisper server running? See Settings → Local Models → Speech.");
       }
     } catch (e) {
@@ -1540,9 +1655,13 @@ export function ChatComposer({
       );
     } finally {
       setTranscribing(false);
-      setPartialText(null);
+      // Whatever the box holds is ordinary draft text now.
+      voiceSpanRef.current = null;
+      voiceRenderedRef.current = "";
+      voiceCommittedRef.current = "";
+      voicePartialRef.current = "";
     }
-  }, [insertTemplateText, stopCapture]);
+  }, [renderVoiceText, stopCapture]);
 
   const beginVoiceRecording = useCallback(async () => {
     if (recordingRef.current || transcribing) return;
@@ -1578,17 +1697,28 @@ export function ChatComposer({
       processor.onaudioprocess = (e) => {
         const data = new Float32Array(e.inputBuffer.getChannelData(0));
         samplesRef.current.push(data);
-        tailRef.current.push(data);
-        tailLenRef.current += data.length;
-        // Trim the rolling partial window (2s slack over the tail length).
-        const maxTail = (PARTIAL_TAIL_SECONDS + 2) * rateRef.current;
-        while (tailLenRef.current > maxTail && tailRef.current.length > 1) {
-          const dropped = tailRef.current.shift();
-          tailLenRef.current -= dropped?.length ?? 0;
-        }
+        segmentRef.current.push(data);
+        segmentLenRef.current += data.length;
         let sum = 0;
         for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
-        levelRef.current = levelRef.current * 0.7 + Math.sqrt(sum / data.length) * 0.3;
+        const rms = Math.sqrt(sum / data.length);
+        levelRef.current = levelRef.current * 0.7 + rms * 0.3;
+        // Silence-gap detection: ~0.77s of quiet ends a dictation segment,
+        // committing its words into the draft so they can never vanish when
+        // speech continues past the live-partial span.
+        if (rms < 0.008) {
+          silenceRunRef.current += 1;
+          if (
+            silenceRunRef.current >= VOICE_SILENCE_CHUNKS &&
+            segmentLenRef.current > 0 &&
+            segmentHadSoundRef.current
+          ) {
+            flushVoiceSegment();
+          }
+        } else {
+          silenceRunRef.current = 0;
+          segmentHadSoundRef.current = true;
+        }
       };
       source.connect(processor);
       processor.connect(sink);
@@ -1598,37 +1728,37 @@ export function ChatComposer({
       captureStreamRef.current = stream;
 
       samplesRef.current = [];
-      tailRef.current = [];
-      tailLenRef.current = 0;
+      segmentRef.current = [];
+      segmentLenRef.current = 0;
+      silenceRunRef.current = 0;
+      segmentHadSoundRef.current = false;
       levelRef.current = 0;
-      setPartialText(null);
+      voiceFocusAppliedRef.current = false;
       recordingRef.current = true;
       setRecording(true);
 
-      // Live partials: transcribe the recent tail on a fixed tick. Each tick
-      // tags its request with the recording generation — a response landing
-      // after stop (or a quick restart) is dropped instead of flashing stale
-      // ghost text.
+      // Live partials: re-transcribe the un-committed segment every tick and
+      // re-render it in place in the textarea. Each request is tagged with
+      // both the recording generation (dropped after stop/cancel/restart)
+      // and the segment generation (dropped if a silence flush swapped the
+      // segment mid-request — the commit path owns that text instead).
       partialTimerRef.current = window.setInterval(() => {
-        const gen = generationRef.current;
+        const recGen = generationRef.current;
+        const segGen = segmentGenRef.current;
+        // A segment that never pauses is force-committed at the cap so the
+        // next live partial starts small again.
+        if (segmentLenRef.current >= SEGMENT_MAX_SECONDS * rateRef.current) {
+          flushVoiceSegment();
+          return;
+        }
+        if (segmentLenRef.current === 0) return; // committed text stays put
         void (async () => {
           try {
-            const joined = joinSamples(tailRef.current, rateRef.current);
-            let peak = 0;
-            for (let i = 0; i < joined.length; i++) {
-              const a = Math.abs(joined[i]);
-              if (a > peak) peak = a;
-            }
-            // Silence gate: don't hit the server for an empty tail, and drop
-            // ghost text so it tracks what's actually audible.
-            if (peak < 0.008) {
-              if (generationRef.current === gen) setPartialText(null);
-              return;
-            }
-            const wav = encodeWav16k(joined);
+            const wav = encodeWav16k(joinSamples(segmentRef.current, rateRef.current));
             const res = await transcribeAudio(await blobToBase64(wav), "audio/wav");
-            if (generationRef.current !== gen || !res?.text) return;
-            setPartialText(flattenVoiceText(res.text));
+            if (generationRef.current !== recGen || segGen !== segmentGenRef.current) return;
+            voicePartialRef.current = res?.text ? flattenVoiceText(res.text) : "";
+            renderVoiceText();
           } catch {
             // Partials are best-effort — the final pass surfaces real errors.
           }
@@ -1646,20 +1776,21 @@ export function ChatComposer({
       stream.getTracks().forEach((t) => t.stop());
       toastError("Could not initialize audio recorder.", e);
     }
-  }, [transcribing, finishVoiceRecording]);
+  }, [transcribing, finishVoiceRecording, flushVoiceSegment, renderVoiceText]);
 
   // Discard the current clip without transcribing — push-to-talk aborted
-  // because a real shortcut (Alt+Tab, Alt+arrows, …) joined the hold.
+  // because a real shortcut (Alt+Tab, Alt+arrows, …) joined the hold. The
+  // words already spliced into the draft are undone with it.
   const cancelVoiceRecording = useCallback(() => {
     if (!recordingRef.current) return;
     generationRef.current += 1;
     stopCapture();
     setRecording(false);
-    setPartialText(null);
+    removeVoiceSpan();
     samplesRef.current = [];
-    tailRef.current = [];
-    tailLenRef.current = 0;
-  }, [stopCapture]);
+    segmentRef.current = [];
+    segmentLenRef.current = 0;
+  }, [removeVoiceSpan, stopCapture]);
 
   const toggleRecording = useCallback(() => {
     if (recordingRef.current) void finishVoiceRecording();
@@ -2431,14 +2562,6 @@ export function ChatComposer({
             disabled={disabled}
           />
         </div>
-        {/* Live partial transcription as ghost text. Rendered while the mic is
-            open AND through the final pass, so the words never vanish between
-            "live" and "final". */}
-        {(recording || transcribing) && partialText && (
-          <div className="voice-live" role="status" aria-live="polite">
-            <div className="voice-partial">{partialText}</div>
-          </div>
-        )}
         {showFooterRow && (
         <div className="chat-composer-footer">
           {forceResearch && (

@@ -401,21 +401,8 @@
   background: linear-gradient(to top, rgba(214, 69, 69, 0.55), var(--danger, #d64545));
   transition: height 0.09s linear;
 }
-/* Ghost text for the in-flight transcription — lives inside the card, below
-   the input; persists from first partial through the final pass. */
-.voice-live {
-  padding: 4px 12px 0;
-}
-.voice-partial {
-  font-size: 12.5px;
-  line-height: 1.45;
-  color: var(--text-dim);
-  font-style: italic;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-}
+/* Voice dictation types straight into the textarea (segment-committed text
+   plus a live in-place partial); only the wave bars need styling here. */
 :root[data-theme="light"] .voice-pill {
   background: rgba(252, 252, 253, 0.94);
   border-color: rgba(0, 0, 0, 0.09);

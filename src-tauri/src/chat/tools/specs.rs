@@ -39,6 +39,10 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         openai_fn(BROWSER_CLICK, BROWSER_CLICK_DESC, browser_ref_parameters()),
         openai_fn(BROWSER_TYPE, BROWSER_TYPE_DESC, browser_type_parameters()),
         openai_fn(BROWSER_SCROLL, BROWSER_SCROLL_DESC, browser_scroll_parameters()),
+        // Screenshot was dispatchable but never advertised (schema drift —
+        // the model can't call what it can't see). No params: it shoots the
+        // pane's current page and returns the artifact path.
+        openai_fn(BROWSER_SCREENSHOT, BROWSER_SCREENSHOT_DESC, no_parameters()),
         // Research source ledger — always on (state tools, not gated by permission mode).
         openai_fn(ADD_SOURCE_NOTE, ADD_SOURCE_NOTE_DESC, add_source_note_parameters()),
         openai_fn(GET_SOURCE_LEDGER, GET_SOURCE_LEDGER_DESC, get_source_ledger_parameters()),
@@ -207,6 +211,8 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
         anthropic_fn(BROWSER_CLICK, BROWSER_CLICK_DESC, browser_ref_parameters()),
         anthropic_fn(BROWSER_TYPE, BROWSER_TYPE_DESC, browser_type_parameters()),
         anthropic_fn(BROWSER_SCROLL, BROWSER_SCROLL_DESC, browser_scroll_parameters()),
+        // Mirror of the OpenAI block's screenshot fix (schema drift).
+        anthropic_fn(BROWSER_SCREENSHOT, BROWSER_SCREENSHOT_DESC, no_parameters()),
         // Research source ledger — always on (state tools, not gated by permission mode).
         anthropic_fn(ADD_SOURCE_NOTE, ADD_SOURCE_NOTE_DESC, add_source_note_parameters()),
         anthropic_fn(GET_SOURCE_LEDGER, GET_SOURCE_LEDGER_DESC, get_source_ledger_parameters()),
@@ -1354,5 +1360,22 @@ mod tests {
         let unavail = &params["properties"]["unavailable"];
         let enums: Vec<&str> = unavail["enum"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
         assert_eq!(enums, vec!["paywalled", "login_required", "extraction_failed", "blocked"]);
+    }
+
+    #[test]
+    fn browser_screenshot_advertised_in_both_wire_formats() {
+        // Schema-drift regression: browser_screenshot was dispatchable in the
+        // dispatcher but missing from BOTH spec builders, so the model was
+        // never told it exists. Both wire formats must advertise it.
+        let caps = ToolCaps::default();
+        for (name, specs) in [
+            ("openai", openai_tool_specs(&caps, permission::SandboxPolicy::WorkspaceWrite)),
+            ("anthropic", anthropic_tool_specs(&caps, permission::SandboxPolicy::WorkspaceWrite)),
+        ] {
+            let found = specs.iter().any(|s| {
+                s["function"]["name"].as_str().or_else(|| s["name"].as_str()) == Some(crate::chat::tools::BROWSER_SCREENSHOT)
+            });
+            assert!(found, "{name} tool specs must advertise browser_screenshot");
+        }
     }
 }

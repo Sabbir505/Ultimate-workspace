@@ -184,14 +184,11 @@ pub(crate) fn core_prompt_base() -> String {
      blocks (they render live). React/JSX components: one self-contained component per ```jsx \
      (or ```tsx) block with `export default function App()` and no imports beyond `react` — \
      it renders in a sandboxed live preview.\n\
-     Diagrams default to INLINE ```mermaid blocks (graph TD/LR, sequenceDiagram, erDiagram, \
-     gantt, mindmap, stateDiagram-v2, classDiagram), one diagram per block. Author them so they \
-     render clean: short node labels (~5 words max — detail belongs in the surrounding prose), \
-     at most ~15 nodes per diagram (split a big system into several focused diagrams), an \
-     explicit direction (LR for pipelines, TD for hierarchies), and `subgraph` blocks for \
-     grouping. Call \
-     generate_diagram only when the user explicitly wants an exportable standalone SVG/PNG \
-     artifact. Never describe a diagram in prose; never use ASCII art.\n\n\
+     Diagrams default to INLINE ```mermaid blocks (flowchart/sequence/ER/state/\
+     gantt/mindmap/class), one diagram per block — short labels, \
+     ≤ ~15 nodes, explicit direction, `subgraph` grouping. Call \
+     generate_diagram only for explicitly requested exportable SVG/PNG \
+     artifacts. Never describe a diagram in prose; never use ASCII art.\n\n\
      ## Connected accounts\n\
      Connected services (Gmail, Drive, Notion, …) are attach-on-demand: their tools appear in \
      your tool list only after you call `attach_connector(\"<id>\")` (or the user pins one with \

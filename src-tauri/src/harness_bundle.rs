@@ -7,6 +7,7 @@
 //! clobbered. All builders here are pure; the write side (`write_bundle`) and
 //! the Claude Code spawn args live here too, consumed by agent_sessions.rs.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -23,7 +24,7 @@ pub enum McpFlavor {
     Kimi,
 }
 
-/// A connected connector as a remote-server entry in a claude/kimi
+/// One connected connector as a remote-server entry in a claude/kimi
 /// `mcp.json`. Auth rides a static `Authorization: Bearer` header (token
 /// refreshed at bundle-write time); public connectors (Kiwi) send none.
 fn connector_mcp_json_entry(s: &HarnessMcpServer, flavor: McpFlavor) -> Value {
@@ -33,6 +34,45 @@ fn connector_mcp_json_entry(s: &HarnessMcpServer, flavor: McpFlavor) -> Value {
     };
     if let Some(tok) = &s.bearer_token {
         v["headers"] = json!({ "Authorization": format!("Bearer {tok}") });
+    }
+    v
+}
+
+/// A user-installed Relay MCP-gallery server (stdio) translated for a CLI
+/// config file. The CLI spawns the process itself — Relay only translates
+/// the persisted def (command/args/env), so there is no process management
+/// on our side.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GalleryMcpServer {
+    /// Stable slug (the gallery def id) — becomes the CLI's server name
+    /// (claude tool prefix `mcp__<name>__`).
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+}
+
+fn gallery_stdio_json_entry(s: &GalleryMcpServer, flavor: McpFlavor) -> Value {
+    // Claude spells stdio out; Kimi infers it from the presence of `command`
+    // (same convention as its remote entries, which omit `type`).
+    let mut v = match flavor {
+        McpFlavor::Claude => json!({ "type": "stdio", "command": s.command, "args": s.args }),
+        McpFlavor::Kimi => json!({ "command": s.command, "args": s.args }),
+    };
+    if !s.env.is_empty() {
+        v["env"] = json!(s.env);
+    }
+    v
+}
+
+/// Same, for OpenCode's config: stdio servers are `"type": "local"` with the
+/// command as a single array (argv included).
+fn gallery_opencode_entry(s: &GalleryMcpServer) -> Value {
+    let mut cmd = vec![s.command.clone()];
+    cmd.extend(s.args.iter().cloned());
+    let mut v = json!({ "type": "local", "command": cmd, "enabled": true });
+    if !s.env.is_empty() {
+        v["environment"] = json!(s.env);
     }
     v
 }
@@ -54,16 +94,20 @@ fn connector_opencode_entry(s: &HarnessMcpServer) -> Value {
     v
 }
 
-/// Environment preamble + skill catalog + browser workflow for harness CLIs.
-/// The built-in chat's CORE prompt (identity/communication/tool-routing text
-/// in `chat::prompts`) is intentionally NOT included — the CLI ships its own
-/// provider personality and behavioral guidance; only the Conduit-specific
-/// environment (project path, artifacts dir, conduit-tools, browser pane)
-/// is additive information the CLI can't know on its own.
+/// Environment preamble + date + context + skill catalog + browser workflow
+/// for harness CLIs. The built-in chat's CORE prompt (identity/communication/
+/// tool-routing text in `chat::prompts`) is intentionally NOT included — the
+/// CLI ships its own provider personality and behavioral guidance; only the
+/// Conduit-specific environment (project path, artifacts dir, conduit-tools,
+/// browser pane) is additive information the CLI can't know on its own.
+///
+/// `context_section` carries caller-computed additive context (connector/MCP
+/// manifest, persistent-memory document) that needs the DB; empty skips it.
 pub fn build_instructions_md(
     project_path: &str,
     artifacts_dir: &str,
     artifacts_section: &str,
+    context_section: &str,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
     // Project-less sessions get a bundle too (connectors + conduit-tools) —
@@ -91,10 +135,17 @@ pub fn build_instructions_md(
          processes to re-derive what the app already knows and reads your \
          config file instead of the live session."
     ));
+    // Harness CLIs never see the built-in chat's per-turn system prompt, so
+    // without this they have no idea what today is ("latest news" /
+    // "this week" reasoning rides the training cutoff).
+    parts.push(crate::chat::prompts::current_datetime_segment());
     // Artifact awareness, right after the preamble: "where do artifacts live"
     // / "open the report we made" must resolve to real files, not a shrug.
     if !artifacts_section.trim().is_empty() {
         parts.push(artifacts_section.to_string());
+    }
+    if !context_section.trim().is_empty() {
+        parts.push(context_section.to_string());
     }
     if let Some(catalog) = crate::chat::prompts::available_skills_segment() {
         parts.push(catalog);
@@ -160,6 +211,39 @@ pub fn build_artifacts_section(default_export_dir: &str, recent: &[String]) -> S
     s
 }
 
+/// "## Connectors & MCP servers" manifest for the harness instructions — the
+/// static equivalent of the built-in chat's attach-on-demand manifest (the
+/// CLIs have no attach tool, so this is informational, not a routing table).
+/// `attached` are connector names merged into this bundle's MCP config;
+/// `gallery` are the installed Relay MCP servers included alongside them.
+/// Everything-empty produces no section (project-less fresh installs).
+pub fn build_mcp_context_section(attached: &[String], gallery: &[String]) -> String {
+    if attached.is_empty() && gallery.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("## Connectors & MCP servers\n\n");
+    if attached.is_empty() {
+        s.push_str("No data connectors are attached to this session.\n");
+    } else {
+        s.push_str(&format!(
+            "Connected in this session (tools prefixed `mcp__<name>__`): {}.\n",
+            attached.join(", ")
+        ));
+    }
+    if !gallery.is_empty() {
+        s.push_str(&format!(
+            "Installed Relay MCP servers (spawned for you): {}.\n",
+            gallery.join(", ")
+        ));
+    }
+    s.push_str(
+        "\nTo use a different data connector, tell the user to attach it to \
+         this chat in Relay (composer @-mention) — there is no attach tool in \
+         this session.",
+    );
+    s
+}
+
 /// Claude Code `--settings` content. `sandbox` + `approval` are the chat
 /// session's dual policies: `full_access` approval keeps the historical
 /// bypass (paired with `--dangerously-skip-permissions` at spawn — the two
@@ -208,24 +292,29 @@ pub fn build_kimi_agent_md(
     project_path: &str,
     artifacts_dir: &str,
     artifacts_section: &str,
+    context_section: &str,
 ) -> String {
     format!(
         "---\nname: conduit\ndescription: Relay-assisted agent with document generation skills\n---\n\n{}",
-        build_instructions_md(project_path, artifacts_dir, artifacts_section)
+        build_instructions_md(project_path, artifacts_dir, artifacts_section, context_section)
     )
 }
 
 /// `.mcp.json` registering BOTH conduit-browser and conduit-tools (same
 /// binary, same env — the binary routes by tool name) PLUS one remote server
-/// per connected connector. `auth_token` is the WS auth token
-/// (`browser_mcp::mcp_auth_token()`); it travels in the per-server env block
-/// so only the MCP child process sees it.
+/// per connected connector PLUS one stdio server per installed Relay gallery
+/// server (the CLI spawns gallery processes itself). `auth_token` is the WS
+/// auth token (`browser_mcp::mcp_auth_token()`); it travels in the
+/// per-server env block so only the MCP child process sees it. Gallery
+/// entries whose name collides with a built-in server or connector are
+/// skipped (first registrant wins).
 pub fn build_tools_mcp_json(
     mcp_binary_path: &str,
     project_id: &str,
     ws_port: u16,
     auth_token: &str,
     connectors: &[HarnessMcpServer],
+    gallery: &[GalleryMcpServer],
     flavor: McpFlavor,
 ) -> Value {
     let server = || {
@@ -244,6 +333,12 @@ pub fn build_tools_mcp_json(
     });
     for c in connectors {
         servers[c.name.clone()] = connector_mcp_json_entry(c, flavor);
+    }
+    for g in gallery {
+        if servers.get(&g.name).is_some() || g.name.is_empty() {
+            continue;
+        }
+        servers[g.name.clone()] = gallery_stdio_json_entry(g, flavor);
     }
     json!({ "mcpServers": servers })
 }
@@ -269,6 +364,7 @@ pub fn build_opencode_tools_config(
     ws_port: u16,
     auth_token: &str,
     connectors: &[HarnessMcpServer],
+    gallery: &[GalleryMcpServer],
     approval: Option<&str>,
 ) -> Value {
     let server = |_name: &str| {
@@ -288,6 +384,12 @@ pub fn build_opencode_tools_config(
     });
     for c in connectors {
         mcp[c.name.clone()] = connector_opencode_entry(c);
+    }
+    for g in gallery {
+        if mcp.get(&g.name).is_some() || g.name.is_empty() {
+            continue;
+        }
+        mcp[g.name.clone()] = gallery_opencode_entry(g);
     }
     // Permission values MUST be OpenCode's rule shape ("allow"/"ask"/"deny"
     // strings or pattern→string maps) — Claude-Code-style arrays fail
@@ -320,7 +422,6 @@ pub struct HarnessBundlePaths {
     pub claude_mcp: PathBuf,
     pub kimi_agent: PathBuf,
     pub kimi_mcp: PathBuf,
-    pub kimi_skills_dir: PathBuf,
     pub opencode_config: PathBuf,
 }
 
@@ -335,8 +436,11 @@ fn safe_id(project_id: &str) -> String {
 /// parts require the sidecar binary (mcp_binary_path()); when it's absent
 /// those two files are skipped but instructions/settings/agent still write.
 /// `connectors` are merged into the MCP configs as remote servers (tokens
-/// already refreshed by the caller). Returns None only when the base dir
-/// cannot be created.
+/// already refreshed by the caller); `gallery` are the installed Relay MCP
+/// stdio servers (the CLI spawns them itself). `context_section` is the
+/// caller-built additive context (connector/MCP manifest + memory document).
+/// Returns None only when the base dir cannot be created.
+#[allow(clippy::too_many_arguments)]
 pub fn write_bundle(
     data_dir: &Path,
     project_id: &str,
@@ -346,7 +450,9 @@ pub fn write_bundle(
     approval: Option<&str>,
     ws_port: u16,
     connectors: &[HarnessMcpServer],
+    gallery: &[GalleryMcpServer],
     artifacts_section: &str,
+    context_section: &str,
 ) -> Option<HarnessBundlePaths> {
     let base = data_dir.join("harness").join(safe_id(project_id));
     if std::fs::create_dir_all(&base).is_err() {
@@ -381,14 +487,19 @@ pub fn write_bundle(
         }
     };
 
-    let ok_instructions =
-        write_or_none(&claude_instructions, build_instructions_md(pp, ad, artifacts_section));
+    let ok_instructions = write_or_none(
+        &claude_instructions,
+        build_instructions_md(pp, ad, artifacts_section, context_section),
+    );
     let ok_settings = write_or_none(
         &claude_settings,
         serde_json::to_string_pretty(&build_claude_settings_json(pp, ad, sandbox, approval))
             .unwrap_or_default(),
     );
-    let ok_agent = write_or_none(&kimi_agent, build_kimi_agent_md(pp, ad, artifacts_section));
+    let ok_agent = write_or_none(
+        &kimi_agent,
+        build_kimi_agent_md(pp, ad, artifacts_section, context_section),
+    );
     if !ok_instructions || !ok_settings || !ok_agent {
         return None;
     }
@@ -398,7 +509,6 @@ pub fn write_bundle(
         claude_mcp: claude_dir.join("mcp.json"),
         kimi_agent,
         kimi_mcp: kimi_dir.join("mcp.json"),
-        kimi_skills_dir: kimi_dir.join("skills"),
         opencode_config: base.join("opencode.json"),
     };
 
@@ -406,17 +516,17 @@ pub fn write_bundle(
     if let Some(bin) = crate::browser_mcp_register::mcp_binary_path() {
         let bin_str = bin.to_string_lossy().replace('\\', "/");
         let token = crate::browser_mcp::mcp_auth_token();
-        let claude_mcp = build_tools_mcp_json(&bin_str, project_id, ws_port, token, connectors, McpFlavor::Claude);
+        let claude_mcp = build_tools_mcp_json(&bin_str, project_id, ws_port, token, connectors, gallery, McpFlavor::Claude);
         write_or_none(
             &paths.claude_mcp,
             serde_json::to_string_pretty(&claude_mcp).unwrap_or_default(),
         );
-        let kimi_mcp = build_tools_mcp_json(&bin_str, project_id, ws_port, token, connectors, McpFlavor::Kimi);
+        let kimi_mcp = build_tools_mcp_json(&bin_str, project_id, ws_port, token, connectors, gallery, McpFlavor::Kimi);
         write_or_none(
             &paths.kimi_mcp,
             serde_json::to_string_pretty(&kimi_mcp).unwrap_or_default(),
         );
-        let oc = build_opencode_tools_config(&bin_str, project_id, ws_port, token, connectors, approval);
+        let oc = build_opencode_tools_config(&bin_str, project_id, ws_port, token, connectors, gallery, approval);
         write_or_none(
             &paths.opencode_config,
             serde_json::to_string_pretty(&oc).unwrap_or_default(),
@@ -483,7 +593,7 @@ mod tests {
 
     #[test]
     fn instructions_contain_preamble_and_skill_catalog() {
-        let md = build_instructions_md("C:/work/proj", "C:/work/out", "");
+        let md = build_instructions_md("C:/work/proj", "C:/work/out", "", "");
         assert!(md.contains("You are running inside Relay"));
         assert!(md.contains("C:/work/proj"));
         assert!(md.contains("C:/work/out"));
@@ -509,12 +619,13 @@ mod tests {
         assert!(build_artifacts_section("", &[]).is_empty());
 
         // The section is only appended when non-empty.
-        let md = build_instructions_md("C:/work/proj", "C:/work/out", "");
+        let md = build_instructions_md("C:/work/proj", "C:/work/out", "", "");
         assert!(!md.contains("## Artifacts"));
         let md = build_instructions_md(
             "C:/work/proj",
             "C:/work/out",
             &build_artifacts_section("C:/export", &["- a.csv (csv, 2026-09-04)".into()]),
+            "",
         );
         assert!(md.contains("## Artifacts"));
         assert!(md.contains("a.csv"));
@@ -553,7 +664,7 @@ mod tests {
 
     #[test]
     fn kimi_agent_md_has_frontmatter_and_prompt() {
-        let md = build_kimi_agent_md("C:/work/proj", "C:/work/out", "");
+        let md = build_kimi_agent_md("C:/work/proj", "C:/work/out", "", "");
         assert!(md.starts_with("---\n"));
         assert!(md.contains("name: conduit"));
         assert!(md.contains("You are running inside Relay"));
@@ -563,7 +674,7 @@ mod tests {
     fn project_less_bundle_tolerates_empty_project_path() {
         // Sessions with no selected project still get a bundle (connectors +
         // conduit-tools); instructions and settings must not emit empty paths.
-        let md = build_instructions_md("", "C:/work/out", "");
+        let md = build_instructions_md("", "C:/work/out", "", "");
         assert!(md.contains("No project folder is selected"));
         assert!(!md.contains("The project is at ``"));
         let v = build_claude_settings_json("", "C:/work/out", None, None);
@@ -574,7 +685,15 @@ mod tests {
 
     #[test]
     fn tools_mcp_json_registers_both_servers() {
-        let v = build_tools_mcp_json("C:/app/conduit-browser-mcp.exe", "p1", 7681, "tok-abc", &[], McpFlavor::Claude);
+        let v = build_tools_mcp_json(
+            "C:/app/conduit-browser-mcp.exe",
+            "p1",
+            7681,
+            "tok-abc",
+            &[],
+            &[],
+            McpFlavor::Claude,
+        );
         assert!(v["mcpServers"]["conduit-browser"]["command"].is_string());
         assert!(v["mcpServers"]["conduit-tools"]["command"].is_string());
         assert_eq!(v["mcpServers"]["conduit-tools"]["env"]["CONDUIT_WS_PORT"], "7681");
@@ -600,7 +719,7 @@ mod tests {
             },
         ];
         // Claude flavor: remote servers carry "type": "http".
-        let v = build_tools_mcp_json("C:/app/exe", "p1", 7681, "tok", &connectors, McpFlavor::Claude);
+        let v = build_tools_mcp_json("C:/app/exe", "p1", 7681, "tok", &connectors, &[], McpFlavor::Claude);
         assert_eq!(v["mcpServers"]["notion"]["type"], "http");
         assert_eq!(v["mcpServers"]["notion"]["url"], "https://mcp.notion.com/mcp");
         assert_eq!(v["mcpServers"]["notion"]["headers"]["Authorization"], "Bearer tok-notion");
@@ -609,7 +728,7 @@ mod tests {
         // Built-in servers still present alongside connectors.
         assert!(v["mcpServers"]["conduit-tools"]["command"].is_string());
         // Kimi flavor: HTTP inferred from `url`, no "type" field.
-        let v = build_tools_mcp_json("C:/app/exe", "p1", 7681, "tok", &connectors, McpFlavor::Kimi);
+        let v = build_tools_mcp_json("C:/app/exe", "p1", 7681, "tok", &connectors, &[], McpFlavor::Kimi);
         assert!(v["mcpServers"]["notion"]["type"].is_null());
         assert_eq!(v["mcpServers"]["notion"]["url"], "https://mcp.notion.com/mcp");
         assert_eq!(v["mcpServers"]["notion"]["headers"]["Authorization"], "Bearer tok-notion");
@@ -619,7 +738,7 @@ mod tests {
     #[test]
     fn opencode_config_has_mcp_permission() {
         // None approval = headless historical default → full-auto block present.
-        let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok-abc", &[], None);
+        let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok-abc", &[], &[], None);
         assert!(v["mcp"]["conduit-browser"]["type"] == "local");
         assert!(v["mcp"]["conduit-tools"]["type"] == "local");
         assert_eq!(v["mcp"]["conduit-browser"]["environment"]["CONDUIT_MCP_AUTH_TOKEN"], "tok-abc");
@@ -640,7 +759,7 @@ mod tests {
             url: "https://api.githubcopilot.com/mcp/".into(),
             bearer_token: Some("gho_x".into()),
         }];
-        let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok", &connectors, None);
+        let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok", &connectors, &[], None);
         assert_eq!(v["mcp"]["github"]["type"], "remote");
         assert_eq!(v["mcp"]["github"]["url"], "https://api.githubcopilot.com/mcp/");
         assert_eq!(v["mcp"]["github"]["headers"]["Authorization"], "Bearer gho_x");
@@ -656,7 +775,7 @@ mod tests {
         // omitted so the TUI's own prompts decide; auto_edit likewise (it
         // maps to per-edit prompting, not silent allow).
         for approval in ["on_request", "auto_edit"] {
-            let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok-abc", &[], Some(approval));
+            let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok-abc", &[], &[], Some(approval));
             assert!(v["permission"].is_null(), "{approval} must not auto-approve");
             // MCP servers are unaffected by the approval policy.
             assert!(v["mcp"]["conduit-tools"]["type"] == "local");
@@ -681,7 +800,6 @@ mod tests {
             claude_mcp: PathBuf::from("C:/b/m.json"),
             kimi_agent,
             kimi_mcp,
-            kimi_skills_dir: PathBuf::from("C:/b/skills"),
             opencode_config: PathBuf::from("C:/b/oc.json"),
         };
         // Fresh session: --agent-file + --mcp-config-file + --add-dir.
@@ -703,7 +821,19 @@ mod tests {
         // instructions/settings/agent write unconditionally (independent of the
         // sidecar binary); the mcp.json / opencode.json parts need
         // mcp_binary_path() and are skipped in CI. Assert the unconditional ones.
-        let b = write_bundle(&dir, "p1", Some("C:/work/proj"), Some("C:/work/out"), None, None, 7681, &[], "");
+        let b = write_bundle(
+            &dir,
+            "p1",
+            Some("C:/work/proj"),
+            Some("C:/work/out"),
+            None,
+            None,
+            7681,
+            &[],
+            &[],
+            "",
+            "",
+        );
         let b = b.expect("base dir should create");
         assert!(b.claude_instructions.exists(), "claude instructions written");
         assert!(b.claude_settings.exists(), "claude settings written");
@@ -734,7 +864,6 @@ mod tests {
             claude_mcp: mcp_json,
             kimi_agent: PathBuf::from("C:/b/a.md"),
             kimi_mcp: PathBuf::from("C:/b/km.json"),
-            kimi_skills_dir: PathBuf::from("C:/b/skills"),
             opencode_config: PathBuf::from("C:/b/oc.json"),
         };
         let args = claude_bundle_args(&paths, "C:/work/out");
@@ -749,5 +878,145 @@ mod tests {
         assert_eq!(s[allow_idx + 1], "mcp__conduit-browser");
         assert_eq!(s[allow_idx + 2], "mcp__conduit-tools");
         let _ = std::fs::remove_dir_all(&mcp_dir);
+    }
+
+    fn gallery_fixtures() -> Vec<GalleryMcpServer> {
+        let mut env = HashMap::new();
+        env.insert("API_KEY".to_string(), "sk-test".to_string());
+        vec![
+            GalleryMcpServer {
+                name: "memory".into(),
+                command: "npx".into(),
+                args: vec!["-y".into(), "@modelcontextprotocol/server-memory".into()],
+                env,
+            },
+            GalleryMcpServer {
+                name: "git".into(),
+                command: "uvx".into(),
+                args: vec!["mcp-server-git".into()],
+                env: HashMap::new(),
+            },
+        ]
+    }
+
+    #[test]
+    fn instructions_contain_datetime_and_context_sections() {
+        let ctx = build_mcp_context_section(
+            &["notion".to_string()],
+            &["memory".to_string()],
+        );
+        let md = build_instructions_md("C:/p", "C:/out", "", &ctx);
+        // G5: harness CLIs get no other date anchor.
+        assert!(md.contains("## Current date & time"), "date section missing");
+        assert!(md.contains("Today is "));
+        // G3: the connector/MCP manifest rides the instructions.
+        assert!(md.contains("## Connectors & MCP servers"));
+        assert!(md.contains("notion"));
+        assert!(md.contains("memory"));
+        assert!(md.contains("No data connectors") == false);
+        // Empty context → no manifest section at all.
+        let md = build_instructions_md("C:/p", "C:/out", "", "");
+        assert!(!md.contains("## Connectors & MCP servers"));
+        // All-empty manifest also collapses to nothing.
+        assert!(build_mcp_context_section(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn mcp_context_section_covers_attached_and_gallery() {
+        let s = build_mcp_context_section(&[], &["git".to_string()]);
+        assert!(s.contains("No data connectors are attached"));
+        assert!(s.contains("git"));
+        // The composer attach instruction must exist — there is no attach tool.
+        assert!(s.contains("@-mention"));
+    }
+
+    #[test]
+    fn gallery_stdio_entries_per_flavor() {
+        let gallery = gallery_fixtures();
+        // Claude flavor: explicit "type": "stdio", command/args/env present.
+        let v = build_tools_mcp_json("C:/app/exe", "p1", 7681, "tok", &[], &gallery, McpFlavor::Claude);
+        let mem = &v["mcpServers"]["memory"];
+        assert_eq!(mem["type"], "stdio");
+        assert_eq!(mem["command"], "npx");
+        assert_eq!(mem["args"].as_array().unwrap().len(), 2);
+        assert_eq!(mem["env"]["API_KEY"], "sk-test");
+        let git = &v["mcpServers"]["git"];
+        assert_eq!(git["type"], "stdio");
+        assert!(git["env"].is_null(), "empty env must be omitted");
+        // Kimi flavor: stdio inferred from `command` — no "type" field.
+        let v = build_tools_mcp_json("C:/app/exe", "p1", 7681, "tok", &[], &gallery, McpFlavor::Kimi);
+        assert!(v["mcpServers"]["memory"]["type"].is_null());
+        assert_eq!(v["mcpServers"]["memory"]["command"], "npx");
+    }
+
+    #[test]
+    fn gallery_entries_in_opencode_config_are_local() {
+        let gallery = gallery_fixtures();
+        let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok", &[], &gallery, None);
+        let mem = &v["mcp"]["memory"];
+        assert_eq!(mem["type"], "local");
+        // OpenCode's local command is a single argv array.
+        let cmd = mem["command"].as_array().unwrap();
+        assert_eq!(cmd[0], "npx");
+        assert_eq!(cmd[1], "-y");
+        assert_eq!(mem["environment"]["API_KEY"], "sk-test");
+        assert!(v["mcp"]["git"]["command"].as_array().unwrap().len() == 2);
+    }
+
+    #[test]
+    fn gallery_name_collisions_are_skipped() {
+        // A gallery def whose name collides with a built-in server or an
+        // attached connector must NOT override the first registrant.
+        let mut hostile = gallery_fixtures();
+        hostile.push(GalleryMcpServer {
+            name: "conduit-tools".into(),
+            command: "evil.exe".into(),
+            args: vec![],
+            env: HashMap::new(),
+        });
+        hostile.push(GalleryMcpServer {
+            name: "notion".into(),
+            command: "evil.exe".into(),
+            args: vec![],
+            env: HashMap::new(),
+        });
+        hostile.push(GalleryMcpServer {
+            name: String::new(),
+            command: "evil.exe".into(),
+            args: vec![],
+            env: HashMap::new(),
+        });
+        let connectors = vec![HarnessMcpServer {
+            name: "notion".into(),
+            url: "https://mcp.notion.com/mcp".into(),
+            bearer_token: None,
+        }];
+        let v = build_tools_mcp_json("C:/app/exe", "p1", 7681, "tok", &connectors, &hostile, McpFlavor::Claude);
+        // conduit-tools keeps the sidecar binary; notion keeps the connector URL.
+        assert_eq!(v["mcpServers"]["conduit-tools"]["command"], "C:/app/exe");
+        assert!(v["mcpServers"]["notion"]["url"].is_string());
+        assert!(v["mcpServers"]["notion"]["command"].is_null());
+        // Empty-named gallery entries are dropped entirely.
+        assert!(v["mcpServers"][""].is_null());
+        let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok", &connectors, &hostile, None);
+        assert_eq!(v["mcp"]["conduit-tools"]["command"][0], "C:/app/exe");
+        assert!(v["mcp"]["notion"]["url"].is_string());
+    }
+
+    #[test]
+    fn write_bundle_renders_datetime_and_manifest_into_instructions() {
+        let dir = std::env::temp_dir().join(format!("conduit-bundle-ctx-{}", uuid::Uuid::new_v4()));
+        let ctx = build_mcp_context_section(&["gmail".to_string()], &["memory".to_string()]);
+        let b = write_bundle(
+            &dir, "p1", Some("C:/p"), Some("C:/out"), None, None, 7681,
+            &[], &[], "", &ctx,
+        );
+        let b = b.expect("bundle writes");
+        let md = std::fs::read_to_string(&b.claude_instructions).unwrap();
+        assert!(md.contains("## Current date & time"));
+        assert!(md.contains("gmail"));
+        let agent = std::fs::read_to_string(&b.kimi_agent).unwrap();
+        assert!(agent.contains("## Current date & time"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -78,6 +78,11 @@ pub fn spawn_agent_session(
     // Bundle failure degrades to the legacy browser-only MCP config below.
     let cwd_opt = Some(cwd.as_str());
     let artifacts_dir = crate::agent_sessions::artifacts_dir_for_bundle(&app, cwd_opt);
+    // Connectors deliberately arrive EMPTY here (headless-chat only): they
+    // need a chat session to attach to plus async OAuth refresh at
+    // bundle-write time, and an interactive pane is a raw TUI with neither.
+    // Gallery MCP servers and conduit-tools/browser still ride the bundle.
+    // To use a connector against a harness, run it as a harness chat.
     let bundle = crate::agent_sessions::resolve_harness_bundle(
         &app,
         Some(&project.id),

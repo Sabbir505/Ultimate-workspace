@@ -238,7 +238,8 @@ impl AgentSessionManager {
         // the gate must be evaluated afterwards. Built BEFORE the user message
         // below is persisted, so the transcript covers only prior turns; this
         // turn's message rides in `content` verbatim.
-        let context_primer = if entry.cli_session_id.lock().ok().and_then(|g| g.clone()).is_none() {
+        let fresh_cli = entry.cli_session_id.lock().ok().and_then(|g| g.clone()).is_none();
+        let context_primer = if fresh_cli {
             // `primer_summary` (when the async command managed to pre-build
             // one) carries a structured summary of the turns that don't fit
             // the tail budget; without it the primer is truncate-only.
@@ -278,18 +279,39 @@ impl AgentSessionManager {
         // message). The attachment appendix goes LAST — after the persona and
         // the typed text — so file paths/text read as an addendum to the
         // user's words.
-        let harness_label = match harness {
-            "claude_code" => "Claude Code",
-            "kimi_code" => "Kimi Code",
-            "opencode" => "OpenCode",
-            other => other,
-        };
+        let harness_label = harness_label(harness);
         let persona = harness_persona(harness_label);
+        // Adapters without a system-prompt flag (opencode/pi/omp/commandcode)
+        // get the bundle instructions prepended to their FIRST turn — the
+        // fresh-session gate mirrors the context primer's, so resumed turns
+        // ride the CLI's own context without re-paying the tokens. claude and
+        // kimi receive the same content via --append-system-prompt-file /
+        // --agent-file and must NOT get it twice. Failure degrades to no
+        // prefix (same contract as bundle failure everywhere else).
+        let instructions_prefix = if fresh_cli && harness_needs_prompt_instructions(harness) {
+            resolve_harness_bundle(
+                app,
+                project_id,
+                cwd,
+                artifacts_dir_for_bundle(app, cwd),
+                connectors,
+                None,
+                None,
+            )
+            .and_then(|b| std::fs::read_to_string(&b.claude_instructions).ok())
+            .filter(|s| !s.trim().is_empty())
+        } else {
+            None
+        };
         let effective = {
             let conn = db.0.lock();
             let custom: Option<String> =
                 crate::db::get_setting(&conn, "assistant.systemPrompt").ok().flatten();
-            let mut base = persona.clone();
+            let mut base = match &instructions_prefix {
+                Some(ins) => format!("{ins}\n\n"),
+                None => String::new(),
+            };
+            base.push_str(&persona);
             if let Some(sp) = custom.filter(|sp| !sp.trim().is_empty()) {
                 base.push_str("\n\n");
                 base.push_str(&sp);
@@ -643,6 +665,34 @@ fn harness_persona(harness_label: &str) -> String {
          reply with its path so they can open it from the gallery — there is no \
          open-file tool in this session."
     )
+}
+
+/// One-shot prompt assembly (automations): `[persona, instructions, custom]`
+/// prefix joined with blank lines, then a `---` separator before the prompt —
+/// mirroring the chat-session prefix stack's ordering. All prefix parts are
+/// optional and skipped when absent/blank; with no prefix at all the prompt
+/// rides alone. Pure so tests can pin the ordering.
+fn assemble_one_shot_prompt(
+    persona: Option<&str>,
+    instructions: Option<&str>,
+    custom: Option<&str>,
+    prompt: &str,
+) -> String {
+    let mut prefix: Vec<&str> = Vec::new();
+    if let Some(p) = persona.filter(|p| !p.trim().is_empty()) {
+        prefix.push(p);
+    }
+    if let Some(i) = instructions.filter(|i| !i.trim().is_empty()) {
+        prefix.push(i);
+    }
+    if let Some(c) = custom.filter(|c| !c.trim().is_empty()) {
+        prefix.push(c);
+    }
+    if prefix.is_empty() {
+        prompt.to_string()
+    } else {
+        format!("{}\n\n---\n\n{prompt}", prefix.join("\n\n"))
+    }
 }
 
 /// DB fetch half of the primer. MUST run before this turn's user message is
@@ -1960,6 +2010,78 @@ pub(crate) fn artifacts_dir_for_bundle(app: &AppHandle, cwd: Option<&str>) -> St
     crate::chat::dispatch::artifacts_dir(app).to_string_lossy().into_owned()
 }
 
+/// Harness label used in the per-turn persona ("running on the … engine").
+fn harness_label(harness: &str) -> &str {
+    match harness {
+        "claude_code" => "Claude Code",
+        "kimi_code" => "Kimi Code",
+        "opencode" => "OpenCode",
+        other => other,
+    }
+}
+
+/// Adapters that have NO system-prompt flag for the bundle instructions:
+/// claude gets `--append-system-prompt-file` and kimi `--agent-file`, but
+/// OpenCode/pi/omp/commandcode read only the turn text — so the instructions
+/// must ride the first turn's prompt instead (see the send path).
+fn harness_needs_prompt_instructions(harness: &str) -> bool {
+    matches!(harness, "opencode" | "pi" | "omp" | "commandcode")
+}
+
+/// Installed Relay MCP-gallery servers (enabled only) as bundle entries.
+/// The CLI spawns these stdio processes itself — Relay just translates the
+/// persisted defs, so there is no session/process management on our side.
+fn gallery_servers_for_bundle(app: &AppHandle) -> Vec<crate::harness_bundle::GalleryMcpServer> {
+    crate::mcp_gallery::load_defs(app)
+        .into_iter()
+        .filter(|d| d.enabled && !d.command.trim().is_empty())
+        .map(|d| crate::harness_bundle::GalleryMcpServer {
+            name: d.id,
+            command: d.command,
+            args: d.args,
+            env: d.env,
+        })
+        .collect()
+}
+
+/// Additive context sections for the harness instructions — the static
+/// equivalent of what the built-in chat assembles per turn: the connector/MCP
+/// manifest (the CLIs have no attach tool, so this is informational) and the
+/// persistent-memory document under the same render budget the built-in chat
+/// uses. DB errors degrade to fewer sections; never fail the bundle.
+fn harness_context_section(
+    app: &AppHandle,
+    project_id: Option<&str>,
+    connectors: &[crate::connectors::HarnessMcpServer],
+    gallery: &[crate::harness_bundle::GalleryMcpServer],
+) -> String {
+    let attached: Vec<String> = connectors.iter().map(|c| c.name.clone()).collect();
+    let gallery_names: Vec<String> = gallery.iter().map(|g| g.name.clone()).collect();
+    let mut parts: Vec<String> = Vec::new();
+    let mcp = crate::harness_bundle::build_mcp_context_section(&attached, &gallery_names);
+    if !mcp.is_empty() {
+        parts.push(mcp);
+    }
+    if let Some(db) = app.try_state::<DbState>() {
+        let conn = db.0.lock();
+        if crate::memory::memory_enabled(&conn) {
+            let mems = crate::db::active_memories_for_scope(&conn, "default", project_id)
+                .unwrap_or_default();
+            let doc = crate::memory::document::stored_document(&conn);
+            if let Some(rendered) = crate::memory::render::render_memory_document(
+                doc.as_deref(),
+                &mems,
+                crate::db::now_ts(),
+            ) {
+                if !rendered.trim().is_empty() {
+                    parts.push(rendered);
+                }
+            }
+        }
+    }
+    parts.join("\n\n")
+}
+
 /// Bundle slug for sessions with no selected project. Connectors and
 /// conduit-tools work project-less too, so a bundle is always written; the
 /// tradeoff is that browser panes and artifacts of ALL project-less sessions
@@ -1972,8 +2094,9 @@ const NO_PROJECT_BUNDLE_SLUG: &str = "_no_project";
 /// fails — bundle failure must never fail the turn (same contract as the old
 /// resolve_mcp_config). `connectors` are merged into the bundle's MCP configs
 /// as remote servers (tokens already refreshed by the command layer).
-/// Shared by the headless chat paths here and the interactive PTY spawn in
-/// `commands::pty_cmds`.
+/// Enabled MCP-gallery servers ride along as stdio entries the CLI spawns
+/// itself. Shared by the headless chat paths here and the interactive PTY
+/// spawn in `commands::pty_cmds`.
 pub(crate) fn resolve_harness_bundle(
     app: &AppHandle,
     project_id: Option<&str>,
@@ -2009,8 +2132,10 @@ pub(crate) fn resolve_harness_bundle(
         .unwrap_or_default();
     let artifacts_section =
         crate::harness_bundle::build_artifacts_section(&default_export_dir, &recent);
+    let gallery = gallery_servers_for_bundle(app);
+    let context_section = harness_context_section(app, project_id, connectors, &gallery);
     crate::harness_bundle::write_bundle(
-        &data_dir, project_id.unwrap_or(NO_PROJECT_BUNDLE_SLUG), cwd, Some(artifacts_dir.as_str()), sandbox, approval, crate::browser_mcp::bound_port(), connectors, &artifacts_section)
+        &data_dir, project_id.unwrap_or(NO_PROJECT_BUNDLE_SLUG), cwd, Some(artifacts_dir.as_str()), sandbox, approval, crate::browser_mcp::bound_port(), connectors, &gallery, &artifacts_section, &context_section)
 }
 
 fn spawn_claude(
@@ -4594,20 +4719,81 @@ pub fn run_one_shot(
             .map_err(|e| e.to_string())?;
     }
 
-    // Prepend the custom system prompt (same as the chat-session path).
-    let effective = {
-        let conn = db.lock();
-        let custom: Option<String> =
-            crate::db::get_setting(&conn, "assistant.systemPrompt").ok().flatten();
-        match custom {
-            Some(sp) if !sp.trim().is_empty() => {
-                format!("{sp}\n\n---\n\n{prompt}")
+    // Persona + bundle instructions + custom system prompt, then the prompt
+    // (prefix joined with blank lines, then the `---` separator before the
+    // prompt text — mirroring the chat-session prefix stack). Automation runs
+    // are unattended but still present as Relay with the conduit-tools bridge.
+    // Session connectors are NOT merged (their OAuth refresh is async and
+    // one-shot runs are self-contained); enabled gallery MCP servers and
+    // conduit-tools/browser still ride the bundle.
+    let (effective, bundle) = {
+        let project_id = {
+            let conn = db.lock();
+            crate::db::get_chat_session(&conn, chat_session_id)
+                .ok()
+                .flatten()
+                .and_then(|s| s.project_id)
+        };
+        let custom = {
+            let conn = db.lock();
+            crate::db::get_setting(&conn, "assistant.systemPrompt").ok().flatten()
+        };
+        let mut persona_text: Option<String> = None;
+        let mut instructions: Option<String> = None;
+        let mut bundle: Option<crate::harness_bundle::HarnessBundlePaths> = None;
+        if let Some(app) = app {
+            persona_text = Some(harness_persona(harness_label(harness)));
+            // The bundle's MCP servers matter for every adapter; its
+            // instructions text only matters where no CLI flag can carry it
+            // (claude/kimi get --append-system-prompt-file / --agent-file).
+            if let Some(b) = resolve_harness_bundle(
+                app,
+                project_id.as_deref(),
+                cwd,
+                artifacts_dir_for_bundle(app, cwd),
+                &[],
+                None,
+                Some("full_access"),
+            ) {
+                if harness_needs_prompt_instructions(harness) {
+                    if let Ok(ins) = std::fs::read_to_string(&b.claude_instructions) {
+                        if !ins.trim().is_empty() {
+                            instructions = Some(ins);
+                        }
+                    }
+                }
+                bundle = Some(b);
             }
-            _ => prompt.to_string(),
         }
+        let effective = assemble_one_shot_prompt(
+            persona_text.as_deref(),
+            instructions.as_deref(),
+            custom.as_deref(),
+            prompt,
+        );
+        (effective, bundle)
     };
 
-    let (spec, prompt_env, prompt_via_stdin) = one_shot_spec(harness, &effective, model)?;
+    let (mut spec, prompt_env, prompt_via_stdin) = one_shot_spec(harness, &effective, model)?;
+    // Bundle args for the adapters that take them on the command line; the
+    // bundle was resolved above only when an app handle exists.
+    let mut opencode_cfg_env: Option<(String, String)> = None;
+    if let (Some(app), Some(b)) = (app, &bundle) {
+        let artifacts = artifacts_dir_for_bundle(app, cwd);
+        match harness {
+            "claude_code" => spec.args.extend(crate::harness_bundle::claude_bundle_args(b, &artifacts)),
+            "kimi_code" => spec.args.extend(crate::harness_bundle::kimi_bundle_args(b, &artifacts, false)),
+            "opencode" => {
+                if b.opencode_config.exists() {
+                    opencode_cfg_env = Some((
+                        "OPENCODE_CONFIG".to_string(),
+                        b.opencode_config.to_string_lossy().replace('\\', "/"),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
     // claude and the pi-lineage CLIs take the prompt via stdin (M12); the
     // other harnesses either carry it in the env pair (Windows wrapper) or
     // inline in argv (POSIX).
@@ -4617,6 +4803,10 @@ pub fn run_one_shot(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     if let Some((k, v)) = &prompt_env {
+        cmd.env(k, v);
+    }
+    // OpenCode consumes the bundle through its config env var (no CLI flag).
+    if let Some((k, v)) = &opencode_cfg_env {
         cmd.env(k, v);
     }
     // Same artifact detection as the chat-session paths: diff the watch dirs
@@ -5989,6 +6179,59 @@ mod tests {
         assert!(!p.contains("open_file"), "persona must not reference the built-in-chat open_file tool");
         assert!(!p.contains("open_url"), "persona must not reference the built-in-chat open_url tool");
         assert!(p.contains("Artifacts gallery"));
+    }
+
+    /// G2 parity: only adapters with no system-prompt flag need the bundle
+    /// instructions riding the turn text. claude/kimi get them via
+    /// --append-system-prompt-file / --agent-file and must not be doubled.
+    #[test]
+    fn instructions_ride_the_prompt_only_for_flagless_adapters() {
+        for h in ["opencode", "pi", "omp", "commandcode"] {
+            assert!(harness_needs_prompt_instructions(h), "{h} has no prompt flag");
+        }
+        for h in ["claude_code", "kimi_code"] {
+            assert!(!harness_needs_prompt_instructions(h), "{h} carries instructions via CLI flags");
+        }
+    }
+
+    #[test]
+    fn harness_label_covers_known_adapters() {
+        assert_eq!(harness_label("claude_code"), "Claude Code");
+        assert_eq!(harness_label("kimi_code"), "Kimi Code");
+        assert_eq!(harness_label("opencode"), "OpenCode");
+        // Unknown harness ids pass through verbatim (persona stays readable).
+        assert_eq!(harness_label("futurecli"), "futurecli");
+    }
+
+    /// G7 parity: automation one-shot prompts carry persona + instructions +
+    /// custom prompt in the same order as the chat path, with the `---`
+    /// separator only between prefix and prompt.
+    #[test]
+    fn one_shot_prompt_prefix_ordering() {
+        let persona = harness_persona("Claude Code");
+        let out = assemble_one_shot_prompt(
+            Some(&persona),
+            Some("## Current date & time\nToday is Monday."),
+            Some("Always answer in French."),
+            "Summarize the repo",
+        );
+        let persona_idx = out.find("You are Relay").unwrap();
+        let date_idx = out.find("## Current date & time").unwrap();
+        let custom_idx = out.find("Always answer in French").unwrap();
+        let prompt_idx = out.find("Summarize the repo").unwrap();
+        assert!(persona_idx < date_idx && date_idx < custom_idx && custom_idx < prompt_idx);
+        // Exactly two separators: prefix-prompt boundary is the `---` line.
+        assert_eq!(out.matches("\n\n---\n\n").count(), 1);
+
+        // Blank / absent parts are skipped, not emitted as empty blocks.
+        let out = assemble_one_shot_prompt(Some(&persona), Some("  "), None, "go");
+        assert!(out.starts_with(&persona));
+        assert!(out.ends_with("\n\n---\n\ngo"));
+        // No prefix at all → bare prompt (app == None on automations).
+        assert_eq!(assemble_one_shot_prompt(None, None, None, "go"), "go");
+        // Blank custom prompt setting must not produce a lone `---`.
+        let out = assemble_one_shot_prompt(None, None, Some("   "), "go");
+        assert_eq!(out, "go");
     }
 
     #[test]

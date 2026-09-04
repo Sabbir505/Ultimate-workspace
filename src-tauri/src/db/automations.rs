@@ -246,7 +246,44 @@ pub fn start_run(
          VALUES (?1, ?2, ?3, 'running', 'In progress…', ?4, ?5)",
         params![id, automation_id, now_ts(), chat_session_id, source],
     )?;
+    // Self-improving artifacts (SELF_IMPROVING_ARTIFACTS.md §5, Q4 decision):
+    // automation_runs stays the source of truth; each run is mirrored into
+    // the improve registry so sweeps/evals see automation failures alongside
+    // skills/loops/templates. Best-effort — never fail the real run.
+    if let Ok(Some(improve_run_id)) = mirror_run_start(conn, automation_id, chat_session_id) {
+        let _ = conn.execute(
+            "UPDATE automation_runs SET improve_run_id = ?2 WHERE id = ?1",
+            params![id, improve_run_id],
+        );
+    }
     Ok(id)
+}
+
+/// Mirror a starting automation run into the improve registry. Registers the
+/// automation as an artifact on first sight and records a new version when
+/// the prompt changed since the stored one (user edits are version history).
+fn mirror_run_start(
+    conn: &Connection,
+    automation_id: &str,
+    chat_session_id: Option<&str>,
+) -> DbResult<Option<String>> {
+    let (name, prompt): (String, String) = match conn.query_row(
+        "SELECT name, prompt FROM automations WHERE id = ?1",
+        params![automation_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    let artifact = super::improve::ensure_artifact(conn, "automation", automation_id, &name, &prompt)?;
+    let active = super::improve::channel_version(conn, &artifact.id, "active")?.unwrap_or(1);
+    if let Some(active_body) = super::improve::version_body(conn, &artifact.id, active)? {
+        if active_body != prompt {
+            super::improve::record_version(conn, &artifact.id, active, &prompt, None, "user")?;
+            super::improve::set_channel(conn, &artifact.id, "active", active + 1)?;
+        }
+    }
+    super::improve::start_run(conn, &artifact.id, chat_session_id).map(Some)
 }
 
 /// Finalize a run (set finished_at + status + summary). Returns silently if
@@ -263,6 +300,29 @@ pub fn finish_run(
            WHERE id = ?1 AND finished_at IS NULL",
         params![run_id, now_ts(), status, summary],
     )?;
+    // Close the linked improve run with a mapped outcome: ok → applied,
+    // skipped (overlap guard, no work happened) → abandoned, else failed.
+    let improve_run_id: Option<String> = conn
+        .query_row(
+            "SELECT improve_run_id FROM automation_runs WHERE id = ?1",
+            params![run_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    if let Some(improve_run_id) = improve_run_id {
+        let (outcome, error_code) = match status {
+            "ok" => ("applied", None),
+            "skipped" => ("abandoned", None),
+            other => ("failed", Some(other)),
+        };
+        let _ = conn.execute(
+            "UPDATE improve_runs
+                SET finished_at = ?2, outcome = ?3, error_code = ?4
+              WHERE id = ?1 AND finished_at IS NULL",
+            params![improve_run_id, now_ts(), outcome, error_code],
+        );
+    }
     Ok(())
 }
 
@@ -312,6 +372,76 @@ pub fn count_runs_for(conn: &Connection, automation_id: &str) -> DbResult<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runs_mirror_into_improve_registry_and_close_with_outcome() {
+        let conn = super::super::mem();
+        let a = create_automation(&conn, &input("nightly")).unwrap();
+        // Starting a run registers the automation as an improve artifact and
+        // links the mirrored run.
+        let run = start_run(&conn, &a.id, None, "scheduled").unwrap();
+        let artifact_id: String = conn
+            .query_row(
+                "SELECT id FROM improve_artifacts WHERE kind = 'automation' AND ref_key = ?1",
+                rusqlite::params![a.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let improve_run_id: String = conn
+            .query_row(
+                "SELECT improve_run_id FROM automation_runs WHERE id = ?1",
+                rusqlite::params![run],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // A prompt edit before the next run records a user version and moves
+        // the active pointer.
+        update_automation(
+            &conn,
+            &a.id,
+            &AutomationInput {
+                name: "nightly".into(),
+                prompt: "fix the tests quietly".into(),
+                harness: "claude_code".into(),
+                model: None,
+                cwd: None,
+                schedule: "0 3 * * *".into(),
+                enabled: Some(true),
+            },
+        )
+        .unwrap();
+        let run2 = start_run(&conn, &a.id, None, "scheduled").unwrap();
+        let _ = run2;
+        let active: i64 = conn
+            .query_row(
+                "SELECT c.version FROM improve_channels c WHERE c.artifact_id = ?1 AND c.channel = 'active'",
+                rusqlite::params![artifact_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(active, 2, "prompt edit recorded as v2");
+        // Failure outcome maps to failed on the improve run.
+        finish_run(&conn, &run, "boom: pty gone", "boom").unwrap();
+        let outcome: String = conn
+            .query_row(
+                "SELECT outcome FROM improve_runs WHERE id = ?1",
+                rusqlite::params![improve_run_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(outcome, "failed");
+        // Idempotent finish must not clobber the outcome.
+        finish_run(&conn, &run, "ok", "").unwrap();
+        let outcome2: String = conn
+            .query_row(
+                "SELECT outcome FROM improve_runs WHERE id = ?1",
+                rusqlite::params![improve_run_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(outcome2, "failed");
+    }
+
 
     fn input(name: &str) -> AutomationInput {
         AutomationInput {

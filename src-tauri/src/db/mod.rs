@@ -8,7 +8,7 @@
 //! (search, filtering, cost rollups) per PRD §6.1.
 
 mod artifacts;
-mod automations;
+pub(crate) mod automations;
 mod chat;
 mod checkpoints;
 mod connector_credentials;
@@ -129,6 +129,19 @@ fn migrate_improve_autonomy(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Q4 decision: automation_runs stays the source of truth; the improve
+/// registry link column mirrors each run into the self-improvement loop.
+fn migrate_automation_runs_improve_link(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE automation_runs ADD COLUMN improve_run_id TEXT REFERENCES improve_runs(id) ON DELETE SET NULL";
+    if let Err(e) = conn.execute(sql, []) {
+        let msg = e.to_string();
+        if !msg.contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
 fn migrate_chat_fts(conn: &Connection) -> DbResult<()> {
     let in_sync = conn
         .query_row(
@@ -174,6 +187,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     migrate_chat_messages_started_completed(conn)?;
     migrate_chat_messages_perf(conn)?;
     migrate_improve_autonomy(conn)?;
+    migrate_automation_runs_improve_link(conn)?;
     migrate_chat_fts(conn)?;
     migrate_memory_reflected(conn)?;
     migrate_unc_paths(conn)
@@ -995,7 +1009,8 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           status TEXT NOT NULL DEFAULT 'running',
           summary TEXT NOT NULL DEFAULT '',
           chat_session_id TEXT,
-          source TEXT NOT NULL DEFAULT 'scheduled'
+          source TEXT NOT NULL DEFAULT 'scheduled',
+          improve_run_id TEXT REFERENCES improve_runs(id) ON DELETE SET NULL
         );
         CREATE INDEX IF NOT EXISTS idx_automation_runs_auto
           ON automation_runs(automation_id, started_at DESC);

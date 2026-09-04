@@ -760,7 +760,22 @@ fn materialize(db: &Arc<parking_lot::Mutex<Connection>>, artifact_id: &str, kind
             }
             db::set_setting(&conn, "prompts.templates", &templates.to_string()).map_err(|e| e.to_string())
         }
-        other => Err(format!("materialization for kind {other:?} arrives in P2 (automations keep automation_runs as source of truth)")),
+        // Q4 decision: automation_runs stays the source of truth; promoting a
+        // proposal rewrites the automation's prompt (the live copy).
+        "automation" => {
+            let conn = db.lock();
+            let n = conn
+                .execute(
+                    "UPDATE automations SET prompt = ?2 WHERE id = ?1",
+                    rusqlite::params![ref_key, body],
+                )
+                .map_err(|e| e.to_string())?;
+            if n == 0 {
+                return Err(format!("automation {ref_key} no longer exists"));
+            }
+            Ok(())
+        }
+        other => Err(format!("unknown artifact kind {other:?}")),
     }
 }
 
@@ -880,7 +895,52 @@ mod tests {
     }
 
     #[test]
+    fn apply_materializes_automation_prompt() {
+        let db = Arc::new(parking_lot::Mutex::new(crate::db::mem()));
+        let automation = {
+            let conn = db.lock();
+            crate::db::create_automation(
+                &conn,
+                &crate::db::automations::AutomationInput {
+                    name: "nightly".into(),
+                    prompt: "old prompt".into(),
+                    harness: "claude_code".into(),
+                    model: None,
+                    cwd: None,
+                    schedule: "0 3 * * *".into(),
+                    enabled: Some(true),
+                },
+            )
+            .unwrap()
+        };
+        let (a, v2) = {
+            let conn = db.lock();
+            let a = improve::ensure_artifact(&conn, "automation", &automation.id, "nightly", "old prompt").unwrap();
+            let v2 = improve::record_version(&conn, &a.id, 1, "improved prompt", None, "auto_proposal").unwrap().unwrap();
+            (a, v2)
+        };
+        let p = {
+            let conn = db.lock();
+            improve::create_proposal(&conn, &a.id, 1, v2, "sharpen the prompt", None, None, None).unwrap()
+        };
+        apply_proposal(&db, &p.id).unwrap();
+        let prompt: String = {
+            let conn = db.lock();
+            conn.query_row(
+                "SELECT prompt FROM automations WHERE id = ?1",
+                rusqlite::params![automation.id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(prompt, "improved prompt");
+        assert_eq!(improve::get_proposal(&db.lock(), &p.id).unwrap().unwrap().status, "applied");
+        assert_eq!(improve::channel_version(&db.lock(), &a.id, "active").unwrap(), Some(2));
+    }
+
+    #[test]
     fn resolve_active_chat_model_returns_known_provider() {
+
         let conn = crate::db::mem();
         // Environment-dependent (the OS keychain may hold real keys on a dev
         // machine), so assert consistency rather than emptiness: whatever we

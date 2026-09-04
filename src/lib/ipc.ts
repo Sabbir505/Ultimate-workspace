@@ -674,6 +674,43 @@ export const getLoopSession = (loopId: string) =>
 export const latestLoopSession = (chatSessionId: string) =>
   safeInvoke<LoopSessionRecord | null>("latest_loop_session", { chatSessionId });
 
+export interface ImproveProposal {
+  id: string;
+  artifactId: string;
+  baseVersion: number;
+  candidateVersion: number;
+  changeSummary: string;
+  rootCausesJson: string | null;
+  expectedEffect: string | null;
+  riskNotes: string | null;
+  status: "open" | "evaluating" | "passed" | "failed_eval" | "applied" | "rejected" | "stale";
+  evalRunId: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export const listImprovementProposals = (status?: string) =>
+  safeInvoke<ImproveProposal[] | null>("list_improvement_proposals", { status: status ?? null });
+export const runImprovementSweep = () =>
+  safeInvoke<ImproveProposal[] | null>("run_improvement_sweep");
+export const evaluateImprovementProposal = (proposalId: string) =>
+  safeInvoke<string | null>("evaluate_improvement_proposal", { proposalId });
+export const applyImprovementProposal = (proposalId: string) =>
+  safeInvoke<void>("apply_improvement_proposal", { proposalId });
+export const rejectImprovementProposal = (proposalId: string) =>
+  safeInvoke<void>("reject_improvement_proposal", { proposalId });
+export interface ImproveEvalCase {
+  id: string;
+  artifactId: string;
+  inputText: string;
+  expectJson: string;
+  source: string;
+  enabled: boolean;
+  createdAt: number;
+}
+export const listImproveEvalCases = (artifactId: string) =>
+  safeInvoke<ImproveEvalCase[] | null>("list_improve_eval_cases", { artifactId });
+
 /** Stream `budget:alert` events (threshold crossed) — drives the in-app toast. */
 export const onBudgetAlert = (handler: (p: BudgetAlertPayload) => void) =>
   safeListen<BudgetAlertPayload>("budget:alert", handler);

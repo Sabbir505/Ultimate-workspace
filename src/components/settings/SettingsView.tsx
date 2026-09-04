@@ -21,6 +21,7 @@ import { ModelMarket, FitBadge } from "./ModelMarket";
 import { LlamaAdvancedFields } from "../chat/LlamaAdvancedFields";
 import { KnowledgePanel } from "./KnowledgePanel";
 import { MemoryPanel } from "./MemoryPanel";
+import { ImprovementsPanel } from "./ImprovementsPanel";
 import { SttPanel } from "./SttPanel";
 import { PermissionRulesPanel } from "./PermissionRulesPanel";
 import { ThemeGalleryPanel } from "./ThemeGalleryPanel";
@@ -60,6 +61,7 @@ type Category =
   | "appearance"
   | "notifications"
   | "assistant"
+  | "improvements"
   | "harnesses"
   | "localmodels"
   | "apikeys"
@@ -77,6 +79,7 @@ const CATEGORY_KEYS: Category[] = [
   "appearance",
   "notifications",
   "assistant",
+  "improvements",
   "harnesses",
   "localmodels",
   "apikeys",
@@ -103,6 +106,7 @@ function SettingsNavIcon({ category }: { category: Category }) {
     case "appearance": return <Palette {...props} />;
     case "notifications": return <Bell {...props} />;
     case "assistant": return <Bot {...props} />;
+    case "improvements": return <Sparkles {...props} />;
     case "apikeys": return <KeyRound {...props} />;
     case "websearch": return <Globe {...props} />;
     case "localmodels": return <Cpu {...props} />;
@@ -136,6 +140,7 @@ const NAV_SECTIONS: Array<{ title: string; items: CategoryDef[] }> = [
       { key: "appearance", label: "Appearance", sub: "Theme & colors" },
       { key: "notifications", label: "Notifications", sub: "DND & sound" },
       { key: "assistant", label: "Assistant", sub: "System prompt & skills" },
+      { key: "improvements", label: "Improvements", sub: "Self-improving artifacts" },
     ],
   },
   {
@@ -536,6 +541,8 @@ export function SettingsView() {
 
               {category === "knowledge" && <KnowledgePanel />}
               {category === "memory" && <MemoryPanel />}
+
+              {category === "improvements" && <ImprovementsPanel />}
 
               {category === "mcpgallery" && <McpGalleryPanel />}
 

@@ -166,3 +166,59 @@ pub fn latest_loop_session(db: State<'_, DbState>, chat_session_id: String) -> C
     let conn = db.0.lock();
     db::improve::latest_loop_session(&conn, &chat_session_id).map_err(|e| e.to_string())
 }
+
+// ---- P1: proposals + eval ----
+
+#[tauri::command]
+pub fn list_improvement_proposals(
+    db: State<'_, DbState>,
+    status: Option<String>,
+) -> CmdResult<Vec<db::improve::ImproveProposal>> {
+    let conn = db.0.lock();
+    db::improve::list_proposals(&conn, status.as_deref()).map_err(|e| e.to_string())
+}
+
+/// Sweep for improvements across eligible artifacts. Long-running (one
+/// proposer LLM turn per eligible artifact) — runs on the blocking pool.
+#[tauri::command]
+pub async fn run_improvement_sweep(db: State<'_, DbState>) -> CmdResult<Vec<db::improve::ImproveProposal>> {
+    let db = std::sync::Arc::clone(&db.0);
+    tauri::async_runtime::spawn_blocking(move || crate::improve_engine::sweep(&db))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Run the regression gate for one proposal (champion vs candidate over the
+/// eval pack). Long-running — blocking pool.
+#[tauri::command]
+pub async fn evaluate_improvement_proposal(db: State<'_, DbState>, proposal_id: String) -> CmdResult<String> {
+    let db = std::sync::Arc::clone(&db.0);
+    tauri::async_runtime::spawn_blocking(move || crate::improve_engine::evaluate_proposal(&db, &proposal_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Manual-tier apply (§9.2): promote the candidate version + materialize the
+/// live copy. Refuses already-terminal proposals.
+#[tauri::command]
+pub async fn apply_improvement_proposal(db: State<'_, DbState>, proposal_id: String) -> CmdResult<()> {
+    let db = std::sync::Arc::clone(&db.0);
+    tauri::async_runtime::spawn_blocking(move || crate::improve_engine::apply_proposal(&db, &proposal_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn reject_improvement_proposal(db: State<'_, DbState>, proposal_id: String) -> CmdResult<()> {
+    let db = std::sync::Arc::clone(&db.0);
+    crate::improve_engine::reject_proposal(&db, &proposal_id)
+}
+
+#[tauri::command]
+pub fn list_improve_eval_cases(
+    db: State<'_, DbState>,
+    artifact_id: String,
+) -> CmdResult<Vec<db::improve::EvalCase>> {
+    let conn = db.0.lock();
+    db::improve::list_eval_cases(&conn, &artifact_id, false).map_err(|e| e.to_string())
+}

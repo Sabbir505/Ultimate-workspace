@@ -184,6 +184,16 @@ pub fn channel_version(conn: &Connection, artifact_id: &str, channel: &str) -> D
     .optional()
 }
 
+/// The stored body of one version.
+pub fn version_body(conn: &Connection, artifact_id: &str, version: i64) -> DbResult<Option<String>> {
+    conn.query_row(
+        "SELECT body FROM improve_versions WHERE artifact_id = ?1 AND version = ?2",
+        params![artifact_id, version],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
 // ---- run telemetry ----
 
 /// Open a run row for one execution of the artifact's active version.
@@ -358,6 +368,247 @@ pub fn latest_loop_session(conn: &Connection, chat_session_id: &str) -> DbResult
     .optional()
 }
 
+// ---- improvement proposals (P1, §6) ----
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImproveProposal {
+    pub id: String,
+    pub artifact_id: String,
+    pub base_version: i64,
+    pub candidate_version: i64,
+    pub change_summary: String,
+    pub root_causes_json: Option<String>,
+    pub expected_effect: Option<String>,
+    pub risk_notes: Option<String>,
+    pub status: String,
+    pub eval_run_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+fn map_proposal(row: &rusqlite::Row) -> rusqlite::Result<ImproveProposal> {
+    Ok(ImproveProposal {
+        id: row.get("id")?,
+        artifact_id: row.get("artifact_id")?,
+        base_version: row.get("base_version")?,
+        candidate_version: row.get("candidate_version")?,
+        change_summary: row.get("change_summary")?,
+        root_causes_json: row.get("root_causes_json")?,
+        expected_effect: row.get("expected_effect")?,
+        risk_notes: row.get("risk_notes")?,
+        status: row.get("status")?,
+        eval_run_id: row.get("eval_run_id")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+pub fn create_proposal(
+    conn: &Connection,
+    artifact_id: &str,
+    base_version: i64,
+    candidate_version: i64,
+    change_summary: &str,
+    root_causes_json: Option<&str>,
+    expected_effect: Option<&str>,
+    risk_notes: Option<&str>,
+) -> DbResult<ImproveProposal> {
+    let id = new_id();
+    let now = now_ts();
+    conn.execute(
+        "INSERT INTO improve_proposals (id, artifact_id, base_version, candidate_version, change_summary,
+                                        root_causes_json, expected_effect, risk_notes, status, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'open', ?9, ?9)",
+        params![id, artifact_id, base_version, candidate_version, change_summary,
+                root_causes_json, expected_effect, risk_notes, now],
+    )?;
+    get_proposal(conn, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+}
+
+pub fn get_proposal(conn: &Connection, id: &str) -> DbResult<Option<ImproveProposal>> {
+    conn.query_row(
+        "SELECT * FROM improve_proposals WHERE id = ?1",
+        params![id],
+        map_proposal,
+    )
+    .optional()
+}
+
+pub fn list_proposals(conn: &Connection, status: Option<&str>) -> DbResult<Vec<ImproveProposal>> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM improve_proposals
+          WHERE (?1 IS NULL OR status = ?1)
+          ORDER BY created_at DESC",
+    )?;
+    let rows = stmt.query_map(params![status], map_proposal)?;
+    rows.collect()
+}
+
+pub fn has_open_proposal(conn: &Connection, artifact_id: &str) -> DbResult<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM improve_proposals
+          WHERE artifact_id = ?1 AND status IN ('open', 'evaluating')",
+        params![artifact_id],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+pub fn set_proposal_status(conn: &Connection, id: &str, status: &str, eval_run_id: Option<&str>) -> DbResult<()> {
+    conn.execute(
+        "UPDATE improve_proposals SET status = ?2, eval_run_id = COALESCE(?3, eval_run_id), updated_at = ?4 WHERE id = ?1",
+        params![id, status, eval_run_id, now_ts()],
+    )?;
+    Ok(())
+}
+
+/// One evidence bundle row for the proposer: a finished bad run plus the user
+/// message that triggered it (harvested from chat_messages by session+time).
+#[derive(Debug, Clone)]
+pub struct RunEvidence {
+    pub run_id: String,
+    pub outcome: String,
+    pub error_code: Option<String>,
+    pub input_text: Option<String>,
+}
+
+pub fn bad_runs_since(conn: &Connection, artifact_id: &str, since: i64, limit: i64) -> DbResult<Vec<RunEvidence>> {
+    let mut stmt = conn.prepare(
+        "SELECT r.id, r.outcome, r.error_code,
+                (SELECT m.content FROM chat_messages m
+                  WHERE m.chat_session_id = r.chat_session_id AND m.role = 'user'
+                    AND m.created_at <= r.started_at
+                  ORDER BY m.created_at DESC, m.id DESC LIMIT 1)
+           FROM improve_runs r
+          WHERE r.artifact_id = ?1 AND r.finished_at IS NOT NULL
+            AND r.started_at >= ?2 AND r.outcome IN ('failed', 'corrected')
+          ORDER BY r.started_at DESC LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![artifact_id, since, limit], |r| {
+        Ok(RunEvidence {
+            run_id: r.get(0)?,
+            outcome: r.get(1)?,
+            error_code: r.get(2)?,
+            input_text: r.get(3)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Artifacts eligible for a sweep: >= `threshold` bad finished runs in the
+/// window, no proposal already open. (§6.1 throttle + dedupe.)
+pub fn sweep_candidates(conn: &Connection, since: i64, threshold: i64) -> DbResult<Vec<(ImproveArtifact, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.kind, a.ref_key, a.name, a.created_at, COUNT(r.id) AS bad
+           FROM improve_artifacts a
+           JOIN improve_runs r ON r.artifact_id = a.id
+          WHERE r.finished_at IS NOT NULL AND r.started_at >= ?1
+            AND r.outcome IN ('failed', 'corrected')
+          GROUP BY a.id
+         HAVING bad >= ?2
+          ORDER BY bad DESC",
+    )?;
+    let rows = stmt.query_map(params![since, threshold], |r| {
+        Ok((ImproveArtifact {
+            id: r.get(0)?,
+            kind: r.get(1)?,
+            ref_key: r.get(2)?,
+            name: r.get(3)?,
+            created_at: r.get(4)?,
+        }, r.get(5)?))
+    })?;
+    let all: Vec<_> = rows.collect::<DbResult<Vec<_>>>()?;
+    Ok(all.into_iter().filter(|(a, _)| !has_open_proposal(conn, &a.id).unwrap_or(true)).collect())
+}
+
+// ---- eval packs (P1, §7/§8) ----
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvalCase {
+    pub id: String,
+    pub artifact_id: String,
+    pub input_text: String,
+    pub expect_json: String,
+    pub source: String,
+    pub enabled: bool,
+    pub created_at: i64,
+}
+
+fn map_case(row: &rusqlite::Row) -> rusqlite::Result<EvalCase> {
+    Ok(EvalCase {
+        id: row.get("id")?,
+        artifact_id: row.get("artifact_id")?,
+        input_text: row.get("input_text")?,
+        expect_json: row.get("expect_json")?,
+        source: row.get("source")?,
+        enabled: row.get::<_, i64>("enabled")? != 0,
+        created_at: row.get("created_at")?,
+    })
+}
+
+pub fn add_eval_case(
+    conn: &Connection,
+    artifact_id: &str,
+    input_text: &str,
+    expect_json: &str,
+    source: &str,
+) -> DbResult<EvalCase> {
+    let id = new_id();
+    conn.execute(
+        "INSERT INTO improve_eval_cases (id, artifact_id, input_text, expect_json, source, enabled, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)",
+        params![id, artifact_id, input_text, expect_json, source, now_ts()],
+    )?;
+    Ok(EvalCase {
+        id,
+        artifact_id: artifact_id.to_string(),
+        input_text: input_text.to_string(),
+        expect_json: expect_json.to_string(),
+        source: source.to_string(),
+        enabled: true,
+        created_at: now_ts(),
+    })
+}
+
+pub fn list_eval_cases(conn: &Connection, artifact_id: &str, enabled_only: bool) -> DbResult<Vec<EvalCase>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, artifact_id, input_text, expect_json, source, enabled, created_at
+           FROM improve_eval_cases
+          WHERE artifact_id = ?1 AND (?2 = 0 OR enabled = 1)
+          ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![artifact_id, enabled_only as i64], map_case)?;
+    rows.collect()
+}
+
+/// Harvest corrected/failed runs into eval cases (dedup by input text).
+/// Expectations are judge-only: the deterministic layer has nothing to pin
+/// against a free-form user request, so the rubric carries the weight.
+pub fn harvest_eval_cases(conn: &Connection, artifact_id: &str, since: i64, max: i64) -> DbResult<usize> {
+    let evidence = bad_runs_since(conn, artifact_id, since, max)?;
+    let mut added = 0;
+    for e in evidence {
+        let Some(input) = e.input_text.as_deref() else { continue };
+        if input.trim().is_empty() { continue; }
+        // Dedup: same input already covered by an existing case.
+        let dup: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM improve_eval_cases WHERE artifact_id = ?1 AND input_text = ?2",
+            params![artifact_id, input],
+            |r| r.get(0),
+        )?;
+        if dup > 0 { continue; }
+        add_eval_case(
+            conn, artifact_id, input,
+            r#"{"judge": true, "rubric": "Addresses the user's request correctly and completely."}"#,
+            "harvested",
+        )?;
+        added += 1;
+    }
+    Ok(added)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,5 +743,77 @@ mod tests {
         let versions: i64 = conn.query_row("SELECT COUNT(*) FROM improve_versions", [], |r| r.get(0)).unwrap();
         let runs: i64 = conn.query_row("SELECT COUNT(*) FROM improve_runs", [], |r| r.get(0)).unwrap();
         assert_eq!((versions, runs), (0, 0));
+    }
+
+    #[test]
+    fn proposal_lifecycle_and_open_dedupe() {
+        let conn = super::super::mem();
+        let a = ensure_artifact(&conn, "skill", "docx", "Docx", "v1").unwrap();
+        let v2 = record_version(&conn, &a.id, 1, "v2", None, "auto_proposal").unwrap().unwrap();
+        let p = create_proposal(&conn, &a.id, 1, v2, "tighten instructions", None, Some("fewer failures"), None).unwrap();
+        assert_eq!(p.status, "open");
+        assert!(has_open_proposal(&conn, &a.id).unwrap());
+        // Gate progression: open → evaluating → passed.
+        set_proposal_status(&conn, &p.id, "evaluating", None).unwrap();
+        set_proposal_status(&conn, &p.id, "passed", Some("er1")).unwrap();
+        let got = get_proposal(&conn, &p.id).unwrap().unwrap();
+        assert_eq!(got.status, "passed");
+        assert_eq!(got.eval_run_id.as_deref(), Some("er1"));
+        assert!(!has_open_proposal(&conn, &a.id).unwrap());
+        assert_eq!(list_proposals(&conn, Some("passed")).unwrap().len(), 1);
+        assert_eq!(list_proposals(&conn, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sweep_candidates_respects_threshold_and_open_proposals() {
+        let conn = super::super::mem();
+        let a = ensure_artifact(&conn, "skill", "hot", "Hot", "v1").unwrap();
+        let b = ensure_artifact(&conn, "skill", "quiet", "Quiet", "v1").unwrap();
+        for s in ["s1", "s2", "s3"] {
+            start_run(&conn, &a.id, Some(s)).unwrap();
+            finish_session_runs(&conn, s, "failed", None).unwrap();
+        }
+        // `b` has runs but all applied — not eligible.
+        start_run(&conn, &b.id, Some("s4")).unwrap();
+        finish_session_runs(&conn, "s4", "applied", None).unwrap();
+
+        let since = 0;
+        let cands = sweep_candidates(&conn, since, 3).unwrap();
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].0.id, a.id);
+        assert_eq!(cands[0].1, 3);
+        // Below threshold: nothing eligible.
+        assert!(sweep_candidates(&conn, since, 4).unwrap().is_empty());
+        // Once a proposal is open, the artifact is deduped out.
+        let v2 = record_version(&conn, &a.id, 1, "v2", None, "auto_proposal").unwrap().unwrap();
+        create_proposal(&conn, &a.id, 1, v2, "fix", None, None, None).unwrap();
+        assert!(sweep_candidates(&conn, since, 3).unwrap().is_empty());
+    }
+
+    #[test]
+    fn eval_cases_round_trip_and_harvest_dedupes() {
+        let conn = super::super::mem();
+        let a = ensure_artifact(&conn, "skill", "docx", "Docx", "v1").unwrap();
+        add_eval_case(&conn, &a.id, "write a report", r#"{"mustContain": ["done"]}"#, "manual").unwrap();
+        // Two bad runs with the same input → one harvested case only.
+        for _ in 0..2 {
+            // Real chat session: improve_runs.chat_session_id joins to
+            // chat_messages for input attribution.
+            let cs = super::super::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None).unwrap();
+            start_run(&conn, &a.id, Some(&cs.id)).unwrap();
+            // Seed the triggering user message so the harvest can attribute it.
+            super::super::add_chat_message(&conn, &cs.id, "user", "make a doc", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+            finish_session_runs(&conn, &cs.id, "corrected", None).unwrap();
+        }
+        let added = harvest_eval_cases(&conn, &a.id, 0, 10).unwrap();
+        assert_eq!(added, 1, "identical inputs dedupe");
+        let cases = list_eval_cases(&conn, &a.id, true).unwrap();
+        assert_eq!(cases.len(), 2); // manual + harvested
+        assert_eq!(cases[0].source, "manual");
+        assert_eq!(cases[1].source, "harvested");
+        // Harvest again → still deduped.
+        assert_eq!(harvest_eval_cases(&conn, &a.id, 0, 10).unwrap(), 0);
+        // Enabled filter.
+        assert_eq!(list_eval_cases(&conn, &a.id, false).unwrap().len(), 2);
     }
 }

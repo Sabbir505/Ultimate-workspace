@@ -26,6 +26,7 @@ mod git_watcher;
 mod harness_adapters;
 mod harness_bundle;
 mod harness_config;
+mod improve_engine;
 mod installed_skills;
 pub mod memory;
 mod mcp_gallery;
@@ -523,6 +524,12 @@ pub fn run() {
             commands::improve_cmds::loop_session_finish,
             commands::improve_cmds::get_loop_session,
             commands::improve_cmds::latest_loop_session,
+            commands::improve_cmds::list_improvement_proposals,
+            commands::improve_cmds::run_improvement_sweep,
+            commands::improve_cmds::evaluate_improvement_proposal,
+            commands::improve_cmds::apply_improvement_proposal,
+            commands::improve_cmds::reject_improvement_proposal,
+            commands::improve_cmds::list_improve_eval_cases,
             commands::speech::transcribe_audio,
             commands::stt::stt_status,
             commands::stt::stt_start,

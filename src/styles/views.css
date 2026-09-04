@@ -996,3 +996,46 @@
   font-size: 11px;
   color: var(--text-dim);
 }
+
+/* --- Self-improving artifacts panel (SELF_IMPROVING_ARTIFACTS.md) --- */
+.improve-proposal {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  padding: 10px 12px;
+  margin: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.improve-proposal-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.improve-status {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.improve-status-passed { color: #3fb950; border-color: #3fb950; }
+.improve-status-failed_eval { color: var(--danger, #f85149); border-color: var(--danger, #f85149); }
+.improve-versions { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--text-dim); }
+.improve-summary { font-size: 12px; color: var(--text); }
+.improve-meta { font-size: 11px; color: var(--text-dim); }
+.improve-actions { display: flex; gap: 6px; }
+.improve-artifact { margin: 4px 0; }
+.improve-versions-list {
+  margin: 4px 0 8px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.improve-version-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}

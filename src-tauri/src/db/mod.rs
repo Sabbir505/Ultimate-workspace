@@ -729,6 +729,84 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_loop_sessions_chat ON loop_sessions(chat_session_id, created_at DESC);
 
+        -- P1: improvement proposals (§6) + eval packs (§7/§8).
+        CREATE TABLE IF NOT EXISTS improve_proposals (
+          id TEXT PRIMARY KEY,
+          artifact_id TEXT NOT NULL REFERENCES improve_artifacts(id) ON DELETE CASCADE,
+          base_version INTEGER NOT NULL,
+          candidate_version INTEGER NOT NULL,
+          change_summary TEXT NOT NULL,
+          root_causes_json TEXT,
+          expected_effect TEXT,
+          risk_notes TEXT,
+          status TEXT NOT NULL DEFAULT 'open', -- open|evaluating|passed|failed_eval|applied|rejected|stale
+          eval_run_id TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_improve_proposals_artifact ON improve_proposals(artifact_id, status);
+
+        -- Eval pack: golden inputs + expectations. `harvested` cases come from
+        -- real corrected/failed runs; they are the memory of past failures.
+        CREATE TABLE IF NOT EXISTS improve_eval_cases (
+          id TEXT PRIMARY KEY,
+          artifact_id TEXT NOT NULL REFERENCES improve_artifacts(id) ON DELETE CASCADE,
+          input_text TEXT NOT NULL,
+          expect_json TEXT NOT NULL,          -- JSON: mustContain/mustNotContain/regex arrays + judge flag
+          source TEXT NOT NULL DEFAULT 'manual',
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_improve_eval_cases_artifact ON improve_eval_cases(artifact_id, enabled);
+
+        CREATE TABLE IF NOT EXISTS improve_eval_runs (
+          id TEXT PRIMARY KEY,
+          artifact_id TEXT NOT NULL REFERENCES improve_artifacts(id) ON DELETE CASCADE,
+          proposal_id TEXT REFERENCES improve_proposals(id) ON DELETE SET NULL,
+          started_at INTEGER NOT NULL,
+          finished_at INTEGER,
+          verdict TEXT,                       -- 'passed'|'failed'
+          report_json TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS improve_eval_results (
+          id TEXT PRIMARY KEY,
+          eval_run_id TEXT NOT NULL REFERENCES improve_eval_runs(id) ON DELETE CASCADE,
+          eval_case_id TEXT NOT NULL,
+          champion_ok INTEGER,
+          candidate_ok INTEGER,
+          champion_score REAL,
+          candidate_score REAL,
+          detail TEXT
+        );
+
+        -- P2: canary (shadow) windows + audit trail.
+        -- The shadow channel points at a candidate version that the injection
+        -- path serves for qualifying runs until the window resolves.
+        CREATE TABLE IF NOT EXISTS improve_canaries (
+          id TEXT PRIMARY KEY,
+          artifact_id TEXT NOT NULL REFERENCES improve_artifacts(id) ON DELETE CASCADE,
+          proposal_id TEXT NOT NULL REFERENCES improve_proposals(id) ON DELETE CASCADE,
+          base_version INTEGER NOT NULL,
+          shadow_version INTEGER NOT NULL,
+          min_runs INTEGER NOT NULL DEFAULT 10,
+          max_age_secs INTEGER NOT NULL DEFAULT 172800,
+          started_at INTEGER NOT NULL,
+          resolved_at INTEGER,
+          verdict TEXT                     -- 'promoted'|'rolled_back'; NULL while open
+        );
+
+        -- Audit log (§9.3): every engine transition is replayable from here.
+        CREATE TABLE IF NOT EXISTS improve_events (
+          id TEXT PRIMARY KEY,
+          artifact_id TEXT REFERENCES improve_artifacts(id) ON DELETE CASCADE,
+          proposal_id TEXT,
+          event TEXT NOT NULL,             -- swept|evaluated|applied|rejected|promoted|rolled_back|tier_changed
+          detail_json TEXT,
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_improve_events_artifact ON improve_events(artifact_id, created_at DESC);
+
         -- Full-text search over chat messages (command palette Chats
         -- section). External-content table: chat_messages stays the source of
         -- truth and the triggers below keep the index in sync on

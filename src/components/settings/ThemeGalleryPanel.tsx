@@ -13,6 +13,7 @@ import {
 } from "../../lib/themes";
 import { toastError, toastSuccess } from "../../lib/ipc";
 import { Plus, Download, Trash2, FileCode, Copy } from "lucide-react";
+import { THEME_PRESETS } from "../../lib/themePresets";
 
 const JSON_TEMPLATE = `{
   "name": "My Theme",
@@ -137,6 +138,39 @@ export function ThemeGalleryPanel() {
         </div>
       )}
 
+      {/* Built-in presets — one click applies. Applying copies the preset into
+          the gallery (importCustomTheme dedupes by id), so it persists like an
+          imported theme and shows as active in the grid below. */}
+      <div className="theme-presets-title">Built-in presets</div>
+      <div className="theme-gallery-grid" style={{ marginBottom: 20 }}>
+        {THEME_PRESETS.map((p) => {
+          const active = customThemeId === p.id;
+          const sw = themeSwatchColors(p);
+          return (
+            <div
+              key={p.id}
+              className={`theme-card${active ? " active" : ""}`}
+              onClick={() => {
+                importCustomTheme(p);
+                setCustomTheme(active ? null : p.id);
+              }}
+              title={active ? "Click to deselect" : "Apply this theme"}
+            >
+              <div className="theme-card-swatches">
+                <span style={{ background: sw.bg }} title="bg-tint" />
+                <span style={{ background: sw.surface }} title="surface" />
+                <span style={{ background: sw.text }} title="text" />
+                <span style={{ background: sw.accent }} title="accent" />
+              </div>
+              <div className="theme-card-name">
+                {p.name}
+                {p.base && <span className="theme-card-base">{p.base}</span>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
       {/* Import dropzone card */}
       <div className="theme-gallery-grid">
         <label className="theme-import-card" htmlFor="theme-import">
@@ -157,7 +191,10 @@ export function ThemeGalleryPanel() {
           </div>
         </label>
 
-        {customThemes.map((t) => {
+        {/* Preset-derived copies render in the Built-in grid above. */}
+        {customThemes
+          .filter((t) => !t.id.startsWith("preset:"))
+          .map((t) => {
           const active = t.id === customThemeId;
           const sw = themeSwatchColors(t);
           return (

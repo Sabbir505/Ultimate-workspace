@@ -25,6 +25,7 @@ import { ImprovementsPanel } from "./ImprovementsPanel";
 import { SttPanel } from "./SttPanel";
 import { PermissionRulesPanel } from "./PermissionRulesPanel";
 import { ThemeGalleryPanel } from "./ThemeGalleryPanel";
+import { FontSettingsPanel } from "./FontSettingsPanel";
 import { AcpAgentsPanel } from "./AcpAgentsPanel";
 import { McpGalleryPanel } from "./McpGalleryPanel";
 import { RemotePanel } from "./RemotePanel";
@@ -258,6 +259,9 @@ function AppearancePanel() {
 
       {/* Custom theme import/export + gallery (roadmap #19). */}
       <ThemeGalleryPanel />
+
+      {/* UI + mono font pickers. */}
+      <FontSettingsPanel />
     </>
   );
 }

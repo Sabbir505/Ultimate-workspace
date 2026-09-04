@@ -6,6 +6,7 @@ import { getSetting, setSetting } from "../lib/ipc";
 import { DEFAULT_KEYBINDINGS, type KeybindingAction, type KeybindingMap } from "../lib/keybindings";
 import { DEFAULT_BROWSER_URL } from "../lib/browserHistory";
 import { parseThemeList, type CustomTheme } from "../lib/themes";
+import { DEFAULT_MONO_FONT, DEFAULT_UI_FONT } from "../lib/fonts";
 
 export type ThemeSetting = "light" | "dark" | "system";
 
@@ -68,6 +69,11 @@ const K_APP_ZOOM = "app.zoom";
 export const DEFAULT_APP_ZOOM = 1;
 export const APP_ZOOM_MIN = 0.6;
 export const APP_ZOOM_MAX = 2;
+
+// Font families for the UI chrome (--font-ui) and code/terminals
+// (--font-mono). Values are ids resolved to CSS stacks via lib/fonts.ts.
+const K_UI_FONT = "fonts.ui";
+const K_MONO_FONT = "fonts.mono";
 
 // Per-provider curated model lists: provider id -> ordered entries with an
 // optional per-model context-window pin (0 = auto). A non-empty list IS the
@@ -159,6 +165,10 @@ interface SettingsState {
   /** App-wide UI zoom multiplier (0.6–2). Applied as CSS zoom on the root
    *  element so every surface scales — driven by the Ctrl +/-/0 shortcuts. */
   appZoom: number;
+  /** UI font family id (lib/fonts.ts UI_FONT_OPTIONS). */
+  uiFont: string;
+  /** Mono font family id (lib/fonts.ts MONO_FONT_OPTIONS) — code + terminals. */
+  monoFont: string;
 
   load: () => Promise<void>;
   setTheme: (theme: ThemeSetting) => void;
@@ -194,6 +204,10 @@ interface SettingsState {
   setChatZoom: (zoom: number) => void;
   /** Set the app-wide UI zoom (clamped to APP_ZOOM_MIN–MAX) and persist it. */
   setAppZoom: (zoom: number) => void;
+  /** Set the UI font family id and persist it. */
+  setUiFont: (id: string) => void;
+  /** Set the mono font family id and persist it. */
+  setMonoFont: (id: string) => void;
 }
 
 function persistKeybindings(map: KeybindingMap) {
@@ -229,9 +243,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   localCompactionRebuildFromRaw: true,
   chatZoom: DEFAULT_CHAT_ZOOM,
   appZoom: DEFAULT_APP_ZOOM,
+  uiFont: DEFAULT_UI_FONT,
+  monoFont: DEFAULT_MONO_FONT,
 
   load: async () => {
-    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault, checkpointsEnabled, cloudEnabled, cloudThreshold, cloudPin, summarizer, rebuildRaw, cloudContextLimit, chatZoomRaw, appZoomRaw] = await Promise.all([
+    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault, checkpointsEnabled, cloudEnabled, cloudThreshold, cloudPin, summarizer, rebuildRaw, cloudContextLimit, chatZoomRaw, appZoomRaw, uiFontRaw, monoFontRaw] = await Promise.all([
       getSetting(K_THEME),
       getSetting(K_DND),
       getSetting(K_NOTIFY_SOUND),
@@ -253,6 +269,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       getSetting(K_CLOUD_CONTEXT_LIMIT),
       getSetting(K_CHAT_ZOOM),
       getSetting(K_APP_ZOOM),
+      getSetting(K_UI_FONT),
+      getSetting(K_MONO_FONT),
     ]);
     // Per-provider curated model lists: the index names the providers that
     // have one; each list is then read from its own key. A missing or
@@ -375,6 +393,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         const v = Number(appZoomRaw);
         if (Number.isFinite(v) && v >= APP_ZOOM_MIN && v <= APP_ZOOM_MAX) next.appZoom = v;
       }
+      if (uiFontRaw) next.uiFont = uiFontRaw;
+      if (monoFontRaw) next.monoFont = monoFontRaw;
       return next;
     });
   },
@@ -569,5 +589,15 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     const clamped = Math.max(APP_ZOOM_MIN, Math.min(APP_ZOOM_MAX, zoom));
     set({ appZoom: clamped });
     void setSetting(K_APP_ZOOM, String(clamped));
+  },
+
+  setUiFont: (id) => {
+    set({ uiFont: id });
+    void setSetting(K_UI_FONT, id);
+  },
+
+  setMonoFont: (id) => {
+    set({ monoFont: id });
+    void setSetting(K_MONO_FONT, id);
   },
 }));

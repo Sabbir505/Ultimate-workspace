@@ -54,6 +54,7 @@ import { useTheme } from "./hooks/useTheme";
 import { confirmReplaceLru } from "./lib/sessionLauncher";
 import { initWorkspacePersistence } from "./lib/workspaceRestore";
 import { initAppFocusTracking } from "./lib/appFocus";
+import { monoFontStack, uiFontStack } from "./lib/fonts";
 import { useProjectsStore } from "./state/projects";
 import { useSettingsStore } from "./state/settings";
 import { useSkillsStore } from "./state/skills";
@@ -248,6 +249,16 @@ export default function App() {
   useEffect(() => {
     document.documentElement.style.setProperty("zoom", String(appZoom));
   }, [appZoom]);
+
+  // Font family picks (Settings → Appearance): publish the resolved stacks as
+  // the font tokens so the whole chrome + code/terminals follow. Inline vars
+  // shadow tokens.css the same way custom theme colors do.
+  const uiFont = useSettingsStore((s) => s.uiFont);
+  const monoFont = useSettingsStore((s) => s.monoFont);
+  useEffect(() => {
+    document.documentElement.style.setProperty("--font-ui", uiFontStack(uiFont));
+    document.documentElement.style.setProperty("--font-mono", monoFontStack(monoFont));
+  }, [uiFont, monoFont]);
 
   // Sync modal states into the UI store so native webviews know to hide.
   // Each modal registers its OWN id (M22) — closing one must not re-expose

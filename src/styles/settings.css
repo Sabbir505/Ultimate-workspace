@@ -1195,6 +1195,57 @@
   }
 }
 
+/* Built-in presets section label (above the preset cards) */
+.theme-presets-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin: 4px 0 10px;
+}
+
+/* Font picker (Settings -> Appearance): option chips preview themselves in
+   their own family; active chip carries the accent. */
+.font-picker-group {
+  margin-bottom: 20px;
+}
+.font-picker-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 2px;
+}
+.font-picker-desc {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+.font-option-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.font-option {
+  padding: 8px 14px;
+  font-size: 13px;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease), color 0.15s var(--ease);
+}
+.font-option:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.font-option.active {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
 /* Import dropzone card */
 .theme-import-card {
   position: relative;

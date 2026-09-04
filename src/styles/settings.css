@@ -2262,13 +2262,319 @@
   justify-content: space-between;
   gap: 16px;
 }
-.memory-panel .toggle-row {
+/* The enable toggle — a real switch, not a bare checkbox. */
+.memory-toggle {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   white-space: nowrap;
   font-size: 13px;
   cursor: pointer;
+  user-select: none;
+}
+.memory-toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.memory-toggle-track {
+  width: 34px;
+  height: 19px;
+  border-radius: 999px;
+  background: var(--border, rgba(128, 128, 128, 0.4));
+  position: relative;
+  transition: background 0.18s var(--ease, ease);
+  flex-shrink: 0;
+}
+.memory-toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: transform 0.18s var(--ease, ease);
+}
+.memory-toggle input:checked + .memory-toggle-track {
+  background: var(--accent, #4ec9b0);
+}
+.memory-toggle input:checked + .memory-toggle-track .memory-toggle-knob {
+  transform: translateX(15px);
+}
+.memory-toggle input:focus-visible + .memory-toggle-track {
+  outline: 2px solid var(--accent, #4ec9b0);
+  outline-offset: 2px;
+}
+.memory-toggle input:disabled + .memory-toggle-track {
+  opacity: 0.5;
+}
+/* Raw entries / audit log tabs. */
+.memory-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  margin: 14px 0 10px;
+}
+.memory-tab {
+  border: none;
+  background: transparent;
+  color: var(--text-dim, #888);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 12px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.15s var(--ease, ease), border-color 0.15s var(--ease, ease);
+}
+.memory-tab:hover {
+  color: var(--text, #eee);
+}
+.memory-tab.on {
+  color: var(--text, #eee);
+  border-bottom-color: var(--accent, #4ec9b0);
+}
+.memory-panel .memory-raw p {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+}
+.memory-panel .memory-audit p {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+}
+/* ── The memory document: the ONE injected field, shown/edited verbatim ── */
+.memory-doc {
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  border-radius: 10px;
+  padding: 12px;
+  margin-top: 12px;
+  background: var(--bg-elev, rgba(128, 128, 128, 0.06));
+}
+.memory-doc-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.memory-doc-head h3 {
+  margin: 0;
+  font-size: 13.5px;
+}
+.memory-doc-budget {
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim, #888);
+}
+.memory-doc-budget.over {
+  color: var(--danger, #d33);
+  font-weight: 600;
+}
+.memory-doc-note {
+  font-size: 12px;
+  margin: 6px 0 8px;
+}
+.memory-doc-editor {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 180px;
+  resize: vertical;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.memory-doc-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.memory-doc-actions button {
+  font-size: 12px;
+  padding: 4px 12px;
+}
+.memory-doc-flash {
+  font-size: 12px;
+  color: var(--state-working, #4ec9b0);
+}
+.memory-doc-error {
+  font-size: 12px;
+  color: var(--danger, #d33);
+}
+.memory-purge-confirm {
+  width: 100%;
+  box-sizing: border-box;
+  font-variant-numeric: tabular-nums;
+}
+.memory-doc-history {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  padding-top: 10px;
+}
+.memory-doc-version {
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--bg-elev, rgba(128, 128, 128, 0.06));
+}
+.memory-doc-version-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  margin-bottom: 4px;
+}
+.memory-doc-version-text {
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  max-height: 96px;
+  overflow-y: auto;
+  margin-bottom: 6px;
+}
+.memory-doc-version button {
+  font-size: 11.5px;
+  padding: 2px 10px;
+}
+.memory-extract-model {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+.memory-extract-model label {
+  font-weight: 600;
+}
+.memory-extract-model input {
+  flex: 0 1 260px;
+  min-width: 160px;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+}
+.memory-extract-model select {
+  min-width: 170px;
+  font-size: 12px;
+}
+.memory-extract-model button {
+  font-size: 12px;
+  padding: 3px 10px;
+}
+.memory-extract-model-hint {
+  flex-basis: 100%;
+  font-size: 11.5px;
+}
+.memory-audit {
+  margin-top: 4px;
+  font-size: 12.5px;
+}
+.memory-ops-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 380px;
+  overflow-y: auto;
+}
+/* One audit row: a colored op badge on the left, the decision on the right. */
+.memory-op {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.18));
+  border-left-width: 3px;
+  border-radius: 8px;
+  padding: 7px 10px;
+  background: var(--bg-elev, rgba(128, 128, 128, 0.06));
+}
+.memory-op-badge {
+  flex-shrink: 0;
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 5px;
+  margin-top: 1px;
+  /* Default: neutral. */
+  color: var(--text-dim, #999);
+  background: color-mix(in srgb, var(--text-dim, #999) 14%, transparent);
+}
+/* Write decisions that ADDED knowledge. */
+.memory-op.op-add .memory-op-badge {
+  color: var(--state-working, #4ec9b0);
+  background: color-mix(in srgb, var(--state-working, #4ec9b0) 14%, transparent);
+}
+/* Merges / updates: accent cyan. */
+.memory-op.op-update .memory-op-badge,
+.memory-op.op-merge .memory-op-badge {
+  color: var(--accent, #88c0d0);
+  background: color-mix(in srgb, var(--accent, #88c0d0) 14%, transparent);
+}
+/* Removals: danger red. */
+.memory-op.op-delete .memory-op-badge,
+.memory-op.op-forget .memory-op-badge,
+.memory-op.op-purge .memory-op-badge {
+  color: var(--danger, #d33);
+  background: color-mix(in srgb, var(--danger, #d33) 12%, transparent);
+}
+/* Document edits + resets: warm gold. */
+.memory-op.op-doc_edit .memory-op-badge,
+.memory-op.op-doc_reset .memory-op-badge,
+.memory-op.op-doc_invalidate .memory-op-badge {
+  color: var(--state-waiting, #dcdcaa);
+  background: color-mix(in srgb, var(--state-waiting, #dcdcaa) 14%, transparent);
+}
+/* NOOP / internal housekeeping: extra dim. */
+.memory-op.op-noop {
+  opacity: 0.6;
+}
+.memory-op-body {
+  flex: 1;
+  min-width: 0;
+}
+.memory-op-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+}
+.memory-op-actor {
+  font-weight: 600;
+  color: var(--text, #eee);
+}
+.memory-op-targets {
+  font-variant-numeric: tabular-nums;
+}
+.memory-op-candidate {
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
+  margin-top: 2px;
+}
+.memory-op-note {
+  font-size: 11.5px;
+  margin-top: 2px;
+  color: var(--text-dim, #888);
+}
+.memory-raw {
+  margin-top: 4px;
+}
+.memory-raw p {
+  margin: 0 0 4px;
+  font-size: 12px;
 }
 .memory-toolbar {
   display: flex;

@@ -646,9 +646,9 @@ const PLAN_MODE_SEGMENT: &str = "## Plan mode (active)\n\
 /// tools are on), the attach-on-demand manifest for connectors / MCP servers
 /// (only when tools are on), the research-mode scaffolding (only on
 /// research-shaped turns with tools on), the plan-mode scaffolding (only while
-/// plan mode is active), the Tier-1 persistent-memory profile block (only when
-/// the memory store has profile-eligible facts — MEMORY_DESIGN_ARCHITECTURE.md
-/// §11.2, pre-rendered by the caller since it needs the DB), the user's custom
+/// plan mode is active), the persistent-memory document block (only when the
+/// memory store has content — MEMORY_DESIGN_ARCHITECTURE.md §11 as amended,
+/// pre-rendered by the caller since it needs the DB), the user's custom
 /// system prompt, and any invoked skills (the caller pre-filters to skills
 /// whose `/command` appears in the message). Returns `None` when nothing
 /// applies.

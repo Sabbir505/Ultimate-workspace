@@ -2991,6 +2991,47 @@ export interface MemoryRecordView {
 export interface MemoryStatusView {
   enabled: boolean;
   activeCount: number;
+  /** The EFFECTIVE memory document — the stored (LLM-merged or user-edited)
+   * text, or a deterministic render from the records. Exactly what gets
+   * injected as one budgeted block each turn. Null = empty store. */
+  document: string | null;
+  /** Whether a hand-merged/edited document is stored (vs the auto render). */
+  documentStored: boolean;
+  /** Unix seconds the stored document was last written; null = auto. */
+  documentUpdatedAt: number | null;
+  /** Injection budget in tokens (enforced in Rust, ~4 chars/token). */
+  documentBudget: number;
+  /** Cheap model the extraction/judge/merge pipeline uses; "" = chat model. */
+  extractModel: string;
+}
+
+/** One stored snapshot of the memory document (History + Restore). */
+export interface MemoryDocVersionView {
+  id: number;
+  /** "merge" (LLM) or "user" (panel save). */
+  source: string;
+  text: string;
+  createdAt: number;
+}
+
+/** One write-decision row from the memory audit log. */
+export interface MemoryOpRowView {
+  id: number;
+  ts: number;
+  actor: string;
+  sessionId: string | null;
+  candidate: string;
+  operation: string;
+  targetIds: string[];
+  rationale: string;
+}
+
+/** Emitted as `memory:updated` after the document merge applies changes. */
+export interface MemoryUpdatedPayload {
+  chatSessionId: string | null;
+  /** Human summary, e.g. "1 added, 2 updated". */
+  summary: string;
+  trimmed: boolean;
 }
 
 export const memoryList = (includeInactive = true) =>
@@ -2998,6 +3039,26 @@ export const memoryList = (includeInactive = true) =>
 
 export const memoryStatus = () =>
   safeInvoke<MemoryStatusView | null>("memory_status");
+
+/** Replace the memory document from the UI. Empty text resets to the
+ * auto-generated document. Errors when over the injection budget. */
+export const memorySetDocument = (text: string) =>
+  safeInvoke<null>("memory_set_document", { text });
+
+/** Bounded version history of the memory document (newest first). */
+export const memoryDocumentHistory = (limit = 20) =>
+  safeInvoke<MemoryDocVersionView[] | null>("memory_document_history", { limit });
+
+/** Recent write-decision audit rows (judge ops, merges, user edits). */
+export const memoryRecentOps = (limit = 30) =>
+  safeInvoke<MemoryOpRowView[] | null>("memory_recent_ops", { limit });
+
+/** Set the cheap model for extraction/judge/merge. Empty = chat model. */
+export const memorySetExtractModel = (model: string) =>
+  safeInvoke<null>("memory_set_extract_model", { model });
+
+export const listenMemoryUpdated = (handler: (payload: MemoryUpdatedPayload) => void) =>
+  safeListen<MemoryUpdatedPayload>("memory:updated", handler);
 
 export const memorySetEnabled = (enabled: boolean) =>
   safeInvoke<null>("memory_set_enabled", { enabled });

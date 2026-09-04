@@ -1695,16 +1695,25 @@ pub async fn send_chat_message(
                 }
             }
         }
-        // Tier-1 memory profile (MEMORY_DESIGN_ARCHITECTURE.md §11.2):
-        // pre-rendered here because the block needs the DB. Empty store or
-        // feature-off → None → the prompt part is omitted byte-neutral.
+        // Memory injection (MEMORY_DESIGN_ARCHITECTURE.md §11, amended):
+        // ONE human-readable document — the stored LLM-merged/user-edited
+        // text, or a deterministic render from the records — budgeted at
+        // 2200 tokens in render.rs. Empty store or feature-off → None → the
+        // prompt part is omitted byte-neutral.
         let project_id = db::get_chat_session(&conn, &chat_session_id)
             .ok()
             .flatten()
             .and_then(|s| s.project_id);
         let memory_profile = if crate::memory::memory_enabled(&conn) {
             match db::active_memories_for_scope(&conn, "default", project_id.as_deref()) {
-                Ok(mems) => crate::memory::render::render_profile_block(&mems, crate::db::now_ts()),
+                Ok(mems) => {
+                    let doc = crate::memory::document::stored_document(&conn);
+                    crate::memory::render::render_memory_document(
+                        doc.as_deref(),
+                        &mems,
+                        crate::db::now_ts(),
+                    )
+                }
                 Err(_) => None,
             }
         } else {
@@ -1728,14 +1737,14 @@ pub async fn send_chat_message(
         );
         (built, audit)
     };
-    // [memory-audit]: Tier-1 profile size, alongside the prompt-audit line
-    // below (design §11.5 budgets are enforced in render::fit_budget).
+    // [memory-audit]: injected memory document size, alongside the
+    // prompt-audit line below (the budget is enforced in render.rs).
     {
         let profile_chars = system
             .as_ref()
             .and_then(|s| s.find("## About this user").map(|i| s.len() - i))
             .unwrap_or(0);
-        eprintln!("[memory-audit] tier1_profile_chars={profile_chars}");
+        eprintln!("[memory-audit] document_chars={profile_chars}");
     }
     // [prompt-audit]: attribute the system prompt's size on every send. The
     // catalog is re-derived (cheap dir scan) because build_system_prompt fuses

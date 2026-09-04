@@ -566,6 +566,16 @@ function SearchIcon() {
   );
 }
 
+/** Memory tool steps (save/recall/forget): a sparkles glyph — the "stored
+ *  knowledge" mark. Same stroke style as the other inline icons. */
+function MemoryIcon() {
+  return (
+    <svg {...iconProps} aria-hidden="true">
+      <path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3L12 3z" />
+    </svg>
+  );
+}
+
 function GlobeIcon() {
   return (
     <svg {...iconProps} aria-hidden="true">
@@ -606,6 +616,8 @@ function ToolIcon({ kind }: { kind?: string }) {
       return <FileIcon />;
     case "code":
       return <TerminalIcon />;
+    case "memory":
+      return <MemoryIcon />;
     default:
       return <WrenchIcon />;
   }

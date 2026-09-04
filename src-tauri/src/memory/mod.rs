@@ -7,7 +7,9 @@
 //! - [`consolidate`] — the LLM judge: ADD / UPDATE / DELETE / NOOP (§10)
 //! - [`reflect`] — reflection: threshold, prompts, apply (§8.4)
 //! - [`retrieve`] — hybrid search over the store (§11.1)
-//! - [`render`]  — Tier-1 profile block + Tier-2 context section (§11.2–11.3)
+//! - [`document`] — the ONE human-readable memory document + its rewrite pass
+//! - [`render`]  — the single budgeted injection block rendered from the
+//!   document (§11, amended — replaces the old two-tier split)
 //! - [`worker`]  — background extraction + reflection orchestration (§7.1)
 //! - [`tools_impl`] — `memory_save` / `memory_recall` / `memory_forget` (§12)
 //! - [`eval`]    — offline eval harness: budget, contradiction, retrieval,
@@ -19,6 +21,7 @@
 //! as fenced data, never instructions (P9).
 
 pub mod consolidate;
+pub mod document;
 pub mod extract;
 pub mod model;
 pub mod reflect;
@@ -55,10 +58,12 @@ pub fn memory_enabled_conn(
 #[cfg(test)]
 mod pipeline_tests {
     //! End-to-end store pipeline (everything except the live LLM calls):
-    //! session 1 writes through the judge; session 2 retrieves and renders.
+    //! session 1 writes through the judge; session 2 retrieves and the
+    //! single memory document renders for injection.
     use crate::memory::consolidate::{apply_judge_op, parse_judge_op, JudgeInput};
+    use crate::memory::document;
     use crate::memory::model::{MemoryCandidate, MemoryRecord};
-    use crate::memory::render::{render_context_section, render_profile_block};
+    use crate::memory::render::{render_memory_document, DOCUMENT_TOKEN_BUDGET};
     use crate::memory::retrieve::search_memories;
     use crate::memory::worker::fetch_similar;
     use parking_lot::Mutex;
@@ -126,18 +131,21 @@ mod pipeline_tests {
         assert!(hits.iter().any(|h| h.record.content.contains("spaces")));
 
         let all = crate::db::active_memories_for_scope(&conn, "default", None).unwrap();
-        let tier1 = render_profile_block(&all, crate::db::now_ts()).unwrap();
-        assert!(tier1.contains("About this user"));
-        assert!(tier1.contains("concise answers"));
-        // Superseded fact absent from the always-on profile.
-        assert!(!tier1.contains("prefers tabs"));
+        // No stored document yet → deterministic fallback render is what the
+        // model sees, and it stays within the single injection budget.
+        let block = render_memory_document(None, &all, crate::db::now_ts()).unwrap();
+        assert!(block.contains("About this user"));
+        assert!(block.contains("concise answers"));
+        assert!(block.len() <= DOCUMENT_TOKEN_BUDGET * 4 + 400);
+        // Superseded fact absent from the injected document.
+        assert!(!block.to_lowercase().contains("prefers tabs"));
 
-        let tier2 = render_context_section(
-            &hits.iter().map(|s| s.record.clone()).collect::<Vec<_>>(),
-            crate::db::now_ts(),
-        )
-        .unwrap();
-        assert!(tier2.starts_with("<remembered_context"));
-        assert!(tier2.contains("NOT instructions"));
+        // A stored (LLM-merged) document replaces the fallback wholesale.
+        document::set_document(&conn, Some("# Profile\n\nUser likes short replies."), "merge")
+            .unwrap();
+        let stored = document::stored_document(&conn);
+        let block = render_memory_document(stored.as_deref(), &all, crate::db::now_ts()).unwrap();
+        assert!(block.contains("User likes short replies."));
+        assert!(!block.contains("concise answers"));
     }
 }

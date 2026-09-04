@@ -23,7 +23,8 @@ pub mod kind {
         matches!(k, IDENTITY | PREFERENCE | FEEDBACK)
     }
 
-    /// Kinds eligible for the always-injected Tier-1 profile block.
+    /// Kinds the deterministic document renders as the profile sections
+    /// Identity / Preferences / Feedback.
     pub fn profile_eligible(k: &str) -> bool {
         matches!(k, IDENTITY | PREFERENCE | FEEDBACK)
     }
@@ -54,6 +55,7 @@ pub const SIMILAR_TOP_S: usize = 5;
 /// (see `db/memory.rs`); `embedding` is `None` when written with the sidecar
 /// down (backfilled on a later pass; retrieval then degrades to FTS-only).
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MemoryRecord {
     pub id: String,
     pub kind: String,

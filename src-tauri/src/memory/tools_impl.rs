@@ -51,7 +51,7 @@ pub fn memory_recall(app: &AppHandle, args: &Value) -> String {
     // Synchronous search: FTS-only leg here (the tool loop is async, but the
     // sidecar embedding adds an await + this tool's value is exact recall;
     // keyword+recency ranking is the low-latency default). Embedding-augmented
-    // recall happens automatically on Tier-2 injection each turn.
+    // recall is available through `search_and_touch`'s callers with sidecar.
     let hits = {
         let conn = db.0.lock();
         search_and_touch(&conn, "default", project_id, query, None, limit * 2)
@@ -102,6 +102,10 @@ pub fn memory_forget(app: &AppHandle, args: &Value) -> String {
             match db::set_memory_status(&conn, id, crate::memory::model::status::RETIRED) {
                 Ok(()) => {
                     let _ = db::log_memory_op(&conn, "agent_tool", None, &m.content, "FORGET", &[id.to_string()], "retired via memory_forget");
+                    // Drop the stored document so the injected text (the
+                    // deterministic fallback render) reflects the retirement
+                    // immediately; the next merge rebuilds it.
+                    let _ = crate::memory::document::set_document(&conn, None, "");
                     format!("Forgotten (retired, history kept): \"{}\"", m.content)
                 }
                 Err(e) => format!("Error: memory_forget failed: {e}"),

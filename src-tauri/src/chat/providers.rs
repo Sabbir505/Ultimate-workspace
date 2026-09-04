@@ -103,11 +103,13 @@ pub struct ChatRequest {
     /// empty when the embedding sidecar isn't running or nothing matched.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub local_docs_retrieval: Vec<String>,
-    /// Tier-2 memory injection (MEMORY_DESIGN_ARCHITECTURE.md §11.3): the
-    /// pre-computed `<remembered_context>` block for this turn, rendered as a
-    /// synthetic user message AHEAD of the docs-retrieval message so durable
-    /// user facts sit closest to the system prompt. `None` when memory is
-    /// disabled or nothing scored above the injection floor.
+    /// Memory injection (MEMORY_DESIGN_ARCHITECTURE.md §11): a pre-rendered
+    /// `<remembered_context>` block rendered as a synthetic user message
+    /// AHEAD of the docs-retrieval message so durable user facts sit closest
+    /// to the system prompt. `None` when memory is disabled or nothing scored
+    /// above the injection floor. (Since the §11 amendment the whole memory
+    /// rides in the system prompt as one document; this slot is the legacy
+    /// per-turn path, currently unused.)
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub memory_context: Option<String>,
 }

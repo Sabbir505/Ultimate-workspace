@@ -435,6 +435,25 @@ If the candidate contradicts E but the transcript is ambiguous (joking, hypothet
 
 ## 11. Retrieval & injection without context bloat
 
+> **Amendment (2026-09-04, implemented):** the three-tier split below was
+> replaced by **ONE human-readable memory document**. A single curated field
+> (`memory.document` in `app_settings`) — identity, preferences, projects,
+> feedback, facts merged into one readable profile — is injected as ONE block
+> in the system prompt, hard budget **2200 tokens** enforced in Rust
+> (`render::DOCUMENT_TOKEN_BUDGET`). After each extraction batch's judge ops,
+> one LLM rewrite call (`document::REWRITE_SYSTEM`) merges the changes into
+> the document (dedupe, supersede, re-organize) within the budget; on any
+> failure the stored document is cleared and injection falls back to a
+> deterministic render from the records, so correctness never depends on the
+> rewrite. UI record mutations clear the stored document the same way (the
+> records are ground truth; the document is their curated view). Tier-2 JIT
+> injection is gone; the `memory_recall` tool (Tier 3) remains for deep
+> recall, and its access bumps still feed recency. `§11.1` scoring is
+> unchanged (used by the tool and the fallback ranking). **Extraction
+> cadence (§7.1 amendment):** the pipeline runs every 3–5 assistant turns
+> (jittered, `worker::EXTRACT_MIN_TURNS/MAX`) instead of every turn —
+> pending turns batch up past the cursor and are extracted in one pass.
+
 ### 11.1 Scoring and search (hybrid, min-max normalized)
 
 Two query formations: **pre-turn** (query = last user message + current turn's first line) and **tool recall** (query = agent's argument, may paginate).

@@ -324,6 +324,24 @@ pub(crate) fn tool_block(name: &str, args: &Value) -> String {
             "task": s("description"),
             "prompt": sanitize(s("prompt")),
         })
+    } else if name == tools::MEMORY_SAVE {
+        json!({
+            "kind": "memory",
+            "title": "Saving to memory",
+            "detail": sanitize(s("content")),
+        })
+    } else if name == tools::MEMORY_RECALL {
+        json!({
+            "kind": "memory",
+            "title": "Searching memories",
+            "detail": sanitize(s("query")),
+        })
+    } else if name == tools::MEMORY_FORGET {
+        json!({
+            "kind": "memory",
+            "title": "Forgetting a memory",
+            "detail": sanitize(s("memory_id")),
+        })
     } else {
         json!({ "kind": "tool", "title": format!("Running tool {name}") })
     };

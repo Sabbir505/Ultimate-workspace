@@ -147,7 +147,7 @@ pub fn trigram_jaccard(a: &str, b: &str) -> f64 {
     inter / union
 }
 
-/// Deterministic Tier-1/Tier-2 token budget enforcement: ~4 chars/token
+/// Deterministic token budget enforcement: ~4 chars/token
 /// (nomic-adjacent English average), dropping lowest-priority items first.
 /// Items are `(priority, rendered_text)`; priority ties keep input order.
 pub fn fit_budget(mut items: Vec<(f64, String)>, token_budget: usize) -> Vec<String> {

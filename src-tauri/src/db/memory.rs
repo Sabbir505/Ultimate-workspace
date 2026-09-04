@@ -341,6 +341,7 @@ pub fn log_memory_op(
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MemoryOpRow {
     pub id: i64,
     pub ts: i64,
@@ -416,6 +417,84 @@ pub fn count_active_memories(conn: &Connection, profile: &str) -> DbResult<i64> 
         params![profile],
         |r| r.get(0),
     )
+}
+
+// ---- document versions (the memory document's History + Restore UI) ----
+
+/// One stored snapshot of the memory document.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryDocVersionRow {
+    pub id: i64,
+    /// Who wrote it: "merge" (LLM) or "user" (panel save).
+    pub source: String,
+    pub text: String,
+    pub created_at: i64,
+}
+
+const DOC_VERSION_CAP: i64 = 20;
+
+/// Append a document snapshot and prune to the newest [`DOC_VERSION_CAP`].
+pub fn insert_document_version(conn: &Connection, source: &str, text: &str) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO memory_document_versions (source, text, created_at) VALUES (?1, ?2, ?3)",
+        params![source, text, crate::db::now_ts()],
+    )?;
+    conn.execute(
+        "DELETE FROM memory_document_versions WHERE id NOT IN \
+         (SELECT id FROM memory_document_versions ORDER BY id DESC LIMIT ?1)",
+        params![DOC_VERSION_CAP],
+    )?;
+    Ok(())
+}
+
+pub fn list_document_versions(
+    conn: &Connection,
+    limit: i64,
+) -> DbResult<Vec<MemoryDocVersionRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, source, text, created_at FROM memory_document_versions \
+         ORDER BY id DESC LIMIT ?1",
+    )?;
+    let rows = stmt
+        .query_map(params![limit], |r| {
+            Ok(MemoryDocVersionRow {
+                id: r.get(0)?,
+                source: r.get(1)?,
+                text: r.get(2)?,
+                created_at: r.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+// ---- embedding backfill (records written while the sidecar was down) ----
+
+/// Active memories with no vector yet — the backfill queue. Project-agnostic:
+/// a missing vector is a store-wide gap, not a scope filter.
+pub fn memories_missing_embedding(
+    conn: &Connection,
+    profile: &str,
+    limit: i64,
+) -> DbResult<Vec<MemoryRecord>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM memories \
+         WHERE profile = ?1 AND status = 'active' AND embedding IS NULL LIMIT ?2"
+    ))?;
+    let rows = stmt
+        .query_map(params![profile, limit], map_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Store a freshly computed vector for one memory.
+pub fn set_memory_embedding(conn: &Connection, id: &str, embedding: &[f32]) -> DbResult<()> {
+    conn.execute(
+        "UPDATE memories SET embedding = ?2 WHERE id = ?1",
+        params![id, crate::db::docs::f32_slice_to_blob(embedding)],
+    )?;
+    Ok(())
 }
 
 // ---- reflection (MEMORY_DESIGN_ARCHITECTURE.md §8.4) ----

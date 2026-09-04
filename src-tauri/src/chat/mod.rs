@@ -563,10 +563,12 @@ impl ChatManager {
                 }
             }
 
-            // ── Tier-2 memory injection (MEMORY_DESIGN_ARCHITECTURE.md §11.3) ─
-            // Budgeted, hybrid-scored recall of relevant memories for THIS
-            // turn's query, rendered as a fenced data block. Disabled store →
-            // nothing happens (the block is omitted entirely).
+            // ── Memory injection (MEMORY_DESIGN_ARCHITECTURE.md §11,
+            // amended) ─ The single 2200-token memory document rides in the
+            // system prompt (rendered back in send_chat_message); the old
+            // per-turn Tier-2 JIT block is gone — injecting the same facts
+            // twice wasted budget. Deeper recall stays available to the model
+            // via the `memory_recall` tool.
             if crate::memory::memory_enabled_conn(&db) {
                 let query = chat_req
                     .messages
@@ -577,11 +579,12 @@ impl ChatManager {
                     .filter(|c| !c.is_empty())
                     .map(|c| c.to_string());
                 if let Some(q) = query {
+                    // Touch-recency bump for the top hybrid hits keeps the
+                    // fallback document's recency signal honest (§11.1).
                     let project_id = {
                         let conn = db.lock();
                         db::get_chat_session(&conn, &sid).ok().flatten().and_then(|s| s.project_id)
                     };
-                    // Vector leg when the sidecar is up; keyword+recency always.
                     let q_emb: Option<Vec<f32>> = match &embedding_base {
                         Some(base) => {
                             match local_models::embed_texts(base, &[q.clone()]).await {
@@ -598,25 +601,11 @@ impl ChatManager {
                         )
                     };
                     if let Ok(scored) = hits {
-                        if !scored.is_empty() {
-                            let recs: Vec<crate::memory::model::MemoryRecord> =
-                                scored.iter().map(|s| s.record.clone()).collect();
-                            if let Some(section) = crate::memory::render::render_context_section(
-                                &recs,
-                                crate::db::now_ts(),
-                            ) {
-                                let injected_chars = section.len();
-                                let injected_n = recs.len();
-                                eprintln!(
-                                    "[memory-audit] tier2_inject_chars={injected_chars} items={injected_n}"
-                                );
-                                chat_req.memory_context = Some(section);
-                                // Access bump drives recency decay (§11.1).
-                                let ids: Vec<String> =
-                                    scored.iter().map(|s| s.record.id.clone()).collect();
-                                let conn = db.lock();
-                                let _ = db::bump_memory_access(&conn, &ids);
-                            }
+                        let ids: Vec<String> =
+                            scored.iter().map(|s| s.record.id.clone()).collect();
+                        if !ids.is_empty() {
+                            let conn = db.lock();
+                            let _ = db::bump_memory_access(&conn, &ids);
                         }
                     }
                 }

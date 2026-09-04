@@ -947,6 +947,16 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           rationale TEXT NOT NULL DEFAULT ''
         );
 
+        -- Bounded version history of the memory document (every LLM merge and
+        -- user save). Powers the panel's History + Restore UI: a bad merge is
+        -- one click from undone. Old versions prune to the newest 20.
+        CREATE TABLE IF NOT EXISTS memory_document_versions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          source TEXT NOT NULL,
+          text TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+
         -- Idempotency cursor: highest chat_messages.id already fed through
         -- extraction for a session (re-running never re-extracts a turn).
         CREATE TABLE IF NOT EXISTS memory_cursor (
@@ -1283,10 +1293,12 @@ pub use automations::{
 pub use memory::{
     active_memories_for_scope, add_memory_evidence, bump_memory_access, count_active_memories,
     delete_memory, evidence_count_for_memory, evidence_for_memory, flag_unbacked_memories,
-    get_cursor, get_memory, insert_memory, list_memories, list_memory_ops, log_memory_op,
-    mark_reflected, purge_memories_for_profile, similar_active_memories, supersede_memory,
-    unreflected_sample, unreflected_stats, update_memory_content, upsert_cursor,
-    search_memories_fts, set_memory_status, MemoryOpRow,
+    get_cursor, get_memory, insert_document_version, insert_memory, list_document_versions,
+    list_memories, list_memory_ops, log_memory_op, mark_reflected,
+    memories_missing_embedding, purge_memories_for_profile, set_memory_embedding,
+    similar_active_memories, supersede_memory, unreflected_sample, unreflected_stats,
+    update_memory_content, upsert_cursor, search_memories_fts, set_memory_status,
+    MemoryDocVersionRow, MemoryOpRow,
 };
 
 // ---- test helpers ----

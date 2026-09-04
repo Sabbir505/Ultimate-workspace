@@ -564,6 +564,10 @@ pub fn run() {
             commands::memory_cmds::memory_status,
             commands::memory_cmds::memory_set_enabled,
             commands::memory_cmds::memory_create,
+            commands::memory_cmds::memory_set_document,
+            commands::memory_cmds::memory_document_history,
+            commands::memory_cmds::memory_recent_ops,
+            commands::memory_cmds::memory_set_extract_model,
         ]);
 
     let app = builder

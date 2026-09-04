@@ -1357,7 +1357,6 @@
    bubbles AND artifact previews). */
 .chat-table-wrap {
   position: relative;
-  margin: 10px 0;
   overflow-x: auto;
 }
 .chat-markdown table,
@@ -1419,42 +1418,42 @@
 .artifact-preview-table tr:nth-child(even) td {
   background: color-mix(in srgb, var(--surface-2) 45%, transparent);
 }
-/* Hover toolbar for a generated table (Copy as TSV / Download CSV). Sits in
-   the header row's top-right corner, INSIDE the card (the wrapper carries the
-   margin, so top/right are relative to the table's own edge); revealed on
-   wrapper hover so it never consumes layout space. */
+/* Table block: the icon action row (Copy / CSV download) sits ABOVE the
+   table, outside the horizontally-scrolling clip box, so the buttons never
+   cover table content. The block owns the vertical margin the wrap used to
+   carry. */
+.chat-table-block {
+  margin: 10px 0;
+}
+.chat-table-wrap {
+  position: relative;
+  overflow-x: auto;
+}
 .chat-table-actions {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  z-index: 2;
   display: flex;
-  gap: 3px;
-  opacity: 0;
-  transition: opacity 0.15s var(--ease);
+  justify-content: flex-end;
+  gap: 4px;
+  margin-bottom: 5px;
   user-select: none;
   -webkit-user-select: none;
-}
-.chat-table-wrap:hover .chat-table-actions,
-.chat-table-actions:focus-within {
-  opacity: 1;
 }
 .chat-table-action {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: var(--radius-xs);
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
   border: 1px solid var(--border);
-  background: var(--surface-glass-2);
-  box-shadow: var(--glass-shadow);
+  border-radius: var(--radius-xs);
+  background: transparent;
   color: var(--text-dim);
-  font-family: var(--font-ui);
-  font-size: 10px;
-  font-weight: 600;
   cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease),
+    border-color 0.15s var(--ease);
 }
-.chat-table-action:hover {
+.chat-table-action:hover:not(:disabled) {
+  background: var(--surface-2);
   color: var(--text);
   border-color: var(--border-strong);
 }

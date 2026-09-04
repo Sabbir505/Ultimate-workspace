@@ -9,6 +9,7 @@
 // working (the extraction is a pure function of the parsed node).
 import { useMemo, useState, type ComponentPropsWithoutRef } from "react";
 import type { ExtraProps } from "react-markdown";
+import { Check, Copy, Download } from "lucide-react";
 
 interface HastNode {
   type?: string;
@@ -59,16 +60,6 @@ export function toTsv(rows: string[][]): string {
     .join("\n");
 }
 
-function DownloadIcon() {
-  return (
-    <svg width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-      <polyline points="7 10 12 15 17 10" />
-      <line x1="12" y1="15" x2="12" y2="3" />
-    </svg>
-  );
-}
-
 function triggerDownload(text: string, filename: string): void {
   const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -108,30 +99,32 @@ function TableActions({ rows }: { rows: string[][] }) {
         type="button"
         className="chat-table-action"
         disabled={disabled}
+        aria-label="Copy table"
         onMouseDown={(e) => e.preventDefault()}
         onClick={copy}
         title="Copy table (pastes into spreadsheets as cells)"
       >
-        {copied ? "Copied" : "Copy"}
+        {copied ? <Check size={13} /> : <Copy size={13} />}
       </button>
       <button
         type="button"
         className="chat-table-action"
         disabled={disabled}
+        aria-label="Download as CSV"
         onMouseDown={(e) => e.preventDefault()}
         onClick={() => triggerDownload(toCsv(rows), csvFilename(rows))}
         title="Download as CSV"
       >
-        <DownloadIcon />
-        CSV
+        <Download size={13} />
       </button>
     </div>
   );
 }
 
 /** react-markdown `table` component override. Renders the same <table> the
- *  default renderer would (children arrive pre-rendered), wrapped with the
- *  hover toolbar. */
+ *  default renderer would (children arrive pre-rendered), with the icon
+ *  action row sitting ABOVE the table (outside the scroll/clip box, so the
+ *  buttons never cover table content). */
 export function MarkdownTable({
   node,
   children,
@@ -139,9 +132,11 @@ export function MarkdownTable({
 }: ComponentPropsWithoutRef<"table"> & ExtraProps) {
   const rows = useMemo(() => rowsFromTableNode(node as HastNode | undefined), [node]);
   return (
-    <div className="chat-table-wrap">
+    <div className="chat-table-block">
       <TableActions rows={rows} />
-      <table {...props}>{children}</table>
+      <div className="chat-table-wrap">
+        <table {...props}>{children}</table>
+      </div>
     </div>
   );
 }

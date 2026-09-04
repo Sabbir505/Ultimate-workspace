@@ -1118,6 +1118,38 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     setLiveTotal(0);
   }, [activeChatSessionId]);
 
+  // Wheel over the composer dock scrolls the transcript. The dock overlays
+  // the bottom of the message list but is a SIBLING subtree of
+  // .chat-messages, so the browser never chains wheel events into it — with
+  // the composer focused (cursor parked at the bottom of the window) rolling
+  // the wheel there did nothing and read as "the chat view isn't scrollable
+  // while the composer is active". Chain the delta into .chat-messages, but
+  // first let any scrollable element under the cursor (the textarea with
+  // overflow, the slash menu, queue text) consume it — including honoring
+  // its scroll edges so the leftover delta hands off naturally.
+  useEffect(() => {
+    const dock = composerDockRef.current;
+    if (!dock) return;
+    const onWheel = (e: WheelEvent) => {
+      for (let n = e.target as Element | null; n && n !== dock; n = n.parentElement) {
+        const el = n as HTMLElement;
+        if (el.scrollHeight <= el.clientHeight + 1) continue;
+        const overflowY = getComputedStyle(el).overflowY;
+        if (overflowY !== "auto" && overflowY !== "scroll") continue;
+        const atTop = el.scrollTop <= 0;
+        const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
+        if ((e.deltaY < 0 && !atTop) || (e.deltaY > 0 && !atBottom)) return;
+      }
+      const view = dock.closest(".chat-view")?.querySelector(".chat-messages");
+      if (!view) return;
+      const delta = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+      view.scrollTop += delta;
+      e.preventDefault();
+    };
+    dock.addEventListener("wheel", onWheel, { passive: false });
+    return () => dock.removeEventListener("wheel", onWheel);
+  }, []);
+
   // The per-action approval card sits below the message list in the composer
   // flex column. Mounting/unmounting it shrinks/grows the scroll viewport, and
   // the browser clamps scrollTop when the viewport shrinks — so the chat

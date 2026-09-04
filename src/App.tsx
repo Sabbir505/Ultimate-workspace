@@ -41,6 +41,7 @@ const CommandPalette = lazy(() => import("./components/command-palette/CommandPa
 import { useChatEvents } from "./hooks/useChatEvents";
 import { useAutomationEvents } from "./hooks/useAutomationEvents";
 import { useBudgetEvents } from "./hooks/useBudgetEvents";
+import { useMemoryEvents } from "./hooks/useMemoryEvents";
 import { useBrowserMcpEvents } from "./hooks/useBrowserMcpEvents";
 import { useGitStatusPolling } from "./hooks/useGitStatusPolling";
 import { useKeybindings } from "./hooks/useKeybindings";
@@ -219,6 +220,7 @@ export default function App() {
   useChatEvents();
   useAutomationEvents();
   useBudgetEvents();
+  useMemoryEvents();
   usePaneMemory();
   useModelDownloadEvents();
   useBrowserMcpEvents();
@@ -237,6 +239,15 @@ export default function App() {
   useEffect(() => {
     document.documentElement.style.setProperty("--chat-zoom", String(chatZoom));
   }, [chatZoom]);
+
+  // App-wide zoom (Ctrl +/-/0): CSS zoom on the root element scales the
+  // ENTIRE UI — sidebar, toolbar, panes, composer, settings — like a browser
+  // zoom, independent of --chat-zoom which only scales chat text. Runs in App
+  // so both the main window and pop-out chats get it.
+  const appZoom = useSettingsStore((s) => s.appZoom);
+  useEffect(() => {
+    document.documentElement.style.setProperty("zoom", String(appZoom));
+  }, [appZoom]);
 
   // Sync modal states into the UI store so native webviews know to hide.
   // Each modal registers its OWN id (M22) — closing one must not re-expose

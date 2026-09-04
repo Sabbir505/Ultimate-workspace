@@ -5,32 +5,32 @@ import { matchesAccelerator, type KeybindingAction } from "../lib/keybindings";
 import { defaultHarness, newSessionFlow } from "../lib/sessionLauncher";
 import { activeTerminalPair, cycleTerminalPair, usePanesStore } from "../state/panes";
 import { useProjectsStore } from "../state/projects";
-import { useSettingsStore } from "../state/settings";
+import { DEFAULT_APP_ZOOM, useSettingsStore } from "../state/settings";
 import { useUiStore } from "../state/ui";
 
 export function useKeybindings(): void {
   const keybindings = useSettingsStore((s) => s.keybindings);
 
-  // Chat text zoom (Ctrl/Cmd + or - to scale, Ctrl/Cmd 0 to reset). Runs on
-  // its own listener BEFORE the editable-target gate so the combos also work
-  // while typing in the composer, and preventDefaults so the webview's native
-  // page zoom never double-fires.
+  // App-wide zoom (Ctrl/Cmd + or - to scale the whole UI, Ctrl/Cmd 0 to
+  // reset). Runs on its own listener BEFORE the editable-target gate so the
+  // combos also work while typing in the composer, and preventDefaults so the
+  // webview's native page zoom never double-fires.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
       let next: number | null = null;
       if (e.key === "=" || e.key === "+") {
-        next = useSettingsStore.getState().chatZoom + 0.1;
+        next = useSettingsStore.getState().appZoom + 0.1;
       } else if (e.key === "-" || e.key === "_") {
-        next = useSettingsStore.getState().chatZoom - 0.1;
+        next = useSettingsStore.getState().appZoom - 0.1;
       } else if (e.key === "0") {
-        next = 1;
+        next = DEFAULT_APP_ZOOM;
       } else {
         return;
       }
       e.preventDefault();
       e.stopPropagation();
-      useSettingsStore.getState().setChatZoom(next);
+      useSettingsStore.getState().setAppZoom(next);
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);

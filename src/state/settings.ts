@@ -52,12 +52,22 @@ export const DEFAULT_CLOUD_PIN_EXCHANGES = 6;
 // chat/context_windows.rs::load_context_limit_override.
 const K_CLOUD_CONTEXT_LIMIT = "chat.cloud.context_limit";
 
-// Chat text zoom (Ctrl + / Ctrl - to scale, Ctrl + 0 to reset). A multiplier
-// on the chat message/composer/code font sizes via the --chat-zoom CSS var.
+// Chat text zoom. A multiplier on the chat message/composer/code font sizes
+// via the --chat-zoom CSS var. (The Ctrl +/-/0 shortcuts now drive the
+// app-wide zoom below; this one persists as a fine-tune multiplier.)
 const K_CHAT_ZOOM = "chat.textZoom";
 export const DEFAULT_CHAT_ZOOM = 1;
 export const CHAT_ZOOM_MIN = 0.7;
 export const CHAT_ZOOM_MAX = 1.6;
+
+// App-wide UI zoom (Ctrl + / Ctrl - to scale, Ctrl + 0 to reset). Applied as
+// the CSS `zoom` property on the document element — native Chromium zoom that
+// scales every surface (sidebar, panes, composer, settings), unlike
+// --chat-zoom which only scales chat text.
+const K_APP_ZOOM = "app.zoom";
+export const DEFAULT_APP_ZOOM = 1;
+export const APP_ZOOM_MIN = 0.6;
+export const APP_ZOOM_MAX = 2;
 
 // Per-provider curated model lists: provider id -> ordered entries with an
 // optional per-model context-window pin (0 = auto). A non-empty list IS the
@@ -146,6 +156,9 @@ interface SettingsState {
   /** Chat text zoom multiplier (0.7–1.6). Scales chat message text, the
    *  composer and code blocks via the --chat-zoom CSS variable. */
   chatZoom: number;
+  /** App-wide UI zoom multiplier (0.6–2). Applied as CSS zoom on the root
+   *  element so every surface scales — driven by the Ctrl +/-/0 shortcuts. */
+  appZoom: number;
 
   load: () => Promise<void>;
   setTheme: (theme: ThemeSetting) => void;
@@ -179,6 +192,8 @@ interface SettingsState {
   setLocalCompactionRebuildFromRaw: (on: boolean) => void;
   /** Set the chat text zoom (clamped to CHAT_ZOOM_MIN–MAX) and persist it. */
   setChatZoom: (zoom: number) => void;
+  /** Set the app-wide UI zoom (clamped to APP_ZOOM_MIN–MAX) and persist it. */
+  setAppZoom: (zoom: number) => void;
 }
 
 function persistKeybindings(map: KeybindingMap) {
@@ -213,9 +228,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   localCompactionSummarizer: "sidecar",
   localCompactionRebuildFromRaw: true,
   chatZoom: DEFAULT_CHAT_ZOOM,
+  appZoom: DEFAULT_APP_ZOOM,
 
   load: async () => {
-    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault, checkpointsEnabled, cloudEnabled, cloudThreshold, cloudPin, summarizer, rebuildRaw, cloudContextLimit, chatZoomRaw] = await Promise.all([
+    const [theme, dnd, notifySound, watchMode, kbJson, urlsJson, paneStateJson, threshold, pin, themesJson, customThemeId, worktreeDefault, checkpointsEnabled, cloudEnabled, cloudThreshold, cloudPin, summarizer, rebuildRaw, cloudContextLimit, chatZoomRaw, appZoomRaw] = await Promise.all([
       getSetting(K_THEME),
       getSetting(K_DND),
       getSetting(K_NOTIFY_SOUND),
@@ -236,6 +252,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       getSetting(K_LOCAL_COMPACTION_REBUILD_FROM_RAW),
       getSetting(K_CLOUD_CONTEXT_LIMIT),
       getSetting(K_CHAT_ZOOM),
+      getSetting(K_APP_ZOOM),
     ]);
     // Per-provider curated model lists: the index names the providers that
     // have one; each list is then read from its own key. A missing or
@@ -353,6 +370,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       if (chatZoomRaw) {
         const v = Number(chatZoomRaw);
         if (Number.isFinite(v) && v >= CHAT_ZOOM_MIN && v <= CHAT_ZOOM_MAX) next.chatZoom = v;
+      }
+      if (appZoomRaw) {
+        const v = Number(appZoomRaw);
+        if (Number.isFinite(v) && v >= APP_ZOOM_MIN && v <= APP_ZOOM_MAX) next.appZoom = v;
       }
       return next;
     });
@@ -542,5 +563,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     const clamped = Math.max(CHAT_ZOOM_MIN, Math.min(CHAT_ZOOM_MAX, zoom));
     set({ chatZoom: clamped });
     void setSetting(K_CHAT_ZOOM, String(clamped));
+  },
+
+  setAppZoom: (zoom) => {
+    const clamped = Math.max(APP_ZOOM_MIN, Math.min(APP_ZOOM_MAX, zoom));
+    set({ appZoom: clamped });
+    void setSetting(K_APP_ZOOM, String(clamped));
   },
 }));

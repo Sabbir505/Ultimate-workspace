@@ -1613,7 +1613,9 @@ button.git-sidebar-section-header:hover {
   right: 0;
   z-index: 90;
   width: 340px;
-  max-height: 440px;
+  /* Head (~37px) + the first 4 rows (rows run 50-66px) — row 5 lands below
+     the fold, so everything past four scrolls. */
+  max-height: 300px;
   display: flex;
   flex-direction: column;
   background: var(--surface-glass);

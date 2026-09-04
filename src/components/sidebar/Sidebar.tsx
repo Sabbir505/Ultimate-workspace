@@ -412,7 +412,7 @@ export function Sidebar() {
             </button>
             <button
               onClick={() => void addProject()}
-              className="p-2 rounded-md bg-transparent border border-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white transition-all duration-150 active:scale-95"
+              className="sidebar-quiet-btn p-2 rounded-md bg-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white transition-all duration-150 active:scale-95"
               title="Add Project"
               aria-label="Add Project"
             >
@@ -585,7 +585,7 @@ export function Sidebar() {
           {/* New Chat â€” same "+" affordance as the Projects header */}
           <button
             onClick={handleNewChat}
-            className="p-2 rounded-md bg-transparent border border-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white transition-all duration-150 active:scale-95"
+            className="sidebar-quiet-btn p-2 rounded-md bg-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white transition-all duration-150 active:scale-95"
             title="New Chat"
             aria-label="New Chat"
           >
@@ -644,10 +644,10 @@ export function Sidebar() {
       {/* â”€â”€ Pinned Footer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div className="flex-shrink-0 flex flex-row justify-center gap-2 p-2 border-t border-gray-200 dark:border-white/20">
         <button
-          className={`p-2 rounded-lg transition-all duration-150 active:scale-95 ${
+          className={`sidebar-quiet-btn p-2 rounded-lg transition-all duration-150 active:scale-95 ${
             activeView === "skills"
-              ? "bg-gray-200 dark:bg-white/15 border border-gray-300 dark:border-white/30 text-gray-900 dark:text-white"
-              : "bg-transparent dark:bg-transparent border border-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white"
+              ? "bg-gray-200 dark:bg-white/15 text-gray-900 dark:text-white"
+              : "bg-transparent dark:bg-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white"
           }`}
           onClick={() => setActiveView(activeView === "skills" ? "chat" : "skills")}
           title="Skills Library"
@@ -656,10 +656,10 @@ export function Sidebar() {
           <Library size={16} strokeWidth={1.8} />
         </button>
         <button
-          className={`p-2 rounded-lg transition-all duration-150 active:scale-95 ${
+          className={`sidebar-quiet-btn p-2 rounded-lg transition-all duration-150 active:scale-95 ${
             activeView === "cost"
-              ? "bg-gray-200 dark:bg-white/15 border border-gray-300 dark:border-white/30 text-gray-900 dark:text-white"
-              : "bg-transparent dark:bg-transparent border border-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white"
+              ? "bg-gray-200 dark:bg-white/15 text-gray-900 dark:text-white"
+              : "bg-transparent dark:bg-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white"
           }`}
           onClick={() => setActiveView(activeView === "cost" ? "chat" : "cost")}
           title="Cost"
@@ -668,10 +668,10 @@ export function Sidebar() {
           <DollarSign size={16} strokeWidth={1.8} />
         </button>
         <button
-          className={`p-2 rounded-lg transition-all duration-150 active:scale-95 ${
+          className={`sidebar-quiet-btn p-2 rounded-lg transition-all duration-150 active:scale-95 ${
             pairingModalOpen
-              ? "bg-gray-200 dark:bg-white/15 border border-gray-300 dark:border-white/30 text-gray-900 dark:text-white"
-              : "bg-transparent dark:bg-transparent border border-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white"
+              ? "bg-gray-200 dark:bg-white/15 text-gray-900 dark:text-white"
+              : "bg-transparent dark:bg-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white"
           }`}
           onClick={openPairingModal}
           title="Phone pairing QR"
@@ -680,10 +680,10 @@ export function Sidebar() {
           <QrCode size={16} strokeWidth={1.8} />
         </button>
         <button
-          className={`p-2 rounded-lg transition-all duration-150 active:scale-95 ${
+          className={`sidebar-quiet-btn p-2 rounded-lg transition-all duration-150 active:scale-95 ${
             activeView === "settings"
-              ? "bg-gray-200 dark:bg-white/15 border border-gray-300 dark:border-white/30 text-gray-900 dark:text-white"
-              : "bg-transparent dark:bg-transparent border border-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white"
+              ? "bg-gray-200 dark:bg-white/15 text-gray-900 dark:text-white"
+              : "bg-transparent dark:bg-transparent text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-white/20 hover:text-gray-900 dark:hover:text-white"
           }`}
           onClick={() => setActiveView(activeView === "settings" ? "chat" : "settings")}
           title="Settings"

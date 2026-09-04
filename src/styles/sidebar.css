@@ -195,6 +195,9 @@
   border: none;
   border-radius: var(--radius-xs);
   background: transparent;
+  /* Kill the global button skin's inset top rim (tokens.css box-shadow) —
+     its rounded arc reads as a stray border on the header labels. */
+  box-shadow: none;
   font-size: 12px;
   font-weight: 500;
   letter-spacing: 0;
@@ -224,6 +227,19 @@ button.sidebar-section-label:hover {
 }
 .sidebar-section-label-icon {
   flex: none;
+}
+
+/* Quiet icon buttons — the section-header "+" buttons and the footer icons.
+   The global button skin (tokens.css bg/border/rim) leaks onto these
+   transparent icon buttons: the inset rim draws a rounded top arc that reads
+   as a border, and button:hover re-colors the skin's 1px border into a full
+   visible box. Neutralize both at rest AND on hover (same treatment as
+   .sidebar-brand-btn); hover feedback comes from the bg utilities that stay
+   on the elements. */
+.sidebar-quiet-btn,
+.sidebar-quiet-btn:hover {
+  border: none;
+  box-shadow: none;
 }
 
 /* Smooth expand/collapse for the projects list. The wrapper is always

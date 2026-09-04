@@ -515,7 +515,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface-glass);
-  box-shadow: var(--glass-rim), 0 8px 24px -14px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--glass-rim), var(--glass-drop-soft);
 }
 .task-card-download { --task-accent: #5aa7f0; }
 .task-card-shell    { --task-accent: #e3b341; }
@@ -1532,7 +1532,7 @@
   );
   backdrop-filter: blur(24px) saturate(160%);
   -webkit-backdrop-filter: blur(24px) saturate(160%);
-  box-shadow: var(--glass-rim), 0 12px 32px -12px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--glass-rim), var(--glass-drop);
 }
 .remote-pairing-card .qr-section img {
   display: block;

@@ -144,7 +144,7 @@
   );
   backdrop-filter: blur(24px) saturate(160%);
   -webkit-backdrop-filter: blur(24px) saturate(160%);
-  box-shadow: var(--glass-rim), 0 12px 32px -12px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--glass-rim), var(--glass-drop);
 }
 /* Light theme: a touch more body so text keeps contrast on bright backdrops
    (same bump the composer card uses). */
@@ -177,7 +177,7 @@ div[data-index]:has(.chat-session-row.menu-open) {
   bottom: 100%;
   margin-bottom: 2px;
   /* Invert the shadow direction so the shadow reads naturally above. */
-  box-shadow: var(--glass-rim), 0 -8px 24px -8px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--glass-rim), var(--glass-drop-up);
 }
 .chat-session-menu button {
   display: flex;
@@ -2218,7 +2218,7 @@ button.chat-mermaid-open {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface-glass);
-  box-shadow: var(--glass-rim), 0 8px 24px -14px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--glass-rim), var(--glass-drop-soft);
   outline: none;
 }
 .approval-card:focus-visible {
@@ -2523,11 +2523,11 @@ button.chat-mermaid-open {
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--surface);
-  box-shadow: 0 8px 24px -14px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--glass-drop-soft);
   outline: none;
 }
 .plan-proposal-card:focus-visible {
-  box-shadow: 0 8px 24px -14px rgba(0, 0, 0, 0.5), 0 0 0 2px color-mix(in srgb, #5aa7f0 45%, transparent);
+  box-shadow: var(--glass-drop-soft), 0 0 0 2px color-mix(in srgb, #5aa7f0 45%, transparent);
 }
 /* The shared plan-preview rows carry their own padding for the docked
    preview — neutralize it inside the floating proposal card. */

@@ -17,7 +17,7 @@
   max-height: 88vh;
   border: 1px solid var(--border-strong);
   border-radius: 16px;
-  box-shadow: var(--glass-rim), 0 12px 32px -12px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--glass-rim), var(--glass-drop);
   animation: modal-in 0.22s var(--ease);
   overflow: hidden;
 }
@@ -40,7 +40,7 @@
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  box-shadow: var(--glass-rim), 0 12px 32px -12px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--glass-rim), var(--glass-drop);
 }
 /* Light theme: a touch more body so text keeps contrast on bright backdrops
    (same bump the composer card uses). */
@@ -578,7 +578,7 @@ table.kv th {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--glass-drop-lg);
 }
 .row-menu button {
   width: 100%;

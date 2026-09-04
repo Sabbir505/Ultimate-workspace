@@ -66,7 +66,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--surface-solid);
-  box-shadow: 0 8px 24px -6px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--glass-drop-lg);
   font-size: 11px;
   line-height: 1.45;
   pointer-events: none;
@@ -691,7 +691,7 @@
   border-radius: var(--radius);
   background: var(--surface);
   border: 1px solid rgba(220, 60, 60, 0.55);
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--glass-drop-lg);
 }
 
 /* ---------- Browser tab bar (multi-tab) ---------- */

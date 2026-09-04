@@ -44,6 +44,14 @@
   --glass-rim-soft: inset 0 1px 0 0 rgba(255, 255, 255, 0.04);
   --glass-shadow: 0 8px 28px -14px rgba(0, 0, 0, 0.4), 0 2px 8px -6px rgba(0, 0, 0, 0.3);
   --glass-shadow-lg: 0 24px 64px -20px rgba(0, 0, 0, 0.45), 0 8px 20px -12px rgba(0, 0, 0, 0.35);
+  /* Drop shadows for floating glass cards (composer, slash menu, session
+     menu, popups…). Dark-tuned here; the light theme MUST override — a
+     0.35–0.5 black shadow that reads as depth on the dark surface reads as
+     a dirty dark "overlay" halo below/around the card on white. */
+  --glass-drop: 0 12px 32px -12px rgba(0, 0, 0, 0.35);
+  --glass-drop-up: 0 -8px 24px -8px rgba(0, 0, 0, 0.35);
+  --glass-drop-soft: 0 4px 16px -10px rgba(0, 0, 0, 0.5);
+  --glass-drop-lg: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
 
   /* Theme switch transition â€” color/bg only, no layout-affecting props.
@@ -218,6 +226,15 @@
   --border-strong: #c8c8c8;
   --glass-rim: inset 0 1px 0 0 rgba(0, 0, 0, 0.06);
   --glass-rim-soft: inset 0 1px 0 0 rgba(0, 0, 0, 0.04);
+  /* Soft, tight shadows — the dark-theme drops read as dark smudges on
+     white (see the drop-token note in :root). Cool-gray black so the halo
+     never warms against the neutral surfaces. */
+  --glass-shadow: 0 8px 24px -14px rgba(15, 22, 30, 0.16), 0 2px 8px -6px rgba(15, 22, 30, 0.08);
+  --glass-shadow-lg: 0 20px 48px -22px rgba(15, 22, 30, 0.18), 0 8px 18px -12px rgba(15, 22, 30, 0.1);
+  --glass-drop: 0 12px 28px -16px rgba(15, 22, 30, 0.16);
+  --glass-drop-up: 0 -8px 22px -14px rgba(15, 22, 30, 0.12);
+  --glass-drop-soft: 0 6px 18px -12px rgba(15, 22, 30, 0.18);
+  --glass-drop-lg: 0 12px 32px -14px rgba(15, 22, 30, 0.18);
   --doc-fold-light: #e8e8e8;
   --doc-fold-dark: #d0d0d0;
   --text: #1a1a1a;
@@ -228,7 +245,10 @@
   --link: #0b69a3;
   --accent: #6e706f;
   --accent-soft: rgba(110, 112, 111, 0.12);
-  --accent-glow: rgba(110, 112, 111, 0.28);
+  /* Focus/active ambient glow. On white even the gray glow muddies into a
+     fog around the focused composer, so light gets roughly half the dark
+     alpha. */
+  --accent-glow: rgba(110, 112, 111, 0.16);
   --accent-contrast: #ffffff;
   --danger: #d64545;
   --fit-ok: #1a7f37;

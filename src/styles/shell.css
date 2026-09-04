@@ -312,7 +312,7 @@
   );
   backdrop-filter: blur(24px) saturate(160%);
   -webkit-backdrop-filter: blur(24px) saturate(160%);
-  box-shadow: var(--glass-rim), 0 12px 32px -12px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--glass-rim), var(--glass-drop);
   overflow: hidden;
   z-index: 50;
   animation: branch-popover-fade 0.15s var(--ease);
@@ -417,7 +417,7 @@
   );
   backdrop-filter: blur(24px) saturate(160%);
   -webkit-backdrop-filter: blur(24px) saturate(160%);
-  box-shadow: var(--glass-rim), 0 12px 32px -12px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--glass-rim), var(--glass-drop);
   overflow: hidden;
   animation: git-sidebar-slide 0.2s var(--ease);
   margin-top: 6px;
@@ -958,7 +958,7 @@ button.git-sidebar-section-header:hover {
   );
   backdrop-filter: blur(24px) saturate(160%);
   -webkit-backdrop-filter: blur(24px) saturate(160%);
-  box-shadow: var(--glass-rim), 0 12px 32px -12px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--glass-rim), var(--glass-drop);
   overflow: hidden;
 }
 :root[data-theme="light"] .branch-dropdown {

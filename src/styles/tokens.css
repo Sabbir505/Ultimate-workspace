@@ -52,6 +52,10 @@
   --glass-drop-up: 0 -8px 24px -8px rgba(0, 0, 0, 0.35);
   --glass-drop-soft: 0 4px 16px -10px rgba(0, 0, 0, 0.5);
   --glass-drop-lg: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+  /* Hairline color for woven-mesh glass textures (composer slash menu).
+     Crossed repeating gradients at this alpha read as frosted mesh, not net. */
+  --glass-mesh-line: rgba(255, 255, 255, 0.03);
+  --glass-mesh-line-light: rgba(0, 0, 0, 0.03);
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
 
   /* Theme switch transition â€” color/bg only, no layout-affecting props.

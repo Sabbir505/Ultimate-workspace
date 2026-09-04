@@ -137,26 +137,53 @@
   padding: 6px;
   max-height: 240px;
   overflow-y: auto;
-  /* Same liquid glass as the composer card itself. */
+  /* Same liquid glass as the composer card, but with a woven-mesh body: two
+     crossed hairline weaves plus a denser base fill give the frost enough
+     "tooth" that list rows stay legible over busy backdrops (welcome cards
+     used to bleed straight through). Still translucent — the backdrop blur
+     reads through the mesh. */
   border: 1px solid var(--border);
   border-bottom: none;
   border-radius: 16px 16px 0 0;
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--surface-glass) 55%, transparent),
-    color-mix(in srgb, var(--surface-glass) 35%, transparent)
-  );
+  background:
+    repeating-linear-gradient(
+      45deg,
+      var(--glass-mesh-line) 0 1px,
+      transparent 1px 4px
+    ),
+    repeating-linear-gradient(
+      -45deg,
+      var(--glass-mesh-line) 0 1px,
+      transparent 1px 4px
+    ),
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--surface-glass) 78%, transparent),
+      color-mix(in srgb, var(--surface-glass) 64%, transparent)
+    );
   backdrop-filter: blur(24px) saturate(160%);
   -webkit-backdrop-filter: blur(24px) saturate(160%);
   box-shadow: var(--glass-rim), var(--glass-drop);
 }
-/* Light theme: match the card's brighter body so rows keep contrast. */
+/* Light theme: dark mesh lines on the brighter body (white lines would
+   vanish on the light glass). */
 :root[data-theme="light"] .composer-slash-menu {
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--surface-glass) 70%, transparent),
-    color-mix(in srgb, var(--surface-glass) 55%, transparent)
-  );
+  background:
+    repeating-linear-gradient(
+      45deg,
+      var(--glass-mesh-line-light) 0 1px,
+      transparent 1px 4px
+    ),
+    repeating-linear-gradient(
+      -45deg,
+      var(--glass-mesh-line-light) 0 1px,
+      transparent 1px 4px
+    ),
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--surface-glass) 86%, transparent),
+      color-mix(in srgb, var(--surface-glass) 74%, transparent)
+    );
 }
 .composer-slash-item {
   display: flex;

@@ -1241,15 +1241,6 @@ export function ChatComposer({
   const [attachSources, setAttachSources] = useState<AttachSource[]>([]);
   const [attachedRows, setAttachedRows] = useState<string[]>([]);
   const [atIndex, setAtIndex] = useState(0);
-  // First-line indent for the textarea = measured width of the pill row, so
-  // the pills overlay the empty start of line 1 and the text wraps at FULL
-  // column width from line 2 on (a plain textarea can't flow around an
-  // inline element; text-indent applies to the first line only).
-  const tokenRowRef = useRef<HTMLSpanElement>(null);
-  const [tokenIndent, setTokenIndent] = useState(0);
-  useLayoutEffect(() => {
-    setTokenIndent(tokenRowRef.current?.offsetWidth ?? 0);
-  }, [commandPill, attachedRows, attachSources]);
 
   const atToken = tokenAtCaret(content, caret, "@");
   const atQuery = atToken?.query ?? null;
@@ -1751,21 +1742,19 @@ export function ChatComposer({
     }
   }, [draft?.nonce]);
 
-  // Auto-grow the textarea as the user types. The write is skipped when the
-  // computed height is unchanged: the "auto" reset + scrollHeight read force a
-  // synchronous layout, and an unconditional height write per keystroke
-  // invalidates the composer card's layout (its backdrop-filter frost must
-  // recomposite) even when nothing resized.
-  const appliedHeightRef = useRef("");
+  // Auto-grow the textarea as the user types, clamped to the CSS max-height
+  // (200px) — taller content scrolls inside the box. The "auto" reset before
+  // measuring is required for shrink detection (a clamped textarea reports
+  // scrollHeight = its own height, so shrunken content would never shrink the
+  // box). It must ALWAYS be followed by restoring a concrete height: an earlier
+  // perf guard skipped the restore when the computed height was unchanged,
+  // which is precisely the hit-the-ceiling-then-keep-typing case — the inline
+  // height stayed `auto` (one row) and the composer collapsed.
   useEffect(() => {
     const ta = textareaRef.current;
     if (!ta) return;
     ta.style.height = "auto";
-    const next = `${Math.min(ta.scrollHeight, 200)}px`;
-    if (appliedHeightRef.current !== next) {
-      appliedHeightRef.current = next;
-      ta.style.height = next;
-    }
+    ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
   }, [content]);
 
   // Re-focus the composer when the right tool panel's tab/collapse state
@@ -2327,7 +2316,7 @@ export function ChatComposer({
         )}
         <div className="composer-slash-wrap">
           {(commandPill || attachedRows.length > 0) && (
-            <span className="composer-token-row" ref={tokenRowRef}>
+            <span className="composer-token-row">
               {commandPill && (
                 <span className="composer-token-pill composer-token-command">
                   <SquareSlash className="composer-token-icon" size={13} aria-hidden="true" />
@@ -2430,7 +2419,6 @@ export function ChatComposer({
                   ? "Ask anything, or select an agent to customize performance…"
                   : "Write a message…  / for skills · @ for apps"
             }
-            style={tokenIndent ? { textIndent: tokenIndent + 8 } : undefined}
             value={content}
             onChange={(e) => {
               setContent(e.target.value);

@@ -28,21 +28,19 @@
 .composer-slash-wrap {
   position: relative;
 }
-/* Token pills (command + attached connectors) overlay the indented first
-   line of the textarea: the textarea's text-indent reserves exactly the
-   pills' measured width on LINE 1 ONLY, so the typed text wraps at full
-   column width from line 2 on. */
+/* Token pills (command + attached connectors) sit in normal flow ABOVE the
+   textarea. They used to overlay the textarea's indented first line
+   (text-indent reserving the pills' width on line 1 only), but that breaks
+   as soon as the message outgrows the textarea's max-height: the content
+   scrolls under the pinned pills and the message's first line "hides to the
+   top". A flow row scrolls nothing and wraps when there are many pills. */
 .composer-token-row {
-  position: absolute;
-  top: 0;
-  left: 0;
-  display: inline-flex;
+  display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 4px;
-  /* 24px pill centered on the textarea's first line (line center ≈ 11.75px
-     from the wrap top → pill top ≈ 0). */
   max-width: 100%;
+  margin-bottom: 4px;
 }
 .composer-token-pill {
   display: inline-flex;

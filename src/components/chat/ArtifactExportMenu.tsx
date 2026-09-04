@@ -22,6 +22,14 @@ import { toJpeg, toPng, toSvg } from "html-to-image";
 import { downloadArtifact } from "../../lib/ipc";
 import { sanitizeHtml } from "../../lib/sanitize";
 import type { ArtifactPreview } from "../../lib/ipc";
+import {
+  computeRasterSize,
+  DEFAULT_EXPORT_SCALE,
+  EXPORT_SCALES,
+  effectiveExportBackground,
+  svgPixelSize,
+  type ExportScale,
+} from "../../lib/diagramExport";
 
 interface Props {
   preview: ArtifactPreview;
@@ -151,11 +159,28 @@ function SvgIcon() {
   );
 }
 
+/** Checkerboard glyph for the transparent-background toggle (the standard
+ *  image-editor convention for "no backdrop"). */
+function TransparentIcon({ active }: { active: boolean }) {
+  return (
+    <svg width={14} height={14} viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="3" width="18" height="18" fill="none" stroke="currentColor" strokeWidth={1.5} />
+      <rect x="4.5" y="4.5" width="7" height="7" fill={active ? "currentColor" : "none"} opacity={0.85} />
+      <rect x="12.5" y="12.5" width="7" height="7" fill={active ? "currentColor" : "none"} opacity={0.85} />
+    </svg>
+  );
+}
+
 /** Build an off-DOM node holding the diagram HTML, rasterize it, and return a
- *  PNG data URL. Used by both Copy and Download PNG. Throws on failure (e.g.
+ *  PNG data URL. Used by the Download PNG / Copy fallback path for HTML/CSS
+ *  diagrams that aren't authored as inline SVG. `bg` is the resolved export
+ *  background ("transparent" keeps the PNG's alpha). Throws on failure (e.g.
  *  tainted canvas) — caller surfaces a friendly error. */
-async function rasterizeHtml(html: string, fallbackBg: string = EXPORT_BG): Promise<string> {
-  const bg = pageBackground(html, fallbackBg);
+async function rasterizeHtml(
+  html: string,
+  bg: string,
+  scale: number,
+): Promise<string> {
   const holder = document.createElement("div");
   holder.style.position = "fixed";
   holder.style.left = "-99999px";
@@ -172,7 +197,7 @@ async function rasterizeHtml(html: string, fallbackBg: string = EXPORT_BG): Prom
     // Give the browser a frame to lay out / paint before capture.
     await new Promise((r) => requestAnimationFrame(() => r(null)));
     const dataUrl = await toPng(holder, {
-      pixelRatio: 2,
+      pixelRatio: scale,
       cacheBust: true,
       backgroundColor: bg,
     });
@@ -182,30 +207,15 @@ async function rasterizeHtml(html: string, fallbackBg: string = EXPORT_BG): Prom
   }
 }
 
-/** Intrinsic pixel size of a standalone SVG string, from its width/height or
- *  viewBox. Returns 0s when neither is present (caller falls back to the
- *  loaded image's natural size). */
-function svgPixelSize(svg: string): { w: number; h: number } {
-  const tag = svg.match(/<svg\b[^>]*>/i)?.[0] ?? "";
-  const w = tag.match(/\bwidth="([\d.]+)(?:px)?"/i);
-  const h = tag.match(/\bheight="([\d.]+)(?:px)?"/i);
-  if (w && h) return { w: parseFloat(w[1]), h: parseFloat(h[1]) };
-  const vb = tag.match(/viewBox="([^"]+)"/i);
-  if (vb) {
-    const p = vb[1].split(/[\s,]+/).map(Number);
-    if (p.length === 4 && p.every(Number.isFinite)) return { w: p[2], h: p[3] };
-  }
-  return { w: 0, h: 0 };
-}
-
 /** Rasterize a standalone <svg> string to a PNG or JPEG data URL via an
  *  <img> + canvas. This is reliable in the WebKitGTK/Tauri webview where
- *  html-to-image's foreignObject capture produces a blank image. Throws on
- *  failure. */
+ *  html-to-image's foreignObject capture produces a blank image. A
+ *  "transparent" bg skips the backdrop fill so the PNG keeps its alpha
+ *  (JPEG callers never pass it). Throws on failure. */
 async function svgToRaster(
   svg: string,
   type: "image/png" | "image/jpeg",
-  scale = 2,
+  scale: number,
   bg = EXPORT_BG,
 ): Promise<string> {
   const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
@@ -222,13 +232,16 @@ async function svgToRaster(
       w = img.naturalWidth || 1200;
       h = img.naturalHeight || 800;
     }
+    const size = computeRasterSize(w, h, scale);
     const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(w * scale));
-    canvas.height = Math.max(1, Math.round(h * scale));
+    canvas.width = size.w;
+    canvas.height = size.h;
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("no 2d canvas context");
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    if (bg !== "transparent") {
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     return type === "image/jpeg"
       ? canvas.toDataURL("image/jpeg", 0.92)
@@ -241,27 +254,38 @@ async function svgToRaster(
 /** Produce a PNG data URL for a diagram/html artifact. Prefers rasterizing the
  *  diagram's own root <svg> (reliable everywhere); falls back to html-to-image
  *  for HTML/CSS diagrams that aren't authored as inline SVG. */
-async function diagramToPng(html: string, fallbackBg: string = EXPORT_BG): Promise<string> {
-  const bg = pageBackground(html, fallbackBg);
+async function diagramToPng(
+  html: string,
+  fallbackBg: string,
+  scale: number,
+  transparent: boolean,
+): Promise<string> {
+  // A user-requested transparent PNG overrides even a declared page
+  // background — the toggle is explicit.
+  const bg = transparent ? "transparent" : pageBackground(html, fallbackBg);
   const rootSvg = extractRootSvg(html, bg);
   if (rootSvg) {
     try {
-      return await svgToRaster(rootSvg, "image/png", 2, bg);
+      return await svgToRaster(rootSvg, "image/png", scale, bg);
     } catch {
       // Fall through to the html-to-image path below.
     }
   }
-  return rasterizeHtml(html);
+  return rasterizeHtml(html, bg, scale);
 }
 
 /** JPEG variant of diagramToPng: same routing, lossy canvas encode. JPEG has
  *  no alpha, so the page background is always painted (white by default). */
-async function diagramToJpeg(html: string, fallbackBg: string = EXPORT_BG): Promise<string> {
+async function diagramToJpeg(
+  html: string,
+  fallbackBg: string,
+  scale: number,
+): Promise<string> {
   const bg = pageBackground(html, fallbackBg);
   const rootSvg = extractRootSvg(html, bg);
   if (rootSvg) {
     try {
-      return await svgToRaster(rootSvg, "image/jpeg", 2, bg);
+      return await svgToRaster(rootSvg, "image/jpeg", scale, bg);
     } catch {
       // Fall through to the html-to-image path below.
     }
@@ -277,14 +301,15 @@ async function diagramToJpeg(html: string, fallbackBg: string = EXPORT_BG): Prom
   document.body.appendChild(holder);
   try {
     await new Promise((r) => requestAnimationFrame(() => r(null)));
-    return await toJpeg(holder, { quality: 0.92, cacheBust: true, backgroundColor: bg });
+    return await toJpeg(holder, { quality: 0.92, cacheBust: true, backgroundColor: bg, pixelRatio: scale });
   } finally {
     document.body.removeChild(holder);
   }
 }
 
 /** Extract the diagram's own root <svg> as a standalone, namespaced SVG string,
- *  or null when the diagram isn't authored as inline SVG. */
+ *  or null when the diagram isn't authored as inline SVG. A "transparent" bg
+ *  skips the opaque backdrop rect (user asked for a transparent export). */
 function extractRootSvg(html: string, bg = EXPORT_BG): string | null {
   const doc = new DOMParser().parseFromString(html, "text/html");
   const svg = doc.querySelector("svg");
@@ -298,7 +323,7 @@ function extractRootSvg(html: string, bg = EXPORT_BG): string | null {
   // Paint an opaque backdrop (the diagram's own page background) behind the
   // diagram so the exported file isn't transparent and matches chat. Insert as
   // the first child so it sits behind everything.
-  if (!svg.querySelector('rect[data-export-bg="1"]')) {
+  if (bg !== "transparent" && !svg.querySelector('rect[data-export-bg="1"]')) {
     const rect = doc.createElementNS("http://www.w3.org/2000/svg", "rect");
     rect.setAttribute("data-export-bg", "1");
     rect.setAttribute("x", "0");
@@ -376,6 +401,11 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  // Raster export options. Scale defaults to 3× (Retina/slide-safe);
+  // "transparent" keeps the PNG's alpha instead of painting the surface
+  // colour behind the diagram.
+  const [scale, setScale] = useState<ExportScale>(DEFAULT_EXPORT_SCALE);
+  const [transparent, setTransparent] = useState(false);
   const kebabRef = useRef<HTMLDivElement>(null);
   // Fallback background for diagrams that don't declare their own (see Props).
   const fallbackBg = exportBg ?? EXPORT_BG;
@@ -409,7 +439,7 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
       if (hasImageUri && preview.dataUri) {
         await copyDataUrlToClipboard(preview.dataUri);
       } else if (isHtmlDiagram && preview.text) {
-        const dataUrl = await diagramToPng(preview.text, fallbackBg);
+        const dataUrl = await diagramToPng(preview.text, fallbackBg, scale, transparent);
         await copyDataUrlToClipboard(dataUrl);
       } else {
         throw new Error("nothing rasterizable to copy");
@@ -430,13 +460,13 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
       if (hasImageUri && preview.dataUri) {
         dataUrl = preview.dataUri;
       } else if (isHtmlDiagram && preview.text) {
-        dataUrl = await diagramToPng(preview.text, fallbackBg);
+        dataUrl = await diagramToPng(preview.text, fallbackBg, scale, transparent);
       } else {
         throw new Error("nothing rasterizable to export");
       }
       // Download via an anchor (Tauri webview supports blob downloads).
       triggerDownload(dataUrl, `${preview.filename.replace(/\.[^.]+$/, "")}.png`);
-      flash("Saved PNG");
+      flash(`Saved PNG (${scale}×)`);
     } catch (e) {
       setError(`PNG export failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -453,7 +483,7 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
         // An image data URI may carry alpha; paint it over white first.
         dataUrl = await rasterizeDataUriToJpeg(preview.dataUri);
       } else if (isHtmlDiagram && preview.text) {
-        dataUrl = await diagramToJpeg(preview.text, fallbackBg);
+        dataUrl = await diagramToJpeg(preview.text, fallbackBg, scale);
       } else {
         throw new Error("nothing rasterizable to export");
       }
@@ -481,14 +511,19 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
     setError(null);
     try {
       const base = preview.filename.replace(/\.[^.]+$/, "");
-      const rootSvg = extractRootSvg(preview.text, pageBackground(preview.text, fallbackBg));
+      // "Transparent background" is honoured here too: export the diagram's
+      // own SVG without the painted backdrop rect.
+      const bg = transparent
+        ? "transparent"
+        : pageBackground(preview.text, fallbackBg);
+      const rootSvg = extractRootSvg(preview.text, bg);
       if (rootSvg) {
         const blob = new Blob([rootSvg], { type: "image/svg+xml" });
         const url = URL.createObjectURL(blob);
         triggerDownload(url, `${base}.svg`);
         setTimeout(() => URL.revokeObjectURL(url), 4000);
       } else {
-        const dataUrl = await rasterizeToSvg(preview.text, fallbackBg);
+        const dataUrl = await rasterizeToSvg(preview.text, effectiveExportBackground(fallbackBg, "png", transparent));
         triggerDownload(dataUrl, `${base}.svg`);
       }
       flash("Saved SVG");
@@ -578,6 +613,39 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
             >
               Copy image
             </button>
+            {isHtmlDiagram && (
+              <>
+                <div className="artifact-kebab-divider" role="separator" />
+                <div className="artifact-kebab-option-row" role="group" aria-label="PNG export scale">
+                  <span className="artifact-kebab-option-label">PNG scale</span>
+                  <div className="artifact-kebab-scale-seg">
+                    {EXPORT_SCALES.map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        className="artifact-kebab-scale-btn"
+                        aria-pressed={scale === s}
+                        title={`Export PNG at ${s}× resolution`}
+                        onClick={() => setScale(s)}
+                      >
+                        {s}×
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={transparent}
+                  className="artifact-kebab-item"
+                  disabled={busy !== null}
+                  onClick={() => setTransparent((t) => !t)}
+                >
+                  <span className="artifact-kebab-check">{transparent ? "✓" : ""}</span>
+                  Transparent background
+                </button>
+              </>
+            )}
             {typeof extraItems === "function" ? extraItems(() => setMenuOpen(false)) : extraItems}
           </div>
         )}
@@ -596,7 +664,7 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
       </Btn>
       <Btn
         onClick={handleDownloadPng}
-        title="Download as PNG"
+        title={`Download as PNG (${scale}×)`}
         disabled={busy !== null}
       >
         <ImageIcon />
@@ -615,6 +683,35 @@ export function ArtifactExportMenu({ preview, path, filename, variant = "toolbar
       >
         <SvgIcon />
       </Btn>
+      {isHtmlDiagram && (
+        <>
+          <select
+            className="artifact-export-scale"
+            title="PNG export scale (resolution multiplier)"
+            aria-label="PNG export scale"
+            value={scale}
+            disabled={busy !== null}
+            onChange={(e) => setScale(Number(e.target.value) as ExportScale)}
+          >
+            {EXPORT_SCALES.map((s) => (
+              <option key={s} value={s}>
+                {s}×
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="artifact-export-btn"
+            aria-pressed={transparent}
+            aria-label="Toggle transparent export background"
+            title={transparent ? "Background: transparent — click for opaque" : "Background: opaque — click for transparent"}
+            disabled={busy !== null}
+            onClick={() => setTransparent((t) => !t)}
+          >
+            <TransparentIcon active={transparent} />
+          </button>
+        </>
+      )}
       {busy && (
         <span className="artifact-export-status">
           {busy === "copy" ? "Copying…" : busy === "svg" ? "Rendering SVG…" : "Rendering PNG…"}

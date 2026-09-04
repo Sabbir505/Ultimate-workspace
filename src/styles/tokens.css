@@ -212,6 +212,22 @@
   --syntax-deleted: #ff7b72;
   --syntax-inserted: #34d17b;
   --syntax-changed: #88C0D0;
+
+  /* === Diagram Palette (Mermaid + generated diagram art) ============ */
+  /* Neutral node surfaces with a single theme accent for emphasis — an
+     all-grey diagram palette reads as a washed-out wireframe. Custom
+     themes may override these like any other color token. */
+  /* Emphasis fills (start/end, highlighted shapes) + their label text. */
+  --diagram-accent: #88c0d0;
+  --diagram-accent-contrast: #10222b;
+  /* Regular node fill/border — faint blue-tinted slate, not pure grey. */
+  --diagram-node-fill: #232a31;
+  --diagram-node-border: #3f4c56;
+  /* Edges + arrowheads — visible structure, less glare than near-white. */
+  --diagram-line: #9aa8b2;
+  /* Subgraph containers, one step below the node fill so grouping reads. */
+  --diagram-cluster-fill: #1d2226;
+  --diagram-cluster-border: #333c44;
 }
 
 :root[data-theme="light"] {
@@ -337,6 +353,15 @@
   --syntax-deleted: #d64545;
   --syntax-inserted: #16a34a;
   --syntax-changed: #0078a8;
+
+  /* === Diagram Palette (mirrors the dark scope above) ================ */
+  --diagram-accent: #0078a8;
+  --diagram-accent-contrast: #ffffff;
+  --diagram-node-fill: #f7fafc;
+  --diagram-node-border: #8fa1ad;
+  --diagram-line: #44525c;
+  --diagram-cluster-fill: #f0f3f6;
+  --diagram-cluster-border: #d5dde3;
 }
 
 * {

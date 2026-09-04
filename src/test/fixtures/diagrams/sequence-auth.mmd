@@ -1,0 +1,14 @@
+sequenceDiagram
+  autonumber
+  participant U as User
+  participant C as Client app
+  participant S as Auth server
+  U->>C: Enter credentials
+  C->>S: POST /login
+  alt credentials valid
+    S-->>C: 200 + access token
+    C-->>U: Dashboard
+  else invalid
+    S-->>C: 401 unauthorized
+    C-->>U: Error banner
+  end

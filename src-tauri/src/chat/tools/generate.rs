@@ -142,6 +142,16 @@ solid primary-flow arrows with a dashed feedback line looping back, and consiste
 colour per category. Put the title as a <text> at the top of the SVG, above the flow. \
 If the diagram you just built looks flat or linear, regenerate it with this guide applied.
 
+MERMAID AUTHORING — the renderer auto-layouts, so your job is clean input: keep node \
+labels short (~5 words max; detail belongs in the surrounding prose), at most ~15 nodes \
+per diagram (split a big system into several focused diagrams and say so in prose), \
+state direction explicitly (LR for pipelines/flows, TD for hierarchies), and group \
+related nodes with `subgraph` + a short title. Use `classDef` + `class` for category \
+colours instead of per-node `style:` lines, and quote any label containing parentheses \
+or punctuation. In sequenceDiagram, declare `participant`s in call order, keep messages \
+terse, and add `autonumber` for protocols. Every decision node gets labeled edges \
+(|Yes| / |No|) — never a bare branch.
+
 SHOWING YOUR WORK — the app handles it: every file you create with write_file is \
 previewed automatically (rendered inline in the chat or opened as a preview tab — \
 HTML runs live, .mmd renders as a diagram, .md renders with diagrams, .tsx runs as \

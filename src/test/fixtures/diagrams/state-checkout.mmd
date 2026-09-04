@@ -1,0 +1,12 @@
+stateDiagram-v2
+  [*] --> Browsing
+  Browsing --> Cart: add to cart
+  Cart --> Checkout: checkout
+  state Checkout {
+    [*] --> Shipping
+    Shipping --> Payment: address confirmed
+    Payment --> [*]: paid
+  }
+  Checkout --> Browsing: cancel
+  Checkout --> Done: order placed
+  Done --> [*]

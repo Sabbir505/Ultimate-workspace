@@ -18,6 +18,11 @@ import { useUiStore } from "../../state/ui";
 export interface MermaidDiagramProps {
   /** The raw mermaid source (the text inside the ```mermaid fence). */
   code: string;
+  /** Optional repair hook: invoked with (source, error) when the user asks
+   *  the agent to fix a diagram that failed to parse/render. The chat mounts
+   *  it to send a fix request into the conversation; surfaces without an
+   *  agent (artifact tabs) omit it and the button never shows. */
+  onFix?: (source: string, error: string) => void;
 }
 
 type MermaidModule = typeof import("mermaid").default;
@@ -25,18 +30,68 @@ type RenderResult = { svg: string };
 
 // Mermaid is only imported client-side, inside an effect, so the heavy
 // bundle stays out of the initial page path and never runs under SSR/tests.
-let lastTheme: string | null = null;
+//
+// Initialization is keyed on the light/dark mode PLUS the live values of
+// every token the diagram palette consumes. Custom gallery themes override
+// tokens inline on <html>, so two dark-based themes with different accents
+// must not share one initialized mermaid instance (the old key was just
+// "dark"/"light", which left stale palette colors after a theme swap).
+const DIAGRAM_THEME_TOKENS = [
+  "--font-ui",
+  "--text",
+  "--surface",
+  "--surface-2",
+  "--surface-glass",
+  "--surface-glass-2",
+  "--editor-bg",
+  "--border",
+  "--border-strong",
+  "--diagram-accent",
+  "--diagram-accent-contrast",
+  "--diagram-node-fill",
+  "--diagram-node-border",
+  "--diagram-line",
+  "--diagram-cluster-fill",
+  "--diagram-cluster-border",
+] as const;
+
+function themeMode(): "light" | "dark" {
+  if (typeof document === "undefined") return "dark";
+  return document.documentElement.dataset.theme === "light" ? "light" : "dark";
+}
+
+function diagramInitKey(theme: string, cs: CSSStyleDeclaration | null): string {
+  if (!cs) return theme;
+  const sig = DIAGRAM_THEME_TOKENS.map((t) => cs.getPropertyValue(t).trim()).join("|");
+  return `${theme}::${sig}`;
+}
+
+let lastInitKey: string | null = null;
+// ELK registers once per app run; it must be registered before initialize().
+let layoutsRegistered = false;
 
 async function loadMermaid(theme: string): Promise<MermaidModule> {
   const mod = await import("mermaid");
   const mermaid = mod.default;
+  if (!layoutsRegistered) {
+    // ELK layout engine: orthogonal, tidier connector routing on complex
+    // graphs than the dagre default (draw.io / Mermaid Chart default to it
+    // for flowcharts). It is ~2MB, so it rides the same lazy import path as
+    // mermaid itself. Per-diagram frontmatter (`config: layout: dagre`)
+    // can still opt out.
+    const elk = await import("@mermaid-js/layout-elk");
+    mermaid.registerLayoutLoaders(elk.default);
+    layoutsRegistered = true;
+  }
   // Read token values from CSS custom properties so diagrams track the
-  // app's data-theme instead of being pinned to one palette.
+  // app's data-theme (and any inline custom-theme overrides) instead of
+  // being pinned to one palette.
   const cs = typeof document !== "undefined" ? getComputedStyle(document.documentElement) : null;
   const tok = (name: string, fallback: string) =>
     cs ? cs.getPropertyValue(name).trim() || fallback : fallback;
   // Re-init only when the theme actually changes — cheap no-op otherwise.
-  if (lastTheme !== theme) {
+  const initKey = diagramInitKey(theme, cs);
+  if (lastInitKey !== initKey) {
     const isDark = theme === "dark";
     mermaid.initialize({
       startOnLoad: false,
@@ -46,57 +101,165 @@ async function loadMermaid(theme: string): Promise<MermaidModule> {
       // rendered SVG is ALSO run through sanitizeSvg() before injection.
       securityLevel: "antiscript",
       theme: isDark ? "dark" : "default",
-      fontFamily: "var(--font-sans)",
+      // ELK by default: significantly cleaner edge routing on dense
+      // flowcharts. Diagram types without a graph layout (sequence, gantt,
+      // pie…) ignore this and keep their dedicated renderers.
+      layout: "elk",
+      // Resolve the UI font stack to a literal string: mermaid bakes it into
+      // the SVG's <style>, and a downloaded .svg file resolves no app CSS —
+      // a var() reference would dangle there. (The previous value,
+      // "var(--font-sans)", named a token that never existed, so diagram
+      // text silently fell back to the webview default font.)
+      fontFamily: tok(
+        "--font-ui",
+        '"Space Grotesk", -apple-system, "Segoe UI", system-ui, sans-serif',
+      ),
+      flowchart: {
+        // The dagre defaults cram nodes together and draw wobbly spline
+        // edges ("basis"), which reads as a sketch. Deliberate air plus
+        // crisp angular edges read as an engineering diagram.
+        nodeSpacing: 55,
+        rankSpacing: 62,
+        padding: 14,
+        curve: "linear",
+        useMaxWidth: true,
+      },
+      sequence: {
+        actorMargin: 60,
+        messageMargin: 40,
+        boxMargin: 12,
+        useMaxWidth: true,
+      },
       themeVariables: isDark
         ? {
             // Transparent canvas so the diagram floats on the app surface.
             background: "transparent",
-            mainBkg: tok("--surface-2", "#1f1f1f"),
+            // Regular nodes: faint blue-tinted slate fills with readable
+            // borders. An all-grey palette reads as a washed-out wireframe.
+            mainBkg: tok("--diagram-node-fill", "#232a31"),
+            nodeBorder: tok("--diagram-node-border", "#3f4c56"),
+            // Subgraph containers sit one step below the nodes so grouping
+            // reads as structure, not noise.
+            clusterBkg: tok("--diagram-cluster-fill", "#1d2226"),
+            clusterBorder: tok("--diagram-cluster-border", "#333c44"),
             secondBkg: tok("--surface-glass-2", "#252525"),
             tertiaryBkg: tok("--surface-glass", "#1e1e1e"),
-            // Cool neutral edges/text; cyan primary accent.
-            lineColor: tok("--syntax-operator", "#d4d4d4"),
+            // Edges + arrowheads: cool slate — visible structure, less glare
+            // than near-white lines.
+            lineColor: tok("--diagram-line", "#9aa8b2"),
+            arrowheadColor: tok("--diagram-line", "#9aa8b2"),
             textColor: tok("--text", "#e4e4e4"),
+            nodeTextColor: tok("--text", "#e4e4e4"),
+            titleColor: tok("--text", "#e4e4e4"),
             // Mermaid derives node/label text from stateLabelColor
             // (stateLabelColor || stateBkg || primaryTextColor) — without an
-            // explicit value it falls back to primaryTextColor, which we pin
-            // to the dark editor bg for accent-filled shapes → invisible
-            // dark-on-dark labels. Pin it to the readable text colour.
+            // explicit value it falls back to primaryTextColor. Pin it to
+            // the readable text colour (see the primary note below).
             stateLabelColor: tok("--text", "#e4e4e4"),
             edgeLabelBackground: "transparent",
-            primaryColor: tok("--accent", "#88C0D0"),
-            primaryTextColor: tok("--editor-bg", "#1a1a1a"),
-            primaryBorderColor: tok("--accent", "#88C0D0"),
+            // Emphasis shapes (start/end, highlighted) carry the theme
+            // accent; their label text uses the contrast colour so it stays
+            // readable on the accent fill.
+            primaryColor: tok("--diagram-accent", "#88C0D0"),
+            primaryTextColor: tok("--diagram-accent-contrast", "#10222b"),
+            primaryBorderColor: tok("--diagram-accent", "#88C0D0"),
             secondaryColor: tok("--surface-glass-2", "#252525"),
             secondaryTextColor: tok("--text", "#e4e4e4"),
             secondaryBorderColor: tok("--border-strong", "#3a3a3a"),
             tertiaryColor: tok("--surface-2", "#1f1f1f"),
             tertiaryTextColor: tok("--text", "#e4e4e4"),
             tertiaryBorderColor: tok("--border", "#2a2a2a"),
+            // Sequence diagrams: actors share the node surface, signals the
+            // edge colour — otherwise they keep the built-in lavender cast
+            // that clashes with the rest of the palette.
+            actorBkg: tok("--diagram-node-fill", "#232a31"),
+            actorBorder: tok("--diagram-node-border", "#3f4c56"),
+            actorTextColor: tok("--text", "#e4e4e4"),
+            actorLineColor: tok("--diagram-line", "#9aa8b2"),
+            signalColor: tok("--diagram-line", "#9aa8b2"),
+            signalTextColor: tok("--text", "#e4e4e4"),
+            activationBkgColor: tok("--diagram-accent", "#88C0D0"),
+            activationBorderColor: tok("--diagram-accent", "#88C0D0"),
+            sequenceNumberColor: tok("--diagram-accent-contrast", "#10222b"),
+            // State diagrams: state nodes + transitions join the palette
+            // (their defaults carry the same lavender cast). The node/label
+            // text colour itself is pinned by stateLabelColor above.
+            stateBkg: tok("--diagram-node-fill", "#232a31"),
+            specialStateColor: tok("--diagram-line", "#9aa8b2"),
+            transitionColor: tok("--diagram-line", "#9aa8b2"),
+            transitionLabelColor: tok("--text", "#e4e4e4"),
+            compositeBackground: tok("--diagram-cluster-fill", "#1d2226"),
+            compositeBorder: tok("--diagram-cluster-border", "#333c44"),
+            // Shared: edge-label chips, notes, generic links, ER relations.
+            labelBackgroundColor: tok("--diagram-node-fill", "#232a31"),
+            noteBkgColor: tok("--diagram-cluster-fill", "#1d2226"),
+            noteBorderColor: tok("--diagram-cluster-border", "#333c44"),
+            noteTextColor: tok("--text", "#e4e4e4"),
+            loopTextColor: tok("--text", "#e4e4e4"),
+            defaultLinkColor: tok("--diagram-line", "#9aa8b2"),
+            nodeBkg: tok("--diagram-node-fill", "#232a31"),
+            relationColor: tok("--diagram-line", "#9aa8b2"),
+            relationLabelBackground: tok("--diagram-node-fill", "#232a31"),
+            relationLabelColor: tok("--text", "#e4e4e4"),
             fontSize: "14px",
           }
         : {
             background: "transparent",
-            lineColor: tok("--text", "#1a1a1a"),
+            mainBkg: tok("--diagram-node-fill", "#f7fafc"),
+            nodeBorder: tok("--diagram-node-border", "#8fa1ad"),
+            clusterBkg: tok("--diagram-cluster-fill", "#f0f3f6"),
+            clusterBorder: tok("--diagram-cluster-border", "#d5dde3"),
+            lineColor: tok("--diagram-line", "#44525c"),
+            arrowheadColor: tok("--diagram-line", "#44525c"),
             textColor: tok("--text", "#1a1a1a"),
+            nodeTextColor: tok("--text", "#1a1a1a"),
+            titleColor: tok("--text", "#1a1a1a"),
             // See the dark-theme note: without this, state/flow node labels
-            // fall back to primaryTextColor (#ffffff here — white on the
+            // fall back to primaryTextColor (white here — unreadable on the
             // near-white node fill).
             stateLabelColor: tok("--text", "#1a1a1a"),
             edgeLabelBackground: "transparent",
-            primaryColor: tok("--accent", "#0078a8"),
-            primaryTextColor: "#ffffff",
-            primaryBorderColor: tok("--accent", "#0078a8"),
+            primaryColor: tok("--diagram-accent", "#0078a8"),
+            primaryTextColor: tok("--diagram-accent-contrast", "#ffffff"),
+            primaryBorderColor: tok("--diagram-accent", "#0078a8"),
             secondaryColor: tok("--surface-2", "#f3f3f3"),
             secondaryTextColor: tok("--text", "#1a1a1a"),
             secondaryBorderColor: tok("--border", "#e0e0e0"),
             tertiaryColor: tok("--surface", "#ffffff"),
             tertiaryTextColor: tok("--text", "#1a1a1a"),
             tertiaryBorderColor: tok("--border", "#e0e0e0"),
+            // Sequence diagrams (see the dark-theme note above).
+            actorBkg: tok("--diagram-node-fill", "#f7fafc"),
+            actorBorder: tok("--diagram-node-border", "#8fa1ad"),
+            actorTextColor: tok("--text", "#1a1a1a"),
+            actorLineColor: tok("--diagram-line", "#44525c"),
+            signalColor: tok("--diagram-line", "#44525c"),
+            signalTextColor: tok("--text", "#1a1a1a"),
+            activationBkgColor: tok("--diagram-accent", "#0078a8"),
+            activationBorderColor: tok("--diagram-accent", "#0078a8"),
+            sequenceNumberColor: tok("--diagram-accent-contrast", "#ffffff"),
+            // State diagrams (see the dark-theme note above).
+            stateBkg: tok("--diagram-node-fill", "#f7fafc"),
+            specialStateColor: tok("--diagram-line", "#44525c"),
+            transitionColor: tok("--diagram-line", "#44525c"),
+            transitionLabelColor: tok("--text", "#1a1a1a"),
+            compositeBackground: tok("--diagram-cluster-fill", "#f0f3f6"),
+            compositeBorder: tok("--diagram-cluster-border", "#d5dde3"),
+            // Shared: edge-label chips, notes, generic links, ER relations.
+            labelBackgroundColor: tok("--diagram-node-fill", "#f7fafc"),
+            noteBkgColor: tok("--diagram-cluster-fill", "#f0f3f6"),
+            noteBorderColor: tok("--diagram-cluster-border", "#d5dde3"),
+            noteTextColor: tok("--text", "#1a1a1a"),
+            loopTextColor: tok("--text", "#1a1a1a"),
+            defaultLinkColor: tok("--diagram-line", "#44525c"),
+            nodeBkg: tok("--diagram-node-fill", "#f7fafc"),
+            relationColor: tok("--diagram-line", "#44525c"),
+            relationLabelBackground: tok("--diagram-node-fill", "#f7fafc"),
+            relationLabelColor: tok("--text", "#1a1a1a"),
             fontSize: "14px",
           },
     });
-    lastTheme = theme;
+    lastInitKey = initKey;
   }
   return mermaid;
 }
@@ -228,16 +391,16 @@ let diagramSeq = 0;
 const MERMAID_CACHE_MAX = 32;
 const mermaidSvgCache = new Map<string, string>();
 
-export function MermaidDiagramInner({ code }: MermaidDiagramProps) {
+export function MermaidDiagramInner({ code, onFix }: MermaidDiagramProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const trimmedCode = code.trim();
-  const currentTheme =
-    typeof document !== "undefined"
-      ? document.documentElement.dataset.theme === "light"
-        ? "light"
-        : "dark"
-      : "dark";
-  const cacheKey = `${currentTheme}:${trimmedCode}`;
+  // Cache key includes the token signature, not just light/dark: a custom
+  // gallery theme with a different diagram palette must not reuse another
+  // theme's cached SVG.
+  const cacheKey = `${diagramInitKey(
+    themeMode(),
+    typeof document !== "undefined" ? getComputedStyle(document.documentElement) : null,
+  )}:${trimmedCode}`;
   // Seed synchronously from the cache so a remount paints the diagram
   // immediately instead of flashing the "Creating the diagram…" hint for the
   // debounce window.
@@ -270,8 +433,10 @@ export function MermaidDiagramInner({ code }: MermaidDiagramProps) {
     // before the debounce fires.
     setTopic(guessTopic(trimmed));
 
-    const themeKey =
-      document.documentElement.dataset.theme === "light" ? "light" : "dark";
+    const themeKey = diagramInitKey(
+      themeMode(),
+      getComputedStyle(document.documentElement),
+    );
     const key = `${themeKey}:${trimmed}`;
     const cached = mermaidSvgCache.get(key);
     if (cached !== undefined) {
@@ -297,9 +462,7 @@ export function MermaidDiagramInner({ code }: MermaidDiagramProps) {
       if (cancelled) return;
       (async () => {
         try {
-          const theme =
-            document.documentElement.dataset.theme === "light" ? "light" : "dark";
-          const mermaid = await loadMermaid(theme);
+          const mermaid = await loadMermaid(themeMode());
           if (cancelled) return;
           // Wait for webfonts before rendering: mermaid measures label text
           // with DOM metrics, and a not-yet-loaded font yields clipped /
@@ -409,6 +572,18 @@ export function MermaidDiagramInner({ code }: MermaidDiagramProps) {
           <div className="chat-mermaid-fallback">
             <div className="chat-mermaid-error">Could not render diagram: {error}</div>
             <pre className="chat-mermaid-source">{renderedFrom}</pre>
+            {onFix && (
+              <div className="chat-mermaid-fallback-actions">
+                <button
+                  type="button"
+                  className="chat-mermaid-fix-btn"
+                  title="Ask the agent to fix this diagram"
+                  onClick={() => onFix(renderedFrom || trimmedCode, error)}
+                >
+                  Fix with AI
+                </button>
+              </div>
+            )}
           </div>
         ) : (
           <div className="chat-mermaid-loading">{loadingHint}</div>

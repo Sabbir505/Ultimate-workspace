@@ -21,10 +21,12 @@ const renderMock = vi.fn();
 vi.mock("mermaid", () => ({
   default: {
     initialize: vi.fn(),
+    registerLayoutLoaders: vi.fn(),
     parse: (...args: unknown[]) => parseMock(...args),
     render: (...args: unknown[]) => renderMock(...args),
   },
 }));
+vi.mock("@mermaid-js/layout-elk", () => ({ default: {} }));
 
 import { DiagramLightbox } from "../components/chat/DiagramLightbox";
 import { MermaidDiagram } from "../components/chat/MermaidDiagram";

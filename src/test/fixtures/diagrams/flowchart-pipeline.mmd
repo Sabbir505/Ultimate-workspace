@@ -1,0 +1,14 @@
+flowchart LR
+  Client[Web client] --> Gateway[API gateway]
+  Gateway --> Auth[Auth service]
+  Gateway --> Orders[Order service]
+  subgraph Data plane
+    Orders --> DB[(Postgres)]
+    Orders --> Cache[(Redis)]
+  end
+  Auth --> IdP{Token valid?}
+  IdP -- yes --> Orders
+  IdP -- no --> Deny[401 response]
+
+  classDef infra fill:#232a31,stroke:#88c0d0,color:#e4e4e4;
+  class DB,Cache infra

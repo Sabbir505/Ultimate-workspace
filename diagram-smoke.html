@@ -1,0 +1,146 @@
+<!doctype html>
+<!-- Dev-only render smoke for the diagram pipeline (not part of the app
+     build). Served by `npm run dev` at /diagram-smoke.html; it initializes
+     mermaid with the SAME configuration as MermaidDiagram.tsx (ELK layout,
+     flowchart spacing, diagram palette via light-theme fallbacks) and
+     renders the test corpus so a real browser engine can be inspected
+     visually (screenshots via Playwright / web-gui testing). -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Diagram render smoke</title>
+    <style>
+      body {
+        font-family: "Space Grotesk", -apple-system, "Segoe UI", system-ui, sans-serif;
+        background: #ffffff;
+        color: #1a1a1a;
+        margin: 24px auto;
+        max-width: 860px;
+      }
+      .case {
+        border: 1px solid #d5dde3;
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin: 16px 0;
+      }
+      .case h2 { font-size: 14px; margin: 0 0 8px; }
+      .case svg { max-width: 100%; height: auto; }
+      #status { position: fixed; top: 8px; right: 8px; font: 12px monospace;
+                padding: 4px 8px; background: #f0f3f6; border-radius: 6px; }
+    </style>
+  </head>
+  <body>
+    <h1>Diagram render smoke</h1>
+    <div id="status">running…</div>
+    <div id="cases"></div>
+    <script type="module">
+      import mermaid from "mermaid";
+      import elkLayouts from "@mermaid-js/layout-elk";
+
+      const cases = [
+        ["flowchart (ELK)", `flowchart LR
+  Client[Web client] --> Gateway[API gateway]
+  Gateway --> Auth[Auth service]
+  Gateway --> Orders[Order service]
+  subgraph Data plane
+    Orders --> DB[(Postgres)]
+    Orders --> Cache[(Redis)]
+  end
+  Auth --> IdP{Token valid?}
+  IdP -- yes --> Orders
+  IdP -- no --> Deny[401 response]
+  classDef infra fill:#232a31,stroke:#88c0d0,color:#e4e4e4;
+  class DB,Cache infra`],
+        ["sequence", `sequenceDiagram
+  autonumber
+  participant U as User
+  participant S as Auth server
+  U->>S: POST /login
+  S-->>U: 200 + token`],
+        ["state", `stateDiagram-v2
+  [*] --> Browsing
+  Browsing --> Cart: add to cart
+  Cart --> [*]: abandoned`],
+      ];
+
+      mermaid.registerLayoutLoaders(elkLayouts);
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: "antiscript",
+        theme: "default",
+        layout: "elk",
+        fontFamily: '"Space Grotesk", -apple-system, "Segoe UI", system-ui, sans-serif',
+        flowchart: { nodeSpacing: 55, rankSpacing: 62, padding: 14, curve: "linear", useMaxWidth: true },
+        sequence: { actorMargin: 60, messageMargin: 40, boxMargin: 12, useMaxWidth: true },
+        themeVariables: {
+          background: "transparent",
+          mainBkg: "#f7fafc",
+          nodeBorder: "#8fa1ad",
+          clusterBkg: "#f0f3f6",
+          clusterBorder: "#d5dde3",
+          lineColor: "#44525c",
+          arrowheadColor: "#44525c",
+          textColor: "#1a1a1a",
+          nodeTextColor: "#1a1a1a",
+          titleColor: "#1a1a1a",
+          stateLabelColor: "#1a1a1a",
+          edgeLabelBackground: "transparent",
+          primaryColor: "#0078a8",
+          primaryTextColor: "#ffffff",
+          primaryBorderColor: "#0078a8",
+          actorBkg: "#f7fafc",
+          actorBorder: "#8fa1ad",
+          actorTextColor: "#1a1a1a",
+          actorLineColor: "#44525c",
+          signalColor: "#44525c",
+          signalTextColor: "#1a1a1a",
+          activationBkgColor: "#0078a8",
+          activationBorderColor: "#0078a8",
+          sequenceNumberColor: "#ffffff",
+          stateBkg: "#f7fafc",
+          specialStateColor: "#44525c",
+          transitionColor: "#44525c",
+          transitionLabelColor: "#1a1a1a",
+          compositeBackground: "#f0f3f6",
+          compositeBorder: "#d5dde3",
+          labelBackgroundColor: "#f7fafc",
+          noteBkgColor: "#f0f3f6",
+          noteBorderColor: "#d5dde3",
+          noteTextColor: "#1a1a1a",
+          loopTextColor: "#1a1a1a",
+          defaultLinkColor: "#44525c",
+          nodeBkg: "#f7fafc",
+          relationColor: "#44525c",
+          relationLabelBackground: "#f7fafc",
+          relationLabelColor: "#1a1a1a",
+          fontSize: "14px",
+        },
+      });
+
+      const host = document.getElementById("cases");
+      let ok = 0;
+      const errors = [];
+      for (const [name, code] of cases) {
+        const card = document.createElement("div");
+        card.className = "case";
+        card.innerHTML = `<h2>${name}</h2><div class="out"></div>`;
+        host.appendChild(card);
+        try {
+          await mermaid.parse(code);
+          const { svg } = await mermaid.render(`smoke-${ok}`, code);
+          card.querySelector(".out").innerHTML = svg;
+          ok += 1;
+        } catch (e) {
+          errors.push(`${name}: ${e instanceof Error ? e.message : String(e)}`);
+          card.querySelector(".out").textContent = `FAILED: ${e}`;
+        }
+      }
+      const status = document.getElementById("status");
+      status.textContent = errors.length
+        ? `FAIL ${ok}/${cases.length} — ${errors.join(" | ")}`
+        : `OK ${ok}/${cases.length}`;
+      status.dataset.result = errors.length ? "fail" : "pass";
+      window.__diagramSmokeDone = true;
+    </script>
+  </body>
+</html>

@@ -173,8 +173,9 @@ pub(crate) fn core_prompt_base() -> String {
      no conversation memory) and fires on a 5-field local-time cron schedule; each run \
      logs to its own chat session.\n\n\
      ## Artifacts & diagrams\n\
-     Files produced via plan_document/generate_document/generate_file/generate_diagram surface in the. For PowerPoint decks prefer plan_document (plan first — the app compiles the design system for you) \
-     artifact panel automatically — a short one-line acknowledgment afterward is enough. \
+     Files produced via plan_document/generate_document/generate_file/generate_diagram surface in the \
+     artifact panel automatically — a short one-line acknowledgment afterward is enough. For PowerPoint \
+     decks prefer plan_document (plan first — the app compiles the design system for you). \
      Files you write with write_file/edit_file do NOT open on screen; they are listed in \
      the Artifacts gallery only. When the user should SEE something you made — a finished \
      HTML page, a saved diagram, a document — open it explicitly with `open_file`; never \
@@ -184,7 +185,11 @@ pub(crate) fn core_prompt_base() -> String {
      (or ```tsx) block with `export default function App()` and no imports beyond `react` — \
      it renders in a sandboxed live preview.\n\
      Diagrams default to INLINE ```mermaid blocks (graph TD/LR, sequenceDiagram, erDiagram, \
-     gantt, mindmap, stateDiagram-v2, classDiagram), one diagram per block. Call \
+     gantt, mindmap, stateDiagram-v2, classDiagram), one diagram per block. Author them so they \
+     render clean: short node labels (~5 words max — detail belongs in the surrounding prose), \
+     at most ~15 nodes per diagram (split a big system into several focused diagrams), an \
+     explicit direction (LR for pipelines, TD for hierarchies), and `subgraph` blocks for \
+     grouping. Call \
      generate_diagram only when the user explicitly wants an exportable standalone SVG/PNG \
      artifact. Never describe a diagram in prose; never use ASCII art.\n\n\
      ## Connected accounts\n\

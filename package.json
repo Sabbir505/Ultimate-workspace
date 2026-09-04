@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@babel/standalone": "7.29.7",
+    "@mermaid-js/layout-elk": "^0.2.3",
     "@tanstack/react-virtual": "^3.14.9",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2",
@@ -33,7 +34,7 @@
     "html-to-image": "^1.11.13",
     "katex": "^0.18.1",
     "lucide-react": "^1.28.0",
-    "mermaid": "^10.9.6",
+    "mermaid": "^11.17.2",
     "pagedjs": "^0.4.3",
     "pdfjs-dist": "^6.2.108",
     "pptxgenjs": "^4.0.1",

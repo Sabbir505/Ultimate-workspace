@@ -957,6 +957,7 @@ function renderProcessBlock(
   onPreviewArtifact?: (artifact: ChatArtifact) => void,
   cache = true,
   sources?: ChatSource[],
+  chatSessionId?: string | null,
 ) {
   switch (b.kind) {
     case "activity":
@@ -989,7 +990,7 @@ function renderProcessBlock(
       ) : null;
     case "text":
       return b.text.trim().length > 0 ? (
-        <Markdown key={`text:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={cache} sources={sources} />
+        <Markdown key={`text:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={cache} sources={sources} chatSessionId={chatSessionId} />
       ) : null;
   }
 }
@@ -1421,11 +1422,16 @@ function Markdown({
   onPreviewArtifact,
   cache = true,
   sources,
+  chatSessionId,
 }: {
   content: string;
   onPreviewArtifact?: (artifact: ChatArtifact) => void;
   cache?: boolean;
   sources?: ChatSource[];
+  /** Owning chat session — enables the mermaid "Fix with AI" repair button
+   *  and routes the fix request to the right conversation (split pane and
+   *  background sessions must not leak into the globally active one). */
+  chatSessionId?: string | null;
 }) {
   const hasSources = !!sources && sources.length > 0;
   const fingerprint = sourcesFingerprint(sources);
@@ -1466,11 +1472,33 @@ function Markdown({
             if (match && match[1] === "mermaid") {
               return (
                 <Suspense fallback={<pre className="chat-markdown-mermaid-fallback">{codeString}</pre>}>
-                  <MermaidDiagram code={codeString} />
+                  <MermaidDiagram
+                    code={codeString}
+                    // A diagram that failed to parse offers a one-click fix:
+                    // send the source + error back to the agent in this
+                    // session (queued automatically if a stream is running).
+                    onFix={
+                      chatSessionId
+                        ? (source, error) => {
+                            const clipped =
+                              source.length > 4096
+                                ? source.slice(0, 4096) + "\n%% …(truncated)"
+                                : source;
+                            void useChatStore
+                              .getState()
+                              .sendMessage(
+                                `The mermaid diagram in your previous message failed to render with this error: ${error}\n\nBroken source:\n\`\`\`mermaid\n${clipped}\n\`\`\`\nReply with the corrected diagram as a single \`\`\`mermaid block — no other commentary.`,
+                                undefined,
+                                false,
+                                chatSessionId,
+                              );
+                          }
+                        : undefined
+                    }
+                  />
                 </Suspense>
               );
             }
-
             // React/JSX artifacts open as a live preview in the side pane
             // (rendered by ArtifactPreviewPane), not inline in the chat.
             if (match && (match[1] === "jsx" || match[1] === "tsx")) {
@@ -2031,7 +2059,7 @@ function MessageBubbleInner({
             <CitationFlagContext.Provider value={citationFlags}>
             {isUser ? (
               cleanContent.trim().length > 0 && (
-                <Markdown content={cleanContent} onPreviewArtifact={onPreviewArtifact} />
+                <Markdown content={cleanContent} onPreviewArtifact={onPreviewArtifact} chatSessionId={chatSessionId} />
               )
             ) : hasProcess ? (
               (() => {
@@ -2065,7 +2093,7 @@ function MessageBubbleInner({
                 const mdCache = !live;
                 const textBlock = (b: Block, key: string) =>
                   b.kind === "text" && b.text.trim().length > 0 ? (
-                    <Markdown key={key} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={mdCache} sources={sources} />
+                    <Markdown key={key} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={mdCache} sources={sources} chatSessionId={chatSessionId} />
                   ) : null;
                 return (
                   <>
@@ -2074,7 +2102,7 @@ function MessageBubbleInner({
                       label={processLabel}
                       keepExpandedOnEnd={endedByStop}
                     >
-                      {inside.map((b, i) => renderProcessBlock(b, i, onPreviewArtifact, mdCache, sources))}
+                      {inside.map((b, i) => renderProcessBlock(b, i, onPreviewArtifact, mdCache, sources, chatSessionId))}
                     </ProcessSummary>
                     {outside.map((b, i) => textBlock(b, `out:${i}`))}
                   </>
@@ -2084,7 +2112,7 @@ function MessageBubbleInner({
               /* Pure-text turn: flat markdown, nothing to expand. */
               blocks!.map((b, i) =>
                 b.kind === "text" && b.text.trim().length > 0
-                  ? <Markdown key={`flat:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={!live} sources={sources} />
+                  ? <Markdown key={`flat:${i}`} content={b.text} onPreviewArtifact={onPreviewArtifact} cache={!live} sources={sources} chatSessionId={chatSessionId} />
                   : null,
               )
             )}

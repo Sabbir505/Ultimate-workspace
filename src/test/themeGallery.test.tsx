@@ -120,10 +120,14 @@ describe("ThemeGalleryPanel", () => {
     render(<Harness />);
     await importThemeViaInput(nordThemeJson);
 
-    expect(await screen.findByText(/Nord/)).toBeTruthy();
-    const saved = setSettingMock.mock.calls.find((c) => c[0] === "themes.custom")?.[1];
-    expect(saved).toBeTruthy();
-    const themes = JSON.parse(saved);
+    // Wait on the persisted write, not on card text: a built-in preset is
+    // also named "Nord", so a text query can resolve before the import lands.
+    let saved: string | undefined;
+    await waitFor(() => {
+      saved = setSettingMock.mock.calls.find((c) => c[0] === "themes.custom")?.[1] as string;
+      expect(saved).toBeTruthy();
+    });
+    const themes = JSON.parse(saved!);
     expect(themes).toHaveLength(1);
     expect(themes[0].name).toBe("Nord");
     expect(themes[0].colors).toEqual({ "bg-tint": "#2e3440", accent: "#88c0d0" });
@@ -169,7 +173,9 @@ describe("ThemeGalleryPanel", () => {
     await waitFor(() =>
       expect(document.documentElement.style.getPropertyValue("--accent")).toBe("#88c0d0"),
     );
-    fireEvent.click(screen.getByText(/Nord/));
+    // A built-in preset is also named "Nord", so text queries are ambiguous —
+    // only the active custom card carries the "deselect" title.
+    fireEvent.click(screen.getByTitle("Click to deselect"));
 
     await waitFor(() =>
       expect(document.documentElement.style.getPropertyValue("--accent")).toBe(""),
@@ -190,7 +196,11 @@ describe("ThemeGalleryPanel", () => {
       const saved = setSettingMock.mock.calls.find((c) => c[0] === "themes.custom")?.[1];
       expect(JSON.parse(saved)).toHaveLength(0);
     });
-    expect(screen.queryByText("Nord")).toBeNull();
+    // The custom card (and its Delete control) is gone; the built-in Nord
+    // preset card legitimately remains, so absence must be asserted via the
+    // delete control, not the name text.
+    expect(screen.queryByTitle("Delete theme")).toBeNull();
+    expect(screen.getAllByText(/Nord/)).toHaveLength(1);
     expect(useSettingsStore.getState().customThemeId).toBeNull();
     confirmSpy.mockRestore();
   });

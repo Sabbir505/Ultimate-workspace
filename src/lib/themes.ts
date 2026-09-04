@@ -60,6 +60,10 @@ export const KNOWN_THEME_TOKENS: ReadonlySet<string> = new Set([
   "syntax-tag", "syntax-attr-name", "syntax-attr-value", "syntax-punctuation",
   "syntax-regex", "syntax-builtin", "syntax-deleted", "syntax-inserted",
   "syntax-changed",
+  // Diagram palette (Mermaid + generated diagram art)
+  "diagram-accent", "diagram-accent-contrast", "diagram-node-fill",
+  "diagram-node-border", "diagram-line", "diagram-cluster-fill",
+  "diagram-cluster-border",
 ]);
 
 /** Core identity tokens shown in the import hint (label = what it colors). */

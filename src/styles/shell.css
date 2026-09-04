@@ -1662,10 +1662,12 @@ button.git-sidebar-section-header:hover {
 .notifications-panel-list {
   flex: 1;
   overflow-y: auto;
-  padding: 4px;
+  padding: 6px;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  /* Rows read as separate cards — give them real space between rather than
+     the hairline 1px separation of a packed list. */
+  gap: 6px;
 }
 .notif-row {
   display: flex;

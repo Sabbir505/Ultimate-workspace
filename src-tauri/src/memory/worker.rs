@@ -10,9 +10,9 @@
 use crate::chat::commands::{anthropic_oneshot, openai_oneshot};
 use crate::chat::providers::{AnthropicProvider, OpenAIProvider, OpenRouterProvider};
 use crate::db;
-use crate::memory::consolidate::{apply_judge_op, judge_user_message, parse_judge_op, JudgeInput};
+use crate::memory::consolidate::{apply_judge_op, judge_user_message, parse_judge_op, Applied, JudgeInput};
 use crate::memory::document::{
-    parse_rewritten, rewrite_user_message, set_document, stored_document, REWRITE_SYSTEM,
+    parse_rewritten, rewrite_user_message, set_document, stored_document, DocChange, REWRITE_SYSTEM,
 };
 use crate::memory::extract::{
     extraction_user_message, filter_candidates, parse_candidates, EXTRACTION_SYSTEM,
@@ -271,7 +271,7 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
     // per chunk only after that chunk committed (§7.4 idempotency). The
     // chunk cap bounds a single run's cost — a backlog longer than the cap
     // continues on a later gated run.
-    let mut results: Vec<(String, String, String)> = Vec::new(); // (op, kind, content)
+    let mut results: Vec<Applied> = Vec::new();
     let mut chunk_start = cursor;
     for _ in 0..EXTRACT_MAX_CHUNKS {
         let chunk: Vec<(i64, String, String)> = pending
@@ -399,13 +399,14 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
             let applied = {
                 let conn = db.0.lock();
                 let applied = apply_judge_op(&conn, &JudgeInput { candidate: cand, similar: &similar }, &op,
-                                             Some(chat_session_id), project_id.as_deref(), emb, crate::db::now_ts())
+                                             Some(chat_session_id), project_id.as_deref(), emb, crate::db::now_ts(),
+                                             crate::memory::model::origin::EXTRACTED)
                     .map_err(|e| e_tostring(e))?;
                 let cand_json = serde_json::to_string(cand).unwrap_or_default();
                 let _ = db::log_memory_op(&conn, "judge", Some(chat_session_id), &cand_json, &applied.op, &applied.target_ids, "");
                 applied
             };
-            results.push((applied.op, cand.kind.clone(), cand.content.clone()));
+            results.push(applied);
         }
 
         // Chunk fully committed (extracted + judged) — advance the cursor
@@ -419,15 +420,20 @@ pub async fn extract_session(app: &AppHandle, chat_session_id: &str) -> Result<(
         }
     }
     eprintln!("[memory] extracted {}: {} candidates → {}", chat_session_id, results.len(),
-              results.iter().map(|(op, _, _)| op.as_str()).collect::<Vec<_>>().join(","));
+              results.iter().map(|a| a.op.as_str()).collect::<Vec<_>>().join(","));
 
     // Document merge (§11 amendment): one LLM call folds the applied changes
     // into the single human-readable memory document. Changes that applied
     // (non-NOOP) only — NOOPs corroborate existing facts, nothing to merge.
-    let changes: Vec<(String, String, String)> = results
+    let changes: Vec<DocChange> = results
         .iter()
-        .filter(|(op, _, _)| op != "NOOP")
-        .cloned()
+        .filter(|a| a.op != "NOOP")
+        .map(|a| DocChange {
+            op: a.op.clone(),
+            kind: a.kind.clone(),
+            content: a.content.clone(),
+            old_content: a.old_content.clone(),
+        })
         .collect();
     if !changes.is_empty() {
         if let Err(e) = merge_document(
@@ -557,9 +563,9 @@ async fn maybe_reflect(
     // live only in the record store, reachable via memory_recall but never
     // injected (a dead-end tier).
     if applied > 0 {
-        let changes: Vec<(String, String, String)> = insights
+        let changes: Vec<DocChange> = insights
             .iter()
-            .map(|i| ("ADD".to_string(), "insight".to_string(), i.content.clone()))
+            .map(|i| DocChange::added("insight", &i.content))
             .collect();
         if let Err(e) = merge_document(
             app, provider, api_key, base_url, model, None, &changes,
@@ -628,12 +634,20 @@ pub async fn save_memory(
     } {
         return Err("memory is disabled in Settings".to_string());
     }
+    // Provenance (P4): anchor the write to the user message that prompted it.
+    // Tool writes used to be born with ZERO evidence rows, so the unbacked-
+    // evidence sweep flagged them out of every read path at the next message
+    // deletion/rollback — the write "succeeded", then silently disappeared.
+    let evidence = {
+        let conn = db.0.lock();
+        tool_write_evidence(&conn, chat_session_id)
+    };
     let cand = MemoryCandidate {
         content: content.trim().to_string(),
         kind: kind.to_string(),
         subject: subject.to_string(),
-        quote: String::new(),
-        message_ids: Vec::new(),
+        quote: evidence.as_ref().map(|(_, q)| q.clone()).unwrap_or_default(),
+        message_ids: evidence.as_ref().map(|(id, _)| vec![*id]).unwrap_or_default(),
         importance: importance_hint.unwrap_or(6).clamp(1, 9),
     };
     let report = filter_candidates(vec![cand]);
@@ -684,7 +698,8 @@ pub async fn save_memory(
     let applied = {
         let conn = db.0.lock();
         let applied = apply_judge_op(&conn, &JudgeInput { candidate: &cand, similar: &similar }, &op,
-                                     Some(chat_session_id), project_id.as_deref(), emb, crate::db::now_ts())
+                                     Some(chat_session_id), project_id.as_deref(), emb, crate::db::now_ts(),
+                                     crate::memory::model::origin::AGENT_TOOL)
             .map_err(|e| e_tostring(e))?;
         let cand_json = serde_json::to_string(&cand).unwrap_or_default();
         let _ = db::log_memory_op(&conn, "agent_tool", Some(chat_session_id), &cand_json, &applied.op, &applied.target_ids, "");
@@ -698,7 +713,12 @@ pub async fn save_memory(
     };
     // Fold the change into the single memory document (non-NOOP only).
     if applied.op != "NOOP" {
-        let changes = vec![(applied.op.clone(), kind.to_string(), cand.content.clone())];
+        let changes = vec![DocChange {
+            op: applied.op.clone(),
+            kind: kind.to_string(),
+            content: applied.content.clone(),
+            old_content: applied.old_content.clone(),
+        }];
         if let Err(e) = merge_document(
             app, &provider_str, &api_key, base_url.as_deref(), &model,
             Some(chat_session_id), &changes,
@@ -725,12 +745,12 @@ pub async fn merge_document(
     base_url: Option<&str>,
     model: &str,
     chat_session_id: Option<&str>,
-    changes: &[(String, String, String)], // (op, kind, content)
+    changes: &[DocChange],
 ) -> Result<(), String> {
     let db = app.state::<crate::DbState>();
     let current = {
         let conn = db.0.lock();
-        stored_document(&conn)
+        document_seed(&conn, chat_session_id)
     };
     let user_msg = rewrite_user_message(current.as_deref(), changes);
     let raw = oneshot(app, provider, api_key, base_url, model, REWRITE_SYSTEM, &user_msg, 2048)
@@ -756,12 +776,17 @@ pub async fn merge_document(
     }
     // Bell-panel record: what changed, in one line.
     let mut counts: std::collections::BTreeMap<&str, usize> = Default::default();
-    for (op, _, _) in changes {
-        *counts.entry(op.as_str()).or_default() += 1;
+    for c in changes {
+        let label = if c.old_content.as_deref().map_or(false, |o| !o.trim().is_empty()) {
+            if c.op == "UPDATE" { "updated" } else { "replaced" }
+        } else {
+            "added"
+        };
+        *counts.entry(label).or_default() += 1;
     }
     let summary = counts
         .iter()
-        .map(|(op, n)| format!("{n} {}", op.to_lowercase()))
+        .map(|(op, n)| format!("{n} {op}"))
         .collect::<Vec<_>>()
         .join(", ");
     let _ = app.emit(
@@ -777,6 +802,40 @@ pub async fn merge_document(
         doc.len()
     );
     Ok(())
+}
+
+/// The "CURRENT document" input for the rewrite pass: the stored document,
+/// or — when none is stored (cleared by a UI mutation, a forget, or a failed
+/// rewrite, or never written yet) — a deterministic render of the record
+/// store. Seeding from the records is what keeps a merge from rebuilding the
+/// document out of the current batch alone: the rewriter only sees the
+/// current text plus the changes, so an "(empty)" seed made it drop every
+/// fact not in the batch. `None` only when the store itself is empty.
+fn document_seed(conn: &rusqlite::Connection, chat_session_id: Option<&str>) -> Option<String> {
+    if let Some(d) = stored_document(conn) {
+        return Some(d);
+    }
+    let project_id = chat_session_id.and_then(|sid| {
+        db::get_chat_session(conn, sid)
+            .ok()
+            .flatten()
+            .and_then(|s| s.project_id)
+    });
+    let mems = db::active_memories_for_scope(conn, "default", project_id.as_deref())
+        .unwrap_or_default();
+    crate::memory::render::build_document_from_records(&mems, crate::db::now_ts())
+}
+
+/// Evidence anchor for an agent-tool write (P4): the session's latest user
+/// message — the one that prompted the save — as `(message_id, quote)`.
+/// `None` when the session has no substantive user message yet.
+fn tool_write_evidence(conn: &rusqlite::Connection, chat_session_id: &str) -> Option<(i64, String)> {
+    db::list_active_chat_messages(conn, chat_session_id)
+        .ok()?
+        .into_iter()
+        .filter(|m| m.role == "user" && !m.content.trim().is_empty())
+        .next_back()
+        .map(|m| (m.id, crate::util::truncate_chars(m.content.trim(), 240)))
 }
 
 /// Backfill vectors for records written while the embedding sidecar was down
@@ -826,6 +885,7 @@ pub fn embedding_base_url(app: &AppHandle) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::model::{kind, MemoryRecord};
 
     #[test]
     fn gate_never_fires_below_min_turns() {
@@ -846,6 +906,49 @@ mod tests {
             (0..200).map(|_| jitter(EXTRACT_MIN_TURNS, EXTRACT_MAX_TURNS)).collect();
         assert!(draws.iter().all(|d| (EXTRACT_MIN_TURNS..=EXTRACT_MAX_TURNS).contains(d)));
         assert!(draws.len() > 1, "jitter collapsed to one value: {draws:?}");
+    }
+
+    /// The merge seed must come from the RECORD STORE when no document is
+    /// stored — an "(empty)" seed made the rewriter rebuild the document from
+    /// the current batch alone, wiping every other fact.
+    #[test]
+    fn document_seed_falls_back_to_records() {
+        let conn = crate::db::mem();
+        // Empty store → no seed (the "(empty…)" prompt branch is correct here).
+        assert!(document_seed(&conn, None).is_none());
+
+        let mut m = MemoryRecord::new_extracted(
+            "mem_seed1", kind::IDENTITY, None, "user", "User's name is Sabbir Hossain", 8, None,
+        );
+        m.last_accessed_at = Some(crate::db::now_ts());
+        db::insert_memory(&conn, &m).unwrap();
+
+        let seed = document_seed(&conn, None).unwrap();
+        assert!(seed.contains("Sabbir Hossain"));
+        assert!(!seed.contains("## "), "seed must be the paragraph-form render: {seed}");
+
+        // A stored document always wins — the seed must not clobber it.
+        crate::memory::document::set_document(&conn, Some("# Custom doc"), "user").unwrap();
+        assert_eq!(document_seed(&conn, None).as_deref(), Some("# Custom doc"));
+    }
+
+    /// Tool writes get real provenance: the session's latest user message.
+    #[test]
+    fn tool_write_evidence_picks_last_user_message() {
+        let conn = crate::db::mem();
+        assert_eq!(tool_write_evidence(&conn, "missing"), None);
+
+        let cs = db::create_chat_session(&conn, "openai", "gpt-test", None).unwrap();
+        db::add_chat_message(&conn, &cs.id, "assistant", "Sure, saving that.", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+        assert_eq!(tool_write_evidence(&conn, &cs.id), None, "no user message yet");
+
+        db::add_chat_message(&conn, &cs.id, "user", "hello", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+        db::add_chat_message(&conn, &cs.id, "user", "remember that my name is Sabbir Hossain", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+
+        let (id, quote) = tool_write_evidence(&conn, &cs.id).unwrap();
+        assert_eq!(quote, "remember that my name is Sabbir Hossain");
+        let msgs = db::list_active_chat_messages(&conn, &cs.id).unwrap();
+        assert_eq!(id, msgs.last().unwrap().id);
     }
 }
 

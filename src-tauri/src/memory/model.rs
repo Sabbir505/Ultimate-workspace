@@ -50,6 +50,13 @@ pub const MIN_CONFIDENCE: f64 = 0.35;
 pub const SIMILARITY_GATE: f32 = 0.55;
 /// Comparison fetch width (Mem0's top-s).
 pub const SIMILAR_TOP_S: usize = 5;
+/// Similarity an existing ACTIVE memory must reach before the Add branch may
+/// supersede it for an exclusive kind — ABOVE the fetch gate on purpose. The
+/// judge already decided the candidate is novel; second-guessing it should
+/// only collapse near-duplicates ("prefers tabs" vs "prefers tabs, mostly"),
+/// not complementary facts of the same kind ("is named X" vs "is from Y"),
+/// which used to overwrite each other down to the last identity fact written.
+pub const ADD_SUPERSEDE_SIMILARITY: f32 = 0.8;
 
 /// One durable fact about the user or a project. Mirrors the `memories` row
 /// (see `db/memory.rs`); `embedding` is `None` when written with the sidecar

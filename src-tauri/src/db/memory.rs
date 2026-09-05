@@ -300,12 +300,15 @@ pub fn evidence_count_for_memory(conn: &Connection, memory_id: &str) -> DbResult
 
 /// Safety net after transcript deletion (design §13.5): memories whose
 /// evidence is all gone get `flagged` — they drop out of injection until the
-/// user reviews them. User-created memories keep provenance in the user
-/// themselves, so they are exempt.
+/// user reviews them. Exempt: `user_created` rows (provenance is the user
+/// themselves) and `agent_tool` rows (an explicit "remember this" — the user
+/// instructed the write, so losing the backing message must not hide the
+/// fact; before the exemption these were born zero-evidence and silently
+/// vanished from every read path at the next message deletion).
 pub fn flag_unbacked_memories(conn: &Connection) -> DbResult<usize> {
     conn.execute(
         "UPDATE memories SET status = 'flagged' \
-         WHERE status = 'active' AND origin != 'user_created' \
+         WHERE status = 'active' AND origin NOT IN ('user_created', 'agent_tool') \
            AND id NOT IN (SELECT DISTINCT memory_id FROM memory_evidence)",
         [],
     )
@@ -649,5 +652,23 @@ mod tests {
         flag_unbacked_memories(&conn).unwrap();
         assert_eq!(get_memory(&conn, "m1").unwrap().unwrap().status, "flagged");
         assert_eq!(get_memory(&conn, "m2").unwrap().unwrap().status, "active");
+    }
+
+    #[test]
+    fn flag_unbacked_exempts_agent_tool_writes() {
+        let conn = crate::db::mem();
+        // An agent-tool write with zero evidence rows — the shape every
+        // memory_save used to produce. It must survive the sweep: the user
+        // explicitly instructed the write, and flagging it hid the fact from
+        // injection AND recall (the vanished name correction).
+        let mut tool_mem = rec("m1", "User's name is Sabbir Hossain", 9, None);
+        tool_mem.origin = crate::memory::model::origin::AGENT_TOOL.to_string();
+        insert_memory(&conn, &tool_mem).unwrap();
+        // An extracted memory in the same state still gets flagged.
+        insert_memory(&conn, &rec("m2", "extracted fact", 5, None)).unwrap();
+
+        flag_unbacked_memories(&conn).unwrap();
+        assert_eq!(get_memory(&conn, "m1").unwrap().unwrap().status, "active");
+        assert_eq!(get_memory(&conn, "m2").unwrap().unwrap().status, "flagged");
     }
 }

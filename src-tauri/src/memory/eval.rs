@@ -94,7 +94,7 @@ fn judge_round(
     let valid: Vec<String> = similar.iter().map(|(m, _)| m.id.clone()).collect();
     let op = parse_judge_op(judge_reply, &valid);
     apply_judge_op(conn, &JudgeInput { candidate: &cand, similar }, &op, Some("eval"),
-                   None, None, crate::db::now_ts()).unwrap()
+                   None, None, crate::db::now_ts(), crate::memory::model::origin::EXTRACTED).unwrap()
 }
 
 /// The §16.2 invariant: a superseded memory's content bytes NEVER change.

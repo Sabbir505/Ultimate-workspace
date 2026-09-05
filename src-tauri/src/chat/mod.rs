@@ -1620,12 +1620,16 @@ mod tests {
             total
         );
         // ≈15k tokens at ~4 chars/token. The measured baseline after the
-        // token-efficiency pass is ≈50.4k chars (system ≈7.9k + specs
-        // ≈42.5k); the assert below locks that in — a change that re-bloats
-        // the fixed per-turn cost fails here instead of shipping a permanent
-        // tax on every request. Headroom covers the per-turn date anchor,
-        // whose rendered length varies with the weekday/UTC-offset strings.
-        assert!(total < 51_000, "fresh-turn baseline over fixed-cost budget: {total} chars");
+        // token-efficiency pass was ≈50.4k chars (system ≈7.9k + specs
+        // ≈42.5k); it has since drifted to ≈51.4k (system ≈8.2k) from
+        // shipped capabilities joining the registry (automations, artifact
+        // listing) — re-baselined here so the guard keeps catching RE-BLOAT
+        // instead of failing on every legitimate tool. The assert below locks
+        // that in — a change that re-bloats the fixed per-turn cost fails
+        // here instead of shipping a permanent tax on every request.
+        // Headroom covers the per-turn date anchor, whose rendered length
+        // varies with the weekday/UTC-offset strings.
+        assert!(total < 52_000, "fresh-turn baseline over fixed-cost budget: {total} chars");
     }
 
     #[test]

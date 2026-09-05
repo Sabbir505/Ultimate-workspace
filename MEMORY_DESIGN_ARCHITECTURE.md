@@ -453,6 +453,38 @@ If the candidate contradicts E but the transcript is ambiguous (joking, hypothet
 > cadence (§7.1 amendment):** the pipeline runs every 3–5 assistant turns
 > (jittered, `worker::EXTRACT_MIN_TURNS/MAX`) instead of every turn —
 > pending turns batch up past the cursor and are extracted in one pass.
+>
+> **Amendment (2026-09-05, document-merge correctness):** three defects in
+> the merge/visibility path above, found via a live audit (`memory_ops` +
+> `memory_document_versions`) after a name correction erased itself from the
+> document: (1) supersession changes were rendered as `[DELETE] <new fact>`,
+> so the rewriter dropped the CORRECTION — changes now carry both sides
+> (`DocChange`: `was:`/`now:` rendered as `[UPDATED]`/`[REPLACED]`, and
+> `UPDATE` passes the judge's `merged_content`, not the raw candidate);
+> (2) after any clear event the rewrite was seeded with "(empty …)" plus the
+> batch, rebuilding the document from the batch alone — `worker::document_seed`
+> now seeds the rewrite with the deterministic record render, so a merge can
+> never drop facts it wasn't told about; (3) `memory_save` wrote memories with
+> zero evidence under `origin=extracted`, so §13.5's unbacked-evidence sweep
+> flagged every tool write out of injection AND recall at the next message
+> deletion — tool writes now anchor evidence to the prompting user message,
+> carry `origin=agent_tool`, and the sweep exempts `agent_tool` alongside
+> `user_created`. Also: the Add branch's exclusive-kind supersession now
+> requires similarity ≥ `model::ADD_SUPERSEDE_SIMILARITY` (0.8, above the
+> fetch gate) so complementary identity facts coexist instead of overwriting
+> each other down to the last fact written, and the CORE prompt's
+> Session-isolation line acknowledges the memory profile (models claimed
+> ignorance of the user while the profile sat in the same prompt).
+>
+> **Amendment (2026-09-05, paragraph form):** per user preference, the
+> document body is ONE compact paragraph of flowing prose — no `##` section
+> headers, no bullet lists — in both the rewrite pass (`REWRITE_SYSTEM`)
+> and the deterministic fallback (`render::build_document_from_records`,
+> sentences ranked by utility and joined; each ends with sentence
+> punctuation). The budget trimmer (`enforce_budget`) now cuts at a line
+> boundary when present, else the last sentence end, always on a char
+> boundary (prose carries multibyte characters). The injection wrapper
+> (`render::HEADER` + P9 fence) is unchanged.
 
 ### 11.1 Scoring and search (hybrid, min-max normalized)
 

@@ -56,25 +56,54 @@ pub fn set_document(
 
 /// System prompt for the rewrite pass. The model sees the current document
 /// plus the newly applied changes and returns the FULL merged document.
+///
+/// Form (user preference, 2026-09-05): ONE compact paragraph of flowing
+/// prose — no section headers, no bullets.
+///
+/// Change labels: `ADD` introduces a new fact; `UPDATED` and `REPLACED` carry
+/// BOTH the superseded wording (`was:`) and the current fact (`now:`). A bare
+/// `DELETE` + new text used to make rewriters drop the correction itself —
+/// the rewriter read "[DELETE] name is Sabbir" and dutifully deleted the new
+/// name from the document while the record store was correct. Labels now
+/// always state what to remove AND what to keep.
 pub const REWRITE_SYSTEM: &str = "You maintain ONE persistent memory document that a personal \
-assistant injects about its user. It is a compact, human-readable profile in Markdown: short \
-section headers (## Identity, ## Preferences, ## Facts, ## Projects, ## Feedback — only the \
-ones in use), one concise timeless sentence per fact, no commentary.\n\
-You will receive the CURRENT document and a list of CHANGES already applied to the underlying \
-memory store (ADD = new fact, UPDATE = fact replaced by a merged version, DELETE = fact \
-invalidated by the change). Merge them cleverly: fold each change into the section where it \
-belongs, rewrite entries the changes supersede, merge duplicates, drop what a DELETE \
-invalidates, and keep everything consistent — the result must read as if written once by a \
-careful human, never as an append log.\n\
+assistant injects about its user. It is ONE compact paragraph of flowing prose: no section \
+headers, no bullets, no Markdown structure — one concise timeless sentence per fact, no \
+commentary.\n\
+You will receive the CURRENT document (the same kind of paragraph) and a list of CHANGES \
+already applied to the underlying memory store:\n\
+- [ADD] — a brand-new fact; work it into the paragraph as its own sentence.\n\
+- [UPDATED] — an existing fact was enriched: replace its old sentence with the `now:` text.\n\
+- [REPLACED] — the `was:` fact is NO LONGER TRUE: drop it and make sure the `now:` text is \
+present instead.\n\
+Rewrite the WHOLE paragraph so it merges the changes: remove superseded sentences, fold \
+duplicates into one, keep every other sentence untouched, and keep the prose readable — it \
+must read as if written once by a careful human, never as an append log.\n\
 HARD LIMIT: the document must stay under ~2200 tokens (~8000 characters). If it would exceed \
-that, compact: generalize repeated details, drop the least useful entries. Never invent facts \
-not present in the input. Output ONLY the document text — no fences, no explanations.";
+that, compact: generalize repeated details, drop the least useful sentences. Never invent facts \
+not present in the input. Output ONLY the paragraph text — no fences, no explanations.";
+
+/// One applied store change, rendered for the document rewrite pass.
+/// `content` is the fact text AFTER the change; `old_content` is the text it
+/// replaced (`None` for a genuinely novel fact). Built from
+/// [`crate::memory::consolidate::Applied`].
+#[derive(Debug, Clone)]
+pub struct DocChange {
+    pub op: String,               // store-level op: ADD | UPDATE | DELETE
+    pub kind: String,
+    pub content: String,
+    pub old_content: Option<String>,
+}
+
+impl DocChange {
+    /// A genuinely new fact (nothing replaced).
+    pub fn added(kind: &str, content: &str) -> Self {
+        DocChange { op: "ADD".into(), kind: kind.into(), content: content.into(), old_content: None }
+    }
+}
 
 /// Render the rewrite call's user message: current document + applied changes.
-pub fn rewrite_user_message(
-    current: Option<&str>,
-    changes: &[(String, String, String)], // (op, kind, content)
-) -> String {
+pub fn rewrite_user_message(current: Option<&str>, changes: &[DocChange]) -> String {
     let mut s = String::from("CURRENT document:\n");
     match current.map(str::trim).filter(|d| !d.is_empty()) {
         Some(d) => s.push_str(d),
@@ -84,8 +113,17 @@ pub fn rewrite_user_message(
     if changes.is_empty() {
         s.push_str("(none)\n");
     }
-    for (op, kind, content) in changes {
-        s.push_str(&format!("- [{op}] ({kind}) {content}\n"));
+    for c in changes {
+        match c.old_content.as_deref().filter(|o| !o.trim().is_empty()) {
+            Some(old) => {
+                // The change replaced/merged an existing fact — show both
+                // sides so the rewriter removes the stale wording and keeps
+                // the current one.
+                let label = if c.op == "UPDATE" { "UPDATED" } else { "REPLACED" };
+                s.push_str(&format!("- [{label}] ({}) was: {:?} now: {:?}\n", c.kind, old, c.content));
+            }
+            None => s.push_str(&format!("- [ADD] ({}) {:?}\n", c.kind, c.content)),
+        }
     }
     s.push_str("\nReturn the merged document now.");
     s
@@ -102,10 +140,19 @@ pub fn parse_rewritten(raw: &str) -> Option<String> {
         .unwrap_or(text)
         .trim();
     let body = body.strip_suffix("```").unwrap_or(body).trim();
-    // Some models preface with "Here is ..." — the document starts at its
-    // first header if one exists.
+    // Some models preface with "Here is ..." — the document starts after a
+    // short intro line ending in ':' or at its first Markdown header if one
+    // exists (older sectioned documents).
     let body = match body.find("\n## ") {
         Some(i) if !body.starts_with('#') => body[i + 1..].trim(),
+        _ => body,
+    };
+    let body = match body.split_once('\n') {
+        Some((first, rest))
+            if first.trim_end().ends_with(':') && first.len() < 80 && !rest.trim().is_empty() =>
+        {
+            rest.trim()
+        }
         _ => body,
     };
     if body.is_empty() {
@@ -130,6 +177,17 @@ mod tests {
             parse_rewritten("Here is the merged document:\n\n## Identity\n- name"),
             Some("## Identity\n- name".into())
         );
+        // Prose (paragraph) documents have no headers — the preface rule must
+        // still strip a "Here is …:" intro line.
+        assert_eq!(
+            parse_rewritten("Here is the merged paragraph:\n\nUser's name is Sabbir Hossain."),
+            Some("User's name is Sabbir Hossain.".into())
+        );
+        // A paragraph with no preface passes through untouched.
+        assert_eq!(
+            parse_rewritten("User's name is Sabbir Hossain. They prefer concise answers."),
+            Some("User's name is Sabbir Hossain. They prefer concise answers.".into())
+        );
         assert_eq!(parse_rewritten("   "), None);
     }
 
@@ -138,17 +196,59 @@ mod tests {
         let msg = rewrite_user_message(
             Some("# Doc"),
             &[
-                ("ADD".into(), "fact".into(), "User uses pnpm".into()),
-                ("DELETE".into(), "preference".into(), "User prefers tabs".into()),
+                DocChange::added("fact", "User uses pnpm"),
+                DocChange {
+                    op: "DELETE".into(),
+                    kind: "identity".into(),
+                    content: "User's name is Sabbir Hossain".into(),
+                    old_content: Some("User is Arjun Ali".into()),
+                },
             ],
         );
         assert!(msg.contains("CURRENT document:"));
         assert!(msg.contains("# Doc"));
-        assert!(msg.contains("- [ADD] (fact) User uses pnpm"));
-        assert!(msg.contains("- [DELETE] (preference) User prefers tabs"));
+        // A brand-new fact renders as an ADD.
+        assert!(msg.contains("- [ADD] (fact) \"User uses pnpm\""));
+        // A contradiction renders BOTH sides — the old fact to drop and the
+        // corrected fact to keep. The old format ("[DELETE] <new text>") made
+        // the rewriter delete the correction itself, which is how a name fix
+        // erased the name from the document.
+        assert!(msg.contains("- [REPLACED] (identity) was: \"User is Arjun Ali\" now: \"User's name is Sabbir Hossain\""));
+        assert!(!msg.contains("[DELETE]"));
         // Empty store seeding branch.
         let msg = rewrite_user_message(None, &[]);
         assert!(msg.contains("(empty — the store has just been seeded"));
+    }
+
+    #[test]
+    fn update_change_renders_was_now() {
+        let msg = rewrite_user_message(
+            Some("# Doc"),
+            &[DocChange {
+                op: "UPDATE".into(),
+                kind: "fact".into(),
+                content: "User likes Rust and dislikes C++ macros".into(),
+                old_content: Some("User likes Rust".into()),
+            }],
+        );
+        assert!(msg.contains("- [UPDATED] (fact) was: \"User likes Rust\" now: \"User likes Rust and dislikes C++ macros\""));
+    }
+
+    #[test]
+    fn empty_old_content_falls_back_to_add() {
+        // A DELETE whose target vanished between fetch and apply still must
+        // not render as a bare DELETE of the NEW fact.
+        let msg = rewrite_user_message(
+            Some("# Doc"),
+            &[DocChange {
+                op: "DELETE".into(),
+                kind: "fact".into(),
+                content: "User migrated to pnpm".into(),
+                old_content: Some("  ".into()),
+            }],
+        );
+        assert!(msg.contains("- [ADD] (fact)"));
+        assert!(!msg.contains("REPLACED"));
     }
 
     #[test]

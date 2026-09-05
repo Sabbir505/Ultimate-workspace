@@ -98,16 +98,27 @@ pub fn parse_judge_op(raw: &str, valid_target_ids: &[String]) -> JudgeOp {
     }
 }
 
-/// Outcome of applying one candidate — what the audit log records.
+/// Outcome of applying one candidate — what the audit log records and what
+/// the document merge folds in. `content` is the fact text AFTER the change
+/// (for UPDATE: the judge's merged sentence); `old_content` is the text it
+/// replaced, `Some` whenever an existing memory was touched — the document
+/// rewrite needs both sides to remove the stale wording and keep the current
+/// one (a bare "DELETE" + new text made the rewriter drop the CORRECTION).
 pub struct Applied {
     pub op: String,
+    pub kind: String,
     pub target_ids: Vec<String>,
     pub new_id: Option<String>,
+    pub content: String,
+    pub old_content: Option<String>,
 }
 
 /// Apply a judge operation to the store. `session_id`/evidence come from the
 /// candidate's cited message ids (P4 — every written memory carries
-/// provenance). `now` is injected for tests.
+/// provenance). `now` is injected for tests. `origin` labels the write path
+/// (`origin::EXTRACTED` for the background worker, `origin::AGENT_TOOL` for
+/// `memory_save`) — the unbacked-evidence sweep exempts `agent_tool`/user
+/// rows, so tool writes must not pass `EXTRACTED`.
 ///
 /// NOTE: the caller must already hold the `DbState` lock (all fns here take
 /// `&Connection`).
@@ -119,6 +130,7 @@ pub fn apply_judge_op(
     project_id: Option<&str>,
     embedding: Option<Vec<f32>>,
     now: i64,
+    origin: &str,
 ) -> db::DbResult<Applied> {
     let cand = input.candidate;
     match op {
@@ -130,7 +142,14 @@ pub fn apply_judge_op(
                     db::add_memory_evidence(conn, &first.id, session_id.unwrap_or(""), *mid, &cand.quote)?;
                 }
             }
-            Ok(Applied { op: "NOOP".into(), target_ids: vec![], new_id: None })
+            Ok(Applied {
+                op: "NOOP".into(),
+                kind: cand.kind.clone(),
+                target_ids: vec![],
+                new_id: None,
+                content: cand.content.clone(),
+                old_content: None,
+            })
         }
         JudgeOp::Update { target_id, merged_content } => {
             let existing = db::get_memory(conn, target_id)?;
@@ -142,13 +161,17 @@ pub fn apply_judge_op(
             }
             Ok(Applied {
                 op: "UPDATE".into(),
+                kind: cand.kind.clone(),
                 target_ids: vec![target_id.clone()],
                 new_id: None,
+                content: merged_content.clone(),
+                old_content: existing.map(|m| m.content),
             })
         }
         JudgeOp::Delete { target_id } => {
             // Supersede, never destroy: insert the candidate as the successor
             // first, then end the old fact's validity pointing at it (§10.2).
+            let old_content = db::get_memory(conn, target_id)?.map(|m| m.content);
             let new_id = format!("mem_{}", uuid::Uuid::new_v4());
             let mut rec = MemoryRecord::new_extracted(
                 &new_id,
@@ -159,6 +182,7 @@ pub fn apply_judge_op(
                 cand.importance,
                 embedding,
             );
+            rec.origin = origin.to_string();
             rec.valid_from = now;
             db::insert_memory(conn, &rec)?;
             db::supersede_memory(conn, target_id, &new_id)?;
@@ -167,20 +191,31 @@ pub fn apply_judge_op(
             }
             Ok(Applied {
                 op: "DELETE".into(),
+                kind: cand.kind.clone(),
                 target_ids: vec![target_id.clone()],
                 new_id: Some(new_id),
+                content: cand.content.clone(),
+                old_content,
             })
         }
         JudgeOp::Add => {
             // Same-subject mutual exclusion for exclusive kinds (§10.2): if a
-            // highly similar active memory exists that the judge didn't pick,
-            // treat ADD as a supersession against the closest one.
+            // NEAR-DUPLICATE active memory exists that the judge didn't pick
+            // (similarity ≥ ADD_SUPERSEDE_SIMILARITY — well above the fetch
+            // gate), treat ADD as a supersession against it. Lower-similarity
+            // same-kind memories are complementary facts and coexist; the old
+            // unconditional sweep collapsed identity chains ("is named X" →
+            // "is from Y" → …) into whichever fact was written last.
             let exclusive = kind::exclusive(&cand.kind);
             let conflicting = exclusive.then(|| {
                 input
                     .similar
                     .iter()
-                    .find(|(m, _)| m.kind == cand.kind && m.status == status::ACTIVE)
+                    .find(|(m, s)| {
+                        *s >= crate::memory::model::ADD_SUPERSEDE_SIMILARITY
+                            && m.kind == cand.kind
+                            && m.status == status::ACTIVE
+                    })
             }).flatten();
             let new_id = format!("mem_{}", uuid::Uuid::new_v4());
             let mut rec = MemoryRecord::new_extracted(
@@ -192,6 +227,7 @@ pub fn apply_judge_op(
                 cand.importance,
                 embedding.clone(),
             );
+            rec.origin = origin.to_string();
             rec.keywords = cand_keywords(cand);
             rec.valid_from = now;
             // Confidence from evidence shape (§8.3).
@@ -214,7 +250,14 @@ pub fn apply_judge_op(
                 db::add_memory_evidence(conn, &new_id, session_id.unwrap_or(""), *mid, &cand.quote)?;
             }
             targets.insert(0, new_id.clone());
-            Ok(Applied { op: "ADD".into(), target_ids: targets, new_id: Some(new_id) })
+            Ok(Applied {
+                op: "ADD".into(),
+                kind: cand.kind.clone(),
+                target_ids: targets,
+                new_id: Some(new_id),
+                content: cand.content.clone(),
+                old_content: conflicting.map(|(old, _)| old.content.clone()),
+            })
         }
     }
 }
@@ -274,9 +317,14 @@ mod tests {
         };
         let similar = vec![(old.clone(), 0.91f32)];
         let input = JudgeInput { candidate: &cand, similar: &similar };
-        let applied = apply_judge_op(&conn, &input, &JudgeOp::Add, Some("s1"), None, None, 1_000).unwrap();
+        let applied = apply_judge_op(&conn, &input, &JudgeOp::Add, Some("s1"), None, None, 1_000,
+                                     crate::memory::model::origin::EXTRACTED).unwrap();
 
         assert_eq!(applied.op, "ADD");
+        // Near-duplicate exclusive-kind swap: the new fact replaces the old,
+        // and the change report carries BOTH sides for the document merge.
+        assert_eq!(applied.old_content.as_deref(), Some("User prefers tabs"));
+        assert_eq!(applied.content, "User now prefers spaces for indentation");
         let new_id = applied.new_id.unwrap();
         let old_row = db::get_memory(&conn, "old1").unwrap().unwrap();
         assert_eq!(old_row.status, "superseded");
@@ -302,12 +350,70 @@ mod tests {
         };
         let similar = vec![(old.clone(), 0.88f32)];
         let input = JudgeInput { candidate: &cand, similar: &similar };
-        let applied = apply_judge_op(&conn, &input, &JudgeOp::Delete { target_id: "old1".into() }, Some("s1"), None, None, 2_000).unwrap();
+        let applied = apply_judge_op(&conn, &input, &JudgeOp::Delete { target_id: "old1".into() }, Some("s1"), None, None, 2_000,
+                                     crate::memory::model::origin::EXTRACTED).unwrap();
         assert_eq!(applied.op, "DELETE");
+        // The change report carries the old fact (to drop from the document)
+        // and the new one (to keep) — the rewriter must see both sides.
+        assert_eq!(applied.old_content.as_deref(), Some("User uses npm"));
+        assert_eq!(applied.content, "User migrated from npm to pnpm");
         let old_row = db::get_memory(&conn, "old1").unwrap().unwrap();
         assert_eq!(old_row.status, "superseded");
         // Content bytes preserved (P3).
         assert_eq!(old_row.content, "User uses npm");
+        // The successor carries the caller's origin, not the extractor's.
+        let new_row = db::get_memory(&conn, applied.new_id.as_deref().unwrap()).unwrap().unwrap();
+        assert_eq!(new_row.origin, crate::memory::model::origin::EXTRACTED);
+    }
+
+    #[test]
+    fn delete_attaches_agent_tool_origin() {
+        let conn = crate::db::mem();
+        let old = MemoryRecord::new_extracted("old1", kind::IDENTITY, None, "user", "User is Arjun Ali", 7, None);
+        db::insert_memory(&conn, &old).unwrap();
+        let cand = MemoryCandidate {
+            content: "User's name is Sabbir Hossain (not Arjun Ali).".into(),
+            kind: kind::IDENTITY.into(),
+            subject: "user".into(),
+            quote: "my name is sabbir hossain".into(),
+            message_ids: vec![7],
+            importance: 9,
+        };
+        let similar = vec![(old.clone(), 0.9f32)];
+        let input = JudgeInput { candidate: &cand, similar: &similar };
+        let applied = apply_judge_op(&conn, &input, &JudgeOp::Delete { target_id: "old1".into() },
+                                     Some("s1"), None, None, 2_000, crate::memory::model::origin::AGENT_TOOL).unwrap();
+        // Tool writes are labeled agent_tool so the unbacked-evidence sweep
+        // never flags them (they were born zero-evidence and vanished).
+        let new_row = db::get_memory(&conn, applied.new_id.as_deref().unwrap()).unwrap().unwrap();
+        assert_eq!(new_row.origin, crate::memory::model::origin::AGENT_TOOL);
+        assert_eq!(new_row.status, crate::memory::model::status::ACTIVE);
+        assert_eq!(db::evidence_count_for_memory(&conn, &new_row.id).unwrap(), 1);
+    }
+
+    /// Complementary identity facts must coexist: the Add branch only
+    /// second-guesses the judge for NEAR-duplicates (≥ 0.8), not for every
+    /// same-kind hit above the fetch gate.
+    #[test]
+    fn add_with_low_similarity_keeps_both() {
+        let conn = crate::db::mem();
+        let old = MemoryRecord::new_extracted("old1", kind::IDENTITY, None, "user", "User's name is Sabbir Hossain", 8, None);
+        db::insert_memory(&conn, &old).unwrap();
+        let cand = MemoryCandidate {
+            content: "Sabbir Hossain is from Bangladesh".into(),
+            kind: kind::IDENTITY.into(),
+            subject: "user".into(),
+            quote: "I am from Bangladesh".into(),
+            message_ids: vec![3],
+            importance: 7,
+        };
+        let similar = vec![(old.clone(), 0.6f32)]; // above fetch gate, below ADD_SUPERSEDE_SIMILARITY
+        let input = JudgeInput { candidate: &cand, similar: &similar };
+        let applied = apply_judge_op(&conn, &input, &JudgeOp::Add, Some("s1"), None, None, 3_000,
+                                     crate::memory::model::origin::EXTRACTED).unwrap();
+        assert_eq!(applied.op, "ADD");
+        assert_eq!(applied.old_content, None, "complementary fact must not supersede the existing one");
+        assert_eq!(db::get_memory(&conn, "old1").unwrap().unwrap().status, crate::memory::model::status::ACTIVE);
     }
 
     #[test]
@@ -333,9 +439,14 @@ mod tests {
             None,
             None,
             3_000,
+            crate::memory::model::origin::EXTRACTED,
         )
         .unwrap();
         assert_eq!(applied.op, "UPDATE");
+        // The change report carries the judge's MERGED text (not the raw
+        // candidate) plus the wording it replaced.
+        assert_eq!(applied.content, "User likes Rust and dislikes C++ macros at work");
+        assert_eq!(applied.old_content.as_deref(), Some("User likes Rust"));
         let row = db::get_memory(&conn, "old1").unwrap().unwrap();
         assert!(row.content.contains("Rust"));
         assert!(row.confidence > old.confidence);

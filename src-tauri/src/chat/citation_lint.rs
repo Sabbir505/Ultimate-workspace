@@ -915,7 +915,7 @@ async closure feature [2]. Nothing else happened. See [9] for details.
         .unwrap();
         // The report body usually lives in a generated artifact file, not the
         // chat text — lint_and_store must read it.
-        let dir = std::env::temp_dir().join(format!("conduit-lint-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("relay-lint-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let artifact = dir.join("report.md");
         std::fs::write(

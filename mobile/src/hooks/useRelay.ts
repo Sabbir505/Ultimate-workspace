@@ -16,8 +16,13 @@ import { computePairProof, deriveSessionKey, decryptFrame, encryptFrame } from '
  *  frame (pre-E2E build) gets a legacy raw-token reconnect, which runs the
  *  connection in plaintext. URLs without a fragment fall back to the old
  *  unauthenticated path (legacy / dev). */
-const RELAY_URL_STORAGE_KEY = 'conduit.relayUrl';
-const RELAY_TOKEN_STORAGE_KEY = 'conduit.relayToken';
+const RELAY_URL_STORAGE_KEY = 'relay.relayUrl';
+const RELAY_TOKEN_STORAGE_KEY = 'relay.relayToken';
+// Pre-rebrand keys (conduit.*) written by older builds — read once so a
+// paired phone keeps its URL/token across the rename, then re-homed under
+// the new keys.
+const LEGACY_URL_STORAGE_KEY = 'conduit.relayUrl';
+const LEGACY_TOKEN_STORAGE_KEY = 'conduit.relayToken';
 
 export interface ProviderInfo {
   id: string; display_name: string; models: string[];
@@ -165,7 +170,18 @@ let _desktopLegacy = false;
 // Loaded once from AsyncStorage; connect() awaits this so a persisted URL
 // wins over the loopback default on cold start.
 const _storedUrlReady: Promise<string | null> = AsyncStorage.getItem(RELAY_URL_STORAGE_KEY)
-  .then((stored) => { if (stored) { _url = stored; _token = extractToken(stored); } return stored; })
+  .then(async (stored) => {
+    if (stored) { _url = stored; _token = extractToken(stored); return stored; }
+    const legacyUrl = await AsyncStorage.getItem(LEGACY_URL_STORAGE_KEY).catch(() => null);
+    if (!legacyUrl) return null;
+    _url = legacyUrl;
+    _token = extractToken(legacyUrl);
+    const legacyToken = await AsyncStorage.getItem(LEGACY_TOKEN_STORAGE_KEY).catch(() => null);
+    if (legacyToken) { _token = legacyToken; }
+    void AsyncStorage.setItem(RELAY_URL_STORAGE_KEY, legacyUrl).catch(() => {});
+    if (legacyToken) { void AsyncStorage.setItem(RELAY_TOKEN_STORAGE_KEY, legacyToken).catch(() => {}); }
+    return legacyUrl;
+  })
   .catch(() => null);
 let _connecting = false;
 let _reconnectTimer: any = null;

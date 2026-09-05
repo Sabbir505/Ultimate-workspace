@@ -1,7 +1,7 @@
 //! Chat checkpoint rows (per-turn git working-tree snapshots).
 //!
 //! Each row pairs a chat session (+ the assistant message it follows) with a
-//! hidden git ref (`refs/conduit/checkpoints/<sid>/<rowid>`) holding the full
+//! hidden git ref (`refs/relay/checkpoints/<sid>/<rowid>`) holding the full
 //! working-tree snapshot. `files` is a JSON array of `{path,status}` entries
 //! (A/M/D) relative to the session's previous checkpoint — what the chip UI
 //! lists. All query functions take `&Connection` for in-memory testability.
@@ -156,16 +156,16 @@ mod tests {
 
         // Baseline (no message), then post-turn (message 7).
         let id1 = insert_checkpoint(&conn, &cs.id, None, "tree1", "D:/repo", "[]").unwrap();
-        set_checkpoint_ref(&conn, id1, "refs/conduit/checkpoints/s/1").unwrap();
+        set_checkpoint_ref(&conn, id1, "refs/relay/checkpoints/s/1").unwrap();
         let id2 = insert_checkpoint(&conn, &cs.id, Some(7), "tree2", "D:/repo", &files_json(&[("a.rs", "M"), ("b.txt", "A")]))
             .unwrap();
-        set_checkpoint_ref(&conn, id2, "refs/conduit/checkpoints/s/2").unwrap();
+        set_checkpoint_ref(&conn, id2, "refs/relay/checkpoints/s/2").unwrap();
 
         let all = list_chat_checkpoints(&conn, &cs.id).unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].id, id1);
         assert!(all[0].message_id.is_none());
-        assert_eq!(all[0].ref_name, "refs/conduit/checkpoints/s/1");
+        assert_eq!(all[0].ref_name, "refs/relay/checkpoints/s/1");
         assert_eq!(all[1].message_id, Some(7));
         assert_eq!(all[1].files.len(), 2);
         assert_eq!(all[1].files[0].path, "a.rs");
@@ -181,7 +181,7 @@ mod tests {
         // Ref paths for delete-time pruning.
         let refs = checkpoint_ref_paths(&conn, &cs.id).unwrap();
         assert_eq!(refs.len(), 2);
-        assert!(refs.contains(&("refs/conduit/checkpoints/s/2".to_string(), "D:/repo".to_string())));
+        assert!(refs.contains(&("refs/relay/checkpoints/s/2".to_string(), "D:/repo".to_string())));
 
         // Corrupt JSON files column degrades to empty, never panics.
         conn.execute("UPDATE chat_checkpoints SET files = 'not json' WHERE id = ?1", rusqlite::params![id2])
@@ -231,13 +231,13 @@ mod tests {
         // checkpoints must snapshot/restore there, not the project root.
         let isolated = chat::create_chat_session(&conn, "anthropic", "m", Some(&pid)).unwrap();
         conn.execute(
-            "UPDATE chat_sessions SET worktree_path = 'D:/proj-conduit-abc' WHERE id = ?1",
+            "UPDATE chat_sessions SET worktree_path = 'D:/proj-relay-abc' WHERE id = ?1",
             rusqlite::params![isolated.id],
         )
         .unwrap();
         assert_eq!(
             chat_session_repo_path(&conn, &isolated.id).as_deref(),
-            Some("D:/proj-conduit-abc")
+            Some("D:/proj-relay-abc")
         );
         // Empty-string worktree path (stale/migrated row) degrades to project.
         let blank = chat::create_chat_session(&conn, "anthropic", "m", Some(&pid)).unwrap();

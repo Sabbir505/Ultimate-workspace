@@ -76,7 +76,7 @@ describe("InlineDiagram gating (diagram vs plain html)", () => {
 
   it("renders an inline iframe for a plain html file (e.g. from write_file)", async () => {
     // API/local models often create HTML diagrams via write_file or
-    // generate_file — kind stays "html" (no conduit:diagram marker), but
+    // generate_file — kind stays "html" (no relay:diagram marker), but
     // it should still render inline since it's visual content.
     mockedRead.mockResolvedValue(
       preview({ kind: "html", text: "<!doctype html><html><body><svg viewBox='0 0 100 50'><rect/></svg></body></html>" }),
@@ -112,7 +112,7 @@ describe("InlineDiagram gating (diagram vs plain html)", () => {
     const sandbox = frame.getAttribute("sandbox") ?? "";
     expect(sandbox).toContain("allow-scripts");
     expect(sandbox).not.toContain("allow-same-origin");
-    expect(frame.getAttribute("srcdoc")).toContain("__conduitInlineVizHeight");
+    expect(frame.getAttribute("srcdoc")).toContain("__relayInlineVizHeight");
     // The page's own script survives (live, not sanitized).
     expect(frame.getAttribute("srcdoc")).toContain("alert('hi')");
     expect(container.querySelector(".chip-fallback")).toBeNull();

@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 /// A real browser User-Agent. Many CDNs/WAFs (Cloudflare in particular) 403
-/// requests with an unknown UA like the old "Conduit/0.1" string, which made
+/// requests with an unknown UA like the old "Relay/0.1" string, which made
 /// `fetch_url` and the SERP scraper look "non-functional" to the model.
 const BROWSER_UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) \
@@ -1410,7 +1410,7 @@ mod tests {
         // skipped by design.
         assert!(host_blocked_in("localhost", false));
         // RFC 2606 `.invalid` is guaranteed unresolvable → fail-closed true.
-        assert!(host_blocked_in("conduit-does-not-exist.invalid", false));
+        assert!(host_blocked_in("relay-does-not-exist.invalid", false));
         // Proxied path: hostname checks are skipped (the proxy resolves),
         // literal IPs are still judged.
         assert!(!host_blocked_in("example.com", true));

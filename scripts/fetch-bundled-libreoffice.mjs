@@ -173,7 +173,7 @@ async function stage(target) {
   // the temp dir.
   rmSync(DEST, { recursive: true, force: true });
   mkdirSync(DEST, { recursive: true });
-  const log = path.join(tmpdir(), `conduit-lo-extract-${LO_VERSION}.log`);
+  const log = path.join(tmpdir(), `relay-lo-extract-${LO_VERSION}.log`);
   run("msiexec", ["/a", msi, "/qn", "/log", log, `TARGETDIR=${DEST}`]);
 
   const programDir = path.join(DEST, "program");

@@ -307,7 +307,7 @@ export default function App() {
             children stay clickable — the drag attribute only fires when the
             event target IS the drag-region element. */}
         <div className="toolbar" data-tauri-drag-region="">
-          {/* Left: identity + view nav live in the SIDEBAR's header ("Conduit"
+          {/* Left: identity + view nav live in the SIDEBAR's header ("Relay"
               + back/forward) — no toolbar duplicates. When the sidebar is
               collapsed (width 0) only the restore logo stays reachable here. */}
           {sidebarCollapsed && (

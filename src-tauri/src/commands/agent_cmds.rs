@@ -14,8 +14,8 @@ use crate::DbState;
 /// `harnessId` is the chat session's CLI ("claude_code" | "kimi_code" |
 /// "opencode"), `model` its selected model id; `cwd` is the working
 /// directory the CLI operates in (the selected project's path, when one
-/// is selected). `projectId` feeds the conduit-browser MCP registration
-/// (CONDUIT_PROJECT_ID) so browser auto-open is scoped to the project.
+/// is selected). `projectId` feeds the relay-browser MCP registration
+/// (RELAY_PROJECT_ID) so browser auto-open is scoped to the project.
 /// All harnesses are spawned with full permissions — no per-session
 /// permission selector is surfaced or consulted.
 ///

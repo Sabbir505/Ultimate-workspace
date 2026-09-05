@@ -394,8 +394,8 @@ export function AutomationsView() {
 
 // ---- Header controls ----
 
-/** "Run while closed" — registers/unregisters the global `ConduitAutomations`
- *  Task Scheduler entry that fires `conduit-automation run-due` every minute.
+/** "Run while closed" — registers/unregisters the global `RelayAutomations`
+ *  Task Scheduler entry that fires `relay-automation run-due` every minute.
  *  One task covers every enabled automation; the registered state is read
  *  back from Task Scheduler itself so the UI can't drift from reality. */
 export function RunWhileClosedToggle() {

@@ -18,8 +18,8 @@
 //! used to hold the overlap guards forever, which read as a permanently
 //! "running" automation that silently stopped triggering.
 //!
-//! Running while Conduit itself is closed is the `conduit-automation` binary's
-//! job (bin/conduit_automation.rs) — it reuses the same `launch_run` path,
+//! Running while Relay itself is closed is the `relay-automation` binary's
+//! job (bin/relay_automation.rs) — it reuses the same `launch_run` path,
 //! so a Windows Task Scheduler entry is the only piece left to add.
 
 use std::collections::HashSet;
@@ -199,7 +199,7 @@ impl RunSource {
     }
 }
 
-/// Blocking variant for the headless `conduit-automation` binary: the process
+/// Blocking variant for the headless `relay-automation` binary: the process
 /// must not exit before the turn ends. Same guards and recording as launch_run.
 pub fn run_blocking(
     app: Option<&AppHandle>,
@@ -257,7 +257,7 @@ fn release_guards(automation_id: &str, lock_path: &Option<std::path::PathBuf>) {
 }
 
 /// Stamp `skipped` only on the TRANSITION: while the external
-/// `conduit-automation` binary holds the lock file, the in-app scheduler
+/// `relay-automation` binary holds the lock file, the in-app scheduler
 /// rejects this automation on every 30 s tick — re-writing last_status each
 /// tick made the UI's status column flap for the whole external run.
 fn stamp_skipped_once(db: &Arc<Mutex<Connection>>, automation: &Automation) {
@@ -315,7 +315,7 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
             return Ok(None);
         }
     }
-    // Guard 2: across processes (app vs conduit-automation binary). The lock
+    // Guard 2: across processes (app vs relay-automation binary). The lock
     // file lives next to the DB and records the owning PID; create_new fails
     // atomically if another process holds it. Staleness (B-28): a lock whose
     // PID is dead is stale IMMEDIATELY — the old age-only check (6h) left a
@@ -432,7 +432,7 @@ fn prepare_run_inner(db: &Arc<Mutex<Connection>>, automation: &Automation, sourc
     Ok(Some(PreparedRun { chat_session_id, lock_path, run_id }))
 }
 
-/// `<db file>.automation-<id>.lock` — next to conduit.db so every process
+/// `<db file>.automation-<id>.lock` — next to relay.db so every process
 /// that opens the same DB agrees on the location. None for in-memory DBs.
 fn lock_file_path(conn: &Connection, automation_id: &str) -> Option<std::path::PathBuf> {
     let db_file: String = conn
@@ -546,7 +546,7 @@ fn finalize(
 //     refreshes the Automations view (app must be open);
 //   - mobile push   → relay broadcast to paired phones (app must be open);
 //   - webhook POST  → every completed run, when `automations.webhookUrl` is
-//     set — the only channel that works while Conduit is fully closed;
+//     set — the only channel that works while Relay is fully closed;
 //   - Gmail email   → failures only, send-to-self via the Gmail connector;
 //     works headless too (tokens refresh through the DB, no AppHandle).
 
@@ -656,7 +656,7 @@ fn notify_run_finished(
 pub(crate) async fn post_json(url: &str, payload: &serde_json::Value) -> Result<(), String> {
     let resp = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
-        .user_agent("conduit-desktop")
+        .user_agent("relay-desktop")
         .build()
         .map_err(|e| e.to_string())?
         .post(url)
@@ -683,7 +683,7 @@ async fn send_failure_email(
     let token = crate::connectors::oauth::ensure_valid_access_token_with_db(db, "gmail").await?;
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
-        .user_agent("conduit-desktop")
+        .user_agent("relay-desktop")
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -739,14 +739,14 @@ async fn send_failure_email(
 /// encoded so non-ASCII automation names survive strict relays.
 fn build_failure_email(to: &str, automation_name: &str, status: &str, summary: &str, finished_at: i64) -> String {
     use base64::Engine as _;
-    let subject_raw = format!("Conduit automation failed: {automation_name}");
+    let subject_raw = format!("Relay automation failed: {automation_name}");
     let subject = format!("=?UTF-8?B?{}?=", base64::engine::general_purpose::STANDARD.encode(subject_raw.as_bytes()));
     let when = chrono::DateTime::from_timestamp(finished_at, 0)
         .map(|dt| dt.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S %Z").to_string())
         .unwrap_or_else(|| finished_at.to_string());
     let body = format!(
         "Automation: {automation_name}\nFinished: {when}\n\nError:\n{status}\n\nSummary:\n{summary}\n\n\
-         Open Conduit → Automations → \"{automation_name}\" for the full transcript.\n"
+         Open Relay → Automations → \"{automation_name}\" for the full transcript.\n"
     );
     format!(
         "To: {to}\r\nSubject: {subject}\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n{body}"
@@ -886,7 +886,7 @@ mod tests {
             .trim_start_matches("Subject: =?UTF-8?B?")
             .trim_end_matches("?=");
         let decoded = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
-        assert_eq!(String::from_utf8(decoded).unwrap(), "Conduit automation failed: nightly 🌙");
+        assert_eq!(String::from_utf8(decoded).unwrap(), "Relay automation failed: nightly 🌙");
         // CRLF header/body separator + plain-text content type + error text.
         assert!(msg.contains("\r\n\r\n"));
         assert!(msg.contains("Content-Type: text/plain; charset=\"UTF-8\""));

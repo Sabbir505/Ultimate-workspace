@@ -67,7 +67,7 @@ export function WorktreeNudgeBanner() {
       }
     >
       <p>
-        New chats get their own git worktree (branch <code>conduit/&lt;id&gt;</code>), so agents
+        New chats get their own git worktree (branch <code>relay/&lt;id&gt;</code>), so agents
         never collide in the same working tree. Existing chats can be moved with the 🪵/⛓ toggle
         in the sidebar or the ⛓ chip beside the composer's folder notch.
       </p>

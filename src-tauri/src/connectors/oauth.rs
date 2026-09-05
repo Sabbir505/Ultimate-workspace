@@ -104,10 +104,7 @@ fn default_auth_method() -> String {
 /// connector), so subsequent connects reuse the same client instead of
 /// minting a new one server-side each time. `<app_data_dir>/oauth-clients.json`.
 fn oauth_clients_cache_path(app: &AppHandle) -> std::path::PathBuf {
-    app.path()
-        .app_data_dir()
-        .map(|d| d.join("oauth-clients.json"))
-        .unwrap_or_else(|_| std::path::PathBuf::from("oauth-clients.json"))
+    crate::user_dirs::app_data_dir(app).join("oauth-clients.json")
 }
 
 fn load_cached_client(app: &AppHandle, connector_id: &str) -> Option<OAuthClient> {
@@ -146,7 +143,7 @@ pub async fn ensure_registered_client(
         )
     })?;
     let body = serde_json::json!({
-        "client_name": "Conduit",
+        "client_name": "Relay",
         "client_uri": "https://conduit.app",
         "redirect_uris": [connector.redirect_uri],
         "grant_types": ["authorization_code", "refresh_token"],
@@ -204,7 +201,7 @@ pub async fn resolve_oauth_client(
 }
 
 /// Static build-time client config — no AppHandle needed, so the headless
-/// `conduit-automation` binary can refresh tokens too. Dynamic-registration
+/// `relay-automation` binary can refresh tokens too. Dynamic-registration
 /// connectors are rejected here (they need the app's DB-backed registrar).
 fn resolve_static_oauth_client(connector: &Connector) -> Result<OAuthClient, String> {
     if connector.registration_url.is_some() {
@@ -286,7 +283,7 @@ impl OAuthFlows {
         let client = match resolve_oauth_client(app, &connector).await {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[conduit:oauth] {connector_id} client resolution failed: {e}");
+                eprintln!("[relay:oauth] {connector_id} client resolution failed: {e}");
                 let _ = app.emit("oauth:callback", OAuthCallbackEvent {
                     flow_id,
                     connector_id: connector.id.to_string(),
@@ -339,7 +336,7 @@ impl OAuthFlows {
         let client = match resolve_oauth_client(app, head).await {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[conduit:oauth] {family} client resolution failed: {e}");
+                eprintln!("[relay:oauth] {family} client resolution failed: {e}");
                 let _ = app.emit("oauth:callback", OAuthCallbackEvent {
                     flow_id,
                     connector_id: family.to_string(),
@@ -429,7 +426,7 @@ impl OAuthFlows {
         let code_challenge = pkce_challenge(&code_verifier);
         let state = format!("flow-{flow_id}-{:016x}", rand::random::<u64>());
         eprintln!(
-            "[conduit:oauth] flow {flow_id} start key={key} client_id={} method={}",
+            "[relay:oauth] flow {flow_id} start key={key} client_id={} method={}",
             client.client_id, client.token_endpoint_auth_method
         );
         // Register the pending flow so accept_one_callback can validate the
@@ -492,7 +489,7 @@ impl OAuthFlows {
             }
         }
         let Some(listener) = listener else {
-            eprintln!("[conduit:oauth] flow {flow_id} bind failed on 127.0.0.1:{port}: {last_err}");
+            eprintln!("[relay:oauth] flow {flow_id} bind failed on 127.0.0.1:{port}: {last_err}");
             let msg = format!(
                 "failed to bind OAuth callback server on 127.0.0.1:{port} \
                  (redirect_uri `{redirect_uri}`) — close the app holding the port and retry: {last_err}"
@@ -516,11 +513,11 @@ impl OAuthFlows {
             scopes,
         );
         eprintln!(
-            "[conduit:oauth] flow {flow_id} listener bound on 127.0.0.1:{port}; opening browser"
+            "[relay:oauth] flow {flow_id} listener bound on 127.0.0.1:{port}; opening browser"
         );
 
         if let Err(e) = open::that(&authorize_url) {
-            eprintln!("[conduit:oauth] flow {flow_id} open::that failed: {e}");
+            eprintln!("[relay:oauth] flow {flow_id} open::that failed: {e}");
             self.cancel(flow_id);
             let _ = app.emit("oauth:callback", OAuthCallbackEvent {
                 flow_id,
@@ -546,11 +543,11 @@ impl OAuthFlows {
 
         let code = match result {
             Ok(Ok(Ok(c))) => {
-                eprintln!("[conduit:oauth] flow {flow_id} callback received (code len {})", c.len());
+                eprintln!("[relay:oauth] flow {flow_id} callback received (code len {})", c.len());
                 c
             }
             Ok(Ok(Err(msg))) => {
-                eprintln!("[conduit:oauth] flow {flow_id} callback error: {msg}");
+                eprintln!("[relay:oauth] flow {flow_id} callback error: {msg}");
                 let _ = app.emit("oauth:callback", OAuthCallbackEvent {
                     flow_id,
                     connector_id: key.to_string(),
@@ -572,7 +569,7 @@ impl OAuthFlows {
                 return Err(msg);
             }
             Err(_elapsed) => {
-                eprintln!("[conduit:oauth] flow {flow_id} timed out waiting for callback (5 min)");
+                eprintln!("[relay:oauth] flow {flow_id} timed out waiting for callback (5 min)");
                 // The spawn_blocking acceptor can't be cancelled and still
                 // owns the listener — without a nudge it blocks in accept()
                 // until app exit, holding the port so every later Connect
@@ -631,7 +628,7 @@ impl OAuthFlows {
         .await;
         match exchanged {
             Ok(account_display) => {
-                eprintln!("[conduit:oauth] flow {flow_id} exchange OK, account={account_display:?}");
+                eprintln!("[relay:oauth] flow {flow_id} exchange OK, account={account_display:?}");
                 let _ = app.emit("oauth:callback", OAuthCallbackEvent {
                     flow_id,
                     connector_id: key.to_string(),
@@ -642,7 +639,7 @@ impl OAuthFlows {
                 Ok(flow_id)
             }
             Err(e) => {
-                eprintln!("[conduit:oauth] flow {flow_id} exchange FAILED: {e}");
+                eprintln!("[relay:oauth] flow {flow_id} exchange FAILED: {e}");
                 let _ = app.emit("oauth:callback", OAuthCallbackEvent {
                     flow_id,
                     connector_id: key.to_string(),
@@ -704,7 +701,7 @@ impl Drop for FlowEntryGuard<'_> {
 #[allow(dead_code)]
 fn unblock_acceptor(port: u16) {
     if let Ok(mut s) = std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)) {
-        let _ = s.write_all(b"GET /conduit-timeout HTTP/1.0\r\n\r\n");
+        let _ = s.write_all(b"GET /relay-timeout HTTP/1.0\r\n\r\n");
         let _ = s.flush();
     }
 }
@@ -716,7 +713,7 @@ fn unblock_acceptor(port: u16) {
 async fn unblock_acceptor_async(port: u16) {
     use tokio::io::AsyncWriteExt;
     if let Ok(mut s) = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await {
-        let _ = s.write_all(b"GET /conduit-timeout HTTP/1.0\r\n\r\n").await;
+        let _ = s.write_all(b"GET /relay-timeout HTTP/1.0\r\n\r\n").await;
         let _ = s.flush().await;
     }
 }
@@ -740,7 +737,7 @@ fn accept_one_callback(listener: &TcpListener, expected_state: &str) -> Result<S
 
     let path = request_line.split_whitespace().nth(1).unwrap_or("/");
     let query_str = path.split('?').nth(1).unwrap_or("");
-    eprintln!("[conduit:oauth] callback request: {path}");
+    eprintln!("[relay:oauth] callback request: {path}");
 
     let query: HashMap<String, String> = url::form_urlencoded::parse(query_str.as_bytes())
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
@@ -767,7 +764,7 @@ fn accept_one_callback(listener: &TcpListener, expected_state: &str) -> Result<S
     };
     if !state_matches(&returned_state) {
         let html = format!(
-            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Conduit — State Mismatch</title>\
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Relay — State Mismatch</title>\
              <style>body{{font-family:system-ui,sans-serif;display:flex;justify-content:center;\
              align-items:center;min-height:100vh;margin:0;background:#fff5f5;color:#7f1d1d}}\
              .card{{background:#fff;padding:2rem 3rem;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,0.08);\
@@ -792,7 +789,7 @@ fn accept_one_callback(listener: &TcpListener, expected_state: &str) -> Result<S
         ("Missing code", "No authorization code was received. You may close this window.".to_string())
     };
     let html = format!(
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Conduit — {status}</title>\
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Relay — {status}</title>\
          <style>body{{font-family:system-ui,sans-serif;display:flex;justify-content:center;\
          align-items:center;min-height:100vh;margin:0;background:#f5f0eb;color:#3d3027}}\
          .card{{background:#fff;padding:2rem 3rem;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,0.08);\
@@ -997,7 +994,7 @@ async fn exchange_token(
     let body = resp.text().await.map_err(|e| format!("token response read failed: {e}"))?;
     // Never log the response body: on success it contains live access/refresh
     // tokens. Log only the connector id and status code.
-    eprintln!("[conduit:oauth] token exchange {} {status}", connector.id);
+    eprintln!("[relay:oauth] token exchange {} {status}", connector.id);
     if !status.is_success() {
         return Err(format!("token exchange HTTP {status}: {body}"));
     }
@@ -1075,10 +1072,10 @@ fn store_exchanged(
     let conn = db.0.lock();
     let now = crate::db::now_ts();
 
-    eprintln!("[conduit:oauth] store_exchanged {connector_id}: keychain access_token");
+    eprintln!("[relay:oauth] store_exchanged {connector_id}: keychain access_token");
     secrets::set_connector_token(&conn, connector_id, "access_token", &token.access_token)?;
     if let Some(ref rt) = token.refresh_token {
-        eprintln!("[conduit:oauth] store_exchanged {connector_id}: keychain refresh_token");
+        eprintln!("[relay:oauth] store_exchanged {connector_id}: keychain refresh_token");
         secrets::set_connector_token(&conn, connector_id, "refresh_token", rt)?;
     } else {
         // No refresh token — clear BOTH tokens first so we never refresh with
@@ -1087,11 +1084,11 @@ fn store_exchanged(
         // left a stale refresh token behind and later spurious invalid_grant
         // disconnects; the failure was also invisible).
         if let Err(e) = secrets::delete_connector_tokens(&conn, connector_id) {
-            eprintln!("[conduit:oauth] store_exchanged {connector_id}: token delete failed: {e}");
+            eprintln!("[relay:oauth] store_exchanged {connector_id}: token delete failed: {e}");
         }
         secrets::set_connector_token(&conn, connector_id, "access_token", &token.access_token)?;
     }
-    eprintln!("[conduit:oauth] store_exchanged {connector_id}: credential row");
+    eprintln!("[relay:oauth] store_exchanged {connector_id}: credential row");
     db::upsert_connector_credential_row(
         &conn,
         connector_id,
@@ -1101,7 +1098,7 @@ fn store_exchanged(
         now,
     )
     .map_err(|e| e.to_string())?;
-    eprintln!("[conduit:oauth] store_exchanged {connector_id}: done");
+    eprintln!("[relay:oauth] store_exchanged {connector_id}: done");
 
     Ok(())
 }
@@ -1137,7 +1134,7 @@ pub async fn refresh_access_token(
     refresh_access_token_inner(&db, connector, &client).await
 }
 
-/// Headless variant for the `conduit-automation` binary (no AppHandle): uses
+/// Headless variant for the `relay-automation` binary (no AppHandle): uses
 /// the static build-time client config. Dynamic-registration connectors error
 /// out — none of them support unattended runs today.
 pub async fn refresh_access_token_headless(
@@ -1274,7 +1271,7 @@ pub async fn ensure_valid_access_token(
     }
 }
 
-/// Headless variant for the `conduit-automation` binary: same semantics as
+/// Headless variant for the `relay-automation` binary: same semantics as
 /// `ensure_valid_access_token` but takes the raw DB handle so no Tauri
 /// runtime is required. Used by automation failure emails.
 pub async fn ensure_valid_access_token_with_db(
@@ -1523,7 +1520,7 @@ mod tests {
         assert_eq!(loopback_callback_port("http://127.0.0.1:9876/oauth/callback"), Some(9876));
         assert_eq!(loopback_callback_port("http://[::1]:9876/callback"), Some(9876));
         // Non-loopback hosts / sentinels / missing or zero ports are rejected.
-        assert_eq!(loopback_callback_port("https://conduit.local/oauth/callback"), None);
+        assert_eq!(loopback_callback_port("https://relay.local/oauth/callback"), None);
         assert_eq!(loopback_callback_port("http://localhost/oauth/callback"), None);
         assert_eq!(loopback_callback_port("http://example.com:9876/callback"), None);
     }

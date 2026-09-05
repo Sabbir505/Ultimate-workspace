@@ -11,8 +11,8 @@ dist/
 src-tauri/.env
 # Tauri updater signing keypair — the private key MUST stay local.
 # If it leaks, anyone can ship signed updates to your users.
-.tauri/conduit-update.key
-.tauri/conduit-update.key.pub
+.tauri/relay-update.key
+.tauri/relay-update.key.pub
 # Bundled Python runtime (~70 MB of binaries) staged by
 # scripts/fetch-bundled-python.mjs into the installer. Regenerated, not
 # committed — never check in the python-build-standalone tree.

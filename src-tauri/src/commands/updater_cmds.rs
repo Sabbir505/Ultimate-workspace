@@ -54,7 +54,7 @@ pub async fn check_for_update(app: AppHandle) -> CmdResult<UpdateInfo> {
         }),
         Err(e) => {
             // A network failure mid-check is not fatal — just report "no update".
-            eprintln!("[conduit:updater] check failed: {e}");
+            eprintln!("[relay:updater] check failed: {e}");
             Ok(UpdateInfo {
                 update_available: false,
                 version: None,

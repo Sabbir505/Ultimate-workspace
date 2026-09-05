@@ -200,6 +200,8 @@ mod tests {
             compute_pair_proof(token),
             "f0ad7888264ad65376e1a0739476a08580837db7cbac0ecd5103184bb70a3070"
         );
+        // The plaintext below is part of the test vector: the expected frame is
+        // precomputed against it (and the noble TS implementation) — do not rebrand.
         let frame = encrypt(&key, 1, b"conduit interop vector");
         assert_eq!(
             to_hex(&frame),

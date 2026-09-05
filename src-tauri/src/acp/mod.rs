@@ -1,7 +1,7 @@
 //! ACP (Agent Client Protocol) client support (roadmap #20).
 //!
 //! ACP is a JSON-RPC 2.0 protocol over the agent binary's stdio: the client
-//! (Conduit) launches the binary, performs the `initialize` → `initialized`
+//! (Relay) launches the binary, performs the `initialize` → `initialized`
 //! handshake, opens a `session/new`, then drives turns with `session/request`
 //! and streams `session/update` notifications until `session/finish`.
 //!
@@ -102,7 +102,7 @@ pub fn tool_error_session_request(session_id: &str, tool_call_id: &str) -> Value
                 "type": "tool_result",
                 "tool_call_id": tool_call_id,
                 "is_error": true,
-                "content": "Tool execution is not supported by this client (Conduit ACP v1) — describe what you would have done with this tool instead.",
+                "content": "Tool execution is not supported by this client (Relay ACP v1) — describe what you would have done with this tool instead.",
             }],
         },
     })

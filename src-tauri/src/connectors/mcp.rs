@@ -14,7 +14,7 @@
 //!
 //! Tool *schemas* are never hardcoded here — they come from the server's own
 //! `tools/list` response. That is the whole point of vendor-hosted remote MCP
-//! servers: Conduit does OAuth + plumbing, the vendor defines the tools.
+//! servers: Relay does OAuth + plumbing, the vendor defines the tools.
 
 
 use rmcp::model::{CallToolRequestParams, ClientInfo, ContentBlock, Implementation};
@@ -73,7 +73,7 @@ pub async fn connect(app: &AppHandle, connector_id: &str) -> Result<McpSession, 
     // tool-calling client needs no custom handler struct or macro.
     let client_info = ClientInfo::new(
         Default::default(),
-        Implementation::new("conduit", env!("CARGO_PKG_VERSION")),
+        Implementation::new("relay", env!("CARGO_PKG_VERSION")),
     );
 
     let svc = client_info
@@ -152,7 +152,7 @@ mod tests {
 
     // Full live handshake against the public Kiwi MCP endpoint, mirroring
     // exactly what `connect()` builds for a public connector (no auth header).
-    // Run explicitly with: cargo test -p conduit kiwi_public -- --ignored
+    // Run explicitly with: cargo test -p relay kiwi_public -- --ignored
     #[test]
     #[ignore = "hits the live network (mcp.kiwi.com)"]
     fn kiwi_public_endpoint_initializes_and_lists_tools() {
@@ -168,7 +168,7 @@ mod tests {
             );
             let client_info = ClientInfo::new(
                 Default::default(),
-                Implementation::new("conduit-live-test", "0.0.0"),
+                Implementation::new("relay-live-test", "0.0.0"),
             );
             let svc = client_info
                 .serve(transport)

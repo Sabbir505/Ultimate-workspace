@@ -891,7 +891,7 @@ impl ChatProvider for OpenRouterProvider {
             crate::chat::cache::openrouter_anthropic(&req.model),
         )
         .header("HTTP-Referer", "https://conduit.app")
-        .header("X-Title", "Conduit"))
+        .header("X-Title", "Relay"))
     }
 
     fn parse_sse_chunk(

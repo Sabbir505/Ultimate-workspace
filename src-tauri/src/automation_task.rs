@@ -1,9 +1,9 @@
 //! "Run while closed" — Windows Task Scheduler registration for automations.
 //!
-//! One global task (`ConduitAutomations`) fires `conduit-automation run-due`
+//! One global task (`RelayAutomations`) fires `relay-automation run-due`
 //! every minute; the binary applies the app's own due-math
 //! (automations::due_automations), so cron semantics are identical whether
-//! Conduit is open or closed. A single registration covers every enabled
+//! Relay is open or closed. A single registration covers every enabled
 //! automation — edits/deletes never touch the task.
 //!
 //! Windows-only for now: `schtasks` is the system tool. Other platforms get a
@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// Task Scheduler name for the global run-due entry.
-const TASK_NAME: &str = "ConduitAutomations";
+const TASK_NAME: &str = "RelayAutomations";
 
 /// The cargo target triple for the host (compile-time cfg-derived — same
 /// approach as browser_mcp_register::HOST_TRIPLE, avoiding env!("TARGET")).
@@ -41,11 +41,11 @@ const HOST_TRIPLE: &str = if cfg!(target_os = "windows") {
     "unknown-target"
 };
 
-/// Resolve the `conduit-automation` binary shipped alongside the main
+/// Resolve the `relay-automation` binary shipped alongside the main
 /// executable. Mirrors browser_mcp_register::mcp_binary_path:
-///   1. Dev layout: `<exe_dir>/conduit-automation[.exe]` (cargo build — both
+///   1. Dev layout: `<exe_dir>/relay-automation[.exe]` (cargo build — both
 ///      bins land in the same target/{debug,release} dir)
-///   2. Bundle layout: `<exe_dir>/binaries/conduit-automation-<triple>[.exe]`
+///   2. Bundle layout: `<exe_dir>/binaries/relay-automation-<triple>[.exe]`
 ///   3. NSIS root: `<exe_dir>/../binaries/...`
 pub fn automation_binary_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
@@ -57,9 +57,9 @@ pub fn automation_binary_path() -> Option<PathBuf> {
 /// a given executable directory.
 fn automation_binary_path_from(dir: &std::path::Path) -> Option<PathBuf> {
     let exe_name = if cfg!(windows) {
-        "conduit-automation.exe"
+        "relay-automation.exe"
     } else {
-        "conduit-automation"
+        "relay-automation"
     };
 
     // 1. Dev layout: sibling in the same target directory.
@@ -70,7 +70,7 @@ fn automation_binary_path_from(dir: &std::path::Path) -> Option<PathBuf> {
 
     // 2. Bundle layout: Tauri 2 externalBin.
     let bundled_name = format!(
-        "conduit-automation-{}{}",
+        "relay-automation-{}{}",
         HOST_TRIPLE,
         if cfg!(windows) { ".exe" } else { "" }
     );
@@ -99,13 +99,13 @@ fn task_run_command(vbs: &std::path::Path) -> String {
 
 /// Path to the VBS wrapper inside the app data directory.
 fn vbs_wrapper_path(app_data_dir: &std::path::Path) -> std::path::PathBuf {
-    app_data_dir.join("conduit-automation-wrapper.vbs")
+    app_data_dir.join("relay-automation-wrapper.vbs")
 }
 
 /// Contents of the hidden VBScript wrapper: runs `<binary> run-due` invisibly.
 ///
-/// conduit-automation is a GUI-subsystem binary on Windows
-/// (`windows_subsystem = "windows"`, see src/bin/conduit_automation.rs), so
+/// relay-automation is a GUI-subsystem binary on Windows
+/// (`windows_subsystem = "windows"`, see src/bin/relay_automation.rs), so
 /// the OS never allocates a console for it and `Run(..., 0)` hides it
 /// outright. Earlier revisions routed through powershell's `-WindowStyle
 /// Hidden`, but that still flashed a terminal every minute tick: the console
@@ -113,9 +113,9 @@ fn vbs_wrapper_path(app_data_dir: &std::path::Path) -> std::path::PathBuf {
 fn vbs_wrapper_contents(binary: &std::path::Path) -> String {
     // In VBScript, double quotes inside a string literal are escaped as "".
     // The quoted binary path (spaces safe) is followed by the run-due arg:
-    //   sh.Run """C:\path\conduit-automation.exe"" run-due", 0, False
+    //   sh.Run """C:\path\relay-automation.exe"" run-due", 0, False
     format!(
-        "' Conduit automation wrapper – runs the headless runner invisibly.\r\n\
+        "' Relay automation wrapper – runs the headless runner invisibly.\r\n\
          ' (GUI-subsystem binary: no console window is ever allocated.)\r\n\
          Set sh = CreateObject(\"WScript.Shell\")\r\n\
          sh.Run \"\"\"{}\"\" run-due\", 0, False\r\n",
@@ -144,6 +144,15 @@ fn create_args(vbs: &std::path::Path) -> Vec<String> {
 
 fn delete_args() -> Vec<String> {
     vec!["/Delete".into(), "/TN".into(), TASK_NAME.into(), "/F".into()]
+}
+
+/// Task name registered before the rebrand. Existing installs still have it
+/// scheduled; it fires `conduit-automation`, which no longer ships — delete it
+/// best-effort whenever we register or unregister the current task.
+const LEGACY_TASK_NAME: &str = "ConduitAutomations";
+
+fn legacy_delete_args() -> Vec<String> {
+    vec!["/Delete".into(), "/TN".into(), LEGACY_TASK_NAME.into(), "/F".into()]
 }
 
 fn query_args() -> Vec<String> {
@@ -201,24 +210,27 @@ pub fn set_run_while_closed(enabled: bool, app: tauri::AppHandle) -> Result<(), 
         if !enabled {
             // Deleting a task that doesn't exist is fine — treat as off.
             let _ = run_schtasks(&delete_args());
+            let _ = run_schtasks(&legacy_delete_args());
             return Ok(());
         }
         let binary = automation_binary_path().ok_or_else(|| {
-            "conduit-automation binary not found next to the app — reinstall or run a full build".to_string()
+            "relay-automation binary not found next to the app — reinstall or run a full build".to_string()
         })?;
         // Write the hidden-window VBS wrapper next to the app's data. Task
         // Scheduler fires it every minute; the binary is GUI-subsystem so
         // `Run(..., 0, False)` keeps it fully invisible (a console exe would
         // flash a terminal on every tick).
-        let data_dir = tauri::Manager::path(&app)
-            .app_data_dir()
-            .map_err(|e| format!("no app data dir: {e}"))?;
+        let data_dir = crate::user_dirs::app_data_dir(&app);
         std::fs::create_dir_all(&data_dir)
             .map_err(|e| format!("failed to create app data dir: {e}"))?;
         let vbs = vbs_wrapper_path(&data_dir);
         std::fs::write(&vbs, vbs_wrapper_contents(&binary))
             .map_err(|e| format!("failed to write VBS wrapper: {e}"))?;
         run_schtasks(&create_args(&vbs))?;
+        // Clean up the pre-rebrand task so it can't fire the removed
+        // conduit-automation binary every minute. Best-effort: absent or
+        // already-deleted tasks are not an error.
+        let _ = run_schtasks(&legacy_delete_args());
         Ok(())
     }
 }
@@ -253,7 +265,7 @@ mod tests {
 
     #[test]
     fn create_args_shape() {
-        let args = create_args(std::path::Path::new("C:\\app\\conduit-automation-wrapper.vbs"));
+        let args = create_args(std::path::Path::new("C:\\app\\relay-automation-wrapper.vbs"));
         assert_eq!(args[0], "/Create");
         assert!(args.windows(2).any(|w| w == ["/TN", TASK_NAME]));
         assert!(args.windows(2).any(|w| w == ["/SC", "MINUTE"]));
@@ -265,18 +277,18 @@ mod tests {
             .expect("/TR present");
         // The task runs the VBS wrapper through wscript (hidden window) —
         // a console exe would flash a terminal on every minute tick.
-        assert_eq!(tr, "wscript.exe //B //Nologo \"C:\\app\\conduit-automation-wrapper.vbs\"");
+        assert_eq!(tr, "wscript.exe //B //Nologo \"C:\\app\\relay-automation-wrapper.vbs\"");
         assert!(args.iter().any(|a| a == "/F"));
     }
 
     #[test]
     fn vbs_wrapper_runs_binary_directly_hidden_without_waiting() {
-        let contents = vbs_wrapper_contents(std::path::Path::new("C:\\app dir\\conduit-automation.exe"));
+        let contents = vbs_wrapper_contents(std::path::Path::new("C:\\app dir\\relay-automation.exe"));
         // The GUI-subsystem binary is invoked directly (no powershell layer —
         // its console flashed before -WindowStyle Hidden landed), quoted for
         // spaces, and Run uses window style 0 + don't-wait False.
         assert!(
-            contents.contains("sh.Run \"\"\"C:\\app dir\\conduit-automation.exe\"\" run-due\", 0, False"),
+            contents.contains("sh.Run \"\"\"C:\\app dir\\relay-automation.exe\"\" run-due\", 0, False"),
             "unexpected wrapper body: {contents}"
         );
     }
@@ -288,9 +300,17 @@ mod tests {
     }
 
     #[test]
+    fn legacy_delete_args_reference_the_pre_rebrand_task() {
+        assert_eq!(
+            legacy_delete_args(),
+            vec!["/Delete", "/TN", "ConduitAutomations", "/F"]
+        );
+    }
+
+    #[test]
     fn binary_path_prefers_dev_layout_then_bundle() {
-        let tmp = std::env::temp_dir().join(format!("conduit-task-test-{}", std::process::id()));
-        let exe_name = if cfg!(windows) { "conduit-automation.exe" } else { "conduit-automation" };
+        let tmp = std::env::temp_dir().join(format!("relay-task-test-{}", std::process::id()));
+        let exe_name = if cfg!(windows) { "relay-automation.exe" } else { "relay-automation" };
         std::fs::create_dir_all(&tmp).unwrap();
 
         // Nothing there → None.
@@ -302,9 +322,9 @@ mod tests {
         assert_eq!(automation_binary_path_from(&tmp), Some(dev.clone()));
         std::fs::remove_file(&dev).unwrap();
 
-        // Bundle layout: binaries/conduit-automation-<triple>.
+        // Bundle layout: binaries/relay-automation-<triple>.
         let bundled_name = format!(
-            "conduit-automation-{}{}",
+            "relay-automation-{}{}",
             HOST_TRIPLE,
             if cfg!(windows) { ".exe" } else { "" }
         );

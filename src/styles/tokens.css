@@ -7,7 +7,7 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Conduit theme system â€” Cursor-style palette (deep neutral dark / warm
+/* Relay theme system â€” Cursor-style palette (deep neutral dark / warm
    light), cyan accent. The window is opaque (transparent:false in
    tauri.conf.json), so every surface here is a SOLID color. Surfaces still
    carry a faint top-edge rim + soft shadow for depth.

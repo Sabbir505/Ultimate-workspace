@@ -490,7 +490,7 @@ button.sidebar-section-label:hover {
 }
 
 /* Back/forward view navigation. Lives in the sidebar header next to the
- * Conduit brand, and stays available in the collapsed rail (App.tsx) so
+ * Relay brand, and stays available in the collapsed rail (App.tsx) so
  * view switching works with the sidebar hidden. */
 .sidebar-nav-btn {
   flex-shrink: 0;

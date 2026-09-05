@@ -8,7 +8,7 @@
 //!
 //! Why app-scoped and not per-project: a Notion account is one identity used
 //! across every chat, mirroring how chat provider API keys are stored (see
-//! `secrets.rs` `conduit:chat:<provider>` namespace). Per-conversation opt-in
+//! `secrets.rs` `relay:chat:<provider>` namespace). Per-conversation opt-in
 //! is handled separately by the `chat_session_connectors` join, not by the
 //! credential row.
 //!

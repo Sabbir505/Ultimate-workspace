@@ -15,7 +15,9 @@ Relay wraps the AI agent CLIs you already use (Claude Code, Kimi Code CLI, OpenC
 
 ## Naming
 
-"Relay" is the user-visible product name — the window title, the `productName` in `tauri.conf.json`, the `<title>` in `index.html`, and all in-app strings. The Rust crate name (`conduit`), the bundle identifier (`dev.conduit.app`), the NSIS installer filename (`Conduit_<version>_x64-setup.exe`), the updater signing key filename, the mobile app name (`Conduit Mobile`, `com.conduit.mobile`), and the Windows scheduled-task name (`ConduitAutomations`) are all still in the Conduit era by design — see `AI CONTEXT/RELEASE.md` for the rationale. Internal sidecar names (`conduit-browser-mcp`, `conduit-automation`) and MCP server identifiers (`conduit-browser`, `conduit-tools`) are also retained.
+"Relay" is the product name everywhere — the window title, the `productName` in `tauri.conf.json`, the `<title>` in `index.html`, all in-app strings, the Rust crate (`relay`, lib `relay_lib`), the bundle identifier (`dev.relay.app`), the sidecar binaries (`relay-browser-mcp`, `relay-automation`), the MCP server identifiers (`relay-browser`, `relay-tools`), the `RELAY_*` env vars, the OS keychain service, the mobile app (`Relay Mobile`, `com.relay.mobile`), and the Windows scheduled-task name (`RelayAutomations`).
+
+The only pre-rebrand values kept on purpose are the E2E pairing crypto constants (`conduit-e2e-relay-*`), which are protocol-anchored on both desktop and phone. Existing installs migrate transparently: the app data dir (`%APPDATA%/dev.conduit.app` → `%APPDATA%/dev.relay.app`) renames itself on first launch, keychain entries are read across generations and re-homed on delete, persisted paths (`conduit.db`, `Documents/Conduit`, `~/Conduit/models`, `ConduitAutomations`) resolve their legacy counterparts, and the updater still accepts legacy `Conduit_` release assets — see `AI CONTEXT/RELEASE.md` for the full compatibility matrix.
 
 ## Quick start
 

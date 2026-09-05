@@ -14,7 +14,7 @@ function report(overrides: Partial<DocQaReportPayload> = {}): DocQaReportPayload
   return {
     path: DECK_PATH,
     filename: "deck.pptx",
-    passed: ["single conduit.save", "slide count matches plan (5)"],
+    passed: ["single relay.save", "slide count matches plan (5)"],
     warnings: [],
     probes: [],
     pageCount: 5,

@@ -28,7 +28,7 @@ fn map_chat_session(row: &rusqlite::Row) -> rusqlite::Result<ChatSession> {
         // chat is nested under this project's expandable sidebar row.
         project_id: row.get::<_, Option<String>>("project_id")?,
         // NULL = work in the bound project's working tree; a path = the chat's
-        // isolated git worktree (roadmap P0 §3.1.1, branch `conduit/<id>`).
+        // isolated git worktree (roadmap P0 §3.1.1, branch `relay/<id>`).
         worktree_path: row.get::<_, Option<String>>("worktree_path")?,
         // Falls back to "manual" for rows written before the column existed
         // (the migration adds it nullable); unknown values also read as manual.
@@ -975,9 +975,9 @@ mod tests {
 
         // Set persists and reads back through the mapper (the migration that
         // adds the column runs inside mem(), so this also covers the schema).
-        set_chat_session_worktree(&conn, &cs.id, Some("D:/proj/conduit-abc12345")).unwrap();
+        set_chat_session_worktree(&conn, &cs.id, Some("D:/proj/relay-abc12345")).unwrap();
         let read = get_chat_session(&conn, &cs.id).unwrap().unwrap();
-        assert_eq!(read.worktree_path.as_deref(), Some("D:/proj/conduit-abc12345"));
+        assert_eq!(read.worktree_path.as_deref(), Some("D:/proj/relay-abc12345"));
 
         // Clear reads back as None.
         set_chat_session_worktree(&conn, &cs.id, None).unwrap();
@@ -986,8 +986,8 @@ mod tests {
 
         // chat_worktree_paths only surfaces non-null values.
         assert!(chat_worktree_paths(&conn, None).unwrap().is_empty());
-        set_chat_session_worktree(&conn, &cs.id, Some("D:/proj/conduit-abc12345")).unwrap();
-        assert_eq!(chat_worktree_paths(&conn, None).unwrap(), vec!["D:/proj/conduit-abc12345"]);
+        set_chat_session_worktree(&conn, &cs.id, Some("D:/proj/relay-abc12345")).unwrap();
+        assert_eq!(chat_worktree_paths(&conn, None).unwrap(), vec!["D:/proj/relay-abc12345"]);
     }
 
     #[test]

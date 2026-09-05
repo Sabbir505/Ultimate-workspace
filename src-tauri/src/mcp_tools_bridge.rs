@@ -1,4 +1,4 @@
-//! App-side half of the `conduit-tools` MCP server. The relay binary forwards
+//! App-side half of the `relay-tools` MCP server. The relay binary forwards
 //! `tools/call` for generate_document / plan_document / revise_document /
 //! generate_diagram / generate_file / get_skill / list_skills / search_docs
 //! over the loopback WebSocket; this
@@ -21,7 +21,7 @@ use crate::chat::tools::{self, ToolCaps};
 /// `search_docs` is read-only and self-guards at runtime (returns
 /// "unavailable" when the embedding sidecar isn't running), so it's safe here.
 /// `get_capabilities` is read-only introspection — intercepted in
-/// `execute_conduit_tool` for the app-level report (ToolCaps::default() here
+/// `execute_relay_tool` for the app-level report (ToolCaps::default() here
 /// has no per-turn attachment state, so routing it through execute_tool would
 /// report a falsely empty connector list). `list_artifacts` is read-only DB
 /// introspection — the harness's always-current answer to "where does the
@@ -39,11 +39,11 @@ const ALLOWED_RELAY_TOOLS: [&str; 10] = [
     tools::LIST_ARTIFACTS,
 ];
 
-/// Strip the `conduit_tools:` prefix from a WS op; None for non-tool ops and
+/// Strip the `relay_tools:` prefix from a WS op; None for non-tool ops and
 /// for any tool outside the relay whitelist (those fall through to
 /// `unknown_op` in the dispatcher).
 pub fn tool_from_op(op: &str) -> Option<String> {
-    let rest = op.strip_prefix("conduit_tools:")?;
+    let rest = op.strip_prefix("relay_tools:")?;
     if ALLOWED_RELAY_TOOLS.contains(&rest) { Some(rest.to_string()) } else { None }
 }
 
@@ -58,8 +58,8 @@ pub fn outcome_artifact_json(o: &tools::ToolOutcome) -> Value {
     }
 }
 
-/// Execute one conduit-tools call and return the text result + artifact info.
-pub async fn execute_conduit_tool(
+/// Execute one relay-tools call and return the text result + artifact info.
+pub async fn execute_relay_tool(
     app: &tauri::AppHandle,
     tool_name: &str,
     args: &Value,
@@ -88,21 +88,21 @@ mod tests {
 
     #[test]
     fn tool_name_extraction() {
-        assert_eq!(tool_from_op("conduit_tools:generate_document"), Some("generate_document".to_string()));
-        assert_eq!(tool_from_op("conduit_tools:search_docs"), Some("search_docs".to_string()));
+        assert_eq!(tool_from_op("relay_tools:generate_document"), Some("generate_document".to_string()));
+        assert_eq!(tool_from_op("relay_tools:search_docs"), Some("search_docs".to_string()));
         // Read-only introspection is allowed through the relay.
-        assert_eq!(tool_from_op("conduit_tools:get_capabilities"), Some("get_capabilities".to_string()));
+        assert_eq!(tool_from_op("relay_tools:get_capabilities"), Some("get_capabilities".to_string()));
         // The plan-compiled design path is reachable from harnesses (same
         // artifacts-dir-only risk class as generate_document).
-        assert_eq!(tool_from_op("conduit_tools:plan_document"), Some("plan_document".to_string()));
-        assert_eq!(tool_from_op("conduit_tools:revise_document"), Some("revise_document".to_string()));
+        assert_eq!(tool_from_op("relay_tools:plan_document"), Some("plan_document".to_string()));
+        assert_eq!(tool_from_op("relay_tools:revise_document"), Some("revise_document".to_string()));
         assert_eq!(tool_from_op("navigate"), None);
-        assert_eq!(tool_from_op("conduit_tools:"), None);
+        assert_eq!(tool_from_op("relay_tools:"), None);
         // Mutating/dangerous chat tools must be rejected server-side even
         // though they exist in chat::tools (no permission gate on this path).
-        assert_eq!(tool_from_op("conduit_tools:delete_file"), None);
-        assert_eq!(tool_from_op("conduit_tools:write_file"), None);
-        assert_eq!(tool_from_op("conduit_tools:run_shell"), None);
+        assert_eq!(tool_from_op("relay_tools:delete_file"), None);
+        assert_eq!(tool_from_op("relay_tools:write_file"), None);
+        assert_eq!(tool_from_op("relay_tools:run_shell"), None);
     }
 
     #[test]

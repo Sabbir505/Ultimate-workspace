@@ -1,13 +1,13 @@
 ---
 name: pptx
-description: "Use this skill whenever generating a slide deck/presentation (.pptx) in Conduit's Chat tab sandbox. Triggers: any request for a deck, slides, pitch deck, or presentation deliverable."
+description: "Use this skill whenever generating a slide deck/presentation (.pptx) in Relay's Chat tab sandbox. Triggers: any request for a deck, slides, pitch deck, or presentation deliverable."
 ---
 
 # PPTX Generation (PptxGenJS via the JavaScript engine)
 
 The default engine is **JavaScript**: your `code` runs in the app's document
 sandbox with `PptxGenJS` preloaded as a global, and the deck is delivered via
-`await conduit.save(...)`. It produces real, editable PowerPoint OOXML with
+`await relay.save(...)`. It produces real, editable PowerPoint OOXML with
 native charts — the same engine Anthropic's public pptx skill uses.
 
 ```js
@@ -31,7 +31,7 @@ s2.addChart(pptx.ChartType.bar, [
 ], { x: 0.6, y: 1.8, w: 7, h: 4.5 });
 s2.addText("READY\nMATURE\nFUNDED", { x: 8.2, y: 1.8, w: 4.5, h: 4.5, fontSize: 16, color: "E6EDF3" });
 
-await pptx.write({ outputType: "blob" }).then((blob) => conduit.save(blob));
+await pptx.write({ outputType: "blob" }).then((blob) => relay.save(blob));
 ```
 
 ## Core rules
@@ -48,7 +48,7 @@ await pptx.write({ outputType: "blob" }).then((blob) => conduit.save(blob));
 - **Native charts** (`pptx.ChartType.bar/line/pie/doughnut` with
   `{ name, labels, values }` series) — never screenshot a chart as an image.
 - **Speaker notes**: `slide.addNotes("...")` — never a visible text box.
-- Deliver with EXACTLY ONE `await conduit.save(...)` (a Blob from
+- Deliver with EXACTLY ONE `await relay.save(...)` (a Blob from
   `pptx.write({ outputType: "blob" })`, or the base64 string from
   `pptx.write({ outputType: "base64" })`).
 
@@ -67,7 +67,7 @@ await pptx.write({ outputType: "blob" }).then((blob) => conduit.save(blob));
 ## Python fallback
 
 If the JavaScript engine is unavailable (headless automation runs), re-call
-with `language: "python"`: python-pptx or `conduit_docgen`
+with `language: "python"`: python-pptx or `relay_docgen`
 (`cd.Deck(title=…, theme=…)`; `deck.section/bullets/two_column/table_slide/
 closing/save`) on the bundled interpreter, saving to
-`os.environ["CONDUIT_OUTPUT"]`.
+`os.environ["RELAY_OUTPUT"]`.

@@ -606,7 +606,7 @@ mod tests {
         )
         .unwrap();
         // Create an artifact file in a temp dir so export actually copies bytes.
-        let tmp = std::env::temp_dir().join(format!("conduit-export-test-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("relay-export-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let afile = tmp.join("diagram.html");
@@ -644,7 +644,7 @@ mod tests {
         // artifact filename isn't deduped against the source file in `tmp`.
         let conn2 = mem();
         let import_dir =
-            std::env::temp_dir().join(format!("conduit-import-roundtrip-{}", std::process::id()));
+            std::env::temp_dir().join(format!("relay-import-roundtrip-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&import_dir);
         std::fs::create_dir_all(&import_dir).unwrap();
         let imported = import_zip_bytes(&conn2, &zip_bytes, &import_dir).unwrap();
@@ -715,7 +715,7 @@ mod tests {
         // (even though the fresh DB has no such project row — project_id has
         // no FK constraint in chat_sessions).
         let conn2 = mem();
-        let tmp = std::env::temp_dir().join(format!("conduit-import-test-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("relay-import-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let imported = import_zip_bytes(&conn2, &zip_bytes, &tmp).unwrap();
@@ -732,7 +732,7 @@ mod tests {
     #[test]
     fn import_rejects_missing_manifest() {
         let conn = mem();
-        let tmp = std::env::temp_dir().join(format!("conduit-no-manifest-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("relay-no-manifest-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         // A zip with no manifest.json.
@@ -758,7 +758,7 @@ mod tests {
     #[test]
     fn import_rejects_unknown_version() {
         let conn = mem();
-        let tmp = std::env::temp_dir().join(format!("conduit-ver-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("relay-ver-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let manifest = ChatManifest {

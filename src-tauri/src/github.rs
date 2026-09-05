@@ -103,7 +103,7 @@ fn client(token: &str) -> Result<reqwest::Client, String> {
     );
     let mut builder = reqwest::Client::builder()
         .default_headers(headers)
-        .user_agent("conduit-desktop");
+        .user_agent("relay-desktop");
     // Route API traffic through the same proxy the user's git uses. Many
     // environments reach github.com ONLY via a local proxy (git push/pull
     // work while api.github.com times out) — a desktop app launched from the

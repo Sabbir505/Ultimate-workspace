@@ -1857,7 +1857,7 @@ function GitPanel() {
         <div className="settings-section-title">Worktree-per-session isolation</div>
         <p className="settings-section-hint">
           Each git-bound chat works in its own isolated worktree (branch{" "}
-          <code>conduit/&lt;id&gt;</code>), so agents never collide. Deleting a chat removes it
+          <code>relay/&lt;id&gt;</code>), so agents never collide. Deleting a chat removes it
           best-effort — committed work is never lost.
         </p>
         <div className="settings-toggle-row">

@@ -1,6 +1,6 @@
 ---
 name: pdf
-description: "Use this skill whenever generating a PDF in Conduit's Chat tab sandbox. Triggers: any request for a PDF deliverable — reports, one-pagers, invoices, or any document explicitly requested as PDF rather than docx."
+description: "Use this skill whenever generating a PDF in Relay's Chat tab sandbox. Triggers: any request for a PDF deliverable — reports, one-pagers, invoices, or any document explicitly requested as PDF rather than docx."
 ---
 
 # PDF Generation
@@ -56,17 +56,17 @@ Rules:
 - The tool result arrives after the PDF is rendered — if it reports a render
   error, fix the HTML and re-call.
 
-## Path B — Python + `conduit_docgen` (fallback; `language: "python"`)
+## Path B — Python + `relay_docgen` (fallback; `language: "python"`)
 
 When the HTML engine is unavailable (headless runs) use the bundled Python
 toolkit (reportlab under the hood):
 
 ```python
-import conduit_docgen as cd
+import relay_docgen as cd
 pdf = cd.Pdf(title="Research Brief", subtitle="2026", theme="plum", author="Acme Labs")
 pdf.heading("Summary"); pdf.paragraph("Body…"); pdf.bullets(["a", "b"])
 pdf.table(["Key", "Value"], [["x", "1"]]); pdf.callout("Bottom line.")
-pdf.save()  # writes to os.environ["CONDUIT_OUTPUT"]
+pdf.save()  # writes to os.environ["RELAY_OUTPUT"]
 ```
 
 Drop to raw reportlab only for pixel-exact print layouts (forms, label

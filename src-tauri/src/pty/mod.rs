@@ -172,7 +172,7 @@ impl RingText {
 
 pub struct Pane {
     id: String,
-    /// Conduit session id (None for shell/quick-action/login panes).
+    /// Relay session id (None for shell/quick-action/login panes).
     session_id: Option<String>,
     /// None for plain shell panes (no scraping, but the state heuristic still runs).
     adapter: Option<Arc<dyn HarnessAdapter>>,
@@ -318,7 +318,7 @@ impl Pane {
         let Some(adapter) = &self.adapter else { return };
         let tail = self.tail.lock().clone();
 
-        // Session-id capture (only for panes bound to a Conduit session).
+        // Session-id capture (only for panes bound to a Relay session).
         if !self.harness_id_reported.load(Ordering::Relaxed) {
             if let Some(hid) = adapter.parse_session_id(&tail) {
                 self.report_harness_id(app, db, &hid);
@@ -629,7 +629,7 @@ impl PtyManager {
         // their config (e.g. CLAUDE_CODE_CHILD_SESSION, API keys, PATH tweaks).
         // mi10: snapshot the vars ONCE process-wide — std::env::vars()
         // re-copied the whole environment block (~200 entries, both Strings)
-        // on every pane spawn. Conduit never mutates its own env after boot,
+        // on every pane spawn. Relay never mutates its own env after boot,
         // so the snapshot can't go stale.
         static PARENT_ENV: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
         let parent_env = PARENT_ENV.get_or_init(|| std::env::vars().collect());

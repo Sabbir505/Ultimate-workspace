@@ -1,8 +1,8 @@
 # Product Requirements Document
-## Codename: Conduit
+## Codename: Relay
 ### A local-first, multi-pane desktop shell for AI coding agents
 
-> **Naming note:** This PRD was written under the codename "Conduit". The product was rebranded to "Relay" in user-visible surfaces on 2026-08-27 (commit `e9abc7c3`); the crate, bundle id, and other internal identifiers are still "Conduit" — see `README.md` and `AI CONTEXT/RELEASE.md`. The requirements themselves are unchanged.
+> **Naming note:** This PRD was written under the codename "Relay". The product was rebranded to "Relay" in user-visible surfaces on 2026-08-27 (commit `e9abc7c3`); the crate, bundle id, and other internal identifiers are still "Relay" — see `README.md` and `AI CONTEXT/RELEASE.md`. The requirements themselves are unchanged.
 
 **Document purpose:** This PRD is written to be handed to an AI coding agent (Kimi Code CLI / Kimi K3, or Claude Code) as the primary build specification. It should be read top to bottom before any code is written. Where a decision is ambiguous, this document states the default to take rather than leaving it open.
 
@@ -10,7 +10,7 @@
 
 ## 1. Product Summary
 
-Conduit is a desktop application that lets a developer open any local project folder and run one or more AI coding agent CLIs (Claude Code, Kimi Code CLI) against it inside resizable, tiled panes — up to 6 at once — with full session history, session resume, a built-in browser for previewing dev servers, and a native macOS "Liquid Glass" visual style with light/dark themes.
+Relay is a desktop application that lets a developer open any local project folder and run one or more AI coding agent CLIs (Claude Code, Kimi Code CLI) against it inside resizable, tiled panes — up to 6 at once — with full session history, session resume, a built-in browser for previewing dev servers, and a native macOS "Liquid Glass" visual style with light/dark themes.
 
 It is **not** a code editor and **not** a fork of VS Code. It does not implement its own AI agent loop, diffing engine, or model inference. It is an orchestration shell: it spawns existing, already-authenticated CLI agent binaries as child processes inside pseudo-terminals, and gives the user a fast, persistent, multi-project interface around them.
 
@@ -47,11 +47,11 @@ The app must support at minimum:
 > **Implementation note (Chat tab):** The app also includes a Chat tab (not described in this PRD) that offers direct LLM conversations via HTTP APIs — a separate feature from the CLI agent panes covered here. The Chat tab supports: streaming responses, tool calling (32 tools: web_search, generate_document, generate_file, generate_diagram, fetch_url, open_url, run_code, get_skill, list_skills, download_file, download_progress, run_shell, get_task_status, cancel_task, the agentic browser control set `browser_read`/`browser_click`/`browser_type`/`browser_scroll`/`browser_screenshot` plus `wait_for`, the focused-subagent `Task` tool, the filesystem set `list_directory`/`read_file`/`search_files`/`search_content`/`write_file`/`edit_file`/`delete_file`/`move_file`/`copy_file`, and the source ledger `add_source_note`/`get_source_ledger`/`reset_source_ledger`), Mermaid diagram rendering, HTML/CSS diagram generation with PNG export, artifact preview/download/export, research mode (`/research`) with Plan/Execute/Synthesize prompting and a persistent source ledger, the autonomous goal loop (`/goal` and its alias `/loop`), context compaction for local GGUF models, per-turn perf metrics (TTFT / LLM time / tool time / tokens-per-second, surfaced in the composer), per-session permission modes (read_only / manual / auto_edit / full_auto), and a Connectors framework (OAuth + remote MCP for Notion, GitHub, Google, Gmail, Kiwi). See `CONTRACT.md` Chat section for the full IPC contract.
 
 Both harnesses run as normal CLI processes; the app does **not** need to reimplement their protocols. The app spawns them in a pseudo-terminal (pty) with the working directory set to the target project folder, and lets their native TUI render inside the pane. This means:
-- Conduit does not need to parse or understand the agent's internal message format for v1's baseline experience — the pty output is rendered as terminal output (via xterm.js or equivalent), exactly as if the user ran the CLI directly.
-- Session ID capture: after a session starts, Conduit must capture the session ID the harness generates (both harnesses expose this — Kimi Code prints a resume hint like `kimi -r <session-id>` on every exit path) so it can be stored and used for later resume.
+- Relay does not need to parse or understand the agent's internal message format for v1's baseline experience — the pty output is rendered as terminal output (via xterm.js or equivalent), exactly as if the user ran the CLI directly.
+- Session ID capture: after a session starts, Relay must capture the session ID the harness generates (both harnesses expose this — Kimi Code prints a resume hint like `kimi -r <session-id>` on every exit path) so it can be stored and used for later resume.
 - The harness list must be implemented as a pluggable adapter interface (see §6.4) so a third harness (e.g. Codex, OpenCode) can be added later without rearchitecting.
 
-**Architecture implication:** because both harnesses persist session state to disk and resume by ID, Conduit does **not** need to keep agent processes resident in memory when a pane is not visible/focused. Process lifecycle is spawn-on-focus, kill-on-blur-or-close, resume-by-ID-on-reopen. This is a deliberate simplification — do not build a background process supervisor for v1.
+**Architecture implication:** because both harnesses persist session state to disk and resume by ID, Relay does **not** need to keep agent processes resident in memory when a pane is not visible/focused. Process lifecycle is spawn-on-focus, kill-on-blur-or-close, resume-by-ID-on-reopen. This is a deliberate simplification — do not build a background process supervisor for v1.
 
 > **Implementation note:** The final implementation diverges from this section's "kill-on-blur" statement. Per §6.5 (which takes precedence), panes are killed only on explicit close or app quit, never on blur. The original "kill-on-blur-or-close" phrasing was aspirational and was corrected during implementation to match the user's expectation that unfocused parallel panes keep running.
 
@@ -70,7 +70,7 @@ Both harnesses run as normal CLI processes; the app does **not** need to reimple
 2. Sidebar expands to show that project's session history (empty on first use).
 3. User clicks "New Session" and picks a harness (Claude Code or Kimi Code) from a small selector (radio/dropdown), or a default harness if only one is configured.
 4. A new pane opens in the main grid, a pty is spawned with cwd = project folder, running the harness's default interactive command (e.g. `claude` or `kimi`).
-5. Once the harness reports a session ID (parsed from its startup/exit output), Conduit stores `{ project_id, session_id, harness, title: null, created_at, last_active_at }` in the local session index.
+5. Once the harness reports a session ID (parsed from its startup/exit output), Relay stores `{ project_id, session_id, harness, title: null, created_at, last_active_at }` in the local session index.
 6. User types prompts directly into the pane; the harness's native TUI handles rendering, tool-call confirmations, diffs, etc.
 
 ### 4.3 Switching between sessions
@@ -98,7 +98,7 @@ Both harnesses run as normal CLI processes; the app does **not** need to reimple
 
 > **Implementation note:** The browser pane uses native Tauri child webviews (`Window::add_child`) on Windows/macOS rather than a secondary `WebviewWindow`. This provides a top-level browsing context with no `X-Frame-Options` restrictions and full navigation history. Linux uses standalone `WebviewWindow`s (one per tab) because wry/gtk has no multi-webview support. No iframe fallback remains on any platform. The webview is positioned over the pane's body div by syncing bounds from the frontend (ResizeObserver) to the backend, with occlusion logic that hides the webview when overlays/modals are open.
 
-> **Implementation note (v0.3.0+):** Agent-driven browser control is available via the bundled `conduit-browser-mcp` sidecar (a standalone MCP binary that bridges JSON-RPC over stdio to the desktop's WebSocket relay) and the in-app chat tools `browser_read`/`browser_click`/`browser_type`/`browser_scroll`/`wait_for`. Visual feedback overlays (cursor tween, click ripple, typing caret, element highlight) show the user what the agent is doing. Page extraction uses Mozilla's Readability.js with consent-banner dismissal, lazy-load/infinite-scroll handling, and structured output (full/summary_only/section modes). See `task-browser-agent-visual-feedback.md`, `task-browser-extraction-quality.md`, and `task-conduit-browser-mcp.md` for full specs.
+> **Implementation note (v0.3.0+):** Agent-driven browser control is available via the bundled `relay-browser-mcp` sidecar (a standalone MCP binary that bridges JSON-RPC over stdio to the desktop's WebSocket relay) and the in-app chat tools `browser_read`/`browser_click`/`browser_type`/`browser_scroll`/`wait_for`. Visual feedback overlays (cursor tween, click ripple, typing caret, element highlight) show the user what the agent is doing. Page extraction uses Mozilla's Readability.js with consent-banner dismissal, lazy-load/infinite-scroll handling, and structured output (full/summary_only/section modes). See `task-browser-agent-visual-feedback.md`, `task-browser-extraction-quality.md`, and `task-relay-browser-mcp.md` for full specs.
 
 ---
 
@@ -144,7 +144,7 @@ Both harnesses run as normal CLI processes; the app does **not** need to reimple
 ### 6.2 Directory Structure (suggested)
 
 ```
-/conduit
+/relay
   /src                      # React frontend
     /components
       /panes                # Terminal pane, browser pane, pane grid
@@ -183,7 +183,7 @@ CREATE TABLE projects (
 );
 
 CREATE TABLE sessions (
-  id TEXT PRIMARY KEY,               -- uuid, internal to Conduit
+  id TEXT PRIMARY KEY,               -- uuid, internal to Relay
   project_id TEXT NOT NULL REFERENCES projects(id),
   harness TEXT NOT NULL,             -- 'claude_code' | 'kimi_code'
   harness_session_id TEXT,           -- ID as reported by the harness itself, used for --resume
@@ -355,7 +355,7 @@ All shortcuts must be remappable in Settings — store overrides in `app_setting
 - Per-project key-value store for env vars/API keys used by quick actions or dev servers run in panes.
 - Values encrypted at rest (e.g. via OS keychain integration through a Tauri plugin, which is the preferred approach over custom encryption — use the platform keychain/credential manager where available, falling back to an encrypted local file only if keychain access isn't feasible).
 - Injected into a pane's process environment only when explicitly referenced by a quick action or when the user opts to inject "this project's secrets" into a freshly spawned pane.
-- Never logged, never included in session exports (§7.14), never sent to any network endpoint by Conduit itself.
+- Never logged, never included in session exports (§7.14), never sent to any network endpoint by Relay itself.
 
 > **Implementation note (Linux):** The `keyring` crate is built with `linux-native` + `sync-secret-service` features, which talks to the Secret Service API (`gnome-keyring`, `kwalletd5`, `KeePassXC`). The XOR-obfuscated SQLite fallback documented in `AUDIT.md` (row 3.2/2.2) remains a last-resort fallback when no Secret Service is available.
 
@@ -405,7 +405,7 @@ A Connectors framework bridges third-party SaaS accounts into the Chat tab as pe
 - **Startup time:** cold app launch to interactive sidebar under 2 seconds on typical developer hardware.
 - **Resource usage:** with 0 panes open, idle memory footprint should be modest (Tauri's baseline, not an Electron-scale footprint) — this is a primary reason Tauri was chosen over Electron.
 - **Process cleanup:** on app quit, all child pty processes must be terminated cleanly (SIGTERM with a grace period, then SIGKILL) — no orphaned agent processes left running after the app closes.
-- **Data durability:** SQLite writes for session/project state should be synchronous enough that an app crash does not lose more than the last few seconds of session metadata (session content itself lives in the harness's own on-disk session store, not duplicated by Conduit, except where explicitly exported per §7.14).
+- **Data durability:** SQLite writes for session/project state should be synchronous enough that an app crash does not lose more than the last few seconds of session metadata (session content itself lives in the harness's own on-disk session store, not duplicated by Relay, except where explicitly exported per §7.14).
 - **Offline behavior:** the app shell itself (sidebar, project list, past session list, settings) must remain fully usable with no network connection; only actual agent interaction requires the harness's own network access.
 - **Cross-platform baseline:** macOS is the primary/reference platform for this build. Windows and Linux must be functional (all core flows work) even where the glass visual effect degrades gracefully per §7.1.
 
@@ -595,4 +595,4 @@ Do not batch multiple unrelated features into one untested, undocumented pass. S
 - **Local Model Market** — Hugging Face model browsing and download. (Not in the original PRD; added in v0.3.0.)
 - **Context compaction for local models** — auto-summarize aged-out turns to fit context window. (Not in the original PRD; added in v0.3.2.)
 - **Research mode** — Plan/Execute/Synthesize orchestration with source ledger. (Not in the original PRD; added in v0.3.0.)
-- **Agent-driven browser control** — `conduit-browser-mcp` sidecar + in-app browser tools with visual feedback overlays. (Not in the original PRD; added in v0.3.0.)
+- **Agent-driven browser control** — `relay-browser-mcp` sidecar + in-app browser tools with visual feedback overlays. (Not in the original PRD; added in v0.3.0.)

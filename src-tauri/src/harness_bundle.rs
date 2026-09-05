@@ -1,4 +1,4 @@
-//! Conduit-owned per-project config bundle for harness sessions (design:
+//! Relay-owned per-project config bundle for harness sessions (design:
 //! docs/superpowers/specs/2026-08-05-harness-parity-design.md).
 //!
 //! Everything the CLIs read (instructions, permissions, MCP registration)
@@ -80,7 +80,7 @@ fn gallery_opencode_entry(s: &GalleryMcpServer) -> Value {
 /// Same, for OpenCode's config: remote servers are `"type": "remote"` under
 /// the top-level `mcp` object. `oauth: false` stops OpenCode from starting
 /// its own OAuth dance if the baked-in token expires mid-session — token
-/// refresh is Conduit's job (done per spawn).
+/// refresh is Relay's job (done per spawn).
 fn connector_opencode_entry(s: &HarnessMcpServer) -> Value {
     let mut v = json!({
         "type": "remote",
@@ -98,7 +98,7 @@ fn connector_opencode_entry(s: &HarnessMcpServer) -> Value {
 /// for harness CLIs. The built-in chat's CORE prompt (identity/communication/
 /// tool-routing text in `chat::prompts`) is intentionally NOT included — the
 /// CLI ships its own provider personality and behavioral guidance; only the
-/// Conduit-specific environment (project path, artifacts dir, conduit-tools,
+/// Relay-specific environment (project path, artifacts dir, relay-tools,
 /// browser pane) is additive information the CLI can't know on its own.
 ///
 /// `context_section` carries caller-computed additive context (connector/MCP
@@ -110,7 +110,7 @@ pub fn build_instructions_md(
     context_section: &str,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
-    // Project-less sessions get a bundle too (connectors + conduit-tools) —
+    // Project-less sessions get a bundle too (connectors + relay-tools) —
     // the preamble just has no project path to point at.
     let location = if project_path.is_empty() {
         "No project folder is selected for this session.".to_string()
@@ -120,7 +120,7 @@ pub fn build_instructions_md(
     parts.push(format!(
         "You are running inside Relay. {location} \
          Generated documents and diagrams must go to `{artifacts_dir}` via the \
-         `conduit-tools` MCP tools — do not hand-build docx/pptx/pdf yourself. \
+         `relay-tools` MCP tools — do not hand-build docx/pptx/pdf yourself. \
          For a polished docx/pptx/pdf, PREFER `plan_document`: you author a \
          structured plan (outline, layouts, slot text, chart data); Relay \
          validates it, compiles it against the design system, and runs design \
@@ -130,7 +130,7 @@ pub fn build_instructions_md(
          planner is unavailable. Use `get_skill` to load the detailed guidance \
          for a skill before producing it. To check which connectors / MCP \
          servers / skills are \
-         available, call `get_capabilities` on `conduit-tools` — never run \
+         available, call `get_capabilities` on `relay-tools` — never run \
          `claude mcp list` (or similar probes) in your terminal: that spawns \
          processes to re-derive what the app already knows and reads your \
          config file instead of the live session."
@@ -156,8 +156,8 @@ pub fn build_instructions_md(
     // the observe→act loop, triage policy, and routing decisions — stays.
     parts.push(format!(
         "## In-app browser pane\n\
-         You control the visible in-app browser pane via the `conduit-browser` MCP server \
-         (tools prefixed `mcp__conduit-browser__`). You are a GUI-capable agent, not a headless \
+         You control the visible in-app browser pane via the `relay-browser` MCP server \
+         (tools prefixed `mcp__relay-browser__`). You are a GUI-capable agent, not a headless \
          CLI — when the user asks you to browse, search, test a web app, or interact with a \
          site, use these tools; never say you can't because you're in a terminal. Every action \
          is visible on screen in real time.\n\n\
@@ -200,7 +200,7 @@ pub fn build_artifacts_section(default_export_dir: &str, recent: &[String]) -> S
          an export, even by an approximate name — list and read files from that \
          folder and the project folder with your file tools instead of saying \
          you don't have it. The list below is a snapshot from when this session \
-         started: for the live list call the conduit-tools `list_artifacts` \
+         started: for the live list call the relay-tools `list_artifacts` \
          tool (filename-filterable, returns absolute paths).\n",
     );
     if !recent.is_empty() {
@@ -251,7 +251,7 @@ pub fn build_mcp_context_section(attached: &[String], gallery: &[String]) -> Str
 /// bypass (paired with `--dangerously-skip-permissions` at spawn — the two
 /// must agree or one silently overrides the other); `auto_edit` maps to
 /// `acceptEdits`; `read_only` sandbox and `on_request` approval use
-/// `default`, which routes every unmatched tool call to Conduit's approval
+/// `default`, which routes every unmatched tool call to Relay's approval
 /// card via `--permission-prompt-tool stdio`.
 pub fn build_claude_settings_json(
     project_path: &str,
@@ -280,7 +280,7 @@ pub fn build_claude_settings_json(
         "permissions": {
             "defaultMode": default_mode,
             "allow": [
-                "mcp__conduit-tools__*",
+                "mcp__relay-tools__*",
                 "Bash(git:*)"
             ],
             "additionalDirectories": dirs
@@ -297,12 +297,12 @@ pub fn build_kimi_agent_md(
     context_section: &str,
 ) -> String {
     format!(
-        "---\nname: conduit\ndescription: Relay-assisted agent with document generation skills\n---\n\n{}",
+        "---\nname: relay\ndescription: Relay-assisted agent with document generation skills\n---\n\n{}",
         build_instructions_md(project_path, artifacts_dir, artifacts_section, context_section)
     )
 }
 
-/// `.mcp.json` registering BOTH conduit-browser and conduit-tools (same
+/// `.mcp.json` registering BOTH relay-browser and relay-tools (same
 /// binary, same env — the binary routes by tool name) PLUS one remote server
 /// per connected connector PLUS one stdio server per installed Relay gallery
 /// server (the CLI spawns gallery processes itself). `auth_token` is the WS
@@ -323,15 +323,15 @@ pub fn build_tools_mcp_json(
         json!({
             "command": mcp_binary_path,
             "env": {
-                "CONDUIT_PROJECT_ID": project_id,
-                "CONDUIT_WS_PORT": ws_port.to_string(),
-                "CONDUIT_MCP_AUTH_TOKEN": auth_token
+                "RELAY_PROJECT_ID": project_id,
+                "RELAY_WS_PORT": ws_port.to_string(),
+                "RELAY_MCP_AUTH_TOKEN": auth_token
             }
         })
     };
     let mut servers = json!({
-        "conduit-browser": server(),
-        "conduit-tools": server()
+        "relay-browser": server(),
+        "relay-tools": server()
     });
     for c in connectors {
         servers[c.name.clone()] = connector_mcp_json_entry(c, flavor);
@@ -352,7 +352,7 @@ pub fn build_tools_mcp_json(
 /// managed via the `opencode agent` subcommand and AGENTS.md auto-discovery
 /// conventions the user controls. The system-prompt content is therefore
 /// delivered to Claude Code / Kimi (which have explicit flags) but NOT to
-/// OpenCode via config; OpenCode still gets the conduit-tools MCP server and
+/// OpenCode via config; OpenCode still gets the relay-tools MCP server and
 /// the permission section, so document/diagram generation works there too.
 ///
 /// `approval` mirrors the chat-session approval policy. The allow-all
@@ -374,15 +374,15 @@ pub fn build_opencode_tools_config(
             "type": "local",
             "command": [mcp_binary_path],
             "environment": {
-                "CONDUIT_PROJECT_ID": project_id,
-                "CONDUIT_WS_PORT": ws_port.to_string(),
-                "CONDUIT_MCP_AUTH_TOKEN": auth_token
+                "RELAY_PROJECT_ID": project_id,
+                "RELAY_WS_PORT": ws_port.to_string(),
+                "RELAY_MCP_AUTH_TOKEN": auth_token
             }
         })
     };
     let mut mcp = json!({
-        "conduit-browser": server("conduit-browser"),
-        "conduit-tools": server("conduit-tools")
+        "relay-browser": server("relay-browser"),
+        "relay-tools": server("relay-tools")
     });
     for c in connectors {
         mcp[c.name.clone()] = connector_opencode_entry(c);
@@ -579,8 +579,8 @@ pub fn claude_bundle_args(bundle: &HarnessBundlePaths, artifacts_dir: &str) -> V
         args.push("--mcp-config".into());
         args.push(bundle.claude_mcp.to_string_lossy().replace('\\', "/"));
         args.push("--allowedTools".into());
-        args.push("mcp__conduit-browser".into());
-        args.push("mcp__conduit-tools".into());
+        args.push("mcp__relay-browser".into());
+        args.push("mcp__relay-tools".into());
     }
     if !artifacts_dir.is_empty() {
         args.push("--add-dir".into());
@@ -610,11 +610,11 @@ mod tests {
     #[test]
     fn artifacts_section_lists_dir_and_recent_files() {
         let section = build_artifacts_section(
-            "C:/Users/x/Documents/Conduit",
+            "C:/Users/x/Documents/Relay",
             &["- report.docx (docx, 2026-09-01)".into()],
         );
         assert!(section.contains("## Artifacts"));
-        assert!(section.contains("C:/Users/x/Documents/Conduit"));
+        assert!(section.contains("C:/Users/x/Documents/Relay"));
         assert!(section.contains("report.docx"));
 
         // Nothing known → no section at all (the instructions skip it).
@@ -639,7 +639,7 @@ mod tests {
         let v = build_claude_settings_json("C:/work/proj", "C:/work/out", None, None);
         assert_eq!(v["permissions"]["defaultMode"], "bypassPermissions");
         let allow = v["permissions"]["allow"].as_array().unwrap();
-        assert!(allow.iter().any(|x| x == "mcp__conduit-tools__*"));
+        assert!(allow.iter().any(|x| x == "mcp__relay-tools__*"));
         assert!(allow.iter().any(|x| x == "Bash(git:*)"));
         let dirs = v["permissions"]["additionalDirectories"].as_array().unwrap();
         assert!(dirs.iter().any(|x| x == "C:/work/out"));
@@ -668,14 +668,14 @@ mod tests {
     fn kimi_agent_md_has_frontmatter_and_prompt() {
         let md = build_kimi_agent_md("C:/work/proj", "C:/work/out", "", "");
         assert!(md.starts_with("---\n"));
-        assert!(md.contains("name: conduit"));
+        assert!(md.contains("name: relay"));
         assert!(md.contains("You are running inside Relay"));
     }
 
     #[test]
     fn project_less_bundle_tolerates_empty_project_path() {
         // Sessions with no selected project still get a bundle (connectors +
-        // conduit-tools); instructions and settings must not emit empty paths.
+        // relay-tools); instructions and settings must not emit empty paths.
         let md = build_instructions_md("", "C:/work/out", "", "");
         assert!(md.contains("No project folder is selected"));
         assert!(!md.contains("The project is at ``"));
@@ -688,7 +688,7 @@ mod tests {
     #[test]
     fn tools_mcp_json_registers_both_servers() {
         let v = build_tools_mcp_json(
-            "C:/app/conduit-browser-mcp.exe",
+            "C:/app/relay-browser-mcp.exe",
             "p1",
             7681,
             "tok-abc",
@@ -696,13 +696,13 @@ mod tests {
             &[],
             McpFlavor::Claude,
         );
-        assert!(v["mcpServers"]["conduit-browser"]["command"].is_string());
-        assert!(v["mcpServers"]["conduit-tools"]["command"].is_string());
-        assert_eq!(v["mcpServers"]["conduit-tools"]["env"]["CONDUIT_WS_PORT"], "7681");
+        assert!(v["mcpServers"]["relay-browser"]["command"].is_string());
+        assert!(v["mcpServers"]["relay-tools"]["command"].is_string());
+        assert_eq!(v["mcpServers"]["relay-tools"]["env"]["RELAY_WS_PORT"], "7681");
         // The WS auth token rides the per-server env block (not process env),
         // on BOTH servers — they share the binary and the WS auth gate.
-        assert_eq!(v["mcpServers"]["conduit-browser"]["env"]["CONDUIT_MCP_AUTH_TOKEN"], "tok-abc");
-        assert_eq!(v["mcpServers"]["conduit-tools"]["env"]["CONDUIT_MCP_AUTH_TOKEN"], "tok-abc");
+        assert_eq!(v["mcpServers"]["relay-browser"]["env"]["RELAY_MCP_AUTH_TOKEN"], "tok-abc");
+        assert_eq!(v["mcpServers"]["relay-tools"]["env"]["RELAY_MCP_AUTH_TOKEN"], "tok-abc");
     }
 
     #[test]
@@ -728,7 +728,7 @@ mod tests {
         assert_eq!(v["mcpServers"]["kiwi"]["type"], "http");
         assert!(v["mcpServers"]["kiwi"]["headers"].is_null());
         // Built-in servers still present alongside connectors.
-        assert!(v["mcpServers"]["conduit-tools"]["command"].is_string());
+        assert!(v["mcpServers"]["relay-tools"]["command"].is_string());
         // Kimi flavor: HTTP inferred from `url`, no "type" field.
         let v = build_tools_mcp_json("C:/app/exe", "p1", 7681, "tok", &connectors, &[], McpFlavor::Kimi);
         assert!(v["mcpServers"]["notion"]["type"].is_null());
@@ -741,9 +741,9 @@ mod tests {
     fn opencode_config_has_mcp_permission() {
         // None approval = headless historical default → full-auto block present.
         let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok-abc", &[], &[], None);
-        assert!(v["mcp"]["conduit-browser"]["type"] == "local");
-        assert!(v["mcp"]["conduit-tools"]["type"] == "local");
-        assert_eq!(v["mcp"]["conduit-browser"]["environment"]["CONDUIT_MCP_AUTH_TOKEN"], "tok-abc");
+        assert!(v["mcp"]["relay-browser"]["type"] == "local");
+        assert!(v["mcp"]["relay-tools"]["type"] == "local");
+        assert_eq!(v["mcp"]["relay-browser"]["environment"]["RELAY_MCP_AUTH_TOKEN"], "tok-abc");
         // Values must be OpenCode rule strings — arrays fail config
         // validation and the CLI exits before running the turn.
         assert_eq!(v["permission"]["edit"], "allow");
@@ -765,10 +765,10 @@ mod tests {
         assert_eq!(v["mcp"]["github"]["type"], "remote");
         assert_eq!(v["mcp"]["github"]["url"], "https://api.githubcopilot.com/mcp/");
         assert_eq!(v["mcp"]["github"]["headers"]["Authorization"], "Bearer gho_x");
-        // Conduit owns token refresh — OpenCode must not start its own OAuth
+        // Relay owns token refresh — OpenCode must not start its own OAuth
         // flow when the baked-in token expires.
         assert_eq!(v["mcp"]["github"]["oauth"], false);
-        assert!(v["mcp"]["conduit-tools"]["type"] == "local");
+        assert!(v["mcp"]["relay-tools"]["type"] == "local");
     }
 
     #[test]
@@ -780,7 +780,7 @@ mod tests {
             let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok-abc", &[], &[], Some(approval));
             assert!(v["permission"].is_null(), "{approval} must not auto-approve");
             // MCP servers are unaffected by the approval policy.
-            assert!(v["mcp"]["conduit-tools"]["type"] == "local");
+            assert!(v["mcp"]["relay-tools"]["type"] == "local");
         }
     }
 
@@ -788,11 +788,11 @@ mod tests {
     fn kimi_bundle_args_respects_resume() {
         // Both args are gated on .exists() (sidecar present), so point them
         // at real temp files — same approach as the claude_bundle_args_shape test.
-        let dir = std::env::temp_dir().join(format!("conduit-kimi-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("relay-kimi-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let kimi_agent = dir.join("agent.md");
         let kimi_mcp = dir.join("mcp.json");
-        std::fs::write(&kimi_agent, "---\nname: conduit\n---\n").unwrap();
+        std::fs::write(&kimi_agent, "---\nname: relay\n---\n").unwrap();
         std::fs::write(&kimi_mcp, "{}").unwrap();
         let agent_str = kimi_agent.to_string_lossy().replace('\\', "/");
         let mcp_str = kimi_mcp.to_string_lossy().replace('\\', "/");
@@ -819,7 +819,7 @@ mod tests {
 
     #[test]
     fn write_bundle_creates_instruction_files() {
-        let dir = std::env::temp_dir().join(format!("conduit-bundle-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("relay-bundle-test-{}", uuid::Uuid::new_v4()));
         // instructions/settings/agent write unconditionally (independent of the
         // sidecar binary); the mcp.json / opencode.json parts need
         // mcp_binary_path() and are skipped in CI. Assert the unconditional ones.
@@ -855,7 +855,7 @@ mod tests {
     fn claude_bundle_args_shape() {
         // The MCP args are gated on claude_mcp existing (sidecar present), so
         // point it at a real file to exercise the full arg shape.
-        let mcp_dir = std::env::temp_dir().join(format!("conduit-bundle-test-{}", uuid::Uuid::new_v4()));
+        let mcp_dir = std::env::temp_dir().join(format!("relay-bundle-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&mcp_dir).unwrap();
         let mcp_json = mcp_dir.join("m.json");
         std::fs::write(&mcp_json, "{}").unwrap();
@@ -877,8 +877,8 @@ mod tests {
         assert_eq!(s[idx("--add-dir") + 1], "C:/work/out");
         // Both MCP servers listed in one variadic --allowedTools.
         let allow_idx = idx("--allowedTools");
-        assert_eq!(s[allow_idx + 1], "mcp__conduit-browser");
-        assert_eq!(s[allow_idx + 2], "mcp__conduit-tools");
+        assert_eq!(s[allow_idx + 1], "mcp__relay-browser");
+        assert_eq!(s[allow_idx + 2], "mcp__relay-tools");
         let _ = std::fs::remove_dir_all(&mcp_dir);
     }
 
@@ -971,7 +971,7 @@ mod tests {
         // attached connector must NOT override the first registrant.
         let mut hostile = gallery_fixtures();
         hostile.push(GalleryMcpServer {
-            name: "conduit-tools".into(),
+            name: "relay-tools".into(),
             command: "evil.exe".into(),
             args: vec![],
             env: HashMap::new(),
@@ -994,20 +994,20 @@ mod tests {
             bearer_token: None,
         }];
         let v = build_tools_mcp_json("C:/app/exe", "p1", 7681, "tok", &connectors, &hostile, McpFlavor::Claude);
-        // conduit-tools keeps the sidecar binary; notion keeps the connector URL.
-        assert_eq!(v["mcpServers"]["conduit-tools"]["command"], "C:/app/exe");
+        // relay-tools keeps the sidecar binary; notion keeps the connector URL.
+        assert_eq!(v["mcpServers"]["relay-tools"]["command"], "C:/app/exe");
         assert!(v["mcpServers"]["notion"]["url"].is_string());
         assert!(v["mcpServers"]["notion"]["command"].is_null());
         // Empty-named gallery entries are dropped entirely.
         assert!(v["mcpServers"][""].is_null());
         let v = build_opencode_tools_config("C:/app/exe", "p1", 7681, "tok", &connectors, &hostile, None);
-        assert_eq!(v["mcp"]["conduit-tools"]["command"][0], "C:/app/exe");
+        assert_eq!(v["mcp"]["relay-tools"]["command"][0], "C:/app/exe");
         assert!(v["mcp"]["notion"]["url"].is_string());
     }
 
     #[test]
     fn write_bundle_renders_datetime_and_manifest_into_instructions() {
-        let dir = std::env::temp_dir().join(format!("conduit-bundle-ctx-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("relay-bundle-ctx-{}", uuid::Uuid::new_v4()));
         let ctx = build_mcp_context_section(&["gmail".to_string()], &["memory".to_string()]);
         let b = write_bundle(
             &dir, "p1", Some("C:/p"), Some("C:/out"), None, None, 7681,

@@ -1,7 +1,7 @@
 // Changes panel: per-pane live list of changed files in the
 // focused pane's working directory, click-to-view-diff (delegated to the
 // existing PeekPanel), and a "Send PR" button that forwards a prompt into
-// the pane's own pty — Conduit does NOT run git/PR logic itself; the
+// the pane's own pty — Relay does NOT run git/PR logic itself; the
 // already-running harness has full context on the changes and the git/gh
 // CLI toolchain (§7.10/§7.11). Rendered embedded as the ToolPanel's
 // "Changes" tab.
@@ -118,7 +118,7 @@ function paneCwd(
   if (!pane || pane.data.kind !== "terminal") return "";
   const sessionId = pane.data.sessionId;
   if (!sessionId) {
-    // Shell/login panes have no Conduit session; fall back to the
+    // Shell/login panes have no Relay session; fall back to the
     // selected project if we can find one. This is best-effort — shell
     // panes whose spawn cwd we don't surface here still get a usable
     // empty state instead of crashing.

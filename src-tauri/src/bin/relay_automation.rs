@@ -1,12 +1,12 @@
-//! conduit-automation — headless automation runner.
+//! relay-automation — headless automation runner.
 //!
-//!   conduit-automation run <automation-id>   execute one turn now (blocking)
-//!   conduit-automation run-due               run every automation that's due
-//!   conduit-automation list                  print automation ids + schedules
+//!   relay-automation run <automation-id>   execute one turn now (blocking)
+//!   relay-automation run-due               run every automation that's due
+//!   relay-automation list                  print automation ids + schedules
 //!
 //! This is the entry point an OS scheduler (Windows Task Scheduler, cron) can
-//! invoke so automations fire while the Conduit GUI is closed. It links
-//! conduit_lib and reuses the exact launch path the in-app scheduler uses
+//! invoke so automations fire while the Relay GUI is closed. It links
+//! relay_lib and reuses the exact launch path the in-app scheduler uses
 //! (automations::run_blocking): same overlap lock file, same run-log chat
 //! session, same DB. No Tauri runtime is created — AppHandle is None, so
 //! chat:* events become no-ops and everything lands in the DB directly.
@@ -17,8 +17,9 @@
 //! semantics stay identical between app-open and app-closed runs.
 //!
 //! The DB is resolved exactly like the GUI resolves it: default
-//! (<data_dir>/dev.conduit.app/conduit.db) unless the GUI's `storage.dbDir`
-//! setting relocates it (B-27).
+//! (<data_dir>/dev.relay.app/relay.db, migrating the pre-rebrand
+//! dev.conduit.app dir) unless the GUI's `storage.dbDir` setting relocates
+//! it (B-27).
 //!
 //! Windows builds use the GUI subsystem (`windows_subsystem = "windows"`) so
 //! Task Scheduler ticks never allocate a console window (the old
@@ -33,7 +34,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use conduit_lib::{automations, db};
+use relay_lib::{automations, db, user_dirs};
 
 /// Reattach to the launching terminal after starting as a GUI-subsystem
 /// process. No-op when there's no parent console (Task Scheduler / wscript),
@@ -91,10 +92,7 @@ fn db_path() -> std::path::PathBuf {
     // B-27: honor the GUI's `storage.dbDir` override — hardcoding the default
     // location made `run-due` read a different (stale/empty) database than
     // the app whenever Settings → Data had relocated it.
-    let default_dir = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("dev.conduit.app");
-    db::resolve_db_path(&default_dir)
+    db::resolve_db_path(&user_dirs::app_data_dir_default())
 }
 
 fn main() -> ExitCode {
@@ -105,7 +103,7 @@ fn main() -> ExitCode {
     match args.next().as_deref() {
         Some("run") => {
             let Some(id) = args.next() else {
-                eprintln!("usage: conduit-automation run <automation-id>");
+                eprintln!("usage: relay-automation run <automation-id>");
                 return ExitCode::from(2);
             };
             run(&id)
@@ -113,7 +111,7 @@ fn main() -> ExitCode {
         Some("run-due") => run_due(),
         Some("list") => list(),
         _ => {
-            eprintln!("usage: conduit-automation run <automation-id> | run-due | list");
+            eprintln!("usage: relay-automation run <automation-id> | run-due | list");
             ExitCode::from(2)
         }
     }

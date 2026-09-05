@@ -4,7 +4,7 @@
 // The compiler is pure and model-free: same plan + theme in, same program out,
 // which makes the output unit-testable and the L2 invariant checks below
 // meaningful. Generated programs use only known-safe PptxGenJS patterns:
-// bare hex (no '#'), one `conduit.save`, native charts without `dLblPos`
+// bare hex (no '#'), one `relay.save`, native charts without `dLblPos`
 // (the classic PowerPoint-repair trigger), option objects never shared.
 import { DECK_LAYOUTS, getLayout, type SlideStyle } from "./catalog";
 import type { DeckPlan, DeckSlide, Issue } from "./ir";
@@ -102,7 +102,7 @@ export function compileDeck(plan: DeckPlan, theme: Theme): { code: string; check
     lines.push(`}`);
   }
 
-  lines.push(`await conduit.save(await pptx.write({ outputType: "blob" }));`);
+  lines.push(`await relay.save(await pptx.write({ outputType: "blob" }));`);
   const code = lines.join("\n");
 
   return { code, checks: checkInvariants(code, plan) };
@@ -345,11 +345,11 @@ export function checkInvariants(code: string, plan: DeckPlan): CompileChecks {
   }
 
   // 2. Exactly one delivery.
-  const saves = code.match(/conduit\.save\(/g)?.length ?? 0;
+  const saves = code.match(/relay\.save\(/g)?.length ?? 0;
   if (saves !== 1) {
-    issues.push({ severity: "error", rule: "l2/save-once", message: `program must call conduit.save exactly once (found ${saves})` });
+    issues.push({ severity: "error", rule: "l2/save-once", message: `program must call relay.save exactly once (found ${saves})` });
   } else {
-    passed.push("single conduit.save");
+    passed.push("single relay.save");
   }
 
   // 3. Slide count matches the plan.

@@ -1,4 +1,4 @@
-//! Conduit backend entry point (Tauri v2).
+//! Relay backend entry point (Tauri v2).
 //!
 //! Wires up: plugins (dialog, notification, fs, opener), shared state (SQLite +
 //! PtyManager), native window vibrancy (PRD §7.1), all CONTRACT.md commands,
@@ -37,6 +37,7 @@ mod os_toast;
 mod pty;
 mod secrets;
 mod types;
+pub mod user_dirs;
 mod util;
 
 use std::fs;
@@ -49,7 +50,7 @@ use tauri::Manager;
 use pty::PtyManager;
 
 /// Shared SQLite connection. One connection behind a mutex: rusqlite
-/// connections are !Sync, and Conduit's write volume is tiny.
+/// connections are !Sync, and Relay's write volume is tiny.
 pub struct DbState(pub Arc<Mutex<Connection>>);
 
 pub struct PtyState(pub Arc<PtyManager>);
@@ -82,6 +83,10 @@ pub struct OAuthFlowsState(pub Arc<connectors::oauth::OAuthFlows>);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Migrate the pre-rebrand app data dir (dev.conduit.app → dev.relay.app)
+    // BEFORE Tauri creates windows/webviews, so the WebView2 profile and the
+    // DB land in the same (new) location on first launch of this build.
+    let _ = user_dirs::app_data_dir_default();
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -90,7 +95,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Chat DB location: `storage.dbDir` (Settings → Data) when set,
-            // else the default `<app data dir>/conduit.db`. The setting is
+            // else the default `<app data dir>/relay.db`. The setting is
             // read by peeking at the default DB, which always exists.
             let db_path = db::chat_db_path(app.handle()).map_err(|e| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, format!("no app data dir: {e}"))
@@ -130,7 +135,7 @@ pub fn run() {
             // tool falls back to the Python engine with a hint.
             #[cfg(windows)]
             if let Err(e) = chat::pdfprint::ensure_print_window(app.handle()) {
-                eprintln!("[conduit] hidden PDF print window unavailable: {e}");
+                eprintln!("[relay] hidden PDF print window unavailable: {e}");
             }
             app.manage(DbState(Arc::clone(&shared_db)));
             app.manage(PtyState(PtyManager::new(app.handle().clone(), Arc::clone(&shared_db))));
@@ -202,7 +207,7 @@ pub fn run() {
             }
 
             // Spawn the loopback WebSocket server that the standalone
-            // conduit-browser-mcp binary connects to (agent-driven browser
+            // relay-browser-mcp binary connects to (agent-driven browser
             // control). Binds an OS-assigned ephemeral port (published via
             // browser_mcp::bound_port + a handshake file, so registration and
             // third-party clients always find it). Bind failure is non-fatal:
@@ -573,7 +578,7 @@ pub fn run() {
 
     let app = builder
         .build(tauri::generate_context!())
-        .expect("error while building Conduit");
+        .expect("error while building Relay");
 
     // Exit cleanup (PRD §8): every child pty process must be terminated when
     // the app quits — closing the last window triggers ExitRequested, and
@@ -619,7 +624,7 @@ pub fn run() {
                     .await
                     .is_err()
                     {
-                        eprintln!("[conduit] llama-server stop_all timed out after 3s; exiting anyway (kill already delivered)");
+                        eprintln!("[relay] llama-server stop_all timed out after 3s; exiting anyway (kill already delivered)");
                     }
                 });
             }

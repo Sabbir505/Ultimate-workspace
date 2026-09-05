@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// Stage the conduit-automation binary for Tauri 2's externalBin bundling.
+// Stage the relay-automation binary for Tauri 2's externalBin bundling.
 // Same contract as stage-browser-mcp.mjs: copies the Cargo-built headless
-// automation runner to binaries/conduit-automation-<target-triple>[.exe]
+// automation runner to binaries/relay-automation-<target-triple>[.exe]
 // so the installer ships it next to the main exe (the "Run while closed"
 // Task Scheduler toggle points at this binary).
 //
-// Called from CI after `cargo build --release --bin conduit-automation`.
+// Called from CI after `cargo build --release --bin relay-automation`.
 
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -35,8 +35,8 @@ if (!target) {
 }
 
 const isWin = process.platform === "win32";
-const srcName = isWin ? "conduit-automation.exe" : "conduit-automation";
-const destName = `conduit-automation-${target}${isWin ? ".exe" : ""}`;
+const srcName = isWin ? "relay-automation.exe" : "relay-automation";
+const destName = `relay-automation-${target}${isWin ? ".exe" : ""}`;
 
 // Check both release and debug target directories.
 const releaseSrc = join(targetDir, srcName);
@@ -48,7 +48,7 @@ if (existsSync(releaseSrc)) {
   src = debugSrc;
 } else {
   console.error(
-    `✗ ${srcName} not found in target/release/ or target/debug/. Run \`cargo build --bin conduit-automation\` first.`
+    `✗ ${srcName} not found in target/release/ or target/debug/. Run \`cargo build --bin relay-automation\` first.`
   );
   process.exit(1);
 }

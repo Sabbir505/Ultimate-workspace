@@ -2091,7 +2091,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           cliAgentId(session.agent),
           session.model || undefined,
           cwd,
-          // Feeds the conduit-browser MCP registration (CONDUIT_PROJECT_ID) so
+          // Feeds the relay-browser MCP registration (RELAY_PROJECT_ID) so
           // browser auto-open is scoped to the selected project.
           projects.selectedProjectId ?? undefined,
           // Attachments ride along: the backend folds display markers +

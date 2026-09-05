@@ -136,7 +136,7 @@ export function contextWindowFor(
 
 // ---- OpenRouter live derivation ------------------------------------------------
 
-const OR_CACHE_KEY = "conduit.openrouterContextWindows";
+const OR_CACHE_KEY = "relay.openrouterContextWindows";
 const OR_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 export const OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models";
 
@@ -198,7 +198,7 @@ export async function openRouterContextWindows(): Promise<Record<string, number>
 
 // ---- Anthropic live derivation --------------------------------------------------
 
-const ANTHROPIC_CACHE_KEY = "conduit.anthropicContextWindows";
+const ANTHROPIC_CACHE_KEY = "relay.anthropicContextWindows";
 const ANTHROPIC_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 function readGenericCache(key: string, ttlMs: number): Record<string, number> | null {

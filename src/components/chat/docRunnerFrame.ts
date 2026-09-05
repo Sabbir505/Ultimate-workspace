@@ -2,7 +2,7 @@
 // `DocCodeRunner` (model-authored code from `generate_document`) and the
 // `DocDesignRunner` (plan-compiled programs from `plan_document`) execute JS
 // through this template: the library bundle is inlined, the script's only
-// contract is exactly one `await conduit.save(...)`, and the result comes
+// contract is exactly one `await relay.save(...)`, and the result comes
 // back to the parent as base64 via postMessage.
 //
 // The iframe is sandboxed to "allow-scripts" only (opaque origin — no DOM,
@@ -26,7 +26,7 @@ export function buildRunnerFrame(libs: string, requestId: string, userCode: stri
   var REQUEST_ID = ${JSON.stringify(requestId)};
   var settled = false;
   function toBase64(data) {
-    if (data == null) return Promise.reject(new Error("conduit.save received nothing"));
+    if (data == null) return Promise.reject(new Error("relay.save received nothing"));
     if (typeof data === "string") {
       // A data URL or a bare base64 string both pass through.
       var comma = data.indexOf(",");
@@ -48,7 +48,7 @@ export function buildRunnerFrame(libs: string, requestId: string, userCode: stri
     var bytes = data instanceof Uint8Array ? data
       : (ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
       : (data instanceof ArrayBuffer ? new Uint8Array(data) : null));
-    if (!bytes) return Promise.reject(new Error("conduit.save got an unsupported type: " + typeof data));
+    if (!bytes) return Promise.reject(new Error("relay.save got an unsupported type: " + typeof data));
     var binary = "";
     var CHUNK = 0x8000;
     for (var i = 0; i < bytes.length; i += CHUNK) {
@@ -56,19 +56,19 @@ export function buildRunnerFrame(libs: string, requestId: string, userCode: stri
     }
     return Promise.resolve(btoa(binary));
   }
-  window.conduit = {
+  window.relay = {
     save: function (data) {
       return toBase64(data).then(function (b64) {
-        if (settled) throw new Error("conduit.save called more than once");
+        if (settled) throw new Error("relay.save called more than once");
         settled = true;
-        parent.postMessage({ source: "conduit-docgen", requestId: REQUEST_ID, ok: true, base64: b64 }, "*");
+        parent.postMessage({ source: "relay-docgen", requestId: REQUEST_ID, ok: true, base64: b64 }, "*");
       });
     }
   };
   window.addEventListener("error", function (e) {
     if (!settled) {
       settled = true;
-      parent.postMessage({ source: "conduit-docgen", requestId: REQUEST_ID, ok: false,
+      parent.postMessage({ source: "relay-docgen", requestId: REQUEST_ID, ok: false,
         error: String((e && e.error && e.error.stack) || e.message || "script error") }, "*");
     }
   });
@@ -78,14 +78,14 @@ export function buildRunnerFrame(libs: string, requestId: string, userCode: stri
     })()).catch(function (err) {
       if (!settled) {
         settled = true;
-        parent.postMessage({ source: "conduit-docgen", requestId: REQUEST_ID, ok: false,
+        parent.postMessage({ source: "relay-docgen", requestId: REQUEST_ID, ok: false,
           error: String((err && err.stack) || err) }, "*");
       }
     });
   } catch (err) {
     if (!settled) {
       settled = true;
-      parent.postMessage({ source: "conduit-docgen", requestId: REQUEST_ID, ok: false,
+      parent.postMessage({ source: "relay-docgen", requestId: REQUEST_ID, ok: false,
         error: String((err && err.stack) || err) }, "*");
     }
   }

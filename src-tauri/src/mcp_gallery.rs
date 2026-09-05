@@ -147,9 +147,9 @@ pub fn catalog() -> Vec<CatalogEntry> {
         CatalogEntry {
             id: "sqlite",
             name: "SQLite",
-            description: "Query/write a local SQLite database at ~/conduit-mcp-sqlite.db (needs uv).",
+            description: "Query/write a local SQLite database at ~/relay-mcp-sqlite.db (needs uv).",
             command: "uvx",
-            args: &["mcp-server-sqlite", "--db-path", "{home}/conduit-mcp-sqlite.db"],
+            args: &["mcp-server-sqlite", "--db-path", "{home}/relay-mcp-sqlite.db"],
             env_keys: &[],
         },
         CatalogEntry {
@@ -324,7 +324,7 @@ pub async fn connect_server(def: &McpServerDef) -> Result<std::sync::Arc<Gallery
         .map_err(|e| format!("failed to spawn `{}`: {e}", def.command))?;
     let client_info = ClientInfo::new(
         Default::default(),
-        Implementation::new("conduit", env!("CARGO_PKG_VERSION")),
+        Implementation::new("relay", env!("CARGO_PKG_VERSION")),
     );
     let svc = client_info
         .serve(transport)
@@ -758,7 +758,7 @@ mod tests {
     /// Full live round-trip through the exact production path: spawn
     /// (including the Windows cmd.exe /C wrap), initialize, tools/list,
     /// tools/call. Run explicitly with:
-    /// cargo test -p conduit everything_server -- --ignored
+    /// cargo test -p relay everything_server -- --ignored
     /// (first run downloads the package via npx).
     #[test]
     #[ignore = "spawns npx and downloads @modelcontextprotocol/server-everything"]

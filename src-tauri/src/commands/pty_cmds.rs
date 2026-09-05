@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
 use crate::browser_mcp::bound_port;
 use crate::browser_mcp_register;
@@ -68,12 +68,12 @@ pub fn spawn_agent_session(
         None => adapter.spawn_new_command(),
     };
 
-    // Conduit-owned bundle: instructions (environment preamble + skill
+    // Relay-owned bundle: instructions (environment preamble + skill
     // catalog + browser workflow, appended to the CLI's own prompt), settings,
     // and BOTH MCP servers (browser + tools) — the same bundle the headless
     // chat paths use. Interactive panes run with on_request approval: the user
     // is watching the TUI and answers Claude Code's native prompts; only the
-    // conduit MCP tools + git are pre-allowed. OpenCode gets no full-auto
+    // relay MCP tools + git are pre-allowed. OpenCode gets no full-auto
     // permission block for the same reason (its TUI prompts stay in charge).
     // Bundle failure degrades to the legacy browser-only MCP config below.
     let cwd_opt = Some(cwd.as_str());
@@ -81,7 +81,7 @@ pub fn spawn_agent_session(
     // Connectors deliberately arrive EMPTY here (headless-chat only): they
     // need a chat session to attach to plus async OAuth refresh at
     // bundle-write time, and an interactive pane is a raw TUI with neither.
-    // Gallery MCP servers and conduit-tools/browser still ride the bundle.
+    // Gallery MCP servers and relay-tools/browser still ride the bundle.
     // To use a connector against a harness, run it as a harness chat.
     let bundle = crate::agent_sessions::resolve_harness_bundle(
         &app,
@@ -116,7 +116,7 @@ pub fn spawn_agent_session(
         "opencode" => {
             // No instructions delivery mechanism exists for OpenCode (no
             // config key; AGENTS.md is user-controlled) — the bundle still
-            // brings conduit-tools + browser MCP without full-auto perms.
+            // brings relay-tools + browser MCP without full-auto perms.
             // Legacy path only applies when the bundle failed to write.
             let cfg = bundle
                 .as_ref()
@@ -148,7 +148,7 @@ pub fn spawn_agent_session(
 /// isn't present (dev build without the binary) or the write failed — both
 /// degrade silently to "no browser tools this session" rather than blocking.
 fn resolve_mcp_config(app: &AppHandle, project_id: &str) -> Option<PathBuf> {
-    let data_dir = app.path().app_data_dir().ok()?;
+    let data_dir = crate::user_dirs::app_data_dir(app);
     browser_mcp_register::write_mcp_config(&data_dir, project_id, bound_port())
 }
 
@@ -156,7 +156,7 @@ fn resolve_mcp_config(app: &AppHandle, project_id: &str) -> Option<PathBuf> {
 /// from an opencode.json "mcp" section, pointed at via the OPENCODE_CONFIG env
 /// var on the spawn (it has no --mcp-config CLI flag).
 fn resolve_opencode_config(app: &AppHandle, project_id: &str) -> Option<PathBuf> {
-    let data_dir = app.path().app_data_dir().ok()?;
+    let data_dir = crate::user_dirs::app_data_dir(app);
     browser_mcp_register::write_opencode_config(&data_dir, project_id, bound_port())
 }
 
@@ -253,7 +253,7 @@ pub fn kill_pty(pane_id: String, pty: State<PtyState>) -> CmdResult<()> {
 /// Dev-mode memory counter: return the resident memory (bytes) of a pane's
 /// child process. For a terminal pane this is the PTY child's RSS via sysinfo
 /// (looked up by PID). For a browser pane there is no per-pane PID exposed by
-/// Tauri's Webview, so we fall back to the conduit app process's own RSS — a
+/// Tauri's Webview, so we fall back to the relay app process's own RSS — a
 /// rough proxy that at least surfaces "the browser is eating memory" growth.
 /// Returns 0 when the pane/PID is gone or memory can't be read (e.g. the
 /// process already exited). Intended for a dev-only header chip; not a

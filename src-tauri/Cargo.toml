@@ -1,31 +1,31 @@
 [package]
-name = "conduit"
+name = "relay"
 version = "0.4.2"
-description = "Conduit — a local-first, multi-pane desktop shell for AI coding agents"
+description = "Relay — a local-first, multi-pane desktop shell for AI coding agents"
 authors = ["you"]
 edition = "2021"
-# Two binaries now ship (the app + the standalone conduit-browser-mcp server).
+# Two binaries now ship (the app + the standalone relay-browser-mcp server).
 # `cargo run` / `tauri dev` must default to the app, not the MCP binary.
-default-run = "conduit"
+default-run = "relay"
 
 [lib]
-name = "conduit_lib"
+name = "relay_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 # Standalone MCP server binary: speaks stdio JSON-RPC to a harness (Claude
-# Code/Kimi Code) and forwards each tool call into the running Conduit app over
-# a loopback WebSocket (see src/browser_mcp.rs + src/bin/conduit_browser_mcp.rs).
-# Shares conduit_lib only for the BROWSER_MCP_PORT constant — does NOT link Tauri.
+# Code/Kimi Code) and forwards each tool call into the running Relay app over
+# a loopback WebSocket (see src/browser_mcp.rs + src/bin/relay_browser_mcp.rs).
+# Shares relay_lib only for the BROWSER_MCP_PORT constant — does NOT link Tauri.
 [[bin]]
-name = "conduit-browser-mcp"
-path = "src/bin/conduit_browser_mcp.rs"
+name = "relay-browser-mcp"
+path = "src/bin/relay_browser_mcp.rs"
 
-# Headless automation runner (see automations.rs): `conduit-automation run <id>`
+# Headless automation runner (see automations.rs): `relay-automation run <id>`
 # executes one scheduled turn with no GUI. This is the entry point a Windows
-# Task Scheduler task invokes so automations can fire while Conduit is closed.
+# Task Scheduler task invokes so automations can fire while Relay is closed.
 [[bin]]
-name = "conduit-automation"
-path = "src/bin/conduit_automation.rs"
+name = "relay-automation"
+path = "src/bin/relay_automation.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -71,7 +71,7 @@ reqwest = { version = "0.12", features = ["stream", "rustls-tls", "json", "multi
 async-trait = "0.1"
 futures-util = "0.3"
 tokio = { version = "1", features = ["rt", "process", "time", "sync", "net", "io-util", "macros"] }
-# Loopback WebSocket bridge between the conduit-browser-mcp binary and the
+# Loopback WebSocket bridge between the relay-browser-mcp binary and the
 # running Tauri app (browser_mcp.rs). Used by both the in-app server and the
 # standalone binary's client.
 tokio-tungstenite = { version = "0.24", features = ["connect"] }

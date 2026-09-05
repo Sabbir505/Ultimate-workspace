@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Stage the conduit-browser-mcp binary for Tauri 2's externalBin bundling.
+// Stage the relay-browser-mcp binary for Tauri 2's externalBin bundling.
 // Tauri 2 expects externalBin entries at binaries/<name>-<target-triple>[.exe]
 // relative to src-tauri/. This script copies the Cargo-built binary there so
 // the installer picks it up.
@@ -35,8 +35,8 @@ if (!target) {
 }
 
 const isWin = process.platform === "win32";
-const srcName = isWin ? "conduit-browser-mcp.exe" : "conduit-browser-mcp";
-const destName = `conduit-browser-mcp-${target}${isWin ? ".exe" : ""}`;
+const srcName = isWin ? "relay-browser-mcp.exe" : "relay-browser-mcp";
+const destName = `relay-browser-mcp-${target}${isWin ? ".exe" : ""}`;
 
 // Check both release and debug target directories.
 const releaseSrc = join(targetDir, srcName);

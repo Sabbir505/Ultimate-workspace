@@ -308,7 +308,7 @@ pub struct ChatSession {
     pub project_id: Option<String>,
     /// Per-session isolated git worktree (roadmap P0 §3.1.1). `None` = the chat
     /// works directly in its bound project's working tree. When set, the
-    /// worktree dir (a sibling of the project, branch `conduit/<id>`) becomes
+    /// worktree dir (a sibling of the project, branch `relay/<id>`) becomes
     /// the chat's working directory for sends, spawns, checkpoints and diffs —
     /// see `ensure_chat_session_worktree`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -370,7 +370,7 @@ pub struct CheckpointFile {
     pub status: String,
 }
 
-/// A per-turn git working-tree snapshot (see `refs/conduit/checkpoints/…`).
+/// A per-turn git working-tree snapshot (see `refs/relay/checkpoints/…`).
 /// `message_id` is the assistant message the checkpoint follows; `None` for
 /// turn-start baselines and pre-restore safety snapshots.
 #[derive(Debug, Clone, Serialize, Deserialize)]

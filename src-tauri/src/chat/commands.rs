@@ -265,7 +265,7 @@ pub fn delete_chat_session(
     // Prune this session's git checkpoint refs before the rows cascade away.
     crate::checkpoints::prune_session_refs(&conn, &chat_session_id);
     // Best-effort remove the session's isolated worktree before its row is
-    // deleted (roadmap P0 §3.1.1) — the `conduit/<id>` branch stays in the
+    // deleted (roadmap P0 §3.1.1) — the `relay/<id>` branch stays in the
     // repo, so committed work survives the delete.
     if let Ok(Some(sess)) = db::get_chat_session(&conn, &chat_session_id) {
         crate::commands::worktree_cmds::remove_worktree_for_session(&conn, &sess);
@@ -279,7 +279,7 @@ pub fn delete_chat_session(
 /// When the binding actually changes, any worktree the chat had under the OLD
 /// project is removed best-effort and its pointer cleared (roadmap P0 §3.1.1):
 /// a worktree belongs to a specific project, so rebinding/unbinding orphans it
-/// — the `conduit/<id>` branch stays in the repo, so nothing committed is lost.
+/// — the `relay/<id>` branch stays in the repo, so nothing committed is lost.
 #[tauri::command]
 pub fn set_chat_session_project(
     chat_session_id: String,
@@ -2269,7 +2269,7 @@ pub async fn send_chat_message(
 
     let shared_db = Arc::clone(&db.0);
     // Granted filesystem roots: every registered project path plus the
-    // artifacts dir (Documents/Conduit). Mutating tool calls routed through
+    // artifacts dir (Documents/Relay). Mutating tool calls routed through
     // `dispatch::run_tool` are rejected by `permission::path_within_scope`
     // unless the path lies under one of these roots — so the agent can write
     // inside the user's projects and its own artifacts folder, while random
@@ -3100,7 +3100,10 @@ pub async fn read_artifact_preview(path: String) -> CmdResult<ArtifactPreview> {
         // diagram sentinel marker at the top. Route it as `kind: "diagram"`
         // (same srcDoc-iframe rendering as html, but diagram-specific export
         // chrome — PNG export enabled, SVG greyed out).
-        let final_kind = if kind == "html" && text.starts_with(crate::chat::tools::DIAGRAM_MARKER) {
+        let final_kind = if kind == "html"
+            && (text.starts_with(crate::chat::tools::DIAGRAM_MARKER)
+                || text.starts_with(crate::chat::tools::LEGACY_DIAGRAM_MARKER))
+        {
             "diagram"
         } else {
             kind
@@ -3952,7 +3955,7 @@ pub fn scan_local_models(
         let mut seen: std::collections::HashSet<String> =
             files.iter().map(|f| f.id.clone()).collect();
         // Also scan the Model Market's download dir — both the user-picked
-        // override (`local_models.dir`) and its ~/Conduit/models default —
+        // override (`local_models.dir`) and its ~/Relay/models default —
         // otherwise market downloads never show up in the local list.
         {
             let conn = db.0.lock();
@@ -3967,10 +3970,16 @@ pub fn scan_local_models(
             }
         }
         if let Some(home) = dirs::home_dir() {
-            let market_default = home.join("Conduit").join("models");
-            for file in local_models::scan_folder(&market_default, "market") {
-                if seen.insert(file.id.clone()) {
-                    files.push(file);
+            let mut scan = vec![crate::user_dirs::default_models_dir(&home)];
+            let legacy = home.join("Conduit").join("models");
+            if legacy.exists() && !scan.contains(&legacy) {
+                scan.push(legacy);
+            }
+            for market_default in scan {
+                for file in local_models::scan_folder(&market_default, "market") {
+                    if seen.insert(file.id.clone()) {
+                        files.push(file);
+                    }
                 }
             }
         }

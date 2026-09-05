@@ -110,7 +110,7 @@ fn build_system_prompt(
     artifact_type: &ArtifactType,
     workspace: &crate::artifacts::context::WorkspaceContext,
 ) -> String {
-    let base = "You are an expert at creating reusable Conduit artifacts. Generate a complete, valid artifact specification in JSON format.\n\n";
+    let base = "You are an expert at creating reusable Relay artifacts. Generate a complete, valid artifact specification in JSON format.\n\n";
 
     let type_specific = match artifact_type {
         ArtifactType::Skill => r#"Create a SKILL artifact. A skill is a reusable prompt that can be invoked with `/skill-name` in chat.

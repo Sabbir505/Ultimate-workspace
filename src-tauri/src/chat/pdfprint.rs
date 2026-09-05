@@ -22,7 +22,7 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 /// Hidden render window label. One window is created lazily and reused for
 /// every PDF render (navigation replaces the document each time).
-const PRINT_WINDOW_LABEL: &str = "conduit-pdf-print";
+const PRINT_WINDOW_LABEL: &str = "relay-pdf-print";
 
 /// Overall wall-clock budget for one render (page JS + print). Generous
 /// because Paged.js pagination of a 100+ page document takes seconds.
@@ -181,7 +181,7 @@ pub fn ensure_print_window(app: &AppHandle) -> Result<(), String> {
 fn build_print_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
     let url = WebviewUrl::External("about:blank".parse().map_err(|e| format!("bad url: {e}"))?);
     WebviewWindowBuilder::new(app, PRINT_WINDOW_LABEL, url)
-        .title("Conduit document renderer")
+        .title("Relay document renderer")
         .visible(false)
         .decorations(false)
         .resizable(false)
@@ -210,7 +210,7 @@ fn print_via_webview(
     // unlike NavigateToString) and hand WebView2 a file:/// URL.
     let temp_dir = std::env::temp_dir();
     let file_name = format!(
-        "conduit-print-{}.html",
+        "relay-print-{}.html",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())

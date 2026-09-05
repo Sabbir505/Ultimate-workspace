@@ -5,7 +5,7 @@
 // as JSON-escaped JS string literals:
 //   QUERY  — case-insensitive substring filter ("find" mode); empty = list all.
 //
-// Ref contract: tags interactive elements with `data-conduit-ref` in document
+// Ref contract: tags interactive elements with `data-relay-ref` in document
 // order using the SAME selector + overlay exclusion as bridge_extract.js and
 // bridge_resolve.js, so ref numbers are identical across read_page,
 // snapshot, find, and click/type/hover for a given page state — and stay
@@ -36,10 +36,10 @@
 
     for (var i = 0; i < els.length; i++) {
         var el = els[i];
-        if (el.getAttribute && el.getAttribute('data-conduit-overlay') !== null) continue;
+        if (el.getAttribute && el.getAttribute('data-relay-overlay') !== null) continue;
         var r = el.getBoundingClientRect();
         if (r.width === 0 || r.height === 0) continue;
-        el.setAttribute('data-conduit-ref', String(total));
+        el.setAttribute('data-relay-ref', String(total));
         var ref = total++;
 
         var tag = el.tagName.toLowerCase();

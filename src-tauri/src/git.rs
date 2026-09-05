@@ -229,7 +229,7 @@ pub fn worktree_dir_exists(path: &Path) -> bool {
 /// `git worktree remove --force <path>` run from the project root (git needs
 /// to resolve the worktree's registration in the main repo). `--force` prunes
 /// uncommitted changes in the worktree — safe to use on chat-owned worktrees
-/// because the worktree's branch (`conduit/<id>`) remains in the repo, so
+/// because the worktree's branch (`relay/<id>`) remains in the repo, so
 /// committed work is never lost. Errors (unknown worktree, missing git) are
 /// surfaced for the caller to swallow: cleanup is always best-effort.
 pub fn remove_worktree(project_path: &Path, worktree_path: &Path) -> Result<(), String> {
@@ -1011,7 +1011,7 @@ pub fn get_git_log(path: &Path) -> Result<Vec<GitLogEntry>, String> {
 //
 // A checkpoint snapshots the ENTIRE working tree (tracked + untracked,
 // .gitignore respected) into a commit object hanging off a hidden ref under
-// `refs/conduit/checkpoints/…`. Everything here uses a TEMP index
+// `refs/relay/checkpoints/…`. Everything here uses a TEMP index
 // (`GIT_INDEX_FILE`), so the user's real index, HEAD, and working tree are
 // never touched by snapshot creation.
 
@@ -1043,7 +1043,7 @@ pub struct CheckpointFileChange {
 pub fn snapshot_working_tree(cwd: &Path) -> Result<CheckpointSnapshot, String> {
     // Unique temp-index path per call (pid + nanos); removed at the end.
     let tmp_index = std::env::temp_dir().join(format!(
-        "conduit-ckpt-idx-{}-{}",
+        "relay-ckpt-idx-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1056,10 +1056,10 @@ pub fn snapshot_working_tree(cwd: &Path) -> Result<CheckpointSnapshot, String> {
     // global git user.name/user.email configured.
     let envs: &[(&str, &str)] = &[
         ("GIT_INDEX_FILE", idx.as_str()),
-        ("GIT_AUTHOR_NAME", "Conduit"),
-        ("GIT_AUTHOR_EMAIL", "checkpoints@conduit.local"),
-        ("GIT_COMMITTER_NAME", "Conduit"),
-        ("GIT_COMMITTER_EMAIL", "checkpoints@conduit.local"),
+        ("GIT_AUTHOR_NAME", "Relay"),
+        ("GIT_AUTHOR_EMAIL", "checkpoints@relay.local"),
+        ("GIT_COMMITTER_NAME", "Relay"),
+        ("GIT_COMMITTER_EMAIL", "checkpoints@relay.local"),
     ];
     let result = (|| -> Result<CheckpointSnapshot, String> {
         run_git_env(cwd, &["add", "-A", "--", "."], envs)?;
@@ -1070,12 +1070,12 @@ pub fn snapshot_working_tree(cwd: &Path) -> Result<CheckpointSnapshot, String> {
         let commit_sha = match &head {
             Some(h) => run_git_env(
                 cwd,
-                &["commit-tree", &tree_sha, "-p", h, "-m", "conduit checkpoint"],
+                &["commit-tree", &tree_sha, "-p", h, "-m", "relay checkpoint"],
                 envs,
             )?,
             None => run_git_env(
                 cwd,
-                &["commit-tree", &tree_sha, "-m", "conduit checkpoint"],
+                &["commit-tree", &tree_sha, "-m", "relay checkpoint"],
                 envs,
             )?,
         };
@@ -1522,12 +1522,12 @@ mod tests {
         // for-each-ref's `*` doesn't cross `/` (wildmatch WM_PATHNAME), so a
         // bare prefix is the correct way to list the whole namespace.
         let commit = after.commit_sha.clone().expect("commit sha");
-        update_checkpoint_ref(path, "refs/conduit/checkpoints/s1/1", &commit).expect("update-ref");
-        let refs = run_git(path, &["for-each-ref", "--format=%(refname)", "refs/conduit/checkpoints"])
+        update_checkpoint_ref(path, "refs/relay/checkpoints/s1/1", &commit).expect("update-ref");
+        let refs = run_git(path, &["for-each-ref", "--format=%(refname)", "refs/relay/checkpoints"])
             .expect("for-each-ref");
-        assert!(refs.contains("refs/conduit/checkpoints/s1/1"), "refs: {refs}");
-        delete_checkpoint_ref(path, "refs/conduit/checkpoints/s1/1").expect("delete ref");
-        let refs = run_git(path, &["for-each-ref", "--format=%(refname)", "refs/conduit/checkpoints"])
+        assert!(refs.contains("refs/relay/checkpoints/s1/1"), "refs: {refs}");
+        delete_checkpoint_ref(path, "refs/relay/checkpoints/s1/1").expect("delete ref");
+        let refs = run_git(path, &["for-each-ref", "--format=%(refname)", "refs/relay/checkpoints"])
             .expect("for-each-ref 2");
         assert!(!refs.contains("s1/1"), "ref should be gone: {refs}");
     }
@@ -1608,12 +1608,12 @@ mod tests {
         let path = dir.path();
         init_test_repo(path);
         // Create the worktree as ensure_chat_session_worktree would.
-        let wt = create_worktree(path, "conduit/abc12345").expect("create worktree");
+        let wt = create_worktree(path, "relay/abc12345").expect("create worktree");
         let wt_path = PathBuf::from(&wt);
         assert!(worktree_dir_exists(&wt_path), "worktree dir exists");
         // The branch exists and is checked out in the worktree.
         let branch = run_git(&wt_path, &["branch", "--show-current"]).expect("branch");
-        assert_eq!(branch.trim(), "conduit/abc12345");
+        assert_eq!(branch.trim(), "relay/abc12345");
         // Committed work in the worktree survives removal (it's on the branch).
         std::fs::write(wt_path.join("agent-note.txt"), "work\n").expect("write");
         run_git(&wt_path, &["add", "."]).expect("add");
@@ -1622,7 +1622,7 @@ mod tests {
         remove_worktree(path, &wt_path).expect("remove worktree");
         assert!(!wt_path.exists(), "worktree dir removed from disk");
         // The branch persists in the main repo.
-        let has_branch = run_git(path, &["show-ref", "--verify", "refs/heads/conduit/abc12345"]);
+        let has_branch = run_git(path, &["show-ref", "--verify", "refs/heads/relay/abc12345"]);
         assert!(has_branch.is_ok(), "branch survives worktree removal");
     }
 

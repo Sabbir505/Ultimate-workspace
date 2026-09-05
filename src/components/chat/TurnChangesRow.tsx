@@ -12,7 +12,7 @@
 // Data sources:
 //  - `files`: the `<tool>` diff blocks streamed for write_file / edit_file
 //    (see DiffCard) — these carry the model's find/replace args for +/− stats.
-//  - `checkpoints`: per-turn git snapshots (refs/conduit/checkpoints/…).
+//  - `checkpoints`: per-turn git snapshots (refs/relay/checkpoints/…).
 //    Files the checkpoint captured that no diff block covers (e.g. edits made
 //    through run_shell) render with an added/modified/deleted pill instead of
 //    line stats.

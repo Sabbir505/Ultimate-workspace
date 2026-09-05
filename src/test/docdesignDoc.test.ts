@@ -120,7 +120,7 @@ describe("docx compiler (L2)", () => {
     expect(code).toContain("spacing: { line: 341");
     // Cover + sections + closing save
     expect(code.match(/HeadingLevel\.HEADING_1/g)?.length).toBe(2);
-    expect(code.match(/conduit\.save\(/g)?.length).toBe(1);
+    expect(code.match(/relay\.save\(/g)?.length).toBe(1);
     expect(code).toContain("new PageBreak()");
     // Numbering config not emitted (no numbered lists in fixture)
     expect(code).not.toContain("dd-num");

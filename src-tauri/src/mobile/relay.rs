@@ -92,7 +92,7 @@ pub fn broadcast(relay_state: &MobileRelayState, msg: DesktopMessage) {
 
 /// Push an automation-finished notice to every paired phone. Called from the
 /// scheduler's finalize path — app-only, since the headless
-/// `conduit-automation` binary has no relay.
+/// `relay-automation` binary has no relay.
 pub fn broadcast_automation_run_finished(
     app: &AppHandle,
     automation_id: &str,

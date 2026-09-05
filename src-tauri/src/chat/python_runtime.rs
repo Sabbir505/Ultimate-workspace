@@ -1,7 +1,7 @@
 //! Python runtime resolution for document generation (`generate_document`)
 //! and ad-hoc code execution (`run_code`).
 //!
-//! Conduit ships a **bundled, relocatable Python** (a `python-build-standalone`
+//! Relay ships a **bundled, relocatable Python** (a `python-build-standalone`
 //! distribution with `python-docx` / `python-pptx` / `openpyxl` / `reportlab`
 //! pre-installed) inside its installer via `tauri.conf.json`'s
 //! `bundle.resources`. That bundle is dropped into the installed app's resource

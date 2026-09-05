@@ -26,7 +26,7 @@ export type TerminalSpawnSpec =
 
 export interface TerminalPaneData {
   kind: "terminal";
-  sessionId: string | null; // Conduit session id for agent panes; null for shell/login panes
+  sessionId: string | null; // Relay session id for agent panes; null for shell/login panes
   harness: HarnessId | null;
   label: string;
   spawn: TerminalSpawnSpec;

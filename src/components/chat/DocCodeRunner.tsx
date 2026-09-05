@@ -31,7 +31,7 @@ export function DocCodeRunner() {
       const data = event.data as
         | { source?: string; requestId?: string; ok?: boolean; base64?: string; error?: string }
         | null;
-      if (!data || data.source !== "conduit-docgen" || !data.requestId) return;
+      if (!data || data.source !== "relay-docgen" || !data.requestId) return;
       if (data.requestId !== activeRef.current) return;
       activeRef.current = null;
       if (timerRef.current != null) {
@@ -83,7 +83,7 @@ export function DocCodeRunner() {
               activeRef.current = null;
               void docgenComplete({
                 requestId: payload.requestId,
-                error: `the document script did not call conduit.save within ${RUN_TIMEOUT_MS / 1000}s`,
+                error: `the document script did not call relay.save within ${RUN_TIMEOUT_MS / 1000}s`,
               });
             }
           }, RUN_TIMEOUT_MS);
@@ -109,7 +109,7 @@ export function DocCodeRunner() {
   return (
     <iframe
       ref={frameRef}
-      title="Conduit document runner"
+      title="Relay document runner"
       sandbox="allow-scripts"
       style={{ display: "none" }}
     />

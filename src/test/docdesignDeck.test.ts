@@ -186,7 +186,7 @@ describe("deck compiler (L2)", () => {
     expect(code).toContain(`background: { color: "${theme.color.coverBg}" }`);
     // Slide count + closing save
     expect(code.match(/addSlide\(/g)?.length).toBe(5);
-    expect(code.match(/conduit\.save\(/g)?.length).toBe(1);
+    expect(code.match(/relay\.save\(/g)?.length).toBe(1);
     // Charts: native, no dLblPos, palette colors bare
     expect(code).toContain("pptx.ChartType.line");
     expect(code).not.toContain("dLblPos");

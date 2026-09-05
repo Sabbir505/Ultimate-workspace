@@ -1,13 +1,13 @@
 [Desktop Entry]
-Name=Conduit
+Name=Relay
 GenericName=AI Coding Workspace
 Comment=Local-first, multi-pane desktop shell for AI coding agents
-Exec=conduit %F
-Icon=conduit
+Exec=relay %F
+Icon=relay
 Terminal=false
 Type=Application
 Categories=Development;IDE;
 StartupNotify=true
-StartupWMClass=conduit
+StartupWMClass=relay
 MimeType=text/plain;text/markdown;application/x-shellscript;
 Keywords=AI;Agent;IDE;Development;Terminal;

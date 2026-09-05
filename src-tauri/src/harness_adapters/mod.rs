@@ -1,6 +1,6 @@
 //! Pluggable adapter interface for AI coding agent CLIs (PRD §6.4).
 //!
-//! Conduit never talks to an agent's protocol directly — it spawns the harness
+//! Relay never talks to an agent's protocol directly — it spawns the harness
 //! binary in a pty and scrapes *hints* (session ids, usage/cost lines,
 //! diff-approval prompts) out of the stripped terminal output. All scraping
 //! is deliberately conservative and best-effort: a missed parse degrades a
@@ -64,7 +64,7 @@ pub trait HarnessAdapter: Send + Sync {
     fn binary(&self) -> &'static str;
     /// Interactive new-session command, e.g. `claude` / `kimi`.
     fn spawn_new_command(&self) -> CommandSpec;
-    /// Resume-by-id command — the core of Conduit's pane lifecycle: panes are
+    /// Resume-by-id command — the core of Relay's pane lifecycle: panes are
     /// killed on close/quit and sessions are resurrected by id later.
     fn spawn_resume_command(&self, session_id: &str) -> CommandSpec;
     /// Interactive login flow command (spawned in a temporary pane, PRD §9).
@@ -253,7 +253,7 @@ pub fn resolve_for_spawn(spec: &CommandSpec) -> CommandSpec {
 // The fix: keep the untrusted prompt OFF every command line.
 //   * claude one-shot: `claude -p` reads the prompt from stdin when no
 //     prompt arg is given (documented "useful for pipes") — caller pipes it.
-//   * kimi / opencode: the prompt travels in the CONDUIT_TURN_PROMPT env var
+//   * kimi / opencode: the prompt travels in the RELAY_TURN_PROMPT env var
 //     (the process env block is never cmd-parsed) and a tiny wrapper batch
 //     expands it with DELAYED expansion (`!VAR!`), which runs after the
 //     percent/metachar phases so the value stays inert — all the way through
@@ -268,7 +268,7 @@ pub fn resolve_for_spawn(spec: &CommandSpec) -> CommandSpec {
 // ---------------------------------------------------------------------------
 
 /// Env var carrying the untrusted turn prompt to the wrapper batch.
-pub const TURN_PROMPT_ENV: &str = "CONDUIT_TURN_PROMPT";
+pub const TURN_PROMPT_ENV: &str = "RELAY_TURN_PROMPT";
 
 /// Harnesses with a one-shot (non-persistent) turn path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,7 +303,7 @@ impl TurnHarness {
     }
 
     /// The constant body of the turn wrapper batch. Only kimi/opencode still
-    /// use the `!CONDUIT_TURN_PROMPT!` delayed-expansion transport — both are
+    /// use the `!RELAY_TURN_PROMPT!` delayed-expansion transport — both are
     /// native .exe binaries, and cmd.exe fully expands `!VAR!` on lines whose
     /// command is an exe. Pi/omp/commandcode install as npm .cmd SHIMS: a
     /// batch-to-batch hand-off passes the RAW argument text to the shim,
@@ -316,10 +316,10 @@ impl TurnHarness {
     fn wrapper_body(&self) -> &'static str {
         match self {
             TurnHarness::Kimi => {
-                "@echo off\r\nsetlocal EnableDelayedExpansion\r\nkimi -p \"!CONDUIT_TURN_PROMPT!\" %*\r\n"
+                "@echo off\r\nsetlocal EnableDelayedExpansion\r\nkimi -p \"!RELAY_TURN_PROMPT!\" %*\r\n"
             }
             TurnHarness::OpenCode => {
-                "@echo off\r\nsetlocal EnableDelayedExpansion\r\nopencode run --format json --auto %* -- \"!CONDUIT_TURN_PROMPT!\"\r\n"
+                "@echo off\r\nsetlocal EnableDelayedExpansion\r\nopencode run --format json --auto %* -- \"!RELAY_TURN_PROMPT!\"\r\n"
             }
             TurnHarness::Pi => "@echo off\r\npi -p --approve --mode json %*\r\n",
             TurnHarness::Omp => "@echo off\r\nomp -p --auto-approve --mode=json %*\r\n",
@@ -395,7 +395,7 @@ impl TurnHarness {
 /// lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnPromptTransport {
-    /// Windows: prompt travels in `CONDUIT_TURN_PROMPT` + the delayed-
+    /// Windows: prompt travels in `RELAY_TURN_PROMPT` + the delayed-
     /// expansion wrapper batch (M12). POSIX: prompt inline in argv. Only
     /// valid for native .exe binaries (kimi/opencode) — see wrapper_body.
     EnvOrArgv,
@@ -410,7 +410,7 @@ pub enum TurnPromptTransport {
 /// unwritable (callers then fall back to the legacy argv spec).
 #[cfg(windows)]
 fn ensure_turn_wrappers() -> Option<std::path::PathBuf> {
-    let dir = std::env::temp_dir().join("conduit-turn-wrappers");
+    let dir = std::env::temp_dir().join("relay-turn-wrappers");
     std::fs::create_dir_all(&dir).ok()?;
     for kind in [TurnHarness::Kimi, TurnHarness::OpenCode, TurnHarness::Pi, TurnHarness::Omp, TurnHarness::CommandCode] {
         let path = dir.join(kind.wrapper_name());
@@ -696,8 +696,8 @@ mod tests {
             let body = std::fs::read_to_string(wrapper_path)
                 .unwrap_or_else(|e| panic!("wrapper {} unreadable: {e}", wrapper_path.display()));
             assert!(body.contains("EnableDelayedExpansion"), "{body}");
-            assert!(body.contains("!CONDUIT_TURN_PROMPT!"), "{body}");
-            assert!(!body.contains("%CONDUIT_TURN_PROMPT%"), "{body}");
+            assert!(body.contains("!RELAY_TURN_PROMPT!"), "{body}");
+            assert!(!body.contains("%RELAY_TURN_PROMPT%"), "{body}");
         }
         // The npm-shim harnesses must NOT use the env transport: a batch→
         // batch hand-off re-expands %* with delayed expansion off (npm shims'
@@ -708,7 +708,7 @@ mod tests {
             assert_eq!(transport, TurnPromptTransport::Stdin, "{kind:?}");
             assert!(env.is_none(), "{kind:?}");
             assert!(
-                spec.args.iter().all(|a| !a.contains(hostile) && !a.contains("CONDUIT_TURN_PROMPT")),
+                spec.args.iter().all(|a| !a.contains(hostile) && !a.contains("RELAY_TURN_PROMPT")),
                 "prompt/placeholder leaked into argv: {:?}",
                 spec.args
             );
@@ -725,13 +725,13 @@ mod tests {
             let (spec, _, transport) = turn_spec(kind, "prompt text", vec!["-m".into(), "some-model".into()]);
             assert_eq!(transport, TurnPromptTransport::Stdin);
             assert!(
-                spec.args.iter().all(|a| !a.contains("CONDUIT_TURN_PROMPT") && !a.contains("prompt text")),
+                spec.args.iter().all(|a| !a.contains("RELAY_TURN_PROMPT") && !a.contains("prompt text")),
                 "prompt leaked into argv: {:?}",
                 spec.args
             );
             let body = kind.wrapper_body();
             assert!(body.contains("%*"), "{body}");
-            assert!(!body.contains("CONDUIT_TURN_PROMPT"), "{body}");
+            assert!(!body.contains("RELAY_TURN_PROMPT"), "{body}");
         }
     }
 
@@ -760,7 +760,7 @@ mod tests {
         // and NOTHING may execute. Mirrors the manual verification from the
         // M12 fix (would catch a cmd behavior change on another Windows
         // version).
-        let dir = std::env::temp_dir().join(format!("conduit-m12-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("relay-m12-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let out = dir.join("out.txt");

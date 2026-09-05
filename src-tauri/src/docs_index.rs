@@ -85,7 +85,12 @@ fn model_scan_dirs(conn: &Connection) -> Vec<PathBuf> {
         }
     }
     if let Some(home) = dirs::home_dir() {
-        dirs.push(home.join("Conduit").join("models"));
+        dirs.push(crate::user_dirs::default_models_dir(&home));
+        // Pre-rebrand layout: keep indexing ~/Conduit/models when it exists.
+        let legacy = home.join("Conduit").join("models");
+        if legacy.exists() && !dirs.contains(&legacy) {
+            dirs.push(legacy);
+        }
     }
     if let Ok(Some(json)) = db::get_setting(conn, "localModels.folders") {
         if let Ok(list) = serde_json::from_str::<Vec<String>>(&json) {
@@ -595,7 +600,7 @@ mod tests {
     fn model_scan_dirs_includes_market_default() {
         let conn = crate::db::mem();
         let dirs = model_scan_dirs(&conn);
-        // Even with no settings, the ~/Conduit/models default is present.
+        // Even with no settings, the ~/Relay/models default is present.
         if dirs::home_dir().is_some() {
             assert!(dirs.iter().any(|d| d.ends_with("models")));
         }
@@ -620,7 +625,7 @@ mod tests {
     fn find_embedding_gguf_prefers_nomic_filename() {
         // Build a temp models dir with two fake embedding GGUFs (minimal
         // GGUF headers with an embedding architecture) plus one chat model.
-        let tmp = std::env::temp_dir().join(format!("conduit-docs-test-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("relay-docs-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).expect("mkdir");
         write_fake_gguf(&tmp.join("some-chat-model.gguf"), "llama");
@@ -643,7 +648,7 @@ mod tests {
 
     #[test]
     fn find_embedding_gguf_none_when_only_chat_models() {
-        let tmp = std::env::temp_dir().join(format!("conduit-docs-test2-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("relay-docs-test2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).expect("mkdir");
         write_fake_gguf(&tmp.join("chat.gguf"), "llama");
@@ -656,7 +661,7 @@ mod tests {
 
         // The market default dir may exist on a dev machine; only assert when
         // it doesn't, otherwise the global nomic preference could match.
-        let default = dirs::home_dir().map(|h| h.join("Conduit").join("models"));
+        let default = dirs::home_dir().map(|h| crate::user_dirs::default_models_dir(&h));
         if !default.map(|d| d.exists()).unwrap_or(false) {
             assert_eq!(find_embedding_gguf(&conn), None);
         }

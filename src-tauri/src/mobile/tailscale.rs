@@ -137,7 +137,7 @@ pub fn serve_args(port: u16) -> Vec<String> {
 
 /// Build the `tailscale serve off` subcommand that tears down any serve
 /// configuration. Note: `tailscale serve off` is config-wide (removes ALL
-/// serve paths on this node), which is acceptable since Conduit is the only
+/// serve paths on this node), which is acceptable since Relay is the only
 /// serve user on a typical desktop.
 pub fn serve_off_args() -> Vec<String> {
     vec!["serve".to_string(), "off".to_string()]

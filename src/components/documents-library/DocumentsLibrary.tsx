@@ -1,4 +1,4 @@
-// Documents library — dedicated full-page view of every file/diagram Conduit
+// Documents library — dedicated full-page view of every file/diagram Relay
 // has generated, persisted across restarts (the backend artifacts table has
 // 30-day retention). The sidebar's "Artifacts" button opens a modal with the
 // same content; this is the always-one-click-away version, like the Browser
@@ -180,7 +180,7 @@ export function DocumentsLibrary() {
     // timestamped zip name. save() is a Tauri dialog — we let it prompt.
     const { save } = await import("@tauri-apps/plugin-dialog");
     const dest = await save({
-      defaultPath: `conduit-documents-${Date.now()}.zip`,
+      defaultPath: `relay-documents-${Date.now()}.zip`,
       filters: [{ name: "Zip archive", extensions: ["zip"] }],
     });
     if (!dest) return;

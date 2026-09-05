@@ -1,6 +1,6 @@
 # Cost Model Redesign (T3-Code parity)
 
-> **Naming note:** This spec was written under the project name "Conduit". The product is "Relay" in user-visible surfaces as of 2026-08-27 (commit `e9abc7c3`); the crate is still `conduit`. See `README.md` and `AI CONTEXT/RELEASE.md`.
+> **Naming note:** This spec was written under the project name "Relay". The product is "Relay" in user-visible surfaces as of 2026-08-27 (commit `e9abc7c3`); the crate is still `relay`. See `README.md` and `AI CONTEXT/RELEASE.md`.
 >
 > **Status:** design spec, ready for review.
 > **Author:** Claude (brainstorming pass, 2026-08-08).
@@ -22,7 +22,7 @@ the price frozen at insert time. As a result:
   cost-quality panel (no `reported_cost_usd`, no `model_key` to count).
 
 The T3 Code reference dashboard (image, 2026-08-08) shows all of the above.
-This spec brings Conduit's cost surface to parity with that dashboard in a
+This spec brings Relay's cost surface to parity with that dashboard in a
 single coherent change.
 
 ## 2. Goals

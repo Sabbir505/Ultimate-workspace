@@ -1,5 +1,5 @@
 // Trivial integration test. It serves two purposes:
-// 1. A sanity check that integration-test binaries (which link conduit_lib and
+// 1. A sanity check that integration-test binaries (which link relay_lib and
 //    thus also import comctl32!TaskDialogIndirect) build and run with the
 //    comctl32-v6 manifest that build.rs embeds into every artifact.
 // 2. It ensures the package always has a [[test]] target, keeping the

@@ -1,7 +1,7 @@
 fn main() {
     tauri_build::build();
 
-    // The conduit_lib test harness (and every other test target of this
+    // The relay_lib test harness (and every other test target of this
     // package) links `comctl32!TaskDialogIndirect` (pulled in transitively by
     // the tauri dialog stack). That symbol only exists in comctl32 v6, which
     // the loader picks only when the process has an embedded application

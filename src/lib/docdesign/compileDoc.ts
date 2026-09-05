@@ -63,7 +63,7 @@ export function compileDoc(plan: DocPlan, theme: Theme): { code: string; checks:
   }
   lines.push(`] }]`);
   lines.push(`});`);
-  lines.push(`await conduit.save(await Packer.toBlob(doc));`);
+  lines.push(`await relay.save(await Packer.toBlob(doc));`);
 
   const code = lines.join("\n");
   return { code, checks: checkDocInvariants(code, plan) };
@@ -228,11 +228,11 @@ export function checkDocInvariants(code: string, plan: DocPlan): CompileChecks {
   const issues: Issue[] = [];
   const passed: string[] = [];
 
-  const saves = code.match(/conduit\.save\(/g)?.length ?? 0;
+  const saves = code.match(/relay\.save\(/g)?.length ?? 0;
   if (saves !== 1) {
-    issues.push({ severity: "error", rule: "l2/save-once", message: `program must call conduit.save exactly once (found ${saves})` });
+    issues.push({ severity: "error", rule: "l2/save-once", message: `program must call relay.save exactly once (found ${saves})` });
   } else {
-    passed.push("single conduit.save");
+    passed.push("single relay.save");
   }
 
   if (/#[0-9a-fA-F]{6}\b/.test(code)) {

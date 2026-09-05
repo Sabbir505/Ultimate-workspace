@@ -249,7 +249,7 @@ fn set_models_dir(conn: &rusqlite::Connection, dir: &str) -> Result<(), String> 
 }
 
 /// Resolved destination for a new download. Falls back to
-/// `~/Conduit/models` if the user hasn't picked one yet (and creates it
+/// `~/Relay/models` if the user hasn't picked one yet (and creates it
 /// on first use — this is the "default folder" promised in the UI).
 /// Also used by the STT module (its models live in a `stt/` subdirectory).
 pub(crate) fn resolve_models_dir(conn: &rusqlite::Connection) -> Result<PathBuf, String> {
@@ -257,7 +257,7 @@ pub(crate) fn resolve_models_dir(conn: &rusqlite::Connection) -> Result<PathBuf,
         return Ok(PathBuf::from(s));
     }
     let home = dirs_home().ok_or_else(|| "no home directory".to_string())?;
-    Ok(home.join("Conduit").join("models"))
+    Ok(crate::user_dirs::default_models_dir(&home))
 }
 
 fn dirs_home() -> Option<PathBuf> {
@@ -315,7 +315,7 @@ struct HfSibling {
 /// empty UAs), timeouts that don't hang the UI, and TLS.
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
-        .user_agent(concat!("Conduit/", env!("CARGO_PKG_VERSION"), " (desktop; +https://conduit.app)"))
+        .user_agent(concat!("Relay/", env!("CARGO_PKG_VERSION"), " (desktop; +https://conduit.app)"))
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .unwrap_or_default()
@@ -887,7 +887,7 @@ pub struct StartDownloadArgs {
     pub download_url: String,
     pub expected_sha256: Option<String>,
     /// Destination folder. If omitted, falls back to the persisted
-    /// models_dir, then to `~/Conduit/models` (created on demand).
+    /// models_dir, then to `~/Relay/models` (created on demand).
     pub dest_dir: Option<String>,
 }
 
@@ -1773,7 +1773,7 @@ mod tests {
     async fn download_atomic_rename_and_mismatch_cleanup() {
         use sha2::{Digest, Sha256};
 
-        let tmp = std::env::temp_dir().join(format!("conduit_mkt_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("relay_mkt_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let partial = tmp.join("model.gguf.partial");
@@ -1781,7 +1781,7 @@ mod tests {
 
         // Write the partial with known bytes, then compute the correct
         // hash.
-        let bytes = b"hello conduit";
+        let bytes = b"hello relay";
         std::fs::write(&partial, bytes).unwrap();
         let mut h = Sha256::new();
         h.update(bytes);

@@ -1059,14 +1059,14 @@ pub fn libreoffice_available() -> bool {
 
 /// Fresh, unique temp dir for one soffice invocation. Keyed by pid AND a
 /// process-local sequence number: concurrent conversions in the same process
-/// used to share `conduit-soffice-<pid>`, and each invocation's cleanup
+/// used to share `relay-soffice-<pid>`, and each invocation's cleanup
 /// (`remove_dir_all`) deleted the other's in-flight work — the second deck's
 /// preview then came back empty or with the first deck's partial output.
 fn soffice_run_dir() -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("conduit-soffice-{}-{seq}", std::process::id()))
+    std::env::temp_dir().join(format!("relay-soffice-{}-{seq}", std::process::id()))
 }
 
 /// Convert an office document (`.pptx`, `.docx`, `.doc`) to PDF bytes via
@@ -1094,7 +1094,7 @@ pub fn office_to_pdf(input_path: &Path) -> Option<Vec<u8>> {
             dur.as_nanos().hash(&mut hasher);
         }
     }
-    let cache_dir = std::env::temp_dir().join("conduit-pptx-pdf");
+    let cache_dir = std::env::temp_dir().join("relay-pptx-pdf");
     let cached = cache_dir.join(format!("{:016x}.pdf", hasher.finish()));
     if let Ok(bytes) = std::fs::read(&cached) {
         if !bytes.is_empty() {
@@ -1189,7 +1189,7 @@ mod tests {
         assert_ne!(a, b, "concurrent conversions must get distinct run dirs");
         let pid = std::process::id().to_string();
         assert!(
-            a.to_string_lossy().contains(&format!("conduit-soffice-{pid}-")),
+            a.to_string_lossy().contains(&format!("relay-soffice-{pid}-")),
             "run dir keeps the pid prefix for diagnosability: {}",
             a.display()
         );
@@ -1214,7 +1214,7 @@ mod tests {
 
     #[test]
     fn docx_render_from_generated_file() {
-        let dir = std::env::temp_dir().join(format!("conduit-docx-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("relay-docx-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = crate::chat::artifacts::generate(
             &dir,
@@ -1232,7 +1232,7 @@ mod tests {
 
     #[test]
     fn doc_to_text_extracts_docx_and_pptx() {
-        let dir = std::env::temp_dir().join(format!("conduit-doctext-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("relay-doctext-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let docx = crate::chat::artifacts::generate(
@@ -1267,7 +1267,7 @@ mod tests {
     fn pptx_text_orders_slides_numerically() {
         // Regression: slide names sorted lexicographically put slide10 before
         // slide2. With 12 slides, slide 2's text must precede slide 10's.
-        let dir = std::env::temp_dir().join(format!("conduit-pptx-order-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("relay-pptx-order-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let content = (1..=12)
             .map(|i| format!("Slide{i}\nMarker{i}"))
@@ -1283,7 +1283,7 @@ mod tests {
 
     #[test]
     fn doc_to_text_extracts_pdf_and_handles_garbage() {
-        let dir = std::env::temp_dir().join(format!("conduit-pdftext-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("relay-pdftext-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let pdf = crate::chat::artifacts::generate(
@@ -1323,7 +1323,7 @@ mod tests {
 
     #[test]
     fn pptx_render_positions_shapes() {
-        let dir = std::env::temp_dir().join(format!("conduit-pptx-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("relay-pptx-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = crate::chat::artifacts::generate(
             &dir,

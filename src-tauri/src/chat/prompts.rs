@@ -803,7 +803,7 @@ mod tests {
     /// registry. A name here that no tool ships (or a registry tool the text
     /// denies) makes the model hallucinate calls or deny real capabilities.
     /// `browser_wait_for` / `browser_read(mode:"interactive")` are the
-    /// regression: they belong to the harness conduit-browser MCP surface,
+    /// regression: they belong to the harness relay-browser MCP surface,
     /// not the built-in chat registry (which only has browser_read with
     /// full/summary_only/section + browser_click/type/scroll).
     #[test]

@@ -71,8 +71,8 @@ guide, regenerate it now.";
 pub(super) const JS_DOCGEN_GUIDE: &str = "\
 JS DOCGEN — for docx and pptx, write JavaScript for `language:\"javascript\"`. \
 The code runs in the app's document sandbox with `docx` (Word) and \
-`PptxGenJS` (PowerPoint) preloaded and a `conduit` helper. Deliver the file \
-with EXACTLY ONE `await conduit.save(blobOrBytesOrDataUrl)`.
+`PptxGenJS` (PowerPoint) preloaded and a `relay` helper. Deliver the file \
+with EXACTLY ONE `await relay.save(blobOrBytesOrDataUrl)`.
 DOCX (docx npm):
   const { Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, \
 TableCell, AlignmentType } = docx;
@@ -81,7 +81,7 @@ new Paragraph({ text: 'Title', heading: HeadingLevel.HEADING_1 }), \
 new Paragraph(new TextRun({ text: 'Body', bold: true })), \
 new Table({ rows: [new TableRow({ children: [new TableCell({ children: [new Paragraph('Cell')] })] })] }) \
 ] }] });
-  await conduit.save(await Packer.toBlob(doc));
+  await relay.save(await Packer.toBlob(doc));
   Headings MUST use HeadingLevel (real Word styles); lists: \
 new Paragraph({ text:'x', bullet:{level:0} }) or numbering.
 PPTX (PptxGenJS):
@@ -92,7 +92,7 @@ PPTX (PptxGenJS):
   s.addText('Title', { x: 0.6, y: 0.5, w: 12, h: 1, fontSize: 40, bold: true, color: 'FFFFFF' });
   s.addChart(pptx.ChartType.bar, [{ name: 'Rev', labels: ['Q1','Q2'], values: [4, 6] }], \
 { x: 0.6, y: 1.8, w: 6, h: 4 });
-  await conduit.save(await pptx.write({ outputType: 'blob' }));
+  await relay.save(await pptx.write({ outputType: 'blob' }));
   Gotchas: hex colors WITHOUT '#' (use '0B1220' not '#0B1220' — a '#' corrupts \
 the file); always set a 16:9 layout (defineLayout) because the default is 10x5.63in; \
 fonts/sizes on every addText call. If generation fails, retry once with \
@@ -224,11 +224,11 @@ pub(super) async fn generate_document(
             ),
             "javascript" => (
                 "a complete JavaScript program (uses the preloaded `docx` / `PptxGenJS` \
-                 globals and `await conduit.save(...)`)",
+                 globals and `await relay.save(...)`)",
                 JS_DOCGEN_GUIDE,
             ),
             _ => (
-                "a complete Python program that saves the file to os.environ[\"CONDUIT_OUTPUT\"]",
+                "a complete Python program that saves the file to os.environ[\"RELAY_OUTPUT\"]",
                 DOC_STYLE_GUIDE,
             ),
         };
@@ -350,7 +350,11 @@ async fn generate_pdf_from_html(
 /// classifier (`read_artifact_preview`) looks for it to route the file as
 /// `kind: "diagram"` (diagram-specific export chrome) instead of generic
 /// `html`. It is harmless when the file is opened directly in a browser.
-pub const DIAGRAM_MARKER: &str = "<!-- conduit:diagram -->";
+pub const DIAGRAM_MARKER: &str = "<!-- relay:diagram -->";
+
+/// Sentinel written by pre-rebrand builds. Accepted on read so older
+/// artifacts still route as diagrams; never written anymore.
+pub const LEGACY_DIAGRAM_MARKER: &str = "<!-- conduit:diagram -->";
 
 /// Build a hand-styled HTML/CSS diagram file. The model supplies the full
 /// HTML document; we prepend the diagram sentinel marker (so the preview pane
@@ -563,9 +567,9 @@ mod tests {
         // The marker must be the file's first bytes (the preview classifier
         // uses `starts_with`), even when the HTML starts with a doctype.
         let with_doctype = "<!doctype html><html><body>x</body></html>";
-        assert!(prepend_diagram_marker(with_doctype).starts_with("<!-- conduit:diagram -->"));
+        assert!(prepend_diagram_marker(with_doctype).starts_with("<!-- relay:diagram -->"));
         let no_doctype = "<html><body>x</body></html>";
-        assert!(prepend_diagram_marker(no_doctype).starts_with("<!-- conduit:diagram -->"));
+        assert!(prepend_diagram_marker(no_doctype).starts_with("<!-- relay:diagram -->"));
     }
 
     #[test]

@@ -46,7 +46,7 @@ fn with_core_on_main<T: Send + 'static>(
 
 # ---------- 2. create(): drop the post-insert attach + navigate (the COM init
 # chain already attaches listeners and navigates); keep Page.enable + injects.
-old = """        eprintln!("[conduit:browser] create OK for label={label}");
+old = """        eprintln!("[relay:browser] create OK for label={label}");
 
         self.webviews.lock().insert(label.clone(), pane);
 
@@ -69,7 +69,7 @@ old = """        eprintln!("[conduit:browser] create OK for label={label}");
         match self.call_devtools_protocol(&label, "Page.enable", "{}") {
             Ok(_) => browser_log(&self.app, &format!("Page.enable OK label={label}")),
             Err(e) => {
-                eprintln!("[conduit:browser] Page.enable failed (non-fatal): {e}");
+                eprintln!("[relay:browser] Page.enable failed (non-fatal): {e}");
                 browser_log(&self.app, &format!("Page.enable FAILED label={label}: {e}"));
             }
         }
@@ -90,7 +90,7 @@ old = """        eprintln!("[conduit:browser] create OK for label={label}");
         }
         nav_result?;
         self.spawn_post_nav_inject(pane_id, tab_id);"""
-new = """        eprintln!("[conduit:browser] create OK for label={label}");
+new = """        eprintln!("[relay:browser] create OK for label={label}");
 
         self.webviews.lock().insert(label.clone(), pane);
 
@@ -108,7 +108,7 @@ new = """        eprintln!("[conduit:browser] create OK for label={label}");
         match self.call_devtools_protocol(&label, "Page.enable", "{}") {
             Ok(_) => browser_log(&self.app, &format!("Page.enable OK label={label}")),
             Err(e) => {
-                eprintln!("[conduit:browser] Page.enable failed (non-fatal): {e}");
+                eprintln!("[relay:browser] Page.enable failed (non-fatal): {e}");
                 browser_log(&self.app, &format!("Page.enable FAILED label={label}: {e}"));
             }
         }

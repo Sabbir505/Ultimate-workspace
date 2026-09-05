@@ -1,8 +1,8 @@
 # Bug Hunt — compiled 2026-08-07
 
-> **Naming note:** This document refers to the project as "Conduit" because it was written before the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The findings still apply; the name has not. See `README.md` and `AI CONTEXT/RELEASE.md` for the current naming.
+> **Naming note:** This document refers to the project as "Relay" because it was written before the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The findings still apply; the name has not. See `README.md` and `AI CONTEXT/RELEASE.md` for the current naming.
 
-Whole-project audit of Conduit (Rust backend `src-tauri/` + React frontend `src/`).
+Whole-project audit of Relay (Rust backend `src-tauri/` + React frontend `src/`).
 67 findings from 7 parallel audit passes. Fix order: critical → high → medium → low.
 Mark items `[x]` as fixed; add a note with the fix commit/approach.
 
@@ -35,7 +35,7 @@ Mark items `[x]` as fixed; add a note with the fix commit/approach.
   **FIXED:** `pending` carry-over buffer; only newline-terminated lines reach `parse_sse_chunk` (mirrors streaming.rs rounds). EOF flush parses a final unterminated line (preserves pre-fix `str::lines` behavior) but tolerates its failure instead of killing a completed turn.
 
 - [x] **H4. Download task's 60 s reqwest timeout caps total transfer — large model downloads always fail** — `src-tauri/src/chat/tasks.rs:350`
-  **FIXED:** blanket `.timeout(60s)` → `.connect_timeout(20s)` + per-chunk stall detection (60s without bytes = stall → Range-resume retry). ALSO FIXED (discovered here): the WIP SSRF guard in the download path (uncommitted) had broken all 3 download tests by refusing their 127.0.0.1 fixture server — added `CONDUIT_ALLOW_PRIVATE_DOWNLOADS` app-env escape hatch (also serves LAN model mirrors; child processes can't set it), tests opt in. 157/157 chat tests green.
+  **FIXED:** blanket `.timeout(60s)` → `.connect_timeout(20s)` + per-chunk stall detection (60s without bytes = stall → Range-resume retry). ALSO FIXED (discovered here): the WIP SSRF guard in the download path (uncommitted) had broken all 3 download tests by refusing their 127.0.0.1 fixture server — added `RELAY_ALLOW_PRIVATE_DOWNLOADS` app-env escape hatch (also serves LAN model mirrors; child processes can't set it), tests opt in. 157/157 chat tests green.
 
 - [x] **H5. Non-tool request builders silently drop attached vision images** — `src-tauri/src/chat/providers.rs:205` (also `:241` OpenAI)
   **FIXED:** both wire bodies now build messages via `proto::anthropic_message_json` / `proto::openai_message_json` (multimodal content arrays when images are present); single-string wire message structs deleted.
@@ -93,12 +93,12 @@ Mark items `[x]` as fixed; add a note with the fix commit/approach.
   **FIXED:** `filter_map(|e| e.ok())` replaces `collect::<Result<Vec<_>,_>>()` — unreadable entries (permission-denied subdir, dangling junction) skip instead of zeroing the whole scan.
 
 - [x] **M5. Concurrent pptx→pdf conversions share one temp dir (keyed by pid), delete each other's work** — `src-tauri/src/chat/office.rs:1038`
-  **FIXED:** new `soffice_run_dir()` helper keys the run dir by pid AND a process-local atomic sequence — concurrent invocations in one process no longer share `conduit-soffice-<pid>`. The pre-clean now only guards crash-leftover dirs (pid+seq recycle). Regression test `soffice_run_dir_is_unique_per_invocation`.
+  **FIXED:** new `soffice_run_dir()` helper keys the run dir by pid AND a process-local atomic sequence — concurrent invocations in one process no longer share `relay-soffice-<pid>`. The pre-clean now only guards crash-leftover dirs (pid+seq recycle). Regression test `soffice_run_dir_is_unique_per_invocation`.
 
 - [x] **M6. `count_context_tokens` reports 0 (not null) when tokenization fails** — `src-tauri/src/chat/commands.rs:2106`
   **FIXED:** tokenize error now early-returns `used_tokens: None` (with the real `max_tokens`) regardless of `has_messages` — the ring keeps its last known value instead of snapping to 0% when the number is untrustworthy. Successful tokenize semantics unchanged (Some(0) with real messages is genuine data). No unit test — Tauri `State<>`-bound command, no seam.
 
-- [x] **M7. MCP relay writes responses to notifications (JSON-RPC violation)** — `src-tauri/src/bin/conduit_browser_mcp.rs:164`
+- [x] **M7. MCP relay writes responses to notifications (JSON-RPC violation)** — `src-tauri/src/bin/relay_browser_mcp.rs:164`
   **FIXED:** `handle_line` now returns `Option<Value>` — any message without an `id` (or with explicit `null` id) is a notification and gets NO response (covers both `notifications/initialized`'s old bare `null` line and unknown notifications' id:null errors). A notifications/* method tagged with an id gets a valid `result: null` envelope instead of the bare `null`. Malformed JSON still gets the spec-mandated Parse-error reply with id:null. Regression test `notifications_get_no_response` (6 assertions).
 
 - [x] **M8. `edit_file` ignores `expected_matches` when find occurs exactly once** — `src-tauri/src/chat/tools/fs.rs:188`
@@ -114,7 +114,7 @@ Mark items `[x]` as fixed; add a note with the fix commit/approach.
   **FIXED:** flag now set BEFORE the stdin write (mirrors `spawn_per_turn`) and cleared again on write error — a fast `result`/EOF can no longer be overwritten back to `true`. No unit test (needs a live child + reader thread); verified by inspection + full suite green.
 
 - [x] **M12. All harness spawns go through `cmd.exe /C` — `%VAR%` expansion + metachar injection via prompt content** — `src-tauri/src/harness_adapters/mod.rs:206`
-  **FIXED:** the untrusted prompt no longer rides ANY command line. **claude one-shot:** prompt via stdin (`claude -p` with no prompt arg — documented; run_one_shot pipes it, kills child on write error). **kimi/opencode** (spawn_per_turn + one_shot_spec): new `turn_spec()` routes the prompt via `CONDUIT_TURN_PROMPT` env + a temp-dir wrapper batch using DELAYED expansion (`!VAR!` — expands after cmd's percent/metachar phases, inert all the way through the shim's unquoted `%*`). Empirically verified on Win11 against `a&b %PATH% say "hi" <tag> | pipe ^caret 100% & calc`, `x"&calc&"y`, and LF/CRLF multi-line payloads — all literal, zero execution. Caveat: embedded `"` is consumed by C-runtime argv parsing at the final node.exe hop (cosmetic). Flags (model/session-id — our bounded strings) stay in argv. POSIX unchanged (argv verbatim via exec). Wrapper-write failure falls back to legacy argv (turn still runs; residual exposure = this note). Tests: `turn_spec_keeps_prompt_off_the_command_line`, `wrapper_batch_transports_hostile_prompt_literally` (end-to-end cmd-chain canary). PTY path unaffected (prompt typed into terminal stdin, never in argv).
+  **FIXED:** the untrusted prompt no longer rides ANY command line. **claude one-shot:** prompt via stdin (`claude -p` with no prompt arg — documented; run_one_shot pipes it, kills child on write error). **kimi/opencode** (spawn_per_turn + one_shot_spec): new `turn_spec()` routes the prompt via `RELAY_TURN_PROMPT` env + a temp-dir wrapper batch using DELAYED expansion (`!VAR!` — expands after cmd's percent/metachar phases, inert all the way through the shim's unquoted `%*`). Empirically verified on Win11 against `a&b %PATH% say "hi" <tag> | pipe ^caret 100% & calc`, `x"&calc&"y`, and LF/CRLF multi-line payloads — all literal, zero execution. Caveat: embedded `"` is consumed by C-runtime argv parsing at the final node.exe hop (cosmetic). Flags (model/session-id — our bounded strings) stay in argv. POSIX unchanged (argv verbatim via exec). Wrapper-write failure falls back to legacy argv (turn still runs; residual exposure = this note). Tests: `turn_spec_keeps_prompt_off_the_command_line`, `wrapper_batch_transports_hostile_prompt_literally` (end-to-end cmd-chain canary). PTY path unaffected (prompt typed into terminal stdin, never in argv).
 
 - [x] **M13. Automation child processes orphaned on app exit** — `src-tauri/src/agent_sessions.rs:1146`
   **FIXED:** new `ONE_SHOT_CHILDREN` registry (pid → Arc<Mutex<Child>>) — `run_one_shot` registers after spawn and unregisters after reaping; `kill_one_shot_children()` (called from the lib.rs ExitRequested/Exit handler) drains it, skips already-exited children via `try_wait` (a recycled pid is never killed), and tree-kills the rest. `run_one_shot` now poll-waits WITHOUT holding the child lock so the exit handler can't deadlock against a running turn. Test `kill_one_shot_children_kills_registered_trees` (real cmd→ping tree).
@@ -189,7 +189,7 @@ Mark items `[x]` as fixed; add a note with the fix commit/approach.
 - [x] **L16.** Cost chart keys bars by truncated 15-char label — collisions — `src/components/cost-dashboard/CostDashboard.tsx:306` → **FIXED:** `ModelBarChart` data gains optional `id`; bars keyed by `d.id ?? d.label`, with `id: u.model` (full model name) passed in — display labels stay truncated.
 - [x] **L17.** `wait_for`/MCP — see M9 (deduped). **FIXED** with M9 (clamp + checked_add in `wait_for_timeout_ms`).
 - [x] **L18.** CGNAT 100.64.0.0/10 not blocked despite doc comment claiming so — `src-tauri/src/chat/tools/search.rs:26` **FIXED** with H6 (manual /10 match; `is_shared()` unstable).
-- [x] **L19.** `CONDUIT_MCP_AUTH_TOKEN` set process-wide via `std::env::set_var` — inherited by every child (pty shells, agent processes) — `src-tauri/src/browser_mcp.rs:39`, `src-tauri/src/harness_bundle.rs:102` → **FIXED:** `set_var` removed; `mcp_auth_token()` only generates the token, and it is delivered exclusively via the per-server env blocks of the generated bundle configs (`.mcp.json` `env` + `opencode.json` `environment`), which the harness passes to the conduit-browser-mcp child process only. Tests assert both bundle formats carry the token env.
+- [x] **L19.** `RELAY_MCP_AUTH_TOKEN` set process-wide via `std::env::set_var` — inherited by every child (pty shells, agent processes) — `src-tauri/src/browser_mcp.rs:39`, `src-tauri/src/harness_bundle.rs:102` → **FIXED:** `set_var` removed; `mcp_auth_token()` only generates the token, and it is delivered exclusively via the per-server env blocks of the generated bundle configs (`.mcp.json` `env` + `opencode.json` `environment`), which the harness passes to the relay-browser-mcp child process only. Tests assert both bundle formats carry the token env.
 
 ## Pre-existing build/test breakage (found during iteration 2 verification)
 

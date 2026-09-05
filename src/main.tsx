@@ -17,7 +17,7 @@ import "katex/dist/katex.min.css";
 if (import.meta.env.DEV) {
   void Promise.all([import("./state/panes"), import("./state/projects")]).then(
     ([panes, projects]) => {
-      (window as unknown as Record<string, unknown>).__conduit = {
+      (window as unknown as Record<string, unknown>).__relay = {
         panes: panes.usePanesStore,
         projects: projects.useProjectsStore,
       };

@@ -25,8 +25,9 @@ pub(crate) use search::{host_blocked, is_blocked_ip};
 mod generate;
 use generate::{generate_document, generate_diagram, generate_file};
 /// Re-exported so `commands.rs` can detect diagram artifacts via
-/// `crate::chat::tools::DIAGRAM_MARKER`.
+/// `crate::chat::tools::DIAGRAM_MARKER` (and the pre-rebrand sentinel).
 pub use generate::DIAGRAM_MARKER;
+pub use generate::LEGACY_DIAGRAM_MARKER;
 
 mod fs;
 use fs::{
@@ -414,9 +415,9 @@ const GENERATE_FILE_DESC: &str = "Generate a simple downloadable text-based \
 const GENERATE_DOCUMENT_DESC: &str = "Create a professionally designed docx/pptx/xlsx/pdf. \
     The engine is chosen by `language` (default per format): \"javascript\" (docx/pptx) — a \
     JS program against the preloaded `docx` / `PptxGenJS` globals delivering via \
-    `await conduit.save(...)`; \"html\" (pdf) — a complete styled HTML document rendered by a \
+    `await relay.save(...)`; \"html\" (pdf) — a complete styled HTML document rendered by a \
     real browser engine; \"python\" (fallback for any format) — a Python program saving to \
-    os.environ[\"CONDUIT_OUTPUT\"] (imports: stdlib, conduit_docgen, python-docx, python-pptx, \
+    os.environ[\"RELAY_OUTPUT\"] (imports: stdlib, relay_docgen, python-docx, python-pptx, \
     openpyxl, reportlab). For PowerPoint decks prefer plan_document instead — it plans the \
     deck first and compiles it against the shared design system. The full editorial style \
     guide + engine cheatsheet is returned with the tool result; regenerate if the first \
@@ -904,7 +905,7 @@ pub async fn execute_tool(
                     text: format!(
                         "Opened {normalized} in the built-in browser. The page is live \
                          in the pane — use browser_read / browser_screenshot (or the \
-                         conduit-browser MCP tools in harness sessions) to inspect it."
+                         relay-browser MCP tools in harness sessions) to inspect it."
                     ),
                     artifact: None,
                     browse_url: Some(normalized),

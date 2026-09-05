@@ -1,6 +1,6 @@
 # Bug Hunt Round 2 — compiled 2026-08-14
 
-> **Naming note:** This document refers to the project as "Conduit" because it was written before the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The findings still apply; the name has not. See `README.md` and `AI CONTEXT/RELEASE.md` for the current naming.
+> **Naming note:** This document refers to the project as "Relay" because it was written before the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The findings still apply; the name has not. See `README.md` and `AI CONTEXT/RELEASE.md` for the current naming.
 
 Whole-project re-audit after the 2026-08-07 bug hunt (`BUG_LIST.md`, 68/69 fixed — H2 still on hold
 by user decision). Sources: `tsc --noEmit` (clean), `cargo check` (clean, 73 warnings), `vitest run`

@@ -1,6 +1,6 @@
-# Conduit — Grounded Audit Log
+# Relay — Grounded Audit Log
 
-> **Naming note:** This document refers to the project as "Conduit" because it was written before the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The audit findings still apply; the name has not. See `README.md` and `AI CONTEXT/RELEASE.md` for the current naming.
+> **Naming note:** This document refers to the project as "Relay" because it was written before the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The audit findings still apply; the name has not. See `README.md` and `AI CONTEXT/RELEASE.md` for the current naming.
 
 All findings grounded in actual code/config (`file:line`), not framework assumptions.
 Verdicts: **proved** / **no-issue** / **weak** / **N/A**
@@ -35,7 +35,7 @@ Status: 🟢 fixed+tested · 🟡 mitigated/doc-only · 🔴 unfixed · ⚪ N/A
 ### Medium
 | ID | Item | File | Fix |
 |----|------|------|-----|
-| 3.7 | Browser MCP WS no auth | `browser_mcp.rs` + `conduit_browser_mcp.rs` | Random token at startup (`CONDUIT_MCP_AUTH_TOKEN` env); first WS message must be `{"auth":"<token>"}` |
+| 3.7 | Browser MCP WS no auth | `browser_mcp.rs` + `relay_browser_mcp.rs` | Random token at startup (`RELAY_MCP_AUTH_TOKEN` env); first WS message must be `{"auth":"<token>"}` |
 | 8.5 | Source ledger no dedup/cap | `source_ledger.rs` + `mod.rs` | `INSERT OR IGNORE` + `UNIQUE INDEX (session, url, fact)` + `LIMIT 50` |
 | 8.6 | xml_unescape entity order | `office.rs:20-26` | `&amp;` resolved first, then `&lt;`/`&gt;`/`&quot;`/`&apos;` |
 | 8.7 | Local model title generation | `commands.rs:281-288` | `local_gguf` skips API key check (keyless), uses sidecar base_url |

@@ -60,7 +60,7 @@ const LIVE_VIZ_MAX_H = 520;
 function withLiveResizeScript(html: string): string {
   const script =
     '<script>(function(){function r(){parent.postMessage(' +
-    "{__conduitInlineVizHeight:Math.ceil(document.documentElement.scrollHeight)},'*')}" +
+    "{__relayInlineVizHeight:Math.ceil(document.documentElement.scrollHeight)},'*')}" +
     "window.addEventListener('load',r);" +
     "try{new ResizeObserver(r).observe(document.documentElement)}catch(e){}" +
     "r()})()</script>";
@@ -114,15 +114,15 @@ export function InlineDiagram({
   const [liveH, setLiveH] = useState<number | null>(null);
   useEffect(() => {
     function onMsg(e: MessageEvent) {
-      const d = e.data as { __conduitInlineVizHeight?: unknown } | null;
+      const d = e.data as { __relayInlineVizHeight?: unknown } | null;
       if (
         d &&
         typeof d === "object" &&
-        typeof d.__conduitInlineVizHeight === "number" &&
-        Number.isFinite(d.__conduitInlineVizHeight)
+        typeof d.__relayInlineVizHeight === "number" &&
+        Number.isFinite(d.__relayInlineVizHeight)
       ) {
         setLiveH(
-          Math.min(LIVE_VIZ_MAX_H, Math.max(LIVE_VIZ_MIN_H, d.__conduitInlineVizHeight)),
+          Math.min(LIVE_VIZ_MAX_H, Math.max(LIVE_VIZ_MIN_H, d.__relayInlineVizHeight)),
         );
       }
     }
@@ -283,7 +283,7 @@ export function InlineDiagram({
     return <div className="chat-diagram-loading">Loading diagram…</div>;
   }
   // Render diagrams AND HTML files inline. The "diagram" kind (from
-  // generate_diagram, carrying the conduit:diagram marker) is the primary
+  // generate_diagram, carrying the relay:diagram marker) is the primary
   // case. But API/local models often create HTML diagrams via write_file or
   // generate_file — those come through as kind "html" and should also render
   // inline instead of falling back to a download chip.

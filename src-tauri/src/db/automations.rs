@@ -5,7 +5,7 @@
 //! can't answer prompts) and are logged into the automation's own chat
 //! session (`chat_session_id`) so transcripts/diffs/cost show up in the
 //! normal chat UI. The scheduler lives in crate::automations; the headless
-//! runner binary (bin/conduit_automation.rs) reads these same rows.
+//! runner binary (bin/relay_automation.rs) reads these same rows.
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};

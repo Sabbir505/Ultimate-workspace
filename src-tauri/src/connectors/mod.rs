@@ -1,7 +1,7 @@
 //! Connectors: OAuth-based connections to third-party SaaS tools that expose
 //! official, vendor-hosted remote MCP servers.
 //!
-//! Design: Conduit owns the OAuth plumbing (credential storage, the native
+//! Design: Relay owns the OAuth plumbing (credential storage, the native
 //! webview login flow, per-conversation opt-in, approval gating) and the
 //! registration of the vendor's remote MCP server URL into a session's tool
 //! set — it does NOT implement vendor tools. Tool schemas come from the

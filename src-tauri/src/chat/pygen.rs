@@ -28,7 +28,7 @@ use super::artifacts;
 /// Wall-clock limit for a single document-generation run. Larger than plain
 /// code execution because building a rich deck/report can be slower.
 const GEN_TIMEOUT: Duration = Duration::from_secs(90);
-/// Styling toolkit made importable (as `conduit_docgen`) for every run so the
+/// Styling toolkit made importable (as `relay_docgen`) for every run so the
 /// model can emit themed docx/pptx with a few high-level calls.
 const DOCGEN_HELPER: &str = include_str!("docgen_helper.py");
 /// Shared design tokens (the same file the JS engines and the HTML print CSS
@@ -63,7 +63,7 @@ fn python_program() -> String {
 
 /// Run `code` (Python) to produce `filename` (a `format` document) inside
 /// `dir`. The program's working directory is `dir`, and the intended absolute
-/// output path is exposed as the `CONDUIT_OUTPUT` environment variable.
+/// output path is exposed as the `RELAY_OUTPUT` environment variable.
 pub async fn generate(
     dir: &Path,
     format: &str,
@@ -91,17 +91,17 @@ pub async fn generate(
     // Write the program to a private temp file (kept out of the artifacts dir
     // so it is never surfaced as an artifact) and run it with cwd = artifacts
     // dir so a relative `filename` resolves there.
-    let tmp = std::env::temp_dir().join(format!("conduit_pygen_{}", unique_suffix()));
+    let tmp = std::env::temp_dir().join(format!("relay_pygen_{}", unique_suffix()));
     std::fs::create_dir_all(&tmp).map_err(|e| format!("could not create work dir: {e}"))?;
     let script = tmp.join("gen.py");
     if let Err(e) = std::fs::write(&script, code) {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(format!("could not write generator script: {e}"));
     }
-    // Drop the styling toolkit next to the script so `import conduit_docgen`
+    // Drop the styling toolkit next to the script so `import relay_docgen`
     // resolves (the script's dir is on sys.path automatically), plus the
     // shared design tokens it reads its themes from.
-    let _ = std::fs::write(tmp.join("conduit_docgen.py"), DOCGEN_HELPER);
+    let _ = std::fs::write(tmp.join("relay_docgen.py"), DOCGEN_HELPER);
     let _ = std::fs::write(tmp.join("docdesign_tokens.json"), DOCDESIGN_TOKENS);
 
     // Also expose the helper via PYTHONPATH so it imports even though cwd is
@@ -121,7 +121,7 @@ pub async fn generate(
     let mut cmd = Command::new(&python);
     cmd.arg(&script)
         .current_dir(dir)
-        .env("CONDUIT_OUTPUT", &out_path)
+        .env("RELAY_OUTPUT", &out_path)
         .env("PYTHONPATH", pythonpath)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -147,7 +147,7 @@ pub async fn generate(
         },
         Err(e) => Err(format!(
             "could not start the Python interpreter ({python}): {e}. \
-             Conduit ships a bundled Python; if it is missing or damaged, install \
+             Relay ships a bundled Python; if it is missing or damaged, install \
              Python 3 with python-docx / python-pptx / openpyxl / reportlab and retry."
         )),
     };
@@ -175,7 +175,7 @@ pub async fn generate(
             } else {
                 format!(
                     "The program ran but did not create the expected file. \
-                     Save the document to the path in the CONDUIT_OUTPUT env var \
+                     Save the document to the path in the RELAY_OUTPUT env var \
                      (or to \"{name}\" in the current directory).\nProgram output:\n{log}"
                 )
             };
@@ -309,7 +309,7 @@ import os
 d = Document()
 d.add_heading("Hello", 0)
 d.add_paragraph("Body text.")
-d.save(os.environ["CONDUIT_OUTPUT"])
+d.save(os.environ["RELAY_OUTPUT"])
 "#;
         let g = tauri::async_runtime::block_on(generate(dir.path(), "docx", "report", code))
             .expect("generation");
@@ -320,11 +320,11 @@ d.save(os.environ["CONDUIT_OUTPUT"])
     #[test]
     #[ignore = "requires python3 + python-docx + python-pptx"]
     fn generates_styled_docs_via_helper() {
-        // The bundled conduit_docgen toolkit is importable and produces both a
+        // The bundled relay_docgen toolkit is importable and produces both a
         // docx and a pptx with almost no code.
         let dir = tempfile::tempdir().unwrap();
         let docx_code = r#"
-import conduit_docgen as cd
+import relay_docgen as cd
 doc = cd.Doc(title="Report", subtitle="Q2", theme="blue")
 doc.heading("Overview")
 doc.bullets(["a", "b"])
@@ -336,7 +336,7 @@ doc.save()
         assert!(g.path.exists());
 
         let pptx_code = r#"
-import conduit_docgen as cd
+import relay_docgen as cd
 deck = cd.Deck(title="Deck", subtitle="2025", theme="emerald")
 deck.section("Intro")
 deck.bullets("Why", ["one", "two"])
@@ -349,7 +349,7 @@ deck.save()
         assert!(g.filename.ends_with(".pptx"));
 
         let pdf_code = r#"
-import conduit_docgen as cd
+import relay_docgen as cd
 pdf = cd.Pdf(title="Brief", subtitle="Sub", theme="plum", author="Acme")
 pdf.heading("Summary")
 pdf.paragraph("Body.")

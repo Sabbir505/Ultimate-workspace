@@ -1,19 +1,19 @@
-//! conduit-browser-mcp — standalone MCP server binary.
+//! relay-browser-mcp — standalone MCP server binary.
 //!
 //! Speaks Model Context Protocol JSON-RPC over stdio to a harness (Claude
-//! Code / Kimi Code) and forwards every `tools/call` to the running Conduit
-//! app over a loopback WebSocket (ws://127.0.0.1:{CONDUIT_WS_PORT}). The app
+//! Code / Kimi Code) and forwards every `tools/call` to the running Relay
+//! app over a loopback WebSocket (ws://127.0.0.1:{RELAY_WS_PORT}). The app
 //! executes against the real visible in-app browser pane — the harness sees
 //! a normal browser MCP server, but it's driving the exact pane on screen.
 //!
 //! This binary deliberately does NOT link Tauri: it's a thin stdio→WS relay.
-//! The WebSocket port comes from the `CONDUIT_WS_PORT` env var (default 7681,
+//! The WebSocket port comes from the `RELAY_WS_PORT` env var (default 7681,
 //! matching `browser::BROWSER_MCP_PORT` in the app), and the project scope
-//! from `CONDUIT_PROJECT_ID`. Both are set by the `.mcp.json` / `--mcp-config`
+//! from `RELAY_PROJECT_ID`. Both are set by the `.mcp.json` / `--mcp-config`
 //! registration written per-project at agent-session spawn.
 //!
 //! Error shape (JSON-RPC error object, task §4):
-//!   { "code": -32000, "message": "<human text>", "data": { "conduit_code": "<code>" } }
+//!   { "code": -32000, "message": "<human text>", "data": { "relay_code": "<code>" } }
 //! Codes: not_found, nav_failure, timeout, browser_unavailable, invalid_args,
 //! pane_not_found, unknown_op, action_failed.
 
@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 /// Default WebSocket port — kept in sync with `browser::BROWSER_MCP_PORT` in
-/// the app. Overridable via `CONDUIT_WS_PORT` (the registration always sets
+/// the app. Overridable via `RELAY_WS_PORT` (the registration always sets
 /// it, so drift is impossible in practice).
 const DEFAULT_WS_PORT: u16 = 7681;
 
@@ -39,11 +39,11 @@ fn main() {
 }
 
 async fn run() {
-    let port: u16 = std::env::var("CONDUIT_WS_PORT")
+    let port: u16 = std::env::var("RELAY_WS_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_WS_PORT);
-    let project_id = std::env::var("CONDUIT_PROJECT_ID").ok();
+    let project_id = std::env::var("RELAY_PROJECT_ID").ok();
     let url = format!("ws://127.0.0.1:{port}/");
 
     // Lazily connect to the app; reconnect if the socket drops (the app may
@@ -93,12 +93,12 @@ async fn connect(url: &str) -> Result<WsConn, String> {
         .await
         .map_err(|e| format!("ws connect failed: {e}"))?;
     let (mut write, read) = stream.split();
-    // Send the MCP auth token as the first text frame. The Conduit app
+    // Send the MCP auth token as the first text frame. The Relay app
     // generates a random token at startup and exposes it via the
-    // CONDUIT_MCP_AUTH_TOKEN env var. If missing, the WS server rejects
+    // RELAY_MCP_AUTH_TOKEN env var. If missing, the WS server rejects
     // the connection — this is expected when running standalone without
-    // the Conduit app.
-    let token = std::env::var("CONDUIT_MCP_AUTH_TOKEN").unwrap_or_default();
+    // the Relay app.
+    let token = std::env::var("RELAY_MCP_AUTH_TOKEN").unwrap_or_default();
     let auth_msg = serde_json::json!({"auth": token});
     write
         .send(Message::Text(serde_json::to_string(&auth_msg).unwrap()))
@@ -179,7 +179,7 @@ async fn handle_line(
             "id": id,
             "result": {
                 "protocolVersion": "2024-11-05",
-                "serverInfo": { "name": "conduit-browser-mcp", "version": "0.1.0" },
+                "serverInfo": { "name": "relay-browser-mcp", "version": "0.1.0" },
                 "capabilities": { "tools": {} }
             }
         }),
@@ -212,7 +212,7 @@ async fn handle_line(
 }
 
 /// Map an MCP tool name to the WS op the app dispatches. Browser tools keep
-/// their bare op names; conduit-tools live under a `conduit_tools:<name>`
+/// their bare op names; relay-tools live under a `relay_tools:<name>`
 /// prefix so the app-side dispatcher can route them to
 /// chat::tools::execute_tool (which receives the name back).
 fn tool_op(tool: &str) -> Result<String, &'static str> {
@@ -224,7 +224,7 @@ fn tool_op(tool: &str) -> Result<String, &'static str> {
         | "new_tab" | "close_tab" | "zoom" | "print_to_pdf" => Ok(tool.to_string()),
         "generate_document" | "generate_diagram" | "generate_file"
         | "plan_document" | "revise_document"
-        | "get_skill" | "list_skills" | "list_artifacts" | "search_docs" | "get_capabilities" => Ok(format!("conduit_tools:{tool}")),
+        | "get_skill" | "list_skills" | "list_artifacts" | "search_docs" | "get_capabilities" => Ok(format!("relay_tools:{tool}")),
         _ => Err("unknown tool"),
     }
 }
@@ -268,7 +268,7 @@ async fn handle_tool_call(
     if let Some(err) = resp.get("error") {
         let code = err.get("code").and_then(|v| v.as_str()).unwrap_or("action_failed");
         let message = err.get("message").and_then(|v| v.as_str()).unwrap_or("unknown error");
-        // Map the app's conduit code into a static-code + message pair.
+        // Map the app's relay code into a static-code + message pair.
         let static_code = match code {
             "not_found" => "not_found",
             "nav_failure" => "nav_failure",
@@ -288,7 +288,7 @@ async fn handle_tool_call(
     Ok(serde_json::to_string_pretty(ok).unwrap_or_else(|_| "ok".into()))
 }
 
-/// JSON-RPC error response with a `conduit_code` data field.
+/// JSON-RPC error response with a `relay_code` data field.
 fn error_response(id: Option<Value>, code: &str, message: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
@@ -296,7 +296,7 @@ fn error_response(id: Option<Value>, code: &str, message: &str) -> Value {
         "error": {
             "code": -32000,
             "message": message,
-            "data": { "conduit_code": code }
+            "data": { "relay_code": code }
         }
     })
 }
@@ -312,7 +312,7 @@ fn tool_schemas() -> Vec<Value> {
     vec![
         json!({
             "name": "navigate",
-            "description": "Navigate the in-app browser pane to a URL. This is NOT an external browser — the page loads in the Conduit window's visible pane. Auto-opens a pane if none exists. Use this (not fetch_url) when the user asks to browse, open a website, search, or interact with a web page. ALSO use it to preview a web app you just built: a static app (HTML/CSS/JS on disk) needs NO server — navigate straight to its index.html via a file:/// URL (e.g. file:///C:/proj/index.html); only framework dev servers (vite/next/…) need to be started first (background task), then navigate to http://localhost:PORT. After navigating, call read_page to see what's on the page.",
+            "description": "Navigate the in-app browser pane to a URL. This is NOT an external browser — the page loads in the Relay window's visible pane. Auto-opens a pane if none exists. Use this (not fetch_url) when the user asks to browse, open a website, search, or interact with a web page. ALSO use it to preview a web app you just built: a static app (HTML/CSS/JS on disk) needs NO server — navigate straight to its index.html via a file:/// URL (e.g. file:///C:/proj/index.html); only framework dev servers (vite/next/…) need to be started first (background task), then navigate to http://localhost:PORT. After navigating, call read_page to see what's on the page.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -645,13 +645,13 @@ fn tool_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "generate_document",
-            "description": "Create a REAL, professionally formatted docx/pptx/xlsx/pdf file in the artifacts dir. Use this instead of hand-building office files with python. Args: format ('docx'|'pptx'|'xlsx'|'pdf'), filename, code (a complete runnable Python program that saves the built document to os.environ['CONDUIT_OUTPUT']).",
+            "description": "Create a REAL, professionally formatted docx/pptx/xlsx/pdf file in the artifacts dir. Use this instead of hand-building office files with python. Args: format ('docx'|'pptx'|'xlsx'|'pdf'), filename, code (a complete runnable Python program that saves the built document to os.environ['RELAY_OUTPUT']).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "format": { "type": "string", "enum": ["docx", "pptx", "xlsx", "pdf"] },
                     "filename": { "type": "string" },
-                    "code": { "type": "string", "description": "Complete runnable Python program (python-docx/python-pptx/openpyxl/reportlab, or conduit_docgen) that builds the document and saves it to os.environ['CONDUIT_OUTPUT']. Not natural-language instructions." },
+                    "code": { "type": "string", "description": "Complete runnable Python program (python-docx/python-pptx/openpyxl/reportlab, or relay_docgen) that builds the document and saves it to os.environ['RELAY_OUTPUT']. Not natural-language instructions." },
                     "instructions": { "type": "string" }
                 },
                 "required": ["format", "filename", "code"]
@@ -774,7 +774,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_schemas_include_conduit_tools() {
+    fn tool_schemas_include_relay_tools() {
         let schemas = tool_schemas();
         let names: Vec<&str> = schemas
             .iter()
@@ -799,15 +799,15 @@ mod tests {
     }
 
     #[test]
-    fn conduit_tool_routing_uses_tools_namespace() {
-        assert_eq!(tool_op("generate_document").unwrap(), "conduit_tools:generate_document");
+    fn relay_tool_routing_uses_tools_namespace() {
+        assert_eq!(tool_op("generate_document").unwrap(), "relay_tools:generate_document");
         // The plan-compiled design path is reachable from harnesses too.
-        assert_eq!(tool_op("plan_document").unwrap(), "conduit_tools:plan_document");
-        assert_eq!(tool_op("revise_document").unwrap(), "conduit_tools:revise_document");
-        assert_eq!(tool_op("search_docs").unwrap(), "conduit_tools:search_docs");
+        assert_eq!(tool_op("plan_document").unwrap(), "relay_tools:plan_document");
+        assert_eq!(tool_op("revise_document").unwrap(), "relay_tools:revise_document");
+        assert_eq!(tool_op("search_docs").unwrap(), "relay_tools:search_docs");
         assert_eq!(tool_op("navigate").unwrap(), "navigate"); // browser tools unchanged
         // New browser tools keep their bare op names (dispatched in
-        // browser_mcp::dispatch) — never the conduit_tools namespace.
+        // browser_mcp::dispatch) — never the relay_tools namespace.
         for tool in ["history", "hover", "evaluate", "click_and_wait"] {
             assert_eq!(tool_op(tool).unwrap(), tool, "expected bare op for {tool}");
         }

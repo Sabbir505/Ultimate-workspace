@@ -128,7 +128,7 @@ pub async fn run_code(language: &str, code: &str) -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!("conduit_exec_{nanos}"));
+    let dir = std::env::temp_dir().join(format!("relay_exec_{nanos}"));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return format!("Error: could not create work dir: {e}");
     }

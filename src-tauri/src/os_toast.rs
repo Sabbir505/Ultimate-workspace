@@ -11,7 +11,6 @@
 //! build type.
 
 #[cfg(windows)]
-use tauri::Manager;
 
 /// Raise an OS toast bearing the app identity. Windows only; other platforms
 /// keep using the notification plugin (see src/lib/notify.ts).
@@ -68,7 +67,7 @@ fn ensure_aumid_registered(aumid: &str, display_name: &str, icon_uri: &str) -> R
 /// asset guaranteed to exist on every build type.
 #[cfg(windows)]
 fn ensure_icon_file(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let dir = crate::user_dirs::app_data_dir(app);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("toast-icon.png");
     if !path.exists() {
@@ -116,13 +115,13 @@ mod tests {
         let info = reader.next_frame(&mut buf).expect("decode png");
         let rgba = &buf[..info.buffer_size()];
 
-        let icon_path = std::env::temp_dir().join("conduit-toast-icon.png");
+        let icon_path = std::env::temp_dir().join("relay-toast-icon.png");
         write_png(&icon_path, rgba, info.width, info.height).expect("write png");
         let icon_uri = url::Url::from_file_path(&icon_path)
             .expect("icon uri")
             .to_string();
 
-        let aumid = "dev.conduit.app";
+        let aumid = "dev.relay.app";
         ensure_aumid_registered(aumid, "Relay", &icon_uri).expect("register aumid");
         tauri_winrt_notification::Toast::new(aumid)
             .title("Relay")

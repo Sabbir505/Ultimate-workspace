@@ -445,7 +445,7 @@ export default function SettingsScreen() {
             <View style={[styles.divider, { backgroundColor: c.border }]} />
             <View style={styles.aboutRow}>
               <Text style={[styles.aboutLabel, { color: c.text }]}>App</Text>
-              <Text style={[styles.aboutValue, { color: c.textSecondary }]}>Conduit Mobile</Text>
+              <Text style={[styles.aboutValue, { color: c.textSecondary }]}>Relay Mobile</Text>
             </View>
           </View>
         </View>

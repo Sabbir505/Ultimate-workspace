@@ -546,13 +546,13 @@ pub fn emit_plan_step_progress<R: tauri::Runtime>(
 }
 
 /// Escape hatch for the SSRF guard in `download_task`: when
-/// `CONDUIT_ALLOW_PRIVATE_DOWNLOADS` is set in the APP's environment, the
+/// `RELAY_ALLOW_PRIVATE_DOWNLOADS` is set in the APP's environment, the
 /// download task may reach loopback/private hosts. Two legitimate uses: LAN
 /// model mirrors (a real deployment pattern for local models) and the unit
 /// tests' loopback fixture server. Read from the app's OWN env at request
 /// time — untrusted child processes (agent harnesses, shells) cannot set it.
 fn private_downloads_allowed() -> bool {
-    std::env::var_os("CONDUIT_ALLOW_PRIVATE_DOWNLOADS").is_some()
+    std::env::var_os("RELAY_ALLOW_PRIVATE_DOWNLOADS").is_some()
 }
 
 /// Stream a download to `dest` with resume + retry. Writes chunks straight
@@ -604,7 +604,7 @@ async fn download_task<R: tauri::Runtime>(
             .unwrap_or_else(|| "part".to_string()),
     );
     let client = reqwest::Client::builder()
-        .user_agent(concat!("Conduit/", env!("CARGO_PKG_VERSION"), " (desktop; +https://conduit.app)"))
+        .user_agent(concat!("Relay/", env!("CARGO_PKG_VERSION"), " (desktop; +https://conduit.app)"))
         // NO blanket .timeout() here: reqwest's request timeout covers the
         // whole body stream, so any download slower than size/timeout can
         // never finish (multi-GB model weights). Bound connection setup only,
@@ -1163,7 +1163,7 @@ mod tests {
     fn download_streams_to_disk_with_progress() {
         // The fixture serves on 127.0.0.1, which the SSRF guard refuses —
         // opt out for tests (process-global, idempotent).
-        std::env::set_var("CONDUIT_ALLOW_PRIVATE_DOWNLOADS", "1");
+        std::env::set_var("RELAY_ALLOW_PRIVATE_DOWNLOADS", "1");
         let body: &'static [u8] = &[0u8; 1024 * 1024 * 2];
         let url = tauri::async_runtime::block_on(serve(body, true, Duration::ZERO));
         
@@ -1192,7 +1192,7 @@ mod tests {
 
     #[test]
     fn download_resumes_from_existing_part() {
-        std::env::set_var("CONDUIT_ALLOW_PRIVATE_DOWNLOADS", "1");
+        std::env::set_var("RELAY_ALLOW_PRIVATE_DOWNLOADS", "1");
         let body: &'static [u8] = &[7u8; 1024 * 1024];
         let url = tauri::async_runtime::block_on(serve(body, true, Duration::ZERO));
         
@@ -1222,7 +1222,7 @@ mod tests {
 
     #[test]
     fn cancel_keeps_part_file_for_resume() {
-        std::env::set_var("CONDUIT_ALLOW_PRIVATE_DOWNLOADS", "1");
+        std::env::set_var("RELAY_ALLOW_PRIVATE_DOWNLOADS", "1");
         // 64KiB chunks at 5ms each ≈ 5s of streaming — guaranteed still
         // in flight when the test cancels.
         let body: &'static [u8] = &[0u8; 1024 * 1024 * 64];
@@ -1257,7 +1257,7 @@ mod tests {
     fn shell_captures_output_and_exit_code() {
 
         let tm = TaskManager::new();
-        let cmd = if cfg!(windows) { "echo conduit-shell-test" } else { "echo conduit-shell-test" };
+        let cmd = if cfg!(windows) { "echo relay-shell-test" } else { "echo relay-shell-test" };
         let id = tm.start_shell(None::<&tauri::AppHandle>, "sid1", cmd, None, None);
         let mut final_state = String::new();
         for _ in 0..200 {
@@ -1269,7 +1269,7 @@ mod tests {
             }
         }
         assert!(final_state.contains("completed"), "got: {final_state}");
-        assert!(final_state.contains("conduit-shell-test"), "output must be captured: {final_state}");
+        assert!(final_state.contains("relay-shell-test"), "output must be captured: {final_state}");
         assert!(final_state.contains("exit 0"), "exit code must be reported: {final_state}");
     }
 

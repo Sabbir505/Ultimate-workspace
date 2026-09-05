@@ -71,7 +71,7 @@ pub async fn connect_all(
     let mut out = Vec::new();
     for id in connector_ids {
         let Some(cfg) = connector_by_id(id) else {
-            eprintln!("[conduit:connectors] unknown connector id `{id}` — skipping");
+            eprintln!("[relay:connectors] unknown connector id `{id}` — skipping");
             continue;
         };
         // REST fallbacks: Google's MCP service layer denies every `tools/call`
@@ -93,7 +93,7 @@ pub async fn connect_all(
                     Ok(t) => t,
                     Err(e) => {
                         eprintln!(
-                            "[conduit:connectors] {id} tools/list failed: {e} — attaching with no tools"
+                            "[relay:connectors] {id} tools/list failed: {e} — attaching with no tools"
                         );
                         Vec::new()
                     }
@@ -122,7 +122,7 @@ pub async fn connect_all(
             Err(e) => {
                 if fallback_defs.is_empty() {
                     eprintln!(
-                        "[conduit:connectors] {id} connect failed: {e} — skipping for this turn"
+                        "[relay:connectors] {id} connect failed: {e} — skipping for this turn"
                     );
                     continue;
                 }
@@ -130,7 +130,7 @@ pub async fn connect_all(
                 // exists) — attach WITHOUT a session so the local REST tools
                 // still reach the model.
                 eprintln!(
-                    "[conduit:connectors] {id} has no reachable MCP server ({e}) — attaching local fallback tools only"
+                    "[relay:connectors] {id} has no reachable MCP server ({e}) — attaching local fallback tools only"
                 );
                 let mut map = HashMap::new();
                 let mut fallback = std::collections::HashSet::new();

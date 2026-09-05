@@ -1,8 +1,8 @@
-# Build & release Conduit for Windows (NSIS).
+# Build & release Relay for Windows (NSIS).
 #
 # Triggers on tag push (v*) or manual dispatch. The job:
 # 1. Installs Tauri system deps.
-# 2. Builds the conduit-browser-mcp sidecar + stages it.
+# 2. Builds the relay-browser-mcp sidecar + stages it.
 # 3. Builds the Tauri bundle (npm run tauri build), producing an unsigned
 #    (Windows) installer.
 # 4. Uploads the bundle as a workflow artifact.
@@ -12,7 +12,7 @@
 # GitHub Release. The installer + `latest.json` are attached as release assets.
 #
 # Required secrets (settings → Secrets and variables → Actions):
-#   TAURI_SIGNING_PRIVATE_KEY          - contents of .tauri/conduit-update.key
+#   TAURI_SIGNING_PRIVATE_KEY          - contents of .tauri/relay-update.key
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD - empty string (signer is invoked -p "")
 
 name: Build & Release
@@ -116,13 +116,13 @@ jobs:
         working-directory: src-tauri
         run: |
           New-Item -ItemType Directory -Force "binaries" | Out-Null
-          New-Item -ItemType File -Force "binaries/conduit-browser-mcp-x86_64-pc-windows-msvc.exe" | Out-Null
-          New-Item -ItemType File -Force "binaries/conduit-automation-x86_64-pc-windows-msvc.exe" | Out-Null
+          New-Item -ItemType File -Force "binaries/relay-browser-mcp-x86_64-pc-windows-msvc.exe" | Out-Null
+          New-Item -ItemType File -Force "binaries/relay-automation-x86_64-pc-windows-msvc.exe" | Out-Null
 
       - name: Build browser-mcp sidecar
         working-directory: src-tauri
         run: |
-          cargo build --release --bin conduit-browser-mcp
+          cargo build --release --bin relay-browser-mcp
           node ../scripts/stage-browser-mcp.mjs
 
       # Headless automation runner (the "Run while closed" Task Scheduler
@@ -130,7 +130,7 @@ jobs:
       - name: Build automation sidecar
         working-directory: src-tauri
         run: |
-          cargo build --release --bin conduit-automation
+          cargo build --release --bin relay-automation
           node ../scripts/stage-automation.mjs
 
       - name: Build (do NOT set signing env vars — the release job signs)
@@ -173,9 +173,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .tauri
-          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > .tauri/conduit-update.key
-          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" > .tauri/conduit-update.key.password
-          chmod 600 .tauri/conduit-update.key
+          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > .tauri/relay-update.key
+          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" > .tauri/relay-update.key.password
+          chmod 600 .tauri/relay-update.key
 
       - name: Sign + generate latest.json
         # npm run release:latest-json expects the bundle at

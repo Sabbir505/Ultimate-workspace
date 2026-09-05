@@ -3,7 +3,9 @@
 //! Design: the SQLite `project_secrets` table only ever stores the *key names*
 //! (plus a small marker blob); the actual values live in the OS keychain
 //! (Windows Credential Manager / macOS Keychain) under service
-//! `dev.conduit.app`, account `conduit:<project_id>:<key>`.
+//! `dev.relay.app`, account `relay:<project_id>:<key>`. Entries written by
+//! pre-rebrand builds (service `dev.conduit.app`, accounts `conduit:…`) are
+//! read as a fallback and cleaned up on delete.
 //!
 //! Why this split: keychain entries are the encrypted-at-rest source of truth
 //! (the PRD's preferred approach), while the table gives us cheap per-project
@@ -18,12 +20,12 @@
 //! when the caller passes `injectSecretsProjectId` — and are never logged.
 //!
 //! Chat API keys use a separate app-scoped namespace: account
-//! `conduit:chat:<provider>` under service `dev.conduit.app`. These keys are
+//! `relay:chat:<provider>` under service `dev.relay.app`. These keys are
 //! NEVER returned to the frontend via any IPC command — they are only read
 //! by the Rust backend for outbound HTTP requests.
 //!
 //! Connector OAuth tokens use a third app-scoped namespace: account
-//! `conduit:connector:<connector_id>:<field>` where `<field>` is
+//! `relay:connector:<connector_id>:<field>` where `<field>` is
 //! `access_token` or `refresh_token`. Only the Rust backend ever reads them
 //! (to authorize calls to the connector's remote MCP server); the frontend
 //! only ever learns the *metadata* (expiry, scopes, account name) via the
@@ -33,13 +35,25 @@ use rusqlite::Connection;
 
 use crate::db;
 
-const SERVICE_NAME: &str = "dev.conduit.app";
+const SERVICE_NAME: &str = "dev.relay.app";
+
+/// Keychain service under which entries were written before the identifier
+/// rebrand (`dev.conduit.app`, accounts `conduit:…`, and briefly `relay:…`).
+/// Read as a fallback and cleaned up on delete — never newly written.
+const LEGACY_SERVICE_NAME: &str = "dev.conduit.app";
+
+/// Pre-rebrand account name for `account` (entries were written as
+/// `conduit:…` under the same service before 0.4). Used as a read-side
+/// fallback and for removal cleanup only — nothing new is written under it.
+fn legacy_of(account: &str) -> String {
+    account.replacen("relay:", "conduit:", 1)
+}
 
 /// Marker written to `value_encrypted` when the real value is in the keychain.
 const KEYRING_MARKER: &[u8] = b"keyring:v1";
 
 fn account(project_id: &str, key: &str) -> String {
-    format!("conduit:{project_id}:{key}")
+    format!("relay:{project_id}:{key}")
 }
 
 pub fn set_secret(conn: &Connection, project_id: &str, key: &str, value: &str) -> Result<(), String> {
@@ -85,9 +99,40 @@ pub fn secrets_for_injection(
 
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod platform {
-    use super::{account, KEYRING_MARKER, SERVICE_NAME};
+    use super::{
+        account, legacy_of, KEYRING_MARKER, LEGACY_SERVICE_NAME, SERVICE_NAME,
+    };
     use keyring::Entry;
     use rusqlite::Connection;
+
+    fn read_entry(service: &str, account: &str) -> Option<String> {
+        Entry::new(service, account)
+            .ok()?
+            .get_password()
+            .ok()
+    }
+
+    /// Reads the newest generation first and falls back to the pre-rebrand
+    /// generations so existing installs keep working without a keychain
+    /// migration; new writes always use the current service + account.
+    fn read_entry_either(account: impl Fn() -> String) -> Option<String> {
+        let account = account();
+        read_entry(SERVICE_NAME, &account)
+            .or_else(|| read_entry(LEGACY_SERVICE_NAME, &account))
+            .or_else(|| read_entry(LEGACY_SERVICE_NAME, &legacy_of(&account)))
+    }
+
+    fn remove_entry(service: &str, account: &str) {
+        if let Ok(entry) = Entry::new(service, account) {
+            let _ = entry.delete_credential();
+        }
+    }
+
+    fn remove_all_generations(account: &str) {
+        remove_entry(SERVICE_NAME, account);
+        remove_entry(LEGACY_SERVICE_NAME, account);
+        remove_entry(LEGACY_SERVICE_NAME, &legacy_of(account));
+    }
 
     pub fn store(project_id: &str, key: &str, value: &str) -> Result<(), String> {
         Entry::new(SERVICE_NAME, &account(project_id, key))
@@ -97,14 +142,11 @@ mod platform {
     }
 
     pub fn load(_conn: &Connection, project_id: &str, key: &str) -> Option<String> {
-        let entry = Entry::new(SERVICE_NAME, &account(project_id, key)).ok()?;
-        entry.get_password().ok()
+        read_entry_either(|| account(project_id, key))
     }
 
     pub fn remove(project_id: &str, key: &str) {
-        if let Ok(entry) = Entry::new(SERVICE_NAME, &account(project_id, key)) {
-            let _ = entry.delete_credential();
-        }
+        remove_all_generations(&account(project_id, key));
     }
 
     /// The table row is only a name registry on keychain platforms.
@@ -122,14 +164,11 @@ mod platform {
     }
 
     pub fn chat_load(_conn: &Connection, provider: &str) -> Option<String> {
-        let entry = Entry::new(SERVICE_NAME, &super::chat_account(provider)).ok()?;
-        entry.get_password().ok()
+        read_entry_either(|| super::chat_account(provider))
     }
 
     pub fn chat_remove(_conn: &Connection, provider: &str) {
-        if let Ok(entry) = Entry::new(SERVICE_NAME, &super::chat_account(provider)) {
-            let _ = entry.delete_credential();
-        }
+        remove_all_generations(&super::chat_account(provider));
     }
 
     // ---- Connector OAuth tokens (app-scoped, per-field keychain entries) ----
@@ -151,17 +190,11 @@ mod platform {
         connector_id: &str,
         field: &str,
     ) -> Option<String> {
-        let entry =
-            Entry::new(SERVICE_NAME, &super::connector_account(connector_id, field)).ok()?;
-        entry.get_password().ok()
+        read_entry_either(|| super::connector_account(connector_id, field))
     }
 
     pub fn connector_remove(_conn: &Connection, connector_id: &str, field: &str) {
-        if let Ok(entry) =
-            Entry::new(SERVICE_NAME, &super::connector_account(connector_id, field))
-        {
-            let _ = entry.delete_credential();
-        }
+        remove_all_generations(&super::connector_account(connector_id, field));
     }
 
     // ---- Arbitrary app-scoped namespace/key store ----
@@ -183,14 +216,11 @@ mod platform {
         namespace: &str,
         key: &str,
     ) -> Option<String> {
-        let entry = Entry::new(SERVICE_NAME, &super::generic_account(namespace, key)).ok()?;
-        entry.get_password().ok()
+        read_entry_either(|| super::generic_account(namespace, key))
     }
 
     pub fn generic_remove(_conn: &Connection, namespace: &str, key: &str) {
-        if let Ok(entry) = Entry::new(SERVICE_NAME, &super::generic_account(namespace, key)) {
-            let _ = entry.delete_credential();
-        }
+        remove_all_generations(&super::generic_account(namespace, key));
     }
 }
 
@@ -396,7 +426,7 @@ fn _account_used(project_id: &str, key: &str) -> String {
 // ---- Chat API key store (app-scoped, separate from per-project secrets) ----
 
 fn chat_account(provider: &str) -> String {
-    format!("conduit:chat:{provider}")
+    format!("relay:chat:{provider}")
 }
 
 /// Store a chat provider API key in the OS keychain. The value is NEVER
@@ -426,7 +456,7 @@ pub fn delete_chat_api_key(conn: &Connection, provider: &str) -> Result<(), Stri
 // ---- Connector OAuth token store (app-scoped, third namespace) ----
 
 fn connector_account(connector_id: &str, field: &str) -> String {
-    format!("conduit:connector:{connector_id}:{field}")
+    format!("relay:connector:{connector_id}:{field}")
 }
 
 /// Store a connector OAuth token field (`access_token` / `refresh_token`) in
@@ -464,7 +494,7 @@ pub fn delete_connector_tokens(conn: &Connection, connector_id: &str) -> Result<
 // the other stores, values are kept out of the SQLite table on platforms
 // with a real keychain and obfuscated as a last-resort fallback.
 fn generic_account(namespace: &str, key: &str) -> String {
-    format!("conduit:{namespace}:{key}")
+    format!("relay:{namespace}:{key}")
 }
 
 /// Store an arbitrary app-scoped secret in the OS keychain (or the
@@ -508,15 +538,15 @@ mod tests {
         let project = db::list_projects(&conn).unwrap().remove(0);
         // On keychain platforms this writes to the real OS keychain under a
         // throwaway account; acceptable for a unit test, and cleaned up after.
-        set_secret(&conn, &project.id, "CONDUIT_TEST_KEY", "test-value").unwrap();
+        set_secret(&conn, &project.id, "RELAY_TEST_KEY", "test-value").unwrap();
         let keys = list_secret_keys(&conn, &project.id).unwrap();
-        assert_eq!(keys, vec!["CONDUIT_TEST_KEY"]);
+        assert_eq!(keys, vec!["RELAY_TEST_KEY"]);
         let injected = secrets_for_injection(&conn, &project.id).unwrap();
         assert_eq!(
             injected,
-            vec![("CONDUIT_TEST_KEY".to_string(), "test-value".to_string())]
+            vec![("RELAY_TEST_KEY".to_string(), "test-value".to_string())]
         );
-        delete_secret(&conn, &project.id, "CONDUIT_TEST_KEY").unwrap();
+        delete_secret(&conn, &project.id, "RELAY_TEST_KEY").unwrap();
         assert!(list_secret_keys(&conn, &project.id).unwrap().is_empty());
     }
 }

@@ -541,7 +541,7 @@ export function Sidebar() {
                                       title={
                                         c.worktreePath
                                           ? `Isolated worktree (${c.worktreePath}). Click to join the main working tree.`
-                                          : "Isolate this chat in its own git worktree (branch conduit/<id>)"
+                                          : "Isolate this chat in its own git worktree (branch relay/<id>)"
                                       }
                                       aria-label={
                                         c.worktreePath ? "Join main working tree" : "Isolate in worktree"

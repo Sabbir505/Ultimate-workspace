@@ -52,7 +52,7 @@ function ckpt(over: Partial<ChatCheckpoint> = {}): ChatCheckpoint {
     id: 11,
     chatSessionId: "s1",
     messageId: 7,
-    refName: "refs/conduit/checkpoints/s1/11",
+    refName: "refs/relay/checkpoints/s1/11",
     treeSha: "abc",
     repoPath: "D:/repo",
     files: [

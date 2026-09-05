@@ -91,7 +91,7 @@ describe("newChat: worktree-per-session default", () => {
   it("fires ensure for a new chat on a git project and patches state", async () => {
     useProjectsStore.setState({ projects: [project("p1")] });
     createChatSessionMock.mockResolvedValue(session("s1", { projectId: "p1" }));
-    ensureChatSessionWorktreeMock.mockResolvedValue("D:/proj/p1-conduit-abc12345");
+    ensureChatSessionWorktreeMock.mockResolvedValue("D:/proj/p1-relay-abc12345");
 
     await useChatStore.getState().newChat("openai", "m", "p1");
 
@@ -99,7 +99,7 @@ describe("newChat: worktree-per-session default", () => {
     // later microtask, so wait for the spy.
     await waitFor(() => expect(ensureChatSessionWorktreeMock).toHaveBeenCalledWith("s1"));
     await waitFor(() => {
-      expect(useChatStore.getState().sessions[0]?.worktreePath).toBe("D:/proj/p1-conduit-abc12345");
+      expect(useChatStore.getState().sessions[0]?.worktreePath).toBe("D:/proj/p1-relay-abc12345");
     });
   });
 
@@ -134,13 +134,13 @@ describe("newChat: worktree-per-session default", () => {
   it("does not re-fire ensure for a session that already has a worktree", async () => {
     useProjectsStore.setState({ projects: [project("p1")] });
     createChatSessionMock.mockResolvedValue(
-      session("s1", { projectId: "p1", worktreePath: "D:/proj/p1-conduit-xyz" }),
+      session("s1", { projectId: "p1", worktreePath: "D:/proj/p1-relay-xyz" }),
     );
 
     await useChatStore.getState().newChat("openai", "m", "p1");
 
     expect(ensureChatSessionWorktreeMock).not.toHaveBeenCalled();
-    expect(useChatStore.getState().sessions[0]?.worktreePath).toBe("D:/proj/p1-conduit-xyz");
+    expect(useChatStore.getState().sessions[0]?.worktreePath).toBe("D:/proj/p1-relay-xyz");
   });
 });
 
@@ -148,7 +148,7 @@ describe("send cwd resolution prefers the worktree", () => {
   it("sends a harness turn with the worktree as cwd", async () => {
     useProjectsStore.setState({ projects: [project("p1")], selectedProjectId: null });
     useChatStore.setState({
-      sessions: [session("s1", { projectId: "p1", worktreePath: "D:/proj/p1-conduit-abc", agent: "harness:claude_code" })],
+      sessions: [session("s1", { projectId: "p1", worktreePath: "D:/proj/p1-relay-abc", agent: "harness:claude_code" })],
       activeChatSessionId: "s1",
       messages: [],
       sessionProjects: { s1: "p1" },
@@ -157,14 +157,14 @@ describe("send cwd resolution prefers the worktree", () => {
     await useChatStore.getState().sendMessage("run tests");
 
     expect(sendAgentChatMessageMock).toHaveBeenCalledWith(
-      "s1", "run tests", "claude_code", "m", "D:/proj/p1-conduit-abc", undefined, undefined,
+      "s1", "run tests", "claude_code", "m", "D:/proj/p1-relay-abc", undefined, undefined,
     );
   });
 
   it("custom-folder override still wins over the worktree", async () => {
     useProjectsStore.setState({ projects: [project("p1")], selectedProjectId: null });
     useChatStore.setState({
-      sessions: [session("s1", { projectId: "p1", worktreePath: "D:/proj/p1-conduit-abc", agent: "harness:claude_code" })],
+      sessions: [session("s1", { projectId: "p1", worktreePath: "D:/proj/p1-relay-abc", agent: "harness:claude_code" })],
       activeChatSessionId: "s1",
       messages: [],
       sessionProjects: { s1: "p1" },
@@ -183,7 +183,7 @@ describe("send cwd resolution prefers the worktree", () => {
     useChatStore.setState({
       sessions: [
         session("a"),
-        session("b", { projectId: "p1", worktreePath: "D:/proj/p1-conduit-b", agent: "harness:kimi_code" }),
+        session("b", { projectId: "p1", worktreePath: "D:/proj/p1-relay-b", agent: "harness:kimi_code" }),
       ],
       activeChatSessionId: "a",
       messages: [],
@@ -193,7 +193,7 @@ describe("send cwd resolution prefers the worktree", () => {
     await useChatStore.getState().broadcastToSessions(["b"], "hello");
 
     expect(sendAgentChatMessageMock).toHaveBeenCalledWith(
-      "b", "hello", "kimi_code", "m", "D:/proj/p1-conduit-b", undefined,
+      "b", "hello", "kimi_code", "m", "D:/proj/p1-relay-b", undefined,
     );
   });
 });
@@ -201,7 +201,7 @@ describe("send cwd resolution prefers the worktree", () => {
 describe("toggleSessionWorktree", () => {
   it("joins the main working tree when isolated", async () => {
     useChatStore.setState({
-      sessions: [session("s1", { projectId: "p1", worktreePath: "D:/proj/p1-conduit-abc" })],
+      sessions: [session("s1", { projectId: "p1", worktreePath: "D:/proj/p1-relay-abc" })],
     });
 
     await useChatStore.getState().toggleSessionWorktree("s1");
@@ -213,13 +213,13 @@ describe("toggleSessionWorktree", () => {
   it("isolates when not yet isolated", async () => {
     useProjectsStore.setState({ projects: [project("p1")] });
     useChatStore.setState({ sessions: [session("s1", { projectId: "p1" })] });
-    ensureChatSessionWorktreeMock.mockResolvedValue("D:/proj/p1-conduit-abc");
+    ensureChatSessionWorktreeMock.mockResolvedValue("D:/proj/p1-relay-abc");
 
     await useChatStore.getState().toggleSessionWorktree("s1");
 
     expect(ensureChatSessionWorktreeMock).toHaveBeenCalledWith("s1");
     await waitFor(() => {
-      expect(useChatStore.getState().sessions[0]?.worktreePath).toBe("D:/proj/p1-conduit-abc");
+      expect(useChatStore.getState().sessions[0]?.worktreePath).toBe("D:/proj/p1-relay-abc");
     });
   });
 });
@@ -227,9 +227,9 @@ describe("toggleSessionWorktree", () => {
 describe("unbind clears the worktree locally", () => {
   it("drops projectId AND worktreePath from the session row", async () => {
     useChatStore.setState({
-      sessions: [session("s1", { projectId: "p1", worktreePath: "D:/proj/p1-conduit-abc" })],
+      sessions: [session("s1", { projectId: "p1", worktreePath: "D:/proj/p1-relay-abc" })],
       sessionProjects: { s1: "p1" },
-      cwdOverrides: { s1: "D:/proj/p1-conduit-abc" },
+      cwdOverrides: { s1: "D:/proj/p1-relay-abc" },
     });
 
     useChatStore.getState().unbindProject("s1");
@@ -286,7 +286,7 @@ describe("WorktreeNudgeBanner (migration nudge)", () => {
       sessions: [session("old1", { projectId: "p1" })],
       activeChatSessionId: "old1",
     });
-    ensureChatSessionWorktreeMock.mockResolvedValue("D:/proj/p1-conduit-old1");
+    ensureChatSessionWorktreeMock.mockResolvedValue("D:/proj/p1-relay-old1");
 
     render(<WorktreeNudgeBanner />);
     const isolate = await screen.findByRole("button", { name: "Isolate this chat" });

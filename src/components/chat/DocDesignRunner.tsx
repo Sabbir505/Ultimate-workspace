@@ -95,7 +95,7 @@ export function DocDesignRunner() {
 
     const messageHandler = (event: MessageEvent) => {
       const data = event.data as (RunnerResult & { source?: string; requestId?: string }) | null;
-      if (!data || data.source !== "conduit-docgen") return;
+      if (!data || data.source !== "relay-docgen") return;
       if (!pendingRef.current || data.requestId !== pendingRef.current.requestId) return;
       settle({ ok: data.ok, base64: data.base64, error: data.error });
     };
@@ -255,7 +255,7 @@ export function DocDesignRunner() {
           timerRef.current = window.setTimeout(() => {
             settle({
               ok: false,
-              error: `the compiled program did not call conduit.save within ${RUN_TIMEOUT_MS / 1000}s`,
+              error: `the compiled program did not call relay.save within ${RUN_TIMEOUT_MS / 1000}s`,
             });
           }, RUN_TIMEOUT_MS);
         } catch (err) {

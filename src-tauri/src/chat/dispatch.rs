@@ -64,7 +64,7 @@ fn emit_chunk(app: &AppHandle, sid: &str, token: &str, full: &mut String, record
 }
 
 /// Setting key for the user-configured artifacts directory (Settings →
-/// Storage & Data). Empty/unset = default `<Documents>/Conduit`.
+/// Storage & Data). Empty/unset = default `<Documents>/Relay`.
 pub(crate) const ARTIFACTS_DIR_SETTING_KEY: &str = "storage.artifactsDir";
 
 /// Resolve the user-configured artifacts directory from the DB setting.
@@ -84,7 +84,7 @@ pub(crate) fn configured_artifacts_dir(conn: &rusqlite::Connection) -> Option<st
 }
 
 /// Directory where generated artifacts are written: the configured
-/// `storage.artifactsDir` when set, else `<Documents>/Conduit` (falling back
+/// `storage.artifactsDir` when set, else `<Documents>/Relay` (falling back
 /// to home, then temp). Created if missing.
 pub(crate) fn artifacts_dir(app: &AppHandle) -> std::path::PathBuf {
     if let Some(db) = app.try_state::<crate::DbState>() {
@@ -102,7 +102,7 @@ pub(crate) fn artifacts_dir(app: &AppHandle) -> std::path::PathBuf {
         .document_dir()
         .or_else(|_| app.path().home_dir())
         .unwrap_or_else(|_| std::env::temp_dir());
-    base.join("Conduit")
+    crate::user_dirs::branded_dir(&base)
 }
 
 /// The absolute target path a filesystem tool call intends to act on, used

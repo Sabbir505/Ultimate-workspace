@@ -9,7 +9,7 @@
 //!     the same struct that decides the tool schema, so the report can never
 //!     disagree with what the model can actually call.
 //!   * [`app_capabilities_report`] — app-level truth for harness CLIs
-//!     (Claude Code / Kimi / OpenCode) arriving through the `conduit-tools`
+//!     (Claude Code / Kimi / OpenCode) arriving through the `relay-tools`
 //!     MCP relay: every connected connector, installed/enabled MCP-gallery
 //!     server, the in-app browser MCP surface, and the skill catalog.
 //!
@@ -115,7 +115,7 @@ pub fn capabilities_report(caps: &ToolCaps) -> String {
     serde_json::to_string_pretty(&report).unwrap_or_else(|_| format!("{{\"note\":\"{NOTE}\"}}"))
 }
 
-/// App-level report for harness CLIs via the `conduit-tools` MCP relay.
+/// App-level report for harness CLIs via the `relay-tools` MCP relay.
 /// Unlike [`capabilities_report`] there is no per-turn attachment state here
 /// (harness sessions register connectors into their CLI config at spawn), so
 /// it reports what the APP has connected/installed overall.
@@ -177,9 +177,9 @@ config; do not probe them with shell commands.",
         },
         "in_app_browser": {
             "available": browser_live,
-            "how": "the conduit-browser MCP server (tools prefixed mcp__conduit-browser__)",
+            "how": "the relay-browser MCP server (tools prefixed mcp__relay-browser__)",
         },
-        "conduit_tools": [
+        "relay_tools": [
             "generate_document", "generate_diagram", "generate_file",
             "get_skill", "list_skills", "search_docs", "get_capabilities",
         ],

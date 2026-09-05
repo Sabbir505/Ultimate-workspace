@@ -75,7 +75,7 @@ describe("InlineDiagram", () => {
     expect(sandbox).toContain("allow-scripts");
     expect(sandbox).not.toContain("allow-same-origin");
     // The postMessage resize reporter is injected into the document…
-    expect(frame.getAttribute("srcdoc")).toContain("__conduitInlineVizHeight");
+    expect(frame.getAttribute("srcdoc")).toContain("__relayInlineVizHeight");
     // …the page's own script survives (live, not sanitized)…
     expect(frame.getAttribute("srcdoc")).toContain("function go()");
     // …and no chip fallback happened.
@@ -94,14 +94,14 @@ describe("InlineDiagram", () => {
     });
 
     // A runaway page reports a huge height — the frame clamps at 520px.
-    fireEvent(window, new MessageEvent("message", { data: { __conduitInlineVizHeight: 9000 } }));
+    fireEvent(window, new MessageEvent("message", { data: { __relayInlineVizHeight: 9000 } }));
     await waitFor(() => {
       const h = (container.querySelector("iframe.chat-live-viz-frame") as HTMLElement).style.height;
       expect(h).toBe("520px");
     });
 
     // Below the floor clamps up to 120px.
-    fireEvent(window, new MessageEvent("message", { data: { __conduitInlineVizHeight: 20 } }));
+    fireEvent(window, new MessageEvent("message", { data: { __relayInlineVizHeight: 20 } }));
     await waitFor(() => {
       const h = (container.querySelector("iframe.chat-live-viz-frame") as HTMLElement).style.height;
       expect(h).toBe("120px");

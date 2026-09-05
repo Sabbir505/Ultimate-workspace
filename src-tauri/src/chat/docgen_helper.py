@@ -1,4 +1,4 @@
-"""conduit_docgen — editorial, frontier-quality styled document builders.
+"""relay_docgen — editorial, frontier-quality styled document builders.
 
 Auto-placed on the Python path for every ``generate_document`` run. Import it to
 produce professionally designed DOCX, PPTX and PDF files (the kind of output
@@ -16,9 +16,9 @@ deliverable from a dated "corporate template"):
 * Real list formatting (Word list styles / PowerPoint bullet XML), never literal
   "•" characters glued onto text.
 
-Everything saves to the path in the ``CONDUIT_OUTPUT`` environment variable.
+Everything saves to the path in the ``RELAY_OUTPUT`` environment variable.
 
-    import conduit_docgen as cd
+    import relay_docgen as cd
     doc = cd.Doc(title="Quarterly Review", subtitle="FY2025 · Q2",
                  theme="ink", author="Acme Analytics")
     doc.heading("Overview"); doc.paragraph("...")
@@ -134,7 +134,7 @@ def _theme(name):
 
 
 def _out_path(fallback):
-    return os.environ.get("CONDUIT_OUTPUT", fallback)
+    return os.environ.get("RELAY_OUTPUT", fallback)
 
 
 def _today():

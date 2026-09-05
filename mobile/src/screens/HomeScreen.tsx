@@ -239,7 +239,7 @@ export default function HomeScreen() {
       <View style={[styles.header, { backgroundColor: c.surface, borderBottomColor: c.border }]}>
         <View style={styles.headerLeft}>
           <Zap size={24} color={theme.colors.primary} />
-          <Text style={[styles.headerTitle, { color: c.text }]}>Conduit</Text>
+          <Text style={[styles.headerTitle, { color: c.text }]}>Relay</Text>
         </View>
         <View style={styles.headerRight}>
           <ConnectionIndicator connected={connected} size={10} />

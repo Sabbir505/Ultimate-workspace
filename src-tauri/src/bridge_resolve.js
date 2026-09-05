@@ -26,10 +26,10 @@
     var tagged = [];
     for (var i = 0; i < els.length; i++) {
         var el = els[i];
-        if (el.getAttribute && el.getAttribute('data-conduit-overlay') !== null) continue;
+        if (el.getAttribute && el.getAttribute('data-relay-overlay') !== null) continue;
         var r = el.getBoundingClientRect();
         if (r.width === 0 || r.height === 0) continue;
-        el.setAttribute('data-conduit-ref', String(tagged.length));
+        el.setAttribute('data-relay-ref', String(tagged.length));
         var label = (el.innerText || el.textContent || el.value ||
             el.getAttribute('aria-label') || el.getAttribute('placeholder') ||
             el.getAttribute('name') || '').trim().replace(/\s+/g, ' ').slice(0, 120);
@@ -52,9 +52,9 @@
     if (direct) {
         // Find its ref (it may not be in the interactive set if it's e.g. a div
         // with onclick — but querySelector matched it, so tag it now).
-        var refAttr = direct.getAttribute('data-conduit-ref');
+        var refAttr = direct.getAttribute('data-relay-ref');
         if (refAttr === null) {
-            direct.setAttribute('data-conduit-ref', String(tagged.length));
+            direct.setAttribute('data-relay-ref', String(tagged.length));
             tagged.push({
                 el: direct,
                 ref: tagged.length,

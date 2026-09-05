@@ -1,4 +1,4 @@
-/* Conduit global styles — aggregator only.
+/* Relay global styles — aggregator only.
    The old 11k-line monolith was split by feature area on 2026-08-15
    (PERFORMANCE_AUDIT.md item 2 follow-up). Import order below preserves the
    original cascade exactly — append new feature files at the END unless a

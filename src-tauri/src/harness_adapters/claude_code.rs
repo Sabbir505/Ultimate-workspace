@@ -1,7 +1,7 @@
 //! Claude Code (Anthropic) adapter.
 //!
 //! Resume architecture: Claude Code persists sessions to disk as JSONL files
-//! under `~/.claude/projects/<cwd-slug>/`, so Conduit only needs the session id
+//! under `~/.claude/projects/<cwd-slug>/`, so Relay only needs the session id
 //! to resurrect a pane later via `claude --resume <id>` — no process needs to
 //! stay resident while a pane is unfocused/closed.
 //!
@@ -319,7 +319,7 @@ mod usage_tests {
         // at it via a cwd whose slug maps there is not feasible without HOME
         // override — so test the summing logic through a real file in the
         // system temp dir using the parser's file path directly.
-        let dir = std::env::temp_dir().join(format!("conduit-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("relay-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("s1.jsonl");
         let mut f = std::fs::File::create(&file).unwrap();

@@ -197,7 +197,7 @@ export async function restoreLayout(projectId: string): Promise<boolean> {
       // without them (serializePanes no longer emits them).
     } catch (err) {
       // One bad pane (deleted session, missing cwd, …) never blocks the rest.
-      console.warn("[conduit] workspace restore skipped a pane:", err);
+      console.warn("[relay] workspace restore skipped a pane:", err);
     }
   }
 
@@ -274,7 +274,7 @@ export async function initWorkspacePersistence(): Promise<void> {
     restoredThisRun.add(projectId);
     restorePending.add(projectId);
     void restoreLayout(projectId)
-      .catch((err) => console.warn("[conduit] workspace restore failed:", err))
+      .catch((err) => console.warn("[relay] workspace restore failed:", err))
       .finally(() => restorePending.delete(projectId));
   };
 

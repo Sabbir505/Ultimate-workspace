@@ -270,7 +270,7 @@ mod tests {
     fn parse_kimi_session_usage_separates_cache() {
         // Verify the four cache/reasoning components are tracked separately in
         // parse_session_usage, mirroring the summing logic.
-        let dir = std::env::temp_dir().join(format!("conduit-kimi-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("relay-kimi-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("wire.jsonl");
         std::fs::write(

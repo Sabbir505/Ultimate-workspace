@@ -682,7 +682,7 @@ mod tests {
     #[test]
     #[ignore = "writes fixtures to /tmp for external validation"]
     fn write_fixtures_for_validation() {
-        let dir = std::path::Path::new("/tmp/conduit_art");
+        let dir = std::path::Path::new("/tmp/relay_art");
         std::fs::create_dir_all(dir).unwrap();
         generate(dir, "pdf", "sample", Some("Sample Report"), "First line.\nSecond line — with an em dash and “quotes”.\nThird.").unwrap();
         generate(dir, "docx", "sample", Some("Sample Doc"), "Paragraph one.\nParagraph two.").unwrap();

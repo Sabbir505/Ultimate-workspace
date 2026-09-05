@@ -308,7 +308,7 @@ export function BrowserPane({ pane, visible = true }: Props) {
       })
       .catch((err) => {
         const msg = typeof err === "string" ? err : err?.message ?? String(err);
-        console.warn(`[conduit] browser_create failed for tab ${tabId}, using iframe fallback: ${msg}`);
+        console.warn(`[relay] browser_create failed for tab ${tabId}, using iframe fallback: ${msg}`);
         setTabStates((prev) => {
           const next = new Map(prev);
           const existing = next.get(tabId);
@@ -701,7 +701,7 @@ export function BrowserPane({ pane, visible = true }: Props) {
         return nextMap;
       });
       void browserNavigateTab(paneId, activeTabId, next).catch((err) => {
-        console.warn("[conduit] browser_navigate failed", err);
+        console.warn("[relay] browser_navigate failed", err);
         setTabStates((prev) => {
           const nextMap = new Map(prev);
           const existing = nextMap.get(activeTabId);

@@ -30,7 +30,7 @@ pub fn set_setting(key: String, value: String, db: State<DbState>) -> CmdResult<
     db::set_setting(&conn, &key, &value).map_err(|e| e.to_string())
 }
 
-/// Absolute path of the chat database. Defaults to `<app data dir>/conduit.db`,
+/// Absolute path of the chat database. Defaults to `<app data dir>/relay.db`,
 /// overridable via `storage.dbDir` (Settings → Data) — the directory is read at
 /// startup and on every `set_chat_db_dir` call.
 #[tauri::command]
@@ -48,7 +48,7 @@ pub const CHAT_DB_DIR_SETTING_KEY: &str = "storage.dbDir";
 /// Move the chat database to a new directory (or back to the app data dir when
 /// `None`). The DB is checkpointed, copied to the destination, and the live
 /// connection is swapped in place — no restart required. The destination
-/// directory is created if missing; an existing `conduit.db` there is
+/// directory is created if missing; an existing `relay.db` there is
 /// overwritten only after a backup-free move (the user picked this location).
 ///
 /// ASYNC on purpose: the file copy + full reopen (which runs all migrations)
@@ -69,19 +69,14 @@ pub async fn set_chat_db_dir(
             let d = d.trim();
             if d.is_empty() {
                 // Empty string = reset to the app-data default.
-                app.path()
-                    .app_data_dir()
-                    .map_err(|e| format!("no app data dir: {e}"))?
+                crate::user_dirs::app_data_dir(&app)
             } else {
                 std::path::PathBuf::from(d)
             }
         }
-        None => app
-            .path()
-            .app_data_dir()
-            .map_err(|e| format!("no app data dir: {e}"))?,
+        None => crate::user_dirs::app_data_dir(&app),
     };
-    let target = target_dir.join("conduit.db");
+    let target = crate::db::db_file_in(&target_dir);
 
     // Same location → nothing to do (still update the setting so a blank
     // override is cleared).
@@ -368,7 +363,7 @@ pub fn export_session_markdown(pane_id: String, pty: State<PtyState>) -> CmdResu
         .0
         .transcript(&pane_id)
         .ok_or_else(|| format!("no transcript for pane {pane_id}"))?;
-    let mut md = String::from("# Conduit Session Transcript\n\n");
+    let mut md = String::from("# Relay Session Transcript\n\n");
     md.push_str("```text\n");
     md.push_str(transcript.trim_end());
     md.push_str("\n```\n");
@@ -410,15 +405,14 @@ pub fn read_file_text(path: String, app: AppHandle, db: State<DbState>) -> CmdRe
 }
 
 /// Check that `path` is under at least one registered project root, or
-/// under the Tauri app data directory (for Conduit-internal files like
+/// under the Tauri app data directory (for Relay-internal files like
 /// artifact exports). Case-insensitive on Windows.
 fn is_path_allowed(path: &Path, app: &AppHandle, db: &DbState) -> bool {
-    // Allow anything under the app data dir (Conduit's own artifacts/config).
-    if let Ok(data_dir) = app.path().app_data_dir() {
-        if let Ok(data_canon) = data_dir.canonicalize() {
-            if crate::util::path_starts_with_ci(path, &data_canon) {
-                return true;
-            }
+    // Allow anything under the app data dir (Relay's own artifacts/config).
+    let data_dir = crate::user_dirs::app_data_dir(app);
+    if let Ok(data_canon) = data_dir.canonicalize() {
+        if crate::util::path_starts_with_ci(path, &data_canon) {
+            return true;
         }
     }
     // Allow anything under a registered project root.
@@ -471,12 +465,17 @@ fn is_path_allowed(path: &Path, app: &AppHandle, db: &DbState) -> bool {
         }
     }
     drop(conn);
-    // Allow anything under the user's Documents/Conduit dir (artifact exports).
+    // Allow anything under the user's Documents/Relay dir (artifact exports),
+    // plus the pre-rebrand Documents/Conduit so old artifacts stay exportable.
     if let Some(docs_dir) = dirs::document_dir() {
-        let conduit_docs = docs_dir.join("Conduit");
-        if let Ok(docs_canon) = conduit_docs.canonicalize() {
-            if crate::util::path_starts_with_ci(path, &docs_canon) {
-                return true;
+        for candidate in [
+            crate::user_dirs::branded_dir(&docs_dir),
+            docs_dir.join("Conduit"),
+        ] {
+            if let Ok(canon) = candidate.canonicalize() {
+                if crate::util::path_starts_with_ci(path, &canon) {
+                    return true;
+                }
             }
         }
     }
@@ -538,7 +537,7 @@ pub fn pop_out_chat(app: AppHandle, session_id: String) -> CmdResult<()> {
     }
     let url = format!("index.html?popout=chat&session={session_id}");
     WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App(url.into()))
-        .title("Conduit — Chat")
+        .title("Relay — Chat")
         .inner_size(720.0, 820.0)
         .min_inner_size(420.0, 480.0)
         .resizable(true)

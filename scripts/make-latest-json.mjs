@@ -30,7 +30,7 @@ const conf = JSON.parse(readFileSync(join(root, "src-tauri/tauri.conf.json"), "u
 const version = conf.version;
 const repo = "Sabbir505/Ultimate-workspace";
 const bundleDir = join(root, "src-tauri/target/release/bundle");
-const keyPath = join(root, ".tauri/conduit-update.key");
+const keyPath = join(root, ".tauri/relay-update.key");
 
 // --- parse args ---
 const args = process.argv.slice(2);

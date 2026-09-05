@@ -44,7 +44,7 @@ export async function safeInvoke<T>(cmd: string, args?: Record<string, unknown>)
   if (!tauriAvailable()) {
     // Outside Tauri there is no backend; resolve with a benign empty value so
     // bootstrap code and tests don't explode. Callers treat null as "empty".
-    console.warn(`[conduit] invoke("${cmd}") skipped — Tauri runtime not available`);
+    console.warn(`[relay] invoke("${cmd}") skipped — Tauri runtime not available`);
     return null as T;
   }
   return invoke<T>(cmd, args);
@@ -58,7 +58,7 @@ export async function safeListen<T>(
   try {
     return await listen<T>(event, (e) => handler(e.payload));
   } catch (err) {
-    console.warn(`[conduit] listen("${event}") failed`, err);
+    console.warn(`[relay] listen("${event}") failed`, err);
     return () => {};
   }
 }
@@ -76,7 +76,7 @@ function errorDetail(err: unknown): string | undefined {
 
 export function toastError(message: string, err?: unknown): void {
   const detail = errorDetail(err);
-  if (detail) console.warn(`[conduit] ${message}:`, detail);
+  if (detail) console.warn(`[relay] ${message}:`, detail);
   useUiStore.getState().pushToast("error", message, detail);
 }
 
@@ -902,7 +902,7 @@ export interface ChatSession {
   projectId?: string | null;
   /** Per-session isolated git worktree (roadmap P0 §3.1.1). null/undefined =
    *  the chat works in its bound project's working tree; a path = the chat's
-   *  isolated git worktree (sibling of the project, branch `conduit/<id>`),
+   *  isolated git worktree (sibling of the project, branch `relay/<id>`),
    *  which becomes its working dir for sends/spawns/diffs. */
   worktreePath?: string | null;
   /** Legacy per-session permission posture — superseded by the dual
@@ -1802,7 +1802,7 @@ export const countAutomationRuns = (automationId: string) =>
 
 // ---- Run while closed (Task Scheduler) + finish notifications ----
 
-/** Whether the global "ConduitAutomations" Task Scheduler entry is
+/** Whether the global "RelayAutomations" Task Scheduler entry is
  *  registered (the task itself is the source of truth). */
 export const getRunWhileClosed = () => safeInvoke<boolean>("get_run_while_closed");
 /** Register/unregister the global run-due task. Errors on non-Windows. */
@@ -2284,7 +2284,7 @@ export const emitMobileSessionChatEvent = (
     .then(({ emit }) =>
       emit("mobile:session_chat_event", { session_id: sessionId, kind, payload }),
     )
-    .catch((err) => console.warn("[conduit] emitMobileSessionChatEvent failed", err));
+    .catch((err) => console.warn("[relay] emitMobileSessionChatEvent failed", err));
 };
 
 export interface ChatOwnerPayload {

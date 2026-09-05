@@ -74,7 +74,7 @@ new_head = """    /// Build the underlying webview and return a uniform `Browser
                 .path()
                 .app_data_dir()
                 .map(|d| d.join("webview2"))
-                .unwrap_or_else(|_| std::path::PathBuf::from("conduit-webview2"));
+                .unwrap_or_else(|_| std::path::PathBuf::from("relay-webview2"));
 
             let (done_tx, done_rx) = mpsc::channel::<Result<(), String>>();
             let done: DoneHandle = std::sync::Arc::new(Mutex::new(Some(done_tx)));

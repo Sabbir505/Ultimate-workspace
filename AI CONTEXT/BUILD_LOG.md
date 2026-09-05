@@ -1,6 +1,6 @@
-# Conduit Build Log
+# Relay Build Log
 
-> **Naming note:** This log refers to the project as "Conduit" because most entries predate the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The build progress, test coverage, and design decisions are unchanged; the name has. See `README.md` and `AI CONTEXT/RELEASE.md`.
+> **Naming note:** This log refers to the project as "Relay" because most entries predate the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The build progress, test coverage, and design decisions are unchanged; the name has. See `README.md` and `AI CONTEXT/RELEASE.md`.
 
 Running log per PRD §13.3: what was built, what was tested and how, assumptions/deviations, known issues.
 
@@ -21,11 +21,11 @@ honest about the resulting tool/skill counts and the perf-metrics schema.
   line to decide whether to issue another continuation turn. Frontend
   chip + `LoopState` machine in `state/chat.ts`.
 - **Browser MCP tool expansion** (`feat/browser-agent-tools`): the
-  `conduit-browser-mcp` binary previously advertised the original six
+  `relay-browser-mcp` binary previously advertised the original six
   browser ops (navigate / read_page / click / type_text / scroll /
   wait_for); it now advertises **10 browser ops** — the six plus
   `screenshot`, `history` (back|forward), `hover`, `evaluate`,
-  `click_and_wait` — plus **5 conduit tools** (`generate_document` /
+  `click_and_wait` — plus **5 relay tools** (`generate_document` /
   `generate_diagram` / `generate_file` / `get_skill` / `list_skills`).
   `click_and_wait` snaps the pre-click URL and polls for nav/selector/
   network_idle in one round-trip; `evaluate` runs page JS and returns a
@@ -82,7 +82,7 @@ flagged. All 379 lib tests now pass.
   `browser_type`/`browser_scroll`/`browser_screenshot`.
 - `AI_CONTEXT.md` — `Last verified: 2026-08-07` → `2026-08-14`; the
   "Tools (32)" line got `browser_screenshot`/`Task`; the
-  `conduit-browser-mcp` section now lists all 10 browser ops + 5 conduit
+  `relay-browser-mcp` section now lists all 10 browser ops + 5 relay
   tools (was "Six tools: navigate / read_page / click / type_text /
   scroll / wait_for"); built-in skills file-map row gained `goal-loop-
   skill.md` and the 6-skill slug list; `chat_messages` schema row gained
@@ -94,19 +94,19 @@ flagged. All 379 lib tests now pass.
   built-in skills are served from the Rust backend now).
 - `PROJECT_OVERVIEW.md` — `29 tools` → `32 tools` (SVG header, narrative,
   file-map row); `browser_mcp.rs` row clarified to enumerate the 10
-  browser ops + 5 conduit tools (was "relay tool whitelist"); added
+  browser ops + 5 relay tools (was "relay tool whitelist"); added
   built-in skill list (`docx`/`pptx`/`pdf`/`diagram` + `goal`/`loop`) to
   the `installed_skills.rs` row.
 - `installed_skills.rs` doc comments — "The four built-in skills" →
   "Six today" with the goal/loop note; the slash-command enumeration
   gained `/goal`, `/loop`.
-- `task-conduit-browser-mcp.md` — the original task proposal enumerated
+- `task-relay-browser-mcp.md` — the original task proposal enumerated
   only six tools and used `type` (shipped as `type_text`) plus a
   two-value `read_page` mode (`interactive|content`); left as a
   historical document, but see this entry for the current surface.
 
 **Verification:** `npx tsc --noEmit` clean; `cargo build --lib` +
-`cargo build --bin conduit-browser-mcp` clean; `cargo test --lib` →
+`cargo build --bin relay-browser-mcp` clean; `cargo test --lib` →
 **379 passed, 0 failed**; `npx vitest run src/test/goalLoop.test.ts` →
 19 passed.
 
@@ -150,7 +150,7 @@ the frontend would not compile.
    caller sees the real startup error.
 2. Routing is by content, not extension: `.jsx` → browser; `.html` is
    classified via `readArtifactPreview` — a diagram (`kind "diagram"`, i.e.
-   starts with the `<!-- conduit:diagram -->` marker) stays in the Canvas
+   starts with the `<!-- relay:diagram -->` marker) stays in the Canvas
    preview (pan/zoom + PNG/SVG export), a plain webpage (`kind "html"`) goes
    to the browser so its scripts run. SVG renders inline in the chat bubble.
    Classification failure / `null` defaults to Canvas.
@@ -166,7 +166,7 @@ the frontend would not compile.
 Harness chat sessions never saw connected connectors: the built-in chat
 attaches them in-process (`connectors::session::connect_all`), but the CLI
 harnesses only read static MCP config at spawn — and the generated bundle
-registered only `conduit-browser` + `conduit-tools`. API-key and local-GGUF
+registered only `relay-browser` + `relay-tools`. API-key and local-GGUF
 chat worked, harnesses didn't.
 
 **What was built:**
@@ -182,7 +182,7 @@ chat worked, harnesses didn't.
   Kimi flavor `{ url, headers }` (HTTP inferred from `url`; no `type` field),
   OpenCode `{ "type": "remote", url, headers, "oauth": false }` (`oauth:
   false` keeps OpenCode from starting its own OAuth flow on token expiry —
-  refresh is Conduit's job, done per spawn). Claude and Kimi `mcp.json`
+  refresh is Relay's job, done per spawn). Claude and Kimi `mcp.json`
   contents are now generated per-flavor (previously one shared document).
 - **Plumbing**: `send_agent_chat_message` is now async; it snapshots the
   connectors before the sync spawn path and threads them through
@@ -209,9 +209,9 @@ chat worked, harnesses didn't.
 
 **Follow-up (same day) — project-less sessions:** the bundle no longer
 requires a selected project. `resolve_harness_bundle` falls back to a
-`_no_project` slug when `project_id` is `None`, so connectors + conduit-tools
+`_no_project` slug when `project_id` is `None`, so connectors + relay-tools
 reach the CLI in every harness session (previously a project-less spawn got
-NO Conduit MCP config at all — the CLI fell back to the user's own Claude
+NO Relay MCP config at all — the CLI fell back to the user's own Claude
 plugin config, which read as "connectors not detected"). Tradeoff: browser
 panes and artifacts of all project-less sessions share the `_no_project`
 scope. `build_instructions_md` / `build_claude_settings_json` tolerate an
@@ -229,7 +229,7 @@ empty project path (no bogus "project is at ``" sentence, empty
 2. **Generated files never surfaced as artifacts in harness sessions when a
    project was selected or `storage.artifactsDir` was customized** — the
    harness `DirWatch` only diffed the spawn dir (project path), but the
-   conduit-tools MCP (`mcp_tools_bridge`) always writes into
+   relay-tools MCP (`mcp_tools_bridge`) always writes into
    `dispatch::artifacts_dir` (the configured/default folder). Files landed
    outside the watched dir → no artifact row, no `chat:artifact` event, no
    canvas auto-open, no sidebar entry. Fix: `turn_watch_dirs()` watches BOTH
@@ -346,7 +346,7 @@ itself is the `PermissionModeMenu` / `ApprovalFlow` removal in favor of the
 - §6 file map updated to include the new backend modules
   (`harness_bundle.rs`, `harness_config.rs`, `agent_sessions.rs`,
   `automations.rs`, `mcp_tools_bridge.rs`, `commands/automation_cmds.rs`,
-  `db/automations.rs`, `bin/conduit_automation.rs`) and the new frontend
+  `db/automations.rs`, `bin/relay_automation.rs`) and the new frontend
   files.
 - `CONTRACT.md`: new types (`Automation`, `AutomationInput`,
   `AutomationRun`, `HarnessModelInfo`, `HarnessModelConfig`,
@@ -544,7 +544,7 @@ Complete `src-tauri/src/` backend per PRD §6.2 and CONTRACT.md:
 
 ```
 src-tauri/src/
-├── main.rs                     # thin entry -> conduit_lib::run()
+├── main.rs                     # thin entry -> relay_lib::run()
 ├── lib.rs                      # app builder: plugins (dialog/notification/fs), state,
 │                               #   window vibrancy (apply_blur on Windows, apply_vibrancy
 │                               #   on macOS, cfg-gated), exit cleanup via app.run callback
@@ -594,7 +594,7 @@ all events (`pty:output`, `pty:exit`, `pty:state`, `session:harness-id`,
   - git helpers: `parse_ahead_behind` (left/right -> behind/ahead),
     worktree path sanitization, non-repo graceful status
   - secrets round-trip (on keychain platforms this exercises the real OS
-    keychain with a throwaway `CONDUIT_TEST_KEY` entry, cleaned up after)
+    keychain with a throwaway `RELAY_TEST_KEY` entry, cleaned up after)
 - Interactive flows (real pty spawn against installed `claude`/`kimi`, glass
   rendering, xterm wiring) are NOT automatable here and remain to be manually
   verified once the frontend lands — see "Known issues / follow-ups".
@@ -825,7 +825,7 @@ src/
 
 - Full independent verification pass: `cargo test` → **34/34 passed**; `npm test` → **55/55 passed**; `npm run build` → clean. Contract cross-check: all 40 commands registered in `invoke_handler`, all 5 events emitted and listened on both sides.
 - Toolchain: rustup + VS 2022 Build Tools (C++) installed via winget during this session; rustc 1.97.1 repaired after a partial winget install.
-- **`npm run tauri dev` launched**: Vite on http://localhost:1420 (HTTP 200), app binary compiled and `conduit.exe` running (~43 MB RSS at idle — in line with §8 expectations vs Electron).
+- **`npm run tauri dev` launched**: Vite on http://localhost:1420 (HTTP 200), app binary compiled and `relay.exe` running (~43 MB RSS at idle — in line with §8 expectations vs Electron).
 - **Manual verification still outstanding** (needs human eyes on the running app): real `claude`/`kimi` spawn-and-resume in a pane, acrylic blur rendering through the transparent CSS, pane state glow transitions, splitter dragging, OS notifications, and the placeholder app icon (replace `src-tauri/icons/` before release).
 
 ## Session: Windows `.cmd` shim fix (harness detection/spawn)
@@ -846,12 +846,12 @@ src/
 
 - **UNC cwd bug:** opening an agent session failed with `CMD.EXE was started with the above path as the current directory. UNC paths are not supported` — `add_project` stored `std::fs::canonicalize` output, which on Windows is a `\?\D:\...` extended-length path that cmd.exe (our `.cmd`-shim wrapper) rejects as cwd. Fixes: new `util::strip_unc_prefix` applied in `add_project`, at the pty spawn choke point (defense in depth), plus a DB migration (`db::migrate_unc_paths`) rewriting existing `projects.path` / `sessions.worktree_path` rows in place. Unit-tested (incl. real `\server\share` UNC passthrough).
 - **Terminal copy/paste:** xterm `attachCustomKeyEventHandler` — Ctrl+Shift+C copies selection, bare Ctrl+C copies when a selection exists (SIGINT otherwise), Ctrl+Shift+V (and Cmd+V on macOS) pastes clipboard text into the pty.
-- **Browser urlbar layout bug (found via Playwright repro against vite :1420):** `.browser-urlbar` had `flex: 1`, making it a flex-grow sibling of `.pane-body` — the URL bar consumed 50% of the browser pane height (geometry: 398px urlbar / 398px frame). Fixed to `flex: 0 0 auto` + padding; post-fix geometry: 35px urlbar / 762px frame. Added a dev-only `window.__conduit` store handle in `main.tsx` (import.meta.env.DEV gated) to make such UI repros scriptable; `.debug/` gitignored.
+- **Browser urlbar layout bug (found via Playwright repro against vite :1420):** `.browser-urlbar` had `flex: 1`, making it a flex-grow sibling of `.pane-body` — the URL bar consumed 50% of the browser pane height (geometry: 398px urlbar / 398px frame). Fixed to `flex: 0 0 auto` + padding; post-fix geometry: 35px urlbar / 762px frame. Added a dev-only `window.__relay` store handle in `main.tsx` (import.meta.env.DEV gated) to make such UI repros scriptable; `.debug/` gitignored.
 - **Verification:** `cargo test` → **37/37**; `npm test` → **66/66**; `npm run build` clean (added missing `src/vite-env.d.ts` for `import.meta.env` typing). Dev server auto-rebuilt; verified live in the running app.
 
 ## Session: session-resume fix + browser omnibox
 
-- **Root cause of "resume starts a fresh session":** two stacked bugs. (1) The Kimi adapter spawned `kimi -r <id>` — a flag that DOES NOT EXIST in Kimi CLI (verified `kimi --help` v0.27.0: resume is `-S, --session [id]`), so both resume and the output-scrape regex (which expected `kimi -r` hints the CLI never prints) were dead. (2) `harness_session_id` was NULL for every stored session (confirmed by inspecting conduit.db), compounded by the earlier UNC bug which ran harnesses in `C:\Windows` so Claude session files landed in the wrong project dir.
+- **Root cause of "resume starts a fresh session":** two stacked bugs. (1) The Kimi adapter spawned `kimi -r <id>` — a flag that DOES NOT EXIST in Kimi CLI (verified `kimi --help` v0.27.0: resume is `-S, --session [id]`), so both resume and the output-scrape regex (which expected `kimi -r` hints the CLI never prints) were dead. (2) `harness_session_id` was NULL for every stored session (confirmed by inspecting relay.db), compounded by the earlier UNC bug which ran harnesses in `C:\Windows` so Claude session files landed in the wrong project dir.
 - **Fixes:** resume command is now `kimi --session <id>`; scrape regex matches `-S/--session`; new trait method `find_session_id_on_disk` with implementations for Claude (`~/.claude/projects/<slug>/*.jsonl`, existing) and Kimi (NEW: scans `~/.kimi-code/session_index.jsonl` bottom-up for the newest entry whose workDir matches the pane cwd, guarded by session-dir mtime >= spawn). The pty monitor probe is now adapter-generic (was Claude-only). Id format verified end-to-end: `kimi export session_<uuid>` accepts exactly the `sessionId` string from the index.
 - **Browser omnibox:** URL bar now distinguishes host-looking input (scheme, localhost, IPv4, anything with a dot and no spaces → navigate) from search queries (→ DuckDuckGo). Caveat: search engines typically send X-Frame-Options, so results may refuse to embed — the pane's "didn't respond" overlay offers open-externally in that case.
 - **Known limitation:** two panes spawned in the same cwd within the probe window can cross-attribute the newest session-index entry (edge case, v1 accepted). Sessions created BEFORE this fix have no harness id and will always spawn fresh — only new sessions are resumable.
@@ -1020,16 +1020,16 @@ src/
   match schema, re-exports complete, imports correct, tests reach helpers).
   Zero findings.
 - **Live integration test:** started a frontend-only `vite` dev server (NOT
-  `tauri dev` — never restart the conduit app per session constraint) and drove
+  `tauri dev` — never restart the relay app per session constraint) and drove
   the running UI with Playwright (`.debug/live_test_refactor.py`, gitignored).
   Verified: app boots clean, toolbar + PaneGrid empty state render, adding a
   browser pane mounts it through the consolidated IPC + memoized PaneFrame
   path (iframe fallback engages since no Tauri runtime), `closePane` disposes
   + removes the pane end-to-end (`disposePaneResources` works), chat module
-  imports intact, `window.__conduit` dev handle present. Zero refactor-
+  imports intact, `window.__relay` dev handle present. Zero refactor-
   introduced console errors (the lone X-Frame-Options iframe refusal is the
   known pre-existing frontend-only limitation, not a regression). Stopped the
-  vite server after; conduit app untouched.
+  vite server after; relay app untouched.
 - **Verification:** `npm run build` clean; `npm test` → **83/83**; `cargo test`
   → **74/74 (1 ignored)**; lib warnings 6 (all pre-existing, outside db/).
 
@@ -1122,7 +1122,7 @@ src/
   prompt tells the model to emit diagrams as ` ```mermaid ` fenced blocks.
 - **`generate_diagram` tool:** a new tool (`tools.rs`: `GENERATE_DIAGRAM` const)
   that writes a self-contained HTML/CSS diagram to the artifacts directory. The
-  file is prepended with `<!-- conduit:diagram -->` sentinel marker and validated
+  file is prepended with `<!-- relay:diagram -->` sentinel marker and validated
   by `validate_diagram_html` (structural check: document skeleton, no scripts/
   iframes, no external resources, balanced tags, non-empty body). Issues are fed
   back so the model can self-correct. Registered in `openai_tool_specs` and
@@ -1184,12 +1184,12 @@ src/
     events + `UpdateInfo` type); the pane-kill and session-title rules now
     reflect LRU replacement and the chat-mode LLM title generator.
   - `skills/diagram-html-svg-skill.md`: removed the "Default to Mermaid for
-    simpler diagrams" guidance — Conduit does not use Mermaid; every diagram goes
+    simpler diagrams" guidance — Relay does not use Mermaid; every diagram goes
     through `generate_diagram`. Also dropped the stale void-black `#08080C`
     canvas claim (the app migrated to the warm Claude-Code palette; the inline
     diagram canvas is white) and re-centered the structure pattern on SVG
     `<rect>`/`<text>` primitives.
-  - `skills/pdf-skill.md`: added Path 0 — the pre-installed `conduit_docgen`
+  - `skills/pdf-skill.md`: added Path 0 — the pre-installed `relay_docgen`
     helper (`cd.Pdf(...)`) for styled PDFs without the `soffice` conversion step.
 - **Test counts as of this entry:** `npm test` → **105/105** (14 files);
   `cargo test` count not re-run this session (last logged 74/74, 1 ignored — the
@@ -1292,7 +1292,7 @@ pipeline anchored on Mozilla's readability.js:
   fixed/sticky overlays with high z-index, `[role=dialog]`, known consent
   IDs/classes, regex-matches button text for accept/reject, removes when no
   button found).
-- Interactive-element tagging (preserves `data-conduit-ref` scheme for
+- Interactive-element tagging (preserves `data-relay-ref` scheme for
   `browser_click`/`browser_type` compatibility).
 - Readability parse: `new Readability(document.cloneNode(true)).parse()`.
 - HTML-to-Markdown converter: h1-h6, paragraphs, lists, tables, blockquotes,
@@ -1414,7 +1414,7 @@ nav/ad/footer and preserves headings/lists; cookie-consent banner
 auto-dismissed (accept button clicked, banner text excluded); `summary_only`
 returns a smaller payload + outline; `section` mode returns only the targeted
 heading's content; paywall page returns `failureReason: "paywalled"`; the
-`data-conduit-ref` element map is populated (click/type/scroll regression).
+`data-relay-ref` element map is populated (click/type/scroll regression).
 
 **Test counts after verification fixes:** `cargo test --lib` 170/170 pass,
 0 fail, 9 ignored. `scripts/verify_extract.cjs` 20/20 pass. The live-site
@@ -1614,18 +1614,18 @@ growing content string (same as the old flat `parseSegments` path).
   emitting a result string). Reserved so a future backend field flows into
   the step disclosure with zero frontend changes.
 
-## 2026-07-26 — Agent-driven browser control (conduit-browser-mcp + visual feedback)
+## 2026-07-26 — Agent-driven browser control (relay-browser-mcp + visual feedback)
 
 ### What was built
 
 Two companion features letting a Dev-tab agent (Claude Code / Kimi Code) drive
 the in-app browser pane — and making that control watchable.
 
-1. **`conduit-browser-mcp`** (new `[[bin]]` in src-tauri/Cargo.toml, same crate
-   sharing `conduit_lib`) — a standalone MCP server speaking stdio JSON-RPC to a
+1. **`relay-browser-mcp`** (new `[[bin]]` in src-tauri/Cargo.toml, same crate
+   sharing `relay_lib`) — a standalone MCP server speaking stdio JSON-RPC to a
    harness. It exposes six tools (navigate / read_page / click / type_text /
    scroll / wait_for, all with optional `pane_id`) and forwards each `tools/call`
-   over a loopback WebSocket into the running Conduit app, which executes it
+   over a loopback WebSocket into the running Relay app, which executes it
    against the real visible pane via the existing `eval()` bridge
    (`BrowserManager::run_action_for_pane`). The harness sees a normal browser
    MCP server; it's actually driving the exact pane on screen.
@@ -1644,7 +1644,7 @@ A loopback WebSocket was chosen over named pipes / Unix sockets because:
 - Bidirectional — tool results flow back over the same connection naturally.
 - The app already depends on tokio; `tokio-tungstenite` is a small additive dep.
 - A fixed port (vs port-from-file) keeps the binary trivial — it reads
-  `CONDUIT_WS_PORT` (default 7681) and `CONDUIT_PROJECT_ID` from env vars set
+  `RELAY_WS_PORT` (default 7681) and `RELAY_PROJECT_ID` from env vars set
   in the `.mcp.json` registration. Bind failure is non-fatal: the binary gets
   connection-refused and returns `browser_unavailable`.
 
@@ -1658,11 +1658,11 @@ lib.rs `setup()`). Wire envelope: `{op, project_id, pane_id, args}` →
 
 Prefer **`--mcp-config <path>`** (Claude Code's flag) over writing `.mcp.json`
 into the project cwd — avoids clobbering a user's hand-maintained config. The
-config is written to a Conduit-owned file (`<app_data_dir>/mcp/<project_id>.mcp.json`)
+config is written to a Relay-owned file (`<app_data_dir>/mcp/<project_id>.mcp.json`)
 in `spawn_agent_session` (commands/pty_cmds.rs), and `--mcp-config` is appended
-to the Claude Code `CommandSpec` there. `default-run = "conduit"` added to
+to the Claude Code `CommandSpec` there. `default-run = "relay"` added to
 Cargo.toml so `cargo run` / `tauri dev` still target the app binary (the new
-`conduit-browser-mcp` binary made `cargo run` ambiguous otherwise). Binary path
+`relay-browser-mcp` binary made `cargo run` ambiguous otherwise). Binary path
 resolved via `std::env::current_exe()` sibling.
 
 **Kimi Code / OpenCode caveat:** `.mcp.json` / `--mcp-config` is Claude Code's
@@ -1688,7 +1688,7 @@ mounted in App.tsx handles both roundtrips. Panes register their project via
 accessibility record per element: `ref, tag, label, href, role, aria_label,
 name, id, value, placeholder, checked, disabled, type, rect{x,y,width,height}`.
 In interactive mode `markdown` is empty; the payload is the element list (no
-Readability run). Overlay elements carry `data-conduit-overlay` and are excluded
+Readability run). Overlay elements carry `data-relay-overlay` and are excluded
 from the tagger so they never appear as targetable page content.
 
 ### Visual feedback timing values (subjective tuning — revisit if needed)
@@ -1696,7 +1696,7 @@ from the tagger so they never appear as targetable page content.
 Chosen mid-range within each task's spec; all are constants in `bridge_overlay.js`
 / `click_js` / `type_js`, logged here so they can be revisited:
 
-- **Cursor tween: 400ms** — `__conduit_tweenCursor` uses a CSS transition with
+- **Cursor tween: 400ms** — `__relay_tweenCursor` uses a CSS transition with
   `cubic-bezier(0.22,1,0.36,1)` (ease-out). Mid-range of the 300-500ms spec;
   fast enough not to lag a multi-step flow, slow enough to read as deliberate
   motion rather than a jump.
@@ -1739,19 +1739,19 @@ toggle). Dispatch resolves global→per-session and gates on pane visibility
 - `cargo test --lib` — 194/194 pass (added: async wrapper, interactive mode,
   build_resolve_js, browser_mcp parse_label/error mapping,
   browser_mcp_register config shape, watch_mode persists).
-- `cargo build --bin conduit-browser-mcp` — clean (standalone, no Tauri link).
+- `cargo build --bin relay-browser-mcp` — clean (standalone, no Tauri link).
 - MCP binary stdio smoke test: `initialize` returns capabilities +
   protocolVersion; `tools/list` returns all 6 schemas; `tools/call` navigate
   with no app running returns structured `browser_unavailable` error with
-  `conduit_code` data field.
+  `relay_code` data field.
 - `npm run build` (tsc + vite) — clean.
 - **Live-app E2E (PRD §13, partially verified):** launched `npm run tauri dev`
   — the in-app WS server bound `ws://127.0.0.1:7681`. Ran the
-  `conduit-browser-mcp` binary against it:
+  `relay-browser-mcp` binary against it:
   - `read_page` with no pane open → structured `pane_not_found` (correct).
   - `navigate http://localhost:1420` → **auto-opened a browser pane**, loaded
-    the app's own Vite dev server, returned `{"pane_id":"...","title":"Conduit",
-    "url":"http://localhost:1420"}`. The `title:"Conduit"` confirms the real
+    the app's own Vite dev server, returned `{"pane_id":"...","title":"Relay",
+    "url":"http://localhost:1420"}`. The `title:"Relay"` confirms the real
     visible pane loaded the page. (Auto-open initially failed with a
     `pane_active_tab` race; fixed by polling the `webviews` map for the
     `browser-{id}-tab-default` label instead of a fixed sleep.)
@@ -1769,7 +1769,7 @@ toggle). Dispatch resolves global→per-session and gates on pane visibility
   `action_failed` (raw `undefined`) to `timeout` — meaning the large eval body
   (readability.js ~2.8k lines + bridge) runs but never reports back, even on a
   trivial page (example.com). A tiny body (`return document.title`) SOMETIMES
-  reports back (returned "Conduit" once, empty another time) — so
+  reports back (returned "Relay" once, empty another time) — so
   `__TAURI_INTERNALS__.invoke('browser_action_result')` is intermittently
   available/reachable in the child browser webview. Root cause needs devtools
   open on the `browser-*` child webview: check whether `__TAURI_INTERNALS__`
@@ -1787,11 +1787,11 @@ toggle). Dispatch resolves global→per-session and gates on pane visibility
 
 ### Out of scope / notes
 
-- `conduit-browser-mcp` deliberately does NOT link Tauri (it's a thin
+- `relay-browser-mcp` deliberately does NOT link Tauri (it's a thin
   stdio→WS relay) — it hardcodes the default port 7681 matching
-  `BROWSER_MCP_PORT` rather than importing `conduit_lib` (which would pull Tauri
+  `BROWSER_MCP_PORT` rather than importing `relay_lib` (which would pull Tauri
   into the binary). Drift is impossible in practice because the registration
-  always sets `CONDUIT_WS_PORT`.
+  always sets `RELAY_WS_PORT`.
 - The auto-open path was hardened: `open_pane_for_project` now polls the
   `webviews` map (up to 3s) for the new pane's label instead of a fixed 200ms
   sleep, since `browser_create` runs async on the main thread and
@@ -1876,7 +1876,7 @@ toggle). Dispatch resolves global→per-session and gates on pane visibility
   chat::` = **103 passed, 0 failed, 8 ignored** (the live-network
   `web_search_live` / `fetch_url_live_*` tests are `#[ignore]`). Frontend
   `tsc --noEmit` clean. Full E2E: `npm run tauri dev` rebuilt the Rust binary
-  and `conduit.exe` launched, browser-mcp WebSocket server came up on port
+  and `relay.exe` launched, browser-mcp WebSocket server came up on port
   7681.
 - **Autoreview (Opus subagent) on the chat split** flagged one candidate
   defect — `MAX_TOOL_ITERS` "silently changed from 15 to 45." **Verified a
@@ -1911,7 +1911,7 @@ toggle). Dispatch resolves global→per-session and gates on pane visibility
   now use `use super::super::permission;` + bare `permission::PermissionMode`.
 - **Verification:** `cargo check` clean (9 warnings, same as the post-split baseline —
   no new warnings). `cargo test --lib chat::` = 103 passed / 0 failed / 8 ignored.
-  Full E2E: `npm run tauri dev` rebuilt and `conduit.exe` launched.
+  Full E2E: `npm run tauri dev` rebuilt and `relay.exe` launched.
 - **Result of the full split:** `chat/mod.rs` 2306→622, `chat/tools.rs` 2394→
   `tools/mod.rs` 628. No file in `chat/` exceeds ~1200 lines; the largest is now
   `commands.rs` (1195) and `office.rs` (1032), both cohesive single-concern files.
@@ -1920,7 +1920,7 @@ toggle). Dispatch resolves global→per-session and gates on pane visibility
 
 Added a "Connectors" system to the Chat tab: OAuth-based connections to
 third-party SaaS tools that expose **official, vendor-hosted remote MCP
-servers**. Conduit owns OAuth plumbing + credential storage + UI + per-
+servers**. Relay owns OAuth plumbing + credential storage + UI + per-
 conversation opt-in + approval gating, and registers the vendor's MCP server
 URL into a session's tool set — it does NOT implement vendor tools (those
 come from the server's own `tools/list`). Notion (`mcp.notion.com/mcp`) is
@@ -1934,8 +1934,8 @@ Gmail, Canva, Slack are follow-ons that reuse this framework.
   per-project) holds `connector_id` PK + `expires_at`/`granted_scopes`/
   `account_display`/`connected_at`. The secret token values (access +
   refresh) live in the OS keychain under a third namespace,
-  `conduit:connector:<id>:<field>`, mirroring the existing
-  `conduit:chat:<provider>` pattern (Linux XOR fallback included). Reuses
+  `relay:connector:<id>:<field>`, mirroring the existing
+  `relay:chat:<provider>` pattern (Linux XOR fallback included). Reuses
   the keychain platform modules verbatim — no second encryption approach.
 - **OAuth flow (`connectors/oauth.rs`):** standard authorization-code + PKCE.
   The vendor's login/consent screen opens in a native child webview
@@ -2021,7 +2021,7 @@ on tasks (Google Drive/Calendar, Gmail, Canva, Slack) scope accurately:
   only forgets the local token (surfaced as a note in the UI). Vendors that
   expose one set `revoke_url` and Disconnect calls it (already wired in
   `connector_disconnect`).
-- **`redirect_uri` = `https://conduit.local/oauth/callback`** — a non-served
+- **`redirect_uri` = `https://relay.local/oauth/callback`** — a non-served
   sentinel intercepted in the webview. **Confirmed against Notion's docs:**
   Notion does exact-string matching on registered redirect URIs and does NOT
   require the URL to resolve (no DNS/HTTP check), so a non-hosted HTTPS
@@ -2058,7 +2058,7 @@ on tasks (Google Drive/Calendar, Gmail, Canva, Slack) scope accurately:
   auto-refresh path), disconnect/revoke (Notion's `POST /v1/oauth/revoke`
   with Basic auth + JSON body). Blocked on setting the real Notion
   client_id/secret in `connectors::config::NOTION` (a build-time config
-  step) and registering `https://conduit.local/oauth/callback` as the
+  step) and registering `https://relay.local/oauth/callback` as the
   integration's redirect URI in the Notion developer portal. All code paths
   are wired and compile; this is the remaining acceptance-criteria gap.
 
@@ -2245,8 +2245,8 @@ platforms — only the underlying `add_child` vs `WebviewWindowBuilder::build`
 differs. The test `platform_support_matches_target_os` was updated to assert
 `platform_supported()` is `true` (was `!cfg!(target_os == "linux")`).
 
-**7. Desktop file (src-tauri/conduit.desktop).** New freedesktop.org entry:
-`[Desktop Entry]` block with `Exec=conduit %F`, `Icon=conduit`,
+**7. Desktop file (src-tauri/relay.desktop).** New freedesktop.org entry:
+`[Desktop Entry]` block with `Exec=relay %F`, `Icon=relay`,
 `Categories=Development;IDE;`, MimeType for text/markdown/shellscript. Tauri
 emits it into the deb's `/usr/share/applications/` on build.
 
@@ -2390,8 +2390,8 @@ Mechanics (in case this needs tuning later):
   prompt they sent — not a silent background action.
 - The button is disabled (and the title explains why) when the focused
   pane has no changes, so an accidental click is impossible.
-- Conduit does **not** stage, commit, push, or call the GitHub API
-  itself. The "Conduit-native PR pipeline" option from the original
+- Relay does **not** stage, commit, push, or call the GitHub API
+  itself. The "Relay-native PR pipeline" option from the original
   discussion is explicitly out of scope and deferred.
 
 ### Per-pane working-directory resolution (PRD §7.10)
@@ -2545,7 +2545,7 @@ Clicking **Settings → Connectors → Connect** on Notion failed with
    the same incompatibility reported against Claude Code
    (anthropics/claude-code#52896, #52961): dynamic/unregistered ports are
    rejected with "Invalid redirect_uri for OAuth client". The previously
-   documented `https://conduit.local/oauth/callback` sentinel only works
+   documented `https://relay.local/oauth/callback` sentinel only works
    with webview `on_navigation` interception (no HTTP request ever lands),
    which the system-browser flow can't do.
 
@@ -2563,7 +2563,7 @@ Clicking **Settings → Connectors → Connect** on Notion failed with
 - **Registration step (user action):** register
   `http://localhost:45123/oauth/callback` verbatim in the Notion developer
   portal (public connection → OAuth redirect URIs), replacing the old
-  `https://conduit.local/oauth/callback` guidance.
+  `https://relay.local/oauth/callback` guidance.
 - **Credentials for dev builds (user action):** set
   `$env:NOTION_CLIENT_ID` / `$env:NOTION_CLIENT_SECRET` in the shell before
   `npm run tauri dev` (or persist as user env vars); the release workflow's
@@ -2682,7 +2682,7 @@ Merge retirement and two Kiwi bug fixes from the same period:
 
 ### Verification
 
-- cargo test -p conduit --lib: **295 passed / 0 failed / 10 ignored**
+- cargo test -p relay --lib: **295 passed / 0 failed / 10 ignored**
   (new: github_is_registered_as_env_configured_oauth_connector,
   canva_is_registered_as_dcr_oauth_connector; live Kiwi handshake test
   still green with --ignored).
@@ -2801,7 +2801,7 @@ Deps added (Windows-only, versions pinned to what tauri 2.11 already links):
 Win32_System_Com_StructuredStorage). Non-Windows returns None for now.
 - Harness mode: new `screenshot` op in `browser_mcp.rs` (saves
   `browser-shot-<ms>.png` to the artifacts dir, returns path + base64);
-  `conduit-browser-mcp` binary gained the `browser_screenshot` tool whose
+  `relay-browser-mcp` binary gained the `browser_screenshot` tool whose
   result is a real MCP image content block (the agent SEES the page) plus a
   text block with the path to embed in chat. Staged binary refreshed
   (debug copy into src-tauri/binaries for dev).

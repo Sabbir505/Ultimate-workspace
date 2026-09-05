@@ -1,11 +1,18 @@
 # Releasing Relay (auto-update)
 
-> **Naming.** "Relay" is the user-visible product name (window title, `package.json` name, `tauri.conf.json` `productName`, `<title>`). The Rust crate is still `conduit`; the bundle id is `dev.conduit.app`; the NSIS installer filename is `Conduit_<version>_x64-setup.exe`; the updater signing key file is `.tauri/conduit-update.key`; the mobile app is `Conduit Mobile` (`com.conduit.mobile`); the Windows scheduled-task entry is `ConduitAutomations`. The rebrand was deliberately limited to user-visible surfaces. Each of those still-`Conduit` identifiers has a deliberate reason for not being renamed:
+> **Naming.** "Relay" is the product name on every surface: user-visible strings (window title, `package.json` name, `tauri.conf.json` `productName`, `<title>`), the Rust crate (`relay`, lib `relay_lib`), the bundle identifier (`dev.relay.app`), the sidecar binaries (`relay-browser-mcp`, `relay-automation`) and their `RELAY_*` env vars, the MCP server identifiers (`relay-browser`, `relay-tools`), the NSIS installer filename (`Relay_<version>_x64-setup.exe`, driven by `productName`), the updater signing key file (`.tauri/relay-update.key`), the OS keychain service, the mobile app (`Relay Mobile`, `com.relay.mobile`), and the Windows scheduled-task entry (`RelayAutomations`). The only pre-rebrand value kept on purpose is the E2E pairing crypto constant (`conduit-e2e-relay-*`) — protocol-anchored on both the desktop and the phone; renaming it breaks existing pairings for no benefit.
 >
-> - **Crate name + bundle id** — renaming either forces a fresh install on every user (different bundle id = macOS/Windows treats it as a new app).
-> - **NSIS filename + updater key filename** — the `make-latest-json.mjs` script and `.github/workflows/build.yml` both reference the `Conduit_...setup.exe` regex and the `conduit-update.key` secret path. Renaming either breaks update verification for already-installed copies.
-> - **Scheduled-task name** — `ConduitAutomations` is registered in Windows Task Scheduler when the user enables `run while closed`. Renaming the string would orphan the existing registration (the scheduler entry would keep firing the old sidecar, but the new one would never run).
-> - **Mobile app name + bundle id** — App Store / Play Store identifiers are immutable post-launch.
+> **Compatibility for existing installs** (all handled in code, nothing moves behind the user's back):
+>
+> - **App data dir** — `%APPDATA%/dev.conduit.app` renames itself to `%APPDATA%/dev.relay.app` on first launch of the new build (`user_dirs::ensure_app_data_dir`, run before any window exists). If the legacy dir is locked (the headless automation runner mid-turn), the DB files are copied out instead, and the next launch converges. Every app-data consumer resolves through `user_dirs::app_data_dir` — never through Tauri's `app_data_dir()` directly.
+> - **Keychain** — new writes go to service `dev.relay.app` + `relay:*` accounts; reads fall back to the legacy service/account generations, and deletes clean up all of them.
+> - **DB file** — `conduit.db` keeps being used when it's the only file in the (migrated) dir (`db::db_file_in`, honored by the GUI and the headless binary).
+> - **Artifacts/models** — `Documents/Conduit` and `~/Conduit/models` stay readable/scannable; new defaults are `Documents/Relay` and `~/Relay/models` (`user_dirs.rs`).
+> - **Scheduled task** — the legacy `ConduitAutomations` task is deleted best-effort whenever `RelayAutomations` registers or unregisters.
+> - **Updater** — the `make-latest-json.mjs` regex still accepts legacy `Conduit_` release assets.
+> - **Mobile** — AsyncStorage keys `conduit.relayUrl/Token` are re-homed to `relay.*` on first read; the bundle id change (`com.conduit.mobile` → `com.relay.mobile`) requires a fresh install on devices.
+>
+> Known one-time leftovers after upgrading an installed copy: a stale Windows uninstall registry entry under the old identifier and a stale toast AUMID key (`Software\Classes\AppUserModelId\dev.conduit.app`) — both cosmetic; a clean reinstall removes them.
 
 Relay ships updates automatically via the Tauri updater plugin. When you publish
 a new version, every running copy checks GitHub Releases on startup (and every 4
@@ -20,8 +27,8 @@ and CI handles the rest.
 
 ## How it works (one-time setup — already done)
 
-- **Signing keypair** lives at `.tauri/conduit-update.key` (private) and
-  `.tauri/conduit-update.key.pub` (public). The private key is gitignored and
+- **Signing keypair** lives at `.tauri/relay-update.key` (private) and
+  `.tauri/relay-update.key.pub` (public). The private key is gitignored and
   **must never be committed or shared**. If you lose it, updates stop working
   and you'll need to regenerate it and have everyone reinstall once.
 - The **public key** is baked into `tauri.conf.json` (`plugins.updater.pubkey`)
@@ -65,7 +72,7 @@ git push origin master --tags
 
 Pushing the tag triggers `.github/workflows/build.yml`, which:
 
-1. **Build (Windows):** Builds the `conduit-browser-mcp` sidecar, stages it,
+1. **Build (Windows):** Builds the `relay-browser-mcp` sidecar, stages it,
    runs `npm run tauri build` (no signing env vars — avoids password prompt
    hang), and uploads the NSIS installer as an artifact.
 2. **Release (Ubuntu):** Downloads the installer, restores the signing key from
@@ -95,7 +102,7 @@ If CI is unavailable, you can cut a release manually:
 
 # 2. Build the sidecar and stage it
 cd src-tauri
-cargo build --release --bin conduit-browser-mcp
+cargo build --release --bin relay-browser-mcp
 node ../scripts/stage-browser-mcp.mjs
 cd ..
 
@@ -121,7 +128,7 @@ Configured in Settings → Secrets and variables → Actions:
 
 | Secret | Description |
 |--------|-------------|
-| `TAURI_SIGNING_PRIVATE_KEY` | Contents of `.tauri/conduit-update.key` |
+| `TAURI_SIGNING_PRIVATE_KEY` | Contents of `.tauri/relay-update.key` |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Empty string (signer is invoked `-p ""`) |
 | `NOTION_CLIENT_ID` | Notion integration client ID |
 | `NOTION_CLIENT_SECRET` | Notion integration secret |
@@ -141,7 +148,7 @@ Configured in Settings → Secrets and variables → Actions:
   publish your first release with a `latest.json`. After publishing it goes away.
 - **Update downloads but won't install ("signature mismatch")** — you signed
   the build with a different key than the `pubkey` in `tauri.conf.json`. Re-sign
-  with the matching `.tauri/conduit-update.key`, or regenerate the keypair and
+  with the matching `.tauri/relay-update.key`, or regenerate the keypair and
   update `pubkey` (then everyone reinstalls once).
 - **Users don't see the banner** — confirm the release is marked "Latest" on
   GitHub (not a draft/prerelease).

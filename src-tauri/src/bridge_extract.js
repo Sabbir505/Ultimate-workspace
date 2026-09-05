@@ -104,13 +104,13 @@
     }
 
     // ---- 2. Interactive element tagging (preserves browser_click/browser_type) ----
-    // Tags every visible interactive element with a `data-conduit-ref` and
+    // Tags every visible interactive element with a `data-relay-ref` and
     // returns a structured record. In `interactive` mode the record carries the
     // full accessibility fields (role, aria-label, form-field state, rect); in
     // the readability modes only the minimal ref/tag/label/href quadruple is
     // emitted (the extras default to null and are omitted by serde at the
     // Rust boundary). Overlay elements injected by the visual-feedback layer
-    // carry `data-conduit-overlay` and are explicitly excluded so they never
+    // carry `data-relay-overlay` and are explicitly excluded so they never
     // appear as targetable page content.
     function tagInteractiveElements() {
         var sel = 'a[href], button, input, textarea, select, [role=button], [onclick]';
@@ -120,10 +120,10 @@
             var el = els[i];
             // Skip our own visual-feedback overlay elements — they must never
             // be targetable or appear in the interactive read output.
-            if (el.getAttribute && el.getAttribute('data-conduit-overlay') !== null) continue;
+            if (el.getAttribute && el.getAttribute('data-relay-overlay') !== null) continue;
             var r = el.getBoundingClientRect();
             if (r.width === 0 || r.height === 0) continue;
-            el.setAttribute('data-conduit-ref', String(refs.length));
+            el.setAttribute('data-relay-ref', String(refs.length));
             var tag = el.tagName.toLowerCase();
             var label = (el.innerText || el.textContent || el.value || el.getAttribute('aria-label') ||
                 el.getAttribute('placeholder') || el.getAttribute('name') || '')

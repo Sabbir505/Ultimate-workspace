@@ -1,7 +1,7 @@
 //! Per-turn git checkpoint orchestration.
 //!
 //! Wires the plumbing in `git.rs` (snapshot / diff / restore via hidden refs
-//! under `refs/conduit/checkpoints/<session>/<rowid>`) to the DB rows in
+//! under `refs/relay/checkpoints/<session>/<rowid>`) to the DB rows in
 //! `db::checkpoints` and the two chat turn-finalize points:
 //!
 //! - builtin/API chats — `chat::mod`'s spawned turn task (baseline at start,
@@ -23,7 +23,7 @@ use crate::git;
 use crate::types::{ChatCheckpoint, RestoreCheckpointResult};
 
 /// Hidden-ref namespace for all checkpoints.
-pub const REFS_PREFIX: &str = "refs/conduit/checkpoints";
+pub const REFS_PREFIX: &str = "refs/relay/checkpoints";
 
 /// `checkpoints.enabled` app setting — "false" disables the whole feature
 /// (snapshots, baselines, restores). Anything else (or missing) = enabled.

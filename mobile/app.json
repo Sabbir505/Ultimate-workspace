@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "Conduit Mobile",
-    "slug": "conduit-mobile",
+    "name": "Relay Mobile",
+    "slug": "relay-mobile",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -10,7 +10,7 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Conduit needs camera access to scan the desktop pairing QR code.",
+          "cameraPermission": "Relay needs camera access to scan the desktop pairing QR code.",
           "microphonePermission": false
         }
       ],
@@ -23,14 +23,14 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.conduit.mobile",
+      "bundleIdentifier": "com.relay.mobile",
       "infoPlist": {
-        "NSCameraUsageDescription": "Conduit needs camera access to scan the desktop pairing QR code.",
+        "NSCameraUsageDescription": "Relay needs camera access to scan the desktop pairing QR code.",
         "UIBackgroundModes": ["remote-notification"]
       }
     },
     "android": {
-      "package": "com.conduit.mobile",
+      "package": "com.relay.mobile",
       "permissions": ["android.permission.CAMERA"],
       "adaptiveIcon": {
         "backgroundColor": "#FAF7F5"

@@ -532,13 +532,9 @@ fn emit_progress(app: &tauri::AppHandle, state: crate::commands::local_model_mar
 
 /// Directory the managed install extracts into.
 fn managed_install_dir(app: &tauri::AppHandle) -> CmdResult<PathBuf> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("no app data dir: {e}"))?
+    Ok(crate::user_dirs::app_data_dir(app)
         .join("bin")
-        .join("whisper-cpp");
-    Ok(dir)
+        .join("whisper-cpp"))
 }
 
 #[tauri::command]
@@ -578,7 +574,7 @@ pub async fn stt_install_server(
                 .map_err(|e| e.to_string())?;
             let resp = client
                 .get(WHISPER_ZIP_URL)
-                .header("User-Agent", "conduit-stt-install")
+                .header("User-Agent", "relay-stt-install")
                 .send()
                 .await
                 .map_err(|e| format!("download failed: {e}"))?;
@@ -591,7 +587,7 @@ pub async fn stt_install_server(
                 return Err(msg);
             }
             let total = resp.content_length();
-            let zip_path = std::env::temp_dir().join(format!("conduit-whisper-{WHISPER_RELEASE_TAG}.zip"));
+            let zip_path = std::env::temp_dir().join(format!("relay-whisper-{WHISPER_RELEASE_TAG}.zip"));
             let mut file = tokio::fs::File::create(&zip_path)
                 .await
                 .map_err(|e| format!("could not write temp file: {e}"))?;

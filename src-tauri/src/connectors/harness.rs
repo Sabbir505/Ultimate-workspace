@@ -75,7 +75,7 @@ pub async fn harness_mcp_servers(
                 bearer_token: if tok.is_empty() { None } else { Some(tok) },
             }),
             Err(e) => {
-                eprintln!("[conduit:connectors] {id} token resolve for harness failed: {e} — skipping");
+                eprintln!("[relay:connectors] {id} token resolve for harness failed: {e} — skipping");
             }
         }
     }

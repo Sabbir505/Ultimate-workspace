@@ -106,7 +106,7 @@ pub async fn generate(
         Ok(Ok(Ok(_))) => {
             PENDING.lock().remove(&request_id);
             return Err("the document runner produced an empty file. Check the code calls \
-                        `await conduit.save(...)` exactly once with the finished document."
+                        `await relay.save(...)` exactly once with the finished document."
                 .to_string());
         }
         Ok(Ok(Err(e))) => {

@@ -45,7 +45,7 @@
 //! A third entry point, `run_one_shot`, runs one blocking self-contained
 //! turn (no persistent process, no CLI session resume) and works with or
 //! without a Tauri AppHandle — it backs scheduled automations, both from the
-//! in-app scheduler and from the standalone `conduit-automation` binary.
+//! in-app scheduler and from the standalone `relay-automation` binary.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
@@ -269,10 +269,10 @@ impl AgentSessionManager {
                 .map_err(|e| e.to_string())?;
         }
 
-        // Prepend the Conduit persona + the user's custom system prompt
+        // Prepend the Relay persona + the user's custom system prompt
         // (Settings → Assistant) so the harness CLI presents the same identity
         // the built-in chat does — without it the CLI answers "I'm Claude
-        // Code / OpenCode" and denies being Conduit. The persona goes FIRST,
+        // Code / OpenCode" and denies being Relay. The persona goes FIRST,
         // the custom prompt after it, both separated from the message by a
         // blank line. The original content is persisted to the DB without the
         // prefix (the system prompt is separate config, not part of the
@@ -448,7 +448,7 @@ impl AgentSessionManager {
             return false;
         };
         let request = json!({
-            "request_id": format!("conduit-setmode-{}", now_ms_u64()),
+            "request_id": format!("relay-setmode-{}", now_ms_u64()),
             "type": "control_request",
             "request": { "subtype": "set_permission_mode", "mode": mode_label },
         })
@@ -646,10 +646,10 @@ const CONTEXT_PRIMER_SUMMARY_TRIGGER_CHARS: usize = 8_000;
 /// The identity + artifact-behavior preamble prepended to every harness turn
 /// (see the send path's comment for ordering). Extracted from the send path
 /// so a test can pin its tool references: the persona must only name tools
-/// that actually exist in harness sessions — the conduit-tools MCP whitelist
+/// that actually exist in harness sessions — the relay-tools MCP whitelist
 /// (generate_document/plan_document/revise_document/diagram/file, get_skill,
 /// list_skills, search_docs) and
-/// the conduit-browser MCP family. It must NOT reference built-in-chat-only
+/// the relay-browser MCP family. It must NOT reference built-in-chat-only
 /// tools like `open_file`, which the CLI cannot call (that phantom reference
 /// used to make harness models promise to "open" files and then fail or
 /// improvise).
@@ -1278,7 +1278,7 @@ fn send_acp_turn(
         if let Ok(mut g) = entry.cli_session_id.lock() {
             *g = None;
         }
-        // Conduit-owned bundle is not part of ACP v1 (no MCP servers, no
+        // Relay-owned bundle is not part of ACP v1 (no MCP servers, no
         // permission flags) — the agent's own config governs its tools.
         let spec = resolve_for_spawn(&CommandSpec {
             program: agent.command.clone(),
@@ -1685,7 +1685,7 @@ fn read_acp_stream(
                 let err = json!({
                     "jsonrpc": "2.0",
                     "id": id,
-                    "error": { "code": -32601, "message": "Method not supported by Conduit ACP v1" },
+                    "error": { "code": -32601, "message": "Method not supported by Relay ACP v1" },
                 });
                 let _ = write_line_shared(&shared_stdin, &err.to_string());
             }
@@ -1743,7 +1743,7 @@ fn reply_acp_tool_error(
 /// would otherwise inherit the app's own cwd — under `tauri dev` that's the
 /// repo root, so generated files land in the app folder and the CLI's
 /// sandbox then refuses paths outside it. Fall back to the configured
-/// artifacts dir (`storage.artifactsDir`) when set, else Documents/Conduit
+/// artifacts dir (`storage.artifactsDir`) when set, else Documents/Relay
 /// (the same default the built-in chat uses) instead.
 fn spawn_dir(
     cwd: Option<&str>,
@@ -1757,7 +1757,7 @@ fn spawn_dir(
         configured.or_else(|| {
             dirs::document_dir()
                 .or_else(dirs::home_dir)
-                .map(|base| base.join("Conduit"))
+                .map(|base| crate::user_dirs::branded_dir(&base))
         })
     });
     if let Some(d) = &dir {
@@ -1768,7 +1768,7 @@ fn spawn_dir(
 
 /// Directories a harness turn's artifact diff must watch: the spawn dir
 /// (files the CLI writes into its workspace) PLUS the artifacts dir
-/// (files the conduit-tools MCP writes — mcp_tools_bridge always resolves
+/// (files the relay-tools MCP writes — mcp_tools_bridge always resolves
 /// `dispatch::artifacts_dir`, which differs from the spawn dir whenever a
 /// project is selected or the user configured a custom `storage.artifactsDir`).
 /// Watching only the spawn dir silently drops every MCP-generated docx/pptx/
@@ -1783,7 +1783,7 @@ fn turn_watch_dirs(
         dirs.push(d);
     }
     // Mirror dispatch::artifacts_dir's default without needing an AppHandle:
-    // configured dir, else <Documents>/Conduit (falling back to home).
+    // configured dir, else <Documents>/Relay (falling back to home).
     let artifacts = {
         let conn = db.lock();
         crate::chat::dispatch::configured_artifacts_dir(&conn)
@@ -1791,7 +1791,7 @@ fn turn_watch_dirs(
     .or_else(|| {
         dirs::document_dir()
             .or_else(dirs::home_dir)
-            .map(|base| base.join("Conduit"))
+            .map(|base| crate::user_dirs::branded_dir(&base))
     });
     if let Some(a) = artifacts {
         let _ = std::fs::create_dir_all(&a);
@@ -2025,17 +2025,17 @@ pub(crate) fn previewable_ext(path: &str) -> bool {
 /// "mcp" section, pointed at via the OPENCODE_CONFIG env var on the spawn.
 /// Legacy fallback for per-turn spawns when the full bundle failed to write.
 fn resolve_opencode_config(app: &AppHandle, project_id: Option<&str>) -> Option<std::path::PathBuf> {
-    let data_dir = app.path().app_data_dir().ok()?;
+    let data_dir = crate::user_dirs::app_data_dir(app);
     browser_mcp_register::write_opencode_config(&data_dir, project_id?, bound_port())
 }
 
 /// The artifacts dir the bundle should advertise: the configured
-/// `storage.artifactsDir`, else the Documents/Conduit default. This is where
-/// the conduit-tools MCP actually writes generated documents (`mcp_tools_bridge`
+/// `storage.artifactsDir`, else the Documents/Relay default. This is where
+/// the relay-tools MCP actually writes generated documents (`mcp_tools_bridge`
 /// resolves `dispatch::artifacts_dir`), so the instructions, `--add-dir`, and
 /// the claude settings' additionalDirectories must all name the SAME folder —
 /// advertising the spawn dir instead sent harness CLIs writing with their own
-/// file tools into the project root while conduit-tools landed in the
+/// file tools into the project root while relay-tools landed in the
 /// configured dir. The spawn dir (`spawn_dir`) remains a separate concept: it
 /// is only the CLI's working directory, never the advertised artifacts target.
 pub(crate) fn artifacts_dir_for_bundle(app: &AppHandle, _cwd: Option<&str>) -> String {
@@ -2115,13 +2115,13 @@ fn harness_context_section(
 }
 
 /// Bundle slug for sessions with no selected project. Connectors and
-/// conduit-tools work project-less too, so a bundle is always written; the
+/// relay-tools work project-less too, so a bundle is always written; the
 /// tradeoff is that browser panes and artifacts of ALL project-less sessions
 /// share this one scope.
 const NO_PROJECT_BUNDLE_SLUG: &str = "_no_project";
 
 /// Resolve (write if needed) the per-project harness bundle. Project-less
-/// sessions fall back to the `_no_project` slug so connectors + conduit-tools
+/// sessions fall back to the `_no_project` slug so connectors + relay-tools
 /// still reach the CLI. Returns None only when the app data dir or the write
 /// fails — bundle failure must never fail the turn (same contract as the old
 /// resolve_mcp_config). `connectors` are merged into the bundle's MCP configs
@@ -2138,7 +2138,7 @@ pub(crate) fn resolve_harness_bundle(
     sandbox: Option<&str>,
     approval: Option<&str>,
 ) -> Option<crate::harness_bundle::HarnessBundlePaths> {
-    let data_dir = app.path().app_data_dir().ok()?;
+    let data_dir = crate::user_dirs::app_data_dir(app);
     // Artifact awareness for the harness instructions: the CLI has no other
     // way to learn where Relay's artifacts live, so "open the report we made"
     // used to resolve to a shrug. Default export folder + the 10 most recent
@@ -2243,9 +2243,9 @@ fn spawn_claude(
         args.push("--resume".into());
         args.push(id.clone());
     }
-    // Conduit-owned bundle: instructions, permissions, and both MCP servers
+    // Relay-owned bundle: instructions, permissions, and both MCP servers
     // (browser + tools). Registration failure degrades to no extra flags —
-    // the turn still runs, just without conduit's prompt/tools.
+    // the turn still runs, just without relay's prompt/tools.
     if let Some(bundle) = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd), connectors, Some(&sandbox_str), Some(&approval_str)) {
         args.extend(crate::harness_bundle::claude_bundle_args(&bundle, &artifacts_dir_for_bundle(app, cwd)));
     }
@@ -2261,7 +2261,7 @@ fn spawn_claude(
     // Snapshot the watch dirs once per (re)spawn so finish_turn can diff them
     // after each turn and surface files the CLI created as artifacts. The
     // first dir is the spawn dir (the CLI's workspace); the second (when
-    // different) is the artifacts dir conduit-tools MCP writes into.
+    // different) is the artifacts dir relay-tools MCP writes into.
     let watch_dirs = turn_watch_dirs(cwd, &db.0);
     if let Some(dir) = watch_dirs.first() {
         cmd.current_dir(dir);
@@ -2289,7 +2289,7 @@ fn spawn_claude(
         if gated {
             if let Some(stdin) = guard.as_mut() {
                 let init = json!({
-                    "request_id": "conduit-init-1",
+                    "request_id": "relay-init-1",
                     "type": "control_request",
                     "request": { "subtype": "initialize" },
                 })
@@ -3090,7 +3090,7 @@ fn spawn_per_turn(
     connectors: &[crate::connectors::HarnessMcpServer],
 ) -> Result<(), String> {
     let resume = entry.cli_session_id.lock().ok().and_then(|g| g.clone());
-    // Conduit-owned bundle: instructions, permissions, and MCP registration.
+    // Relay-owned bundle: instructions, permissions, and MCP registration.
     // Failure degrades to the legacy browser-only configs below (or none).
     // The bundle hardcodes bypassPermissions in settings.json so claude
     // runs with full-auto approval.
@@ -3111,7 +3111,7 @@ fn spawn_per_turn(
     let spec = match kind {
         PerTurn::Kimi => {
             // The untrusted prompt never rides the command line — it goes via
-            // CONDUIT_TURN_PROMPT + a delayed-expansion wrapper batch on
+            // RELAY_TURN_PROMPT + a delayed-expansion wrapper batch on
             // Windows (M12, see harness_adapters::turn_spec). Only OUR
             // bounded strings (model, session id, bundle paths) are argv.
             // Kimi prompt mode is non-interactive; --yolo/--auto are
@@ -3297,8 +3297,8 @@ End your reply with the plan and wait for the user's approval.]"
     if let Some((k, v)) = &prompt_env {
         cmd.env(k, v);
     }
-    // OpenCode only: point the CLI at the Conduit-owned opencode.json that
-    // registers conduit-browser (it has no --mcp-config CLI flag).
+    // OpenCode only: point the CLI at the Relay-owned opencode.json that
+    // registers relay-browser (it has no --mcp-config CLI flag).
     if matches!(kind, PerTurn::OpenCode) {
         // Bundle's opencode.json already has both MCP servers + permissions;
         // the legacy path only applies when the bundle failed to write.
@@ -3310,7 +3310,7 @@ End your reply with the plan and wait for the user's approval.]"
     }
     // Snapshot the watch dirs once for this turn so finish_turn can diff them
     // afterwards and surface files the CLI created as artifacts (spawn dir +
-    // the artifacts dir conduit-tools MCP writes into, when different).
+    // the artifacts dir relay-tools MCP writes into, when different).
     let watch_dirs = turn_watch_dirs(cwd, &db.0);
     if let Some(dir) = watch_dirs.first() {
         cmd.current_dir(dir);
@@ -3718,7 +3718,7 @@ fn spawn_opencode_server(
     let base_url = format!("http://127.0.0.1:{port}");
 
     // Same MCP registration contract as every other opencode spawn: point
-    // OPENCODE_CONFIG at the Conduit-owned bundle config (browser + tools +
+    // OPENCODE_CONFIG at the Relay-owned bundle config (browser + tools +
     // connectors). Failure degrades to the legacy browser-only config.
     let bundle = resolve_harness_bundle(app, project_id, cwd, artifacts_dir_for_bundle(app, cwd), connectors, None, None);
     let legacy_cfg = if bundle.is_none() {
@@ -3845,7 +3845,7 @@ fn opencode_create_session(base_url: &str) -> Result<String, String> {
     })
 }
 
-/// Split Conduit's "provider/model" id into OpenCode's message-body shape.
+/// Split Relay's "provider/model" id into OpenCode's message-body shape.
 /// Empty/unparseable models stay None → server uses its configured default.
 fn split_opencode_model(model: &str) -> Option<Value> {
     let (provider, name) = model.split_once('/')?;
@@ -4933,7 +4933,7 @@ fn handle_commandcode_event(
 
 /// Run a single self-contained turn and BLOCK until it finishes. This is the
 /// shared engine for automations: the in-app scheduler calls it with
-/// `Some(app)` (live `chat:*` events) and the headless `conduit-automation`
+/// `Some(app)` (live `chat:*` events) and the headless `relay-automation`
 /// binary calls it with `None` (no Tauri runtime — events become no-ops,
 /// messages still persist to the DB). Unlike the chat-session paths above,
 /// claude runs one-shot here too (`claude -p <prompt>`), because scheduled
@@ -4960,10 +4960,10 @@ pub fn run_one_shot(
     // Persona + bundle instructions + custom system prompt, then the prompt
     // (prefix joined with blank lines, then the `---` separator before the
     // prompt text — mirroring the chat-session prefix stack). Automation runs
-    // are unattended but still present as Relay with the conduit-tools bridge.
+    // are unattended but still present as Relay with the relay-tools bridge.
     // Session connectors are NOT merged (their OAuth refresh is async and
     // one-shot runs are self-contained); enabled gallery MCP servers and
-    // conduit-tools/browser still ride the bundle.
+    // relay-tools/browser still ride the bundle.
     let (effective, bundle) = {
         let project_id = {
             let conn = db.lock();
@@ -5469,7 +5469,7 @@ fn parse_oneshot_text(harness_id: &str, raw: &str) -> Result<String, String> {
 /// The prompt is UNTRUSTED user text and never rides a cmd.exe command line
 /// (M12): claude reads it from stdin (`claude -p` with no prompt arg — the
 /// caller pipes it, see `prompt_via_stdin` in run_one_shot); kimi/opencode
-/// get it via CONDUIT_TURN_PROMPT + delayed-expansion wrapper (the returned
+/// get it via RELAY_TURN_PROMPT + delayed-expansion wrapper (the returned
 /// env pair, Windows only — POSIX keeps the prompt in argv, which exec
 /// carries verbatim).
 fn one_shot_spec(
@@ -6558,7 +6558,7 @@ mod tests {
 
     /// The harness persona must never reference a tool the CLI session
     /// doesn't have. `open_file` is a built-in-chat tool — not bridged through
-    /// the conduit-tools MCP whitelist (see mcp_tools_bridge) — so a persona
+    /// the relay-tools MCP whitelist (see mcp_tools_bridge) — so a persona
     /// mention makes harness models promise an action they cannot take.
     /// See the doc on `harness_persona` for the whitelist rationale.
     #[test]
@@ -7313,7 +7313,7 @@ mod tests {
     }
 
     /// The artifact watch covers BOTH the spawn dir and the configured
-    /// artifacts dir: conduit-tools MCP writes into `storage.artifactsDir`
+    /// artifacts dir: relay-tools MCP writes into `storage.artifactsDir`
     /// regardless of the CLI's workspace, so a project-selected turn (or a
     /// custom folder) must still surface MCP-generated files.
     #[test]
@@ -7336,7 +7336,7 @@ mod tests {
     }
 
     /// With no project and no configured dir, the spawn dir and the artifacts
-    /// fallback are the same <Documents>/Conduit — the watch must dedup to
+    /// fallback are the same <Documents>/Relay — the watch must dedup to
     /// one dir, not snapshot the same tree twice.
     #[test]
     fn turn_watch_dirs_dedups_when_dirs_coincide() {

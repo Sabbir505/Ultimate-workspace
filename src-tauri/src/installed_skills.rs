@@ -69,7 +69,7 @@ struct BuiltinSkill {
 
 /// Root dirs per harness for a given kind ("skills" | "loops").
 ///
-/// Claude Code's skill layout has shifted across versions. Conduit scans
+/// Claude Code's skill layout has shifted across versions. Relay scans
 /// every convention we know about so the Skills Library shows what's actually
 /// on disk regardless of which one the user (or a marketplace) wrote into:
 ///
@@ -569,7 +569,7 @@ mod tests {
     #[test]
     fn create_writes_both_roots() {
         // Point HOME/USERPROFILE at a temp dir for hermetic roots.
-        let tmp = std::env::temp_dir().join(format!("conduit-skills-{}", uuid::Uuid::new_v4()));
+        let tmp = std::env::temp_dir().join(format!("relay-skills-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp).unwrap();
         std::env::set_var("USERPROFILE", &tmp);
         std::env::set_var("HOME", &tmp);

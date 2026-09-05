@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn walker_filters_dirs_caps_and_classifies() {
-        let root = std::env::temp_dir().join(format!("conduit-docs-test-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("relay-docs-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
         std::fs::create_dir_all(root.join(".git")).unwrap();

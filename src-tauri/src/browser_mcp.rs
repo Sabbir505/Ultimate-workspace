@@ -1,7 +1,7 @@
 //! Loopback WebSocket server: the bridge between the standalone
-//! `conduit-browser-mcp` binary and the running Conduit app.
+//! `relay-browser-mcp` binary and the running Relay app.
 //!
-//! The MCP binary (src/bin/conduit_browser_mcp.rs) speaks stdio JSON-RPC to a
+//! The MCP binary (src/bin/relay_browser_mcp.rs) speaks stdio JSON-RPC to a
 //! harness (Claude Code / Kimi Code) and forwards every `tools/call` over a
 //! loopback WebSocket to this server. Each request is dispatched against the
 //! real visible browser pane via `BrowserManager`'s `run_action_for_pane` /
@@ -52,9 +52,7 @@ pub fn bound_port() -> u16 {
 /// travels only in the MCP child's env block; this file is port discovery,
 /// never an auth grant. Best-effort: failure only means no discovery file.
 fn write_handshake_file(app: &AppHandle, port: u16) {
-    let Some(dir) = app.path().app_data_dir().ok().map(|d| d.join("mcp")) else {
-        return;
-    };
+    let dir = crate::user_dirs::app_data_dir(app).join("mcp");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
@@ -73,10 +71,10 @@ fn write_handshake_file(app: &AppHandle, port: u16) {
     }
 }
 
-/// Random auth token generated at startup so only the conduit-browser-mcp
+/// Random auth token generated at startup so only the relay-browser-mcp
 /// binary can connect to the loopback WS. It is delivered to the binary via
 /// the per-server env block of the generated `.mcp.json` / `opencode.json`
-/// (CONDUIT_MCP_AUTH_TOKEN) — never process-wide, so pty shells and agent
+/// (RELAY_MCP_AUTH_TOKEN) — never process-wide, so pty shells and agent
 /// processes don't inherit it.
 static MCP_AUTH_TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
@@ -142,7 +140,7 @@ impl McpError {
 /// Bind 127.0.0.1 on an OS-assigned ephemeral port and serve connections
 /// until the app exits. Non-fatal if the bind fails (the MCP binary will just
 /// see connection-refused → `browser_unavailable`). Generates a random auth
-/// token at startup; it reaches the conduit-browser-mcp binary via the env
+/// token at startup; it reaches the relay-browser-mcp binary via the env
 /// block of the generated MCP configs so only that binary can connect. The
 /// actual port is published via `bound_port()` (used by every registration
 /// path) and a handshake file under `<app_data>/mcp/`.
@@ -156,12 +154,12 @@ pub async fn serve(browser: Arc<BrowserManager>, app: AppHandle) {
                 .unwrap_or(BROWSER_MCP_PORT);
             BOUND_PORT.store(port, Ordering::SeqCst);
             write_handshake_file(&app, port);
-            eprintln!("[conduit:browser-mcp] WebSocket server listening on ws://127.0.0.1:{port}");
+            eprintln!("[relay:browser-mcp] WebSocket server listening on ws://127.0.0.1:{port}");
             l
         }
         Err(e) => {
             eprintln!(
-                "[conduit:browser-mcp] FAILED to bind 127.0.0.1:0: {e} — agent browser tools will be unavailable"
+                "[relay:browser-mcp] FAILED to bind 127.0.0.1:0: {e} — agent browser tools will be unavailable"
             );
             return;
         }
@@ -175,12 +173,12 @@ pub async fn serve(browser: Arc<BrowserManager>, app: AppHandle) {
                 let expected_token = token.to_string();
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(stream, browser, app, &expected_token).await {
-                        eprintln!("[conduit:browser-mcp] connection error: {e}");
+                        eprintln!("[relay:browser-mcp] connection error: {e}");
                     }
                 });
             }
             Err(e) => {
-                eprintln!("[conduit:browser-mcp] accept error: {e}");
+                eprintln!("[relay:browser-mcp] accept error: {e}");
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
         }
@@ -200,7 +198,7 @@ async fn handle_connection(
 
     // Auth gate: the first text message MUST be {"auth":"<token>"}.
     // Any other first message (including close) rejects the connection.
-    // The conduit-browser-mcp binary reads CONDUIT_MCP_AUTH_TOKEN from
+    // The relay-browser-mcp binary reads RELAY_MCP_AUTH_TOKEN from
     // the environment at startup and sends this as its first message.
     let first = loop {
         if let Some(msg) = read.next().await {
@@ -347,7 +345,7 @@ fn map_resolve_result(res: Result<String, String>) -> Result<Option<String>, Mcp
         Err(e) if e == "pane_not_found" => Ok(None),
         Err(e) if e.starts_with("No page is open") => Ok(None),
         Err(e) => {
-            eprintln!("[conduit:browser-mcp] pane resolution failed: {e}");
+            eprintln!("[relay:browser-mcp] pane resolution failed: {e}");
             Err(McpError { code: "pane_not_found", message: e })
         }
     }
@@ -363,7 +361,7 @@ async fn dispatch(
     browser: &BrowserManager,
     app: &AppHandle,
 ) -> Result<Value, McpError> {
-    // Skip the whole trust layer for the conduit-tools escape hatch and for
+    // Skip the whole trust layer for the relay-tools escape hatch and for
     // pure control ops that must always work (tab listing, diagnostics).
     if crate::mcp_tools_bridge::tool_from_op(&req.op).is_some() || is_uncontrolled_op(&req.op) {
         return dispatch_inner(req, browser, app).await;
@@ -700,7 +698,7 @@ async fn dispatch_inner(
         op if crate::mcp_tools_bridge::tool_from_op(op).is_some() => {
             let tool = crate::mcp_tools_bridge::tool_from_op(op).unwrap();
             let args = req.args.clone();
-            match crate::mcp_tools_bridge::execute_conduit_tool(app, &tool, &args).await {
+            match crate::mcp_tools_bridge::execute_relay_tool(app, &tool, &args).await {
                 Ok(v) => Ok(v),
                 Err(e) => Err(e),
             }
@@ -760,7 +758,7 @@ async fn op_screenshot(
         })?;
     let dir = crate::chat::dispatch::artifacts_dir(app);
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("[conduit:browser-mcp] artifacts dir create failed: {e}");
+        eprintln!("[relay:browser-mcp] artifacts dir create failed: {e}");
     }
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1077,7 +1075,7 @@ async fn op_wait_for(
             Err(e) => {
                 // A mid-navigation eval may fail transiently; keep polling
                 // unless we've blown the deadline.
-                eprintln!("[conduit:browser-mcp] wait_for poll error: {e}");
+                eprintln!("[relay:browser-mcp] wait_for poll error: {e}");
             }
         }
         let step = if condition == "selector" || condition == "stable" { 200 } else { 300 };
@@ -1247,7 +1245,7 @@ async fn op_click_and_wait(
             Ok(u) if !u.trim().is_empty() => Some(u),
             Ok(_) => None, // empty eval result — treat as a failed snapshot
             Err(e) => {
-                eprintln!("[conduit:browser-mcp] click_and_wait URL snapshot failed: {e}");
+                eprintln!("[relay:browser-mcp] click_and_wait URL snapshot failed: {e}");
                 None
             }
         },
@@ -1344,7 +1342,7 @@ async fn op_click_and_wait(
             }
             Err(e) => {
                 // A mid-navigation eval may fail transiently; keep polling.
-                eprintln!("[conduit:browser-mcp] click_and_wait poll error: {e}");
+                eprintln!("[relay:browser-mcp] click_and_wait poll error: {e}");
             }
         }
         let step = if condition == "selector" { 200 } else { 300 };
@@ -1520,7 +1518,7 @@ async fn op_press_key(
 /// on the first failure ("Not executed: an earlier action failed" for the
 /// remaining steps). Cuts harness round trips for multi-step interactions
 /// (fill form -> press Enter -> wait). Only deterministic browser ops
-/// allowed; no nested batch, no conduit tools.
+/// allowed; no nested batch, no relay tools.
 const MAX_BATCH_ACTIONS: usize = 15;
 
 async fn op_batch(

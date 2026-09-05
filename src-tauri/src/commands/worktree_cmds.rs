@@ -1,7 +1,7 @@
 //! Chat-session worktree commands (roadmap P0 §3.1.1).
 //!
 //! Every new chat bound to a git project gets its own isolated git worktree
-//! (`<project-parent>/<project-name>-conduit-<id8>`, branch `conduit/<id8>`).
+//! (`<project-parent>/<project-name>-relay-<id8>`, branch `relay/<id8>`).
 //! This module owns the lifecycle:
 //!
 //! - `ensure_chat_session_worktree` — create + persist + watch (idempotent).
@@ -14,7 +14,7 @@
 //!   delete / unbind / project-removal paths call so no orphaned linked
 //!   working trees accumulate on disk.
 //!
-//! All removal is best-effort by design: the worktree's branch (`conduit/<id>`)
+//! All removal is best-effort by design: the worktree's branch (`relay/<id>`)
 //! stays in the repo, so committed work is never lost — only uncommitted
 //! changes inside a deleted chat go away.
 
@@ -37,7 +37,7 @@ type CmdResult<T> = Result<T, String>;
 /// Idempotent: a session that already points at a live worktree dir returns
 /// that path unchanged. A stale pointer (dir deleted out from under us) is
 /// cleared and the worktree re-created. Branch creation prefers
-/// `conduit/<first-8-of-id>` and falls back to the full id on a collision
+/// `relay/<first-8-of-id>` and falls back to the full id on a collision
 /// (e.g. a leftover worktree from a deleted chat with the same id prefix).
 #[tauri::command]
 pub fn ensure_chat_session_worktree(
@@ -72,13 +72,13 @@ pub fn ensure_chat_session_worktree(
     if !project.is_git_repo {
         return Ok(None);
     }
-    // Branch: `conduit/<first 8 of the uuid>`. UUIDs are ASCII so a byte slice
-    // is safe; `conduit/` groups all chat worktrees in `git branch`/`git log`.
+    // Branch: `relay/<first 8 of the uuid>`. UUIDs are ASCII so a byte slice
+    // is safe; `relay/` groups all chat worktrees in `git branch`/`git log`.
     let short = session_id.get(..8).unwrap_or(&session_id);
-    let path = match git::create_worktree(Path::new(&project.path), &format!("conduit/{short}")) {
+    let path = match git::create_worktree(Path::new(&project.path), &format!("relay/{short}")) {
         Ok(p) => p,
         Err(first_err) => {
-            let full = format!("conduit/{session_id}");
+            let full = format!("relay/{session_id}");
             match git::create_worktree(Path::new(&project.path), &full) {
                 Ok(p) => p,
                 Err(_) => return Err(first_err),
@@ -159,7 +159,7 @@ mod tests {
         // Simulate a pointer that references a now-missing project.
         let mut ghost = unbound.clone();
         ghost.project_id = Some("gone-project".into());
-        ghost.worktree_path = Some("D:/nowhere/conduit-123".into());
+        ghost.worktree_path = Some("D:/nowhere/relay-123".into());
         remove_worktree_for_session(&conn, &ghost);
         let after = db::get_chat_session(&conn, &sess.id).unwrap().unwrap();
         assert!(after.worktree_path.is_none());

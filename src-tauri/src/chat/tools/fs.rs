@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn fs_write_read_edit_round_trip() {
-        let dir = std::env::temp_dir().join(format!("conduit_fs_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("relay_fs_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("sub").join("hello.txt");
 
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn file_tools_surface_previewable_files_as_artifacts() {
-        let dir = std::env::temp_dir().join(format!("conduit_fs_art_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("relay_fs_art_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -483,7 +483,7 @@ mod tests {
         // occurred MORE than once — `expected_matches: 2` with a single
         // actual occurrence silently edited once, contradicting the schema
         // contract. Now any count mismatch rejects the edit untouched.
-        let dir = std::env::temp_dir().join(format!("conduit_fs_test_{}_exp", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("relay_fs_test_{}_exp", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("one.txt");
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn fs_copy_and_move() {
-        let dir = std::env::temp_dir().join(format!("conduit_fs_cm_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("relay_fs_cm_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("a.txt");
@@ -539,7 +539,7 @@ mod tests {
 
     #[test]
     fn fs_delete_file_removes_file() {
-        let dir = std::env::temp_dir().join(format!("conduit_fs_del_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("relay_fs_del_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("gone.txt");
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn fs_search_files_finds_by_substring() {
-        let dir = std::env::temp_dir().join(format!("conduit_fs_search_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("relay_fs_search_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("report_q1.md"), "x").unwrap();
@@ -582,7 +582,7 @@ mod tests {
 
     #[test]
     fn edit_file_rejects_ambiguous_find_with_line_numbers() {
-        let dir = std::env::temp_dir().join(format!("conduit_edit_amb_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("relay_edit_amb_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let f = two_duplicate_lines_file(&dir);
@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn edit_file_all_occurrences_replaces_every_match() {
-        let dir = std::env::temp_dir().join(format!("conduit_edit_all_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("relay_edit_all_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let f = two_duplicate_lines_file(&dir);
@@ -623,7 +623,7 @@ mod tests {
 
     #[test]
     fn edit_file_expected_matches_disambiguates() {
-        let dir = std::env::temp_dir().join(format!("conduit_edit_exp_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("relay_edit_exp_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let f = two_duplicate_lines_file(&dir);
@@ -656,7 +656,7 @@ mod tests {
     #[test]
     fn edit_file_unique_find_still_works() {
         // Regression: a single-match find (the old happy path) is unchanged.
-        let dir = std::env::temp_dir().join(format!("conduit_edit_ok_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("relay_edit_ok_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("ok.txt");

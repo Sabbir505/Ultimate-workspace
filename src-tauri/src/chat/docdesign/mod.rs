@@ -3,7 +3,7 @@
 //!
 //! `src/lib/docdesign/tokens.json` is the single source of truth: the JS
 //! document engines import it (Vite), the bundled Python helper reads a staged
-//! copy ([`super::pygen`] writes it next to `conduit_docgen.py`), and this
+//! copy ([`super::pygen`] writes it next to `relay_docgen.py`), and this
 //! module embeds it at compile time to derive the HTML→PDF base stylesheet.
 //! Change a token and every engine picks it up — no per-engine constants.
 //!

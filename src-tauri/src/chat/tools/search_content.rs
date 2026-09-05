@@ -439,7 +439,7 @@ mod tests {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "conduit_search_content_{}_{}",
+            "relay_search_content_{}_{}",
             std::process::id(),
             n
         ));

@@ -342,10 +342,10 @@ fn generate_document_parameters() -> Value {
                 "enum": ["javascript", "html", "python"],
                 "description": "Engine for `code`. javascript (default for docx/pptx): \
                     program against the preloaded `docx` / `PptxGenJS` globals, delivers via \
-                    `await conduit.save(...)`. html (default for pdf): a complete styled HTML \
+                    `await relay.save(...)`. html (default for pdf): a complete styled HTML \
                     document rendered to PDF by a real browser engine (CSS/SVG/Unicode). \
                     python: python-docx / python-pptx / openpyxl / reportlab on the bundled \
-                    interpreter, saving to the CONDUIT_OUTPUT path.",
+                    interpreter, saving to the RELAY_OUTPUT path.",
             },
             "code": {
                 "type": "string",
@@ -1131,7 +1131,7 @@ fn search_content_parameters() -> Value {
 // ---- Connector remote-tool schema merge ----
 //
 // The vendor's MCP server defines its own tools (e.g. Notion's search/create-
-// page tools); Conduit does NOT hardcode them. At turn start each attached
+// page tools); Relay does NOT hardcode them. At turn start each attached
 // connector's `tools/list` is fetched and classified (Read/Write) in
 // `connectors::session`. Here we advertise those tools to the model with a
 // permissive object schema (the server validates the real args) and tag the

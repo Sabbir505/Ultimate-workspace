@@ -54,4 +54,4 @@ After you call `generate_diagram`, the tool runs a lightweight structural check 
 
 - Don't reach for a JS diagramming library (D3, GoJS) inside `generate_diagram`'s `html` argument — that path is for hand-authored markup only. Inline diagrams in the chat reply have a different, Mermaid-rendered path: emit a fenced ` ```mermaid ` block there if a Mermaid lexer fits the structure.
 - Don't default to rounded pill shapes for everything — vary shape subtly by role only if it aids clarity (e.g. a data-store node as a slightly different shape), not decoratively.
-- Don't add drop shadows, gradients, or glow effects unless the diagram is explicitly meant to match Conduit's own Liquid Glass brand identity — plain flat fills read cleanest for informational diagrams.
+- Don't add drop shadows, gradients, or glow effects unless the diagram is explicitly meant to match Relay's own Liquid Glass brand identity — plain flat fills read cleanest for informational diagrams.

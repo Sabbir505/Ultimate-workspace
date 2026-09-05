@@ -1,6 +1,6 @@
 //! SQLite persistence layer (PRD §6.3 + CONTRACT.md).
 //!
-//! The DB lives at `<app_data_dir>/conduit.db`. All query functions take a
+//! The DB lives at `<app_data_dir>/relay.db`. All query functions take a
 //! `&Connection` so they can be unit-tested against an in-memory database
 //! (`:memory:`) — the app itself holds one shared connection behind a mutex.
 //!
@@ -27,7 +27,6 @@ mod workspaces;
 
 use rusqlite::Connection;
 use std::path::Path;
-use tauri::Manager;
 use uuid::Uuid;
 
 pub type DbResult<T> = Result<T, rusqlite::Error>;
@@ -50,16 +49,24 @@ pub fn open(path: &Path) -> DbResult<Connection> {
     Ok(conn)
 }
 
-/// Absolute path of the chat database. Defaults to `<app data dir>/conduit.db` —
+/// Absolute path of the chat database. Defaults to `<app data dir>/relay.db` —
 /// overridable via the `storage.dbDir` setting (Settings → Data), which must
-/// be read from the CURRENT database before a move. Returns an `io::Error`
-/// when the app data dir cannot be resolved.
+/// be read from the CURRENT database before a move.
 pub fn chat_db_path(app: &tauri::AppHandle) -> std::io::Result<std::path::PathBuf> {
-    let default_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()))?;
-    Ok(resolve_db_path(&default_dir))
+    Ok(resolve_db_path(&crate::user_dirs::app_data_dir(app)))
+}
+
+/// The DB file to use inside `dir`: `relay.db` for fresh setups, the
+/// pre-rebrand `conduit.db` when that is the only one present (existing
+/// installs keep their history without a move). Must be used by EVERY
+/// resolver (GUI + headless automation binary) so both never disagree.
+pub fn db_file_in(dir: &std::path::Path) -> std::path::PathBuf {
+    let new = dir.join("relay.db");
+    if new.exists() || !dir.join("conduit.db").exists() {
+        new
+    } else {
+        dir.join("conduit.db")
+    }
 }
 
 /// Pure core of [`chat_db_path`]: resolve the DB path given the DEFAULT app
@@ -68,14 +75,14 @@ pub fn chat_db_path(app: &tauri::AppHandle) -> std::io::Result<std::path::PathBu
 /// the default location and silently read a stale/empty DB whenever
 /// `storage.dbDir` was set (B-27).
 pub fn resolve_db_path(default_dir: &std::path::Path) -> std::path::PathBuf {
-    let default = default_dir.join("conduit.db");
+    let default = db_file_in(default_dir);
     // The setting lives IN the DB, so resolve it by peeking at the default
     // location's DB (which always exists — it's created at first launch).
     if let Ok(conn) = Connection::open(&default) {
         if let Ok(Some(dir)) = settings::get_setting(&conn, "storage.dbDir") {
             let dir = dir.trim();
             if !dir.is_empty() {
-                return std::path::PathBuf::from(dir).join("conduit.db");
+                return db_file_in(&std::path::PathBuf::from(dir));
             }
         }
     }
@@ -272,7 +279,7 @@ fn migrate_chat_session_policies(conn: &Connection) -> DbResult<()> {
 
 /// before the worktree-per-session feature (roadmap P0 §3.1.1). NULL = the
 /// chat works in its bound project's working tree; a path = the chat's
-/// isolated git worktree (branch `conduit/<id>`, a sibling of the project).
+/// isolated git worktree (branch `relay/<id>`, a sibling of the project).
 /// The column is maintained by `ensure_chat_session_worktree` /
 /// `set_chat_session_worktree`; see the legacy `sessions.worktree_path`
 /// (PTY harness sessions) for the older sibling of this concept.
@@ -496,7 +503,7 @@ pub fn migrate_cost_v2(conn: &Connection) -> DbResult<()> {
         .unwrap_or(false);
     if has_old_col {
         if let Err(e) = conn.execute("ALTER TABLE cost_events DROP COLUMN estimated_cost_usd", []) {
-            eprintln!("[conduit] cost_v2: DROP COLUMN failed ({e}); column will be unused");
+            eprintln!("[relay] cost_v2: DROP COLUMN failed ({e}); column will be unused");
         }
     }
     Ok(())
@@ -965,7 +972,7 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           last_run_at INTEGER NOT NULL DEFAULT 0
         );
 
-        -- Per-turn git working-tree snapshots (refs/conduit/checkpoints/…).
+        -- Per-turn git working-tree snapshots (refs/relay/checkpoints/…).
         -- message_id is the assistant message the checkpoint follows; NULL =
         -- turn-start baseline / pre-restore safety snapshot. `files` is a
         -- JSON [{path,status}] array vs the session's previous checkpoint.
@@ -1338,6 +1345,23 @@ pub(crate) fn mem() -> Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn db_file_prefers_new_name_and_falls_back_to_legacy() {
+        let tmp = std::env::temp_dir().join(format!("relay-db-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // Fresh dir → new name.
+        assert_eq!(db_file_in(&tmp), tmp.join("relay.db"));
+        // Only the pre-rebrand file exists → keep using it (no data moved
+        // behind the user's back).
+        std::fs::write(tmp.join("conduit.db"), b"x").unwrap();
+        assert_eq!(db_file_in(&tmp), tmp.join("conduit.db"));
+        // Both exist → new name wins.
+        std::fs::write(tmp.join("relay.db"), b"x").unwrap();
+        assert_eq!(db_file_in(&tmp), tmp.join("relay.db"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn schema_creates_idempotently() {

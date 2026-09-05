@@ -1,13 +1,13 @@
 ---
 name: docx
-description: "Use this skill whenever generating a Word document (.docx) in Conduit's Chat tab sandbox. Triggers: any request for a report, memo, letter, proposal, or similar document deliverable as a .docx file."
+description: "Use this skill whenever generating a Word document (.docx) in Relay's Chat tab sandbox. Triggers: any request for a report, memo, letter, proposal, or similar document deliverable as a .docx file."
 ---
 
 # DOCX Generation (docx npm via the JavaScript engine)
 
 The default engine is **JavaScript**: your `code` runs in the app's document
 sandbox with the `docx` npm library preloaded as a global, and the produced
-file is delivered through `await conduit.save(...)`. It emits real, editable
+file is delivered through `await relay.save(...)`. It emits real, editable
 Word OOXML (the same engine Anthropic's public docx skill uses) and needs no
 Python runtime.
 
@@ -34,7 +34,7 @@ const doc = new Document({
   }],
 });
 
-await conduit.save(await Packer.toBlob(doc));
+await relay.save(await Packer.toBlob(doc));
 ```
 
 ## Structure first, content second
@@ -56,7 +56,7 @@ almost always ones that started writing paragraphs before deciding structure.
   `styles.default.document.run`; give the title real visual weight (TITLE
   style, 24-28pt) rather than colored bars or underlines.
 - **Clean white pages**; one restrained accent colour if any.
-- Deliver with EXACTLY ONE `await conduit.save(...)`. No network calls, no
+- Deliver with EXACTLY ONE `await relay.save(...)`. No network calls, no
   file-system access from the sandbox.
 - Build genuinely useful content — several sections, real numbers where the
   user gave them.
@@ -64,6 +64,6 @@ almost always ones that started writing paragraphs before deciding structure.
 ## Python fallback
 
 If the JavaScript engine is unavailable (e.g. headless automation runs),
-re-call with `language: "python"`: python-docx or `conduit_docgen`
+re-call with `language: "python"`: python-docx or `relay_docgen`
 (`cd.Doc(title=…, theme=…)`; `doc.heading/paragraph/bullets/table/save`) on
-the bundled interpreter, saving to `os.environ["CONDUIT_OUTPUT"]`.
+the bundled interpreter, saving to `os.environ["RELAY_OUTPUT"]`.

@@ -237,11 +237,11 @@ impl BrowserPane {
     }
 }
 
-/// Fixed loopback port the `conduit-browser-mcp` binary connects to. The
+/// Fixed loopback port the `relay-browser-mcp` binary connects to. The
 /// in-app WebSocket server (`browser_mcp::serve`) binds 127.0.0.1:{port}; the
-/// standalone MCP binary reads this from the `CONDUIT_WS_PORT` env var (set in
+/// standalone MCP binary reads this from the `RELAY_WS_PORT` env var (set in
 /// `.mcp.json`/`--mcp-config` registration) and forwards tool calls here.
-/// Shared between the two via `conduit_lib` so they can never drift apart.
+/// Shared between the two via `relay_lib` so they can never drift apart.
 pub const BROWSER_MCP_PORT: u16 = 7681;
 
 /// An interactive element the browser_click / browser_type tools target.
@@ -435,8 +435,8 @@ const BRIDGE_EXTRACT_JS: &str = include_str!("bridge_extract.js");
 const BRIDGE_RESOLVE_JS: &str = include_str!("bridge_resolve.js");
 /// Visual feedback overlay (Task #7): synthetic cursor tween, click ripple,
 /// animated typing caret, pre-action highlight. Defines globals
-/// `__conduit_injectOverlay` / `__conduit_tweenCursor` / `__conduit_showRipple`
-/// / `__conduit_highlight` / `__conduit_showCaret`. Injected after every
+/// `__relay_injectOverlay` / `__relay_tweenCursor` / `__relay_showRipple`
+/// / `__relay_highlight` / `__relay_showCaret`. Injected after every
 /// navigation (alongside the pushState monkey-patch) and re-injected lazily by
 /// each action so a fresh page load re-installs it.
 const BRIDGE_OVERLAY_JS: &str = include_str!("bridge_overlay.js");
@@ -448,7 +448,7 @@ const BRIDGE_SNAPSHOT_JS: &str = include_str!("bridge_snapshot.js");
 
 /// Diagnostics ring buffer (Phase 1): document-start instrumentation that
 /// records console output, fetch/XHR network activity, and the last DOM
-/// mutation timestamp into `window.__conduitDiag`. Backs the agent-facing
+/// mutation timestamp into `window.__relayDiag`. Backs the agent-facing
 /// `read_console` / `read_network` ops and the `wait_for: stable` DOM-stability
 /// heuristic — cross-platform (pure JS, no CDP needed on macOS/Linux; on
 /// Windows the same data could later come from CDP event receivers).
@@ -456,7 +456,7 @@ const BRIDGE_SNAPSHOT_JS: &str = include_str!("bridge_snapshot.js");
 /// initialization_script (macOS) / the escalating post-nav injection (all
 /// platforms — the guard makes re-injection a no-op).
 const DIAG_INIT_JS: &str = r#"(function() {
-    if (window.__conduitDiag) { window.__conduitDiag.installed = true; return; }
+    if (window.__relayDiag) { window.__relayDiag.installed = true; return; }
     var diag = {
         installed: true,
         seq: 0,
@@ -464,7 +464,7 @@ const DIAG_INIT_JS: &str = r#"(function() {
         console: [],   // {seq, ts, level, text}
         network: []    // {seq, ts, method, url, status, resourceType}
     };
-    window.__conduitDiag = diag;
+    window.__relayDiag = diag;
     var MAX = 100;
     function push(kind, entry) {
         entry.seq = ++diag.seq;
@@ -526,11 +526,11 @@ const DIAG_INIT_JS: &str = r#"(function() {
             var origOpen = XHR.prototype.open;
             var origSend = XHR.prototype.send;
             XHR.prototype.open = function(method, url) {
-                try { this.__conduitReq = { method: String(method).toUpperCase(), url: String(url).slice(0, 300), status: null }; } catch (e) {}
+                try { this.__relayReq = { method: String(method).toUpperCase(), url: String(url).slice(0, 300), status: null }; } catch (e) {}
                 return origOpen.apply(this, arguments);
             };
             XHR.prototype.send = function() {
-                var entry = this.__conduitReq;
+                var entry = this.__relayReq;
                 if (entry) {
                     this.addEventListener('loadend', function() {
                         try { entry.status = this.status; entry.resourceType = 'xhr'; push('network', entry); } catch (e) {}
@@ -617,15 +617,10 @@ fn sanitize(rect: Rect) -> Rect {
 /// nav-complete with error codes. Best-effort: logging must never fail a
 /// browser operation.
 pub(crate) fn browser_log(app: &tauri::AppHandle, msg: &str) {
-    let Some(dir) = app
-        .path()
-        .app_data_dir()
-        .ok()
-        .map(|d| d.join("logs"))
-        .filter(|d| std::fs::create_dir_all(d).is_ok())
-    else {
+    let dir = crate::user_dirs::app_data_dir(app).join("logs");
+    if std::fs::create_dir_all(&dir).is_err() {
         return;
-    };
+    }
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -1205,7 +1200,7 @@ fn title_report_js(pane_id: &str, tab_id: &str) -> String {
     try {{
         if (window.chrome && window.chrome.webview &&
             typeof window.chrome.webview.postMessage === 'function') {{
-            args.__conduit = 'title_report';
+            args.__relay = 'title_report';
             window.chrome.webview.postMessage(JSON.stringify(args));
             return;
         }}
@@ -1233,8 +1228,8 @@ fn pushstate_injection_js(pane_id: &str, tab_id: &str) -> String {
     format!(
         r#"(function() {{
     {title_report}
-    if (window.__conduit_pushstate_patched) return;
-    window.__conduit_pushstate_patched = true;
+    if (window.__relay_pushstate_patched) return;
+    window.__relay_pushstate_patched = true;
     var emit = function() {{
         var args = {{ paneId: '{pane}', tabId: '{tab}', url: location.href }};
         try {{
@@ -1242,7 +1237,7 @@ fn pushstate_injection_js(pane_id: &str, tab_id: &str) -> String {
                 typeof window.chrome.webview.postMessage === 'function') {{
                 // B-3: raw WebView2 panes have no Tauri IPC — report through
                 // the WebMessageReceived bridge instead.
-                args.__conduit = 'push_state';
+                args.__relay = 'push_state';
                 args.cmd = 'browser_push_state';
                 window.chrome.webview.postMessage(JSON.stringify(args));
                 return;
@@ -1300,7 +1295,7 @@ fn attach_web_message_bridge(
                 // Not our envelope (page posted its own data) — ignore.
                 return Ok(());
             };
-            match v.get("__conduit").and_then(|k| k.as_str()) {
+            match v.get("__relay").and_then(|k| k.as_str()) {
                 Some("action_result") => {
                     let req_id = v.get("reqId").and_then(|x| x.as_u64()).unwrap_or(0);
                     let nonce = v.get("nonce").and_then(|x| x.as_str()).unwrap_or("");
@@ -1530,7 +1525,7 @@ impl BrowserManager {
         project_id: Option<&str>,
     ) -> Result<(), String> {
         let label = browser_label(pane_id, tab_id);
-        eprintln!("[conduit:browser] create pane={pane_id} tab={tab_id} label={label} url={url} rect={rect:?}");
+        eprintln!("[relay:browser] create pane={pane_id} tab={tab_id} label={label} url={url} rect={rect:?}");
         browser_log(&self.app, &format!("create pane={pane_id} tab={tab_id} label={label} url={url} rect={rect:?}"));
 
         // Guard against concurrent creates for the same label. React
@@ -1540,7 +1535,7 @@ impl BrowserManager {
         {
             let mut inf = self.in_flight.lock();
             if inf.contains(&label) {
-                eprintln!("[conduit:browser] create SKIP label={label} — already in-flight");
+                eprintln!("[relay:browser] create SKIP label={label} — already in-flight");
                 browser_log(&self.app, &format!("create SKIP label={label} — already in-flight"));
                 return Ok(());
             }
@@ -1552,7 +1547,7 @@ impl BrowserManager {
         let _in_flight_guard = InFlightGuard::new(&self.in_flight, label.clone());
 
         ensure_supported().map_err(|e| {
-            eprintln!("[conduit:browser] ensure_supported FAILED: {e}");
+            eprintln!("[relay:browser] ensure_supported FAILED: {e}");
             e
         })?;
 
@@ -1565,10 +1560,10 @@ impl BrowserManager {
         {
             let old = self.webviews.lock().remove(&label);
             if let Some(pane) = old {
-                eprintln!("[conduit:browser] create replacing existing label={label} — closing old webview on main thread");
+                eprintln!("[relay:browser] create replacing existing label={label} — closing old webview on main thread");
                 self.run_main_thread_call(move || pane.close().map_err(|e| e.to_string()))
                     .map_err(|e| {
-                        eprintln!("[conduit:browser] close(existing) FAILED: {e}");
+                        eprintln!("[relay:browser] close(existing) FAILED: {e}");
                         e
                     })?;
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1578,7 +1573,7 @@ impl BrowserManager {
         // Validate the target URL up front (scheme allowlist — see
         // validate_nav_url).
         let _parsed = validate_nav_url(url).map_err(|e| {
-            eprintln!("[conduit:browser] url validation FAILED: {e}");
+            eprintln!("[relay:browser] url validation FAILED: {e}");
             e
         })?;
         let rect = sanitize(rect);
@@ -1595,7 +1590,7 @@ impl BrowserManager {
                 return Err(e);
             }
         };
-        eprintln!("[conduit:browser] create OK for label={label}");
+        eprintln!("[relay:browser] create OK for label={label}");
 
         self.webviews.lock().insert(label.clone(), pane);
 
@@ -1613,7 +1608,7 @@ impl BrowserManager {
         match self.call_devtools_protocol(&label, "Page.enable", "{}") {
             Ok(_) => browser_log(&self.app, &format!("Page.enable OK label={label}")),
             Err(e) => {
-                eprintln!("[conduit:browser] Page.enable failed (non-fatal): {e}");
+                eprintln!("[relay:browser] Page.enable failed (non-fatal): {e}");
                 browser_log(&self.app, &format!("Page.enable FAILED label={label}: {e}"));
             }
         }
@@ -1760,12 +1755,7 @@ impl BrowserManager {
                 right: ((rect.x + rect.width) * scale) as i32,
                 bottom: ((rect.y + rect.height) * scale) as i32,
             };
-            let data_dir = self
-                .app
-                .path()
-                .app_data_dir()
-                .map(|d| d.join("webview2"))
-                .unwrap_or_else(|_| std::path::PathBuf::from("conduit-webview2"));
+            let data_dir = crate::user_dirs::app_data_dir(&self.app).join("webview2");
 
             let (done_tx, done_rx) = mpsc::channel::<Result<(), String>>();
             let done: DoneHandle = std::sync::Arc::new(Mutex::new(Some(done_tx)));
@@ -1873,7 +1863,7 @@ impl BrowserManager {
                         .map(|(l, _)| l.to_string())
                         .collect();
                     let msg = "main window not found".to_string();
-                    eprintln!("[conduit:browser] get_window('main') FAILED: {msg} — known: {known:?}");
+                    eprintln!("[relay:browser] get_window('main') FAILED: {msg} — known: {known:?}");
                     msg
                 })?;
 
@@ -1894,7 +1884,7 @@ impl BrowserManager {
                 .initialization_script(DIAG_INIT_JS)
                 .initialization_script(BRIDGE_OVERLAY_JS)
                 .on_navigation(move |nav_url| {
-                    eprintln!("[conduit:browser] navigation: {nav_url}");
+                    eprintln!("[relay:browser] navigation: {nav_url}");
                     browser_log(&app, &format!("wry on_navigation (nav START allowed) url={nav_url} label={label_for_nav}"));
                     if let Some(state) = app.try_state::<crate::BrowserState>() {
                         state.0.remember_tab_url(&label_for_nav, nav_url.as_str());
@@ -1914,7 +1904,7 @@ impl BrowserManager {
                     std::thread::spawn(move || {
                         // B9: no more blind 1.5 s sleep. The injection is
                         // idempotent (guarded by
-                        // `window.__conduit_pushstate_patched`), so inject on
+                        // `window.__relay_pushstate_patched`), so inject on
                         // an escalating schedule: fast pages get the hook
                         // immediately, slow pages still get it within ~5 s,
                         // and each later eval no-ops once installed.
@@ -1944,7 +1934,7 @@ impl BrowserManager {
                     true
                 })
                 .on_new_window(move |new_url, _label| {
-                    eprintln!("[conduit:browser] new_window: {new_url} — navigating in-place");
+                    eprintln!("[relay:browser] new_window: {new_url} — navigating in-place");
                     let _ = app2.emit(
                         "browser:navigated",
                         BrowserNavigatedEvent {
@@ -1957,7 +1947,7 @@ impl BrowserManager {
                 });
 
             eprintln!(
-                "[conduit:browser] add_child at ({},{}) {}x{} (main-thread scheduled)",
+                "[relay:browser] add_child at ({},{}) {}x{} (main-thread scheduled)",
                 rect.x, rect.y, rect.width, rect.height
             );
 
@@ -1986,13 +1976,13 @@ impl BrowserManager {
                         } else {
                             "unknown panic".to_string()
                         };
-                        eprintln!("[conduit:browser] add_child PANICKED on main thread: {detail}");
+                        eprintln!("[relay:browser] add_child PANICKED on main thread: {detail}");
                         Err(format!("browser webview creation panicked: {detail}"))
                     }
                 };
                 match &res {
-                    Ok(_) => eprintln!("[conduit:browser] add_child OK on main thread for label={label_owned}"),
-                    Err(msg) => eprintln!("[conduit:browser] add_child FAILED on main thread: {msg}"),
+                    Ok(_) => eprintln!("[relay:browser] add_child OK on main thread for label={label_owned}"),
+                    Err(msg) => eprintln!("[relay:browser] add_child FAILED on main thread: {msg}"),
                 }
                 let _ = tx.send(res);
             });
@@ -2055,8 +2045,8 @@ impl BrowserManager {
                 .build()
                 .map_err(|e| format!("failed to create browser webview window: {e}"));
                 match &res {
-                    Ok(_) => eprintln!("[conduit:browser] WebviewWindow OK for label={label_for_win}"),
-                    Err(msg) => eprintln!("[conduit:browser] WebviewWindow FAILED for label={label_for_win}: {msg}"),
+                    Ok(_) => eprintln!("[relay:browser] WebviewWindow OK for label={label_for_win}"),
+                    Err(msg) => eprintln!("[relay:browser] WebviewWindow FAILED for label={label_for_win}: {msg}"),
                 }
                 let _ = tx.send(res);
             });
@@ -2274,7 +2264,7 @@ try {
     }
   }
 } catch (e) {}
-window.__conduitSiteCleared = location.origin;
+window.__relaySiteCleared = location.origin;
 location.reload();
 "#,
         )
@@ -2843,7 +2833,7 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
                     // AND extracted content < 2000 chars.
                     if scroll_height > viewport * 2 && markdown_len < 2000 {
                         eprintln!(
-                            "[conduit:browser] lazy-load scroll loop: scrollHeight={scroll_height} \
+                            "[relay:browser] lazy-load scroll loop: scrollHeight={scroll_height} \
                              viewport={viewport} markdownLen={markdown_len}"
                         );
                         let mut prev_scroll_height = scroll_height;
@@ -2864,7 +2854,7 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
                                     // Short-circuit: content didn't grow meaningfully
                                     if new_len <= content.markdown.len() + 100 {
                                         eprintln!(
-                                            "[conduit:browser] lazy-load scroll stop: no content growth at step {step}"
+                                            "[relay:browser] lazy-load scroll stop: no content growth at step {step}"
                                         );
                                         break;
                                     }
@@ -2881,7 +2871,7 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
                                     let new_sh = check["scrollHeight"].as_f64().unwrap_or(0.0) as i64;
                                     if new_sh <= prev_scroll_height {
                                         eprintln!(
-                                            "[conduit:browser] lazy-load scroll stop: scrollHeight stable at {new_sh}"
+                                            "[relay:browser] lazy-load scroll stop: scrollHeight stable at {new_sh}"
                                         );
                                         break;
                                     }
@@ -3339,7 +3329,7 @@ return JSON.stringify({scrollHeight: h, viewportHeight: vh});
         self.run_action(&scroll_js(dy)).await
     }
 
-    /// Hover the element tagged with `data-conduit-ref="{r}"` in the active
+    /// Hover the element tagged with `data-relay-ref="{r}"` in the active
     /// pane. Dispatches real mouseover/mouseenter events so React/Vue hover
     /// handlers and CSS `:hover` activate. Backs the new `hover` MCP tool.
     pub async fn hover_ref(&self, r: i64) -> Result<String, String> {
@@ -3717,7 +3707,7 @@ fn action_wrapper_js(req_id: u64, nonce: &str, body: &str, opts: &ActionOpts) ->
         try {{
             if (window.chrome && window.chrome.webview &&
                 typeof window.chrome.webview.postMessage === 'function') {{
-                args.__conduit = 'action_result';
+                args.__relay = 'action_result';
                 args.cmd = 'browser_action_result';
                 window.chrome.webview.postMessage(JSON.stringify(args));
                 return;
@@ -3754,7 +3744,7 @@ fn action_wrapper_js(req_id: u64, nonce: &str, body: &str, opts: &ActionOpts) ->
 
 /// Legacy flat-text read JS (replaced by the readability-style bridge above,
 /// but kept for the click_js / type_js tests that check the ref-tagging pattern).
-/// The interactive-element ref scheme (data-conduit-ref + non-zero-bounding-rect
+/// The interactive-element ref scheme (data-relay-ref + non-zero-bounding-rect
 /// guard) is preserved in the new bridge_extract.js.
 #[allow(dead_code)]
 const READ_PAGE_JS: &str = r#"
@@ -3765,7 +3755,7 @@ var i = 0;
 els.forEach(function(el) {
     var r = el.getBoundingClientRect();
     if (r.width === 0 || r.height === 0) return;
-    el.setAttribute('data-conduit-ref', String(i));
+    el.setAttribute('data-relay-ref', String(i));
     var tag = el.tagName.toLowerCase();
     var label = (el.innerText || el.value || el.getAttribute('aria-label') ||
         el.getAttribute('placeholder') || el.getAttribute('name') || '')
@@ -3784,25 +3774,25 @@ return 'URL: ' + location.href + '\nTITLE: ' + document.title +
     '\n\nPAGE TEXT:\n' + text;
 "#;
 
-/// Click the element tagged with `data-conduit-ref="{r}"`. Returns a JS body
+/// Click the element tagged with `data-relay-ref="{r}"`. Returns a JS body
 /// (for `action_wrapper_js`) that returns a PROMISE: it tweens the synthetic
 /// cursor to the element, shows a ripple, THEN fires the real click — so a
 /// human watching can follow the action, and the tool result is only reported
 /// once the whole sequence (and the real DOM click) completes (Task #7 race
 /// guard). The overlay primitives come from bridge_overlay.js (injected after
-/// navigation + lazily by __conduit_injectOverlay).
+/// navigation + lazily by __relay_injectOverlay).
 fn click_js(r: i64, narrate: Option<&str>) -> String {
     let narrate_js = match narrate {
         Some(t) => {
             let esc = serde_json::to_string(t).unwrap_or_else(|_| "null".to_string());
-            format!("if (typeof __conduit_narrate === 'function') __conduit_narrate({esc});")
+            format!("if (typeof __relay_narrate === 'function') __relay_narrate({esc});")
         }
         None => String::new(),
     };
     format!(
         r#"
 {narrate_js}
-var el = document.querySelector('[data-conduit-ref="{r}"]');
+var el = document.querySelector('[data-relay-ref="{r}"]');
 if (!el) return 'ERROR: ref {r} is stale — no element with this ref on the current page. The page changed since the ref was assigned; re-read the page (read_page or find) to get fresh refs.';
 function doClick() {{
     el.scrollIntoView({{block: 'center'}});
@@ -3812,23 +3802,23 @@ function doClick() {{
 // Graceful degradation: if the visual overlay isn't installed yet (page loaded
 // before the post-nav injection fired, or the primitives got cleared), skip the
 // cursor/ripple and just click. Functionality never depends on the visuals.
-if (typeof __conduit_tweenCursor !== 'function') {{ return doClick(); }}
+if (typeof __relay_tweenCursor !== 'function') {{ return doClick(); }}
 var rect = el.getBoundingClientRect();
 var cx = rect.left + rect.width / 2;
 var cy = rect.top + rect.height / 2;
-__conduit_highlight(rect);
-return __conduit_tweenCursor(cx, cy, 150).then(function() {{
-    __conduit_showRipple(cx, cy);
+__relay_highlight(rect);
+return __relay_tweenCursor(cx, cy, 150).then(function() {{
+    __relay_showRipple(cx, cy);
     return doClick();
 }}).then(function(msg) {{
-    setTimeout(function() {{ __conduit_fadeHighlight(); }}, 250);
+    setTimeout(function() {{ __relay_fadeHighlight(); }}, 250);
     return msg;
 }});
 "#
     )
 }
 
-/// Type `text` into the element tagged with `data-conduit-ref="{r}"`. Returns a
+/// Type `text` into the element tagged with `data-relay-ref="{r}"`. Returns a
 /// JS body that returns a PROMISE: it tweens the cursor to the field, shows a
 /// caret, then inserts the text CHARACTER BY CHARACTER (~14ms±6ms per char,
 /// randomized) dispatching real keydown/keyup/input events per keystroke —
@@ -3840,14 +3830,14 @@ fn type_js(r: i64, text: &str, narrate: Option<&str>) -> String {
     let narrate_js = match narrate {
         Some(t) => {
             let esc = serde_json::to_string(t).unwrap_or_else(|_| "null".to_string());
-            format!("if (typeof __conduit_narrate === 'function') __conduit_narrate({esc});")
+            format!("if (typeof __relay_narrate === 'function') __relay_narrate({esc});")
         }
         None => String::new(),
     };
     format!(
         r#"
 {narrate_js}
-var el = document.querySelector('[data-conduit-ref="{r}"]');
+var el = document.querySelector('[data-relay-ref="{r}"]');
 if (!el) return 'ERROR: ref {r} is stale — no element with this ref on the current page. The page changed since the ref was assigned; re-read the page (read_page or find) to get fresh refs.';
 var text = {js_text};
 function doTypePlain() {{
@@ -3858,22 +3848,22 @@ function doTypePlain() {{
     return 'Typed into ref {r}.';
 }}
 // Graceful degradation when the overlay primitives aren't installed yet.
-if (typeof __conduit_tweenCursor !== 'function') {{ return doTypePlain(); }}
+if (typeof __relay_tweenCursor !== 'function') {{ return doTypePlain(); }}
 var rect = el.getBoundingClientRect();
 var cx = rect.left + rect.width / 2;
 var cy = rect.top + rect.height / 2;
-__conduit_highlight(rect);
-return __conduit_tweenCursor(cx, cy, 150).then(function() {{
+__relay_highlight(rect);
+return __relay_tweenCursor(cx, cy, 150).then(function() {{
     el.focus();
-    __conduit_showCaret(cx + rect.width / 2 - 2, cy);
+    __relay_showCaret(cx + rect.width / 2 - 2, cy);
     var existing = ('value' in el && typeof el.value === 'string') ? el.value : '';
     var i = 0;
     function next() {{
         if (i >= text.length) {{
             el.dispatchEvent(new Event('input', {{bubbles: true}}));
             el.dispatchEvent(new Event('change', {{bubbles: true}}));
-            __conduit_hideCaret();
-            setTimeout(function() {{ __conduit_fadeHighlight(); }}, 200);
+            __relay_hideCaret();
+            setTimeout(function() {{ __relay_fadeHighlight(); }}, 200);
             return 'Typed into ref {r}.';
         }}
         var ch = text[i];
@@ -3886,7 +3876,7 @@ return __conduit_tweenCursor(cx, cy, 150).then(function() {{
         try {{ el.dispatchEvent(new KeyboardEvent('keyup', {{key: ch, bubbles: true}})); }} catch(e) {{}}
         el.dispatchEvent(new Event('input', {{bubbles: true}}));
         var r2 = el.getBoundingClientRect();
-        __conduit_showCaret(r2.left + Math.min(r2.width, 8), r2.top + r2.height / 2 - 9);
+        __relay_showCaret(r2.left + Math.min(r2.width, 8), r2.top + r2.height / 2 - 9);
         i++;
         var delay = 8 + Math.random() * 12;
         return new Promise(function(resolve) {{ setTimeout(function() {{ resolve(next()); }}, delay); }});
@@ -3908,7 +3898,7 @@ return 'Scrolled by {dy}px. scrollY=' + Math.round(window.scrollY) +
 }
 
 /// Hover (dispatch true mouseover/mouseenter/mousemove) over the element tagged
-/// with `data-conduit-ref="{r}"`. Needed for CSS-`:hover` menus and dropdowns
+/// with `data-relay-ref="{r}"`. Needed for CSS-`:hover` menus and dropdowns
 /// that reveal on hover before a click is possible. Real MouseEvents with
 /// `bubbles:true` are required so React/Vue `onMouseEnter` handlers fire the
 /// same way they do for a real cursor. Returns a Promise like click_js (cursor
@@ -3916,7 +3906,7 @@ return 'Scrolled by {dy}px. scrollY=' + Math.round(window.scrollY) +
 fn hover_js(r: i64) -> String {
     format!(
         r#"
-var el = document.querySelector('[data-conduit-ref="{r}"]');
+var el = document.querySelector('[data-relay-ref="{r}"]');
 if (!el) return 'ERROR: ref {r} is stale — no element with this ref on the current page. The page changed since the ref was assigned; re-read the page (read_page or find) to get fresh refs.';
 var rect = el.getBoundingClientRect();
 var cx = Math.max(rect.left + Math.max(rect.width / 2, 1), 1);
@@ -3932,11 +3922,11 @@ function doHover() {{
     try {{ el.dispatchEvent(new MouseEvent('mouseenter', opts)); }} catch(e) {{}}
     return 'Hovered ref {r}. Menus toggled by :hover should now be visible.';
 }}
-if (typeof __conduit_tweenCursor !== 'function') {{ return doHover(); }}
-__conduit_highlight(rect);
-return __conduit_tweenCursor(cx, cy, 150).then(function() {{
+if (typeof __relay_tweenCursor !== 'function') {{ return doHover(); }}
+__relay_highlight(rect);
+return __relay_tweenCursor(cx, cy, 150).then(function() {{
     var msg = doHover();
-    setTimeout(function() {{ __conduit_fadeHighlight(); }}, 250);
+    setTimeout(function() {{ __relay_fadeHighlight(); }}, 250);
     return msg;
 }});
 "#
@@ -4027,7 +4017,7 @@ function setDirect(el, text) {{
 }}
 for (var i = 0; i < fields.length; i++) {{
     var f = fields[i];
-    var el = document.querySelector('[data-conduit-ref="' + f.ref + '"]');
+    var el = document.querySelector('[data-relay-ref="' + f.ref + '"]');
     if (!el) {{ results.push({{ ref: f.ref, ok: false, error: 'stale — no element with this ref on the current page; re-read to get fresh refs' }}); continue; }}
     try {{
         setDirect(el, String(f.text == null ? '' : f.text));
@@ -4050,7 +4040,7 @@ fn select_option_js(r: i64, value: &str) -> String {
     let val = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string());
     format!(
         r#"
-var el = document.querySelector('[data-conduit-ref="{r}"]');
+var el = document.querySelector('[data-relay-ref="{r}"]');
 if (!el) return 'ERROR: ref {r} is stale — no element with this ref on the current page. Re-read the page (read_page or find) to get fresh refs.';
 if (el.tagName !== 'SELECT') return 'ERROR: ref {r} is a ' + el.tagName.toLowerCase() + ', not a <select>.';
 var want = {val};
@@ -4116,7 +4106,7 @@ return 'Pressed ' + JSON.stringify(key) + ' on ' + target.tagName.toLowerCase() 
 fn diag_read_js(kind: &str, since: u64) -> String {
     format!(
         r#"
-var diag = window.__conduitDiag;
+var diag = window.__relayDiag;
 if (!diag) return JSON.stringify({{ entries: [], latest: 0, installed: false }});
 var since = {since};
 var arr = diag.{kind} || [];
@@ -4133,7 +4123,7 @@ return JSON.stringify({{ entries: out, latest: diag.seq, installed: true }});
 /// and the probe degrades to the readyState check.
 pub fn stable_check_js() -> String {
     r#"
-var diag = window.__conduitDiag;
+var diag = window.__relayDiag;
 var quiet = !diag || (Date.now() - diag.lastMutation) > 600;
 return JSON.stringify({ stable: document.readyState === 'complete' && quiet });
 "#
@@ -4207,7 +4197,7 @@ mod tests {
     #[test]
     fn click_js_targets_ref_and_guards_missing() {
         let js = click_js(3, None);
-        assert!(js.contains(r#"data-conduit-ref="3""#));
+        assert!(js.contains(r#"data-relay-ref="3""#));
         assert!(js.contains(".click()"));
         assert!(js.contains("ERROR: ref 3 is stale"));
     }
@@ -4217,7 +4207,7 @@ mod tests {
         let js = type_js(1, "he said \"hi\"\nbye", None);
         // The typed text must be a valid JS string literal (quotes/newlines escaped).
         assert!(js.contains(r#"he said \"hi\"\nbye"#));
-        assert!(js.contains(r#"data-conduit-ref="1""#));
+        assert!(js.contains(r#"data-relay-ref="1""#));
         assert!(js.contains("dispatchEvent"));
     }
 
@@ -4229,7 +4219,7 @@ mod tests {
     #[test]
     fn hover_js_targets_ref_and_dispatches_mouse_events() {
         let js = hover_js(4);
-        assert!(js.contains(r#"data-conduit-ref="4""#));
+        assert!(js.contains(r#"data-relay-ref="4""#));
         assert!(js.contains("MouseEvent"));
         assert!(js.contains("mouseover"));
         assert!(js.contains("mouseenter"));
@@ -4267,7 +4257,7 @@ mod tests {
 
     #[test]
     fn read_page_js_assigns_refs_and_collects_text() {
-        assert!(READ_PAGE_JS.contains("data-conduit-ref"));
+        assert!(READ_PAGE_JS.contains("data-relay-ref"));
         assert!(READ_PAGE_JS.contains("INTERACTIVE ELEMENTS"));
         assert!(READ_PAGE_JS.contains("location.href"));
     }
@@ -4535,7 +4525,7 @@ mod tests {
         assert!(js_empty.contains("var QUERY = \"\";"));
         // The bridge must tag refs (same contract as click/type) and emit
         // the compact one-line-per-element format.
-        assert!(js.contains("data-conduit-ref"));
+        assert!(js.contains("data-relay-ref"));
         assert!(js.contains("var MAX_LIST = 250;"));
     }
 
@@ -4559,7 +4549,7 @@ mod tests {
     #[test]
     fn select_option_js_targets_ref_and_matches_value_or_text() {
         let js = select_option_js(7, "Shipping");
-        assert!(js.contains(r#"data-conduit-ref="7""#));
+        assert!(js.contains(r#"data-relay-ref="7""#));
         assert!(js.contains("var want = \"Shipping\";"));
         assert!(js.contains("HTMLSelectElement"));
         assert!(js.contains("Available:")); // error path lists options
@@ -4581,7 +4571,7 @@ mod tests {
         let js = diag_read_js("console", 42);
         assert!(js.contains("var since = 42;"));
         assert!(js.contains("diag.console"));
-        assert!(js.contains("__conduitDiag"));
+        assert!(js.contains("__relayDiag"));
         // Uninstalled pages degrade to an explicit marker.
         assert!(js.contains("installed: false"));
     }
@@ -4589,7 +4579,7 @@ mod tests {
     #[test]
     fn diag_init_js_patches_console_fetch_xhr_and_mutations_once() {
         // Guard: re-injection must be a no-op (escalating schedule + post-nav).
-        assert!(DIAG_INIT_JS.contains("if (window.__conduitDiag)"));
+        assert!(DIAG_INIT_JS.contains("if (window.__relayDiag)"));
         assert!(DIAG_INIT_JS.contains("console[level]"));
         assert!(DIAG_INIT_JS.contains("window.fetch"));
         assert!(DIAG_INIT_JS.contains("XMLHttpRequest"));
@@ -4634,12 +4624,12 @@ mod tests {
         // Narration labels (trust layer) ride into the action body, guarded on
         // the overlay primitive existing (graceful degradation).
         let js = click_js(3, Some("clicking the checkout button"));
-        assert!(js.contains("__conduit_narrate"));
+        assert!(js.contains("__relay_narrate"));
         assert!(js.contains("clicking the checkout button"));
         let plain = click_js(3, None);
-        assert!(!plain.contains("__conduit_narrate"));
+        assert!(!plain.contains("__relay_narrate"));
         let type_n = type_js(4, "x", Some("typing email"));
-        assert!(type_n.contains("__conduit_narrate"));
+        assert!(type_n.contains("__relay_narrate"));
         assert!(type_n.contains("typing email"));
     }
 

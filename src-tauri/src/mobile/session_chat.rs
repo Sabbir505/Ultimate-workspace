@@ -261,7 +261,55 @@ fn handle_send_chat_message(
 
     // 2. Resolve provider + credentials exactly like the desktop
     //    send_chat_message command. local_gguf is keyless; everything else
-    //    reads the real key from the keychain.
+    //    reads the real key from the keychain. An Auto-routed session
+    //    (provider "auto") resolves synchronously here — the WS dispatch is
+    //    sync, so no live /v1/models fetch: first keyed provider (static
+    //    preference order) that the health store hasn't excluded, with its
+    //    persisted default model (the desktop composer path runs the full
+    //    context-aware resolver and writes the pick back for stickiness).
+    let (provider_str, model_str) = if provider_str == "auto" {
+        let picked: Option<(String, String)> = {
+            let conn = db.lock();
+            let now = db::now_ts();
+            let mut chosen: Option<(String, String)> = None;
+            for p in crate::chat::auto_router::AUTO_PROVIDERS {
+                if !crate::secrets::has_chat_api_key(&conn, p) {
+                    continue;
+                }
+                if crate::chat::model_health::provider_excluded(&conn, p, now).is_some() {
+                    continue;
+                }
+                let default_model = db::get_setting(&conn, &format!("chat.{p}.model"))
+                    .ok()
+                    .flatten()
+                    .filter(|m| !m.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        let pid = crate::chat::commands::chat_provider_id_from_str(p);
+                        crate::chat::streaming::resolve_provider(&pid.unwrap())
+                            .default_model()
+                            .to_string()
+                    });
+                chosen = Some((p.to_string(), default_model));
+                break;
+            }
+            chosen
+        };
+        let Some((p, m)) = picked else {
+            return Err(
+                "Auto has no usable provider: add a cloud API key in Settings → API Keys.".to_string(),
+            );
+        };
+        {
+            let conn = db.lock();
+            db::update_chat_session_provider(&conn, &chat_session_id, &p)
+                .map_err(|e| e.to_string())?;
+            db::update_chat_session_model(&conn, &chat_session_id, &m)
+                .map_err(|e| e.to_string())?;
+        }
+        (p, m)
+    } else {
+        (provider_str, model)
+    };
     let provider_id = match provider_str.as_str() {
         "anthropic" => crate::chat::providers::ChatProviderId::Anthropic,
         "openai" => crate::chat::providers::ChatProviderId::OpenAI,
@@ -271,6 +319,7 @@ fn handle_send_chat_message(
         "local_gguf" => crate::chat::providers::ChatProviderId::LocalGguf,
         other => return Err(format!("unknown provider: {other}")),
     };
+    let model = model_str;
     let api_key = if provider_str == "local_gguf" {
         "no-key".to_string()
     } else {
@@ -375,6 +424,10 @@ fn handle_send_chat_message(
         Arc::clone(db),
         app.clone(),
         false,
+        None,
+        // Mobile turns have no fail-over chain (the desktop composer runs
+        // the full resolver) and no system-prompt rebuild inputs.
+        Vec::new(),
         None,
     );
 

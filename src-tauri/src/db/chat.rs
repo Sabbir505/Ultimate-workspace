@@ -46,6 +46,8 @@ fn map_chat_session(row: &rusqlite::Row) -> rusqlite::Result<ChatSession> {
             .get::<_, Option<String>>("approval_policy")?
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "on_request".to_string()),
+        // Auto model routing: 1 = every send re-resolves provider+model.
+        auto_model: row.get::<_, i64>("auto_model")? != 0,
     })
 }
 
@@ -84,6 +86,33 @@ pub fn set_chat_session_unread(
     Ok(())
 }
 
+/// Flip a chat between Auto routing and a pinned provider/model.
+///
+/// `true`: the session becomes auto-routed; provider/model become "auto"
+/// placeholders until the first send resolves them (the resolver writes the
+/// concrete values back while `auto_model` stays 1).
+/// `false`: clears the routing flag only — a manual pick immediately
+/// afterwards overwrites provider/model (that order matters: clearing first
+/// means a failed pick can't leave the session pointing at stale auto state).
+pub fn set_chat_session_auto(
+    conn: &Connection,
+    chat_session_id: &str,
+    auto: bool,
+) -> DbResult<()> {
+    if auto {
+        conn.execute(
+            "UPDATE chat_sessions SET auto_model = 1, provider = 'auto', model = 'auto' WHERE id = ?1",
+            params![chat_session_id],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE chat_sessions SET auto_model = 0 WHERE id = ?1",
+            params![chat_session_id],
+        )?;
+    }
+    Ok(())
+}
+
 pub fn create_chat_session(
     conn: &Connection,
     provider: &str,
@@ -98,10 +127,14 @@ pub fn create_chat_session(
     // mode menu.
     let now = now_ts();
     let id = new_id();
+    // provider "auto" ⟺ auto-routed session (fresh Auto chats from the
+    // composer picker arrive as ("auto", "auto") placeholders; the real
+    // provider/model are resolved per send and written back).
+    let auto_model = provider == "auto";
     conn.execute(
-        "INSERT INTO chat_sessions (id, title, provider, model, created_at, last_active_at, watch_mode, project_id, permission_mode, sandbox_policy, approval_policy)
-         VALUES (?1, NULL, ?2, ?3, ?4, ?4, NULL, ?5, 'full_auto', 'workspace_write', 'full_access')",
-        params![id, provider, model, now, project_id],
+        "INSERT INTO chat_sessions (id, title, provider, model, created_at, last_active_at, watch_mode, project_id, permission_mode, sandbox_policy, approval_policy, auto_model)
+         VALUES (?1, NULL, ?2, ?3, ?4, ?4, NULL, ?5, 'full_auto', 'workspace_write', 'full_access', ?6)",
+        params![id, provider, model, now, project_id, auto_model as i64],
     )?;
     conn.query_row(
         "SELECT * FROM chat_sessions WHERE id = ?1",

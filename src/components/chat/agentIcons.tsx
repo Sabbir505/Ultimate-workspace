@@ -170,6 +170,38 @@ export function LocalModelIcon(): ReactElement {
   );
 }
 
+/** Auto model routing — a four-point sparkle ("the app picks for you"). No
+ *  brand to represent; stroke-drawn like the LocalModelIcon so it reads as
+ *  an icon, not a logo. */
+export function AutoRouteIcon(): ReactElement {
+  return (
+    <svg
+      className="agent-rail-svg"
+      style={{ width: 16, height: 16 }}
+      viewBox="0 0 24 24"
+      role="img"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <title>Auto</title>
+      {/* large four-point sparkle */}
+      <path
+        d="M12 3c.7 4.6 2.9 6.8 7.5 7.5-4.6.7-6.8 2.9-7.5 7.5-.7-4.6-2.9-6.8-7.5-7.5C9.1 9.8 11.3 7.6 12 3Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+      {/* small companion sparkle */}
+      <path
+        d="M18.5 15.5c.3 1.9 1.1 2.7 3 3-1.9.3-2.7 1.1-3 3-.3-1.9-1.1-2.7-3-3 1.9-.3 2.7-1.1 3-3Z"
+        fill="currentColor"
+        opacity="0.6"
+      />
+    </svg>
+  );
+}
+
 /** Monogram fallback — Devin and user-defined ACP agents have no freely
  *  redistributable mark; use the agent's initial in a small tile. */
 export function MonogramIcon({ letter }: { letter: string }): ReactElement {

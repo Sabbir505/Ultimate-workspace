@@ -13,6 +13,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useChatStore } from "../../state/chat";
 import { useProjectsStore } from "../../state/projects";
+import { useSettingsStore } from "../../state/settings";
 import { useUiStore } from "../../state/ui";
 import { ChatComposer, type ChatAttachment } from "./ChatComposer";
 import { ApprovalCard, FullAutoConfirmModal } from "./ApprovalFlow";
@@ -40,6 +41,7 @@ import { harnessModelCatalog } from "../../lib/harnessModels";
 import { setChatScrollToMessage } from "../../lib/chatScroll";
 import { setChatSelectionPrefill } from "../../lib/chatSelection";
 import type { AgentModelSelection } from "./AgentModelPicker";
+import { seedSelectionFrom } from "../../lib/lastSelection";
 import { TurnNavigator } from "./TurnNavigator";
 import { useContextMeter } from "../../hooks/useContextMeter";
 import { useElementHeight } from "../../hooks/useElementHeight";
@@ -160,6 +162,7 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   const chatStatus = useChatStore((s) => s.chatStatus);
   const error = useChatStore((s) => s.error);
   const loaded = useChatStore((s) => s.loaded);
+  const lastSelection = useChatStore((s) => s.lastSelection);
   const loadSessions = useChatStore((s) => s.loadSessions);
   const sendMessage = useChatStore((s) => s.sendMessage);
   const regenerate = useChatStore((s) => s.regenerate);
@@ -174,8 +177,13 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
   const setSessionModel = useChatStore((s) => s.setSessionModel);
   const setSessionProvider = useChatStore((s) => s.setSessionProvider);
   const setSessionAgent = useChatStore((s) => s.setSessionAgent);
+  const setSessionAuto = useChatStore((s) => s.setSessionAuto);
   const effort = useChatStore((s) => s.effort);
   const setEffort = useChatStore((s) => s.setEffort);
+  // Auto routing bias (Quality/Balanced/Economy) — settings store, persisted
+  // as chat.auto.bias and read by the backend resolver.
+  const autoBias = useSettingsStore((s) => s.autoBias);
+  const setAutoBias = useSettingsStore((s) => s.setAutoBias);
   const localCtx = useChatStore((s) => s.localCtx);
   const setLocalCtx = useChatStore((s) => s.setLocalCtx);
   const thinking = useChatStore((s) => s.thinking);
@@ -630,6 +638,10 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
       if (session?.model !== model) {
         await setSessionModel(activeChatSessionId, model);
       }
+      // The gear flow is a committed pick like any other — remember it.
+      useChatStore
+        .getState()
+        .rememberSelection({ agent: "local", provider: "local_gguf", model });
     },
     [activeChatSessionId, sessions, localModels, spawnLocalModel, setSessionAgent, setSessionProvider, setSessionModel, localLoading],
   );
@@ -675,10 +687,36 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
       // is already in flight.
       if (sel.provider === "local_gguf" && localLoading) return;
       const session = sessions.find((s) => s.id === activeChatSessionId);
+      // Auto routing: the session runs on whatever cloud provider the
+      // backend's resolver picks per send (local/CLI models are never auto
+      // candidates). Agent-wise it's a builtin chat — leaving a harness/
+      // ACP session for Auto kills the CLI via setSessionAgent above.
+      if (sel.provider === "auto") {
+        // Auto is a builtin-cloud mode: leaving a harness/ACP session for it
+        // kills the CLI via setSessionAgent.
+        if ((session?.agent ?? null) !== "builtin") {
+          await setSessionAgent(activeChatSessionId, "builtin");
+        }
+        await setSessionAuto(activeChatSessionId, true);
+        useChatStore
+          .getState()
+          .rememberSelection({ agent: "builtin", provider: "auto", model: "auto" });
+        return;
+      }
+      // A manual pick takes the session out of Auto mode first, so the flag
+      // can't survive pointing at a provider the pick just replaced.
+      if (session?.autoModel) {
+        await setSessionAuto(activeChatSessionId, false);
+      }
       if ((session?.agent ?? null) !== sel.agent) {
         await setSessionAgent(activeChatSessionId, sel.agent);
       }
-      // ACP agents decide their own model — the agent switch above is all.
+      // Remember the committed pick (any kind) so every future new chat —
+      // this launch and after restarts — seeds ready-to-send on it. ACP
+      // agents decide their own model, so their pick is fully committed here.
+      useChatStore
+        .getState()
+        .rememberSelection({ agent: sel.agent, provider: sel.provider, model: sel.model });
       if (sel.agent.startsWith("acp:")) return;
       if (sel.provider === "local_gguf") {
         const match = localModels.find((m) => (m.name || m.filename) === sel.model);
@@ -707,6 +745,7 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
       setSessionAgent,
       setSessionProvider,
       setSessionModel,
+      setSessionAuto,
       localLoading,
     ],
   );
@@ -861,15 +900,14 @@ export function ChatView({ popoutSessionId, splitSessionId }: { popoutSessionId?
     void deleteEmptyChatSessions().then((deleted) => {
       if (deleted) void loadSessions();
     });
-    const provider = config.provider ?? "openai_compatible";
-    // Seed the new session with the provider's persisted default model
-    // (chat.<provider>.model) so the model selector stays populated instead of
-    // snapping to empty — which previously made it look like the selected
-    // model (including a running local sidecar) had been ejected. Falls back
-    // to "" only when no default model is configured for the provider, in
-    // which case the user must still pick one before sending.
-    void newChat(provider, config.model ?? "");
-  }, [loaded, isSplitView, activeChatSessionId, config, newChat, loadSessions]);
+    // Seed from the last committed composer pick (any kind — harness/ACP/
+    // local included) so the fresh chat is ready to send on what the user was
+    // last using; falls back to the per-provider config defaults. Local seeds
+    // are safe across restarts: a dead sidecar is respawned automatically on
+    // the first send (send_chat_message's auto-warm path).
+    const seed = seedSelectionFrom(lastSelection, config);
+    void newChat(seed.provider, seed.model, undefined, seed.agent);
+  }, [loaded, isSplitView, activeChatSessionId, config, lastSelection, newChat, loadSessions]);
 
   // Split pane: load (or re-target) the pinned session's history whenever the
   // pane opens on a different session.
@@ -2110,10 +2148,12 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         modes={harnessModeOptions}
         agentLoading={harnessAgent ? harnessLoading : false}
         effort={effort}
-        provider={activeSession?.provider}
+        provider={activeSession?.autoModel ? "auto" : activeSession?.provider}
         modelLoading={localLoading}
         localCtx={localCtx}
         onEffortChange={setEffort}
+        autoBias={autoBias}
+        onAutoBiasChange={(b) => setAutoBias(b as "quality" | "balanced" | "economy")}
         onEjectLocalModel={ejectLocalModel}
         localModelActive={isLocal && !!activeLocalModelId}
         localOverridesMap={localOverridesByName}

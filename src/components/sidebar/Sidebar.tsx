@@ -37,6 +37,7 @@ import { useChatStore } from "../../state/chat";
 import { useUiStore } from "../../state/ui";
 import { useArtifactsStore } from "../../state/artifacts";
 import { useNewChatAction } from "../../hooks/useNewChatAction";
+import { seedSelectionFrom } from "../../lib/lastSelection";
 import { useViewNav } from "../../hooks/useViewNav";
 import { ArtifactLibrary } from "./ArtifactLibrary";
 import { ChatSessionRowMemo as ChatSessionRow, type ChatSessionRowData } from "../chat/ChatSessionRow";
@@ -78,6 +79,7 @@ export function Sidebar() {
     useCallback((s) => Object.keys(s.streaming), []),
   );
   const chatConfig = useChatStore((s) => s.config);
+  const lastSelection = useChatStore((s) => s.lastSelection);
   const chatLoaded = useChatStore((s) => s.loaded);
   const selectSession = useChatStore((s) => s.selectSession);
   const newChat = useChatStore((s) => s.newChat);
@@ -161,17 +163,18 @@ export function Sidebar() {
   );
 
   // Start a brand-new chat explicitly bound to this project, and expand the
-  // project so the new chat is visible under it.
+  // project so the new chat is visible under it. Seeded from the last
+  // committed pick, same as every other new-chat entry point.
   const handleNewChatForProject = useCallback(
     (projectId: string) => {
       selectProject(projectId);
       setExpanded(projectId, true);
-      const provider = chatConfig?.provider ?? "openai_compatible";
-      void newChat(provider, chatConfig?.model ?? "", projectId).then((session) => {
+      const seed = seedSelectionFrom(lastSelection, chatConfig);
+      void newChat(seed.provider, seed.model, projectId, seed.agent).then((session) => {
         if (session) setActiveView("chat");
       });
     },
-    [selectProject, setExpanded, newChat, chatConfig, setActiveView],
+    [selectProject, setExpanded, newChat, lastSelection, chatConfig, setActiveView],
   );
 
   // Remove a project from the sidebar. The backend cascade also deletes every

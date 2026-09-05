@@ -4,6 +4,7 @@
 //! All SSE streaming, API keys stored in the OS keychain, HTTP in Rust backend.
 
 pub mod artifacts;
+pub mod auto_router;
 pub mod cache;
 pub mod citation_lint;
 pub mod citation_verify;
@@ -21,6 +22,7 @@ pub mod docs_images;
 pub mod export;
 pub mod error_class;
 pub mod local_models;
+pub mod model_health;
 pub mod office;
 pub mod permission;
 pub mod plan;
@@ -55,6 +57,33 @@ use proto::*;
 use providers::*;
 use streaming::*;
 
+
+/// One fail-over candidate for Auto-routed turns (chat/auto_router.rs): the
+/// resolver's ordered chain — primary first, then fallbacks — with each
+/// candidate's credentials pre-resolved. Empty for pinned (non-auto)
+/// sessions, which therefore behave exactly as before.
+#[derive(Debug, Clone)]
+pub struct AutoFallback {
+    pub provider_id: ChatProviderId,
+    pub model: String,
+    pub api_key: String,
+    pub base_url: Option<String>,
+}
+
+/// Raw inputs for rebuilding a provider-appropriate system prompt per
+/// fail-over candidate (the prebuilt `system` was assembled for the primary's
+/// provider/model class). Captured only for Auto sessions; `system_suffix`
+/// carries the working-directory section that the send path appends AFTER
+/// `build_system_prompt`, so rebuilt prompts keep it.
+#[derive(Debug, Clone, Default)]
+pub struct SystemPromptInputs {
+    pub custom: Option<String>,
+    pub skills: Vec<(String, String)>,
+    pub manifest: Option<String>,
+    pub memory_profile: Option<String>,
+    pub plan_mode: bool,
+    pub system_suffix: String,
+}
 
 /// A pending per-action approval for a filesystem tool call. Created when the
 /// central `check_permission` returns `NeedsApproval`; the tool loop pauses on
@@ -324,11 +353,15 @@ impl ChatManager {
         app: AppHandle,
         research_mode: bool,
         thinking: Option<bool>,
+        // Auto fail-over chain (primary already applied by the caller).
+        fallbacks: Vec<AutoFallback>,
+        // Raw system-prompt inputs for rebuilding the prompt per fail-over
+        // candidate; None (pinned sessions) keeps the prebuilt `system`.
+        system_inputs: Option<SystemPromptInputs>,
     ) {
         // Cancel any existing stream for this session.
         self.cancel(&chat_session_id);
 
-        let provider = resolve_provider(&provider_id);
         let chat_req = ChatRequest {
             model,
             messages,
@@ -341,30 +374,8 @@ impl ChatManager {
         };
 
         // OpenRouter and LocalGguf speak the OpenAI wire format, so they ride
-        // the OpenAI request/tool path.
-        let is_openai = matches!(
-            provider_id,
-            ChatProviderId::OpenAI
-                | ChatProviderId::OpenAICompatible
-                | ChatProviderId::OpenRouter
-                | ChatProviderId::LocalGguf
-        );
-        let is_anthropic = matches!(
-            provider_id,
-            ChatProviderId::Anthropic | ChatProviderId::AnthropicCompatible
-        );
-        // Tools need a base URL; compatible providers already carry one, native
-        // providers fall back to their default endpoint. LocalGguf requires the
-        // stored base_url (written by the sidecar-start command).
-        let tool_base = base_url.clone().unwrap_or_else(|| {
-            if matches!(provider_id, ChatProviderId::OpenRouter) {
-                providers::OpenRouterProvider::DEFAULT_BASE.to_string()
-            } else if is_openai {
-                OpenAIProvider::DEFAULT_BASE.to_string()
-            } else {
-                AnthropicProvider::DEFAULT_BASE.to_string()
-            }
-        });
+        // the OpenAI request/tool path. (Computed per fail-over candidate
+        // inside the turn loop — the primary's values drive nothing else.)
 
         let client = self.client.clone();
         let sid = chat_session_id.clone();
@@ -619,63 +630,204 @@ impl ChatManager {
                 }
             }
 
-            // ── Turn execution, with ONE compact-and-retry on context
-            // overflow. A provider rejecting the request for exceeding its
-            // window is recoverable: force a cloud compaction pass over the
-            // session's DB history and re-run the turn with the rewritten
-            // request. A second failure — or a session that cannot shrink —
-            // surfaces the original error unchanged.
+            // ── Turn execution — candidate chain with fail-over. The primary
+            // runs first; Auto-routed sessions carry fail-over candidates
+            // (the auto resolver's ordered chain): when one fails BEFORE any
+            // token streamed with a retryable class (429 / 5xx / unreachable
+            // / bad key / out of credit / dead model), the failure is
+            // recorded in the health store (chat/model_health.rs) and the
+            // next candidate takes the turn, disclosed via chat:status.
+            // Mid-stream failures NEVER re-route (tokens may already be on
+            // screen and partially persisted). Pinned sessions have no
+            // fallbacks and behave exactly as before. Context-overflow keeps
+            // its ONE compact-and-retry per turn.
             let mut retried_after_compaction = false;
-            // Anthropic-style cache marks ride the OpenAI wire format ONLY
-            // for OpenRouter serving an `anthropic/*` model — OpenRouter
-            // translates them into native Claude prompt caching, while
-            // stricter OpenAI-compatible backends can reject unknown fields.
-            let openrouter_cache_marks = provider_id == ChatProviderId::OpenRouter
-                && cache::openrouter_anthropic(&chat_req.model);
-            let result = loop {
-                let attempt = if tools_enabled && is_openai {
-                    run_openai_tool_loop(
-                        &client, &tool_base, &api_key, &chat_req, caps.clone(), sandbox, approval, &mgr, &sid, &app, research_mode, openrouter_cache_marks, perf.clone(),
+
+            // Candidate set: primary first, then the resolver's fallbacks.
+            let mut candidates: Vec<AutoFallback> = Vec::with_capacity(fallbacks.len() + 1);
+            candidates.push(AutoFallback {
+                provider_id: provider_id.clone(),
+                model: chat_req.model.clone(),
+                api_key: api_key.clone(),
+                base_url: base_url.clone(),
+            });
+            candidates.extend(fallbacks);
+
+            let mut result: Option<Result<(String, Option<ChatUsage>), String>> = None;
+            // Post-turn helpers (citation verification, cache-hit-rate) need
+            // the WINNING candidate's endpoint details — tracked here.
+            let mut winner: Option<(String, String, bool)> = None;
+            for (ci, cand) in candidates.iter().enumerate() {
+                // OpenRouter and LocalGguf speak the OpenAI wire format; the
+                // rest ride the Anthropic path.
+                let cand_is_openai = matches!(
+                    cand.provider_id,
+                    ChatProviderId::OpenAI
+                        | ChatProviderId::OpenAICompatible
+                        | ChatProviderId::OpenRouter
+                        | ChatProviderId::LocalGguf
+                );
+                let cand_is_anthropic = matches!(
+                    cand.provider_id,
+                    ChatProviderId::Anthropic | ChatProviderId::AnthropicCompatible
+                );
+                let cand_provider = resolve_provider(&cand.provider_id);
+                let cand_tool_base = cand.base_url.clone().unwrap_or_else(|| {
+                    if cand.provider_id == ChatProviderId::OpenRouter {
+                        providers::OpenRouterProvider::DEFAULT_BASE.to_string()
+                    } else if cand_is_openai {
+                        OpenAIProvider::DEFAULT_BASE.to_string()
+                    } else {
+                        AnthropicProvider::DEFAULT_BASE.to_string()
+                    }
+                });
+                // Anthropic-style cache marks ride the OpenAI wire format ONLY
+                // for OpenRouter serving an `anthropic/*` model — OpenRouter
+                // translates them into native Claude prompt caching, while
+                // stricter OpenAI-compatible backends can reject unknown fields.
+                let cand_cache_marks = cand.provider_id == ChatProviderId::OpenRouter
+                    && cache::openrouter_anthropic(&cand.model);
+                // Rebuild the system prompt for the candidate's provider/model
+                // class when the raw inputs are available (Auto sessions) —
+                // the prebuilt `system` was assembled for the primary.
+                let cand_system: Option<String> = system_inputs.as_ref().and_then(|inp| {
+                    let mut s = prompts::build_system_prompt(
+                        cand.provider_id.clone(),
+                        &cand.model,
+                        inp.custom.as_deref(),
+                        &inp.skills,
+                        tools_enabled,
+                        research_mode,
+                        inp.plan_mode,
+                        inp.manifest.as_deref(),
+                        inp.memory_profile.as_deref(),
                     )
-                    .await
-                } else if tools_enabled && is_anthropic {
-                    run_anthropic_tool_loop(
-                        &client, &tool_base, &api_key, &chat_req, caps.clone(), sandbox, approval, &mgr, &sid, &app, research_mode, perf.clone(),
-                    )
-                    .await
-                } else {
-                    run_chat_stream(
-                        &client,
-                        provider.as_ref(),
-                        &sid,
-                        &chat_req,
-                        &api_key,
-                        base_url.as_deref(),
-                        Some(&app),
-                        &perf,
-                    )
-                    .await
-                };
-                let overflow = matches!(&attempt, Err(e) if crate::chat::error_class::classify_error(e) == Some(crate::chat::error_class::CODE_CONTEXT_OVERFLOW));
-                if overflow
-                    && !retried_after_compaction
-                    && !matches!(provider_id, ChatProviderId::LocalGguf)
-                {
-                    retried_after_compaction = true;
-                    match compact_and_retry(
-                        &db, &client, provider_id, &tool_base, &api_key, &sid, &chat_req, &app,
-                    )
-                    .await
+                    .unwrap_or_default();
+                    s.push_str(&inp.system_suffix);
+                    if s.trim().is_empty() { None } else { Some(s) }
+                });
+                // THIS candidate's request: same messages/params, its own
+                // model + system prompt. On success/failure the request's
+                // model names what actually ran (cost attribution below).
+                chat_req.model = cand.model.clone();
+                chat_req.system = cand_system.clone().or(chat_req.system.take());
+                let attempt = loop {
+                    let attempt = if tools_enabled && cand_is_openai {
+                        run_openai_tool_loop(
+                            &client, &cand_tool_base, &cand.api_key, &chat_req, caps.clone(), sandbox, approval, &mgr, &sid, &app, research_mode, cand_cache_marks, perf.clone(),
+                        )
+                        .await
+                    } else if tools_enabled && cand_is_anthropic {
+                        run_anthropic_tool_loop(
+                            &client, &cand_tool_base, &cand.api_key, &chat_req, caps.clone(), sandbox, approval, &mgr, &sid, &app, research_mode, perf.clone(),
+                        )
+                        .await
+                    } else {
+                        run_chat_stream(
+                            &client,
+                            cand_provider.as_ref(),
+                            &sid,
+                            &chat_req,
+                            &cand.api_key,
+                            cand.base_url.as_deref(),
+                            Some(&app),
+                            &perf,
+                        )
+                        .await
+                    };
+                    let overflow = matches!(&attempt, Err(e) if crate::chat::error_class::classify_error(e) == Some(crate::chat::error_class::CODE_CONTEXT_OVERFLOW));
+                    if overflow
+                        && !retried_after_compaction
+                        && !matches!(cand.provider_id, ChatProviderId::LocalGguf)
                     {
-                        Some(rebuilt) => {
-                            chat_req = rebuilt;
+                        retried_after_compaction = true;
+                        match compact_and_retry(
+                            &db, &client, cand.provider_id.clone(), &cand_tool_base, &cand.api_key, &sid, &chat_req, &app,
+                        )
+                        .await
+                        {
+                            Some(rebuilt) => {
+                                // Compaction shrank the history — keep this
+                                // candidate's model + rebuilt prompt on it.
+                                chat_req = rebuilt;
+                                chat_req.model = cand.model.clone();
+                                chat_req.system = cand_system.clone().or(chat_req.system.take());
+                                continue;
+                            }
+                            None => break attempt,
+                        }
+                    }
+                    break attempt;
+                };
+                match attempt {
+                    Ok(turn) => {
+                        // The endpoint works — clear its failure state.
+                        {
+                            let conn = db.lock();
+                            crate::chat::model_health::record_success(&conn, cand.provider_id.as_str(), db::now_ts());
+                        }
+                        winner = Some((cand_tool_base.clone(), cand.api_key.clone(), cand_is_openai));
+                        result = Some(Ok(turn));
+                        break;
+                    }
+                    Err(e) => {
+                        let failure = crate::chat::error_class::classify_failure(&e);
+                        if let Some(f) = &failure {
+                            let conn = db.lock();
+                            crate::chat::model_health::record_failure(
+                                &conn,
+                                cand.provider_id.as_str(),
+                                &cand.model,
+                                f,
+                                db::now_ts(),
+                            );
+                        }
+                        let retryable =
+                            failure.as_ref().map(|f| f.kind.retryable()).unwrap_or(false);
+                        if retryable && ci + 1 < candidates.len() {
+                            let next = &candidates[ci + 1];
+                            eprintln!(
+                                "[chat:auto] {} · {} failed pre-stream ({}); failing over to {} · {}",
+                                cand.provider_id.as_str(),
+                                cand.model,
+                                crate::util::truncate_chars(&e, 160),
+                                next.provider_id.as_str(),
+                                next.model,
+                            );
+                            let _ = app.emit(
+                                "chat:status",
+                                crate::types::ChatStatusPayload {
+                                    chat_session_id: sid.clone(),
+                                    // Distinct from the routine "auto_route"
+                                    // resolution notice (which the frontend
+                                    // suppresses — a pill on every turn read
+                                    // as noise): fail-overs are rare and
+                                    // worth surfacing.
+                                    reason: "auto_failover".to_string(),
+                                    message: format!(
+                                        "Auto: {} · {} unavailable — trying {} · {}",
+                                        crate::chat::auto_router::provider_label(cand.provider_id.as_str()),
+                                        cand.model,
+                                        crate::chat::auto_router::provider_label(next.provider_id.as_str()),
+                                        next.model,
+                                    ),
+                                },
+                            );
                             continue;
                         }
-                        None => break attempt,
+                        result = Some(Err(e));
+                        break;
                     }
                 }
-                break attempt;
-            };
+            }
+            let result =
+                result.unwrap_or_else(|| Err("no routing candidate was executed".to_string()));
+            // Winner details for the post-turn helpers below (only read on
+            // the success path, where `winner` is always set). The
+            // unwrap_or fallbacks cover the no-candidate corner.
+            let tool_base = winner.as_ref().map(|w| w.0.clone()).unwrap_or_default();
+            let api_key = winner.as_ref().map(|w| w.1.clone()).unwrap_or(api_key);
+            let is_openai = winner.as_ref().map(|w| w.2).unwrap_or(true);
 
             match result {
                 Ok((full_response, usage)) => {

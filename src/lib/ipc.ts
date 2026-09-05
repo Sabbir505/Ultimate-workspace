@@ -917,6 +917,11 @@ export interface ChatSession {
    *  "full_access". Decides when visible tools pause for approval.
    *  Defaults to "on_request". */
   approvalPolicy?: string;
+  /** Auto model routing: every send re-resolves the provider+model through
+   *  the backend's auto router (cloud providers only). The row's
+   *  provider/model hold the LAST resolution (post-first-send they name the
+   *  model that actually ran); the chip shows "Auto" while this is set. */
+  autoModel?: boolean;
 }
 
 export interface ChatMessageRecord {
@@ -1843,6 +1848,13 @@ export const listenAutomationRunStarted = (
  *  local model from the selector in a cloud session, or vice versa). */
 export const updateChatSessionProvider = (chatSessionId: string, provider: string) =>
   safeInvoke<void>("update_chat_session_provider", { chatSessionId, provider });
+/** Flip a chat between Auto model routing (backend re-resolves the
+ *  provider+model per send — cloud providers only) and a pinned pick. `true`
+ *  resets the row's provider/model to "auto" placeholders until the next
+ *  send resolves them; `false` clears the flag so a manual pick can take
+ *  over. */
+export const setChatSessionAuto = (chatSessionId: string, auto: boolean) =>
+  safeInvoke<void>("set_chat_session_auto", { chatSessionId, auto });
 /** Update a chat session's watch-mode pacing override. null clears the
  *  override so the session inherits the global setting; "on" | "off" set
  *  a per-session override. */

@@ -822,6 +822,12 @@ function LocalModelsPanel() {
 
       // Create/select a chat session with local_gguf provider.
       const modelName = m.name || m.filename;
+      // Explicit local pick — remember it so new chats seed on this model
+      // (the fresh app-launch sidecar is respawned by the send-path
+      // auto-warm, so a local last-selection is safe to reopen on).
+      useChatStore
+        .getState()
+        .rememberSelection({ agent: "local", provider: "local_gguf", model: modelName });
       const existing = sessions.find(
         (s) => s.provider === "local_gguf" && s.model === modelName,
       );

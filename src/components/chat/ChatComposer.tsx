@@ -924,6 +924,10 @@ interface Props {
   /** True while a local model is loading onto the GPU (see ChatView). */
   modelLoading?: boolean;
   onEffortChange?: (effort: string) => void;
+  /** Auto routing bias + setter (picker's Auto pane footer), wired from the
+   *  settings store by ChatView. */
+  autoBias?: string;
+  onAutoBiasChange?: (bias: string) => void;
   /** Eject the running local-model sidecar and free its VRAM. Wired by
    *  ChatView only when the local_gguf provider has a live sidecar. */
   onEjectLocalModel?: () => void;
@@ -979,6 +983,8 @@ export function ChatComposer({
   localCtx,
   modelLoading,
   onEffortChange,
+  autoBias,
+  onAutoBiasChange,
   onEjectLocalModel,
   localModelActive,
   localOverridesMap,
@@ -2850,6 +2856,8 @@ export function ChatComposer({
                 onPick={onAgentModelPick}
                 effort={effort}
                 onEffortChange={onEffortChange}
+                autoBias={autoBias}
+                onAutoBiasChange={onAutoBiasChange}
                 onEjectLocalModel={onEjectLocalModel}
                 localModelActive={localModelActive}
                 localOverridesMap={localOverridesMap}

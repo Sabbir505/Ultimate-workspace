@@ -15,6 +15,20 @@ use crate::DbState;
 
 pub(crate) type CmdResult<T> = Result<T, String>;
 
+/// Map a provider id string to the ChatProviderId enum (send-path dispatch
+/// and auto fail-over chain building).
+pub(crate) fn chat_provider_id_from_str(s: &str) -> Option<ChatProviderId> {
+    match s {
+        "anthropic" => Some(ChatProviderId::Anthropic),
+        "openai" => Some(ChatProviderId::OpenAI),
+        "anthropic_compatible" => Some(ChatProviderId::AnthropicCompatible),
+        "openai_compatible" => Some(ChatProviderId::OpenAICompatible),
+        "openrouter" => Some(ChatProviderId::OpenRouter),
+        "local_gguf" => Some(ChatProviderId::LocalGguf),
+        _ => None,
+    }
+}
+
 // ---- Chat session CRUD ----
 
 /// Removes display-only process blocks — `<think>…</think>` reasoning and
@@ -464,6 +478,24 @@ pub fn update_chat_session_watch_mode(
     }
     let conn = db.0.lock();
     db::update_chat_session_watch_mode(&conn, &chat_session_id, mode.as_deref()).map_err(|e| e.to_string())
+}
+
+/// Flip a chat session between Auto model routing and a pinned provider/model
+/// (the composer picker's "Auto" entry). `true` marks the session auto-routed
+/// and resets provider/model to "auto" placeholders until the next send
+/// resolves them; `false` clears the flag only — a manual pick immediately
+/// afterwards overwrites provider/model. Every send into an auto-routed
+/// session re-resolves (cloud providers only; see chat/auto_router.rs) and
+/// writes the concrete provider/model back to the row for the context meter,
+/// cost attribution, and next-turn stickiness.
+#[tauri::command]
+pub fn set_chat_session_auto(
+    chat_session_id: String,
+    auto: bool,
+    db: State<DbState>,
+) -> CmdResult<()> {
+    let conn = db.0.lock();
+    db::set_chat_session_auto(&conn, &chat_session_id, auto).map_err(|e| e.to_string())
 }
 
 /// Update a chat session's agent selection from the composer's
@@ -1294,6 +1326,329 @@ pub(crate) fn process_attachments(
 
 /// Persists the user message, looks up provider/model/api_key/base_url for the
 /// session, assembles messages from history, and kicks off streaming.
+/// Fetch + parse a provider's `/v1/models` list — shared by the
+/// `list_chat_models` command and the auto-router's snapshot gathering.
+/// `base`/`key` are pre-resolved (the command resolves arg → setting →
+/// provider default → keychain; the resolver resolves setting → provider
+/// default → keychain).
+pub(crate) async fn fetch_models_list(
+    provider: &str,
+    base: String,
+    key: String,
+) -> Result<Vec<crate::types::ChatModel>, String> {
+    use reqwest;
+
+    let url = format!("{base}/v1/models");
+
+    // B-10: these are one-shot JSON calls — a total timeout is safe here and
+    // bounds a wedged endpoint instead of hanging the async command forever.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+    let req = client.get(&url);
+
+    let req = match provider {
+        "anthropic" | "anthropic_compatible" => req
+            .header("x-api-key", &key)
+            .header("anthropic-version", "2023-06-01"),
+        "openai" | "openai_compatible" | "openrouter" => {
+            req.header("Authorization", format!("Bearer {key}"))
+        }
+        _ => return Err("list_chat_models only supports compatible providers".to_string()),
+    };
+
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let body_text = resp.text().await.map_err(|e| e.to_string())?;
+
+    if status == 404 {
+        return Ok(vec![]);
+    }
+
+    if !status.is_success() {
+        return Err(format!("HTTP {status}: {body_text}"));
+    }
+
+    // Try to parse as JSON
+    let json: serde_json::Value = match serde_json::from_str(&body_text) {
+        Ok(v) => v,
+        Err(e) => {
+            // Log the raw response for debugging
+            eprintln!("[list_chat_models] Failed to parse JSON: {e}");
+            eprintln!("[list_chat_models] Raw response (first 500 chars): {}", &body_text.chars().take(500).collect::<String>());
+            return Err(format!("error decoding response body: {e}"));
+        }
+    };
+
+    // Try standard OpenAI shape first ({ data: [...] }). Only `id` is
+    // required — many compatible providers omit object/created/owned_by.
+    // Per-model context window: Anthropic publishes `context_window`,
+    // OpenRouter `context_length` — accept either. Absent → None (the
+    // frontend's registry fallback stands).
+    let model_window = |v: &serde_json::Value| -> Option<u64> {
+        v.get("context_window")
+            .and_then(|w| w.as_u64())
+            .or_else(|| v.get("context_length").and_then(|w| w.as_u64()))
+            .filter(|w| *w > 0)
+    };
+    let models: Vec<crate::types::ChatModel> = if let Some(data) = json.get("data").and_then(|v| v.as_array()) {
+        data.iter()
+            .filter_map(|v| {
+                let id = v.get("id")?.as_str()?.to_string();
+                let object = v
+                    .get("object")
+                    .and_then(|o| o.as_str())
+                    .unwrap_or("model")
+                    .to_string();
+                let created = v.get("created").and_then(|c| c.as_i64()).unwrap_or(0);
+                let owned_by = v
+                    .get("owned_by")
+                    .and_then(|o| o.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Some(crate::types::ChatModel {
+                    id,
+                    object,
+                    created,
+                    owned_by,
+                    context_window: model_window(v),
+                })
+            })
+            .collect()
+    } else if let Some(arr) = json.as_array() {
+        // Fallback: plain array of model IDs.
+        arr.iter()
+            .filter_map(|v| {
+                let id = v.as_str()?.to_string();
+                Some(crate::types::ChatModel {
+                    id,
+                    object: "model".to_string(),
+                    created: 0,
+                    owned_by: "".to_string(),
+                    context_window: None,
+                })
+            })
+            .collect()
+    } else {
+        return Err("unexpected /v1/models response shape".to_string());
+    };
+
+    Ok(models)
+}
+
+/// Public alias for the mobile relay path (mobile/session_chat.rs), which
+/// holds the DB Arc directly instead of a Tauri State. Currently unused on
+/// the mobile side (its WS dispatch is sync and resolves via the health-aware
+/// scan instead) — kept as the extension point.
+#[allow(dead_code)]
+pub async fn gather_auto_snapshots_arc(
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+) -> Vec<crate::chat::auto_router::ProviderSnapshot> {
+    gather_auto_snapshots(db).await
+}
+
+/// Per-provider config snapshot gathered under one DB lock for the auto
+/// router (see gather_auto_snapshots).
+struct AutoProviderCfg {
+    id: &'static str,
+    has_key: bool,
+    base: Option<String>,
+    key: String,
+    preferred: Option<String>,
+    /// (model id, persisted context window) — the curated list.
+    curated: Option<Vec<crate::chat::auto_router::ModelEntry>>,
+    /// Active provider-level health exclusion (dead key / out of credit) —
+    /// from chat/model_health.rs.
+    excluded_reason: Option<String>,
+    /// True when the provider's /v1/models endpoint requires a valid key — a
+    /// successful fetch there re-proves the key and clears a key-invalid
+    /// exclusion. OpenRouter's models list is public and proves nothing.
+    endpoint_validates_key: bool,
+}
+
+/// Gather everything the auto router needs per candidate provider: key
+/// presence (keychain), the provider's persisted default model, the user's
+/// curated model list (`chat.<provider>.selected_models` — wins over the
+/// live list when present, exactly like the picker's), and a live
+/// `/v1/models` fetch per keyed provider. Fetches run CONCURRENTLY so one
+/// dead endpoint can't serialize the resolution (the Open WebUI failure
+/// mode); a provider whose fetch fails comes through as `Err` and is skipped
+/// by the resolver rather than failing the turn.
+async fn gather_auto_snapshots(
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+) -> Vec<crate::chat::auto_router::ProviderSnapshot> {
+    use crate::chat::auto_router::{ModelEntry, ProviderSnapshot, AUTO_PROVIDERS};
+
+    // Everything touchable under the DB lock is read up front — the lock
+    // must never be held across the awaits below.
+    let now = crate::db::now_ts();
+    let cfgs: Vec<AutoProviderCfg> = {
+        let conn = db.lock();
+        AUTO_PROVIDERS
+            .iter()
+            .map(|p| {
+                let base = db::get_setting(&conn, &format!("chat.{p}.base_url")).ok().flatten();
+                let key = secrets::get_chat_api_key(&conn, p).unwrap_or_default();
+                let preferred = db::get_setting(&conn, &format!("chat.{p}.model")).ok().flatten();
+                let curated: Option<Vec<ModelEntry>> = db::get_setting(
+                    &conn,
+                    &format!("chat.{p}.selected_models"),
+                )
+                .ok()
+                .flatten()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v).ok())
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|e| {
+                            let id = e.get("id")?.as_str()?.to_string();
+                            let context_window = e
+                                .get("contextWindow")
+                                .and_then(|w| w.as_u64())
+                                .filter(|w| *w > 0);
+                            Some(ModelEntry { id, context_window })
+                        })
+                        .collect()
+                })
+                .filter(|l: &Vec<ModelEntry>| !l.is_empty());
+                let excluded_reason =
+                    crate::chat::model_health::provider_excluded(&conn, p, now);
+                AutoProviderCfg {
+                    id: p,
+                    has_key: !key.is_empty(),
+                    base,
+                    key,
+                    preferred,
+                    curated,
+                    excluded_reason,
+                    // First-party keyed endpoints 401 on /v1/models with a
+                    // bad key; OpenRouter's is public.
+                    endpoint_validates_key: *p != "openrouter",
+                }
+            })
+            .collect()
+    };
+
+    let fetches = cfgs.into_iter().map(|cfg| async move {
+        // Health-aware fetch: drop models cooling down from a recent
+        // 429/5xx, and skip (or revalidate) providers the health store has
+        // excluded. On fetch success a key-validating endpoint's exclusion
+        // is cleared — its /v1/models 401s on a bad key, so success
+        // re-proves the key.
+        let drop_cooled = |models: Vec<ModelEntry>,
+                           db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>|
+         -> Vec<ModelEntry> {
+            let conn = db.lock();
+            models
+                .into_iter()
+                .filter(|m| {
+                    crate::chat::model_health::model_cooldown_remaining(&conn, cfg.id, &m.id, now)
+                        .is_none()
+                })
+                .collect()
+        };
+        let models = if !cfg.has_key {
+            Err("no API key".to_string())
+        } else if let Some(reason) = &cfg.excluded_reason {
+            // Health-excluded providers skip the fetch entirely — EXCEPT
+            // first-party ones whose models fetch can revalidate a bad key.
+            let revalidating = cfg.endpoint_validates_key && reason.contains("key");
+            if !revalidating {
+                Err(reason.clone())
+            } else {
+                match fetch_auto_models(&cfg).await {
+                    Ok(list) => {
+                        let conn = db.lock();
+                        crate::chat::model_health::clear_key_invalid_on_fetch_ok(
+                            &conn, cfg.id, true, now,
+                        );
+                        Ok(list)
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+        } else {
+            match fetch_auto_models(&cfg).await {
+                Ok(list) => {
+                    if cfg.endpoint_validates_key {
+                        let conn = db.lock();
+                        crate::chat::model_health::clear_key_invalid_on_fetch_ok(
+                            &conn, cfg.id, true, now,
+                        );
+                    }
+                    Ok(list)
+                }
+                Err(e) => Err(e),
+            }
+        };
+        // Curated fallback: a fetch failure must not disqualify a provider
+        // the user explicitly curated — but cooled-down entries still drop.
+        let models = match models {
+            Ok(m) => Ok(m),
+            Err(e) => match &cfg.curated {
+                Some(curated) => Ok(curated.clone()),
+                None => Err(e),
+            },
+        };
+        let models = models.map(|m| drop_cooled(m, db));
+        ProviderSnapshot {
+            id: cfg.id.to_string(),
+            has_key: cfg.has_key,
+            preferred_model: cfg.preferred,
+            models,
+        }
+    });
+    futures_util::future::join_all(fetches).await
+}
+
+/// Resolve base URL (stored setting → provider default; compatible providers
+/// require a stored one) and fetch + parse the provider's model list into
+/// resolver entries, overlaying the curated list's persisted context windows.
+type AutoModelEntry = crate::chat::auto_router::ModelEntry;
+
+async fn fetch_auto_models(
+    cfg: &AutoProviderCfg,
+) -> Result<Vec<AutoModelEntry>, String> {
+    let base = cfg
+        .base
+        .clone()
+        .filter(|b| !b.trim().is_empty())
+        .or_else(|| match cfg.id {
+            "openrouter" => Some(crate::chat::providers::OpenRouterProvider::DEFAULT_BASE.to_string()),
+            "anthropic" => Some(crate::chat::providers::AnthropicProvider::DEFAULT_BASE.to_string()),
+            "openai" => Some(crate::chat::providers::OpenAIProvider::DEFAULT_BASE.to_string()),
+            _ => None,
+        })
+        .ok_or_else(|| "base_url not configured".to_string())?;
+    let list = fetch_models_list(cfg.id, base, cfg.key.clone()).await?;
+    let live: Vec<AutoModelEntry> = list
+        .into_iter()
+        .map(|m| AutoModelEntry { id: m.id, context_window: m.context_window })
+        .collect();
+    // Curated list wins when present (exactly like the picker's); entries
+    // missing a persisted window fall back to the live fetch's figure.
+    Ok(match &cfg.curated {
+        Some(curated) => {
+            if live.is_empty() {
+                curated.clone()
+            } else {
+                curated
+                    .iter()
+                    .map(|c| AutoModelEntry {
+                        context_window: c.context_window.or_else(|| {
+                            live.iter().find(|l| l.id == c.id).and_then(|l| l.context_window)
+                        }),
+                        ..c.clone()
+                    })
+                    .collect()
+            }
+        }
+        None => live,
+    })
+}
+
 #[tauri::command]
 pub async fn send_chat_message(
     chat_session_id: String,
@@ -1332,7 +1687,7 @@ pub async fn send_chat_message(
     let content = format!("{content}{extra_text}");
     let chat_mgr = &chat_state.0;
     // 1. Look up the session — provider/model/permission policies for this turn.
-    let (provider_str, model_str, sandbox_str, approval_str, mode_label) = {
+    let (provider_str, model_str, sandbox_str, approval_str, mode_label, session_auto) = {
         let conn = db.0.lock();
         let cs = db::get_chat_session(&conn, &chat_session_id)
             .map_err(|e| e.to_string())?
@@ -1343,10 +1698,102 @@ pub async fn send_chat_message(
             cs.sandbox_policy,
             cs.approval_policy,
             cs.permission_mode,
+            cs.auto_model,
         )
     };
     let sandbox = crate::chat::permission::SandboxPolicy::from_db(&sandbox_str);
     let approval = crate::chat::permission::ApprovalPolicy::from_db(&approval_str);
+
+    // 1b. Auto model routing: an auto-flagged session re-resolves its
+    // provider+model on EVERY send (chat/auto_router.rs — cloud providers
+    // only; the local sidecar and harness CLIs are never auto candidates).
+    // The resolution is written back to the session row (auto_model stays 1)
+    // so the context meter, cost attribution, and the picker chip all see
+    // real values, and the next turn sticks to this pick while it stays
+    // eligible (prompt-cache economics). A chat:status notice discloses the
+    // pick — and its reason — before the first token.
+    let (provider_str, model_str, auto_fallbacks) = if session_auto {
+        // The pre-resolution row values are this conversation's sticky pick
+        // ("auto"/"auto" on a fresh Auto chat = no sticky yet).
+        let sticky = if provider_str != "auto" || model_str != "auto" {
+            Some((provider_str.clone(), model_str.clone()))
+        } else {
+            None
+        };
+        // Conservative prompt estimate: outgoing message text (attachments'
+        // textual form included) plus a fixed budget for the system prompt
+        // (tools + skills + memory routinely push it past 4k tokens),
+        // ≈4 chars/token.
+        let prompt_tokens = ((content.len() + 16_000) / 4) as u64;
+        let snapshots = gather_auto_snapshots(&db.0).await;
+        // Cost/quality preference (the picker's Auto pane writes
+        // `chat.auto.bias`); Balanced keeps provider-preference ranking.
+        let bias_setting = {
+            let conn = db.0.lock();
+            db::get_setting(&conn, "chat.auto.bias").ok().flatten()
+        };
+        let query = crate::chat::auto_router::AutoQuery {
+            prompt_tokens,
+            needs_vision: !images.is_empty(),
+            sticky,
+            bias: crate::chat::auto_router::Bias::from_setting(bias_setting.as_deref()),
+        };
+        let chain = crate::chat::auto_router::resolve(&snapshots, &query)?;
+        let pick = &chain[0];
+        {
+            let conn = db.0.lock();
+            db::update_chat_session_provider(&conn, &chat_session_id, &pick.provider)
+                .map_err(|e| e.to_string())?;
+            db::update_chat_session_model(&conn, &chat_session_id, &pick.model)
+                .map_err(|e| e.to_string())?;
+        }
+        let _ = app.emit(
+            "chat:status",
+            crate::types::ChatStatusPayload {
+                chat_session_id: chat_session_id.clone(),
+                reason: "auto_route".to_string(),
+                message: format!(
+                    "Auto → {} · {} ({})",
+                    crate::chat::auto_router::provider_label(&pick.provider),
+                    pick.model,
+                    pick.reason
+                ),
+            },
+        );
+        // Fail-over chain: candidates after the pick, with credentials
+        // pre-resolved so the turn loop never touches the DB for them.
+        // Candidates missing a usable key are dropped (the resolver already
+        // required has_key, but a key can be deleted between the snapshot
+        // and this read).
+        let mut fallbacks: Vec<crate::chat::AutoFallback> = Vec::new();
+        for cand in chain.iter().skip(1) {
+            let Some(pid) = chat_provider_id_from_str(&cand.provider) else {
+                continue;
+            };
+            let key = {
+                let conn = db.0.lock();
+                secrets::get_chat_api_key(&conn, &cand.provider).unwrap_or_default()
+            };
+            if key.is_empty() {
+                continue;
+            }
+            let base_url = {
+                let conn = db.0.lock();
+                db::get_setting(&conn, &format!("chat.{}.base_url", cand.provider))
+                    .ok()
+                    .flatten()
+            };
+            fallbacks.push(crate::chat::AutoFallback {
+                provider_id: pid,
+                model: cand.model.clone(),
+                api_key: key,
+                base_url,
+            });
+        }
+        (pick.provider.clone(), pick.model.clone(), fallbacks)
+    } else {
+        (provider_str, model_str, Vec::new())
+    };
 
     // Attach-on-demand: ONLY connectors / MCP-gallery servers attached to this
     // session ship their tool schemas — rows in `chat_session_connectors`
@@ -1678,6 +2125,12 @@ pub async fn send_chat_message(
         plan_state.set_plan_mode(Some(&app), &chat_session_id, persisted, "restored from session", &mode_label);
         tools_on && plan_state.plan_mode(&chat_session_id)
     };
+    // Raw system-prompt inputs for Auto sessions: the turn loop rebuilds a
+    // provider-appropriate prompt per fail-over candidate (the prebuilt
+    // `system` below matches only the primary). Populated inside the 5b
+    // block; the working-directory suffix is appended further down.
+    let mut auto_system_inputs: Option<crate::chat::SystemPromptInputs> =
+        if session_auto { Some(crate::chat::SystemPromptInputs::default()) } else { None };
     let (mut system, prompt_audit) = {
         let conn = db.0.lock();
         let custom = db::get_setting(&conn, "assistant.systemPrompt")
@@ -1735,6 +2188,13 @@ pub async fn send_chat_message(
             custom.as_deref().map(|c| c.trim().len()).unwrap_or(0),
             skills.iter().map(|(_, body)| body.len()).sum::<usize>(),
         );
+        if let Some(inp) = auto_system_inputs.as_mut() {
+            inp.custom = custom.clone();
+            inp.skills = skills.clone();
+            inp.manifest = manifest.clone();
+            inp.memory_profile = memory_profile.clone();
+            inp.plan_mode = session_plan_mode;
+        }
         (built, audit)
     };
     // [memory-audit]: injected memory document size, alongside the
@@ -2316,6 +2776,11 @@ pub async fn send_chat_message(
                 fs_roots.push(root.clone());
             }
             let section = working_directory_section(&root);
+            // The suffix rides the rebuilt fail-over prompts too (without it
+            // a failed-over candidate would lose the working directory).
+            if let Some(inp) = auto_system_inputs.as_mut() {
+                inp.system_suffix.push_str(&section);
+            }
             system = Some(system.unwrap_or_default() + &section);
             // Remember the root for the prompt warmup: the selected project /
             // custom folder live in frontend state the warmup can't see, and
@@ -2348,6 +2813,8 @@ pub async fn send_chat_message(
         app,
         research_mode,
         thinking,
+        auto_fallbacks,
+        auto_system_inputs,
     );
 
     Ok(())
@@ -3801,8 +4268,6 @@ pub async fn list_chat_models(
         return Ok(Vec::new());
     }
 
-    use reqwest;
-
     // Resolve base_url: prefer the passed argument, then the stored setting.
     // The fixed-endpoint providers (native anthropic/openai, OpenRouter) fall
     // back to their default bases so the agent picker can list their models
@@ -3833,104 +4298,7 @@ pub async fn list_chat_models(
         }
     };
 
-    let url = format!("{base}/v1/models");
-
-    // B-10: these are one-shot JSON calls — a total timeout is safe here and
-    // bounds a wedged endpoint instead of hanging the async command forever.
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(20))
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
-    let req = client.get(&url);
-
-    let req = match provider.as_str() {
-        "anthropic" | "anthropic_compatible" => req
-            .header("x-api-key", &key)
-            .header("anthropic-version", "2023-06-01"),
-        "openai" | "openai_compatible" | "openrouter" => {
-            req.header("Authorization", format!("Bearer {key}"))
-        }
-        _ => return Err("list_chat_models only supports compatible providers".to_string()),
-    };
-
-    let resp = req.send().await.map_err(|e| e.to_string())?;
-    let status = resp.status();
-    let body_text = resp.text().await.map_err(|e| e.to_string())?;
-
-    if status == 404 {
-        return Ok(vec![]);
-    }
-
-    if !status.is_success() {
-        return Err(format!("HTTP {status}: {body_text}"));
-    }
-
-    // Try to parse as JSON
-    let json: serde_json::Value = match serde_json::from_str(&body_text) {
-        Ok(v) => v,
-        Err(e) => {
-            // Log the raw response for debugging
-            eprintln!("[list_chat_models] Failed to parse JSON: {e}");
-            eprintln!("[list_chat_models] Raw response (first 500 chars): {}", &body_text.chars().take(500).collect::<String>());
-            return Err(format!("error decoding response body: {e}"));
-        }
-    };
-
-    // Try standard OpenAI shape first ({ data: [...] }). Only `id` is
-    // required — many compatible providers omit object/created/owned_by.
-    // Per-model context window: Anthropic publishes `context_window`,
-    // OpenRouter `context_length` — accept either. Absent → None (the
-    // frontend's registry fallback stands).
-    let model_window = |v: &serde_json::Value| -> Option<u64> {
-        v.get("context_window")
-            .and_then(|w| w.as_u64())
-            .or_else(|| v.get("context_length").and_then(|w| w.as_u64()))
-            .filter(|w| *w > 0)
-    };
-    let models: Vec<crate::types::ChatModel> = if let Some(data) = json.get("data").and_then(|v| v.as_array()) {
-        data.iter()
-            .filter_map(|v| {
-                let id = v.get("id")?.as_str()?.to_string();
-                let object = v
-                    .get("object")
-                    .and_then(|o| o.as_str())
-                    .unwrap_or("model")
-                    .to_string();
-                let created = v.get("created").and_then(|c| c.as_i64()).unwrap_or(0);
-                let owned_by = v
-                    .get("owned_by")
-                    .and_then(|o| o.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                Some(crate::types::ChatModel {
-                    id,
-                    object,
-                    created,
-                    owned_by,
-                    context_window: model_window(v),
-                })
-            })
-            .collect()
-    } else if let Some(arr) = json.as_array() {
-        // Fallback: plain array of model IDs.
-        arr.iter()
-            .filter_map(|v| {
-                let id = v.as_str()?.to_string();
-                Some(crate::types::ChatModel {
-                    id,
-                    object: "model".to_string(),
-                    created: 0,
-                    owned_by: "".to_string(),
-                    context_window: None,
-                })
-            })
-            .collect()
-    } else {
-        return Err("unexpected /v1/models response shape".to_string());
-    };
-
-    Ok(models)
+    fetch_models_list(&provider, base, key).await
 }
 
 // ---- Local models (GGUF scan / llama-server sidecar) ----

@@ -181,6 +181,7 @@ pub fn configure(conn: &Connection) -> DbResult<()> {
     init_schema(conn)?;
     migrate_chat_session_flags(conn)?;
     migrate_chat_session_watch_mode(conn)?;
+    migrate_chat_session_auto(conn)?;
     migrate_chat_session_agent(conn)?;
     migrate_chat_session_project_id(conn)?;
     migrate_chat_session_permission_mode(conn)?;
@@ -222,6 +223,20 @@ fn migrate_chat_session_flags(conn: &Connection) -> DbResult<()> {
 /// means "inherit global setting"; per-session values are `"on"` | `"off"`.
 fn migrate_chat_session_watch_mode(conn: &Connection) -> DbResult<()> {
     let sql = "ALTER TABLE chat_sessions ADD COLUMN watch_mode TEXT";
+    if let Err(e) = conn.execute(sql, []) {
+        if !e.to_string().contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Add the `auto_model` column to `chat_sessions` (auto model routing). 1 =
+/// the session routes each turn through the auto resolver (the row's
+/// provider/model hold the LAST resolution — used for display, context
+/// metering, and next-turn stickiness — and are re-resolved per send).
+fn migrate_chat_session_auto(conn: &Connection) -> DbResult<()> {
+    let sql = "ALTER TABLE chat_sessions ADD COLUMN auto_model INTEGER NOT NULL DEFAULT 0";
     if let Err(e) = conn.execute(sql, []) {
         if !e.to_string().contains("duplicate column name") {
             return Err(e);
@@ -656,7 +671,8 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
           permission_mode TEXT,
           worktree_path TEXT,
           sandbox_policy TEXT,
-          approval_policy TEXT
+          approval_policy TEXT,
+          auto_model INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS chat_messages (
@@ -1237,7 +1253,7 @@ pub use chat::{
     mark_branch_superseded, mark_superseded, search_chat_messages,
     chat_worktree_paths,
     remove_chat_session_connector, set_chat_session_connectors,
-    permission_label_from_policies, set_chat_session_plan,
+    permission_label_from_policies, set_chat_session_auto, set_chat_session_plan,
     set_chat_session_project, set_chat_session_starred, set_chat_session_unread,
     set_chat_session_worktree,
     touch_chat_session, update_chat_session_agent, update_chat_session_model,

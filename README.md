@@ -35,9 +35,9 @@ npm run tauri build    # NSIS installer in src-tauri/target/release/bundle/nsis/
 ## Tests
 
 ```bash
-npm test                          # vitest, 100 files / 733 tests
-cd src-tauri && cargo test --lib  # 865 passed, 0 failed, 12 ignored
-npx tsc --noEmit                  # clean
+npm test                          # vitest, 128 files / 798 tests
+cd src-tauri && cargo test --lib  # 898 passed, 0 failed, 12 ignored
+npx tsc --noEmit                  # clean (also for mobile/: npx tsc --noEmit)
 ```
 
 ## Repository layout

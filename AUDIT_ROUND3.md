@@ -1,5 +1,7 @@
 # Relay — Bug & Performance Audit (Round 3)
 
+> **UPDATE 2026-09-06: all findings in this round-3 audit are resolved.** The top items were fixed in later passes — the untyped selector fallbacks (A1/A3) became the typed `EMPTY_*` constants (BUG_AUDIT N5, fixed 2026-09-05), the hooks-after-return crash (B9) is C13 of the 2026-09-05 full-project audit, and the timeline memo churn (B1), tail-capping (A7), and index work (C2) shipped in the `ISSUES.md` sweep (all 60 findings fixed 2026-09-05), which also covered this audit's "Not yet covered" list (Rust streaming internals, mobile WS framing, build pipeline). Current suite health: vitest 128 files / 798 tests green, `cargo test --lib` 898/0, `tsc --noEmit` clean — see `BUG_AUDIT.md` for the live status. The findings below are kept as historical record.
+
 > **Naming note:** This document refers to the project as "Conduit" because it was written before the 2026-08-27 user-visible rebrand to "Relay" (commit `e9abc7c3`). The findings still apply; the name has not. See `README.md` and `AI CONTEXT/RELEASE.md` for the current naming.
 
 **Date:** 2026-08-21 · **Scope:** frontend state/hooks (`src/state`, `src/hooks`, `src/lib/ipc.ts`), component render paths (`src/components`), SQLite layer (`src-tauri/src/db`) + DB-touching backend paths.

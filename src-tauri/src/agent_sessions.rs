@@ -5216,10 +5216,18 @@ fn harness_oneshot_blocking(
     // the turn). Kimi/OpenCode reuse the per-turn turn_spec transport — the
     // untrusted prompt never rides a cmd.exe command line (M12) — with their
     // stream events accumulated in `parse_oneshot_text` below.
+    //
+    // `--bare` (skip plugins/hooks/LSP/MCP) is REQUIRED here, not optional:
+    // with a plugin-heavy settings.json, `claude -p` spent ~190s of wall time
+    // on CLI startup before answering a 9s API call — past this function's
+    // 180s kill timer, so every /create generation timed out. Bare mode
+    // answers in ~4s. The prompt is self-contained and needs none of those
+    // features; settings env (auth) still applies.
     let (spec, prompt_env, prompt_via_stdin) = match harness_id {
         "claude_code" => {
             let mut args: Vec<String> = vec![
                 "-p".into(),
+                "--bare".into(),
                 "--output-format".into(),
                 "json".into(),
                 "--dangerously-skip-permissions".into(),

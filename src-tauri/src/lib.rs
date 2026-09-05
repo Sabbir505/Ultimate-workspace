@@ -539,6 +539,7 @@ pub fn run() {
             commands::improve_cmds::get_improve_autonomy,
             commands::improve_cmds::check_improvement_canaries,
             commands::speech::transcribe_audio,
+            commands::speech::transcribe_cancel,
             commands::stt::stt_status,
             commands::stt::stt_start,
             commands::stt::stt_stop,
@@ -619,6 +620,23 @@ pub fn run() {
                     .is_err()
                     {
                         eprintln!("[conduit] llama-server stop_all timed out after 3s; exiting anyway (kill already delivered)");
+                    }
+                });
+            }
+            // Kill the whisper-server sidecar too. Without this every app
+            // quit orphans a whisper-server process holding a CUDA context —
+            // with auto-start on, one leaks per app session and the GPU
+            // slowly fills up with zombie contexts.
+            if let Some(state) = handle.try_state::<commands::stt::SttState>() {
+                tauri::async_runtime::block_on(async {
+                    if tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        commands::stt::stop_sidecar(&state),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        eprintln!("[stt] sidecar kill timed out at exit; exiting anyway");
                     }
                 });
             }

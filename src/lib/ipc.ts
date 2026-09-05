@@ -730,12 +730,20 @@ export interface TranscriptionResult {
 }
 
 /** Transcribe a recorded audio clip (base64 WAV/MP3) via a whisper-compatible
- *  endpoint. Returns the recognized text. */
-export const transcribeAudio = (payload: string, mime?: string) =>
+ *  endpoint. Returns the recognized text. `tag` opts the request into
+ *  cancellation via cancelTranscription — the whisper server aborts inference
+ *  early when its client disconnects, freeing the serial inference queue. */
+export const transcribeAudio = (payload: string, mime?: string, tag?: string) =>
   safeInvoke<TranscriptionResult | null>("transcribe_audio", {
     payload,
     mime: mime ?? null,
+    tag: tag ?? null,
   });
+
+/** Abort an in-flight transcription request previously sent with `tag`.
+ *  No-op when that request already finished. */
+export const cancelTranscription = (tag: string) =>
+  safeInvoke<void>("transcribe_cancel", { tag });
 
 // ---- Speech-to-text models (Settings → Knowledge manages; mic uses) ----
 

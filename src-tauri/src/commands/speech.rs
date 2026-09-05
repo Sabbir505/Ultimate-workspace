@@ -10,12 +10,34 @@
 //! it at whisper-server, a cloud STT, or a bundler binary.
 
 use base64::Engine;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tauri::State;
+use tokio::sync::Notify;
 
 use crate::db;
 use crate::DbState;
 
 type CmdResult<T> = Result<T, String>;
+
+/// Cancellation slots for in-flight transcription requests, keyed by a short
+/// client-chosen tag ("partial", "commit"). Dropping the reqwest future closes
+/// the connection, and whisper.cpp's server aborts inference early when its
+/// client disconnects — so a cancelled request stops burning the serial
+/// inference queue almost immediately instead of running to completion and
+/// delaying the requests that matter behind it.
+static CANCEL_SLOTS: once_cell::sync::Lazy<parking_lot::Mutex<HashMap<String, Arc<Notify>>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(HashMap::new()));
+
+fn register_cancel_slot(tag: &str) -> Arc<Notify> {
+    let notify = Arc::new(Notify::new());
+    CANCEL_SLOTS.lock().insert(tag.to_string(), notify.clone());
+    notify
+}
+
+fn unregister_cancel_slot(tag: &str) {
+    CANCEL_SLOTS.lock().remove(tag);
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,12 +56,18 @@ pub struct TranscriptionResult {
 /// Models → Speech manages both). Only when that's impossible do we fall back
 /// to an explicitly-configured OpenAI-compatible `whisper.baseUrl` — never to
 /// the guessed default port, which just produces confusing connection errors.
+///
+/// `tag` opts the request into cancellation: the client can abort it via
+/// `transcribe_cancel` (used for stale live-partials and aborted commits —
+/// the whisper server processes requests strictly serially, so letting a
+/// stale request finish would delay everything queued behind it).
 #[tauri::command]
 pub async fn transcribe_audio(
     db: State<'_, DbState>,
     stt: State<'_, crate::commands::stt::SttState>,
     payload: String,
     mime: Option<String>,
+    tag: Option<String>,
 ) -> CmdResult<TranscriptionResult> {
     use reqwest::multipart;
 
@@ -109,12 +137,31 @@ pub async fn transcribe_audio(
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| e.to_string())?;
-    let resp = client
-        .post(&endpoint)
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| format!("whisper request failed: {e}"))?;
+    // Tagged requests race the send against a cancel signal; winning the race
+    // drops the reqwest future, closing the connection so the server aborts.
+    let resp = if let Some(notify) = tag.as_deref().map(register_cancel_slot) {
+        tokio::select! {
+            r = client.post(&endpoint).multipart(form).send() => {
+                r.map_err(|e| format!("whisper request failed: {e}"))?
+            }
+            _ = notify.notified() => {
+                if let Some(t) = tag.as_deref() {
+                    unregister_cancel_slot(t);
+                }
+                return Err("transcription cancelled by client".into());
+            }
+        }
+    } else {
+        client
+            .post(&endpoint)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("whisper request failed: {e}"))?
+    };
+    if let Some(t) = tag.as_deref() {
+        unregister_cancel_slot(t);
+    }
     if !resp.status().is_success() {
         return Err(format!("whisper server returned HTTP {}: {}", resp.status(), resp.text().await.unwrap_or_default()));
     }
@@ -127,4 +174,15 @@ pub async fn transcribe_audio(
         return Err("whisper returned no recognized text".to_string());
     }
     Ok(TranscriptionResult { text, base_url: base_url.clone() })
+}
+
+/// Abort an in-flight `transcribe_audio` request previously sent with `tag`.
+/// No-op when that request already finished (its slot is removed on
+/// completion), so a late cancel can never hit the wrong request.
+#[tauri::command]
+pub async fn transcribe_cancel(tag: String) -> CmdResult<()> {
+    if let Some(notify) = CANCEL_SLOTS.lock().remove(&tag) {
+        notify.notify_one();
+    }
+    Ok(())
 }

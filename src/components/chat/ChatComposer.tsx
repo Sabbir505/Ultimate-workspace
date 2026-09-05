@@ -29,6 +29,7 @@ import {
   templateVariables,
   fillTemplate,
   transcribeAudio,
+  cancelTranscription,
   toastError,
   toastInfo,
   toastSuccess,
@@ -318,10 +319,15 @@ const VOICE_SILENCE_CHUNKS = 3;
 const SEGMENT_MAX_SECONDS = 20;
 
 /** Whisper was trained on subtitle-style transcripts and sprinkles newline
- *  tokens at segment boundaries — mid-flow, semi-random. Flatten them into
- *  one predictable paragraph; the composer soft-wraps for readability. */
+ *  tokens at segment boundaries — mid-flow, semi-random — plus bracketed
+ *  non-speech markers ([BLANK_AUDIO], [MUSIC], …) for quiet tails. Flatten
+ *  both away into one predictable paragraph; the composer soft-wraps. */
 function flattenVoiceText(text: string): string {
-  return text.replace(/\s*\n+\s*/g, " ").replace(/ {2,}/g, " ").trim();
+  return text
+    .replace(/\s*\[[^\]]*\]\s*/g, " ")
+    .replace(/\s*\n+\s*/g, " ")
+    .replace(/ {2,}/g, " ")
+    .trim();
 }
 
 /** Stable empty list for the queue selector (a fresh [] per call would make
@@ -1073,11 +1079,12 @@ export function ChatComposer({
   const [transcribing, setTranscribing] = useState(false);
   // Live dictation lands directly in the textarea: while the mic is open,
   // Float32 sample chunks from a ScriptProcessor on a 16 kHz AudioContext
-  // (no MediaRecorder) fill two buffers — the full clip for the final pass
-  // and the current SEGMENT (audio since the last pause) for the live
-  // partial. A short silence commits the segment's text into the draft, so
-  // it can never vanish when speech continues; the partial after it is
-  // re-rendered in place every PARTIAL_TICK_MS.
+  // (no MediaRecorder) fill two buffers — the full clip, kept for stop's
+  // repair pass (used only when a segment commit failed), and the current
+  // SEGMENT (audio since the last pause) for the live partial. A short
+  // silence commits the segment's text into the draft, so it can never
+  // vanish when speech continues; the partial after it is re-rendered in
+  // place every PARTIAL_TICK_MS.
   const samplesRef = useRef<Float32Array[]>([]);
   const segmentRef = useRef<Float32Array[]>([]);
   const segmentLenRef = useRef(0);
@@ -1090,6 +1097,24 @@ export function ChatComposer({
   /** Serializes segment-commit transcriptions so their text appends in
    *  audio order even when two flushes overlap. */
   const commitChainRef = useRef<Promise<void>>(Promise.resolve());
+  /** How many commit jobs are queued or in flight on the chain. Stop uses it
+   *  to show the mic spinner exactly while the last text is still landing —
+   *  and to skip the spinner (and its one-frame flash) when nothing pends. */
+  const pendingCommitsRef = useRef(0);
+  /** At most one live-partial request may be outstanding. The whisper server
+   *  transcribes strictly serially, so every extra queued request delays the
+   *  segment commits and the stop-flush behind it — a pile-up of stale
+   *  partials was the main "dictation gets slower the longer I talk" cause. */
+  const partialInFlightRef = useRef(false);
+  /** Commit results apply only while this equals the value captured when the
+   *  segment was flushed. Cancel and re-begin bump it so a stale commit can
+   *  never land in the wrong session; stop deliberately does NOT — commits
+   *  still in flight when recording stops must finish landing, because the
+   *  full-clip safety pass no longer re-transcribes everything. */
+  const commitArmRef = useRef(0);
+  /** Latched when a segment commit fails; stop runs the old full-clip repair
+   *  pass only when this is set, instead of after every dictation. */
+  const commitFailedRef = useRef(false);
   // Where the live dictation text sits in the draft: [start, end) span in
   // `content`, plus the exact text last rendered there (the splice
   // validates against it — if the user edited that region by hand, the next
@@ -1493,6 +1518,13 @@ export function ChatComposer({
       window.clearInterval(partialTimerRef.current);
       partialTimerRef.current = null;
     }
+    // A live partial still in flight is stale from this moment (its result
+    // would be dropped) — cancel it so the server's serial inference queue is
+    // free for the commits that actually matter. The whisper server aborts
+    // inference early when its client disconnects.
+    if (partialInFlightRef.current) {
+      cancelTranscription("partial").catch(() => {});
+    }
     const nodes = captureNodesRef.current;
     captureNodesRef.current = null;
     if (nodes) {
@@ -1590,24 +1622,33 @@ export function ChatComposer({
   }, []);
 
   // Hand the current segment to the commit chain: swap it out, transcribe,
-  // and append its text to the draft as stable committed words. Jobs check
-  // the recording generation after their await, so a stop/cancel mid-flight
-  // drops the result (the final pass or the abort covers it).
+  // and append its text to the draft as stable committed words. The chain is
+  // the record now — commits keep landing after stop (only cancel/re-begin
+  // disarm them via commitArmRef), so they must not check the recording
+  // generation or the segment gen: a later flush overlapping an in-flight
+  // commit would silently drop that segment's words. A failure latches
+  // commitFailedRef so stop's repair pass can fill the gap.
   const flushVoiceSegment = useCallback(() => {
     const chunks = segmentRef.current;
     if (chunks.length === 0) return;
     segmentRef.current = [];
     segmentLenRef.current = 0;
-    segmentHadSoundRef.current = false;
     silenceRunRef.current = 0;
+    segmentHadSoundRef.current = false;
     segmentGenRef.current += 1;
-    const segGen = segmentGenRef.current;
-    const recGen = generationRef.current;
+    const arm = commitArmRef.current;
+    // The partial in flight (if any) was transcribing the segment just
+    // swapped out — stale now, and its result would be dropped. Cancel it so
+    // this commit doesn't queue behind wasted server work.
+    if (partialInFlightRef.current) {
+      cancelTranscription("partial").catch(() => {});
+    }
+    pendingCommitsRef.current += 1;
     commitChainRef.current = commitChainRef.current.then(async () => {
       try {
         const wav = encodeWav16k(joinSamples(chunks, rateRef.current));
-        const res = await transcribeAudio(await blobToBase64(wav), "audio/wav");
-        if (generationRef.current !== recGen || segGen !== segmentGenRef.current) return;
+        const res = await transcribeAudio(await blobToBase64(wav), "audio/wav", "commit");
+        if (arm !== commitArmRef.current) return;
         const text = res?.text ? flattenVoiceText(res.text) : "";
         if (text) {
           voiceCommittedRef.current = voiceCommittedRef.current
@@ -1617,41 +1658,59 @@ export function ChatComposer({
           renderVoiceText();
         }
       } catch {
-        // Segment commits are best-effort — the final pass retries everything.
+        // Best-effort: the ghost text (if any) stays on screen, and stop's
+        // repair pass fills the gap.
+        commitFailedRef.current = true;
+      } finally {
+        pendingCommitsRef.current -= 1;
       }
     });
   }, [renderVoiceText]);
 
   const finishVoiceRecording = useCallback(async () => {
     if (!recordingRef.current) return;
-    generationRef.current += 1; // disarm in-flight segment commits and partials
+    generationRef.current += 1; // disarm live partials — their results drop via the gen check
     stopCapture();
     setRecording(false);
+    // Hand the trailing (never-paused) segment to the commit chain, then wait
+    // out every commit — in-flight ones included — before finalizing. The old
+    // always-on full-clip re-transcription is gone: it queued behind the
+    // partial pile-up AND re-decoded the whole session, so the last line
+    // froze for ages after stop. Commit results keep landing past this point
+    // (commitArmRef is deliberately not bumped); they now carry the text.
+    if (segmentHadSoundRef.current) flushVoiceSegment();
     const chunks = samplesRef.current;
     samplesRef.current = [];
     segmentRef.current = [];
     segmentLenRef.current = 0;
     // Segment text already sits in the box and stays visible through the
-    // final pass — and survives it if the full pass fails or comes back
-    // empty (the chunks only ever get wiped once a result is in hand).
+    // repair pass — and survives it if the pass fails or comes back empty.
     if (chunks.length === 0) return;
-    setTranscribing(true);
     try {
-      const wav = encodeWav16k(joinSamples(chunks, rateRef.current));
-      const res = await transcribeAudio(await blobToBase64(wav), "audio/wav");
-      const text = res?.text ? flattenVoiceText(res.text) : "";
-      if (text) {
-        // One polished full-clip pass replaces the pause-by-pause segments.
-        voiceCommittedRef.current = text;
-        voicePartialRef.current = "";
-        renderVoiceText();
-      } else if (!voiceCommittedRef.current && !voicePartialRef.current) {
-        toastError("Transcription returned no text. Is a Whisper server running? See Settings → Local Models → Speech.");
+      // The trailing segment was just queued above and earlier commits may
+      // still be in flight: keep the mic spinner on while the last text is
+      // landing, and only when something is actually pending (a settled
+      // chain must not flash the spinner for a frame).
+      if (pendingCommitsRef.current > 0) setTranscribing(true);
+      await commitChainRef.current;
+      if (commitFailedRef.current) {
+        // Some segment commit failed, so words may be missing from the box.
+        // Fall back to the polished full-clip pass to repair the text —
+        // normally (every commit succeeded) this O(session) cost is skipped.
+        setTranscribing(true);
+        const wav = encodeWav16k(joinSamples(chunks, rateRef.current));
+        const res = await transcribeAudio(await blobToBase64(wav), "audio/wav");
+        const text = res?.text ? flattenVoiceText(res.text) : "";
+        if (text) {
+          // One polished full-clip pass replaces the pause-by-pause segments.
+          voiceCommittedRef.current = text;
+          voicePartialRef.current = "";
+          renderVoiceText();
+        }
       }
-    } catch (e) {
+    } catch {
       toastError(
-        "No speech-to-text server running. Install and start one in Settings → Local Models → Speech, or point whisper.baseUrl at an OpenAI-compatible STT endpoint.",
-        e,
+        "Speech-to-text failed partway — the text already in the box is kept, but some words may be missing. Check Settings → Local Models → Speech if this keeps happening.",
       );
     } finally {
       setTranscribing(false);
@@ -1661,7 +1720,7 @@ export function ChatComposer({
       voiceCommittedRef.current = "";
       voicePartialRef.current = "";
     }
-  }, [renderVoiceText, stopCapture]);
+  }, [flushVoiceSegment, renderVoiceText, stopCapture]);
 
   const beginVoiceRecording = useCallback(async () => {
     if (recordingRef.current || transcribing) return;
@@ -1734,6 +1793,11 @@ export function ChatComposer({
       segmentHadSoundRef.current = false;
       levelRef.current = 0;
       voiceFocusAppliedRef.current = false;
+      // Fresh session: commits still in flight from the previous one must not
+      // land here, and a hung partial from it must not block this one.
+      commitArmRef.current += 1;
+      commitFailedRef.current = false;
+      partialInFlightRef.current = false;
       recordingRef.current = true;
       setRecording(true);
 
@@ -1752,15 +1816,23 @@ export function ChatComposer({
           return;
         }
         if (segmentLenRef.current === 0) return; // committed text stays put
+        // The server transcribes one request at a time, so a second queued
+        // partial would only delay the segment commits behind it — skip the
+        // tick while one is still out. Stale results were already dropped
+        // via the gen checks below.
+        if (partialInFlightRef.current) return;
+        partialInFlightRef.current = true;
         void (async () => {
           try {
             const wav = encodeWav16k(joinSamples(segmentRef.current, rateRef.current));
-            const res = await transcribeAudio(await blobToBase64(wav), "audio/wav");
+            const res = await transcribeAudio(await blobToBase64(wav), "audio/wav", "partial");
             if (generationRef.current !== recGen || segGen !== segmentGenRef.current) return;
             voicePartialRef.current = res?.text ? flattenVoiceText(res.text) : "";
             renderVoiceText();
           } catch {
-            // Partials are best-effort — the final pass surfaces real errors.
+            // Partials are best-effort — the commit chain owns the real text.
+          } finally {
+            partialInFlightRef.current = false;
           }
         })();
       }, PARTIAL_TICK_MS);
@@ -1784,6 +1856,12 @@ export function ChatComposer({
   const cancelVoiceRecording = useCallback(() => {
     if (!recordingRef.current) return;
     generationRef.current += 1;
+    // Disarm in-flight/queued commits too — an aborted take must never insert
+    // text later. Stop deliberately skips this: there, commits are the record.
+    commitArmRef.current += 1;
+    // Free the serial server as well: any commit still running would be
+    // dropped by the arm check above, so let it stop early.
+    cancelTranscription("commit").catch(() => {});
     stopCapture();
     setRecording(false);
     removeVoiceSpan();

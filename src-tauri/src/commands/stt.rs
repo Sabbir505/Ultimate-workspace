@@ -411,13 +411,21 @@ pub async fn stt_start(
     stt_status(db, stt).await
 }
 
-#[tauri::command]
-pub async fn stt_stop(stt: State<'_, SttState>) -> CmdResult<()> {
+/// Kill the running sidecar, if any. Shared by the `stt_stop` command and the
+/// app-exit cleanup — without the exit kill, every app quit orphans a
+/// whisper-server holding a CUDA context (hundreds of MB of VRAM), and with
+/// auto-start on, one leaks per app session.
+pub async fn stop_sidecar(stt: &SttState) {
     // Take out under the lock, drop the guard, then kill (Send future).
     let mut handle = stt.0.lock().take();
     if let Some(h) = handle.as_mut() {
         let _ = h.child.kill().await;
     }
+}
+
+#[tauri::command]
+pub async fn stt_stop(stt: State<'_, SttState>) -> CmdResult<()> {
+    stop_sidecar(&stt).await;
     Ok(())
 }
 

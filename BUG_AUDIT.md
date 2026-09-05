@@ -1,8 +1,8 @@
-# BUG AUDIT — Relay (crate: Conduit)
+# BUG AUDIT — Relay (crate: `relay`)
 
-**Last verified:** 2026-08-27
+**Last verified:** 2026-09-06
 **Branch:** `master`
-**Working tree:** **NOT GREEN.** `tsc --noEmit` reports 34 errors and `cargo test --lib` has 1 failing test. The previous audit (2026-08-23) claimed everything was green — that is no longer accurate. The H/M items from the 2026-08-17 audit remain resolved; the regression is in `tsc` and one cargo unit test.
+**Working tree:** **GREEN.** `tsc --noEmit` clean (root + mobile), `npx vitest run` 128 files / 798 tests all passing, `cargo test --lib` 898 passed / 0 failed / 12 ignored. The 2026-08-27 regressions (N5, N6) are fixed — see the open-items table. The full-project audit of 2026-09-05 (`ISSUES.md`, 60 findings) is also fully resolved.
 
 ---
 
@@ -26,10 +26,10 @@
 | `N2` | L | `test/budgetPanel.test.tsx:34` | Mock returns an array for `setBudget` (should be `undefined`) | **MINIMAL RISK** — production code ignores the return value of `setBudget`, so the mismatch does not surface at runtime; test still passes |
 | `N3` | L | `test/themeGallery.test.tsx` | 5 tests said to fail on import/edit/export | **RESOLVED** — current `vitest` run is fully green for this file |
 | `N4` | L | `test/activityGrouping.test.tsx` | 1 test said to fail on fallback labels | **RESOLVED** — current suite green |
-| **`N5`** | **M** | `src/components/chat/GitToolsSidebar.tsx`, `src/components/panes/ProgressPanel.tsx` | `tsc --noEmit` reports 34 errors, all `TS18046: x is of type 'unknown'`. Affected names: `step` (GitToolsSidebar lines 409, 410, 411, 413, 417, 421, 431, 433), `t` (208, 213, 439, 443), `sub` (482, 485, 488, 490, 491), and `t` in ProgressPanel (28, 30, 32, 33, 35, 37). Root cause: destructured values from `unknown`-typed store selectors are then used without narrowing. | **OPEN** — fix the destructures to either type the selector return or narrow inline |
-| **`N6`** | **M** | `src-tauri/src/chat/commands.rs:2759` | `cargo test --lib chat::commands::preview_tests::basename_walk_prefers_newest_match_and_skips_vendor_dirs` fails — assertion compares `older-shallow == newer-deep`. The test exists and the function exists; either the walk is choosing the wrong file or the test fixture is misordered. | **OPEN** — investigate walk ordering vs. the test's expectation; this is a real regression in the current tree |
+| **`N5`** | **M** | `src/components/chat/GitToolsSidebar.tsx`, `src/components/panes/ProgressPanel.tsx` | `tsc --noEmit` reports 34 errors, all `TS18046: x is of type 'unknown'`. Root cause: destructured values from `unknown`-typed store selectors are then used without narrowing. | **RESOLVED** (2026-09-05) — typed fallback constants (`EMPTY_TASKS`, `EMPTY_STEPS`, `EMPTY_SUBAGENTS`, `EMPTY_ACCEPTED`) replace the `unknown`-typed fallbacks in both files; `tsc --noEmit` verified clean on 2026-09-06 |
+| **`N6`** | **M** | `src-tauri/src/chat/commands.rs` | `cargo test --lib chat::commands::preview_tests::basename_walk_prefers_newest_match_and_skips_vendor_dirs` fails — assertion compares `older-shallow == newer-deep`. | **RESOLVED** (2026-09-05) — test passes (`cargo test --lib basename_walk` → 1 passed, 0 failed, re-verified 2026-09-06) |
 
-**No currently-open Sev H items. Two open Sev M items (N5, N6).**
+**No currently-open items.**
 
 ---
 
@@ -48,12 +48,12 @@
 
 ---
 
-## Regression-suite health (2026-08-27)
+## Regression-suite health (2026-09-06)
 
-* **Unit tests:** 68 files · 460 tests · **all passing** (vitest)
-* **TypeScript:** `tsc --noEmit` — **34 errors** (see N5)
-* **Rust:** `cargo test --lib` — **539 passed, 1 FAILED, 11 ignored** (see N6); `cargo test` (all targets) propagates the lib failure; smoke test passes
+* **Unit tests:** 128 files · 798 tests · **all passing** (vitest)
+* **TypeScript:** `tsc --noEmit` — **clean** (root and `mobile/`)
+* **Rust:** `cargo test --lib` — **898 passed, 0 failed, 12 ignored** (all ignores carry legitimate reasons: live network, python3, npx spawn)
 
-> The previous version of this document said `tsc --noEmit clean` and `cargo test clean`. Both claims are now false. The 2026-08-23 audit predates the regressions; this 2026-08-27 pass reflects the current tree.
+> The 2026-08-27 regressions (34 `tsc` errors, one failing cargo test) were fixed in the 2026-09-05 full-project audit (`ISSUES.md`) and re-verified on 2026-09-06.
 
 Test files added since the 2026-08-23 audit: `acpAgents`, `agentModelPicker`, `apiKeysPanel`, `approvalRules`, `artifactProposalCard`, `automationRunClosed`, `broadcast`, `chatSessionRowExport`, `chatStreamLifecycle`, `checkpointChip`, `commandPaletteChats`, `composerHud`, `costDashboard`, `costRollups`, `deletedChatTombstone`, `knowledgePanel`, `localModelAdvanced`, `messageBranching`, `modalOpen`, `modelMarket`, `permissionModeMenu`, `permissionModeStore`, `projectBindingSwitch`, `promptTemplates`, `pullsPanel`, `releaseNotes`, `safeSlice`, `sanitizeSvg`, `toasts`, `updaterDismiss`, `useCostRollups`, `vramRecommendations`, `workspaceRestore`, `worktreeSessions`.

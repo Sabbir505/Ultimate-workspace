@@ -4,6 +4,8 @@
 
 > **Update (2026-09-05):** two drift items since this research — the relay sidecar binary is now `src-tauri/src/bin/relay_browser_mcp.rs` (Conduit→Relay rename, `7f6952b1`), and the §4 P0 "screenshot tool exists server-side but is unreachable from the relay binary" gap is **closed**: `screenshot` is advertised in the binary's `tools/list` (`relay_browser_mcp.rs`) with a drift-regression test in `src-tauri/src/chat/tools/specs.rs`.
 
+> **Update (2026-09-06): the entire §4 P0 list is closed** — all five verified in code: (1) `screenshot` advertised (above); (2) the circular CapturePreview fallback deleted (the HWND capture path replaced the COM roundtrip) and `browser_capture.rs` removed; (3) tab titles/favicons populate from the `browser:navigated` payload (`BrowserPane.tsx:544`); (4) fixed port 7681 replaced by an OS-assigned ephemeral port published via `browser_mcp::bound_port` + handshake file (`lib.rs:211`); (5) back/forward buttons render their disabled state from `canGoBack`/`canGoForward` (`BrowserPane.tsx:908`). **The P1 agent-capability gaps and the P2 trust layer remain the open roadmap.**
+
 ---
 
 ## 1. Executive summary

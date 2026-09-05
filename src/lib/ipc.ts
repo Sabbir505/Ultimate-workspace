@@ -984,6 +984,12 @@ export interface ChatDonePayload {
   inputTokens: number | null;
   outputTokens: number | null;
   costUsd: number | null;
+  /** Cache-write tokens from harness turns that report them (claude/pi/
+   *  commandcode/opencode); null when the harness didn't report a split. */
+  cacheCreationInputTokens?: number | null;
+  /** Cache-read tokens from harness turns that report them — the bulk of a
+   *  mid-session claude prompt. `inputTokens` stays the uncached slice. */
+  cacheReadInputTokens?: number | null;
   /** Cumulative wall-clock the model spent actively generating text (ms). */
   llmTimeMs: number | null;
   /** Cumulative wall-clock spent executing tools (ms), excluding approval waits. */
@@ -1807,6 +1813,18 @@ export interface AutomationRunFinishedPayload {
 export const listenAutomationRunFinished = (
   handler: (payload: AutomationRunFinishedPayload) => void,
 ) => safeListen<AutomationRunFinishedPayload>("automation:run-finished", handler);
+
+/** Emitted when a run actually begins executing (app-open runs only). The
+ *  frontend pre-creates the session's streaming entry with it so the
+ *  run-log chat shows the live turn instead of dropping every token. */
+export interface AutomationRunStartedPayload {
+  automationId: string;
+  chatSessionId: string;
+}
+
+export const listenAutomationRunStarted = (
+  handler: (payload: AutomationRunStartedPayload) => void,
+) => safeListen<AutomationRunStartedPayload>("automation:run-started", handler);
 
 /** Switch a chat session's provider (e.g. to/from "local_gguf" when picking a
  *  local model from the selector in a cloud session, or vice versa). */

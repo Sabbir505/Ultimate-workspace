@@ -976,6 +976,15 @@ export interface ChatState {
 
   // Called by the event hook (useChatEvents) — not meant for direct component use.
   onToken: (chatSessionId: string, token: string) => void;
+  /** Pre-create the streaming entry for a turn the BACKEND started (an
+   *  automation run). Without it, onToken's straggler guard would drop every
+   *  token the run emits. Called from automation:run-started. */
+  beginRemoteTurn: (chatSessionId: string) => void;
+  /** Clear the streaming entry a remote turn began with, and refetch the
+   *  active session's messages so the persisted reply appears. Called from
+   *  automation:run-finished — covers providers whose one-shot path never
+   *  emits chat:done, and failure paths that die before a terminal event. */
+  endRemoteTurn: (chatSessionId: string) => Promise<void>;
   onStatus: (chatSessionId: string, reason: string, message: string) => void;
   onDone: (
     chatSessionId: string,
@@ -2649,6 +2658,57 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   // ---- Event handlers (called by useChatEvents) ----
+
+  // Backend-initiated turn lifecycle (automation runs). These mirror the
+  // pre-create/cleanup sendMessage does around its own turns so the same
+  // streaming machinery — and onToken's straggler guard — applies unchanged.
+  beginRemoteTurn: (chatSessionId) => {
+    set((s) => {
+      // Never clobber a live entry: a user-initiated send to this session
+      // (or a previous run-started event) owns the existing buffer.
+      if (chatSessionId in s.streaming) return s;
+      return {
+        streaming: { ...s.streaming, [chatSessionId]: "" },
+        streamingChatSessionId: chatSessionId,
+      };
+    });
+  },
+
+  endRemoteTurn: async (chatSessionId) => {
+    // The harness path's chat:done may have cleaned up already; only act
+    // when a streaming entry survived (provider one-shots emit no terminal
+    // chat event, and failure paths can die before emitting one).
+    if (!(chatSessionId in get().streaming)) return;
+    set((s) => {
+      const nextStreaming = { ...s.streaming };
+      delete nextStreaming[chatSessionId];
+      const nextStatus = { ...s.chatStatus };
+      delete nextStatus[chatSessionId];
+      return {
+        streaming: nextStreaming,
+        chatStatus: nextStatus,
+        streamingChatSessionId:
+          s.streamingChatSessionId === chatSessionId ? null : s.streamingChatSessionId,
+      };
+    });
+    // Surface the persisted reply: an active viewer refetches the page;
+    // everyone else gets the unread mark (same posture as onDone).
+    if (get().activeChatSessionId !== chatSessionId) {
+      void setChatSessionUnread(chatSessionId, true).catch(() => {});
+      return;
+    }
+    try {
+      const messages = await getChatMessages(chatSessionId, undefined, 200);
+      if (get().activeChatSessionId === chatSessionId && !(chatSessionId in get().streaming)) {
+        set({
+          messages: mergeOptimistic(get().messages, messages ?? []),
+          messagesSessionId: chatSessionId,
+        });
+      }
+    } catch {
+      /* best-effort: the sidebar relist picks it up on the next interaction */
+    }
+  },
 
   onToken: (chatSessionId, token) => {
     // Ignore stragglers (same guard as onPerf): a token emitted just before

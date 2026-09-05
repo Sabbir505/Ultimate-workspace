@@ -117,6 +117,10 @@ export function NotificationBell() {
     // Navigate to whatever the row points at, then drop it from the panel.
     if (n.chatSessionId) {
       void useChatStore.getState().selectSession(n.chatSessionId);
+      // selectSession only flips chat state — without an explicit view
+      // switch (automation rows carry view:"automations") the click
+      // switched chats invisibly behind the current view.
+      useUiStore.getState().setActiveView("chat");
     } else if (n.paneId) {
       const panes = usePanesStore.getState();
       if (panes.panes.some((p) => p.paneId === n.paneId)) {

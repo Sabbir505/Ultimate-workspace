@@ -140,6 +140,21 @@ pub fn launch_run(
     let Some(prepared) = prepare_run(db, automation, source)? else {
         return Ok(()); // overlap — already recorded as "skipped"
     };
+    // Tell the (open) frontend the run is starting so it can mark the
+    // run-log chat as streaming: without this the chat store drops every
+    // chat:token the run emits (straggler guard — only sessions whose turn
+    // the frontend itself began accept tokens). App-open runs only; the
+    // headless binary has no listeners.
+    if let Some(app) = app {
+        use tauri::Emitter;
+        let _ = app.emit(
+            "automation:run-started",
+            serde_json::json!({
+                "automationId": automation.id,
+                "chatSessionId": prepared.chat_session_id,
+            }),
+        );
+    }
     let app2 = app.cloned();
     let db2 = Arc::clone(db);
     let a = automation.clone();

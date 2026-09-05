@@ -365,10 +365,26 @@ export const useUiStore = create<UiState>((set, get) => ({
 
   setActiveView: (activeView) =>
     set((s) => {
-      // Same-view re-selects don't create history entries.
-      if (s.viewHistory[s.viewIndex]?.view === activeView) return {};
+      // Same-view re-selects don't create history entries. Compare the LIVE
+      // activeView, not the history top: selectSession's recordChatNav can
+      // rewrite the top entry to {view:"chat"} while the user is still on
+      // Automations (the automation "Open run log" flow), and a top-based
+      // guard turned the follow-up setActiveView("chat") into a silent
+      // no-op — the click switched chats but never left the view.
+      if (s.activeView === activeView) return {};
       // A new navigation truncates the forward branch (browser semantics),
       // and the log is capped so endless switching can't grow it forever.
+      const top = s.viewHistory[s.viewIndex];
+      if (top?.view === activeView) {
+        // The new view is already the top entry (recordChatNav pushed it a
+        // moment ago): update it in place instead of stacking a duplicate
+        // chat-less dead step behind Back.
+        const history = [
+          ...s.viewHistory.slice(0, s.viewIndex),
+          { view: activeView, chatSessionId: null } satisfies ViewNavEntry,
+        ];
+        return { activeView, viewHistory: history, viewIndex: history.length - 1 };
+      }
       let history = [
         ...s.viewHistory.slice(0, s.viewIndex + 1),
         { view: activeView, chatSessionId: null } satisfies ViewNavEntry,

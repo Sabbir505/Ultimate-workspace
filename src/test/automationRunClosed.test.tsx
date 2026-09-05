@@ -32,6 +32,7 @@ vi.mock("../lib/ipc", () => ({
     runFinishedHandler = handler;
     return Promise.resolve(() => {});
   },
+  listenAutomationRunStarted: () => Promise.resolve(() => {}),
   // Imported by AutomationsView but not exercised here — stubs so the
   // module's named imports resolve against the mock.
   listAutomationRuns: vi.fn().mockResolvedValue([]),
@@ -58,7 +59,16 @@ vi.mock("../state/settings", () => ({
 // controls it exports, but the module's other imports still need to resolve.
 vi.mock("../state/projects", () => ({ useProjectsStore: (sel: (s: object) => unknown) => sel({}) }));
 vi.mock("../state/ui", () => ({ useUiStore: (sel: (s: object) => unknown) => sel({}) }));
-vi.mock("../state/chat", () => ({ useChatStore: (sel: (s: object) => unknown) => sel({}) }));
+vi.mock("../state/chat", () => ({
+  useChatStore: Object.assign((sel: (s: object) => unknown) => sel({}), {
+    // The run-finished handler releases the run's streaming entry through
+    // the real chat store; stub it here (this file tests notification UX).
+    getState: () => ({
+      beginRemoteTurn: () => {},
+      endRemoteTurn: () => Promise.resolve(),
+    }),
+  }),
+}));
 
 import {
   NotifySettingsButton,

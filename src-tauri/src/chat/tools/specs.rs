@@ -1279,6 +1279,38 @@ pub(crate) fn append_mcp_tools_anthropic(
 mod tests {
     use super::*;
 
+    /// Per-spec size report + regression guard. Tool specs ride EVERY request
+    /// (every turn, every tool round), so a single bloated spec taxes every
+    /// turn forever. Run with `--nocapture` to see the distribution; the
+    /// assertion keeps any one spec from silently re-bloating.
+    #[test]
+    fn no_single_tool_spec_blows_its_budget() {
+        let caps = ToolCaps::default();
+        let specs = openai_tool_specs(&caps, permission::SandboxPolicy::WorkspaceWrite);
+        let mut sizes: Vec<(usize, String)> = specs
+            .iter()
+            .map(|s| {
+                let name = s["function"]["name"].as_str().unwrap_or("?").to_string();
+                let len = serde_json::to_string(s).unwrap_or_default().len();
+                (len, name)
+            })
+            .collect();
+        sizes.sort_by(|a, b| b.0.cmp(&a.0));
+        for (len, name) in &sizes {
+            println!("{len:>6}  {name}");
+        }
+        let total: usize = sizes.iter().map(|(l, _)| l).sum();
+        println!("total specs JSON: {total} chars across {} tools", sizes.len());
+        // The worst offenders as of the token-efficiency pass were the
+        // document tools (~2.5k each). Anything past this needs a reason.
+        if let Some((worst, name)) = sizes.first() {
+            assert!(
+                *worst < 2_600,
+                "tool spec `{name}` bloated to {worst} chars — trim the description/schema or raise the budget deliberately"
+            );
+        }
+    }
+
     #[test]
     fn mcp_gallery_tools_merge_with_prefix_and_write_stripping() {
         use crate::chat::permission::ConnectorToolKind;

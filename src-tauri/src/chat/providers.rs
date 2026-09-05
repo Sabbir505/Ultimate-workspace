@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 // ---- Shared types ----
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatProviderId {
     Anthropic,
@@ -173,11 +173,15 @@ struct AnthropicWireBody {
     model: String,
     /// Built via `proto::anthropic_message_json` so messages carrying images
     /// become content-block arrays (vision); plain messages stay strings.
+    /// The newest message carries a `cache_control` breakpoint (see
+    /// `crate::chat::cache`) so the prefix caches incrementally across turns.
     messages: Vec<serde_json::Value>,
     max_tokens: i64,
     stream: bool,
+    /// Rendered as a cached content-block array (not a bare string) so the
+    /// stable system prompt hits the prompt cache on every turn.
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<serde_json::Value>,
     /// Anthropic extended thinking. Only emitted when the user has explicitly
     /// toggled it on (composer "brain" icon). `budget_tokens` is bounded by
     /// `max_tokens` so the thinking block can't blow past the model's
@@ -273,23 +277,36 @@ fn anthropic_request(
             "content": mem,
         }));
     }
+    messages.extend(
+        req.messages
+            .iter()
+            .map(crate::chat::proto::anthropic_message_json),
+    );
+    // Per-turn local-docs auto-retrieval (§3.1.7): appended as the LAST
+    // message, next to the turn's question, rather than injected at the
+    // head. The synthetic message is not persisted, so an injected-first
+    // copy would change the head of every request and invalidate the prompt
+    // cache for the entire history (same reasoning as the tool loops in
+    // streaming.rs; see `crate::chat::cache`).
     if !req.local_docs_retrieval.is_empty() {
         messages.push(serde_json::json!({
             "role": "user",
             "content": req.local_docs_retrieval.join("\n\n")
         }));
     }
-    messages.extend(
-        req.messages
-            .iter()
-            .map(crate::chat::proto::anthropic_message_json),
-    );
+    // Breakpoint on the newest message so each turn's request re-reads the
+    // whole prior conversation as cache hits and writes only the fresh tail.
+    crate::chat::cache::mark_last_message(&mut messages);
     let body = AnthropicWireBody {
         model: req.model.clone(),
         messages,
         max_tokens,
         stream: true,
-        system: req.system.clone(),
+        system: req
+            .system
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(crate::chat::cache::cached_system_block),
         thinking,
     };
     client
@@ -308,7 +325,35 @@ fn openai_request(
     api_key: &str,
     base: &str,
 ) -> reqwest::RequestBuilder {
+    openai_request_marked(client, req, api_key, base, false)
+}
+
+/// Same, with optional Anthropic-style `cache_control` breakpoints. Only
+/// OpenRouter serving an `anthropic/*` model may set `cache_marks` (see
+/// `cache::openrouter_anthropic`): OpenRouter translates the marks into
+/// native Claude prompt caching, while other OpenAI-family backends are
+/// stricter servers where unknown request fields can 400.
+fn openai_request_marked(
+    client: &reqwest::Client,
+    req: &ChatRequest,
+    api_key: &str,
+    base: &str,
+    cache_marks: bool,
+) -> reqwest::RequestBuilder {
     let url = format!("{base}/v1/chat/completions");
+    let body = openai_wire_body(req, cache_marks);
+    // `.json(&body)` (B12): lets reqwest serialize + set content-type itself;
+    // the previous `.body(to_string(&body))` eagerly stringified the payload
+    // even when the request never fired, and duplicated the header.
+    client
+        .post(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&body)
+}
+
+/// Message assembly + wire body for the OpenAI family. Split from
+/// [`openai_request_marked`] so tests can assert on the exact payload.
+fn openai_wire_body(req: &ChatRequest, cache_marks: bool) -> OpenAIWireBody {
     let mut messages: Vec<serde_json::Value> = Vec::new();
     if let Some(sys) = &req.system {
         if !sys.is_empty() {
@@ -323,21 +368,39 @@ fn openai_request(
             "content": mem,
         }));
     }
-    // Per-turn local-docs auto-retrieval (§3.1.7): first user message carries
-    // the retrieved context so the model answers from the user's own docs
-    // without an explicit search_docs call.
+    messages.extend(
+        req.messages
+            .iter()
+            .map(crate::chat::proto::openai_message_json),
+    );
+    // Per-turn local-docs auto-retrieval (§3.1.7): appended as the LAST
+    // message (next to the turn's question) rather than injected at the head
+    // — the synthetic message isn't persisted, so injecting it early would
+    // rewrite the head of every request and invalidate OpenAI's automatic
+    // prefix cache for the entire history.
     if !req.local_docs_retrieval.is_empty() {
         messages.push(serde_json::json!({
             "role": "user",
             "content": req.local_docs_retrieval.join("\n\n")
         }));
     }
-    messages.extend(
-        req.messages
-            .iter()
-            .map(crate::chat::proto::openai_message_json),
-    );
-    let body = OpenAIWireBody {
+    if cache_marks {
+        // System message → cached content-block array, and a breakpoint on
+        // the newest message — the same two marks the Anthropic loop sends
+        // natively (tools need no separate mark: Anthropic caches the whole
+        // prefix up to the system breakpoint, tools included).
+        if let Some(sys) = messages.first_mut() {
+            if sys.get("role").and_then(|r| r.as_str()) == Some("system") {
+                if let Some(serde_json::Value::String(text)) = sys.get_mut("content") {
+                    if !text.is_empty() {
+                        sys["content"] = crate::chat::cache::cached_system_block(text);
+                    }
+                }
+            }
+        }
+        crate::chat::cache::mark_last_message(&mut messages);
+    }
+    OpenAIWireBody {
         model: req.model.clone(),
         messages,
         stream: true,
@@ -346,14 +409,7 @@ fn openai_request(
         chat_template_kwargs: req.thinking.map(|t| ChatTemplateKwargs {
             enable_thinking: t,
         }),
-    };
-    // `.json(&body)` (B12): lets reqwest serialize + set content-type itself;
-    // the previous `.body(to_string(&body))` eagerly stringified the payload
-    // even when the request never fired, and duplicated the header.
-    client
-        .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .json(&body)
+    }
 }
 
 // ---- Anthropic ----
@@ -827,9 +883,15 @@ impl ChatProvider for OpenRouterProvider {
         base_url: Option<&str>,
     ) -> Result<reqwest::RequestBuilder, String> {
         let base = base_url.unwrap_or(Self::DEFAULT_BASE);
-        Ok(openai_request(client, req, api_key, base)
-            .header("HTTP-Referer", "https://conduit.app")
-            .header("X-Title", "Conduit"))
+        Ok(openai_request_marked(
+            client,
+            req,
+            api_key,
+            base,
+            crate::chat::cache::openrouter_anthropic(&req.model),
+        )
+        .header("HTTP-Referer", "https://conduit.app")
+        .header("X-Title", "Conduit"))
     }
 
     fn parse_sse_chunk(
@@ -892,6 +954,110 @@ impl ChatProvider for LocalGgufProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Anthropic wire-body cache tests ----
+
+    fn req_with(system: Option<String>) -> ChatRequest {
+        ChatRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: "earlier question".to_string(),
+                    images: Vec::new(),
+                },
+                ChatMessage {
+                    role: "assistant".to_string(),
+                    content: "earlier answer".to_string(),
+                    images: Vec::new(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: "new question".to_string(),
+                    images: Vec::new(),
+                },
+            ],
+            max_tokens: Some(4096),
+            system,
+            effort: None,
+            thinking: None,
+            local_docs_retrieval: Vec::new(),
+            memory_context: None,
+        }
+    }
+
+    #[test]
+    fn anthropic_wire_body_system_is_a_cached_block() {
+        let req = req_with(Some("You are Relay.".to_string()));
+        let thinking = None;
+        // Rebuild the body the same way anthropic_request does.
+        let mut messages: Vec<serde_json::Value> = req
+            .messages
+            .iter()
+            .map(crate::chat::proto::anthropic_message_json)
+            .collect();
+        crate::chat::cache::mark_last_message(&mut messages);
+        let body = AnthropicWireBody {
+            model: req.model.clone(),
+            messages,
+            max_tokens: 4096,
+            stream: true,
+            system: req
+                .system
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(crate::chat::cache::cached_system_block),
+            thinking,
+        };
+        let json: serde_json::Value = serde_json::to_value(&body).unwrap();
+
+        assert_eq!(json["system"][0]["type"], "text");
+        assert_eq!(json["system"][0]["cache_control"]["type"], "ephemeral");
+        // Only the newest message is marked; earlier ones stay plain strings.
+        let msgs = json["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert!(msgs[0]["content"].is_string());
+        assert!(msgs[1]["content"].is_string());
+        assert_eq!(msgs[2]["content"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn anthropic_wire_body_empty_system_stays_absent() {
+        let req = req_with(Some(String::new()));
+        let system = req
+            .system
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(crate::chat::cache::cached_system_block);
+        assert!(system.is_none());
+    }
+
+    #[test]
+    fn openai_wire_body_cache_marks_only_when_requested() {
+        let req = req_with(Some("You are Relay.".to_string()));
+        // Marks OFF — the flag is the caller's decision (OpenRouter gating on
+        // `anthropic/*`), so a non-marked body never carries the field.
+        let plain: serde_json::Value =
+            serde_json::to_value(openai_wire_body(&req, false)).unwrap();
+        assert!(!serde_json::to_string(&plain).unwrap().contains("cache_control"));
+        assert!(plain["messages"][0]["content"].is_string());
+
+        // Marks ON — system converted to a cached content-block array,
+        // newest message marked, middle messages untouched strings.
+        let marked: serde_json::Value =
+            serde_json::to_value(openai_wire_body(&req, true)).unwrap();
+        let msgs = marked["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"][0]["type"], "text");
+        assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert!(msgs[1]["content"].is_string());
+        assert!(msgs[2]["content"].is_string());
+        assert_eq!(msgs[3]["content"][0]["cache_control"]["type"], "ephemeral");
+
+        // And the detector that gates the flag at the OpenRouter call site.
+        assert!(crate::chat::cache::openrouter_anthropic("anthropic/claude-sonnet-4.5"));
+        assert!(!crate::chat::cache::openrouter_anthropic("openai/gpt-4o"));
+    }
 
     // ---- Anthropic SSE tests ----
 

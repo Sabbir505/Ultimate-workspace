@@ -408,7 +408,7 @@ impl AgentSessionManager {
         if let Some(state) = app.try_state::<crate::ChatState>() {
             state.0.drop_pending_for_session(chat_session_id);
         }
-        emit_done(Some(app), chat_session_id, None, None, None);
+        emit_done(Some(app), chat_session_id, None, None, None, None, None);
         Ok(())
     }
 
@@ -1615,7 +1615,7 @@ fn read_acp_stream(
                         // partial reply.
                         full.clear();
                     } else {
-                        finish_turn(app, db, sid, &mut full, None, None, None, &mut watches, started, None);
+                        finish_turn(app, db, sid, &mut full, None, None, None, None, None, &mut watches, started, None);
                     }
                     if should_clear_in_flight(
                         proc_generation.load(Ordering::SeqCst),
@@ -2827,6 +2827,17 @@ fn read_claude_stream(
                     let input = usage.and_then(|u| u.get("input_tokens")).and_then(|t| t.as_i64());
                     let output = usage.and_then(|u| u.get("output_tokens")).and_then(|t| t.as_i64());
                     let cost = v.get("total_cost_usd").and_then(|c| c.as_f64());
+                    // claude's input_tokens EXCLUDES cached tokens — the cache
+                    // halves of the report carry 80-95% of the prompt in
+                    // agentic turns. Dropping them (as this parser once did)
+                    // made harness turns look nearly free next to the
+                    // built-in chat's full-prompt accounting. Absent fields
+                    // (older CLIs) stay NULL; present-but-zero is a true
+                    // report and is stored as 0.
+                    let cache_creation = usage
+                        .and_then(|u| usage_i64(u, &["cache_creation_input_tokens", "cacheCreationInputTokens"]));
+                    let cache_read = usage
+                        .and_then(|u| usage_i64(u, &["cache_read_input_tokens", "cacheReadInputTokens"]));
                     // Some CLI versions also report the model on the result
                     // event itself — prefer it if we never saw an assistant
                     // message with one.
@@ -2840,7 +2851,7 @@ fn read_claude_stream(
                     if let Some(m) = actual_model.as_deref() {
                         persist_actual_model(db, "claude_code", sid, m);
                     }
-                    finish_turn(app, db, sid, &mut full, input, output, cost, &mut watches, turn_started, actual_model.as_deref());
+                    finish_turn(app, db, sid, &mut full, input, output, cost, cache_creation, cache_read, &mut watches, turn_started, actual_model.as_deref());
                 } else {
                     let msg = v
                         .get("error")
@@ -3323,6 +3334,12 @@ fn read_per_turn_stream(
     let mut input: Option<i64> = None;
     let mut output: Option<i64> = None;
     let mut cost: Option<f64> = None;
+    // Cache halves of the harness's usage report, threaded through the
+    // handlers like input/output. Handlers only overwrite when their event
+    // actually carries the field, so a CLI that never reports cache stays
+    // NULL end-to-end.
+    let mut cache_read: Option<i64> = None;
+    let mut cache_creation: Option<i64> = None;
     let mut tools = ToolTracker::new();
     // CommandCode emits several frames per running tool (`tool_running` and
     // friends all carry the same toolCallId) — dedupe markers per call id.
@@ -3347,14 +3364,14 @@ fn read_per_turn_stream(
             continue;
         };
         match kind {
-            PerTurn::Kimi => handle_kimi_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut tools),
-            PerTurn::OpenCode => handle_opencode_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut cost, &mut last_text, &mut last_reasoning, &mut in_think, &mut tools),
+            PerTurn::Kimi => handle_kimi_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut cache_read, &mut cache_creation, &mut tools),
+            PerTurn::OpenCode => handle_opencode_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut cache_read, &mut cache_creation, &mut cost, &mut last_text, &mut last_reasoning, &mut in_think, &mut tools),
             // Pi and Omp share the pi-lineage JSON event protocol.
             PerTurn::Pi | PerTurn::Omp => {
-                handle_pi_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut cost, &mut in_think, &mut tools)
+                handle_pi_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut cache_read, &mut cache_creation, &mut cost, &mut in_think, &mut tools)
             }
             PerTurn::CommandCode => {
-                handle_commandcode_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut in_think, &mut tools, &mut seen_tools)
+                handle_commandcode_event(app, sid, &v, &mut full, session_cell, &mut input, &mut output, &mut cache_read, &mut cache_creation, &mut in_think, &mut tools, &mut seen_tools)
             }
         }
     }
@@ -3369,7 +3386,7 @@ fn read_per_turn_stream(
     } else {
         // per-turn CLI streams don't reliably expose a model id on their
         // events — the cost rollup falls back to the session's model.
-        finish_turn(app, db, sid, &mut full, input, output, cost, &mut watches, started_at, None);
+        finish_turn(app, db, sid, &mut full, input, output, cost, cache_creation, cache_read, &mut watches, started_at, None);
     }
 }
 
@@ -3506,7 +3523,7 @@ fn send_opencode_turn(
         };
 
         match opencode_post_message(&base2, &oc_sid2, model_body, agent_body, &content2) {
-            Ok((input, output, cost, actual)) => {
+            Ok((input, output, cache_read, cache_creation, cost, actual)) => {
                 // The POST resolves when the turn completes but can race its
                 // last SSE flush — wait for a reader-quiet gap so the final
                 // text snapshot is inside `full` before persisting.
@@ -3524,6 +3541,8 @@ fn send_opencode_turn(
                     input,
                     output,
                     cost,
+                    cache_creation,
+                    cache_read,
                     &mut watches,
                     started_at,
                     actual.as_deref(),
@@ -3746,7 +3765,7 @@ fn opencode_post_message(
     model: Option<Value>,
     agent: Option<&str>,
     content: &str,
-) -> Result<(Option<i64>, Option<i64>, Option<f64>, Option<String>), String> {
+) -> Result<(Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<f64>, Option<String>), String> {
     tauri::async_runtime::block_on(async {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
@@ -3777,6 +3796,10 @@ fn opencode_post_message(
         let info = v.get("info").cloned().unwrap_or(json!({}));
         let input = info.pointer("/tokens/input").and_then(|t| t.as_i64());
         let output = info.pointer("/tokens/output").and_then(|t| t.as_i64());
+        // OpenCode nests cache reads/writes under tokens.cache when the
+        // provider reports them; absent → NULL like every other harness.
+        let cache_read = info.pointer("/tokens/cache/read").and_then(|t| t.as_i64());
+        let cache_creation = info.pointer("/tokens/cache/write").and_then(|t| t.as_i64());
         let cost = info.get("cost").and_then(|c| c.as_f64());
         // The model that ACTUALLY served the turn (opencode routes through
         // whatever its config says — the session's stored id can be a stale
@@ -3792,7 +3815,7 @@ fn opencode_post_message(
                     _ => m.to_string(),
                 }
             });
-        Ok((input, output, cost, model))
+        Ok((input, output, cache_read, cache_creation, cost, model))
     })
 }
 
@@ -4088,8 +4111,12 @@ fn handle_opencode_sse_data(
             let event = json!({ "type": kind, "part": { "text": part.get("text") } });
             let mut full = full_cell.lock().unwrap_or_else(|e| e.into_inner());
             let mut in_think = think_cell.lock().unwrap_or_else(|e| e.into_inner());
+            // Throwaway usage accumulators — text/reasoning parts carry no
+            // usage; the turn's numbers come from the POST response.
             let mut input: Option<i64> = None;
             let mut output: Option<i64> = None;
+            let mut cache_read: Option<i64> = None;
+            let mut cache_creation: Option<i64> = None;
             let mut cost: Option<f64> = None;
             handle_opencode_event(
                 app,
@@ -4099,6 +4126,8 @@ fn handle_opencode_sse_data(
                 session_cell,
                 &mut input,
                 &mut output,
+                &mut cache_read,
+                &mut cache_creation,
                 &mut cost,
                 last_text,
                 last_reasoning,
@@ -4197,6 +4226,8 @@ fn handle_kimi_event(
     session_cell: &Arc<Mutex<Option<String>>>,
     input: &mut Option<i64>,
     output: &mut Option<i64>,
+    cache_read: &mut Option<i64>,
+    cache_creation: &mut Option<i64>,
     tools: &mut ToolTracker,
 ) {
     let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("");
@@ -4261,6 +4292,11 @@ fn handle_kimi_event(
                 if let Some(u) = v.get("usage") {
                     *input = u.get("input_tokens").and_then(|t| t.as_i64()).or(*input);
                     *output = u.get("output_tokens").and_then(|t| t.as_i64()).or(*output);
+                    // Kimi rides on Anthropic-shaped provider reports; match
+                    // both the snake_case and camelCase spellings rather
+                    // than guess one.
+                    *cache_read = usage_i64(u, &["cache_read_input_tokens", "cacheReadInputTokens", "cacheRead"]).or(*cache_read);
+                    *cache_creation = usage_i64(u, &["cache_creation_input_tokens", "cacheCreationInputTokens", "cacheWrite"]).or(*cache_creation);
                 }
             }
         }
@@ -4330,6 +4366,8 @@ fn handle_opencode_event(
     session_cell: &Arc<Mutex<Option<String>>>,
     input: &mut Option<i64>,
     output: &mut Option<i64>,
+    cache_read: &mut Option<i64>,
+    cache_creation: &mut Option<i64>,
     cost: &mut Option<f64>,
     last_text: &mut String,
     last_reasoning: &mut String,
@@ -4425,6 +4463,14 @@ fn handle_opencode_event(
             if let Some(u) = v.pointer("/part/tokens") {
                 *input = u.get("input").and_then(|t| t.as_i64()).or(*input);
                 *output = u.get("output").and_then(|t| t.as_i64()).or(*output);
+                // OpenCode nests cache counters under `cache` on the tokens
+                // object; match the flat spellings too for older versions.
+                *cache_read = u.get("cacheRead").and_then(|t| t.as_i64())
+                    .or_else(|| u.pointer("/cache/read").and_then(|t| t.as_i64()))
+                    .or(*cache_read);
+                *cache_creation = u.get("cacheWrite").and_then(|t| t.as_i64())
+                    .or_else(|| u.pointer("/cache/write").and_then(|t| t.as_i64()))
+                    .or(*cache_creation);
             }
             // Free models report cost 0; Zen/relay models report real dollars.
             *cost = v.pointer("/part/cost").and_then(|c| c.as_f64()).or(*cost);
@@ -4458,6 +4504,8 @@ fn handle_pi_event(
     session_cell: &Arc<Mutex<Option<String>>>,
     input: &mut Option<i64>,
     output: &mut Option<i64>,
+    cache_read: &mut Option<i64>,
+    cache_creation: &mut Option<i64>,
     cost: &mut Option<f64>,
     in_think: &mut bool,
     tools: &mut ToolTracker,
@@ -4478,6 +4526,11 @@ fn handle_pi_event(
             if let Some(u) = v.get("usage") {
                 *input = u.get("input").and_then(|t| t.as_i64()).or(*input);
                 *output = u.get("output").and_then(|t| t.as_i64()).or(*output);
+                // pi/omp report the cache halves alongside input/output
+                // (cacheRead/cacheWrite); dropping them once made these
+                // turns look nearly token-free.
+                *cache_read = usage_i64(u, &["cacheRead", "cache_read"]).or(*cache_read);
+                *cache_creation = usage_i64(u, &["cacheWrite", "cache_write"]).or(*cache_creation);
                 *cost = u.pointer("/cost/total").and_then(|c| c.as_f64()).filter(|c| *c > 0.0).or(*cost);
             }
             let Some(ev) = v.get("assistantMessageEvent") else { return };
@@ -4592,6 +4645,8 @@ fn handle_commandcode_event(
     session_cell: &Arc<Mutex<Option<String>>>,
     input: &mut Option<i64>,
     output: &mut Option<i64>,
+    cache_read: &mut Option<i64>,
+    cache_creation: &mut Option<i64>,
     in_think: &mut bool,
     tools: &mut ToolTracker,
     seen_tools: &mut std::collections::HashSet<String>,
@@ -4621,6 +4676,8 @@ fn handle_commandcode_event(
                     if let Some(u) = inner.pointer("/result/usage") {
                         *input = u.get("inputTokens").and_then(|t| t.as_i64()).or(*input);
                         *output = u.get("outputTokens").and_then(|t| t.as_i64()).or(*output);
+                        *cache_read = usage_i64(u, &["cacheReadTokens", "cacheRead"]).or(*cache_read);
+                        *cache_creation = usage_i64(u, &["cacheWriteTokens", "cacheWrite"]).or(*cache_creation);
                     }
                 }
                 _ => {
@@ -4666,6 +4723,8 @@ fn handle_commandcode_event(
             if let Some(u) = v.get("usage") {
                 *input = u.get("inputTokens").and_then(|t| t.as_i64()).or(*input);
                 *output = u.get("outputTokens").and_then(|t| t.as_i64()).or(*output);
+                *cache_read = usage_i64(u, &["cacheReadTokens", "cacheRead"]).or(*cache_read);
+                *cache_creation = usage_i64(u, &["cacheWriteTokens", "cacheWrite"]).or(*cache_creation);
             }
             if v.get("subtype").and_then(|s| s.as_str()) == Some("error") {
                 if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
@@ -5703,11 +5762,28 @@ pub(crate) fn tool_meta_generic(name: &str, input: &Value) -> Value {
 
 // ---------------------------------------------------------------- shared emit/persist
 
+/// First present integer among `keys` on a usage object. Harnesses disagree on
+/// cache-field names (claude: snake_case `cache_read_input_tokens`, pi:
+/// `cacheRead`, commandcode: `cacheReadTokens`), so handlers match every known
+/// spelling and take the first that's there.
+fn usage_i64(u: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .find_map(|k| u.get(*k).and_then(|t| t.as_i64()))
+}
+
 /// Turn finished successfully: persist the accumulated assistant message
 /// (mirroring the built-in chat, so onDone's refetch sees it), surface any
 /// files the CLI created or modified as artifacts (same insert_artifact +
 /// `chat:artifact` emit as the built-in chat in chat/dispatch.rs), then emit
 /// done.
+///
+/// The cache fields carry the harness's own split of its input tokens:
+/// `input` is the UNCACHED portion only for claude-style reports, so a turn
+/// whose prompt was mostly cache hits legitimately records a small `input`
+/// alongside a large `cache_read`. Persisting the split (instead of folding
+/// it into input or dropping it) is what lets session metrics and the cost
+/// rollup bill cached tokens at the cached rate like the built-in chat does.
+#[allow(clippy::too_many_arguments)]
 fn finish_turn(
     app: Option<&AppHandle>,
     db: &DbState,
@@ -5716,6 +5792,8 @@ fn finish_turn(
     input: Option<i64>,
     output: Option<i64>,
     cost: Option<f64>,
+    cache_creation: Option<i64>,
+    cache_read: Option<i64>,
     watches: &mut Vec<DirWatch>,
     // Unix-second instant the turn started (captured when the reader began),
     // persisted as `started_at` so the UI can show "Worked for Xs".
@@ -5733,11 +5811,13 @@ fn finish_turn(
     // renders as "used" against its cap (lib/contextWindow.ts). No context
     // limit crosses this boundary; the CLI enforces its own window.
     eprintln!(
-        "[context] harness turn: session={} model='{}' in={} out={}",
+        "[context] harness turn: session={} model='{}' in={} out={} cache_write={} cache_read={}",
         sid,
         model_key.unwrap_or("—"),
         input.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
         output.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+        cache_creation.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+        cache_read.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
     );
     // Persist the assistant message FIRST so we can attribute artifacts to it.
     let message_id: Option<i64> = if !full.is_empty() {
@@ -5762,7 +5842,7 @@ fn finish_turn(
         let (ttft, tok_s) = crate::chat::turn_perf::active_snapshot(sid)
             .map(|p| (p.ttft_ms, p.tokens_per_second))
             .unwrap_or((None, None));
-        crate::db::add_chat_message(&conn, sid, "assistant", full, input, output, cost, None, None, None, Some(provider), model_key, None, Some(started_at), Some(crate::db::now_ts()), None, None, ttft, tok_s)
+        crate::db::add_chat_message(&conn, sid, "assistant", full, input, output, cost, cache_creation, cache_read, None, Some(provider), model_key, None, Some(started_at), Some(crate::db::now_ts()), None, None, ttft, tok_s)
             .ok()
             .map(|m| m.id)
     } else {
@@ -5819,7 +5899,7 @@ fn finish_turn(
         let _ = crate::db::attach_artifacts_to_message(&conn, sid, mid);
     }
 
-    emit_done(app, sid, input, output, cost);
+    emit_done(app, sid, input, output, cost, cache_creation, cache_read);
 
     // Per-turn git checkpoint against the spawn dir (watches are ordered
     // spawn-dir-first by turn_watch_dirs; non-repo dirs skip silently).
@@ -5847,11 +5927,39 @@ fn emit_token(app: Option<&AppHandle>, sid: &str, token: &str) {
     crate::chat::turn_perf::record_active_token(sid);
 }
 
-fn emit_done(app: Option<&AppHandle>, sid: &str, input: Option<i64>, output: Option<i64>, cost: Option<f64>) {
+fn emit_done(
+    app: Option<&AppHandle>,
+    sid: &str,
+    input: Option<i64>,
+    output: Option<i64>,
+    cost: Option<f64>,
+    cache_creation: Option<i64>,
+    cache_read: Option<i64>,
+) {
     if let Some(app) = app {
+        // Cache fields ride along when the harness reported them (absent →
+        // null, so older frontend consumers keep working unchanged). `input`
+        // is the uncached slice for claude-style reports; the frontend uses
+        // the split to show the same IN/CACHE breakdown the built-in chat
+        // gets — including the cacheHitRate chip (same math as
+        // turn_perf::cache_hit_rate; harness reports are all exclusive).
+        let cache_hit_rate = crate::chat::turn_perf::cache_hit_rate(
+            cache_read.unwrap_or(0),
+            cache_creation.unwrap_or(0),
+            input.unwrap_or(0),
+            false,
+        );
         let _ = app.emit(
             "chat:done",
-            json!({ "chatSessionId": sid, "inputTokens": input, "outputTokens": output, "costUsd": cost }),
+            json!({
+                "chatSessionId": sid,
+                "inputTokens": input,
+                "outputTokens": output,
+                "costUsd": cost,
+                "cacheCreationInputTokens": cache_creation,
+                "cacheReadInputTokens": cache_read,
+                "cacheHitRate": cache_hit_rate,
+            }),
         );
     }
 }
@@ -5928,104 +6036,137 @@ fn no_console_window(cmd: &mut Command) {
 mod tests {
     use super::*;
 
+    /// Reader-state snapshot the handler tests assert against.
+    struct UsageState {
+        full: String,
+        cell: Arc<Mutex<Option<String>>>,
+        input: Option<i64>,
+        output: Option<i64>,
+        cache_read: Option<i64>,
+        cache_creation: Option<i64>,
+        cost: Option<f64>,
+    }
+
     /// Feed pi-lineage JSONL lines through handle_pi_event with app=None
     /// (events no-op), sharing reader state across lines exactly like
-    /// read_per_turn_stream does. Returns (transcript, cli-session-id cell).
-    fn feed_pi(lines: &[&str]) -> (String, Arc<Mutex<Option<String>>>) {
+    /// read_per_turn_stream does.
+    fn feed_pi(lines: &[&str]) -> UsageState {
         let cell = Arc::new(Mutex::new(None));
         let mut full = String::new();
         let mut input = None;
         let mut output = None;
+        let mut cache_read = None;
+        let mut cache_creation = None;
         let mut cost = None;
         let mut in_think = false;
         let mut tools = ToolTracker::new();
         for line in lines {
             let v = serde_json::from_str(line).expect("test line must be valid JSON");
             handle_pi_event(
-                None, "s", &v, &mut full, &cell, &mut input, &mut output, &mut cost, &mut in_think, &mut tools,
+                None, "s", &v, &mut full, &cell, &mut input, &mut output, &mut cache_read, &mut cache_creation, &mut cost, &mut in_think, &mut tools,
             );
         }
-        (full, cell)
+        UsageState { full, cell, input, output, cache_read, cache_creation, cost }
     }
 
     #[test]
     fn pi_session_header_binds_cli_session_id() {
         // First line of a real `pi -p --mode json` run.
-        let (full, cell) = feed_pi(&[
+        let st = feed_pi(&[
             r#"{"type":"session","version":3,"id":"01a067a9-7c1d-7332-9b4e-1d3f5a7b9c1e","timestamp":"2026-09-03","cwd":"D:/x"}"#,
         ]);
-        assert!(full.is_empty()); // header is metadata, not transcript
+        assert!(st.full.is_empty()); // header is metadata, not transcript
         assert_eq!(
-            cell.lock().unwrap().clone(),
+            st.cell.lock().unwrap().clone(),
             Some("01a067a9-7c1d-7332-9b4e-1d3f5a7b9c1e".to_string())
         );
     }
 
     #[test]
     fn pi_text_deltas_stream_into_transcript() {
-        let (full, _) = feed_pi(&[
+        let st = feed_pi(&[
             r#"{"type":"message_update","usage":{"input":10,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":11,"cost":{"total":0.0}},"assistantMessageEvent":{"type":"text_start","contentIndex":0}}"#,
             r#"{"type":"message_update","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":12,"cost":{"total":0.0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hel"}}"#,
             r#"{"type":"message_update","usage":{"input":10,"output":3,"cacheRead":0,"cacheWrite":0,"totalTokens":13,"cost":{"total":0.0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"lo"}}"#,
         ]);
-        assert_eq!(full, "Hello");
+        assert_eq!(st.full, "Hello");
+        // pi reports input/output EXCLUDING the cache halves — a 200-token
+        // cache read + 10 uncached must record input=10, not input=210.
+        assert_eq!(st.input, Some(10));
+        assert_eq!(st.output, Some(3));
+    }
+
+    /// The cache halves of pi's cumulative usage must reach the turn
+    /// accumulators — dropping them is what made harness sessions look
+    /// nearly token-free next to the built-in chat.
+    #[test]
+    fn pi_usage_captures_cache_read_and_write() {
+        let st = feed_pi(&[
+            r#"{"type":"message_update","usage":{"input":10,"output":2,"cacheRead":18432,"cacheWrite":2097,"totalTokens":22541,"cost":{"total":0.0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"hi"}}"#,
+        ]);
+        assert_eq!(st.input, Some(10));
+        assert_eq!(st.output, Some(2));
+        assert_eq!(st.cache_read, Some(18432));
+        assert_eq!(st.cache_creation, Some(2097));
     }
 
     #[test]
     fn pi_thinking_deltas_wrap_in_think_block() {
-        let (full, _) = feed_pi(&[
+        let st = feed_pi(&[
             r#"{"type":"message_update","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"total":0}},"assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"hmm "}}"#,
             r#"{"type":"message_update","usage":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"answer"}}"#,
         ]);
-        assert_eq!(full, "<think>hmm </think>answer");
+        assert_eq!(st.full, "<think>hmm </think>answer");
     }
 
     #[test]
     fn pi_error_event_surfaces_message() {
-        let (full, _) = feed_pi(&[
+        let st = feed_pi(&[
             r#"{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"total":0}},"assistantMessageEvent":{"type":"error","reason":"error","error":{"role":"assistant","content":[{"type":"text","text":"401: bad key"}],"stopReason":"error"}}}"#,
         ]);
-        assert!(full.contains("401: bad key"), "{full}");
+        assert!(st.full.contains("401: bad key"), "{}", st.full);
     }
 
     #[test]
     fn pi_tool_execution_renders_markers() {
-        let (full, _) = feed_pi(&[
+        let st = feed_pi(&[
             r#"{"type":"tool_execution_start","toolCallId":"t1","toolName":"bash","args":{"command":"ls"}}"#,
             r#"{"type":"tool_execution_end","toolCallId":"t1","result":{"content":"a.txt"},"isError":false}"#,
         ]);
-        assert!(full.contains("bash"), "start marker missing: {full}");
-        assert!(full.contains("a.txt"), "result missing: {full}");
+        assert!(st.full.contains("bash"), "start marker missing: {}", st.full);
+        assert!(st.full.contains("a.txt"), "result missing: {}", st.full);
     }
 
     #[test]
     fn pi_unknown_event_types_are_ignored() {
         // omp emits advisor events pi doesn't have; neither may corrupt the
         // transcript or panic.
-        let (full, _) = feed_pi(&[
+        let st = feed_pi(&[
             r#"{"type":"advisor_cost_changed","total":0.5}"#,
             r#"{"type":"agent_start"}"#,
         ]);
-        assert!(full.is_empty());
+        assert!(st.full.is_empty());
     }
 
     /// Feed CommandCode NDJSON frames through handle_commandcode_event with
     /// app=None, sharing reader state like read_per_turn_stream does.
-    fn feed_cc(lines: &[&str]) -> (String, Arc<Mutex<Option<String>>>, Option<i64>, Option<i64>) {
+    fn feed_cc(lines: &[&str]) -> UsageState {
         let cell = Arc::new(Mutex::new(None));
         let mut full = String::new();
         let mut input = None;
         let mut output = None;
+        let mut cache_read = None;
+        let mut cache_creation = None;
         let mut in_think = false;
         let mut tools = ToolTracker::new();
         let mut seen = std::collections::HashSet::new();
         for line in lines {
             let v = serde_json::from_str(line).expect("test line must be valid JSON");
             handle_commandcode_event(
-                None, "s", &v, &mut full, &cell, &mut input, &mut output, &mut in_think, &mut tools, &mut seen,
+                None, "s", &v, &mut full, &cell, &mut input, &mut output, &mut cache_read, &mut cache_creation, &mut in_think, &mut tools, &mut seen,
             );
         }
-        (full, cell, input, output)
+        UsageState { full, cell, input, output, cache_read, cache_creation, cost: None }
     }
 
     #[test]
@@ -6033,49 +6174,63 @@ mod tests {
         // Envelope shapes captured verbatim from a live `commandcode -p
         // --output-format json` run (the account was out of credits, so the
         // error path is the recorded one).
-        let (full, cell, input, output) = feed_cc(&[
+        let st = feed_cc(&[
             r#"{"type":"event","event":{"type":"run_start","sessionId":"88a3940f-2032-4a7a-b362-4fca46c4ea9b"}}"#,
             r#"{"type":"result","subtype":"error","sessionId":"88a3940f-2032-4a7a-b362-4fca46c4ea9b","usage":{"inputTokens":12,"outputTokens":5,"cacheReadTokens":0,"cacheWriteTokens":0},"durationMs":3970,"finalText":"","error":"Error: insufficient credits"}"#,
         ]);
         assert_eq!(
-            cell.lock().unwrap().clone(),
+            st.cell.lock().unwrap().clone(),
             Some("88a3940f-2032-4a7a-b362-4fca46c4ea9b".to_string())
         );
-        assert_eq!(input, Some(12));
-        assert_eq!(output, Some(5));
-        assert!(full.contains("insufficient credits"), "{full}");
+        assert_eq!(st.input, Some(12));
+        assert_eq!(st.output, Some(5));
+        assert_eq!(st.cache_read, Some(0), "a reported zero is a true report, not absence");
+        assert_eq!(st.cache_creation, Some(0));
+        assert!(st.full.contains("insufficient credits"), "{}", st.full);
+    }
+
+    /// The result line's camelCase cache counters must reach the
+    /// accumulators (nonzero variant — the Claude-Code-style split).
+    #[test]
+    fn commandcode_result_captures_cache_split() {
+        let st = feed_cc(&[
+            r#"{"type":"result","subtype":"success","sessionId":"s1","usage":{"inputTokens":42,"outputTokens":8,"cacheReadTokens":15000,"cacheWriteTokens":1200},"finalText":"done"}"#,
+        ]);
+        assert_eq!(st.input, Some(42));
+        assert_eq!(st.cache_read, Some(15000));
+        assert_eq!(st.cache_creation, Some(1200));
     }
 
     #[test]
     fn commandcode_delta_frames_stream_and_result_catches_up() {
-        let (full, _, _, _) = feed_cc(&[
+        let st = feed_cc(&[
             r#"{"type":"event","event":{"type":"text_delta","delta":"Hel"}}"#,
             r#"{"type":"event","event":{"type":"text_delta","delta":"lo"}}"#,
             // finalText carries the full reply — only the unstreamed suffix lands.
             r#"{"type":"result","subtype":"success","sessionId":"sid-1","usage":{"inputTokens":1,"outputTokens":2},"finalText":"Hello world"}"#,
         ]);
-        assert_eq!(full, "Hello world");
+        assert_eq!(st.full, "Hello world");
     }
 
     #[test]
     fn commandcode_final_text_recovers_when_no_deltas_arrived() {
         // If the delta event type ever renames, the result line still
         // delivers the reply (forward-compat contract).
-        let (full, _, _, _) = feed_cc(&[
+        let st = feed_cc(&[
             r#"{"type":"event","event":{"type":"message_start"}}"#,
             r#"{"type":"result","subtype":"success","finalText":"the whole answer"}"#,
         ]);
-        assert_eq!(full, "the whole answer");
+        assert_eq!(st.full, "the whole answer");
     }
 
     #[test]
     fn commandcode_tool_frames_mark_once() {
-        let (full, _, _, _) = feed_cc(&[
+        let st = feed_cc(&[
             r#"{"type":"event","event":{"type":"tool_running","toolCallId":"t1","toolName":"bash","description":"ls"}}"#,
             r#"{"type":"event","event":{"type":"tool_running","toolCallId":"t1","toolName":"bash","description":"ls"}}"#,
             r#"{"type":"event","event":{"type":"tool_finished","toolCallId":"t1","toolName":"bash"}}"#,
         ]);
-        assert_eq!(full.matches("bash").count(), 1, "tool marked once: {full}");
+        assert_eq!(st.full.matches("bash").count(), 1, "tool marked once: {}", st.full);
     }
 
     #[test]
@@ -6084,10 +6239,41 @@ mod tests {
         // mid-stream self-update banner ("Updated 1.44.0 → 1.45.0") observed
         // live must never corrupt the transcript — covered by the reader's
         // from_str guard, asserted here at the handler boundary.
-        let (full, _, _, _) = feed_cc(&[
+        let st = feed_cc(&[
             r#"{"type":"event","event":{"type":"turn_start","turnNumber":1}}"#,
         ]);
-        assert!(full.is_empty());
+        assert!(st.full.is_empty());
+    }
+
+    /// OpenCode's step-finish tokens object (per-turn `run` mode). Cache
+    /// counters arrive nested under `cache` — verified against the server's
+    /// message-info shape.
+    #[test]
+    fn opencode_step_finish_captures_cache_split() {
+        let cell = Arc::new(Mutex::new(None));
+        let mut full = String::new();
+        let mut input = None;
+        let mut output = None;
+        let mut cache_read = None;
+        let mut cache_creation = None;
+        let mut cost = None;
+        let mut last_text = String::new();
+        let mut last_reasoning = String::new();
+        let mut in_think = false;
+        let mut tools = ToolTracker::new();
+        let v = serde_json::from_str::<Value>(
+            r#"{"type":"step_finish","sessionID":"oc-1","part":{"tokens":{"input":11,"output":3,"cache":{"read":20000,"write":2500}},"cost":0.01}}"#,
+        )
+        .unwrap();
+        handle_opencode_event(
+            None, "s", &v, &mut full, &cell, &mut input, &mut output, &mut cache_read, &mut cache_creation, &mut cost,
+            &mut last_text, &mut last_reasoning, &mut in_think, &mut tools,
+        );
+        assert_eq!(input, Some(11));
+        assert_eq!(output, Some(3));
+        assert_eq!(cache_read, Some(20000));
+        assert_eq!(cache_creation, Some(2500));
+        assert_eq!(cost, Some(0.01));
     }
 
     fn record(id: i64, role: &str, content: &str) -> crate::types::ChatMessageRecord {
@@ -6294,6 +6480,85 @@ mod tests {
         assert_eq!(assistant.len(), 1, "the recovered text must be persisted");
         assert_eq!(assistant[0].content, "the answer");
         assert_eq!(assistant[0].output_tokens, Some(5));
+    }
+
+    /// The cache halves of claude's result usage must reach the assistant
+    /// row. claude's `input_tokens` excludes cached tokens, so without this
+    /// split a heavily-cached turn (the common case mid-session) persisted
+    /// ~5-20% of the tokens the model actually processed — the accounting
+    /// hole that made harness sessions look nearly token-free next to the
+    /// built-in chat.
+    #[test]
+    fn claude_result_usage_persists_cache_read_and_write() {
+        let conn = crate::db::mem();
+        let cs = crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None)
+            .unwrap();
+        let db = DbState(Arc::new(parking_lot::Mutex::new(conn)));
+
+        let transcript = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"cli-abc"}"#, "\n",
+            r#"{"type":"assistant","message":{"model":"claude-x","content":[{"type":"text","text":"ok"}]}}"#, "\n",
+            r#"{"type":"result","subtype":"success","result":"ok","session_id":"cli-abc","usage":{"input_tokens":120,"output_tokens":40,"cache_creation_input_tokens":2097,"cache_read_input_tokens":48311},"total_cost_usd":0.02}"#, "\n",
+        );
+        let never = AtomicBool::new(false);
+        let generation = AtomicU64::new(1);
+        read_claude_stream(
+            None,
+            &db,
+            &cs.id,
+            std::io::Cursor::new(transcript),
+            &never,
+            &Arc::new(std::sync::Mutex::new(None)),
+            &never,
+            Arc::new(std::sync::Mutex::new(None)),
+            Vec::new(),
+            &generation,
+            1,
+        );
+
+        let conn = db.0.lock();
+        let rows = crate::db::list_chat_messages(&conn, &cs.id).unwrap();
+        let assistant: Vec<_> = rows.iter().filter(|m| m.role == "assistant").collect();
+        assert_eq!(assistant.len(), 1);
+        assert_eq!(assistant[0].input_tokens, Some(120));
+        assert_eq!(assistant[0].cache_creation_input_tokens, Some(2097));
+        assert_eq!(assistant[0].cache_read_input_tokens, Some(48311));
+    }
+
+    /// A CLI that never reports cache fields (older versions) must persist
+    /// NULLs — absence is not zero.
+    #[test]
+    fn claude_result_without_cache_fields_stays_null() {
+        let conn = crate::db::mem();
+        let cs = crate::db::create_chat_session(&conn, "anthropic", "claude-sonnet-4-5", None)
+            .unwrap();
+        let db = DbState(Arc::new(parking_lot::Mutex::new(conn)));
+
+        let transcript = concat!(
+            r#"{"type":"result","subtype":"success","result":"hi","session_id":"cli-abc","usage":{"input_tokens":7,"output_tokens":2},"total_cost_usd":0.001}"#, "\n",
+        );
+        let never = AtomicBool::new(false);
+        let generation = AtomicU64::new(1);
+        read_claude_stream(
+            None,
+            &db,
+            &cs.id,
+            std::io::Cursor::new(transcript),
+            &never,
+            &Arc::new(std::sync::Mutex::new(None)),
+            &never,
+            Arc::new(std::sync::Mutex::new(None)),
+            Vec::new(),
+            &generation,
+            1,
+        );
+
+        let conn = db.0.lock();
+        let rows = crate::db::list_chat_messages(&conn, &cs.id).unwrap();
+        let assistant: Vec<_> = rows.iter().filter(|m| m.role == "assistant").collect();
+        assert_eq!(assistant.len(), 1);
+        assert_eq!(assistant[0].cache_creation_input_tokens, None);
+        assert_eq!(assistant[0].cache_read_input_tokens, None);
     }
 
     /// Minimal persisted-message row for primer tests (only role/content are
@@ -6560,10 +6825,11 @@ mod tests {
         let mut last_reasoning = String::new();
         let mut in_think = false;
         let (mut input, mut output, mut cost) = (None, None, None);
+        let (mut cache_read, mut cache_creation) = (None, None);
         let mut tools = ToolTracker::new();
         let ev = |t: &str| json!({ "type": "text", "part": { "text": t } });
         let mut feed = |v: &Value, full: &mut String, last: &mut String| {
-            handle_opencode_event(None, "s", v, full, &cell, &mut input, &mut output, &mut cost, last, &mut last_reasoning, &mut in_think, &mut tools);
+            handle_opencode_event(None, "s", v, full, &cell, &mut input, &mut output, &mut cache_read, &mut cache_creation, &mut cost, last, &mut last_reasoning, &mut in_think, &mut tools);
         };
         feed(&ev("Hello"), &mut full, &mut last);
         feed(&ev("Hello, world"), &mut full, &mut last);
@@ -6580,6 +6846,7 @@ mod tests {
         let cell = Arc::new(Mutex::new(None));
         let mut full = String::new();
         let (mut input, mut output, mut cost) = (None, None, None);
+        let (mut cache_read, mut cache_creation) = (None, None);
         let mut last_text = String::new();
         let mut last_reasoning = String::new();
         let mut in_think = false;
@@ -6589,7 +6856,7 @@ mod tests {
                         last_text: &mut String,
                         last_reasoning: &mut String,
                         in_think: &mut bool| {
-            handle_opencode_event(None, "s", v, full, &cell, &mut input, &mut output, &mut cost, last_text, last_reasoning, in_think, &mut tools);
+            handle_opencode_event(None, "s", v, full, &cell, &mut input, &mut output, &mut cache_read, &mut cache_creation, &mut cost, last_text, last_reasoning, in_think, &mut tools);
         };
         // Reasoning snapshots stream as suffixes inside one <think> block.
         feed(&json!({ "type": "reasoning", "part": { "text": "Think" } }), &mut full, &mut last_text, &mut last_reasoning, &mut in_think);

@@ -4,6 +4,7 @@
 //! All SSE streaming, API keys stored in the OS keychain, HTTP in Rust backend.
 
 pub mod artifacts;
+pub mod cache;
 pub mod citation_lint;
 pub mod citation_verify;
 pub mod docdesign;
@@ -618,10 +619,16 @@ impl ChatManager {
             // request. A second failure — or a session that cannot shrink —
             // surfaces the original error unchanged.
             let mut retried_after_compaction = false;
+            // Anthropic-style cache marks ride the OpenAI wire format ONLY
+            // for OpenRouter serving an `anthropic/*` model — OpenRouter
+            // translates them into native Claude prompt caching, while
+            // stricter OpenAI-compatible backends can reject unknown fields.
+            let openrouter_cache_marks = provider_id == ChatProviderId::OpenRouter
+                && cache::openrouter_anthropic(&chat_req.model);
             let result = loop {
                 let attempt = if tools_enabled && is_openai {
                     run_openai_tool_loop(
-                        &client, &tool_base, &api_key, &chat_req, caps.clone(), sandbox, approval, &mgr, &sid, &app, research_mode, perf.clone(),
+                        &client, &tool_base, &api_key, &chat_req, caps.clone(), sandbox, approval, &mgr, &sid, &app, research_mode, openrouter_cache_marks, perf.clone(),
                     )
                     .await
                 } else if tools_enabled && is_anthropic {
@@ -1612,12 +1619,13 @@ mod tests {
             specs.len(),
             total
         );
-        // ≈15k tokens at ~4 chars/token. 58_200 (not 60_000) leaves headroom
-        // for the per-turn date anchor, whose rendered length varies with the
-        // weekday/UTC-offset strings. The last real jump was the automation
-        // tool family (5 specs, ≈2.5k chars) — the capability must be
-        // model-visible, so it's paid in the baseline rather than hidden.
-        assert!(total < 58_200, "fresh-turn baseline over 15k budget: {total} chars");
+        // ≈15k tokens at ~4 chars/token. The measured baseline after the
+        // token-efficiency pass is ≈50.4k chars (system ≈7.9k + specs
+        // ≈42.5k); the assert below locks that in — a change that re-bloats
+        // the fixed per-turn cost fails here instead of shipping a permanent
+        // tax on every request. Headroom covers the per-turn date anchor,
+        // whose rendered length varies with the weekday/UTC-offset strings.
+        assert!(total < 51_000, "fresh-turn baseline over fixed-cost budget: {total} chars");
     }
 
     #[test]

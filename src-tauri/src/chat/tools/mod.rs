@@ -397,15 +397,14 @@ STATES a new fact rather than asking to delete.";
 const GENERATE_FILE_DESC: &str = "Generate a simple downloadable text-based \
     file/artifact and save it to disk. Best for plain formats: txt, md, csv, \
     json, html. ALSO use this to save SOURCE CODE: set `format` to the \
-    language (e.g. \"python\", \"javascript\", \"typescript\", \"java\", \
-    \"cpp\", \"csharp\", \"go\", \"rust\", \"ruby\", \"php\", \"sql\", \
-    \"bash\", …) so the file gets the correct extension (main.py, App.java, \
-    main.cpp) — do NOT bolt on a .txt. If you include an extension in \
-    `filename`, make it the real language extension, not .txt. For a \
-    professionally formatted docx/pptx/xlsx/pdf, prefer generate_document \
-    instead. For pptx here, separate slides with a line containing only '---'; \
-    the first line of each slide is its title and remaining lines are bullets. \
-    For xlsx/csv, provide comma-separated rows (one row per line).";
+    language (\"python\", \"typescript\", \"rust\", … — any language) so the \
+    file gets the correct extension (main.py, App.java) — do NOT bolt on a \
+    .txt. If you include an extension in `filename`, make it the real \
+    language extension, not .txt. For a professionally formatted \
+    docx/pptx/xlsx/pdf, prefer generate_document instead. For pptx here, \
+    separate slides with a line containing only '---'; the first line of each \
+    slide is its title and remaining lines are bullets. For xlsx/csv, provide \
+    comma-separated rows (one row per line).";
 
 const GENERATE_DOCUMENT_DESC: &str = "Create a professionally designed docx/pptx/xlsx/pdf. \
     The engine is chosen by `language` (default per format): \"javascript\" (docx/pptx) — a \

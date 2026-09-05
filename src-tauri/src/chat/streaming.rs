@@ -17,6 +17,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tauri::AppHandle;
 
+use crate::chat::cache;
 use crate::chat::{permission, tools, ChatManager};
 use crate::chat::dispatch::{artifacts_dir, emit_marker, emit_token, run_tool};
 use crate::chat::proto::{
@@ -788,6 +789,141 @@ fn fold_late_attaches(
     changed
 }
 
+/// Tool results from earlier rounds of the SAME turn are re-sent on every
+/// subsequent round, and a long agentic turn can therefore carry hundreds of
+/// KB of stale output (a single `browser_read`/`read_file` result is 32-50k
+/// chars). Once the model has replied to a tool result, keeping its full text
+/// verbatim rarely helps — so all but the newest
+/// [`KEEP_LAST_TOOL_RESULTS`] results elide to a short stub (head snippet
+/// preserved) before each round's request is built.
+const KEEP_LAST_TOOL_RESULTS: usize = 3;
+/// How much of an elided result survives in the stub, so the model keeps a
+/// hint of what it learned without the bulk.
+const ELIDED_RESULT_HEAD_CHARS: usize = 300;
+const ELISION_MARKER: &str = "[tool result elided to save context";
+
+/// Render the stub that replaces an elided tool result.
+fn elided_result_stub(content: &str) -> String {
+    let truncated = crate::util::truncate_chars(content, ELIDED_RESULT_HEAD_CHARS);
+    let ellipsis = if content.chars().count() > ELIDED_RESULT_HEAD_CHARS {
+        "…"
+    } else {
+        ""
+    };
+    format!(
+        "{ELISION_MARKER} — original {n} chars, first {keep} kept below; re-run the tool if you need the full output again]\n{truncated}{ellipsis}",
+        n = content.len(),
+        keep = ELIDED_RESULT_HEAD_CHARS,
+    )
+}
+
+/// Elide tool results older than the newest [`KEEP_LAST_TOOL_RESULTS`] from a
+/// turn's working `messages` array, in place. Idempotent (stubs are never
+/// re-elided) and deterministic (the same array always yields the same
+/// request), so the mutated prefix stays prompt-cache-stable across rounds.
+/// `openai` selects the tool-result shape: OpenAI uses `role:"tool"`
+/// messages; Anthropic uses `user` messages carrying `tool_result` blocks.
+fn elide_stale_tool_results(messages: &mut [Value], openai: bool) {
+    let is_tool_message = |m: &Value| -> bool {
+        if openai {
+            m.get("role").and_then(|r| r.as_str()) == Some("tool")
+        } else {
+            m.get("content")
+                .and_then(|c| c.as_array())
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                })
+                .unwrap_or(false)
+        }
+    };
+    let tool_message_positions: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| is_tool_message(m))
+        .map(|(i, _)| i)
+        .collect();
+    if tool_message_positions.len() <= KEEP_LAST_TOOL_RESULTS {
+        return;
+    }
+    let elide_count = tool_message_positions.len() - KEEP_LAST_TOOL_RESULTS;
+    for &pos in &tool_message_positions[..elide_count] {
+        let message = &mut messages[pos];
+        if openai {
+            if let Some(Value::String(content)) = message.get_mut("content") {
+                if !content.starts_with(ELISION_MARKER) {
+                    *content = elided_result_stub(content);
+                }
+            }
+        } else if let Some(blocks) = message
+            .get_mut("content")
+            .and_then(|c| c.as_array_mut())
+        {
+            for block in blocks.iter_mut() {
+                if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                    continue;
+                }
+                if let Some(Value::String(content)) = block.get_mut("content") {
+                    if !content.starts_with(ELISION_MARKER) {
+                        *content = elided_result_stub(content);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Assemble one OpenAI `/v1/chat/completions` tool-loop round body. With
+/// `cache_marks` (OpenRouter routing an `anthropic/*` model — the only
+/// OpenAI-family combo that accepts them, see `cache::openrouter_anthropic`)
+/// the system message and the newest message carry Anthropic-style
+/// `cache_control` breakpoints, which OpenRouter translates into native
+/// Claude prompt caching: the stable prefix re-reads as cache hits across
+/// the turn's rounds instead of being re-billed. Marks are applied to a
+/// clone — the caller's working arrays stay pristine, and the identical
+/// marks every round keep the request prefix byte-stable.
+fn build_openai_body(
+    req: &ChatRequest,
+    messages: &[Value],
+    tool_specs: &[Value],
+    cache_marks: bool,
+) -> Value {
+    let mut body = json!({
+        "model": req.model,
+        "messages": messages,
+        "stream": true,
+        "stream_options": { "include_usage": true },
+        "tools": tool_specs,
+    });
+    if let Some(e) = &req.effort {
+        body["reasoning_effort"] = json!(e);
+    }
+    // Local GGUF (llama.cpp) uses `chat_template_kwargs.enable_thinking`
+    // for Qwen3 / DeepSeek-R1 thinking. Cloud OpenAI reasoning models
+    // read `reasoning_effort` (above) and ignore this flag. Only emit
+    // when the user has explicitly toggled thinking — None leaves the
+    // model at its default.
+    if let Some(on) = req.thinking {
+        body["chat_template_kwargs"] = json!({ "enable_thinking": on });
+    }
+    if cache_marks {
+        let mut msgs = messages.to_vec();
+        if let Some(sys) = msgs.first_mut() {
+            if sys.get("role").and_then(|r| r.as_str()) == Some("system") {
+                if let Some(Value::String(text)) = sys.get_mut("content") {
+                    if !text.is_empty() {
+                        sys["content"] = cache::cached_system_block(text);
+                    }
+                }
+            }
+        }
+        cache::mark_last_message(&mut msgs);
+        body["messages"] = Value::Array(msgs);
+    }
+    body
+}
+
 /// Agentic tool loop for OpenAI-style providers (native + compatible).
 ///
 /// Uses streaming `/v1/chat/completions` calls: request with `tools`, stream
@@ -808,6 +944,12 @@ pub(crate) async fn run_openai_tool_loop(
     sid: &str,
     app: &AppHandle,
     research_mode: bool,
+    // Anthropic-style cache marks on the OpenAI wire format — set ONLY for
+    // OpenRouter requests whose model is `anthropic/*` (the call site gates
+    // via cache::openrouter_anthropic). OpenRouter translates the marks into
+    // native Claude prompt caching; stricter OpenAI-compatible backends can
+    // 400 on unknown fields, so nobody else gets them.
+    cache_marks: bool,
     perf: crate::chat::turn_perf::TurnPerf,
 ) -> Result<(String, Option<ChatUsage>), String> {
     let url = format!("{base}/v1/chat/completions");
@@ -830,19 +972,22 @@ pub(crate) async fn run_openai_tool_loop(
             messages.push(json!({ "role": "system", "content": sys }));
         }
     }
-    // Per-turn local-docs auto-retrieval (§3.1.7): inject the retrieved
-    // context as the FIRST user message (right after the system prompt) so
-    // the model answers from the user's own documents without an explicit
-    // search_docs call. The retrieval is computed once per turn and re-sent
-    // on every tool round-trip, matching how the history is re-sent.
+    for m in &req.messages {
+        messages.push(openai_message_json(m));
+    }
+    // Per-turn local-docs auto-retrieval (§3.1.7): the retrieved context is
+    // appended as the LAST message, right next to the turn's question, so the
+    // model answers from the user's own documents without an explicit
+    // search_docs call. Appending (not injecting at the head) keeps the
+    // message prefix byte-stable across turns: the synthetic message is not
+    // persisted, so an injected-first copy would change the head of every
+    // request and invalidate prefix caching (OpenAI's automatic cache, Z.ai's,
+    // and the Anthropic breakpoints) for the entire history.
     if !req.local_docs_retrieval.is_empty() {
         messages.push(json!({
             "role": "user",
             "content": req.local_docs_retrieval.join("\n\n")
         }));
-    }
-    for m in &req.messages {
-        messages.push(openai_message_json(m));
     }
 
     let mut full = String::new();
@@ -886,28 +1031,34 @@ pub(crate) async fn run_openai_tool_loop(
     }
 
     for round in 0..cap {
-        let mut body = json!({
-            "model": req.model,
-            "messages": messages,
-            "stream": true,
-            "stream_options": { "include_usage": true },
-            "tools": tool_specs,
-        });
-        if let Some(e) = &req.effort {
-            body["reasoning_effort"] = json!(e);
-        }
-        // Local GGUF (llama.cpp) uses `chat_template_kwargs.enable_thinking`
-        // for Qwen3 / DeepSeek-R1 thinking. Cloud OpenAI reasoning models
-        // read `reasoning_effort` (above) and ignore this flag. Only emit
-        // when the user has explicitly toggled thinking — None leaves the
-        // model at its default.
-        if let Some(on) = req.thinking {
-            body["chat_template_kwargs"] = json!({ "enable_thinking": on });
-        }
+        // Shrink stale tool output before the request is assembled — a 20-
+        // round research turn otherwise re-sends every earlier fetch/read
+        // result verbatim on every round.
+        elide_stale_tool_results(&mut messages, true);
+        let mut body = build_openai_body(req, &messages, &tool_specs, cache_marks);
 
         perf.begin_gen();
-        let (message, round_usage) =
-            openai_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?;
+        // Mirror of the Anthropic loop's gateway fallback: a backend that
+        // rejects the cache marks fails with an HTTP 400 before any byte
+        // streams (nothing emitted into `full` yet), so retrying the round
+        // uncached is safe.
+        let (message, round_usage) = match openai_stream_round(
+            client,
+            &url,
+            api_key,
+            &body,
+            app,
+            sid,
+            &mut full,
+        )
+        .await
+        {
+            Err(e) if cache::is_cache_rejection(&e) => {
+                cache::strip_cache_control(&mut body);
+                openai_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?
+            }
+            other => other?,
+        };
         perf.end_gen();
         if round_usage.have {
             eprintln!(
@@ -1125,6 +1276,52 @@ pub(crate) async fn run_openai_tool_loop(
     Ok((full, build_usage(true, total)))
 }
 
+/// Assemble one Anthropic `/v1/messages` tool-loop round body with prompt-cache
+/// breakpoints (see [`crate::chat::cache`]): the last tool spec, the system
+/// block, and the newest message each mark the stable prefix, so every round
+/// re-reads everything before the fresh tail as 0.1×-price cache hits instead
+/// of re-billing the whole prefix at full input price. The marks are applied
+/// to clones — the caller's working `messages`/`tool_specs` arrays stay
+/// pristine so nothing accumulates across rounds.
+fn build_anthropic_body(req: &ChatRequest, messages: &[Value], tool_specs: &[Value]) -> Value {
+    let mut tools = tool_specs.to_vec();
+    cache::mark_last_tool(&mut tools);
+    let mut msgs = messages.to_vec();
+    cache::mark_last_message(&mut msgs);
+
+    // E-3: with thinking on, Anthropic requires budget_tokens < max_tokens,
+    // so the emitted cap itself is floored to 3072 (same as providers.rs) —
+    // flooring only the budget derivation left max_tokens=1024 requests with
+    // budget_tokens=2048, which the API rejects outright.
+    let max_tokens = if req.thinking == Some(true) {
+        req.max_tokens.unwrap_or(4096).max(3072)
+    } else {
+        req.max_tokens.unwrap_or(4096)
+    };
+    let mut body = json!({
+        "model": req.model,
+        "max_tokens": max_tokens,
+        "messages": msgs,
+        "tools": tools,
+        "stream": true,
+    });
+    if let Some(sys) = &req.system {
+        if !sys.is_empty() {
+            body["system"] = cache::cached_system_block(sys);
+        }
+    }
+    // Extended thinking on the tool path too — previously only the
+    // non-tool request builder (providers.rs) sent this, so the
+    // composer's brain toggle was a no-op with tools on (the default).
+    if req.thinking == Some(true) {
+        body["thinking"] = json!({
+            "type": "enabled",
+            "budget_tokens": (max_tokens - 1024).clamp(1024, max_tokens - 1),
+        });
+    }
+    body
+}
+
 /// Agentic tool loop for Anthropic-style providers (native + compatible).
 pub(crate) async fn run_anthropic_tool_loop(
     client: &reqwest::Client,
@@ -1156,11 +1353,11 @@ pub(crate) async fn run_anthropic_tool_loop(
         .iter()
         .map(anthropic_message_json)
         .collect();
-    // Per-turn local-docs auto-retrieval (§3.1.7): inject the retrieved
-    // context as the FIRST user message so the model answers from the user's
-    // own documents without an explicit search_docs call.
+    // Per-turn local-docs auto-retrieval (§3.1.7): appended as the LAST
+    // message, next to the turn's question — see the OpenAI loop for why
+    // appending (not injecting at the head) keeps prefix caching intact.
     if !req.local_docs_retrieval.is_empty() {
-        messages.insert(0, json!({
+        messages.push(json!({
             "role": "user",
             "content": req.local_docs_retrieval.join("\n\n")
         }));
@@ -1170,35 +1367,33 @@ pub(crate) async fn run_anthropic_tool_loop(
     let mut total = RoundUsage::default();
 
     for _ in 0..cap {
-        let mut body = json!({
-            "model": req.model,
-            "max_tokens": req.max_tokens.unwrap_or(4096),
-            "messages": messages,
-            "tools": tool_specs,
-            "stream": true,
-        });
-        if let Some(sys) = &req.system {
-            if !sys.is_empty() {
-                body["system"] = json!(sys);
-            }
-        }
-        // Extended thinking on the tool path too — previously only the
-        // non-tool request builder (providers.rs) sent this, so the
-        // composer's brain toggle was a no-op with tools on (the default).
-        // Anthropic requires budget_tokens < max_tokens (E-3: a caller-set
-        // max_tokens <= 1024 would violate that — floor the cap like
-        // providers.rs does).
-        if req.thinking == Some(true) {
-            let max_tokens = req.max_tokens.unwrap_or(4096).max(3072);
-            body["thinking"] = json!({
-                "type": "enabled",
-                "budget_tokens": (max_tokens - 1024).clamp(1024, max_tokens - 1),
-            });
-        }
+        // Same stale-tool-output shrink as the OpenAI loop (see
+        // elide_stale_tool_results).
+        elide_stale_tool_results(&mut messages, false);
+        let mut body = build_anthropic_body(req, &messages, &tool_specs);
 
         perf.begin_gen();
-        let (content, round_usage) =
-            anthropic_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?;
+        // Some Anthropic-compatible gateways reject `cache_control` outright.
+        // That rejection is an HTTP 400 raised before any byte streams, so
+        // nothing has been emitted into `full` — falling back to an uncached
+        // body once is safe and keeps those providers working.
+        let (content, round_usage) = match anthropic_stream_round(
+            client,
+            &url,
+            api_key,
+            &body,
+            app,
+            sid,
+            &mut full,
+        )
+        .await
+        {
+            Err(e) if cache::is_cache_rejection(&e) => {
+                cache::strip_cache_control(&mut body);
+                anthropic_stream_round(client, &url, api_key, &body, app, sid, &mut full).await?
+            }
+            other => other?,
+        };
         perf.end_gen();
         // Fold round-boundary usage into the live snapshot so the composer's
         // IN/CACHE chips update before chat:done. Anthropic's input_tokens is
@@ -1338,5 +1533,294 @@ pub(crate) fn resolve_provider(id: &ChatProviderId) -> Box<dyn ChatProvider> {
         ChatProviderId::OpenAICompatible => Box::new(OpenAICompatibleProvider),
         ChatProviderId::OpenRouter => Box::new(OpenRouterProvider),
         ChatProviderId::LocalGguf => Box::new(LocalGgufProvider),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::providers::ChatMessage;
+
+    fn sample_req(system: Option<&str>, thinking: Option<bool>) -> ChatRequest {
+        ChatRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                images: Vec::new(),
+            }],
+            max_tokens: Some(4096),
+            system: system.map(|s| s.to_string()),
+            effort: None,
+            thinking,
+            local_docs_retrieval: Vec::new(),
+            memory_context: None,
+        }
+    }
+
+    #[test]
+    fn anthropic_body_places_three_cache_breakpoints() {
+        let req = sample_req(Some("You are Relay."), None);
+        let msgs = vec![json!({"role": "user", "content": "hello"})];
+        let specs = vec![
+            json!({"name": "read_file", "input_schema": {}}),
+            json!({"name": "web_search", "input_schema": {}}),
+        ];
+        let body = build_anthropic_body(&req, &msgs, &specs);
+
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        // Only the last tool carries the breakpoint (the API caches the whole
+        // array up to it).
+        assert!(tools[0].get("cache_control").is_none());
+        assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
+
+        // System rendered as a cached block array, not a bare string.
+        assert_eq!(body["system"][0]["type"], "text");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+
+        // Newest message marked so the prefix caches incrementally per round.
+        let last = body["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["content"][0]["cache_control"]["type"], "ephemeral");
+
+        // The caller's working arrays stay pristine (marks must not
+        // accumulate across rounds).
+        assert!(msgs[0]["content"].is_string());
+        assert!(specs[1].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn anthropic_body_omits_system_and_thinking_when_unset() {
+        let req = sample_req(None, None);
+        let body = build_anthropic_body(&req, &[], &[]);
+        assert!(body.get("system").is_none());
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("tools").unwrap().as_array().unwrap().is_empty());
+        // No messages → no message breakpoint, and no crash.
+        assert!(body["messages"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn anthropic_body_keeps_thinking_floor() {
+        let req = ChatRequest {
+            max_tokens: Some(1024),
+            thinking: Some(true),
+            ..sample_req(Some("sys"), Some(true))
+        };
+        let body = build_anthropic_body(&req, &[], &[]);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        // E-3 floor: budget must be < max_tokens, and max_tokens is floored
+        // to 3072 before the budget is derived.
+        assert_eq!(body["max_tokens"], 3072);
+        assert_eq!(body["thinking"]["budget_tokens"], 2048);
+    }
+
+    #[test]
+    fn cache_rejection_detector_matches_wire_errors() {
+        assert!(cache::is_cache_rejection(
+            "HTTP 400 Bad Request: {\"type\":\"error\",\"error\":{\"message\":\"Unexpected value(s) `cache_control`\"}}"
+        ));
+        assert!(cache::is_cache_rejection(
+            "HTTP 400: `ephemeral` is not a valid cache type"
+        ));
+        assert!(!cache::is_cache_rejection(
+            "HTTP 429: rate limited"
+        ));
+        assert!(!cache::is_cache_rejection("request failed: connection reset"));
+    }
+
+    fn openai_turn_messages() -> Vec<Value> {
+        let mut messages = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "go"}),
+        ];
+        for i in 0..5 {
+            messages.push(json!({"role": "assistant", "content": "", "tool_calls": []}));
+            messages.push(json!({"role": "tool", "tool_call_id": format!("t{i}"), "content": format!("result number {i} — {}", "x".repeat(1000))}));
+        }
+        messages
+    }
+
+    #[test]
+    fn elision_keeps_newest_tool_results_verbatim_openai() {
+        let mut messages = openai_turn_messages();
+        elide_stale_tool_results(&mut messages, true);
+
+        // 5 tool messages → the 2 oldest elide, the newest 3 stay verbatim.
+        let tools: Vec<&Value> = messages
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .collect();
+        assert_eq!(tools.len(), 5);
+        for (i, m) in tools.iter().enumerate() {
+            let content = m["content"].as_str().unwrap();
+            if i < 2 {
+                assert!(content.starts_with(ELISION_MARKER), "tool {i} should be elided");
+                assert!(content.contains(&format!("original {} chars", 1000 + format!("result number {i} — ").len())), "stub carries the original size: {content}");
+                assert!(content.contains(&format!("result number {i}")), "stub keeps the head: {content}");
+            } else {
+                assert!(content.starts_with("result number"), "tool {i} must stay verbatim: {content}");
+                assert!(content.contains("xxx"), "verbatim result keeps its body");
+            }
+        }
+        // Non-tool messages untouched.
+        assert_eq!(messages[0]["content"], "sys");
+    }
+
+    #[test]
+    fn elision_is_idempotent() {
+        let mut messages = openai_turn_messages();
+        elide_stale_tool_results(&mut messages, true);
+        let once = serde_json::to_string(&messages).unwrap();
+        elide_stale_tool_results(&mut messages, true);
+        let twice = serde_json::to_string(&messages).unwrap();
+        assert_eq!(once, twice, "second pass must be a no-op");
+    }
+
+    #[test]
+    fn elision_skips_small_turns() {
+        let mut messages = vec![
+            json!({"role": "user", "content": "go"}),
+            json!({"role": "assistant", "content": "", "tool_calls": []}),
+            json!({"role": "tool", "tool_call_id": "t1", "content": "a"}),
+            json!({"role": "assistant", "content": "", "tool_calls": []}),
+            json!({"role": "tool", "tool_call_id": "t2", "content": "b"}),
+        ];
+        elide_stale_tool_results(&mut messages, true);
+        assert_eq!(messages[2]["content"], "a");
+        assert_eq!(messages[4]["content"], "b");
+    }
+
+    #[test]
+    fn elision_covers_anthropic_tool_result_blocks() {
+        let mut messages = vec![json!({"role": "user", "content": "go"})];
+        for i in 0..5 {
+            messages.push(json!({"role": "assistant", "content": [
+                {"type": "tool_use", "id": format!("t{i}"), "name": "read_file", "input": {}}
+            ]}));
+            messages.push(json!({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": format!("t{i}"), "content": format!("file body {i} — {}", "y".repeat(1000))}
+            ]}));
+        }
+        elide_stale_tool_results(&mut messages, false);
+
+        let results: Vec<&Value> = messages
+            .iter()
+            .filter_map(|m| m["content"].as_array())
+            .flat_map(|b| b.iter())
+            .filter(|b| b["type"] == "tool_result")
+            .collect();
+        assert_eq!(results.len(), 5);
+        for (i, b) in results.iter().enumerate() {
+            let content = b["content"].as_str().unwrap();
+            if i < 2 {
+                assert!(content.starts_with(ELISION_MARKER), "result {i} should be elided");
+                assert!(content.contains(&format!("file body {i}")), "stub keeps the head");
+            } else {
+                assert!(content.starts_with("file body"), "result {i} must stay verbatim");
+            }
+        }
+        // Assistant tool_use echoes are never touched.
+        assert!(messages[1]["content"][0].get("content").is_none());
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+
+        // And the Anthropic pass is idempotent too.
+        let once = serde_json::to_string(&messages).unwrap();
+        elide_stale_tool_results(&mut messages, false);
+        assert_eq!(once, serde_json::to_string(&messages).unwrap());
+    }
+
+    fn openai_cache_req() -> ChatRequest {
+        ChatRequest {
+            model: "anthropic/claude-sonnet-4.5".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: "earlier".to_string(),
+                    images: Vec::new(),
+                },
+                ChatMessage {
+                    role: "assistant".to_string(),
+                    content: "earlier answer".to_string(),
+                    images: Vec::new(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: "newest".to_string(),
+                    images: Vec::new(),
+                },
+            ],
+            max_tokens: Some(4096),
+            system: Some("You are Relay.".to_string()),
+            effort: None,
+            thinking: None,
+            local_docs_retrieval: Vec::new(),
+            memory_context: None,
+        }
+    }
+
+    #[test]
+    fn openai_body_carries_cache_marks_only_when_requested() {
+        let req = openai_cache_req();
+        let msgs = vec![
+            json!({"role": "system", "content": "You are Relay."}),
+            json!({"role": "user", "content": "earlier"}),
+            json!({"role": "user", "content": "newest"}),
+        ];
+        let specs = vec![json!({"type": "function", "function": {"name": "read_file"}})];
+
+        // Marks OFF (native OpenAI / compatible / LocalGguf): no cache_control
+        // anywhere, plain string content preserved.
+        let plain = build_openai_body(&req, &msgs, &specs, false);
+        let flat = serde_json::to_string(&plain).unwrap();
+        assert!(!flat.contains("cache_control"), "{flat}");
+        assert_eq!(plain["messages"][0]["content"], "You are Relay.");
+        assert_eq!(plain["messages"][2]["content"], "newest");
+
+        // Marks ON (OpenRouter → anthropic/*): system converted to a cached
+        // content-block array, newest message marked, middle untouched, tools
+        // never marked.
+        let marked = build_openai_body(&req, &msgs, &specs, true);
+        assert_eq!(marked["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(
+            marked["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert!(marked["messages"][1]["content"].is_string());
+        assert_eq!(
+            marked["messages"][2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert!(!serde_json::to_string(&marked["tools"])
+            .unwrap()
+            .contains("cache_control"));
+
+        // The caller's working arrays stay pristine.
+        assert_eq!(msgs[0]["content"], "You are Relay.");
+        assert_eq!(msgs[2]["content"], "newest");
+    }
+
+    #[test]
+    fn openai_body_marks_survive_a_missing_system_message() {
+        let mut req = openai_cache_req();
+        req.system = None;
+        let msgs = vec![json!({"role": "user", "content": "only"})];
+        let marked = build_openai_body(&req, &msgs, &[], true);
+        let flat = serde_json::to_string(&marked).unwrap();
+        // No system message to mark; the single message still gets the
+        // newest-message breakpoint.
+        assert_eq!(marked["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert!(!flat.contains("\"role\":\"system\""));
+    }
+
+    #[test]
+    fn openai_body_keeps_effort_and_thinking_fields() {
+        let mut req = openai_cache_req();
+        req.effort = Some("low".to_string());
+        req.thinking = Some(true);
+        let body = build_openai_body(&req, &[], &[], false);
+        assert_eq!(body["reasoning_effort"], "low");
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
+        assert_eq!(body["stream_options"]["include_usage"], true);
     }
 }

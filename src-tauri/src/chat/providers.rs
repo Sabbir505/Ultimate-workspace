@@ -251,6 +251,47 @@ fn openai_wire_max_tokens(req: &ChatRequest) -> Option<u32> {
     req.max_tokens.map(|t| t as u32)
 }
 
+/// Map the composer's effort slider to Anthropic's native reasoning control.
+/// The Anthropic wire has no `reasoning_effort` parameter — its analog is
+/// extended thinking with a token budget — so effort tiers become
+/// thinking-budget tiers and the response cap is raised to keep
+/// `budget_tokens < max_tokens` valid (Anthropic rejects the request
+/// otherwise).
+///
+/// Precedence: an explicit brain-toggle OFF (`thinking == Some(false)`) wins
+/// — the user disabled thinking and a tier must not silently re-enable it.
+/// Otherwise any effort tier turns thinking ON with the tier's budget;
+/// `Default` (no effort) keeps the legacy behavior (thinking only when the
+/// brain toggle is on, budget = whatever the cap leaves).
+///
+/// Returns the (max_tokens, thinking) pair for the request body.
+fn anthropic_thinking_for(req: &ChatRequest) -> (i64, Option<AnthropicThinking>) {
+    // E-3: a caller-set max_tokens <= 1024 would make budget_tokens >=
+    // max_tokens, which Anthropic rejects outright (budget must be strictly
+    // smaller). Floor the cap so the thinking-enabled request stays valid.
+    let mut max_tokens = req.max_tokens.unwrap_or(4096).max(3072);
+    let explicit_off = req.thinking == Some(false);
+    let tier_budget = match req.effort.as_deref() {
+        Some("low") => Some(4_096i64),
+        Some("medium") => Some(12_288),
+        Some("high") => Some(24_576),
+        _ => None,
+    };
+    let thinking_on = !explicit_off && (req.thinking == Some(true) || tier_budget.is_some());
+    if thinking_on {
+        if let Some(budget) = tier_budget {
+            // Reserve at least 1024 tokens for the visible answer above the
+            // thinking budget.
+            max_tokens = max_tokens.max(budget + 1024);
+        }
+    }
+    let thinking = thinking_on.then(|| AnthropicThinking {
+        kind: "enabled",
+        budget_tokens: tier_budget.unwrap_or_else(|| (max_tokens - 1024).clamp(1024, max_tokens - 1)),
+    });
+    (max_tokens, thinking)
+}
+
 /// Build the Anthropic `/v1/messages` streaming request. Both
 /// `AnthropicProvider` and `AnthropicCompatibleProvider` route through here.
 fn anthropic_request(
@@ -260,16 +301,7 @@ fn anthropic_request(
     base: &str,
 ) -> reqwest::RequestBuilder {
     let url = format!("{base}/v1/messages");
-    // E-3: a caller-set max_tokens <= 1024 would make budget_tokens >=
-    // max_tokens, which Anthropic rejects outright (budget must be strictly
-    // smaller). Floor the cap so the thinking-enabled request stays valid.
-    let max_tokens = req.max_tokens.unwrap_or(4096).max(3072);
-    // Reserve at least 1024 tokens for the visible answer; cap the thinking
-    // budget at the rest. Anthropic requires `budget_tokens < max_tokens`.
-    let thinking = req.thinking.unwrap_or(false).then(|| AnthropicThinking {
-        kind: "enabled",
-        budget_tokens: (max_tokens - 1024).clamp(1024, max_tokens - 1),
-    });
+    let (max_tokens, thinking) = anthropic_thinking_for(req);
     let mut messages: Vec<serde_json::Value> = Vec::new();
     if let Some(mem) = &req.memory_context {
         messages.push(serde_json::json!({
@@ -954,6 +986,74 @@ impl ChatProvider for LocalGgufProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Effort → Anthropic extended-thinking tier mapping ----
+
+    fn bare_req() -> ChatRequest {
+        ChatRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+                images: Vec::new(),
+            }],
+            max_tokens: Some(4096),
+            system: None,
+            effort: None,
+            thinking: None,
+            local_docs_retrieval: Vec::new(),
+            memory_context: None,
+        }
+    }
+
+    #[test]
+    fn effort_none_keeps_legacy_thinking_behavior() {
+        let (max, thinking) = anthropic_thinking_for(&bare_req());
+        assert_eq!(max, 4096);
+        assert!(thinking.is_none());
+        let mut r = bare_req();
+        r.thinking = Some(true);
+        let (max, thinking) = anthropic_thinking_for(&r);
+        assert_eq!(max, 4096);
+        assert_eq!(thinking.unwrap().budget_tokens, 3072);
+    }
+
+    #[test]
+    fn effort_tiers_map_to_ascending_thinking_budgets() {
+        for (tier, budget, max) in [
+            ("low", 4_096, 5_120),
+            ("medium", 12_288, 13_312),
+            ("high", 24_576, 25_600),
+        ] {
+            let mut r = bare_req();
+            r.effort = Some(tier.to_string());
+            let (max_tokens, thinking) = anthropic_thinking_for(&r);
+            assert_eq!(max_tokens, max, "tier {tier}");
+            let t = thinking.expect(tier);
+            assert_eq!(t.budget_tokens, budget, "tier {tier}");
+            assert!(t.budget_tokens < max_tokens);
+        }
+    }
+
+    #[test]
+    fn explicit_brain_off_beats_effort_tier() {
+        let mut r = bare_req();
+        r.effort = Some("high".to_string());
+        r.thinking = Some(false);
+        let (max, thinking) = anthropic_thinking_for(&r);
+        assert_eq!(max, 4096);
+        assert!(thinking.is_none());
+    }
+
+    #[test]
+    fn effort_tier_implies_thinking_without_the_brain_toggle() {
+        let mut r = bare_req();
+        r.effort = Some("low".to_string());
+        r.thinking = None;
+        let (_, thinking) = anthropic_thinking_for(&r);
+        assert!(thinking.is_some());
+    }
+
 
     // ---- Anthropic wire-body cache tests ----
 

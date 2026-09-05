@@ -28,6 +28,7 @@ import { fuzzyFilter, type FuzzyResult } from "../../lib/fuzzy";
 import { shortModelName } from "../../lib/modelLabel";
 import { useSettingsStore } from "../../state/settings";
 import { harnessModelCatalog } from "../../lib/harnessModels";
+import { effortAppliesTo } from "../../lib/modelCapabilities";
 import { SegmentedSlider } from "./SegmentedSlider";
 import { LlamaAdvancedFields } from "./LlamaAdvancedFields";
 import {
@@ -767,10 +768,24 @@ export function AgentModelPickerInner({
 
   // ---- render ----------------------------------------------------------------
 
+  // The effort slider only appears where it has a REAL effect on the model
+  // (see lib/modelCapabilities.ts): builtin sessions on reasoning models
+  // (reasoning_effort param) or Claude (maps to the extended-thinking
+  // budget). Harness/ACP sessions' CLI send path has no effort parameter,
+  // and non-reasoning models silently ignore the field — a visible slider
+  // there would be a lie. Placement stays on the harness/provider panes;
+  // the session gate decides visibility.
+  const sessionEffortApplies =
+    agent != null &&
+    !agent.startsWith("harness:") &&
+    !agent.startsWith("acp:") &&
+    agent !== "local" &&
+    effortAppliesTo(provider, model);
   const showEffort =
     !!onEffortChange &&
     effort !== undefined &&
-    (railKey.startsWith("harness:") || railKey.startsWith("provider:"));
+    sessionEffortApplies &&
+    (railKey.startsWith("harness:") || railKey.startsWith("provider:") || railKey === "auto");
 
   return (
     <div className="agent-menu" ref={rootRef}>

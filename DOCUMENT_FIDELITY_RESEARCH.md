@@ -1,5 +1,7 @@
 # Document Fidelity Research — Current State & Best-in-Class Architecture (Aug 2026)
 
+> **Superseded (2026-09-04):** the engine migration this research recommended is implemented — see `DOCUMENT_DESIGN_ARCHITECTURE.md` (Status: Implemented). Part 1's "how the pipeline works today" describes the pre-migration stack (Python/`conduit_docgen`, no pdf.js/docx/pptxgenjs); the shipped pipeline now generates DOCX via the `docx` npm library, PPTX via PptxGenJS, PDF via HTML → WebView2 print (Paged.js), and previews with pdf.js/docx-preview. Kept as background/rationale.
+
 Research question: what is the best way to **create** and **render** DOC / PPT / PDF with full fidelity, given our Tauri 2 local-first app (Windows-first, offline-capable, LLM as document author, currently bundles Python 3.12 + portable LibreOffice 26.2)?
 
 ---

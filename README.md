@@ -2,7 +2,7 @@
 
 > A local-first, multi-pane desktop shell for AI coding agents.
 
-Relay wraps the AI agent CLIs you already use (Claude Code, Kimi Code CLI, OpenCode) and adds a unified built-in chat, native browser panes, a git sidebar, a cost dashboard, scheduled automations, and a mobile companion — all local-first on your machine.
+Relay wraps the AI agent CLIs you already use (Claude Code, Kimi Code CLI, OpenCode, Pi, Omp, CommandCode) and adds a unified built-in chat, native browser panes, a git sidebar, a cost dashboard, scheduled automations, and a mobile companion — all local-first on your machine.
 
 - Up to **6** PTY agent panes, tiled and resizable
 - **Built-in chat** that talks to Anthropic, OpenAI, OpenRouter, OpenAI-compatible endpoints, and local GGUF models (via `llama-server`)
@@ -35,9 +35,9 @@ npm run tauri build    # NSIS installer in src-tauri/target/release/bundle/nsis/
 ## Tests
 
 ```bash
-npm test                          # vitest, 68 files / 460 tests
-cd src-tauri && cargo test --lib  # 539 passed, 1 FAILED, 11 ignored (see BUG_AUDIT.md)
-npx tsc --noEmit                  # 34 errors — see BUG_AUDIT.md N5
+npm test                          # vitest, 100 files / 733 tests
+cd src-tauri && cargo test --lib  # 865 passed, 0 failed, 12 ignored
+npx tsc --noEmit                  # clean
 ```
 
 ## Repository layout
@@ -45,13 +45,15 @@ npx tsc --noEmit                  # 34 errors — see BUG_AUDIT.md N5
 ```
 src/                React + TypeScript frontend (Zustand stores, components, lib)
 src-tauri/          Rust backend (Tauri v2)
-  src/lib.rs        Tauri command surface (235 commands)
-  src/db/           SQLite schema + 12+ inline migrations (21 tables, WAL mode)
+  src/lib.rs        Tauri command surface (296 registered commands)
+  src/db/           SQLite schema + 19 inline migrations (42 tables, WAL mode)
   src/chat/         Chat dispatch, prompts, streaming, providers, tools, local models
+  src/memory/       Persistent user memory (extraction, consolidation, retrieval)
   src/pty/          PTY lifecycle
   src/browser*.rs   Native browser panes + browser MCP
   src/mobile/       Localhost WebSocket relay (E2E encrypted)
   src/automations*  Cron scheduler
+  src/improve_engine.rs  Self-improving artifacts engine
   src/connectors/   OAuth + remote MCP for Notion / GitHub / Google / etc.
 mobile/             React Native / Expo companion (Expo SDK 57, RN 0.86)
 scripts/            Build sidecars, stage Python/LibreOffice bundles, emit latest.json
@@ -64,7 +66,7 @@ AI CONTEXT/         Canonical code map, IPC contract, PRD, build log, release no
 | File | Purpose |
 |---|---|
 | `README.md` | This file |
-| `PROJECT_OVERVIEW.md` | Codebase-wide tour with metrics, architecture, ranked improvements |
+| `AI CONTEXT/README.md` | Index of the `AI CONTEXT/` doc set |
 | `CHANGELOG.md` | Release notes and notable commits |
 | `BUG_AUDIT.md` | Open and resolved bugs (Sev-tagged, source of truth: the code) |
 | `PERFORMANCE_AUDIT.md` | Performance findings and current build metrics |
@@ -74,6 +76,10 @@ AI CONTEXT/         Canonical code map, IPC contract, PRD, build log, release no
 | `AI CONTEXT/BUILD_LOG.md` | Build history, test coverage, design decisions |
 | `AI CONTEXT/RELEASE.md` | Auto-update release flow + naming rationale |
 | `AI CONTEXT/AUDIT.md`, `AI CONTEXT/BUG_LIST.md`, `AI CONTEXT/BUG_LIST_ROUND2.md` | Historical bug audits |
+| `DOCUMENT_DESIGN_ARCHITECTURE.md` | Document design layer (DOCX/PPTX/PDF generation) |
+| `MEMORY_DESIGN_ARCHITECTURE.md` | Persistent user-memory architecture |
+| `COMPACTION_REDESIGN.md` | Context compaction across the three chat paths |
+| `SELF_IMPROVING_ARTIFACTS.md` | Self-improving artifacts loop (design + shipped phases) |
 | `docs/remote-access.md` | Pairing the mobile companion over USB or Tailscale |
 
 ## License

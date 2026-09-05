@@ -1,11 +1,11 @@
 # Remote access — pairing your phone to the desktop
 
-Relay's desktop app runs a **loopback-only** WebSocket relay (`127.0.0.1:<port>`) that the mobile companion app connects to. The phone never holds API keys — every request is proxied through the desktop session.
+Relay's desktop app runs a local WebSocket relay that the mobile companion app connects to. The relay always binds the loopback interface (`127.0.0.1:<port>`); when the desktop is on a Tailscale network it **additionally** binds the same port on the tailnet interface, so only tailnet peers (or a USB bridge) can reach it. The phone never holds API keys — every request is proxied through the desktop session.
 
-There are two ways to bridge the phone to the loopback relay:
+There are two ways to bridge the phone to the relay:
 
 1. **USB bridge** (development) — `adb reverse` forwards a phone-side port to the desktop's loopback.
-2. **Tailscale Serve** (remote) — the desktop runs `tailscale serve` to expose the loopback relay over HTTPS on your tailnet, and the phone connects via `wss://`.
+2. **Tailscale** (remote) — the phone connects either **directly** over the tailnet (`ws://<tailnet-ip>:<port>`, the primary QR the desktop shows) or through **Tailscale Serve**, which exposes the loopback relay over HTTPS on your tailnet (`wss://`, requires TLS-terminating proxy).
 
 ## Pairing flow
 
@@ -38,10 +38,12 @@ Alternatively, scan the **local fallback QR** shown in the desktop Remote panel 
 1. On the desktop, open **Settings → Remote → Tailscale**.
 2. The panel shows the Tailscale status:
    - **Not installed** — download from [tailscale.com](https://tailscale.com/download).
-   - **Logged out** — run `tailscale login` from a terminal.
+   - **Logged out** — click **Log in** in the panel (the app runs `tailscale up`, which opens the browser auth flow), or run `tailscale up` from a terminal.
    - **Ready** — your machine's tailnet DNS name is shown (e.g. `laptop.tailnet-name.ts.net`).
-3. Tap **Enable Tailscale Serve**. The desktop runs `tailscale serve --bg https+insecure://http://127.0.0.1:<port>` (background mode), and the resulting `wss://` URL is shown.
+3. Tap **Enable Tailscale Serve**. The desktop runs `tailscale serve --bg --https=443 http://127.0.0.1:<port>` (background mode; TLS is terminated by tailscaled), and the resulting `wss://` URL is shown.
 4. Scan the QR code (or manually enter the URL on the phone). The QR encodes `wss://<machine>.<tailnet>.ts.net/#<token>`.
+
+> Tip: if both devices are on the same tailnet, you can skip Serve entirely and scan the **direct tailnet QR** (primary QR in the Remote panel) — it encodes `ws://<tailnet-ip>:<port>/#<token>` and connects without the HTTPS proxy.
 5. On the phone, open **Settings → Desktop Connection → Scan QR**. Point the camera at the desktop's QR code.
 6. The phone connects automatically.
 
@@ -61,13 +63,13 @@ The desktop processes mobile attachments through the same path as desktop-attach
 
 | Layer | Protection |
 |---|---|
-| Network bind | `127.0.0.1` only — not reachable from LAN without a tunnel |
+| Network bind | `127.0.0.1` always; the tailnet interface additionally when on a tailnet (CGNAT-range — unreachable from the LAN) |
 | Pairing | Per-launch token (43-char base64), constant-time HMAC proof, 30s timeout |
 | Payload encryption | XChaCha20-Poly1305 session key derived via HKDF-SHA256 from the pairing token; per-direction counter nonces; raw token never on the wire (§3.2.11) |
-| TLS | Via Tailscale Serve (HTTPS/WSS) — the relay itself is plain WS behind the proxy |
+| TLS | Via Tailscale Serve (HTTPS/WSS) — the relay itself is plain WS behind the proxy. Direct tailnet connections are WS without TLS, but always E2E-encrypted at the payload layer |
 | API keys | Phone never holds keys — all requests proxied through the desktop |
 
-The relay performs no Host/Origin validation and no path routing — it relies entirely on the loopback bind + pairing token. For cross-network access, **always use Tailscale Serve** rather than exposing the port directly.
+The relay performs no Host/Origin validation and no path routing — it relies entirely on the bind posture + pairing token. For cross-network access, use the tailnet bind or **Tailscale Serve** rather than exposing the port directly.
 
 ## Rebuilding the mobile app
 

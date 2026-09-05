@@ -1,5 +1,7 @@
 # Project Audit Report
 
+> **Status (2026-09-05):** this is a point-in-time audit of the v0.4.1 tree (commit `0b6e4e32`, 2026-08-31); line numbers and counts refer to that snapshot. The headline S-1 auth fail-open is **fixed** — pairing now fails closed on an empty token (`src-tauri/src/mobile/relay_crypto.rs:60`); see `FIXES.md` for the itemized fix log and verification results. Current suite health: 865 cargo-lib tests passing, 100 vitest files / 733 tests passing, `tsc --noEmit` clean.
+
 **Project:** Relay (`relay` v0.4.1) — Tauri 2 desktop shell for AI coding agents
 **Scope:** full repo — `src-tauri/src` (126 Rust files, ~73k lines), `src` (221 TS/TSX files, ~55k lines), config, CI, tests
 **Method:** manual line-level review of every critical module (fs/permission/secrets/browser/codeexec by hand; agent_sessions, chat pipeline, db/automations/mobile/oauth, frontend state/ipc reviewed across four parallel deep passes), with the top-severity findings re-verified against source in a second pass. Baseline confirmed before audit: `cargo check` clean, `npx vitest run` = 491/491 tests pass.

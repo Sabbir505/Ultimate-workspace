@@ -125,6 +125,26 @@ pub(super) fn fs_search_files(args: &Value) -> ToolOutcome {
 /// For visual file types (.html, .svg), returns an ArtifactRef so the UI
 /// can render it inline in the chat — API/local models often use write_file
 /// to create diagrams instead of the dedicated generate_diagram tool.
+/// Artifact ref for a file the built-in chat just wrote/edited/copied, when
+/// its extension is one the artifact system can preview. Harness turns pick
+/// files up via the turn's dir-watch with exactly this allow-list; the
+/// built-in chat has no watch, so the tool outcome is the only chance to
+/// surface the file in the Artifacts gallery (before this, only html/svg
+/// writes landed there — generated docs, data files and images didn't).
+fn artifact_ref_for(path: &str) -> Option<super::ArtifactRef> {
+    if !crate::agent_sessions::previewable_ext(path) {
+        return None;
+    }
+    let filename = std::path::Path::new(path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string());
+    Some(super::ArtifactRef {
+        path: path.to_string(),
+        filename,
+    })
+}
+
 pub(super) fn fs_write_file(args: &Value) -> ToolOutcome {
     let path = arg_str(args, "path");
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -146,25 +166,12 @@ pub(super) fn fs_write_file(args: &Value) -> ToolOutcome {
                 content.len(),
                 content.chars().count()
             );
-            // Surface .html and .svg files as artifacts so the chat can
-            // render them inline (InlineDiagram). Without this, diagrams
-            // created via write_file are invisible to the UI.
-            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-            let artifact = if ext == "html" || ext == "svg" {
-                let filename = p
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.clone());
-                Some(super::ArtifactRef {
-                    path: path.clone(),
-                    filename,
-                })
-            } else {
-                None
-            };
+            // Html/svg render inline via InlineDiagram; every other
+            // previewable kind (docs, data files, images, code) lands in
+            // the Artifacts gallery — matching what harness turns surface.
             ToolOutcome {
                 text: msg,
-                artifact,
+                artifact: artifact_ref_for(&path),
                 browse_url: None,
                 preview: None,
             }
@@ -285,7 +292,15 @@ pub(super) fn fs_edit_file(args: &Value) -> ToolOutcome {
         }
     }
     match std::fs::write(p, &text) {
-        Ok(_) => ToolOutcome::text(format!("Edited {path} (now {} bytes).", text.len())),
+        Ok(_) => ToolOutcome {
+            text: format!("Edited {path} (now {} bytes).", text.len()),
+            // Same surfacing as write_file: harness turns catch edits via
+            // the dir-watch; without this the modified file never reaches
+            // the gallery.
+            artifact: artifact_ref_for(&path),
+            browse_url: None,
+            preview: None,
+        },
         Err(e) => ToolOutcome::text(format!("edit_file failed to write: {e}")),
     }
 }
@@ -323,7 +338,14 @@ pub(super) fn fs_move_file(args: &Value) -> ToolOutcome {
         }
     }
     match std::fs::rename(&src, &dest) {
-        Ok(_) => ToolOutcome::text(format!("Moved {src} → {dest}.")),
+        Ok(_) => ToolOutcome {
+            text: format!("Moved {src} → {dest}."),
+            // The moved file is "produced" at its new path — harness turns
+            // see the rename as a new file via the dir-watch.
+            artifact: artifact_ref_for(&dest),
+            browse_url: None,
+            preview: None,
+        },
         Err(e) => ToolOutcome::text(format!("move_file failed: {e}")),
     }
 }
@@ -346,7 +368,14 @@ pub(super) fn fs_copy_file(args: &Value) -> ToolOutcome {
         }
     }
     match std::fs::copy(&src, &dest) {
-        Ok(n) => ToolOutcome::text(format!("Copied {src} → {dest} ({n} bytes).")),
+        Ok(n) => ToolOutcome {
+            text: format!("Copied {src} → {dest} ({n} bytes)."),
+            // The copy is a newly produced file — same gallery surfacing
+            // the harness dir-watch gives its writes.
+            artifact: artifact_ref_for(&dest),
+            browse_url: None,
+            preview: None,
+        },
         Err(e) => ToolOutcome::text(format!("copy_file failed: {e}")),
     }
 }
@@ -389,6 +418,61 @@ mod tests {
         // list_directory lists the parent (contains hello.txt).
         let out = fs_list_directory(&json!({ "path": dir.join("sub").display().to_string() }));
         assert!(out.text.contains("hello.txt"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_tools_surface_previewable_files_as_artifacts() {
+        let dir = std::env::temp_dir().join(format!("conduit_fs_art_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Generated docs / data files reach the gallery via write_file —
+        // previously only html/svg did, so a model-written docx never
+        // appeared in the Artifacts gallery.
+        let docx = dir.join("report.docx");
+        let out = fs_write_file(&json!({ "path": docx.display().to_string(), "content": "x" }));
+        let art = out.artifact.expect("docx write must surface an artifact");
+        assert_eq!(art.filename, "report.docx");
+
+        let csv = dir.join("data.csv");
+        let out = fs_write_file(&json!({ "path": csv.display().to_string(), "content": "a,b" }));
+        assert!(out.artifact.is_some());
+
+        // Non-previewable downloads/archives stay out of the gallery.
+        let zip = dir.join("bundle.zip");
+        let out = fs_write_file(&json!({ "path": zip.display().to_string(), "content": "x" }));
+        assert!(out.artifact.is_none(), "zip must not surface an artifact");
+
+        // Edits count as modifications — the harness dir-watch surfaces
+        // those; edit_file must too.
+        let md = dir.join("notes.md");
+        fs_write_file(&json!({ "path": md.display().to_string(), "content": "hello" }));
+        let out = fs_edit_file(&json!({
+            "path": md.display().to_string(),
+            "find": "hello",
+            "replace": "hi"
+        }));
+        assert!(out.artifact.is_some(), "edit must surface an artifact");
+
+        // Copies/moves produce a file at the destination.
+        let copy = dir.join("copy.pdf");
+        std::fs::write(dir.join("src.pdf"), b"pdf").unwrap();
+        let out = fs_copy_file(&json!({
+            "src": dir.join("src.pdf").display().to_string(),
+            "dest": copy.display().to_string(),
+        }));
+        let art = out.artifact.expect("copy must surface an artifact");
+        assert_eq!(art.filename, "copy.pdf");
+
+        let moved = dir.join("moved.docx");
+        let out = fs_move_file(&json!({
+            "src": docx.display().to_string(),
+            "dest": moved.display().to_string(),
+        }));
+        let art = out.artifact.expect("move must surface an artifact");
+        assert_eq!(art.filename, "moved.docx");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

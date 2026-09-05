@@ -813,6 +813,11 @@ async fn download_task<R: tauri::Runtime>(
             snap.speed_bps = 0;
             snap.dest_path = Some(dest.to_string());
         }
+        // Surface the download in the Artifacts gallery when the extension
+        // is previewable (docs, images, data files) — the built-in chat has
+        // no dir-watch, so this is the only chance to record it. Model
+        // weights / archives and other non-previewable downloads stay out.
+        record_download_artifact(app, sid, &dest_path);
         TaskManager::finish(
             app,
             sid,
@@ -826,6 +831,44 @@ async fn download_task<R: tauri::Runtime>(
         "download failed after {} attempts: {last_error}",
         DOWNLOAD_RETRIES + 1
     ))
+}
+
+/// Record a completed download in the Artifacts gallery (30-day retention)
+/// and push the `chat:artifact` event — what the harness turn's dir-watch
+/// does for files its CLIs write, applied to the one file this tool
+/// produces. Previewable extensions only: model weights / archives aren't
+/// gallery material. Best-effort — a DB or emit failure must not fail the
+/// (already successful) download. `None` app (tests / headless) skips.
+fn record_download_artifact<R: tauri::Runtime>(
+    app: Option<&AppHandle<R>>,
+    sid: &str,
+    dest: &Path,
+) {
+    use tauri::Manager;
+    let Some(app) = app else { return };
+    if !crate::agent_sessions::previewable_ext(&dest.to_string_lossy()) {
+        return;
+    }
+    let Some(filename) = dest.file_name().map(|s| s.to_string_lossy().to_string()) else {
+        return;
+    };
+    let db = app.state::<crate::DbState>();
+    let kind = dest
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let path = dest.to_string_lossy().to_string();
+    let conn = db.0.lock();
+    let _ = crate::db::insert_artifact(&conn, Some(sid), &filename, &path, &kind);
+    let _ = app.emit(
+        "chat:artifact",
+        crate::types::ChatArtifactPayload {
+            chat_session_id: sid.to_string(),
+            path,
+            filename,
+        },
+    );
 }
 
 /// Run a native shell command, streaming output lines as progress events.

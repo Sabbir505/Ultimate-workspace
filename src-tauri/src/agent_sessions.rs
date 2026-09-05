@@ -1975,7 +1975,9 @@ fn changed_previewable_files(
 
 /// Extension allow-list mirrored from read_artifact_preview's classification
 /// (chat/commands.rs): text/code kinds, images, pdf, and Office documents.
-fn previewable_ext(path: &str) -> bool {
+/// Shared with the built-in chat's file tools (chat/tools/fs.rs), which have
+/// no dir-watch and must decide per-write what surfaces as an artifact.
+pub(crate) fn previewable_ext(path: &str) -> bool {
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())

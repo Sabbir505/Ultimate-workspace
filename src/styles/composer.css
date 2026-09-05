@@ -515,7 +515,11 @@
    webviews are hidden separately while it shows (contextTipOpen occlusion). */
 .context-meter-panel {
   position: fixed;
-  transform: translateX(-50%);
+  /* NO transform here: ContextMeter positions this panel by its LEFT EDGE
+     (panelPos.left is pre-clamped against the window in onHover). This
+     WebView2 build silently dropped the inline translateX(-50%) that used to
+     center the panel on the meter — the position contract now lives entirely
+     in inline styles (see ContextMeter.tsx). */
   width: 260px;
   padding: 10px 12px;
   border-radius: 8px;

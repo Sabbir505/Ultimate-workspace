@@ -2054,7 +2054,21 @@ const handleCreateProposal = useCallback(async (proposalId: string) => {
         onStop={handleStop}
         streaming={activeIsStreaming}
         disabled={false}
-        model={activeChatSessionId ? (meterModel ?? "") : undefined}
+        model={
+          activeChatSessionId
+            ? // A session's model is only COMMITTED once an agent is picked
+              // (the picker commits agent+provider+model together; the chip
+              // shows "⌘ Select agent" before that and Send is agentLocked).
+              // New chats are pre-seeded with the provider's default model,
+              // and passing that seed through made the meter tooltip name a
+              // model the user never picked for this chat — reading as stale
+              // data from the previous chat. Mirror the chip: "—" until an
+              // agent is picked.
+              activeSession?.agent != null
+                ? (meterModel ?? "")
+                : ""
+            : undefined
+        }
         modelLabels={modelLabels}
         agent={activeChatSessionId ? (activeSession?.agent ?? null) : undefined}
         onAgentModelPick={handleAgentModelPick}

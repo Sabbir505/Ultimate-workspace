@@ -24,7 +24,7 @@
 // useContextMeter — fresh after every sent message or compaction) with the
 // input_tokens of the last assistant turn (the full prompt size the
 // provider counted), taking the larger. 0 until the first turn completes.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   contextWindowFor,
@@ -66,6 +66,15 @@ interface Props {
 
 const PCT_WARN = 0.7;
 const PCT_CRIT = 0.9;
+
+/** The hover panel's width — mirrored inline on the element (see the portal
+ *  note below). The horizontal clamp is computed from this CONSTANT, not from
+ *  a mounted-element measurement: measuring proved unreliable inside the
+ *  portal (offsetWidth read 0 pre-layout), which silently disabled the clamp
+ *  and let the panel overflow the window edge. */
+const PANEL_WIDTH = 260;
+/** Gap kept between the panel and the window edges. */
+const PANEL_MARGIN = 8;
 
 // Ring geometry (viewBox 36x36, stroke width 4 → radius 16, circumference ~100).
 const R = 16;
@@ -163,6 +172,7 @@ export function ContextMeter({
   // rect at hover time (see the portal note below).
   const [panelPos, setPanelPos] = useState<{ left: number; bottom: number } | null>(null);
   const circleRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const breakdownKey = chatSessionId ?? "";
   const lastKey = useRef(breakdownKey);
   if (lastKey.current !== breakdownKey) {
@@ -184,11 +194,25 @@ export function ContextMeter({
     const el = circleRef.current;
     if (el) {
       const r = el.getBoundingClientRect();
-      // Center on the circle, clamped so the 260px panel can't leave the
-      // viewport (the circle sits in the composer's corner).
+      // The panel ALWAYS opens to the LEFT of the meter: its right edge sits
+      // a small gap right of the circle's center, so in the composer (meter
+      // at the row's right end) the panel grows into the full chat-column
+      // width and can never run past the window's right edge — regardless
+      // of how narrow the window is. panelPos.left is the panel's LEFT EDGE
+      // (no transforms; this WebView2 drops them), clamped to the viewport.
+      // Computed from the PANEL_WIDTH constant — measuring the mounted
+      // element inside the portal read 0 pre-layout and silently disabled
+      // an earlier clamp.
+      const half = PANEL_WIDTH / 2;
+      const circleCenter = r.left + r.width / 2;
+      // The panel sits ENTIRELY to the left of the meter: its right edge
+      // stops 100px left of the circle, so the values column is never near
+      // the window edge (overlapping windows can cover that sliver) and the
+      // meter itself stays visible.
+      const unclampedLeft = circleCenter - half - 100 - PANEL_MARGIN;
       const left = Math.min(
-        Math.max(138, r.left + r.width / 2),
-        window.innerWidth - 138,
+        Math.max(unclampedLeft, PANEL_MARGIN),
+        window.innerWidth - PANEL_WIDTH - PANEL_MARGIN,
       );
       setPanelPos({ left, bottom: window.innerHeight - r.top + 6 });
     }
@@ -203,6 +227,24 @@ export function ContextMeter({
         .catch(() => setBreakdown(null));
     }
   };
+
+  // Vertical safety net: `bottom` is the gap under the panel, and a tall
+  // panel on a short window would push its top off-screen. Measuring the
+  // mounted height is fine here (the horizontal clamp above no longer
+  // depends on it); skip when the measurement reads 0 (pre-layout).
+  useLayoutEffect(() => {
+    if (!showPanel || !panelPos) return;
+    const el = panelRef.current;
+    if (!el || el.offsetHeight === 0) return;
+    const maxBottom = Math.max(
+      window.innerHeight - el.offsetHeight - PANEL_MARGIN,
+      PANEL_MARGIN,
+    );
+    const bottom = Math.min(Math.max(panelPos.bottom, PANEL_MARGIN), maxBottom);
+    if (bottom !== panelPos.bottom) {
+      setPanelPos({ ...panelPos, bottom });
+    }
+  }, [showPanel, panelPos]);
 
   const rows: Row[] = breakdown
     ? [
@@ -257,7 +299,22 @@ export function ContextMeter({
           over every HTML surface (native webviews are handled separately via
           the contextTipOpen occlusion flag). */}
       {showPanel && panelPos && createPortal(
-        <div className="context-meter-panel" style={{ left: panelPos.left, bottom: panelPos.bottom }}>
+        <div
+          ref={panelRef}
+          className="context-meter-panel"
+          style={{
+            left: panelPos.left,
+            bottom: panelPos.bottom,
+            // The positioning CONTRACT lives here, inline: panelPos.left is
+            // the panel's LEFT EDGE (already clamped against PANEL_WIDTH in
+            // onHover — no transform is used; see the note there). The
+            // stylesheet carries the same declarations, but if the cascade
+            // ever drops them the panel shrink-wraps and the geometry goes
+            // wrong, so they are set here authoritatively.
+            width: PANEL_WIDTH,
+            boxSizing: "border-box",
+          }}
+        >
           {/* Model + usage stats on one row */}
           <div className="context-meter-panel-top">
             <span className="context-meter-panel-model" title={model ?? ""}>

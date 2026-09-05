@@ -4587,6 +4587,15 @@ fn estimate_usage_parts(
     )
 }
 
+/// The meter's `used` figure for the estimate path. An empty session has used
+/// NOTHING yet — its system+tools baseline is what the FIRST send would cost,
+/// not usage, so reporting it made a brand-new chat claim ~14k tokens out of
+/// nowhere (reading as leftover data from the previous chat; the meter's own
+/// contract is 0 until the first turn completes). Pure for tests.
+fn estimate_used_tokens(n_records: usize, total_and_tools: u32) -> Option<u32> {
+    (n_records > 0).then_some(total_and_tools)
+}
+
 /// The model id whose window a cloud/harness session's meter should use.
 /// Harness sessions report the model their CLI LAST actually ran (persisted
 /// as `agent.actual_model.<harness>.<sid>`); falling back to the session's
@@ -4735,7 +4744,7 @@ pub async fn count_context_tokens(
         };
         if let Some(tokens) = chat_state.0.cached_context_tokens(&chat_session_id, &fingerprint) {
             return Ok(crate::types::ContextUsagePayload {
-                used_tokens: if tokens > 0 || n_records > 0 { Some(tokens) } else { None },
+                used_tokens: estimate_used_tokens(n_records, tokens as u32),
                 max_tokens,
             });
         }
@@ -4744,7 +4753,7 @@ pub async fn count_context_tokens(
             estimate_usage_parts(&system_str, &messages, &tool_specs_json);
         chat_state.0.store_context_tokens(&chat_session_id, fingerprint, total + tools);
         return Ok(crate::types::ContextUsagePayload {
-            used_tokens: Some(total + tools),
+            used_tokens: estimate_used_tokens(n_records, total + tools),
             max_tokens,
         });
     }
@@ -5442,6 +5451,16 @@ mod tests {
         assert_eq!(msgs_tok, 5);
         assert_eq!(tools, 1);
         assert_eq!(total, 7);
+    }
+
+    #[test]
+    fn empty_session_reports_no_used_tokens() {
+        // A brand-new chat's system+tools baseline (~14k for the built-in
+        // agent) must NOT surface as `used` — the meter's contract is 0
+        // until the first turn completes. With history, the estimate flows.
+        assert_eq!(estimate_used_tokens(0, 14_400), None);
+        assert_eq!(estimate_used_tokens(1, 14_400), Some(14_400));
+        assert_eq!(estimate_used_tokens(12, 0), Some(0));
     }
 
     #[test]

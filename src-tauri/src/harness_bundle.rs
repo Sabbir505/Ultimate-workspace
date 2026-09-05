@@ -199,7 +199,9 @@ pub fn build_artifacts_section(default_export_dir: &str, recent: &[String]) -> S
         ". When the user asks about an artifact — a report, a document, a chart, \
          an export, even by an approximate name — list and read files from that \
          folder and the project folder with your file tools instead of saying \
-         you don't have it.\n",
+         you don't have it. The list below is a snapshot from when this session \
+         started: for the live list call the conduit-tools `list_artifacts` \
+         tool (filename-filterable, returns absolute paths).\n",
     );
     if !recent.is_empty() {
         s.push_str("\nMost recent artifacts:\n");

@@ -32,6 +32,9 @@ pub fn openai_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy) ->
         openai_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
         openai_fn(GET_SKILL, GET_SKILL_DESC, get_skill_parameters()),
         openai_fn(LIST_SKILLS, LIST_SKILLS_DESC, no_parameters()),
+        // Live artifact listing (read-only, no gating) — answers "where does
+        // the report live" from the DB, newest first, with absolute paths.
+        openai_fn(LIST_ARTIFACTS, LIST_ARTIFACTS_DESC, list_artifacts_parameters()),
         // In-process availability introspection — always on (read-only, no
         // gating). Replaces shell probes for connector/MCP availability.
         openai_fn(GET_CAPABILITIES, GET_CAPABILITIES_DESC, no_parameters()),
@@ -205,6 +208,8 @@ pub fn anthropic_tool_specs(caps: &ToolCaps, sandbox: permission::SandboxPolicy)
         anthropic_fn(OPEN_URL, OPEN_URL_DESC, fetch_url_parameters()),
         anthropic_fn(GET_SKILL, GET_SKILL_DESC, get_skill_parameters()),
         anthropic_fn(LIST_SKILLS, LIST_SKILLS_DESC, no_parameters()),
+        // Mirror of the OpenAI block's live artifact listing.
+        anthropic_fn(LIST_ARTIFACTS, LIST_ARTIFACTS_DESC, list_artifacts_parameters()),
         // In-process availability introspection (mirror of the OpenAI block).
         anthropic_fn(GET_CAPABILITIES, GET_CAPABILITIES_DESC, no_parameters()),
         anthropic_fn(BROWSER_READ, BROWSER_READ_DESC, browser_read_parameters()),
@@ -430,6 +435,23 @@ fn generate_diagram_parameters() -> Value {
 /// read-only `get_source_ledger` / `reset_source_ledger` ledger tools).
 fn no_parameters() -> Value {
     json!({ "type": "object", "properties": {} })
+}
+
+fn list_artifacts_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Optional filename substring filter (case-insensitive), \
+                    e.g. \"digest\" or \"report\"."
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max entries to return (1–50, default 10)."
+            }
+        }
+    })
 }
 
 /// `get_source_ledger` takes an optional read mode: default returns full

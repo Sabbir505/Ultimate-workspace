@@ -277,7 +277,10 @@ pub(crate) fn core_prompt_base_local() -> String {
      automatically. Written files do NOT open on screen — call `open_file` only when the \
      user should see a finished result. \
      Put Markdown/SVG/HTML meant for in-app reading directly in your text. \
-     After producing an artifact, a short one-line acknowledgment is enough.\n\n\
+     After producing an artifact, a short one-line acknowledgment is enough.\n\
+     When the user asks WHERE an artifact lives, what was generated recently, or wants one \
+     opened/shown, NEVER guess from memory — call `list_artifacts` for the live list with \
+     kinds, dates and absolute paths, then `open_file` the one they mean.\n\n\
      ## Automations\n\
      Scheduled headless runs (Automations view). `list_automations`, \
      `create_automation(name, prompt, schedule)`, `run_automation_now` manage \

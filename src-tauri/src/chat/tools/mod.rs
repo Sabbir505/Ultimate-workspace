@@ -74,6 +74,11 @@ pub const OPEN_URL: &str = "open_url";
 pub const OPEN_FILE: &str = "open_file";
 pub const GET_SKILL: &str = "get_skill";
 pub const LIST_SKILLS: &str = "list_skills";
+/// Live artifact listing straight from the DB — how both chat surfaces answer
+/// "where does the report live" / "open the thing we made". The harness
+/// instructions only carry a snapshot (written at bundle resolve time); this
+/// tool is the always-current source, and its absolute paths feed `open_file`.
+pub const LIST_ARTIFACTS: &str = "list_artifacts";
 /// Attach-on-demand meta-tools: load a connector's / MCP server's tools into
 /// this conversation (see specs.rs and dispatch.rs). Advertised with an enum
 /// of attachable ids; a fresh turn ships no connector schemas at all.
@@ -469,6 +474,11 @@ const GET_SKILL_DESC: &str = "Load a skill's detailed instructions into your \
     questions.";
 
 const LIST_SKILLS_DESC: &str = "List every available skill slug.";
+
+const LIST_ARTIFACTS_DESC: &str = "List the user's Relay artifacts — generated documents, \
+    charts, exports, reports and downloads from the last 30 days — newest first, each with \
+    its kind, date and ABSOLUTE path. Call this when the user asks where an artifact lives, \
+    what was generated recently, or before opening one (pair the path with open_file).";
 
 const ATTACH_CONNECTOR_DESC: &str = "Load a connected app's tools into this \
     turn (Gmail, Notion, Drive, … — see \"Connected apps & servers\" in the \
@@ -1013,6 +1023,59 @@ pub async fn execute_tool(
             // can never disagree with what the model can call. No process, no
             // approval; this is what replaces `claude mcp list`-style probes.
             ToolOutcome::text(capabilities_report(caps))
+        }
+        LIST_ARTIFACTS => {
+            // Read-only DB introspection — available under every permission
+            // mode, mirroring list_skills. Absolute paths pair with
+            // open_file; a harness caller reads them with its file tools.
+            use tauri::Manager;
+            let Some(app) = app else {
+                return ToolOutcome::text(
+                    "Error: list_artifacts needs the app runtime (unavailable in this headless run).",
+                );
+            };
+            let query = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|n| n.clamp(1, 50) as usize)
+                .unwrap_or(10);
+            let db = app.state::<crate::DbState>();
+            let all = {
+                let conn = db.0.lock();
+                crate::db::list_artifacts(&conn).unwrap_or_default()
+            };
+            let matched: Vec<_> = all
+                .iter()
+                .filter(|a| query.is_empty() || a.filename.to_lowercase().contains(&query))
+                .take(limit)
+                .collect();
+            if matched.is_empty() {
+                return ToolOutcome::text(if query.is_empty() {
+                    "No artifacts yet — nothing was generated in the last 30 days.".to_string()
+                } else {
+                    format!("No artifact filename contains \"{query}\".")
+                });
+            }
+            let lines: Vec<String> = matched
+                .iter()
+                .map(|a| {
+                    let date = chrono::DateTime::from_timestamp(a.created_at, 0)
+                        .map(|d| d.format("%Y-%m-%d").to_string())
+                        .unwrap_or_default();
+                    format!("- {} ({}, {}) — {}", a.filename, a.kind, date, a.path)
+                })
+                .collect();
+            ToolOutcome::text(format!(
+                "{} artifact(s), newest first:\n{}",
+                matched.len(),
+                lines.join("\n")
+            ))
         }
         RUN_CODE => {
             if !caps.code_exec {

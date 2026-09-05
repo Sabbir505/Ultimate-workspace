@@ -23,8 +23,10 @@ use crate::chat::tools::{self, ToolCaps};
 /// `get_capabilities` is read-only introspection — intercepted in
 /// `execute_conduit_tool` for the app-level report (ToolCaps::default() here
 /// has no per-turn attachment state, so routing it through execute_tool would
-/// report a falsely empty connector list).
-const ALLOWED_RELAY_TOOLS: [&str; 9] = [
+/// report a falsely empty connector list). `list_artifacts` is read-only DB
+/// introspection — the harness's always-current answer to "where does the
+/// report live" (the bundle instructions only carry a spawn-time snapshot).
+const ALLOWED_RELAY_TOOLS: [&str; 10] = [
     tools::GENERATE_DOCUMENT,
     tools::PLAN_DOCUMENT,
     tools::REVISE_DOCUMENT,
@@ -34,6 +36,7 @@ const ALLOWED_RELAY_TOOLS: [&str; 9] = [
     tools::LIST_SKILLS,
     tools::SEARCH_DOCS,
     tools::GET_CAPABILITIES,
+    tools::LIST_ARTIFACTS,
 ];
 
 /// Strip the `conduit_tools:` prefix from a WS op; None for non-tool ops and

@@ -224,7 +224,7 @@ fn tool_op(tool: &str) -> Result<String, &'static str> {
         | "new_tab" | "close_tab" | "zoom" | "print_to_pdf" => Ok(tool.to_string()),
         "generate_document" | "generate_diagram" | "generate_file"
         | "plan_document" | "revise_document"
-        | "get_skill" | "list_skills" | "search_docs" | "get_capabilities" => Ok(format!("conduit_tools:{tool}")),
+        | "get_skill" | "list_skills" | "list_artifacts" | "search_docs" | "get_capabilities" => Ok(format!("conduit_tools:{tool}")),
         _ => Err("unknown tool"),
     }
 }
@@ -732,6 +732,22 @@ fn tool_schemas() -> Vec<Value> {
             "name": "list_skills",
             "description": "List every available skill slug.",
             "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "list_artifacts",
+            "description": "List Relay's artifacts — generated documents, charts, exports, \
+                reports and downloads from the last 30 days — newest first, each with its \
+                kind, date and ABSOLUTE path. Call this when the user asks where an artifact \
+                lives, what was generated recently, or wants one opened or shown; the path is \
+                readable with your file tools.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Optional filename substring filter (case-insensitive)." },
+                    "limit": { "type": "integer", "description": "Max entries to return (1–50, default 10)." }
+                }
+            },
+            "annotations": { "readOnlyHint": true }
         }),
         json!({
             "name": "search_docs",

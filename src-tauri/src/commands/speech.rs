@@ -39,6 +39,21 @@ fn unregister_cancel_slot(tag: &str) {
     CANCEL_SLOTS.lock().remove(tag);
 }
 
+/// UTC wall-clock stamp (HH:MM:SS.mmm) for correlating diagnostic lines.
+fn now_stamp() -> String {
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let s = d.as_secs() % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        s / 3600,
+        (s % 3600) / 60,
+        s % 60,
+        d.subsec_millis()
+    )
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptionResult {
@@ -68,8 +83,25 @@ pub async fn transcribe_audio(
     payload: String,
     mime: Option<String>,
     tag: Option<String>,
+    sent_at: Option<u64>,
 ) -> CmdResult<TranscriptionResult> {
     use reqwest::multipart;
+    // Diagnostics: each request logs lag (webview→host IPC delivery — a large
+    // lag means the WebView2 transport stalled, NOT the server), setup
+    // (base64 decode + endpoint resolve, includes a lazy sidecar start on the
+    // first call), http (server queue wait + inference), and total — read
+    // these from tauri_dev.log.
+    let t_start = std::time::Instant::now();
+    let payload_kb = payload.len() / 1024;
+    let ipc_lag_ms = sent_at
+        .map(|sent| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            now.saturating_sub(sent)
+        })
+        .unwrap_or(0);
 
     // Sidecar first: it serves whisper.cpp's native /inference endpoint.
     let mut sidecar_base = crate::commands::stt::active_base_url(&stt);
@@ -137,8 +169,10 @@ pub async fn transcribe_audio(
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| e.to_string())?;
+    let t_ready = t_start.elapsed();
     // Tagged requests race the send against a cancel signal; winning the race
     // drops the reqwest future, closing the connection so the server aborts.
+    let send_t0 = std::time::Instant::now();
     let resp = if let Some(notify) = tag.as_deref().map(register_cancel_slot) {
         tokio::select! {
             r = client.post(&endpoint).multipart(form).send() => {
@@ -148,6 +182,13 @@ pub async fn transcribe_audio(
                 if let Some(t) = tag.as_deref() {
                     unregister_cancel_slot(t);
                 }
+                eprintln!(
+                    "[stt] transcribe tag={} CANCELLED after {}ms ({}KB) {}",
+                    tag.as_deref().unwrap_or("-"),
+                    t_start.elapsed().as_millis(),
+                    payload_kb,
+                    now_stamp(),
+                );
                 return Err("transcription cancelled by client".into());
             }
         }
@@ -162,6 +203,16 @@ pub async fn transcribe_audio(
     if let Some(t) = tag.as_deref() {
         unregister_cancel_slot(t);
     }
+    eprintln!(
+        "[stt] transcribe tag={} lag={}ms setup={}ms http={}ms total={}ms ({}KB) {}",
+        tag.as_deref().unwrap_or("-"),
+        ipc_lag_ms,
+        t_ready.as_millis(),
+        send_t0.elapsed().as_millis(),
+        t_start.elapsed().as_millis(),
+        payload_kb,
+        now_stamp(),
+    );
     if !resp.status().is_success() {
         return Err(format!("whisper server returned HTTP {}: {}", resp.status(), resp.text().await.unwrap_or_default()));
     }

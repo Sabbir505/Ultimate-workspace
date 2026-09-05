@@ -330,6 +330,19 @@ function flattenVoiceText(text: string): string {
     .trim();
 }
 
+/** Diagnostics helper: seconds of audio in a captured chunk list (the list's
+ *  `.length` is the CHUNK count — chunks are 256ms each at 16 kHz — so sum
+ *  the samples, never divide the count). */
+function chunkSeconds(chunks: Float32Array[], rate: number): number {
+  return chunks.reduce((n, c) => n + c.length, 0) / rate;
+}
+
+/** Dictation diagnostics — dev builds only (these lines diagnosed the
+ *  Alt-release menu-mode IPC stall; keep them for the next one). */
+const voiceLog = (...args: unknown[]) => {
+  if (import.meta.env.DEV) console.info(...args);
+};
+
 /** Stable empty list for the queue selector (a fresh [] per call would make
  *  every store change re-render the composer). */
 const NO_QUEUED_MESSAGES: import("../../state/chat").QueuedChatMessage[] = [];
@@ -1545,6 +1558,31 @@ export function ChatComposer({
   // Unmount mid-recording (chat switch, window close) must not leak the mic.
   useEffect(() => stopCapture, [stopCapture]);
 
+  // Diagnostics: WebView2 throttles occluded/hidden windows hard enough to
+  // stall invoke delivery (observed: a finished transcription's response sat
+  // undelivered for 68s while the server had completed in 0.96s). Log
+  // visibility/focus transitions so a slow stop can be correlated with the
+  // window going to the background.
+  useEffect(() => {
+    const stamp = () => new Date().toISOString().slice(11, 23);
+    const onVis = () =>
+      voiceLog(
+        `[voice] ${stamp()} window ${document.visibilityState === "hidden" ? "HIDDEN (renderer throttled)" : "visible"} focus=${document.hasFocus()}`,
+      );
+    const onBlur = () =>
+      voiceLog(`[voice] ${stamp()} window lost focus (visibility=${document.visibilityState})`);
+    const onFocus = () =>
+      voiceLog(`[voice] ${stamp()} window gained focus (visibility=${document.visibilityState})`);
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
+
   // Wave animation: bars breathe with the live input level (levelRef is fed
   // by onaudioprocess). rAF writes heights straight to the DOM — React state
   // at 60fps would re-render the whole composer.
@@ -1645,6 +1683,7 @@ export function ChatComposer({
     }
     pendingCommitsRef.current += 1;
     commitChainRef.current = commitChainRef.current.then(async () => {
+      const t0 = performance.now();
       try {
         const wav = encodeWav16k(joinSamples(chunks, rateRef.current));
         const res = await transcribeAudio(await blobToBase64(wav), "audio/wav", "commit");
@@ -1657,7 +1696,11 @@ export function ChatComposer({
           voicePartialRef.current = "";
           renderVoiceText();
         }
+        voiceLog(
+          `[voice] commit ${Math.round(performance.now() - t0)}ms for ${chunkSeconds(chunks, rateRef.current).toFixed(1)}s audio`,
+        );
       } catch {
+        voiceLog(`[voice] commit failed after ${Math.round(performance.now() - t0)}ms`);
         // Best-effort: the ghost text (if any) stays on screen, and stop's
         // repair pass fills the gap.
         commitFailedRef.current = true;
@@ -1678,7 +1721,12 @@ export function ChatComposer({
     // partial pile-up AND re-decoded the whole session, so the last line
     // froze for ages after stop. Commit results keep landing past this point
     // (commitArmRef is deliberately not bumped); they now carry the text.
-    if (segmentHadSoundRef.current) flushVoiceSegment();
+    if (segmentHadSoundRef.current) {
+      voiceLog(
+        `[voice] ${new Date().toISOString().slice(11, 23)} stop: flushing trailing segment (${(segmentLenRef.current / rateRef.current).toFixed(1)}s audio), ${pendingCommitsRef.current} commit(s) already pending, visibility=${document.visibilityState}, focus=${document.hasFocus()}`,
+      );
+      flushVoiceSegment();
+    }
     const chunks = samplesRef.current;
     samplesRef.current = [];
     segmentRef.current = [];
@@ -1692,12 +1740,15 @@ export function ChatComposer({
       // landing, and only when something is actually pending (a settled
       // chain must not flash the spinner for a frame).
       if (pendingCommitsRef.current > 0) setTranscribing(true);
+      const settleT0 = performance.now();
       await commitChainRef.current;
+      voiceLog(`[voice] stop: commits settled ${Math.round(performance.now() - settleT0)}ms after flush`);
       if (commitFailedRef.current) {
         // Some segment commit failed, so words may be missing from the box.
         // Fall back to the polished full-clip pass to repair the text —
         // normally (every commit succeeded) this O(session) cost is skipped.
         setTranscribing(true);
+        const repairT0 = performance.now();
         const wav = encodeWav16k(joinSamples(chunks, rateRef.current));
         const res = await transcribeAudio(await blobToBase64(wav), "audio/wav");
         const text = res?.text ? flattenVoiceText(res.text) : "";
@@ -1707,6 +1758,7 @@ export function ChatComposer({
           voicePartialRef.current = "";
           renderVoiceText();
         }
+        voiceLog(`[voice] repair pass ${Math.round(performance.now() - repairT0)}ms for ${chunkSeconds(chunks, rateRef.current).toFixed(1)}s audio`);
       }
     } catch {
       toastError(
@@ -1823,13 +1875,19 @@ export function ChatComposer({
         if (partialInFlightRef.current) return;
         partialInFlightRef.current = true;
         void (async () => {
+          const t0 = performance.now();
           try {
+            const segSamples = segmentRef.current.reduce((n, c) => n + c.length, 0);
             const wav = encodeWav16k(joinSamples(segmentRef.current, rateRef.current));
             const res = await transcribeAudio(await blobToBase64(wav), "audio/wav", "partial");
             if (generationRef.current !== recGen || segGen !== segmentGenRef.current) return;
             voicePartialRef.current = res?.text ? flattenVoiceText(res.text) : "";
             renderVoiceText();
+            voiceLog(
+              `[voice] partial ${Math.round(performance.now() - t0)}ms for ${(segSamples / rateRef.current).toFixed(1)}s audio`,
+            );
           } catch {
+            voiceLog(`[voice] partial dropped/cancelled after ${Math.round(performance.now() - t0)}ms`);
             // Partials are best-effort — the commit chain owns the real text.
           } finally {
             partialInFlightRef.current = false;
@@ -1886,6 +1944,11 @@ export function ChatComposer({
         // Ignore AltGr (reports as Ctrl+Alt on intl layouts) and shortcuts
         // already in flight — only a solo Alt press starts dictation.
         if (e.ctrlKey || e.metaKey || e.repeat) return;
+        // Suppress the default: an Alt release otherwise toggles Win32 menu
+        // mode, whose modal loop stalls the whole WebView2 transport —
+        // dictation results sat 10-30s undelivered until the next click
+        // dismissed the menu mode (the "app freezes, click fixes it" bug).
+        e.preventDefault();
         if (recordingRef.current || transcribing) return;
         altTalkRef.current = true;
         void beginVoiceRecording();
@@ -1899,6 +1962,8 @@ export function ChatComposer({
     };
     const onKeyUp = (e: KeyboardEvent) => {
       if (e.key !== "Alt" || !altTalkRef.current) return;
+      // See onKeyDown: the release must not reach the default menu-mode toggle.
+      e.preventDefault();
       altTalkRef.current = false;
       if (recordingRef.current) {
         void finishVoiceRecording();

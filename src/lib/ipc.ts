@@ -738,6 +738,9 @@ export const transcribeAudio = (payload: string, mime?: string, tag?: string) =>
     payload,
     mime: mime ?? null,
     tag: tag ?? null,
+    // Diagnostics: lets the Rust side measure the webview→host transport lag
+    // (a stalled delivery showed up as multi-second "last line" delays).
+    sentAt: Date.now(),
   });
 
 /** Abort an in-flight transcription request previously sent with `tag`.

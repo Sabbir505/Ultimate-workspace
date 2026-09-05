@@ -204,14 +204,19 @@ function np(v: ProviderInfo[]) { onProviderList.emit(v); _pl.forEach(fn => fn(v)
 function ns(v: Session[]) { onSessionList.emit(v); _sl.forEach(fn => fn(v)); }
 function ncs(v: CostSummary) { _csl.forEach(fn => fn(v)); }
 function ncd(v: CostDetails) { onCostDetails.emit(v); _cdl.forEach(fn => fn(v)); }
-function _send(msg: MobileMessagePlain) {
-  if (_ws?.readyState !== WebSocket.OPEN) return;
+/// Send a plaintext/encrypted frame on the relay socket. Returns false when
+/// the socket is not OPEN — callers that gate UI state on a reply (e.g. the
+/// session-chat send) MUST check it, or the message is silently dropped
+/// while the UI waits forever for events that will never arrive.
+function _send(msg: MobileMessagePlain): boolean {
+  if (_ws?.readyState !== WebSocket.OPEN) return false;
   const json = JSON.stringify(msg);
   if (_e2eKey) {
     _ws.send(encryptFrame(_e2eKey, _outCounter++, new TextEncoder().encode(json)));
   } else {
     _ws.send(json);
   }
+  return true;
 }
 
 function startPolling() {
@@ -435,9 +440,8 @@ export function useRelay() {
     [],
   );
   const sendSessionChat = useCallback(
-    (sessionId: string, text: string, attachments: SessionChatAttachment[] = []) => {
-      _send({ type: 'SendChatMessage', session_id: sessionId, text, attachments } as SessionChatMessage);
-    },
+    (sessionId: string, text: string, attachments: SessionChatAttachment[] = []): boolean =>
+      _send({ type: 'SendChatMessage', session_id: sessionId, text, attachments } as SessionChatMessage),
     [],
   );
   const cancelSessionStream = useCallback(

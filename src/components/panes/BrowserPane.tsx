@@ -197,6 +197,12 @@ export function BrowserPane({ pane, visible = true }: Props) {
     }
     return m;
   });
+  // Per-tab UNCOMMITTED address-bar text. Kept OUT of tabStates on purpose:
+  // the bounds/occlusion effects key on the tabStates Map identity, so
+  // storing keystrokes there re-ran browser_set_bounds / browser_set_visible
+  // for EVERY character typed (C6). The draft overlays the committed address
+  // while typing and is dropped on navigate / real navigation events.
+  const [addressDrafts, setAddressDrafts] = useState<Record<string, string>>({});
 
   const [copied, setCopied] = useState(false);
   const iframeRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
@@ -492,6 +498,15 @@ export function BrowserPane({ pane, visible = true }: Props) {
       // Update the specific tab's url in the store.
       setBrowserTabUrl(paneId, tabId, url);
 
+      // The page really navigated — drop any uncommitted address typing so
+      // the bar reflects the actual URL.
+      setAddressDrafts((prev) => {
+        if (!(tabId in prev)) return prev;
+        const next = { ...prev };
+        delete next[tabId];
+        return next;
+      });
+
       setTabStates((prev) => {
         const next = new Map(prev);
         const existing = next.get(tabId);
@@ -652,6 +667,14 @@ export function BrowserPane({ pane, visible = true }: Props) {
   useEffect(() => {
     const url = activeTab?.url;
     if (!url) return;
+    // External navigation (chat "open_url" -> setBrowserUrl) — drop any
+    // uncommitted typing so the bar reflects the actual URL.
+    setAddressDrafts((prev) => {
+      if (!(activeTabId in prev)) return prev;
+      const next = { ...prev };
+      delete next[activeTabId];
+      return next;
+    });
     setTabStates((prev) => {
       const existing = prev.get(activeTabId);
       if (!existing) return prev;
@@ -680,6 +703,13 @@ export function BrowserPane({ pane, visible = true }: Props) {
 
   const navigate = (raw: string) => {
     const next = normalizeUrl(raw);
+    // The address is committed — drop the draft so the bar shows the real URL.
+    setAddressDrafts((prev) => {
+      if (!(activeTabId in prev)) return prev;
+      const nextDrafts = { ...prev };
+      delete nextDrafts[activeTabId];
+      return nextDrafts;
+    });
     setTabStates((prev) => {
       const nextMap = new Map(prev);
       const existing = nextMap.get(activeTabId);
@@ -901,18 +931,14 @@ export function BrowserPane({ pane, visible = true }: Props) {
           ⌂
         </button>
         <input
-          value={activeTabState?.address ?? ""}
+          value={addressDrafts[activeTabId] ?? activeTabState?.address ?? ""}
           onChange={(e) => {
-            setTabStates((prev) => {
-              const next = new Map(prev);
-              const existing = next.get(activeTabId);
-              if (existing) next.set(activeTabId, { ...existing, address: e.target.value });
-              return next;
-            });
+            const value = e.target.value;
+            setAddressDrafts((prev) => ({ ...prev, [activeTabId]: value }));
           }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
-              const addr = tabStates.get(activeTabId)?.address ?? "";
+              const addr = addressDrafts[activeTabId] ?? tabStates.get(activeTabId)?.address ?? "";
               if (addr) navigate(addr);
             }
           }}

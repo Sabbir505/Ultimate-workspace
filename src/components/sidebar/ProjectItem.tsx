@@ -213,6 +213,13 @@ export function ProjectItem({ project }: Props) {
             className="danger"
             onClick={() => {
               setMenu(null);
+              // The backend cascade also deletes every chat nested under the
+              // project, so confirm first — same guard + wording as the
+              // sidebar's row menu (Sidebar.tsx handleRemoveProject).
+              const ok = window.confirm(
+                `Remove project "${project.name}"?\n\nThis also deletes all chats nested under it. This cannot be undone.`,
+              );
+              if (!ok) return;
               void removeProjectById(project.id);
             }}
           >

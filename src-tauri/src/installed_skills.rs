@@ -169,14 +169,19 @@ fn strip_frontmatter(content: &str) -> (String, Option<String>, Option<String>) 
         }
         if in_fm {
             if t == "---" {
-                // Body starts after this line. `lines()` strips the trailing
-                // newline, so advance past the second `---` + its newline.
+                // Body starts after this line's terminating newline. Compute
+                // it from the ACTUAL newline positions: `lines()` strips
+                // `\r\n`, so the old `len + 1`-per-line budget undercounted
+                // CRLF files by one byte per line — the offset landed inside
+                // the `---\r\n` delimiter (frontmatter leaked into skill
+                // bodies) and, with enough frontmatter lines, backed into
+                // multibyte values and panicked on every chat send. The i-th
+                // `\n` is exactly the one terminating line i.
                 body_start = content
-                    .lines()
-                    .take(i + 1)
-                    .map(|l| l.len() + 1)
-                    .sum::<usize>()
-                    .min(content.len());
+                    .match_indices('\n')
+                    .nth(i)
+                    .map(|(pos, _)| pos + 1)
+                    .unwrap_or(content.len());
                 break;
             }
             let unquote = |v: &str| v.trim().trim_matches('"').trim_matches('\'').to_string();
@@ -564,6 +569,52 @@ mod tests {
         assert_eq!(d.as_deref(), Some("PDF tools"));
         let (n2, d2) = parse_frontmatter("# no frontmatter");
         assert!(n2.is_none() && d2.is_none());
+    }
+
+    /// F5 regression: `lines()` strips `\r\n` but the old body offset budgeted
+    /// only `+1` byte per line, so CRLF files landed the offset inside the
+    /// `---\r\n` closing delimiter and the frontmatter leaked into the body.
+    #[test]
+    fn strip_frontmatter_crlf_body_starts_after_delimiter() {
+        let content =
+            "---\r\nname: Test Skill\r\ndescription: Does things\r\n---\r\n\r\n# Body\r\nline two\r\n";
+        let (body, name, desc) = strip_frontmatter(content);
+        assert_eq!(name.as_deref(), Some("Test Skill"));
+        assert_eq!(desc.as_deref(), Some("Does things"));
+        assert_eq!(body, "# Body\r\nline two");
+        assert!(!body.contains("---"), "delimiter leaked into body: {body:?}");
+        assert!(!body.contains("name:"), "frontmatter leaked into body: {body:?}");
+    }
+
+    /// F5 panic case: with 6+ frontmatter lines the old undercount (one byte
+    /// per line) backed the body offset into a multibyte frontmatter value —
+    /// `content[offset..]` panicked on every chat send. Must parse cleanly.
+    #[test]
+    fn strip_frontmatter_crlf_multibyte_frontmatter_does_not_panic() {
+        let content = "---\r\nname: X\r\ndescription: ✓ünïcödé ✓\r\na: 1\r\nb: 2\r\nc: 3\r\nd: 4\r\ne: ✓✓\r\n---\r\n# Body here\r\n";
+        let (body, name, desc) = strip_frontmatter(content);
+        assert_eq!(name.as_deref(), Some("X"));
+        assert_eq!(desc.as_deref(), Some("✓ünïcödé ✓"));
+        assert_eq!(body, "# Body here");
+        assert!(!body.contains("---"), "delimiter leaked into body: {body:?}");
+    }
+
+    /// LF files keep working: body is everything after the closing delimiter.
+    #[test]
+    fn strip_frontmatter_lf_body_is_unchanged() {
+        let content = "---\nname: pdf\n---\n\n# Body";
+        let (body, name, _) = strip_frontmatter(content);
+        assert_eq!(name.as_deref(), Some("pdf"));
+        assert_eq!(body, "# Body");
+    }
+
+    /// Closing delimiter as the last line with no trailing newline → empty body.
+    #[test]
+    fn strip_frontmatter_closing_delimiter_without_trailing_newline() {
+        let content = "---\r\nname: X\r\n---";
+        let (body, name, _) = strip_frontmatter(content);
+        assert_eq!(name.as_deref(), Some("X"));
+        assert_eq!(body, "");
     }
 
     #[test]

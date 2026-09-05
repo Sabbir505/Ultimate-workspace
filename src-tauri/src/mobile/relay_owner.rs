@@ -8,6 +8,21 @@ use super::relay_ws::OwnerMap;
 use super::protocol::DesktopMessage;
 use serde::Deserialize;
 use tauri::Listener;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Process-global guard for the `mobile:session_chat_event` listener. Every
+/// `start_relay` used to register ANOTHER listener, so after N relay restarts
+/// every chat event was forwarded N times and the phone saw every token
+/// duplicated. One registration for the process is correct: the OwnerMap is
+/// `Arc`-shared across restarts, so the original listener keeps routing to
+/// whatever connection currently owns each session.
+static SESSION_CHAT_EVENT_LISTENER_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// Claim the single listener slot. Returns false when it is already claimed.
+pub(crate) fn claim_listener_slot(flag: &AtomicBool) -> bool {
+    flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
 
 /// Payload structure for the `mobile:session_chat_event` Tauri event emitted by
 /// the React side. The relay listens for these and forwards them to the
@@ -166,13 +181,18 @@ pub fn forward_session_chat_event(
 }
 
 /// Start listening for Tauri `mobile:session_chat_event` events and forward them
-/// to the appropriate WebSocket connection via the owner map.
-/// Returns a handle that can be used to stop the listener (currently a no-op
-/// since the listener runs for the lifetime of the relay).
+/// to the appropriate WebSocket connection via the owner map. Idempotent: the
+/// listener is registered once per process (see the guard above) — repeat calls
+/// from relay restarts are no-ops, since the Arc-shared owner map means the
+/// original registration already routes to live connections.
 pub fn start_session_chat_event_listener(
     app: &tauri::AppHandle,
     owner: OwnerMap,
 ) -> Result<(), String> {
+    if !claim_listener_slot(&SESSION_CHAT_EVENT_LISTENER_REGISTERED) {
+        eprintln!("[mobile-relay] session_chat_event listener already registered; skipping");
+        return Ok(());
+    }
     let _app_clone = app.clone();
     app.listen("mobile:session_chat_event", move |event| {
         let payload_str = event.payload();

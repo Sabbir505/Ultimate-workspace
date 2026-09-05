@@ -407,6 +407,13 @@ impl TaskManager {
     }
 }
 
+/// Drain-buffer ceiling for a FOREGROUND shell (D1): each pipe is drained
+/// into a [`crate::util::BoundedTail`] of at most this many bytes, so a
+/// command printing continuously can't accumulate GBs of RAM inside the 120s
+/// window. The 60-line/8KB result cap below still shapes what the model
+/// finally sees — this only bounds what we buffer while draining.
+const SHELL_DRAIN_CAP: usize = 4 * 1024 * 1024;
+
 /// Synchronous shell execution: runs the command to completion and returns
 /// its combined stdout+stderr as a string. Used by the built-in provider path
 /// so the tool result (and therefore the captured output) flows into the turn
@@ -449,23 +456,38 @@ pub fn run_shell_to_completion(
     // Drain both pipes on threads BEFORE waiting: reading only after exit
     // deadlocks once output exceeds the OS pipe buffer (~64 KB), and a
     // deadline-based wait makes the old wait_with_output unusable anyway.
+    // D1: each thread drains into a bounded tail (SHELL_DRAIN_CAP) instead
+    // of `read_to_string`'s unbounded String — a chatty command used to
+    // accumulate GBs of RAM before the 8KB tail cap below ever applied.
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
     let out_thread = std::thread::spawn(move || {
-        let mut buf = String::new();
+        let mut tail = crate::util::BoundedTail::new(SHELL_DRAIN_CAP);
         if let Some(p) = stdout_pipe.as_mut() {
             use std::io::Read;
-            let _ = p.read_to_string(&mut buf);
+            let mut chunk = [0u8; 64 * 1024];
+            loop {
+                match p.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => tail.push(&chunk[..n]),
+                }
+            }
         }
-        buf
+        tail.into_lossy()
     });
     let err_thread = std::thread::spawn(move || {
-        let mut buf = String::new();
+        let mut tail = crate::util::BoundedTail::new(SHELL_DRAIN_CAP);
         if let Some(p) = stderr_pipe.as_mut() {
             use std::io::Read;
-            let _ = p.read_to_string(&mut buf);
+            let mut chunk = [0u8; 64 * 1024];
+            loop {
+                match p.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => tail.push(&chunk[..n]),
+                }
+            }
         }
-        buf
+        tail.into_lossy()
     });
     // Bounded wait: poll try_wait until the child exits or the ceiling hits.
     let deadline = std::time::Instant::now() + timeout;
@@ -1337,6 +1359,30 @@ mod tests {
         let cmd = if cfg!(windows) { "ping -n 30 127.0.0.1" } else { "sleep 30" };
         let out = run_shell_to_completion(cmd, None, Duration::from_secs(1));
         assert!(out.contains("timed out"), "must carry the timeout notice: {out}");
+    }
+
+    #[test]
+    fn foreground_run_tail_caps_chatty_output() {
+        // D1: a fast-printing command (~800KB of stdout) must come back in
+        // the small tail-capped form (60 lines / 8KB + notices), NOT the full
+        // stream — and the drain itself is bounded by SHELL_DRAIN_CAP (the
+        // util::BoundedTail unit tests pin the bounding; this pins the
+        // end-to-end result shape).
+        let cmd = if cfg!(windows) {
+            "for /l %i in (1,1,20000) do @echo 0123456789012345678901234567890123456789"
+        } else {
+            "i=0; while [ $i -lt 20000 ]; do echo 0123456789012345678901234567890123456789; i=$((i+1)); done"
+        };
+        let out = run_shell_to_completion(cmd, None, Duration::from_secs(60));
+        assert!(
+            out.len() < 16_000,
+            "foreground output must be tail-capped, got {} bytes",
+            out.len()
+        );
+        assert!(
+            out.contains("earlier lines truncated"),
+            "early lines must be dropped by the 60-line cap: {out}"
+        );
     }
 }
 

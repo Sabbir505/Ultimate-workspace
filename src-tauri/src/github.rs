@@ -78,8 +78,14 @@ async fn resolve_repo(
             .ok_or_else(|| "project not found".to_string())?
             .path
     };
-    let remote = crate::git::get_remote_url(Path::new(&project_path))
-        .ok_or_else(|| "this project has no git remote".to_string())?;
+    // `git remote get-url` is a blocking subprocess — keep it off the async
+    // runtime worker this command shares with every other in-flight task.
+    let remote = tauri::async_runtime::spawn_blocking(move || {
+        crate::git::get_remote_url(Path::new(&project_path))
+    })
+    .await
+    .map_err(|e| format!("git remote lookup failed: {e}"))?
+    .ok_or_else(|| "this project has no git remote".to_string())?;
     let (owner, repo) = parse_github_remote(&remote)
         .ok_or_else(|| format!("remote `{remote}` is not a GitHub repository"))?;
     let token = crate::connectors::oauth::ensure_valid_access_token(app, "github")
@@ -474,15 +480,21 @@ pub async fn github_draft_pr_text(
             .ok_or_else(|| "project not found".to_string())?
             .path
     };
-    let path = Path::new(&project_path);
+    let path = Path::new(&project_path).to_path_buf();
 
     // Branch diff vs base: stat summary + bounded patch body. Three-dot
-    // (merge-base) diff: what the PR will actually contain.
+    // (merge-base) diff: what the PR will actually contain. Both are blocking
+    // git subprocesses — run them off the async runtime worker.
     let range = format!("{base}...HEAD");
-    let stat = crate::git::run_git_env(path, &["diff", "--stat", &range], &[])
-        .unwrap_or_default();
-    let patch = crate::git::run_git_env(path, &["diff", &range], &[])
-        .unwrap_or_default();
+    let (stat, patch) = tauri::async_runtime::spawn_blocking(move || {
+        let stat = crate::git::run_git_env(&path, &["diff", "--stat", &range], &[])
+            .unwrap_or_default();
+        let patch = crate::git::run_git_env(&path, &["diff", &range], &[])
+            .unwrap_or_default();
+        (stat, patch)
+    })
+    .await
+    .map_err(|e| format!("git diff failed: {e}"))?;
     if patch.trim().is_empty() {
         return Ok(None);
     }

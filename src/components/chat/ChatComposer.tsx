@@ -408,13 +408,20 @@ function QueuedMessageRow({
   const onGripPointerMove = (e: React.PointerEvent<HTMLSpanElement>) => {
     if (dragPointerId.current !== e.pointerId) return;
     // Which row slot is the pointer over RIGHT NOW? Rects are queried live so
-    // the tracking survives the list re-rendering after each reorder.
-    const rows = document.querySelectorAll<HTMLDivElement>(".composer-queue-row");
+    // the tracking survives the list re-rendering after each reorder. The
+    // hit-test is scoped to THIS composer's queue: split view mounts one
+    // composer per pane, and the document-global selector used to see the
+    // other pane's rows too — their (overlapping viewport) rects won the
+    // last-match-wins loop and produced an out-of-range index that silently
+    // no-op'd the reorder.
+    const queue = e.currentTarget.closest<HTMLDivElement>(".composer-queue");
     let target = dragIndex.current;
-    rows.forEach((el, i) => {
-      const r = el.getBoundingClientRect();
-      if (e.clientY >= r.top && e.clientY <= r.bottom) target = i;
-    });
+    if (queue) {
+      queue.querySelectorAll<HTMLDivElement>(".composer-queue-row").forEach((el, i) => {
+        const r = el.getBoundingClientRect();
+        if (e.clientY >= r.top && e.clientY <= r.bottom) target = i;
+      });
+    }
     if (target !== dragIndex.current) {
       const from = dragIndex.current;
       dragIndex.current = target;
@@ -2195,7 +2202,10 @@ export function ChatComposer({
       useChatStore.getState().removeArtifactProposal(sessionId, tempId);
       toastError("Failed to generate artifact", e);
     }
-  }, []);
+    // sessionIdProp: ChatView passes the ACTIVE session id, which changes
+    // without a remount (session switch) — a stale closure here would write
+    // /create messages, proposals and artifacts into the previous chat.
+  }, [sessionIdProp]);
 
   const handleSend = useCallback(() => {
     if (needsModel || agentLocked) return;
@@ -2380,11 +2390,13 @@ export function ChatComposer({
       isLocal: provider === "local_gguf",
       localCtx,
       liveMaxTokens,
-      chatSessionId: activeChatSessionId,
+      // Split view: THIS pane's session, not the globally active one — the
+      // meter/hud must not read the main chat's perf + context telemetry.
+      chatSessionId: effectiveSessionId,
       contextLimitOverride,
       pinnedWindow: pinnedWindow > 0 ? pinnedWindow : undefined,
     }),
-    [usedTokens, model, provider, localCtx, liveMaxTokens, activeChatSessionId, contextLimitOverride, pinnedWindow],
+    [usedTokens, model, provider, localCtx, liveMaxTokens, effectiveSessionId, contextLimitOverride, pinnedWindow],
   );
   // The footer row only exists when something visible lives in it (research
   // chip, attach error, needs-model hint) — otherwise it's an empty strip
@@ -2906,7 +2918,7 @@ export function ChatComposer({
           </div>
         </div>
         <ComposerMetrics
-          chatSessionId={activeChatSessionId}
+          chatSessionId={effectiveSessionId}
           streaming={streaming}
           variant="hud"
           contextMeter={contextMeterProps}

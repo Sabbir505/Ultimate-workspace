@@ -147,7 +147,11 @@ pub async fn tailscale_serve_enable(
         let guard = relay_state.0.port.lock();
         guard.ok_or_else(|| "relay is not running".to_string())?
     };
-    let ts = tailscale::status();
+    // `tailscale status --json` is a blocking subprocess — keep it off the
+    // async runtime worker (same as get_mobile_pairing_info).
+    let ts = tauri::async_runtime::spawn_blocking(tailscale::status)
+        .await
+        .map_err(|e| format!("tailscale probe join failed: {e}"))?;
     if !ts.installed {
         return Err("tailscale CLI not found on PATH".into());
     }
@@ -176,7 +180,11 @@ pub async fn tailscale_serve_enable(
     while std::time::Instant::now() < deadline {
         // Give serve a moment to initialise on first check.
         tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
-        if tailscale::serve_active() {
+        // Each probe spawns `tailscale serve status` — off the runtime worker.
+        let active = tauri::async_runtime::spawn_blocking(tailscale::serve_active)
+            .await
+            .unwrap_or(false);
+        if active {
             // Persist so future get_mobile_pairing_info calls know serve is live.
             let conn = db.0.lock();
             let _ = crate::db::set_setting(&conn, "mobile.tailscale_url", &url);

@@ -32,14 +32,23 @@ let loading: Promise<SyntaxHighlighterComponent> | null = null;
 export async function loadSyntaxHighlighter(): Promise<SyntaxHighlighterComponent> {
   if (cached) return cached;
   if (loading) return loading;
-  loading = import("react-syntax-highlighter").then((mod) => {
-    // The Prism build is the default export of the prism entry; cast through
-    // unknown because the subpath types aren't declared in @types.
-    const C = (mod as unknown as { Prism: SyntaxHighlighterComponent }).Prism;
-    cached = C;
-    loading = null;
-    return C;
-  });
+  loading = import("react-syntax-highlighter")
+    .then((mod) => {
+      // The Prism build is the default export of the prism entry; cast through
+      // unknown because the subpath types aren't declared in @types.
+      const C = (mod as unknown as { Prism: SyntaxHighlighterComponent }).Prism;
+      cached = C;
+      loading = null;
+      return C;
+    })
+    // A rejected import must not stay cached (audit A7): reset `loading`
+    // before propagating so the NEXT call retries the dynamic import instead
+    // of replaying the same failure forever (e.g. a dev-server hiccup while
+    // the chunk was being fetched).
+    .catch((err: unknown) => {
+      loading = null;
+      throw err;
+    });
   return loading;
 }
 

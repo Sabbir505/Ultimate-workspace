@@ -264,11 +264,29 @@ fn pick_free_port() -> u16 {
         .unwrap_or(8915)
 }
 
+/// E5: serializes the whole start sequence (spawn → health-poll → insert).
+/// The old check-then-start spanned several awaits; two concurrent starters
+/// (boot auto-start racing a first mic press) could both pass the "is
+/// running" gate, both spawn a whisper-server, and the second insert would
+/// overwrite the first handle — orphaning a live server process (with a CUDA
+/// context on GPU builds). A `parking_lot` guard cannot be held across the
+/// awaits, so the gate is an async mutex instead; there is exactly one
+/// SttState per process, so a process-global lock is equivalent.
+static START_SEQ: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 /// Spawn + health-wait shared by the `stt_start` command and the lazy-start
 /// path inside `transcribe_audio` (mic press self-heals when binary+model are
-/// present). Assumes nothing is running — callers check `SttState` first.
-/// Returns the port the sidecar came up on.
+/// present). Idempotent (E5): callers race on the [`START_SEQ`] lock, and a
+/// start that finds a live handle under the lock returns ITS port instead of
+/// spawning a second child. Returns the port the sidecar came up on.
 pub async fn start_sidecar_core(db: &DbState, stt: &SttState) -> CmdResult<u16> {
+    let _seq = START_SEQ.lock().await;
+    // Re-check under the sequence lock: a concurrent start may have won the
+    // race and installed a handle while we were queued.
+    if let Some(running) = stt.0.lock().as_ref() {
+        return Ok(running.port);
+    }
     let (dir, default_model, binary) = {
         let conn = db.0.lock();
         (
@@ -304,13 +322,16 @@ pub async fn start_sidecar_core(db: &DbState, stt: &SttState) -> CmdResult<u16> 
     ])
     .stdin(std::process::Stdio::null())
     .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped());
+    .stderr(std::process::Stdio::piped())
+    // E5: a child dropped mid-start (early error return, task abort) must
+    // not linger as an orphaned server holding its port/model memory.
+    .kill_on_drop(true);
     #[cfg(windows)]
     {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to start whisper-server: {e}"))?;
 
@@ -331,13 +352,12 @@ pub async fn start_sidecar_core(db: &DbState, stt: &SttState) -> CmdResult<u16> 
         }
     }
     if !healthy {
-        // Take the handle out under the lock, drop the guard, THEN kill —
-        // the parking_lot guard must never be held across an await (the
-        // command future has to stay Send).
-        let mut handle = stt.0.lock().take();
-        if let Some(h) = handle.as_mut() {
-            let _ = h.child.kill().await;
-        }
+        // The handle was never inserted (and the sequence lock guarantees no
+        // concurrent start inserted one) — kill OUR OWN child directly. The
+        // old take-from-state form killed nothing (state was still None) or
+        // raced into killing another start's healthy child.
+        let _ = child.kill().await;
+        let _ = child.wait().await;
         return Err("whisper-server started but never became reachable (check the model file / binary build)".into());
     }
 
@@ -450,6 +470,106 @@ pub fn stt_set_server_path(db: State<'_, DbState>, path: Option<String>) -> CmdR
             db::set_setting(&conn, SERVER_PATH_KEY, p.trim()).map_err(|e| e.to_string())
         }
         _ => db::set_setting(&conn, SERVER_PATH_KEY, "").map_err(|e| e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn test_db() -> DbState {
+        DbState(Arc::new(Mutex::new(crate::db::mem())))
+    }
+
+    /// A stand-in live handle: a real (harmless, self-terminating) child so
+    /// `SttHandle` can be constructed without a whisper-server binary.
+    fn dummy_handle(port: u16) -> SttHandle {
+        let mut cmd = tokio::process::Command::new(if cfg!(windows) { "ping" } else { "sleep" });
+        if cfg!(windows) {
+            cmd.args(["-n", "30", "127.0.0.1"]);
+        } else {
+            cmd.arg("30");
+        }
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        SttHandle {
+            port,
+            model_path: "dummy.bin".into(),
+            child: cmd.spawn().expect("spawn dummy child"),
+        }
+    }
+
+    #[tokio::test]
+    async fn start_sidecar_core_reuses_running_handle_instead_of_second_spawn() {
+        // E5: a start racing a live sidecar must return the EXISTING port
+        // under the start lock — never spawn a second child whose insert
+        // would orphan the first.
+        let db = test_db();
+        let stt = SttState::default();
+        *stt.0.lock() = Some(dummy_handle(4321));
+
+        let port = start_sidecar_core(&db, &stt).await.expect("reuses live handle");
+        assert_eq!(port, 4321, "must report the RUNNING sidecar's port");
+
+        // Exactly the one handle we installed — no second child was spawned.
+        assert!(stt.0.lock().is_some());
+        stop_sidecar(&stt).await;
+        assert!(stt.0.lock().is_none());
+    }
+
+    #[tokio::test]
+    async fn start_sidecar_core_waits_for_the_start_lock() {
+        // E5: while another starter holds the sequence lock, a second
+        // start_sidecar_core must NOT proceed (the old code would sail
+        // through its own check-then-start). Once the lock frees, it runs
+        // and fails fast — proving it got past the gate exactly once the
+        // serialized section opened. The models dir is pointed at an EMPTY
+        // temp dir so the failure is deterministic and no real sidecar can
+        // be spawned on a machine that has whisper.cpp installed.
+        let empty_models = tempfile::tempdir().expect("temp models dir");
+        let stt = Arc::new(SttState::default());
+
+        let _guard = START_SEQ.lock().await;
+        let db2 = test_db();
+        {
+            let conn = db2.0.lock();
+            db::set_setting(
+                &conn,
+                "local_models.dir",
+                empty_models.path().to_string_lossy().as_ref(),
+            )
+            .unwrap();
+        }
+        let stt2 = Arc::clone(&stt);
+        let mut task = tauri::async_runtime::spawn(async move {
+            start_sidecar_core(&db2, &stt2).await
+        });
+
+        let peek = tokio::time::timeout(std::time::Duration::from_millis(400), &mut task).await;
+        assert!(
+            peek.is_err(),
+            "second start must wait for the sequence lock, got: {:?}",
+            peek
+        );
+
+        drop(_guard);
+        let inner = tokio::time::timeout(std::time::Duration::from_secs(15), task)
+            .await
+            .expect("start completes once the lock is released")
+            .expect("start task did not panic");
+        // With an empty models dir the start fails deterministically at the
+        // setup gates (binary or model missing, depending on the machine) —
+        // it must NOT have succeeded and must not have inserted a handle.
+        let err = inner.expect_err("start must fail on the empty models dir");
+        assert!(
+            err.contains("No speech model installed")
+                || err.contains("whisper-server is not installed"),
+            "unexpected error: {err}"
+        );
+        assert!(stt.0.lock().is_none());
     }
 }
 

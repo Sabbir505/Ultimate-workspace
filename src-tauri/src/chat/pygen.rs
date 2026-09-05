@@ -37,6 +37,10 @@ const DOCGEN_HELPER: &str = include_str!("docgen_helper.py");
 const DOCDESIGN_TOKENS: &str = include_str!("../../../src/lib/docdesign/tokens.json");
 /// Max bytes of the program's own stdout/stderr fed back to the model.
 const MAX_OUTPUT: usize = 8_000;
+/// D5: drain-buffer ceiling per pipe while the generator runs (the log fed
+/// back to the model is capped to [`MAX_OUTPUT`] afterwards; this only bounds
+/// what is held in RAM during the run).
+const GEN_DRAIN_CAP: usize = 512 * 1024;
 
 /// A document produced on disk by the Python program.
 pub struct Generated {
@@ -137,14 +141,25 @@ pub async fn generate(
     }
 
     let run = match cmd.spawn() {
-        Ok(child) => match timeout(GEN_TIMEOUT, child.wait_with_output()).await {
-            Ok(Ok(out)) => Ok(out),
-            Ok(Err(e)) => Err(format!("generation failed: {e}")),
-            Err(_) => Err(format!(
-                "generation timed out after {}s (process killed).",
-                GEN_TIMEOUT.as_secs()
-            )),
-        },
+        Ok(child) => {
+            // D5: drain stdout/stderr into bounded tails instead of
+            // `wait_with_output`'s unbounded buffers — a script stuck in a
+            // print loop used to buffer its entire output inside the timeout
+            // window. Same helper the run_code tool uses.
+            match timeout(
+                GEN_TIMEOUT,
+                super::codeexec::wait_with_bounded_output(child, GEN_DRAIN_CAP),
+            )
+            .await
+            {
+                Ok(Ok((status, stdout, stderr))) => Ok((status, stdout, stderr)),
+                Ok(Err(e)) => Err(format!("generation failed: {e}")),
+                Err(_) => Err(format!(
+                    "generation timed out after {}s (process killed).",
+                    GEN_TIMEOUT.as_secs()
+                )),
+            }
+        }
         Err(e) => Err(format!(
             "could not start the Python interpreter ({python}): {e}. \
              Relay ships a bundled Python; if it is missing or damaged, install \
@@ -154,9 +169,9 @@ pub async fn generate(
 
     let _ = std::fs::remove_dir_all(&tmp);
 
-    let out = run?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let (status, stdout_bytes, stderr_bytes) = run?;
+    let stdout = String::from_utf8_lossy(&stdout_bytes);
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
     let log = truncate(&format!("{stdout}{stderr}"));
 
     // Prefer the exact requested path; otherwise fall back to the newest file
@@ -170,7 +185,7 @@ pub async fn generate(
     match produced {
         Some((path, filename)) => Ok(Generated { path, filename, log }),
         None => {
-            let hint = if !out.status.success() {
+            let hint = if !status.success() {
                 format!("The program exited with an error:\n{log}")
             } else {
                 format!(

@@ -460,18 +460,25 @@ impl ChatManager {
             // Checkpoint baseline: snapshot the pre-turn working tree once per
             // session (checkpoint 0 = pre-chat state, so even the first turn
             // is undoable). Only fires for project-bound git-repo sessions;
-            // failures are logged inside and never fail the turn. Must run
-            // BEFORE the turn starts — the snapshot has to be truly pre-turn.
+            // failures are logged inside and never fail the turn.
+            // D3: this used to run the `git add -A` snapshot INLINE while
+            // HOLDING the global DB mutex, stalling every other DB consumer
+            // for the whole snapshot. It now runs on a detached thread (the
+            // same shape as the turn-end checkpoint below) which takes the
+            // mutex only twice, briefly — repo+gates, then the row insert —
+            // and snapshots lock-free in between. The snapshot still starts
+            // here, before any model I/O, so it remains pre-turn in practice.
             {
-                let conn = db.lock();
-                if let Some(repo) = db::chat_session_repo_path(&conn, &sid) {
-                    crate::checkpoints::maybe_baseline(
-                        Some(&app),
-                        &conn,
-                        &sid,
-                        std::path::Path::new(&repo),
+                let ckpt_db = Arc::clone(&db);
+                let ckpt_sid = sid.clone();
+                let ckpt_app = app.clone();
+                std::thread::spawn(move || {
+                    crate::checkpoints::maybe_baseline_detached(
+                        Some(&ckpt_app),
+                        &ckpt_db,
+                        &ckpt_sid,
                     );
-                }
+                });
             }
             // When tools are enabled and the session has connectors attached,
             // connect to each vendor's remote MCP server now (refreshing the
@@ -644,7 +651,7 @@ impl ChatManager {
                         &chat_req,
                         &api_key,
                         base_url.as_deref(),
-                        &app,
+                        Some(&app),
                         &perf,
                     )
                     .await
@@ -1140,6 +1147,9 @@ pub(crate) async fn compute_docs_retrieval(
 
 /// Runs the full SSE stream lifecycle for one chat request.
 /// Returns the accumulated assistant text and optional usage info.
+/// `app` may be `None` in headless tests (token events then flow only
+/// through `stream_events::try_send`, which is a no-op without a
+/// subscriber).
 pub(crate) async fn run_chat_stream(
     client: &reqwest::Client,
     provider: &dyn ChatProvider,
@@ -1147,7 +1157,7 @@ pub(crate) async fn run_chat_stream(
     req: &ChatRequest,
     api_key: &str,
     base_url: Option<&str>,
-    app: &AppHandle,
+    app: Option<&AppHandle>,
     perf: &turn_perf::TurnPerf,
 ) -> Result<(String, Option<ChatUsage>), String> {
     let request = provider
@@ -1196,7 +1206,13 @@ pub(crate) async fn run_chat_stream(
     // by the parser) still fail immediately.
     let mut parse_failures: u32 = 0;
 
-    loop {
+    // D4: the done flag previously broke only the INNER line loop, so the
+    // outer read kept pulling from the SSE body. Providers that hold the
+    // connection open after `data: [DONE]` then parked here on the 60s
+    // watchdog and FAILED the turn after the answer had already streamed.
+    // The `'read` label makes `[DONE]` terminal for the whole loop; usage is
+    // parsed from the accumulated buffer below either way.
+    'read: loop {
         // B-9: 60s stall watchdog — a silent connection must fail the turn,
         // not park it forever.
         let chunk = match crate::chat::streaming::stream_next_with_watchdog(
@@ -1256,14 +1272,16 @@ pub(crate) async fn run_chat_stream(
                         token: out,
                     };
                     if !crate::chat::stream_events::try_send(chat_session_id, &payload) {
-                        let _ = app.emit("chat:token", payload);
+                        if let Some(app) = app {
+                            let _ = app.emit("chat:token", payload);
+                        }
                     }
                     perf.record_token();
                     perf.maybe_emit_perf();
                 }
                 (_, true) => {
                     // Stream done — usage will be parsed from buffer below.
-                    break;
+                    break 'read;
                 }
                 _ => {}
             }
@@ -1301,7 +1319,9 @@ pub(crate) async fn run_chat_stream(
                 token: out,
             };
             if !crate::chat::stream_events::try_send(chat_session_id, &payload) {
-                let _ = app.emit("chat:token", payload);
+                if let Some(app) = app {
+                    let _ = app.emit("chat:token", payload);
+                }
             }
             perf.record_token();
             perf.maybe_emit_perf();
@@ -1317,7 +1337,9 @@ pub(crate) async fn run_chat_stream(
                 token: "</think>".to_string(),
             };
             if !crate::chat::stream_events::try_send(chat_session_id, &payload) {
-                let _ = app.emit("chat:token", payload);
+                if let Some(app) = app {
+                    let _ = app.emit("chat:token", payload);
+                }
             }
     }
 
@@ -1856,8 +1878,151 @@ mod tests {
     #[test]
     fn strip_hermes_handles_unclosed_block() {
         // A model that kept streaming the call without closing the tag.
-        let content = "Thinking�?� <tool_calls><invoke name=\"web_search\"><parameter name=\"query\">cow";
+        let content = "Thinking\u{fffd} <tool_calls><invoke name=\"web_search\"><parameter name=\"query\">cow";
         let stripped = strip_hermes_tool_calls(content);
-        assert_eq!(stripped, "Thinking�?�");
+        assert_eq!(stripped, "Thinking\u{fffd}");
+    }
+
+    // ---- D4: `data: [DONE]` must end the WHOLE read loop ----
+
+    /// Minimal provider whose wire shape matches the fixture server below:
+    /// OpenAI-style deltas, a usage-only event, then `[DONE]`.
+    struct DoneHangProvider {
+        url: String,
+    }
+
+    #[async_trait::async_trait]
+    impl ChatProvider for DoneHangProvider {
+        fn id(&self) -> ChatProviderId {
+            ChatProviderId::OpenAI
+        }
+        fn default_model(&self) -> &'static str {
+            "gpt-test"
+        }
+        fn build_request(
+            &self,
+            client: &reqwest::Client,
+            _req: &ChatRequest,
+            _api_key: &str,
+            _base_url: Option<&str>,
+        ) -> Result<reqwest::RequestBuilder, String> {
+            Ok(client
+                .post(&self.url)
+                .header("content-type", "application/json")
+                .body("{\"stream\":true}"))
+        }
+        fn parse_sse_chunk(
+            &self,
+            line: &str,
+            buf: &mut String,
+        ) -> Result<(Option<String>, bool), String> {
+            let data = line.strip_prefix("data: ").unwrap_or(line).trim();
+            if data == "[DONE]" {
+                return Ok((None, true));
+            }
+            let v: serde_json::Value =
+                serde_json::from_str(data).map_err(|e| format!("parse: {e}"))?;
+            if v.get("usage").is_some() || v.pointer("/choices/0/delta/content").is_some() {
+                buf.push_str(line);
+                buf.push('\n');
+            }
+            if let Some(c) = v.pointer("/choices/0/delta/content").and_then(|x| x.as_str()) {
+                return Ok((Some(c.to_string()), false));
+            }
+            Ok((None, false))
+        }
+        fn parse_usage(&self, buf: &str) -> Option<ChatUsage> {
+            for line in buf.lines() {
+                let data = line.strip_prefix("data: ").unwrap_or(line);
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(u) = v.get("usage") {
+                        return Some(ChatUsage {
+                            input_tokens: u["prompt_tokens"].as_i64().unwrap_or(0),
+                            output_tokens: u["completion_tokens"].as_i64().unwrap_or(0),
+                            cost_usd: 0.0,
+                            cache_creation_input_tokens: 0,
+                            cache_read_input_tokens: 0,
+                            reasoning_tokens: 0,
+                        });
+                    }
+                }
+            }
+            None
+        }
+    }
+
+    /// One-shot SSE server: streams a delta, a usage event and `[DONE]`, then
+    /// holds the connection OPEN without ever closing it (no Content-Length,
+    /// no EOF) — exactly the provider behavior that used to park the turn on
+    /// the 60s watchdog after the answer had already streamed.
+    async fn spawn_done_then_hang_server() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut sock, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n\
+                        data: {\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n\
+                        data: [DONE]\n\n";
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n";
+            if sock.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            if sock.write_all(body.as_bytes()).await.is_err() {
+                return;
+            }
+            // Hold the socket open; drain (and ignore) anything the client
+            // sends until it goes away.
+            let mut buf = [0u8; 512];
+            loop {
+                match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+        format!("http://127.0.0.1:{port}/v1/chat/completions")
+    }
+
+    #[tokio::test]
+    async fn done_marker_ends_the_whole_read_loop() {
+        let url = spawn_done_then_hang_server().await;
+        let provider = DoneHangProvider { url };
+        let req = ChatRequest {
+            model: "gpt-test".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+                images: Vec::new(),
+            }],
+            max_tokens: Some(16),
+            system: None,
+            effort: None,
+            thinking: None,
+            local_docs_retrieval: Vec::new(),
+            memory_context: None,
+        };
+        let client = reqwest::Client::new();
+        let perf = crate::chat::turn_perf::TurnPerf::new_headless("sid-done");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            run_chat_stream(
+                &client, &provider, "sid-done", &req, "key", None, None, &perf,
+            ),
+        )
+        .await
+        .expect(
+            "run_chat_stream must finish promptly after [DONE] — it must not \
+             park on the stall watchdog because the server holds the body open",
+        );
+        let (text, usage) = result.expect("stream must complete Ok after [DONE]");
+        assert_eq!(text, "hello");
+        let usage = usage.expect("usage must be parsed from the SSE buffer");
+        assert_eq!(usage.input_tokens, 7);
+        assert_eq!(usage.output_tokens, 3);
     }
 }

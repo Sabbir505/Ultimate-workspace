@@ -56,24 +56,38 @@ pub(super) fn fs_list_directory(args: &Value) -> ToolOutcome {
     ToolOutcome::text(items.join("\n"))
 }
 
-/// Read a file's text contents, length-capped.
+/// Read a file's text contents, length-capped. D2: the read itself is
+/// BOUNDED — `Read::take` stops after FS_READ_MAX+1 bytes (the +1 tells
+/// "truncated" apart from "exactly at the cap"), so pointing read_file at a
+/// multi-hundred-MB log or model file no longer loads the whole thing into
+/// RAM. (Dispatch additionally runs this on the blocking pool — see
+/// tools::execute_tool.)
 pub(super) fn fs_read_file(args: &Value) -> ToolOutcome {
     let path = arg_str(args, "path");
     if path.is_empty() {
         return ToolOutcome::text("Error: read_file requires a \"path\".");
     }
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
+    let file = match std::fs::File::open(&path) {
+        Ok(f) => f,
         Err(e) => return ToolOutcome::text(format!("read_file failed: {e}")),
     };
-    let mut text = String::from_utf8_lossy(&bytes).into_owned();
-    let truncated = text.len() > FS_READ_MAX;
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    if let Err(e) = file.take((FS_READ_MAX + 1) as u64).read_to_end(&mut bytes) {
+        return ToolOutcome::text(format!("read_file failed: {e}"));
+    }
+    let truncated = bytes.len() > FS_READ_MAX;
     if truncated {
+        // The byte cap can land mid-UTF-8-sequence (CJK/emoji) — back up to
+        // a char boundary, same discipline the whole-file path used.
         let mut cut = FS_READ_MAX;
-        while !text.is_char_boundary(cut) {
+        while cut > 0 && (bytes[cut] & 0xC0) == 0x80 {
             cut -= 1;
         }
-        text.truncate(cut);
+        bytes.truncate(cut);
+    }
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if truncated {
         text.push_str("\n… (truncated)");
     }
     ToolOutcome::text(text)
@@ -560,6 +574,43 @@ mod tests {
         let out = fs_search_files(&json!({ "path": dir.display().to_string(), "query": "report" }));
         assert!(out.text.contains("report_q1.md"), "{}", out.text);
         assert!(!out.text.contains("notes.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_file_is_bounded_on_a_huge_file() {
+        // D2: a 100MB file must NOT be loaded whole — fs_read_file reads at
+        // most FS_READ_MAX(+1) bytes via Read::take and reports truncation.
+        // `set_len` extends sparsely (zeros), so the fixture stays fast.
+        let dir = std::env::temp_dir().join(format!("relay_fs_huge_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("huge.log");
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(100 * 1024 * 1024).unwrap();
+        drop(f);
+
+        let out = fs_read_file(&json!({ "path": path.display().to_string() }));
+        assert!(out.text.contains("(truncated)"), "must report truncation");
+        assert!(
+            out.text.len() < FS_READ_MAX + 64,
+            "returned text must sit at the cap, got {} bytes",
+            out.text.len()
+        );
+
+        // A multibyte char straddling the byte cut must not corrupt the text:
+        // 31_998 ASCII + one 3-byte char puts the boundary inside it.
+        let path2 = dir.join("cjk.log");
+        let mut body = "x".repeat(FS_READ_MAX - 2);
+        body.push_str("日".repeat(1000).as_str());
+        std::fs::write(&path2, body.as_bytes()).unwrap();
+        let out = fs_read_file(&json!({ "path": path2.display().to_string() }));
+        assert!(out.text.contains("(truncated)"));
+        // The straddling char is dropped WHOLE: the ASCII run ends exactly
+        // where the marker begins (body has no newlines of its own).
+        assert_eq!(out.text.find('\n'), Some(FS_READ_MAX - 2));
+        assert!(out.text.ends_with("\n… (truncated)"));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

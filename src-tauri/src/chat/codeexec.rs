@@ -26,6 +26,57 @@ use tokio::time::timeout;
 const EXEC_TIMEOUT: Duration = Duration::from_secs(20);
 /// Max bytes of combined stdout+stderr returned to the model.
 const MAX_OUTPUT: usize = 12_000;
+/// D5: drain-buffer ceiling per pipe. The final text is capped to
+/// [`MAX_OUTPUT`] anyway; this bounds what we hold in RAM WHILE draining, so
+/// a `print`-looping snippet can't buffer GBs inside the 20s window (the old
+/// `wait_with_output` accumulated the entire stream unbounded).
+const EXEC_DRAIN_CAP: usize = 512 * 1024;
+
+/// D5: bounded replacement for `Child::wait_with_output`. Waits for `child`
+/// while draining stdout/stderr into [`crate::util::BoundedTail`]s (the LAST
+/// `cap` bytes of each pipe), returning (status, stdout tail, stderr tail).
+/// `kill_on_drop` still applies on timeout — dropping this future drops the
+/// child, which kills it.
+pub(crate) async fn wait_with_bounded_output(
+    mut child: tokio::process::Child,
+    cap: usize,
+) -> std::io::Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>)> {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (out_tail, err_tail, status) = tokio::join!(
+        async {
+            match stdout {
+                Some(p) => drain_pipe_bounded(p, cap).await,
+                None => Vec::new(),
+            }
+        },
+        async {
+            match stderr {
+                Some(p) => drain_pipe_bounded(p, cap).await,
+                None => Vec::new(),
+            }
+        },
+        child.wait(),
+    );
+    status.map(|s| (s, out_tail, err_tail))
+}
+
+/// Drain one child pipe into a bounded tail, chunk by chunk.
+async fn drain_pipe_bounded<R: tokio::io::AsyncRead + Unpin>(
+    mut pipe: R,
+    cap: usize,
+) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut tail = crate::util::BoundedTail::new(cap);
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        match pipe.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => tail.push(&chunk[..n]),
+        }
+    }
+    tail.into_bytes()
+}
 
 /// True if the host currently enforces a real sandbox around `run_code`.
 /// Logged once per process so the user (and our own audits) can see when we
@@ -161,14 +212,21 @@ pub async fn run_code(language: &str, code: &str) -> String {
     }
 
     let result = match cmd.spawn() {
-        Ok(child) => match timeout(EXEC_TIMEOUT, child.wait_with_output()).await {
-            Ok(Ok(out)) => Ok(out),
-            Ok(Err(e)) => Err(format!("Error: execution failed: {e}")),
-            Err(_) => Err(format!(
-                "Error: execution timed out after {}s (process killed).",
-                EXEC_TIMEOUT.as_secs()
-            )),
-        },
+        Ok(child) => {
+            match timeout(
+                EXEC_TIMEOUT,
+                wait_with_bounded_output(child, EXEC_DRAIN_CAP),
+            )
+            .await
+            {
+                Ok(Ok((status, stdout, stderr))) => Ok((status, stdout, stderr)),
+                Ok(Err(e)) => Err(format!("Error: execution failed: {e}")),
+                Err(_) => Err(format!(
+                    "Error: execution timed out after {}s (process killed).",
+                    EXEC_TIMEOUT.as_secs()
+                )),
+            }
+        }
         Err(e) => Err(format!(
             "Error: could not start {program} (is it installed?): {e}"
         )),
@@ -183,10 +241,10 @@ pub async fn run_code(language: &str, code: &str) -> String {
     };
     match result {
         Err(msg) => format!("{msg}{sandbox_note}"),
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let code = out.status.code();
+        Ok((status, stdout_bytes, stderr_bytes)) => {
+            let stdout = String::from_utf8_lossy(&stdout_bytes);
+            let stderr = String::from_utf8_lossy(&stderr_bytes);
+            let code = status.code();
             let mut s = String::new();
             s.push_str(&format!("Exit code: {}\n", code.map(|c| c.to_string()).unwrap_or_else(|| "signal".into())));
             if !stdout.trim().is_empty() {
@@ -251,5 +309,82 @@ mod tests {
             "import time\ntime.sleep(60)",
         ));
         assert!(out.contains("timed out"), "got: {out}");
+    }
+
+    #[test]
+    fn print_loop_output_is_capped() {
+        // D5: a print-looping snippet must come back as the small capped
+        // result (Exit code + ≤ MAX_OUTPUT tail), whatever the interpreter
+        // streams at us. Soft-skips when no Python is installed (the bounded
+        // drain itself is pinned by wait_with_bounded_output_tails_both_pipes
+        // and the util::BoundedTail unit tests).
+        if which_python_missing() {
+            eprintln!("skipping: no Python interpreter on this machine");
+            return;
+        }
+        // ~4MB of stdout — far past both the drain cap and MAX_OUTPUT.
+        let code = "for i in range(50000):\n    print('x' * 80)\n";
+        let out = tauri::async_runtime::block_on(run_code("python", code));
+        assert!(out.contains("Exit code: 0"), "got: {out}");
+        assert!(
+            out.len() < MAX_OUTPUT + 2_000,
+            "output must be capped, got {} bytes",
+            out.len()
+        );
+        assert!(
+            out.contains("output truncated"),
+            "overflowing output must say so: {}",
+            &out[..out.len().min(200)]
+        );
+    }
+
+    /// True when no Python answers (mirrors python_runtime's probe order).
+    fn which_python_missing() -> bool {
+        let candidates: &[&str] = if cfg!(windows) {
+            &["py", "python"]
+        } else {
+            &["python3", "python"]
+        };
+        !candidates.iter().any(|c| {
+            std::process::Command::new(c)
+                .arg("-c")
+                .arg("print(1)")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        })
+    }
+
+    #[test]
+    fn wait_with_bounded_output_tails_both_pipes() {
+        // Direct check of the bounded wait on a script that shouts on BOTH
+        // pipes (uses the shell so no Python dependency).
+        let mut cmd = Command::new(if cfg!(windows) { "cmd.exe" } else { "sh" });
+        cmd.arg(if cfg!(windows) { "/C" } else { "-c" });
+        let script: &str = if cfg!(windows) {
+            "for /l %i in (1,1,1000) do @(echo out-stream-line & echo err-stream-line 1>&2)"
+        } else {
+            "i=0; while [ $i -lt 1000 ]; do echo out-stream-line; echo err-stream-line 1>&2; i=$((i+1)); done"
+        };
+        cmd.arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let child = cmd.spawn().expect("spawn shell");
+        let (status, out, err) = tauri::async_runtime::block_on(
+            wait_with_bounded_output(child, 4096),
+        )
+        .expect("wait succeeds");
+        assert!(status.success());
+        let out = String::from_utf8_lossy(&out);
+        let err = String::from_utf8_lossy(&err);
+        assert!(out.len() <= 4096, "stdout tail bounded, got {}", out.len());
+        assert!(err.len() <= 4096, "stderr tail bounded, got {}", err.len());
+        // The TAIL is what's kept: the LAST lines must be present.
+        assert!(out.contains("out-stream-line"), "stdout tail: {out}");
+        assert!(err.contains("err-stream-line"), "stderr tail: {err}");
     }
 }

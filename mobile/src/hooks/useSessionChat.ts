@@ -229,6 +229,10 @@ export function useSessionChat(sessionId: string | null) {
   const send = useCallback(
     (text: string, attachments: SessionChatAttachment[] = []) => {
       if (!sessionId) return;
+      // Send FIRST: if the relay socket isn't open the frame is dropped, and
+      // we must not flip into the optimistic streaming state — no tokens or
+      // Done/Error event would ever arrive to clear it (stuck streaming).
+      const sent = sendSessionChat(sessionId, text, attachments);
       // Optimistically show the user message immediately so the UI feels
       // responsive before the desktop echoes it back via GetSessionMessages.
       const userMsg: SessionMessageRecord = {
@@ -237,8 +241,13 @@ export function useSessionChat(sessionId: string | null) {
         content: text,
         created_at: Math.floor(Date.now() / 1000),
       };
-      setState((s) => ({ ...s, messages: [userMsg, ...s.messages], streaming: true, streamingContent: '' }));
-      sendSessionChat(sessionId, text, attachments);
+      setState((s) => ({
+        ...s,
+        messages: [userMsg, ...s.messages],
+        streaming: sent,
+        streamingContent: '',
+        error: sent ? s.error : 'Not connected to desktop — message not sent. Reconnect and try again.',
+      }));
     },
     [sessionId, sendSessionChat],
   );

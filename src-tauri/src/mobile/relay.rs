@@ -194,8 +194,13 @@ pub async fn start_relay(
     // Wrapped in Arc so the future can own a reference to it (avoids borrow
     // checker issues when storing the accept future in a local variable).
     // Best-effort: if this bind fails (interface vanished between the status
-    // call and now) we keep loopback-only rather than fail.
-    let ts_ip = super::tailscale::status().tailscale_ip;
+    // call and now) we keep loopback-only rather than fail. The status probe
+    // spawns the `tailscale` CLI (seconds against a cold daemon) — run it off
+    // the async runtime like get_mobile_pairing_info does.
+    let ts_ip = tauri::async_runtime::spawn_blocking(super::tailscale::status)
+        .await
+        .ok()
+        .and_then(|ts| ts.tailscale_ip);
     let tailnet_listener = match ts_ip {
         Some(ip) => TcpListener::bind(format!("{ip}:{port}")).await.ok().map(Arc::new),
         None => None,
@@ -791,41 +796,24 @@ async fn handle_connection(
                         }
                         next = read.next() => {
                             match next {
-                                Some(Ok(Message::Text(t))) => {
-                                    match serde_json::from_str::<MobileMessage>(&t) {
-                                        Ok(MobileMessage::CancelChatTurn { chat_session_id }) => {
-                                            eprintln!("[mobile-relay] CancelChatTurn mid-turn (B-26)");
-                                            chat_mgr.cancel(&chat_session_id);
-                                            let resp = DesktopMessage::ChatDone {
-                                                chat_session_id,
-                                                usage: None,
-                                            };
-                                            let _ = send_msg(&write, &resp).await;
-                                        }
-                                        Ok(_) => {
-                                            // One turn at a time: queueing other
-                                            // commands mid-stream would need the
-                                            // full dispatch loop reentrant; tell
-                                            // the phone honestly.
-                                            let err = DesktopMessage::ChatError {
-                                                chat_session_id: "unknown".to_string(),
-                                                error: "busy: a chat turn is in flight".into(),
-                                            };
-                                            let _ = send_msg(&write, &err).await;
-                                        }
-                                        Err(e) => {
-                                            let err = DesktopMessage::ChatError {
-                                                chat_session_id: "unknown".to_string(),
-                                                error: format!("malformed request: {e}"),
-                                            };
-                                            let _ = send_msg(&write, &err).await;
-                                        }
-                                    }
+                                Some(Ok(msg)) => {
+                                    // Decrypts E2E Binary frames (advancing the
+                                    // inbound counter), handles CancelChatTurn,
+                                    // answers everything else with the busy
+                                    // error. A mid-turn CancelChatTurn used to
+                                    // ride an encrypted Binary frame straight
+                                    // into the catch-all `Some(Ok(_)) => {}` —
+                                    // the stop button did nothing on E2E
+                                    // connections AND the stranded counter broke
+                                    // decryption of every later frame.
+                                    handle_mid_turn_frame(
+                                        msg,
+                                        used_e2e,
+                                        &|sid: &str| chat_mgr.cancel(sid),
+                                        &write,
+                                    )
+                                    .await;
                                 }
-                                Some(Ok(Message::Ping(p))) => {
-                                    let _ = write.lock().await.sink.send(Message::Pong(p)).await;
-                                }
-                                Some(Ok(_)) => {}
                                 Some(Err(e)) => {
                                     turn.abort();
                                     return Err(format!("ws read failed: {e}"));
@@ -868,12 +856,7 @@ async fn handle_connection(
                 // M11: skip re-sending a byte-identical screen — the phone
                 // polls this on a timer and terminal screens are static far
                 // more often than not.
-                let hash = {
-                    use std::hash::{BuildHasher, Hasher};
-                    let mut h = std::hash::RandomState::new().build_hasher();
-                    h.write(text.as_bytes());
-                    h.finish()
-                };
+                let hash = transcript_hash(&text);
                 let unchanged = transcript_hashes.get(&session_id) == Some(&hash);
                 if !unchanged {
                     transcript_hashes.insert(session_id.clone(), hash);
@@ -1206,6 +1189,106 @@ async fn send_msg(
     msg: &DesktopMessage,
 ) -> Result<(), String> {
     super::relay_ws::send_ws_message(write, msg).await
+}
+
+/// Stable per-process digest of a transcript screen (M11 dedup). Uses
+/// `DefaultHasher` (fixed SipHash keys), NOT a fresh `RandomState` — a new
+/// `RandomState` per call gave every poll a different digest for the same
+/// screen, so the `unchanged` dedup could never fire.
+pub(crate) fn transcript_hash(text: &str) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    h.write(text.as_bytes());
+    h.finish()
+}
+
+/// Handle ONE inbound frame read in the mid-turn select loop (B-26): decrypt
+/// E2E `Binary` frames (advancing the inbound counter — skipping that
+/// stranded the counter and broke decryption of every later frame), act on
+/// `CancelChatTurn`, answer everything else with the busy error. `on_cancel`
+/// receives the chat session id to cancel (production passes
+/// `ChatManager::cancel`; tests record the call).
+pub(crate) async fn handle_mid_turn_frame(
+    msg: Message,
+    used_e2e: bool,
+    on_cancel: &(dyn Fn(&str) + Sync),
+    write: &super::relay_ws::SharedWsWrite,
+) {
+    let text = match msg {
+        Message::Text(t) => {
+            if used_e2e {
+                // Main-loop parity (B-24): plaintext command frames on an
+                // E2E connection are a protocol violation.
+                let err = DesktopMessage::ChatError {
+                    chat_session_id: "pair".into(),
+                    error: "protocol violation: plaintext frame on an E2E connection".into(),
+                };
+                let _ = send_msg(write, &err).await;
+                return;
+            }
+            t
+        }
+        Message::Binary(b) => {
+            // E2E frames must be decrypted mid-turn too. The inbound counter
+            // advances for every Binary frame — decrypt success or not — so
+            // it stays in lockstep with the phone's send counter.
+            let plain = match super::relay_ws::decrypt_binary(write, &b).await {
+                Some(p) => p,
+                None => {
+                    let err = DesktopMessage::ChatError {
+                        chat_session_id: "unknown".to_string(),
+                        error: "undecryptable frame (E2E not enabled or tag mismatch)".into(),
+                    };
+                    let _ = send_msg(write, &err).await;
+                    return;
+                }
+            };
+            match String::from_utf8(plain) {
+                Ok(s) => s,
+                Err(_) => {
+                    let err = DesktopMessage::ChatError {
+                        chat_session_id: "unknown".to_string(),
+                        error: "binary frame was not valid UTF-8".into(),
+                    };
+                    let _ = send_msg(write, &err).await;
+                    return;
+                }
+            }
+        }
+        Message::Ping(p) => {
+            let _ = write.lock().await.sink.send(Message::Pong(p)).await;
+            return;
+        }
+        _ => return,
+    };
+
+    match serde_json::from_str::<MobileMessage>(&text) {
+        Ok(MobileMessage::CancelChatTurn { chat_session_id }) => {
+            eprintln!("[mobile-relay] CancelChatTurn mid-turn (B-26)");
+            on_cancel(&chat_session_id);
+            let resp = DesktopMessage::ChatDone {
+                chat_session_id,
+                usage: None,
+            };
+            let _ = send_msg(write, &resp).await;
+        }
+        Ok(_) => {
+            // One turn at a time: queueing other commands mid-stream would
+            // need the full dispatch loop reentrant; tell the phone honestly.
+            let err = DesktopMessage::ChatError {
+                chat_session_id: "unknown".to_string(),
+                error: "busy: a chat turn is in flight".into(),
+            };
+            let _ = send_msg(write, &err).await;
+        }
+        Err(e) => {
+            let err = DesktopMessage::ChatError {
+                chat_session_id: "unknown".to_string(),
+                error: format!("malformed request: {e}"),
+            };
+            let _ = send_msg(write, &err).await;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

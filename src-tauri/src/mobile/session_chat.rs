@@ -91,7 +91,10 @@ pub fn fetch_page(
         None => return Ok((vec![], false)), // No session yet, return empty.
     };
 
-    // Fetch limit+1 rows to detect if there's more.
+    // Fetch limit+1 rows to detect if there's more. Clamp the phone-controlled
+    // limit first: u32::MAX used to overflow the `+1` (panic in debug builds,
+    // wrap in release) instead of yielding a bounded page.
+    let limit = limit.min(200);
     let limit_plus_one = (limit + 1) as i64;
     let mut stmt = db.prepare(
         "SELECT id, role, content, created_at, input_tokens, output_tokens, cost_usd

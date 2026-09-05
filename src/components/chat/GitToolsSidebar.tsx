@@ -246,7 +246,10 @@ export function GitToolsSidebar() {
           debouncedPoll();
         }
       });
-      if (!cancelled) unlisten = u;
+      // Unmount won the race: the subscription resolved after cleanup — call
+      // the unlisten NOW, or this listener leaks for the app's lifetime.
+      if (cancelled) u();
+      else unlisten = u;
     };
     void setup();
 

@@ -21,6 +21,7 @@ import {
   type MemoryStatusView,
 } from "../../lib/ipc";
 import { shortModelName } from "../../lib/modelLabel";
+import { toastError } from "../../lib/ipc";
 import { Modal } from "../common/Modal";
 
 /**
@@ -42,6 +43,11 @@ const KIND_LABELS: Record<string, string> = {
 };
 
 const STATUS_FILTERS = ["active", "superseded", "retired", "flagged"] as const;
+
+/** Debounce for the free-text extraction-model input: it persists per
+ *  keystroke otherwise, and rapid KV writes can land OUT OF ORDER (a shorter
+ *  intermediate value overwriting the final one). */
+const EXTRACT_MODEL_DEBOUNCE_MS = 400;
 
 /** Agent sources for the extraction-model picker — the SAME groups and ids
  *  the Automations form offers (AGENT_OPTIONS there), so both surfaces read
@@ -197,9 +203,14 @@ export function MemoryPanel() {
 
   const toggle = async (enabled: boolean) => {
     setBusy(true);
-    await memorySetEnabled(enabled);
-    await refresh();
-    setBusy(false);
+    try {
+      await memorySetEnabled(enabled);
+      await refresh();
+    } catch (err) {
+      toastError("Couldn't change the memory setting", err);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const saveDoc = async () => {
@@ -232,11 +243,30 @@ export function MemoryPanel() {
     }
   };
 
-  const changeExtractModel = async (value: string) => {
+  // Pending debounced persist for the free-text model input (see
+  // changeExtractModel).
+  const extractPersistTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (extractPersistTimer.current !== null) window.clearTimeout(extractPersistTimer.current);
+    },
+    [],
+  );
+
+  const changeExtractModel = (value: string) => {
     setExtractModel(value);
+    // Debounce the persist (keystroke-driven input — see the constant above).
+    if (extractPersistTimer.current !== null) window.clearTimeout(extractPersistTimer.current);
+    extractPersistTimer.current = window.setTimeout(() => {
+      extractPersistTimer.current = null;
+      void persistExtractModel(value.trim());
+    }, EXTRACT_MODEL_DEBOUNCE_MS);
+  };
+
+  const persistExtractModel = async (value: string) => {
     setBusy(true);
     try {
-      await memorySetExtractModel(value.trim());
+      await memorySetExtractModel(value);
       setExtractModelSaved(true);
       window.setTimeout(() => setExtractModelSaved(false), 2500);
     } finally {
@@ -257,6 +287,12 @@ export function MemoryPanel() {
    *  never overwrites the saved pick — the inline warning explains. */
   const applyExtractOverride = async (agent: string, model: string) => {
     if (extractAgentGroup(agent) === "harness") return;
+    // Cancel any pending debounced model write — its agent::model pair could
+    // otherwise land AFTER this override and resurrect a stale pick.
+    if (extractPersistTimer.current !== null) {
+      window.clearTimeout(extractPersistTimer.current);
+      extractPersistTimer.current = null;
+    }
     const value = agent === "chat" || !model ? "" : `${agent}::${model}`;
     setBusy(true);
     try {
@@ -293,28 +329,43 @@ export function MemoryPanel() {
 
   const retire = async (id: string) => {
     setBusy(true);
-    await memoryDelete(id);
-    await refresh();
-    setBusy(false);
+    try {
+      await memoryDelete(id);
+      await refresh();
+    } catch (err) {
+      toastError("Couldn't forget that memory", err);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const saveEdit = async () => {
     if (!editing) return;
     setBusy(true);
-    await memoryUpdate(editing.id, editing.content);
-    setEditing(null);
-    await refresh();
-    setBusy(false);
+    try {
+      await memoryUpdate(editing.id, editing.content);
+      setEditing(null);
+      await refresh();
+    } catch (err) {
+      toastError("Couldn't save the edit", err);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const add = async () => {
     const content = newFact.trim();
     if (!content) return;
     setBusy(true);
-    await memoryCreate(content, newKind);
-    setNewFact("");
-    await refresh();
-    setBusy(false);
+    try {
+      await memoryCreate(content, newKind);
+      setNewFact("");
+      await refresh();
+    } catch (err) {
+      toastError("Couldn't add the memory", err);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const purgeAll = async () => {

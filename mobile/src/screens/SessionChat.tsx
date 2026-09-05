@@ -63,7 +63,7 @@ export default function SessionChat() {
   useTheme();
   const c = themeMod.colors;
 
-  const { providers } = useRelay();
+  const { providers, connected } = useRelay();
   const chat = useSessionChat(sessionId);
 
   const [renameOpen, setRenameOpen] = useState(false);
@@ -275,13 +275,15 @@ export default function SessionChat() {
         {/* Transient status banner. */}
         {chat.status ? <StatusBanner message={chat.status} /> : null}
 
-        {/* Composer. */}
+        {/* Composer — hard-gated on the relay connection: sending while
+            disconnected would only surface an error, so disable up front. */}
         <ChatComposer
           onSend={chat.send}
           onCancel={chat.cancel}
           streaming={chat.streaming}
+          disabled={!connected}
           modelHint={modelHint}
-          placeholder="Send a message…"
+          placeholder={connected ? 'Send a message…' : 'Not connected to desktop…'}
         />
 
         {/* Rename modal. */}

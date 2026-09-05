@@ -5363,7 +5363,12 @@ fn harness_oneshot_blocking(
 
     let text = parse_oneshot_text(harness_id, &raw)?;
     if text.trim().is_empty() {
-        return Err(format!("{harness_id} returned an empty response (raw: {})", &raw[..raw.len().min(200)]));
+        // Char-safe truncation: byte slicing panics when offset 200 lands
+        // mid-multibyte-char (CJK/emoji CLI output).
+        return Err(format!(
+            "{harness_id} returned an empty response (raw: {})",
+            crate::util::truncate_chars(&raw, 200)
+        ));
     }
     Ok(text)
 }
@@ -5376,7 +5381,9 @@ fn harness_oneshot_blocking(
 /// OpenCode (run-mode json events): text parts carry FULL snapshots, so only
 /// each part's new suffix is appended — mirrors handle_opencode_event.
 fn parse_oneshot_text(harness_id: &str, raw: &str) -> Result<String, String> {
-    let head = |n: usize| &raw[..raw.len().min(n)];
+    // Char-safe head truncation (byte slicing panics when the cut lands
+    // mid-multibyte-char).
+    let head = |n: usize| crate::util::truncate_chars(raw, n);
     match harness_id {
         "claude_code" => {
             let v: Value = serde_json::from_str(raw.trim())
@@ -7344,5 +7351,32 @@ mod tests {
         let db = Arc::new(parking_lot::Mutex::new(conn));
         let dirs = turn_watch_dirs(None, &db);
         assert_eq!(dirs.len(), 1, "{dirs:?}");
+    }
+
+    /// F4 regression: the raw-stdout preview was sliced at BYTE 200
+    /// (`&raw[..raw.len().min(200)]`), which panics when a multibyte char
+    /// straddles the cut — routine for CJK/emoji CLI output. The truncation
+    /// must be char-safe and still embed the truncated raw in the error.
+    #[test]
+    fn parse_oneshot_text_multibyte_straddling_byte_200_does_not_panic() {
+        let mut raw = "x".repeat(199);
+        raw.push('日'); // 3-byte char spanning bytes 199..202 — byte-cut at 200 panicked
+        raw.push_str(" not json");
+        let err = parse_oneshot_text("claude_code", &raw).unwrap_err();
+        assert!(err.contains("unparseable claude output"), "{err}");
+        // Truncation is char-safe: the straddling char survives in the preview.
+        assert!(err.contains('日'), "{err}");
+    }
+
+    /// Same contract for the `result`-missing path (head(200) in the
+    /// ok_or_else): valid JSON, multibyte char at the 200-byte boundary.
+    #[test]
+    fn parse_oneshot_text_missing_result_preview_is_char_safe() {
+        // 8 bytes of prefix + 190 x + 3-byte 日 at bytes 198..201: a byte-cut
+        // at 200 lands mid-char.
+        let raw = format!("{{\"pad\":\"{}日\"}}", "x".repeat(190));
+        let err = parse_oneshot_text("claude_code", &raw).unwrap_err();
+        assert!(err.contains("missing `result`"), "{err}");
+        assert!(err.contains('日'), "{err}");
     }
 }

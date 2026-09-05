@@ -89,6 +89,12 @@ export interface ModelMarketProps {
 export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProps) {
   const [settings, setSettings] = useState<MarketSettings | null>(null);
   const [entries, setEntries] = useState<CatalogEntry[]>([]);
+  // Latest catalog for the download-progress handler: the subscription effect
+  // keeps ONE listener across parent renders, so its closure would otherwise
+  // capture the entries snapshot from its creation render ([]) and the
+  // auto-mmproj lookup below would never find the finished card.
+  const entriesRef = useRef(entries);
+  entriesRef.current = entries;
   const [query, setQuery] = useState("");
   const [uiSort, setUiSort] = useState<UiSortKey>("trending");
   // Backend-facing sort: the "fits" pseudo-entry fetches with "trending" and
@@ -185,7 +191,7 @@ export function ModelMarket({ onDownloadComplete, localModels }: ModelMarketProp
           if (sep > 0) {
             const repoId = p.id.slice(0, sep);
             const filename = p.id.slice(sep + 2);
-            const card = entries.find(
+            const card = entriesRef.current.find(
               (e) => e.id === p.id || (e.repoId === repoId && e.filename === filename),
             );
             if (card?.vision) {

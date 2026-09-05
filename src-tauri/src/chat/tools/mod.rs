@@ -1098,7 +1098,13 @@ pub async fn execute_tool(
         // the user). `read_only` mode additionally strips the mutating tools
         // from the schema so the model can't even call them.
         LIST_DIRECTORY => fs_list_directory(args),
-        READ_FILE => fs_read_file(args),
+        // D2: read_file used to load the ENTIRE file inline on the async
+        // runtime (a big read stalls every tokio worker — chat streams, PTY,
+        // IPC), and edit_file does a whole-file read-modify-write. Both now
+        // run on the dedicated blocking pool like the recursive scans below;
+        // read_file is ALSO byte-bounded inside fs_read_file. Neither tool
+        // takes locks, so the routing changes no locking semantics.
+        READ_FILE => run_blocking_tool(args, fs_read_file).await,
         // The two recursive scans walk unbounded trees (search_content reads
         // up to 5 MiB per file) — running them inline on the async runtime
         // stalls the tokio worker and delays every other task (chat streams,
@@ -1106,7 +1112,7 @@ pub async fn execute_tool(
         SEARCH_FILES => run_blocking_tool(args, fs_search_files).await,
         SEARCH_CONTENT => run_blocking_tool(args, fs_search_content).await,
         WRITE_FILE => fs_write_file(args),
-        EDIT_FILE => fs_edit_file(args),
+        EDIT_FILE => run_blocking_tool(args, fs_edit_file).await,
         DELETE_FILE => fs_delete_file(args),
         MOVE_FILE => fs_move_file(args),
         COPY_FILE => fs_copy_file(args),

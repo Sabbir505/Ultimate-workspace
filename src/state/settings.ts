@@ -186,6 +186,10 @@ interface SettingsState {
   rememberBrowserUrl: (projectId: string | null, url: string) => void;
   /** Persist the full tab state for a browser pane (on app close / pane close). */
   persistBrowserPaneTabs: (paneId: string, tabs: PersistedTabData[], activeTabIndex: number) => void;
+  /** Drop a pane's persisted tab state — called on every pane-removal path
+   *  (paneIds are fresh UUIDs, so a closed pane's entry would otherwise grow
+   *  the persisted settings blob without bound). */
+  forgetBrowserPaneTabs: (paneId: string) => void;
   /** Restore saved tab state for a browser pane (returns null if nothing saved). */
   restoreBrowserPaneTabs: (paneId: string) => { tabs: PersistedTabData[]; activeTabIndex: number } | null;
   setLocalCompactionThreshold: (threshold: number) => void;
@@ -210,13 +214,20 @@ interface SettingsState {
   setMonoFont: (id: string) => void;
 }
 
+/** Fire-and-forget persistence write. The in-memory store is authoritative,
+ *  so a failed backend write is swallowed instead of surfacing as an
+ *  unhandled rejection (audit A6). */
+function persistSetting(key: string, value: string): void {
+  void setSetting(key, value).catch(() => {});
+}
+
 function persistKeybindings(map: KeybindingMap) {
   // Only persist overrides that differ from defaults, keeping the stored blob small.
   const overrides: Partial<KeybindingMap> = {};
   (Object.keys(map) as KeybindingAction[]).forEach((action) => {
     if (map[action] !== DEFAULT_KEYBINDINGS[action]) overrides[action] = map[action];
   });
-  void setSetting(K_KEYBINDINGS, JSON.stringify(overrides));
+  persistSetting(K_KEYBINDINGS, JSON.stringify(overrides));
 }
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
@@ -403,52 +414,52 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     // Switching the base mode deselects the custom overlay (the user
     // explicitly picked a built-in theme).
     set({ theme, customThemeId: null });
-    void setSetting(K_THEME, theme);
-    void setSetting(K_CUSTOM_THEME_ID, "");
+    persistSetting(K_THEME, theme);
+    persistSetting(K_CUSTOM_THEME_ID, "");
   },
 
   setCustomTheme: (id) => {
     set({ customThemeId: id });
-    void setSetting(K_CUSTOM_THEME_ID, id ?? "");
+    persistSetting(K_CUSTOM_THEME_ID, id ?? "");
   },
 
   importCustomTheme: (theme) => {
     const customThemes = [...get().customThemes.filter((t) => t.id !== theme.id), theme];
     set({ customThemes });
-    void setSetting(K_THEMES, JSON.stringify(customThemes));
+    persistSetting(K_THEMES, JSON.stringify(customThemes));
   },
 
   deleteCustomTheme: (id) => {
     const customThemes = get().customThemes.filter((t) => t.id !== id);
     const wasActive = get().customThemeId === id;
     set({ customThemes, customThemeId: wasActive ? null : get().customThemeId });
-    void setSetting(K_THEMES, JSON.stringify(customThemes));
-    if (wasActive) void setSetting(K_CUSTOM_THEME_ID, "");
+    persistSetting(K_THEMES, JSON.stringify(customThemes));
+    if (wasActive) persistSetting(K_CUSTOM_THEME_ID, "");
   },
 
   setDnd: (dnd) => {
     set({ dnd });
-    void setSetting(K_DND, String(dnd));
+    persistSetting(K_DND, String(dnd));
   },
 
   setNotifySound: (on) => {
     set({ notifySound: on });
-    void setSetting(K_NOTIFY_SOUND, String(on));
+    persistSetting(K_NOTIFY_SOUND, String(on));
   },
 
   setWatchMode: (watchMode) => {
     set({ watchMode });
-    void setSetting(K_WATCH_MODE, String(watchMode));
+    persistSetting(K_WATCH_MODE, String(watchMode));
   },
 
   setWorktreeDefault: (enabled) => {
     set({ worktreeDefault: enabled });
-    void setSetting(K_WORKTREE_DEFAULT, String(enabled));
+    persistSetting(K_WORKTREE_DEFAULT, String(enabled));
   },
 
   setCheckpointsEnabled: (enabled) => {
     set({ checkpointsEnabled: enabled });
-    void setSetting(K_CHECKPOINTS_ENABLED, String(enabled));
+    persistSetting(K_CHECKPOINTS_ENABLED, String(enabled));
   },
 
   setKeybinding: (action, accelerator) => {
@@ -481,7 +492,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         : get().browserUrls.perProject,
     };
     set({ browserUrls });
-    void setSetting(K_BROWSER_URLS, JSON.stringify(browserUrls));
+    persistSetting(K_BROWSER_URLS, JSON.stringify(browserUrls));
   },
 
   persistBrowserPaneTabs: (paneId, tabs, activeTabIndex) => {
@@ -491,7 +502,18 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     };
     const state: PersistedBrowserPaneState = { paneTabs };
     set({ browserPaneState: state });
-    void setSetting(K_BROWSER_PANE_STATE, JSON.stringify(state));
+    persistSetting(K_BROWSER_PANE_STATE, JSON.stringify(state));
+  },
+
+  forgetBrowserPaneTabs: (paneId) => {
+    // No-op (and no pointless backend write) for panes that never persisted
+    // any tab state.
+    if (!(paneId in get().browserPaneState.paneTabs)) return;
+    const paneTabs = { ...get().browserPaneState.paneTabs };
+    delete paneTabs[paneId];
+    const state: PersistedBrowserPaneState = { paneTabs };
+    set({ browserPaneState: state });
+    persistSetting(K_BROWSER_PANE_STATE, JSON.stringify(state));
   },
 
   restoreBrowserPaneTabs: (paneId) => {
@@ -502,37 +524,37 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setLocalCompactionThreshold: (threshold) => {
     if (!Number.isFinite(threshold) || threshold < 0.25 || threshold > 0.99) return;
     set({ localCompactionThreshold: threshold });
-    void setSetting(K_LOCAL_COMPACTION_THRESHOLD, String(threshold));
+    persistSetting(K_LOCAL_COMPACTION_THRESHOLD, String(threshold));
   },
 
   setLocalPinExchanges: (exchanges) => {
     if (!Number.isInteger(exchanges) || exchanges < 1 || exchanges > 50) return;
     set({ localPinExchanges: exchanges });
-    void setSetting(K_LOCAL_PIN_EXCHANGES, String(exchanges));
+    persistSetting(K_LOCAL_PIN_EXCHANGES, String(exchanges));
   },
 
   setCloudCompactionEnabled: (enabled) => {
     set({ cloudCompactionEnabled: enabled });
-    void setSetting(K_CLOUD_COMPACTION_ENABLED, String(enabled));
+    persistSetting(K_CLOUD_COMPACTION_ENABLED, String(enabled));
   },
 
   setCloudCompactionThreshold: (threshold) => {
     if (!Number.isFinite(threshold) || threshold < 0.25 || threshold > 0.99) return;
     set({ cloudCompactionThreshold: threshold });
-    void setSetting(K_CLOUD_COMPACTION_THRESHOLD, String(threshold));
+    persistSetting(K_CLOUD_COMPACTION_THRESHOLD, String(threshold));
   },
 
   setCloudPinExchanges: (exchanges) => {
     if (!Number.isInteger(exchanges) || exchanges < 1 || exchanges > 50) return;
     set({ cloudPinExchanges: exchanges });
-    void setSetting(K_CLOUD_PIN_EXCHANGES, String(exchanges));
+    persistSetting(K_CLOUD_PIN_EXCHANGES, String(exchanges));
   },
 
   setCloudContextLimit: (limit) => {
     if (!Number.isFinite(limit) || limit < 0) return;
     const v = Math.floor(limit);
     set({ cloudContextLimit: v });
-    void setSetting(K_CLOUD_CONTEXT_LIMIT, String(v));
+    persistSetting(K_CLOUD_CONTEXT_LIMIT, String(v));
   },
 
   setProviderModels: (provider, models) => {
@@ -547,7 +569,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }));
     // An empty list persists as [] — the backend's load_selected_models
     // treats that as "nothing curated" (picker shows all fetched models).
-    void setSetting(selectedModelsKey(provider), JSON.stringify(cleaned));
+    persistSetting(selectedModelsKey(provider), JSON.stringify(cleaned));
     // Maintain the index so load() knows which keys exist.
     void (async () => {
       try {
@@ -555,7 +577,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         const providers: string[] = indexRaw ? JSON.parse(indexRaw) : [];
         if (!providers.includes(provider)) {
           providers.push(provider);
-          void setSetting(SELECTED_MODELS_INDEX_KEY, JSON.stringify(providers));
+          persistSetting(SELECTED_MODELS_INDEX_KEY, JSON.stringify(providers));
         }
       } catch { /* index write is best-effort; the list itself still lands */ }
     })();
@@ -571,33 +593,33 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   setLocalCompactionSummarizer: (which) => {
     set({ localCompactionSummarizer: which });
-    void setSetting(K_LOCAL_COMPACTION_SUMMARIZER, which);
+    persistSetting(K_LOCAL_COMPACTION_SUMMARIZER, which);
   },
 
   setLocalCompactionRebuildFromRaw: (on) => {
     set({ localCompactionRebuildFromRaw: on });
-    void setSetting(K_LOCAL_COMPACTION_REBUILD_FROM_RAW, String(on));
+    persistSetting(K_LOCAL_COMPACTION_REBUILD_FROM_RAW, String(on));
   },
 
   setChatZoom: (zoom) => {
     const clamped = Math.max(CHAT_ZOOM_MIN, Math.min(CHAT_ZOOM_MAX, zoom));
     set({ chatZoom: clamped });
-    void setSetting(K_CHAT_ZOOM, String(clamped));
+    persistSetting(K_CHAT_ZOOM, String(clamped));
   },
 
   setAppZoom: (zoom) => {
     const clamped = Math.max(APP_ZOOM_MIN, Math.min(APP_ZOOM_MAX, zoom));
     set({ appZoom: clamped });
-    void setSetting(K_APP_ZOOM, String(clamped));
+    persistSetting(K_APP_ZOOM, String(clamped));
   },
 
   setUiFont: (id) => {
     set({ uiFont: id });
-    void setSetting(K_UI_FONT, id);
+    persistSetting(K_UI_FONT, id);
   },
 
   setMonoFont: (id) => {
     set({ monoFont: id });
-    void setSetting(K_MONO_FONT, id);
+    persistSetting(K_MONO_FONT, id);
   },
 }));

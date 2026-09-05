@@ -165,10 +165,15 @@ export function SubagentPanel() {
     [selectedSub?.output],
   );
 
-  // Auto-scroll to the end as the subagent outputs tokens
+  // Follow the tail as the subagent streams — but only when the user is
+  // already reading near the bottom (<80px). Forcing scrollTop to the end on
+  // EVERY render pinned anyone who scrolled up to re-read the output.
   useLayoutEffect(() => {
-    if (panelRef.current) {
-      panelRef.current.scrollTop = panelRef.current.scrollHeight;
+    const panel = panelRef.current;
+    if (!panel) return;
+    const distanceFromBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight;
+    if (distanceFromBottom < 80) {
+      panel.scrollTop = panel.scrollHeight;
     }
   });
 

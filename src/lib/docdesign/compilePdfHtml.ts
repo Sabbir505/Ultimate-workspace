@@ -55,7 +55,7 @@ export function compilePdfHtml(plan: DocPlan, theme: Theme, now: Date = new Date
                padding: 8px 14px; margin: 1.1em 0; font-weight: 600; break-inside: avoid; }
     .doc-quote { break-inside: avoid; }
     .source-note { font-size: ${doc.captionPt}pt; color: #${c.muted}; margin-top: -0.6em; }
-    .kpi-grid { display: flex; gap: ${tokens.space.deck.gapIn}cm; margin: 1.2em 0; break-inside: avoid; }
+    .kpi-grid { display: flex; gap: ${(tokens.space.deck.gapIn * 2.54).toFixed(2)}cm; margin: 1.2em 0; break-inside: avoid; }
     .kpi { flex: 1; }
     .kpi .v { font-family: ${display}; font-size: ${Math.max(doc.h1Pt, 22)}pt; font-weight: 700; color: #${c.accent}; }
     .kpi .l { font-size: ${doc.captionPt + 1}pt; color: #${c.muted}; }

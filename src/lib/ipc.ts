@@ -118,8 +118,10 @@ export const writePty = (paneId: string, data: string) => safeInvoke<void>("writ
  *  (xterm.js emits "\r" as a standalone chunk). The delay lets the TUI
  *  render the typed text before the submit key arrives. */
 export const writePtySubmit = (paneId: string, text: string) => {
-  void writePty(paneId, text);
-  window.setTimeout(() => void writePty(paneId, "\r"), 250);
+  // Fire-and-forget by design (the pty may already be dead) — swallow
+  // rejections so a failed write never becomes an unhandled rejection (A6).
+  void writePty(paneId, text).catch(() => {});
+  window.setTimeout(() => void writePty(paneId, "\r").catch(() => {}), 250);
 };
 export const resizePty = (paneId: string, cols: number, rows: number) =>
   safeInvoke<void>("resize_pty", { paneId, cols, rows });

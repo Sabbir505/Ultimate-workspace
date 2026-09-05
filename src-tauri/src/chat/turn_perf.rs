@@ -58,31 +58,30 @@ static ACTIVE: once_cell::sync::Lazy<ActiveRegistry> =
 /// perf remains the session's active one. The token-driven emits only start
 /// with the FIRST token, and prompt eval can take tens of seconds — without
 /// the heartbeat the UI's "Working for Xs" timer had no data until the first
-/// token and then jumped straight to e.g. "1min".
+/// token and then jumped straight to e.g. "1min". Spawned through
+/// `tauri::async_runtime` (NOT `Handle::try_current`) because harness reader
+/// threads are plain `std::thread`s with no ambient tokio context — the
+/// try_current guard made the heartbeat silently vanish exactly where the
+/// harness HUD needed it most.
 pub fn register(session_id: &str, perf: TurnPerf) -> TurnPerf {
     ACTIVE.lock().insert(session_id.to_string(), perf.clone());
-    // Heartbeat task: tick until this perf is no longer the session's active
-    // one (turn ended → unregistered, or a new turn replaced it). Spawned
-    // through Handle::try_current so non-async callers (tests) don't panic.
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        let sid = session_id.to_string();
-        let heartbeat = perf.clone();
-        handle.spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
-            loop {
-                interval.tick().await;
-                let still_active = {
-                    ACTIVE.lock().get(&sid).is_some_and(|p| {
-                        Arc::ptr_eq(&p.inner, &heartbeat.inner)
-                    })
-                };
-                if !still_active {
-                    break;
-                }
-                heartbeat.maybe_emit_perf();
+    let sid = session_id.to_string();
+    let heartbeat = perf.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+        loop {
+            interval.tick().await;
+            let still_active = {
+                ACTIVE.lock().get(&sid).is_some_and(|p| {
+                    Arc::ptr_eq(&p.inner, &heartbeat.inner)
+                })
+            };
+            if !still_active {
+                break;
             }
-        });
-    }
+            heartbeat.maybe_emit_perf();
+        }
+    });
     perf
 }
 
@@ -108,6 +107,79 @@ pub fn record_active_stream_delta(session_id: &str) {
     if let Some(p) = ACTIVE.lock().get(session_id) {
         p.record_stream_delta();
     }
+}
+
+/// Open a generation window on the session's active accumulator. The harness
+/// reader loops don't hold `TurnPerf` handles (they parse CLI event streams
+/// through shared handlers), so they act through the registry. No-op when
+/// none is registered or a window is already open.
+pub fn begin_active_gen(session_id: &str) {
+    if let Some(p) = ACTIVE.lock().get(session_id) {
+        p.begin_gen();
+    }
+}
+
+/// Close the open generation window on the session's active accumulator.
+/// No-op when none is registered or no window is open.
+pub fn end_active_gen(session_id: &str) {
+    if let Some(p) = ACTIVE.lock().get(session_id) {
+        p.end_gen();
+    }
+}
+
+/// Fold one PER-ROUND usage report into the live IN/CACHE totals (claude's
+/// `message_start` reports each round's prompt separately, so reports
+/// accumulate to the turn total). No-op when none is registered.
+pub fn note_active_round_usage(
+    session_id: &str,
+    input_tokens: i64,
+    cache_read: i64,
+    cache_creation: i64,
+    input_includes_cache: bool,
+) {
+    if let Some(p) = ACTIVE.lock().get(session_id) {
+        p.note_round_usage(input_tokens, cache_read, cache_creation, input_includes_cache);
+    }
+}
+
+/// REPLACE the live IN/CACHE totals with a turn-cumulative usage report.
+/// Kimi/pi/omp/commandcode/opencode report running totals (not per-round
+/// deltas), so accumulating them would double-count — the latest report wins,
+/// mirroring how the handlers derive the final done values (last report
+/// overwrites). No-op when none is registered.
+pub fn set_active_round_usage(
+    session_id: &str,
+    input_tokens: i64,
+    cache_read: i64,
+    cache_creation: i64,
+    input_includes_cache: bool,
+) {
+    if let Some(p) = ACTIVE.lock().get(session_id) {
+        let mut g = p.inner.lock();
+        g.ru_input = input_tokens;
+        g.ru_cache_read = cache_read;
+        g.ru_cache_creation = cache_creation;
+        g.ru_inclusive = input_includes_cache;
+        g.ru_seen = true;
+    }
+}
+
+/// Final stats for a finishing harness turn from the active accumulator:
+/// `(ttft_ms, tokens_per_second, llm_time_ms)`. Any window still open is
+/// closed first (tool-less turns never hit an explicit end marker), and tok/s
+/// uses the provider's authoritative output count against the accumulated
+/// decode time. All `None` when no accumulator is registered.
+pub fn active_harness_final(
+    session_id: &str,
+    output_tokens: Option<i64>,
+) -> (Option<i64>, Option<f64>, Option<i64>) {
+    let Some(p) = ACTIVE.lock().get(session_id).cloned() else {
+        return (None, None, None);
+    };
+    p.close_open_windows();
+    let g = p.inner.lock();
+    let tok_s = output_tokens.and_then(|o| tokens_per_second(o, g.decode_ms));
+    (g.ttft_ms, tok_s, (g.llm_time_ms > 0).then_some(g.llm_time_ms))
 }
 
 /// Read the session's active `TurnPerf` snapshot for a live `chat:perf`
@@ -245,22 +317,25 @@ pub struct TurnPerf {
 }
 
 impl TurnPerf {
-    pub fn new(app: AppHandle, sid: &str) -> Self {
+    /// App-optional constructor: `chat:perf` flows only when an AppHandle is
+    /// available. Harness reader threads pass the chat's handle; headless
+    /// tests (and any path without an app) pass None.
+    pub fn new_opt(app: Option<AppHandle>, sid: &str) -> Self {
         Self {
-            app: Some(app),
+            app,
             sid: sid.to_string(),
             inner: Arc::new(Mutex::new(Inner::new())),
         }
     }
 
+    pub fn new(app: AppHandle, sid: &str) -> Self {
+        Self::new_opt(Some(app), sid)
+    }
+
     /// A no-backend variant for paths that don't have an `AppHandle` handy
     /// (e.g. headless tests). Records timing but never emits `chat:perf`.
     pub fn new_headless(sid: &str) -> Self {
-        Self {
-            app: None,
-            sid: sid.to_string(),
-            inner: Arc::new(Mutex::new(Inner::new())),
-        }
+        Self::new_opt(None, sid)
     }
 
     /// Open a generation window. Called when a model round's stream starts
@@ -677,5 +752,77 @@ mod tests {
         let snap = p.snapshot();
         assert!(snap.tool_time_ms >= 5);
         assert!(snap.llm_time_ms >= 4);
+    }
+
+    // ---- harness registry helpers ----
+
+    #[test]
+    fn active_harness_final_measures_registered_turn() {
+        let sid = format!("test-harness-final-{}", uuid::Uuid::new_v4());
+        let p = register(&sid, TurnPerf::new_headless(&sid));
+        // Round 1: open a window, stream, close.
+        p.begin_gen();
+        p.record_token();
+        p.record_token();
+        std::thread::sleep(std::time::Duration::from_millis(6));
+        p.end_gen();
+        // Round 2 left OPEN at finish (tool-less turn) — active_harness_final
+        // must fold it via close_open_windows, not drop it.
+        p.begin_gen();
+        p.record_token();
+        p.note_round_usage(100, 60, 20, false);
+
+        let (ttft, tok_s, llm_ms) = active_harness_final(&sid, Some(30));
+        assert!(ttft.is_some(), "ttft captured from the first token");
+        let ts = tok_s.expect("tok/s from authoritative output over decode time");
+        assert!(ts > 0.0);
+        assert!(llm_ms.unwrap_or(0) >= 6, "llm time covers the closed round");
+        // 30 tokens over ≥6ms decode would exceed 1000 tok/s only if the
+        // window stayed open; just sanity-bound the value.
+        assert!(ts < 100_000.0);
+        unregister(&sid);
+    }
+
+    #[test]
+    fn active_harness_final_none_without_registration() {
+        let sid = format!("test-harness-final-missing-{}", uuid::Uuid::new_v4());
+        let (ttft, tok_s, llm_ms) = active_harness_final(&sid, Some(10));
+        assert!(ttft.is_none() && tok_s.is_none() && llm_ms.is_none());
+    }
+
+    #[test]
+    fn registry_gen_windows_track_decode_time() {
+        let sid = format!("test-harness-gen-{}", uuid::Uuid::new_v4());
+        let _p = register(&sid, TurnPerf::new_headless(&sid));
+        begin_active_gen(&sid);
+        record_active_token(&sid); // TTFT + decode anchor
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        end_active_gen(&sid);
+        // A second begin/end cycle on the same window pair must not crash or
+        // double-count (end on a closed window is a no-op).
+        end_active_gen(&sid);
+        let (ttft, tok_s, llm_ms) = active_harness_final(&sid, Some(5));
+        assert!(ttft.is_some());
+        assert!(tok_s.unwrap_or(0.0) > 0.0, "decode window was measured");
+        assert!(llm_ms.unwrap_or(0) >= 5);
+        unregister(&sid);
+    }
+
+    #[test]
+    fn set_active_round_usage_replaces_note_accumulates() {
+        let sid = format!("test-harness-usage-{}", uuid::Uuid::new_v4());
+        let p = register(&sid, TurnPerf::new_headless(&sid));
+        // Accumulate (claude per-round reports).
+        note_active_round_usage(&sid, 100, 60, 20, false);
+        note_active_round_usage(&sid, 100, 60, 20, false);
+        let snap = p.snapshot();
+        assert_eq!(snap.input_tokens, Some(200));
+        // Replace (running-total reporters).
+        set_active_round_usage(&sid, 500, 300, 50, false);
+        let snap = p.snapshot();
+        assert_eq!(snap.input_tokens, Some(500));
+        let rate = snap.cache_hit_rate.expect("cache reported");
+        assert!((rate - (300.0 / 850.0)).abs() < 1e-9);
+        unregister(&sid);
     }
 }

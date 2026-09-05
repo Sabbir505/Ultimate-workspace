@@ -408,7 +408,7 @@ impl AgentSessionManager {
         if let Some(state) = app.try_state::<crate::ChatState>() {
             state.0.drop_pending_for_session(chat_session_id);
         }
-        emit_done(Some(app), chat_session_id, None, None, None, None, None);
+        emit_done(Some(app), chat_session_id, None, None, None, None, None, None, None, None);
         Ok(())
     }
 
@@ -1423,7 +1423,11 @@ fn read_acp_stream(
     // for the turn's output until session/finish. Reset at each finish so the
     // next turn (sent directly by send_acp_turn) gets its own window.
     let mut turn_started = crate::db::now_ts();
-    let _perf = crate::chat::turn_perf::register(sid, crate::chat::turn_perf::TurnPerf::new_headless(sid));
+    // Perf accumulator for the CURRENT turn, holding the chat's AppHandle so
+    // `chat:perf` flows. Like the claude reader, this loop outlives turns: a
+    // fresh accumulator is registered at the first session/update of each
+    // turn (finish_turn unregisters the previous one at session/finish).
+    let mut perf: Option<crate::chat::turn_perf::TurnPerf> = None;
     let mut handshake_done = false;
     // Id of the session/new request we're awaiting a response for.
     let mut awaiting_session_new: Option<u64> = None;
@@ -1472,6 +1476,8 @@ fn read_acp_stream(
                             &format!("ACP request failed: {msg}"),
                         );
                         full.clear();
+                        crate::chat::turn_perf::unregister(sid);
+                        perf = None;
                         if should_clear_in_flight(
                             proc_generation.load(Ordering::SeqCst),
                             my_generation,
@@ -1567,6 +1573,14 @@ fn read_acp_stream(
             }
             AcpLine::Notification { method, params } => match method.as_str() {
                 "session/update" => {
+                    // First update of a turn: register a fresh accumulator
+                    // (the previous turn's was unregistered at finish).
+                    if perf.is_none() {
+                        perf = Some(crate::chat::turn_perf::register(
+                            sid,
+                            crate::chat::turn_perf::TurnPerf::new_opt(app.cloned(), sid),
+                        ));
+                    }
                     for ev in crate::acp::events::translate_session_update(&params) {
                         match ev {
                             AcpEvent::Text(t) => {
@@ -1614,9 +1628,14 @@ fn read_acp_stream(
                         // Cancel already emitted chat:done — discard the
                         // partial reply.
                         full.clear();
+                        crate::chat::turn_perf::unregister(sid);
                     } else {
                         finish_turn(app, db, sid, &mut full, None, None, None, None, None, &mut watches, started, None);
                     }
+                    // Both paths above closed the turn's accumulator
+                    // (finish_turn unregisters internally) — drop the handle
+                    // so the next turn registers a fresh one.
+                    perf = None;
                     if should_clear_in_flight(
                         proc_generation.load(Ordering::SeqCst),
                         my_generation,
@@ -1693,6 +1712,12 @@ fn read_acp_stream(
         && !cancelled.load(Ordering::SeqCst)
     {
         emit_error(app, sid, "ACP agent exited mid-turn");
+    }
+    // A reader that dies mid-turn leaves the turn's accumulator registered —
+    // finish_turn never ran. Drop it so the registry entry can't outlive the
+    // session (same backstop as the claude reader's EOF).
+    if perf.take().is_some() {
+        crate::chat::turn_perf::unregister(sid);
     }
 }
 
@@ -2004,11 +2029,16 @@ fn resolve_opencode_config(app: &AppHandle, project_id: Option<&str>) -> Option<
     browser_mcp_register::write_opencode_config(&data_dir, project_id?, bound_port())
 }
 
-/// The artifacts dir the bundle should advertise: the spawn dir when set
-/// (it IS the CLI's workspace), else the configured artifacts dir, else the
-/// Documents/Conduit default — mirroring `spawn_dir`.
-pub(crate) fn artifacts_dir_for_bundle(app: &AppHandle, cwd: Option<&str>) -> String {
-    if let Some(c) = cwd { return c.to_string(); }
+/// The artifacts dir the bundle should advertise: the configured
+/// `storage.artifactsDir`, else the Documents/Conduit default. This is where
+/// the conduit-tools MCP actually writes generated documents (`mcp_tools_bridge`
+/// resolves `dispatch::artifacts_dir`), so the instructions, `--add-dir`, and
+/// the claude settings' additionalDirectories must all name the SAME folder —
+/// advertising the spawn dir instead sent harness CLIs writing with their own
+/// file tools into the project root while conduit-tools landed in the
+/// configured dir. The spawn dir (`spawn_dir`) remains a separate concept: it
+/// is only the CLI's working directory, never the advertised artifacts target.
+pub(crate) fn artifacts_dir_for_bundle(app: &AppHandle, _cwd: Option<&str>) -> String {
     crate::chat::dispatch::artifacts_dir(app).to_string_lossy().into_owned()
 }
 
@@ -2608,11 +2638,13 @@ fn read_claude_stream(
     // model. Persisted with the assistant row (model_key → correct pricing)
     // and to app_settings so the composer's context meter shows the truth.
     let mut actual_model: Option<String> = None;
-    // Register a per-turn perf accumulator so `emit_token` can drive live
-    // TTFT / tok/s in the composer row. Cleared in `finish_turn`. The split
-    // between LLM and tool time isn't available for the harness CLI (it's a
-    // black-box mixed stream), so those stay — like legacy rows.
-    let _perf = crate::chat::turn_perf::register(sid, crate::chat::turn_perf::TurnPerf::new_headless(sid));
+    // Perf accumulator for the CURRENT turn, holding the chat's AppHandle so
+    // `chat:perf` flows (a headless accumulator never emits — the live
+    // composer row never ticked for harness turns). This reader outlives
+    // turns, so it re-registers at each turn's first `message_start` after
+    // `finish_turn` unregistered the previous turn's accumulator; None means
+    // no turn has streamed yet.
+    let mut perf: Option<crate::chat::turn_perf::TurnPerf> = None;
     // mi18: read_line into ONE reused String — BufReader::lines() allocated a
     // fresh String per line on streams that run thousands of lines per turn.
     let mut reader = BufReader::new(stdout);
@@ -2637,6 +2669,40 @@ fn read_claude_stream(
             // deltas wrapped in stream_event.
             Some("stream_event") => {
                 saw_turn_activity = true;
+                // Model-round boundaries: each assistant message opens a
+                // generation window on message_start and closes it on
+                // message_stop, so decode time (→ tok/s) and LLM time become
+                // measurable, and message_start's per-round usage feeds the
+                // live IN/CACHE chips. A fresh accumulator is registered on
+                // the turn's first message_start (finish_turn unregistered
+                // the previous turn's).
+                match v.pointer("/event/type").and_then(|t| t.as_str()) {
+                    Some("message_start") => {
+                        if perf.is_none() {
+                            perf = Some(crate::chat::turn_perf::register(
+                                sid,
+                                crate::chat::turn_perf::TurnPerf::new_opt(app.cloned(), sid),
+                            ));
+                        }
+                        if let Some(p) = &perf {
+                            p.begin_gen();
+                            if let Some(u) = v.pointer("/event/message/usage") {
+                                p.note_round_usage(
+                                    u.get("input_tokens").and_then(|t| t.as_i64()).unwrap_or(0),
+                                    usage_i64(u, &["cache_read_input_tokens", "cacheReadInputTokens"]).unwrap_or(0),
+                                    usage_i64(u, &["cache_creation_input_tokens", "cacheCreationInputTokens"]).unwrap_or(0),
+                                    false,
+                                );
+                            }
+                        }
+                    }
+                    Some("message_stop") => {
+                        if let Some(p) = &perf {
+                            p.end_gen();
+                        }
+                    }
+                    _ => {}
+                }
                 let delta = v.pointer("/event/delta");
                 match delta
                     .and_then(|d| d.get("type"))
@@ -2805,6 +2871,8 @@ fn read_claude_stream(
                     // Turn was cancelled while in flight: discard the partial
                     // reply — cancel() already emitted `chat:done`.
                     full.clear();
+                    crate::chat::turn_perf::unregister(sid);
+                    perf = None;
                 } else if ok {
                     // A turn that ends mid-thinking (rare) still needs the
                     // closing marker or the block renders open forever.
@@ -2854,6 +2922,10 @@ fn read_claude_stream(
                         persist_actual_model(db, "claude_code", sid, m);
                     }
                     finish_turn(app, db, sid, &mut full, input, output, cost, cache_creation, cache_read, &mut watches, turn_started, actual_model.as_deref());
+                    // finish_turn unregistered the turn's accumulator — drop
+                    // the local handle so the next turn's message_start
+                    // registers a fresh one.
+                    perf = None;
                 } else {
                     let msg = v
                         .get("error")
@@ -2863,6 +2935,10 @@ fn read_claude_stream(
                         .to_string();
                     full.clear();
                     emit_error(app, sid, &msg);
+                    // The failed turn's accumulator must not leak into the
+                    // registry (nothing else unregisters this path).
+                    crate::chat::turn_perf::unregister(sid);
+                    perf = None;
                 }
             }
             // Control protocol: the CLI answers our `initialize`
@@ -2909,6 +2985,12 @@ fn read_claude_stream(
     if in_think {
         full.push_str("</think>");
         emit_token(app, sid, "</think>");
+    }
+    // A process that died mid-turn leaves the turn's accumulator registered —
+    // finish_turn never ran. Drop it so the registry entry and its heartbeat
+    // don't outlive the session.
+    if perf.take().is_some() {
+        crate::chat::turn_perf::unregister(sid);
     }
     persist_cli_session_id(db, "claude_code", sid, session_cell);
     // Stale-resume-id recovery: a process that died with ZERO turn activity
@@ -3327,6 +3409,13 @@ fn read_per_turn_stream(
     let mut full = String::new();
     // Capture the turn's start instant for the "Worked for Xs" label.
     let started_at = crate::db::now_ts();
+    // One accumulator per turn (this whole reader IS one turn): the chat's
+    // AppHandle makes `chat:perf` flow so the composer row ticks live.
+    // finish_turn unregisters; the cancelled branch below unregisters too.
+    let _perf = crate::chat::turn_perf::register(
+        sid,
+        crate::chat::turn_perf::TurnPerf::new_opt(app.cloned(), sid),
+    );
     // OpenCode buffers deltas internally in `run` mode: each "text" event
     // carries the FULL snapshot of its part so far, not a delta. Track the
     // last snapshots so only the new suffix is emitted/persisted.
@@ -3385,6 +3474,9 @@ fn read_per_turn_stream(
     in_flight.store(false, Ordering::SeqCst);
     if cancelled.load(Ordering::SeqCst) {
         full.clear();
+        // Cancel skips finish_turn (which normally unregisters) — drop the
+        // turn's accumulator here so it can't linger in the registry.
+        crate::chat::turn_perf::unregister(sid);
     } else {
         // per-turn CLI streams don't reliably expose a model id on their
         // events — the cost rollup falls back to the session's model.
@@ -3498,10 +3590,13 @@ fn send_opencode_turn(
     let watch_dirs = turn_watch_dirs(cwd, &db.0);
     let started_at = crate::db::now_ts();
     std::thread::spawn(move || {
-        // Live TTFT / tok/s for this turn; finish_turn unregisters, the
-        // guard's drop is the backstop.
+        // Live TTFT / tok/s for this turn, with the chat's AppHandle so
+        // `chat:perf` flows (headless accumulators never emit). The SSE
+        // reader's token emissions hit this accumulator; finish_turn
+        // unregisters, and the unconditional unregister at thread end is the
+        // backstop for the error/cancel paths.
         let _perf =
-            crate::chat::turn_perf::register(&sid2, crate::chat::turn_perf::TurnPerf::new_headless(&sid2));
+            crate::chat::turn_perf::register(&sid2, crate::chat::turn_perf::TurnPerf::new_opt(Some(app2.clone()), &sid2));
         let mut watches: Vec<DirWatch> = watch_dirs.into_iter().map(DirWatch::new).collect();
 
         // Resolve or create the server-side session id (resume across
@@ -3574,6 +3669,10 @@ fn send_opencode_turn(
                 }
             }
         }
+        // Error/cancel paths skip finish_turn (the success path already
+        // unregistered inside it) — this no-op-on-success backstop covers all
+        // three so a stale accumulator can't linger in the registry.
+        crate::chat::turn_perf::unregister(&sid2);
         in_flight2.store(false, Ordering::SeqCst);
     });
     Ok(())
@@ -4139,6 +4238,10 @@ fn handle_opencode_sse_data(
         }
         Some("tool") => {
             // Deltas for tool parts are ignored — cards are state-machine driven.
+            // Tool execution begins — close the generation window so the tool
+            // wait stays out of decode time/LLM time (mirrors the per-turn
+            // handler's tool_use arm).
+            crate::chat::turn_perf::end_active_gen(sid);
             if let Some(pid) = part.get("id").and_then(|p| p.as_str()) {
                 part_kinds.insert(pid.to_string(), "tool".to_string());
             }
@@ -4235,6 +4338,9 @@ fn handle_kimi_event(
     let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("");
     match role {
         "assistant" => {
+            // Assistant frames are model output — open/keep the generation
+            // window so decode time (→ tok/s) is measurable.
+            crate::chat::turn_perf::begin_active_gen(sid);
             if let Some(text) = v.get("content").and_then(|c| c.as_str()) {
                 full.push_str(text);
                 emit_token(app, sid, text);
@@ -4271,11 +4377,20 @@ fn handle_kimi_event(
                         }
                     }
                 }
+                // A frame carrying tool_calls ends the model's round — the
+                // CLI now executes the tools; close the window here so the
+                // tool wait isn't billed as decode time.
+                if !calls.is_empty() {
+                    crate::chat::turn_perf::end_active_gen(sid);
+                }
             }
         }
         // Tool results: kimi delivers one per call, in call order. Attach shell
         // output to its step; non-shell results are consumed for ordering only.
         "tool" => {
+            // Defensive: a tool result also closes any open window (covers
+            // streams where the tool_calls frame was missed).
+            crate::chat::turn_perf::end_active_gen(sid);
             let text = extract_result_text(v.get("content"));
             if let Some(marker) = tools.tool_result(&text, false, app, sid) {
                 full.push_str(&marker);
@@ -4299,6 +4414,16 @@ fn handle_kimi_event(
                     // than guess one.
                     *cache_read = usage_i64(u, &["cache_read_input_tokens", "cacheReadInputTokens", "cacheRead"]).or(*cache_read);
                     *cache_creation = usage_i64(u, &["cache_creation_input_tokens", "cacheCreationInputTokens", "cacheWrite"]).or(*cache_creation);
+                    // Live IN/CACHE chips: kimi reports running totals, so
+                    // replace (never accumulate) — same values the final done
+                    // carries.
+                    crate::chat::turn_perf::set_active_round_usage(
+                        sid,
+                        (*input).unwrap_or(0),
+                        (*cache_read).unwrap_or(0),
+                        (*cache_creation).unwrap_or(0),
+                        false,
+                    );
                 }
             }
         }
@@ -4385,6 +4510,9 @@ fn handle_opencode_event(
         // whole snapshot to `full` would duplicate it in the persisted
         // message.)
         Some("text") => {
+            // Model output resumed — open/keep the generation window (per-step
+            // windows: tool parts and step-finish close it).
+            crate::chat::turn_perf::begin_active_gen(sid);
             // Text after reasoning closes the thinking block — same contract
             // as claude's stream reader (an unclosed <think> would swallow
             // the answer into the collapsible block).
@@ -4408,6 +4536,7 @@ fn handle_opencode_event(
         // SSE). Same full-snapshot-suffix rule as text; wrapped in
         // <think>…</think> so the frontend shows a live collapsible block.
         Some("reasoning") => {
+            crate::chat::turn_perf::begin_active_gen(sid);
             if let Some(text) = v.pointer("/part/text").and_then(|t| t.as_str()) {
                 if !*in_think {
                     full.push_str("<think>");
@@ -4426,6 +4555,9 @@ fn handle_opencode_event(
         }
         // {"type":"tool_use","part":{"tool":…,"state":{"input":…}}}
         Some("tool_use") => {
+            // Tool execution begins — close the generation window so the tool
+            // wait stays out of decode time/LLM time.
+            crate::chat::turn_perf::end_active_gen(sid);
             let part = v.get("part").cloned().unwrap_or(json!({}));
             let name = part.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
             let inp = part.pointer("/state/input").cloned().unwrap_or(json!({}));
@@ -4455,6 +4587,8 @@ fn handle_opencode_event(
         }
         // Session id / usage surfaces on step-finish.
         Some("step_finish") => {
+            // The model round ended — close its generation window.
+            crate::chat::turn_perf::end_active_gen(sid);
             if let Ok(mut g) = session_cell.lock() {
                 if g.is_none() {
                     if let Some(id) = v.get("sessionID").and_then(|s| s.as_str()) {
@@ -4473,6 +4607,15 @@ fn handle_opencode_event(
                 *cache_creation = u.get("cacheWrite").and_then(|t| t.as_i64())
                     .or_else(|| u.pointer("/cache/write").and_then(|t| t.as_i64()))
                     .or(*cache_creation);
+                // Live IN/CACHE chips: report-level totals — replace, not
+                // accumulate.
+                crate::chat::turn_perf::set_active_round_usage(
+                    sid,
+                    (*input).unwrap_or(0),
+                    (*cache_read).unwrap_or(0),
+                    (*cache_creation).unwrap_or(0),
+                    false,
+                );
             }
             // Free models report cost 0; Zen/relay models report real dollars.
             *cost = v.pointer("/part/cost").and_then(|c| c.as_f64()).or(*cost);
@@ -4534,10 +4677,21 @@ fn handle_pi_event(
                 *cache_read = usage_i64(u, &["cacheRead", "cache_read"]).or(*cache_read);
                 *cache_creation = usage_i64(u, &["cacheWrite", "cache_write"]).or(*cache_creation);
                 *cost = u.pointer("/cost/total").and_then(|c| c.as_f64()).filter(|c| *c > 0.0).or(*cost);
+                // Live IN/CACHE chips: pi reports running totals — replace,
+                // never accumulate.
+                crate::chat::turn_perf::set_active_round_usage(
+                    sid,
+                    (*input).unwrap_or(0),
+                    (*cache_read).unwrap_or(0),
+                    (*cache_creation).unwrap_or(0),
+                    false,
+                );
             }
             let Some(ev) = v.get("assistantMessageEvent") else { return };
             match ev.get("type").and_then(|t| t.as_str()) {
                 Some("text_delta") => {
+                    // Model output resumed — open/keep the generation window.
+                    crate::chat::turn_perf::begin_active_gen(sid);
                     // Text closes an open thinking block — same contract as
                     // claude's stream reader (an unclosed <think> would
                     // swallow the answer into the collapsible block).
@@ -4552,6 +4706,7 @@ fn handle_pi_event(
                     }
                 }
                 Some("thinking_delta") => {
+                    crate::chat::turn_perf::begin_active_gen(sid);
                     if !*in_think {
                         full.push_str("<think>");
                         emit_token(app, sid, "<think>");
@@ -4575,6 +4730,9 @@ fn handle_pi_event(
         }
         // A tool starts executing with its complete parsed arguments.
         Some("tool_execution_start") => {
+            // Tool execution begins — close the generation window so the tool
+            // wait stays out of decode time/LLM time.
+            crate::chat::turn_perf::end_active_gen(sid);
             let name = v.get("toolName").and_then(|t| t.as_str()).unwrap_or("tool");
             let inp = v.get("args").cloned().unwrap_or(json!({}));
             emit_todowrite_steps(app, sid, name, &inp);
@@ -4680,6 +4838,14 @@ fn handle_commandcode_event(
                         *output = u.get("outputTokens").and_then(|t| t.as_i64()).or(*output);
                         *cache_read = usage_i64(u, &["cacheReadTokens", "cacheRead"]).or(*cache_read);
                         *cache_creation = usage_i64(u, &["cacheWriteTokens", "cacheWrite"]).or(*cache_creation);
+                        // Live IN/CACHE chips: turn-cumulative totals — replace.
+                        crate::chat::turn_perf::set_active_round_usage(
+                            sid,
+                            (*input).unwrap_or(0),
+                            (*cache_read).unwrap_or(0),
+                            (*cache_creation).unwrap_or(0),
+                            false,
+                        );
                     }
                 }
                 _ => {
@@ -4690,6 +4856,8 @@ fn handle_commandcode_event(
                         inner.get("toolCallId").and_then(|t| t.as_str()),
                         inner.get("toolName").and_then(|t| t.as_str()),
                     ) {
+                        // Tool execution begins — close the generation window.
+                        crate::chat::turn_perf::end_active_gen(sid);
                         if seen_tools.insert(call_id.to_string()) {
                             let inp = inner.get("args").cloned().unwrap_or(inner.get("input").cloned().unwrap_or(json!({})));
                             emit_todowrite_steps(app, sid, name, &inp);
@@ -4702,6 +4870,8 @@ fn handle_commandcode_event(
                     }
                     // Streaming deltas (liberal match — see doc comment).
                     if let Some(delta) = inner.get("delta").and_then(|d| d.as_str()) {
+                        // Model output — open/keep the generation window.
+                        crate::chat::turn_perf::begin_active_gen(sid);
                         let thinking = ty.contains("think") || ty.contains("reason");
                         if thinking && !*in_think {
                             full.push_str("<think>");
@@ -4727,6 +4897,13 @@ fn handle_commandcode_event(
                 *output = u.get("outputTokens").and_then(|t| t.as_i64()).or(*output);
                 *cache_read = usage_i64(u, &["cacheReadTokens", "cacheRead"]).or(*cache_read);
                 *cache_creation = usage_i64(u, &["cacheWriteTokens", "cacheWrite"]).or(*cache_creation);
+                crate::chat::turn_perf::set_active_round_usage(
+                    sid,
+                    (*input).unwrap_or(0),
+                    (*cache_read).unwrap_or(0),
+                    (*cache_creation).unwrap_or(0),
+                    false,
+                );
             }
             if v.get("subtype").and_then(|s| s.as_str()) == Some("error") {
                 if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
@@ -5821,6 +5998,16 @@ fn finish_turn(
         cache_creation.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
         cache_read.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
     );
+    // Pull the harness turn's final perf from the active accumulator (before
+    // it's unregistered below). TTFT and tok/s are measured for every
+    // harness; LLM time is measurable for streams with recognizable
+    // model-round boundaries (claude message_start/stop, opencode steps). The
+    // tool-time split stays unavailable — the CLI executes tools as a black
+    // box. Hoisted above the persist block so emit_done carries the same
+    // numbers even for turns whose reply text ended up empty.
+    let (ttft, tok_s, llm_ms) =
+        crate::chat::turn_perf::active_harness_final(sid, output);
+
     // Persist the assistant message FIRST so we can attribute artifacts to it.
     let message_id: Option<i64> = if !full.is_empty() {
         let conn = db.0.lock();
@@ -5838,13 +6025,7 @@ fn finish_turn(
             .as_deref()
             .and_then(|a| a.strip_prefix("harness:"))
             .unwrap_or("unknown");
-        // Pull the harness turn's live perf from the active accumulator
-        // (TTFT and tok/s only — the harness CLI's mixed stream doesn't
-        // admit a clean LLM/tool split, so those stay —).
-        let (ttft, tok_s) = crate::chat::turn_perf::active_snapshot(sid)
-            .map(|p| (p.ttft_ms, p.tokens_per_second))
-            .unwrap_or((None, None));
-        crate::db::add_chat_message(&conn, sid, "assistant", full, input, output, cost, cache_creation, cache_read, None, Some(provider), model_key, None, Some(started_at), Some(crate::db::now_ts()), None, None, ttft, tok_s)
+        crate::db::add_chat_message(&conn, sid, "assistant", full, input, output, cost, cache_creation, cache_read, None, Some(provider), model_key, None, Some(started_at), Some(crate::db::now_ts()), llm_ms, None, ttft, tok_s)
             .ok()
             .map(|m| m.id)
     } else {
@@ -5901,7 +6082,7 @@ fn finish_turn(
         let _ = crate::db::attach_artifacts_to_message(&conn, sid, mid);
     }
 
-    emit_done(app, sid, input, output, cost, cache_creation, cache_read);
+    emit_done(app, sid, input, output, cost, cache_creation, cache_read, ttft, tok_s, llm_ms);
 
     // Per-turn git checkpoint against the spawn dir (watches are ordered
     // spawn-dir-first by turn_watch_dirs; non-repo dirs skip silently).
@@ -5929,6 +6110,7 @@ fn emit_token(app: Option<&AppHandle>, sid: &str, token: &str) {
     crate::chat::turn_perf::record_active_token(sid);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_done(
     app: Option<&AppHandle>,
     sid: &str,
@@ -5937,6 +6119,13 @@ fn emit_done(
     cost: Option<f64>,
     cache_creation: Option<i64>,
     cache_read: Option<i64>,
+    // Final harness-turn perf, measured by the turn's accumulator and already
+    // persisted on the assistant row. The built-in chat's ChatDonePayload
+    // carries the same fields — omitting them here made the composer metrics
+    // row drop TTFT/speed/elapsed for harness sessions even when measured.
+    ttft: Option<i64>,
+    tokens_per_second: Option<f64>,
+    llm_time_ms: Option<i64>,
 ) {
     if let Some(app) = app {
         // Cache fields ride along when the harness reported them (absent →
@@ -5961,6 +6150,10 @@ fn emit_done(
                 "cacheCreationInputTokens": cache_creation,
                 "cacheReadInputTokens": cache_read,
                 "cacheHitRate": cache_hit_rate,
+                "llmTimeMs": llm_time_ms,
+                "toolTimeMs": null,
+                "ttftMs": ttft,
+                "tokensPerSecond": tokens_per_second,
             }),
         );
     }
